@@ -25,8 +25,8 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
     validate_source_revision,
 )
 
-INPUT_SHAPE = (7, 24, 7, 16, 16)
-OUTPUT_SHAPE = (7, 3, 28, 256, 256)
+INPUT_SHAPE = (28, 24, 7, 16, 16)
+OUTPUT_SHAPE = (28, 3, 28, 256, 256)
 
 
 def main() -> int:

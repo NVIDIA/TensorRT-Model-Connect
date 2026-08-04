@@ -14,7 +14,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <dlfcn.h>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -42,8 +41,6 @@ constexpr int32_t kPatchWidth = 2;
 constexpr int32_t kPatchDim = 96;
 constexpr int32_t kVideoRows = 37296;
 constexpr int32_t kSequenceRows = 38247;
-constexpr int32_t kPaddedRows = 38272;
-constexpr int32_t kLocalRows = kPaddedRows / 4;
 constexpr int32_t kLayers = 50;
 constexpr int32_t kHidden = 5376;
 constexpr int32_t kTimestepSlots = 4;
@@ -53,12 +50,13 @@ constexpr int32_t kSteps = 50;
 constexpr int32_t kOutputFrames = 124;
 constexpr int32_t kOutputHeight = 768;
 constexpr int32_t kOutputWidth = 1344;
-constexpr int32_t kTileBatch = 7;
+constexpr int32_t kTileBatch = 28;
 constexpr int32_t kTileFrames = 28;
 constexpr int32_t kTileSize = 256;
 constexpr int32_t kTileLatentSize = 16;
 constexpr int32_t kTileInputFrames = 7;
 constexpr int32_t kTileCount = 28;
+static_assert(kTileBatch == kTileCount);
 
 constexpr std::array<float, kLatentChannels> kLatentMean = {
     0.8580903411F,  -0.9606591463F, 1.0661640167F,  -0.5090325475F, -0.2727581859F, -1.3675414324F,
@@ -193,7 +191,7 @@ std::vector<float> unpatchify_video(const std::vector<float>& rows) {
 }
 
 std::vector<float> make_position_ids() {
-    std::vector<float> positions(static_cast<std::size_t>(kPaddedRows) * 3, 0.0F);
+    std::vector<float> positions(static_cast<std::size_t>(kSequenceRows) * 3, 0.0F);
     for (int32_t index = 0; index < kTextRows; ++index)
         positions[static_cast<std::size_t>(index) * 3] = static_cast<float>(index);
 
@@ -239,33 +237,28 @@ std::vector<float> make_position_ids() {
     return positions;
 }
 
-struct LocalMetadata {
+struct DenoiserMetadata {
     std::vector<float> positions;
     std::vector<int32_t> adaln_indices;
     std::vector<int32_t> timestep_indices;
 };
 
-LocalMetadata make_local_metadata(int32_t rank) {
-    const auto global_positions = make_position_ids();
-    const int32_t begin = rank * kLocalRows;
-    LocalMetadata result;
-    result.positions.assign(global_positions.begin() + static_cast<std::ptrdiff_t>(begin) * 3,
-                            global_positions.begin() +
-                                static_cast<std::ptrdiff_t>(begin + kLocalRows) * 3);
-    result.adaln_indices.resize(kLocalRows);
-    result.timestep_indices.resize(kLocalRows);
-    for (int32_t local = 0; local < kLocalRows; ++local) {
-        const int32_t global = begin + local;
+DenoiserMetadata make_denoiser_metadata() {
+    DenoiserMetadata result;
+    result.positions = make_position_ids();
+    result.adaln_indices.resize(kSequenceRows);
+    result.timestep_indices.resize(kSequenceRows);
+    for (int32_t row = 0; row < kSequenceRows; ++row) {
         int32_t tag = 0;
         int32_t timestep = 0;
-        if (global < kTextRows) {
+        if (row < kTextRows) {
             tag = 1;
-        } else if (global < kTextRows + kAudioRows) {
+        } else if (row < kTextRows + kAudioRows) {
             tag = 2;
             timestep = 1;
         }
-        result.timestep_indices[local] = timestep;
-        result.adaln_indices[local] = timestep * kModalityCount + tag;
+        result.timestep_indices[row] = timestep;
+        result.adaln_indices[row] = timestep * kModalityCount + tag;
     }
     return result;
 }
@@ -314,15 +307,13 @@ void denormalize_latents(std::vector<float>& latent) {
     }
 }
 
-std::vector<float> extract_rank_tiles(const std::vector<float>& latent, int32_t clip,
-                                      int32_t rank) {
+std::vector<float> extract_tiles(const std::vector<float>& latent, int32_t clip) {
     constexpr std::array<int32_t, 4> y_starts = {0, 10, 21, 32};
     constexpr std::array<int32_t, 7> x_starts = {0, 11, 22, 33, 44, 56, 68};
     const std::size_t one_tile = static_cast<std::size_t>(kLatentChannels) * kTileInputFrames *
                                  kTileLatentSize * kTileLatentSize;
     std::vector<float> result(static_cast<std::size_t>(kTileBatch) * one_tile);
-    for (int32_t local = 0; local < kTileBatch; ++local) {
-        const int32_t tile = rank * kTileBatch + local;
+    for (int32_t tile = 0; tile < kTileBatch; ++tile) {
         const int32_t tile_y = tile / 7;
         const int32_t tile_x = tile % 7;
         for (int32_t channel = 0; channel < kLatentChannels; ++channel) {
@@ -335,7 +326,7 @@ std::vector<float> extract_rank_tiles(const std::vector<float>& latent, int32_t 
                           kLatentWidth) +
                          x_starts[tile_x]);
                     const auto target =
-                        ((((static_cast<std::size_t>(local) * kLatentChannels + channel) *
+                        ((((static_cast<std::size_t>(tile) * kLatentChannels + channel) *
                                kTileInputFrames +
                            frame) *
                               kTileLatentSize +
@@ -351,215 +342,6 @@ std::vector<float> extract_rank_tiles(const std::vector<float>& latent, int32_t 
     return result;
 }
 
-using NcclAllGatherFn = int (*)(const void*, void*, std::size_t, int, void*, cudaStream_t);
-using NcclBroadcastFn = int (*)(const void*, void*, std::size_t, int, int, void*, cudaStream_t);
-using NcclErrorStringFn = const char* (*)(int);
-
-struct NcclApi {
-    void* handle{nullptr};
-    NcclAllGatherFn all_gather{nullptr};
-    NcclBroadcastFn broadcast{nullptr};
-    NcclErrorStringFn error_string{nullptr};
-};
-
-const NcclApi& nccl_api() {
-    static const NcclApi api = [] {
-        NcclApi result;
-        result.handle = dlopen("libnccl.so.2", RTLD_NOW | RTLD_LOCAL);
-        if (result.handle == nullptr)
-            result.handle = dlopen("libnccl.so", RTLD_NOW | RTLD_LOCAL);
-        if (result.handle == nullptr)
-            throw std::runtime_error("MiniMax-H3 could not load NCCL");
-        result.all_gather =
-            reinterpret_cast<NcclAllGatherFn>(dlsym(result.handle, "ncclAllGather"));
-        result.broadcast = reinterpret_cast<NcclBroadcastFn>(dlsym(result.handle, "ncclBroadcast"));
-        result.error_string =
-            reinterpret_cast<NcclErrorStringFn>(dlsym(result.handle, "ncclGetErrorString"));
-        if (result.all_gather == nullptr || result.broadcast == nullptr ||
-            result.error_string == nullptr)
-            throw std::runtime_error("MiniMax-H3 could not resolve NCCL symbols");
-        return result;
-    }();
-    return api;
-}
-
-void broadcast_bytes(std::vector<std::byte>& values, std::size_t count, void* communicator,
-                     cudaStream_t stream, int32_t rank) {
-    values.resize(count);
-    void* device = nullptr;
-    if (cudaMalloc(&device, count) != cudaSuccess)
-        throw std::runtime_error("MiniMax-H3 broadcast allocation failed");
-    try {
-        if (rank == 0) {
-            const auto upload =
-                cudaMemcpyAsync(device, values.data(), count, cudaMemcpyHostToDevice, stream);
-            if (upload != cudaSuccess)
-                throw std::runtime_error(std::string("MiniMax-H3 broadcast upload failed: ") +
-                                         cudaGetErrorString(upload));
-        }
-        constexpr int kNcclUint8 = 1;
-        const auto& api = nccl_api();
-        const int status =
-            api.broadcast(device, device, count, kNcclUint8, 0, communicator, stream);
-        if (status != 0)
-            throw std::runtime_error(std::string("MiniMax-H3 NCCL broadcast failed: ") +
-                                     api.error_string(status));
-        const auto collective_sync = cudaStreamSynchronize(stream);
-        if (collective_sync != cudaSuccess)
-            throw std::runtime_error(
-                std::string("MiniMax-H3 NCCL broadcast synchronization failed: ") +
-                cudaGetErrorString(collective_sync));
-        const auto download = cudaMemcpy(values.data(), device, count, cudaMemcpyDeviceToHost);
-        if (download != cudaSuccess)
-            throw std::runtime_error(std::string("MiniMax-H3 broadcast download failed: ") +
-                                     cudaGetErrorString(download));
-        cudaFree(device);
-    } catch (...) {
-        cudaFree(device);
-        throw;
-    }
-}
-
-void broadcast_floats(std::vector<float>& values, std::size_t count, void* communicator,
-                      cudaStream_t stream, int32_t rank) {
-    std::vector<std::byte> bytes(count * sizeof(float));
-    if (rank == 0)
-        std::memcpy(bytes.data(), values.data(), bytes.size());
-    broadcast_bytes(bytes, bytes.size(), communicator, stream, rank);
-    values.resize(count);
-    std::memcpy(values.data(), bytes.data(), bytes.size());
-}
-
-void broadcast_modulations(std::vector<StepModulation>& modulations, void* communicator,
-                           cudaStream_t stream, int32_t rank) {
-    constexpr std::size_t block_bytes =
-        static_cast<std::size_t>(kAdalnRows) * 6 * kHidden * sizeof(uint16_t);
-    constexpr std::size_t final_bytes =
-        static_cast<std::size_t>(kTimestepSlots) * 2 * kHidden * sizeof(uint16_t);
-    constexpr std::size_t step_bytes = kLayers * block_bytes + final_bytes;
-    constexpr std::size_t step_count = kSteps - 1;
-    std::vector<std::byte> packed(step_count * step_bytes);
-    if (rank == 0) {
-        if (modulations.size() != step_count)
-            throw std::runtime_error("MiniMax-H3 invalid rank-zero AdaLN table count");
-        std::size_t offset = 0;
-        for (const auto& step : modulations) {
-            for (const auto& block : step.blocks) {
-                if (block.bytes.size() != block_bytes)
-                    throw std::runtime_error("MiniMax-H3 invalid rank-zero AdaLN block");
-                std::memcpy(packed.data() + offset, block.bytes.data(), block_bytes);
-                offset += block_bytes;
-            }
-            if (step.final.bytes.size() != final_bytes)
-                throw std::runtime_error("MiniMax-H3 invalid rank-zero final AdaLN block");
-            std::memcpy(packed.data() + offset, step.final.bytes.data(), final_bytes);
-            offset += final_bytes;
-        }
-    }
-    broadcast_bytes(packed, packed.size(), communicator, stream, rank);
-    if (rank == 0)
-        return;
-    modulations.resize(step_count);
-    std::size_t offset = 0;
-    for (auto& step : modulations) {
-        for (auto& block : step.blocks) {
-            block.shape = {kAdalnRows, 6, kHidden};
-            block.dtype = DType::kBFloat16;
-            block.bytes.resize(block_bytes);
-            std::memcpy(block.bytes.data(), packed.data() + offset, block_bytes);
-            offset += block_bytes;
-        }
-        step.final.shape = {kTimestepSlots, 2, kHidden};
-        step.final.dtype = DType::kBFloat16;
-        step.final.bytes.resize(final_bytes);
-        std::memcpy(step.final.bytes.data(), packed.data() + offset, final_bytes);
-        offset += final_bytes;
-    }
-}
-
-std::vector<float> gather_tiles(const std::vector<float>& local, void* communicator,
-                                cudaStream_t stream, int32_t rank) {
-    float* local_device = nullptr;
-    float* all_device = nullptr;
-    const std::size_t local_bytes = local.size() * sizeof(float);
-    const std::size_t all_count = local.size() * 4;
-    if (cudaMalloc(reinterpret_cast<void**>(&local_device), local_bytes) != cudaSuccess ||
-        cudaMalloc(reinterpret_cast<void**>(&all_device), all_count * sizeof(float)) !=
-            cudaSuccess) {
-        cudaFree(local_device);
-        cudaFree(all_device);
-        throw std::runtime_error("MiniMax-H3 VAE tile gather allocation failed");
-    }
-    try {
-        if (cudaMemcpyAsync(local_device, local.data(), local_bytes, cudaMemcpyHostToDevice,
-                            stream) != cudaSuccess)
-            throw std::runtime_error("MiniMax-H3 VAE tile upload failed");
-        constexpr int kNcclFloat32 = 7;
-        const auto& api = nccl_api();
-        const int status = api.all_gather(local_device, all_device, local.size(), kNcclFloat32,
-                                          communicator, stream);
-        if (status != 0)
-            throw std::runtime_error(std::string("MiniMax-H3 NCCL all-gather failed: ") +
-                                     api.error_string(status));
-        std::vector<float> result;
-        if (rank == 0) {
-            result.resize(all_count);
-            if (cudaMemcpyAsync(result.data(), all_device, all_count * sizeof(float),
-                                cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-                throw std::runtime_error("MiniMax-H3 VAE tile download failed");
-        }
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            throw std::runtime_error("MiniMax-H3 VAE tile gather synchronization failed");
-        cudaFree(local_device);
-        cudaFree(all_device);
-        return result;
-    } catch (...) {
-        cudaFree(local_device);
-        cudaFree(all_device);
-        throw;
-    }
-}
-
-std::vector<float> all_gather_floats(const std::vector<float>& local, void* communicator,
-                                     cudaStream_t stream) {
-    float* local_device = nullptr;
-    float* all_device = nullptr;
-    const std::size_t local_bytes = local.size() * sizeof(float);
-    const std::size_t all_count = local.size() * 4;
-    if (cudaMalloc(reinterpret_cast<void**>(&local_device), local_bytes) != cudaSuccess ||
-        cudaMalloc(reinterpret_cast<void**>(&all_device), all_count * sizeof(float)) !=
-            cudaSuccess) {
-        cudaFree(local_device);
-        cudaFree(all_device);
-        throw std::runtime_error("MiniMax-H3 denoiser gather allocation failed");
-    }
-    try {
-        if (cudaMemcpyAsync(local_device, local.data(), local_bytes, cudaMemcpyHostToDevice,
-                            stream) != cudaSuccess)
-            throw std::runtime_error("MiniMax-H3 denoiser gather upload failed");
-        constexpr int kNcclFloat32 = 7;
-        const auto& api = nccl_api();
-        const int status = api.all_gather(local_device, all_device, local.size(), kNcclFloat32,
-                                          communicator, stream);
-        if (status != 0)
-            throw std::runtime_error(std::string("MiniMax-H3 denoiser NCCL all-gather failed: ") +
-                                     api.error_string(status));
-        std::vector<float> result(all_count);
-        if (cudaMemcpyAsync(result.data(), all_device, all_count * sizeof(float),
-                            cudaMemcpyDeviceToHost, stream) != cudaSuccess)
-            throw std::runtime_error("MiniMax-H3 denoiser gather download failed");
-        if (cudaStreamSynchronize(stream) != cudaSuccess)
-            throw std::runtime_error("MiniMax-H3 denoiser gather synchronization failed");
-        cudaFree(local_device);
-        cudaFree(all_device);
-        return result;
-    } catch (...) {
-        cudaFree(local_device);
-        cudaFree(all_device);
-        throw;
-    }
-}
-
 std::vector<float> stitch_spatial_tiles(const std::vector<float>& tiles) {
     constexpr std::array<int32_t, 3> height_overlaps = {96, 80, 80};
     constexpr std::array<int32_t, 6> width_overlaps = {80, 80, 80, 80, 64, 64};
@@ -567,7 +349,7 @@ std::vector<float> stitch_spatial_tiles(const std::vector<float>& tiles) {
     constexpr std::array<int32_t, 7> output_x = {0, 176, 352, 528, 704, 896, 1088};
     const std::size_t one_tile = static_cast<std::size_t>(3) * kTileFrames * kTileSize * kTileSize;
     if (tiles.size() != static_cast<std::size_t>(kTileCount) * one_tile)
-        throw std::runtime_error("MiniMax-H3 gathered VAE tile count is invalid");
+        throw std::runtime_error("MiniMax-H3 decoded VAE tile count is invalid");
     std::vector<float> clip(static_cast<std::size_t>(3) * kTileFrames * kOutputHeight *
                             kOutputWidth);
     const auto tile_value = [&](int32_t tile, int32_t channel, int32_t frame, int32_t y,
@@ -751,17 +533,10 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
 }
 
 MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
-                                     std::unique_ptr<ITokenizer> tokenizer,
-                                     void* distributed_communicator,
-                                     std::shared_ptr<void> distributed_owner, int32_t rank,
-                                     int32_t world_size, std::string model_id)
-    : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)),
-      distributed_communicator_(distributed_communicator),
-      distributed_owner_(std::move(distributed_owner)), rank_(rank), world_size_(world_size),
-      model_id_(std::move(model_id)) {
-    if (!loader_ || !tokenizer_ || distributed_communicator_ == nullptr || world_size_ != 4 ||
-        rank_ < 0 || rank_ >= world_size_)
-        throw std::invalid_argument("MiniMax-H3 pipeline requires a valid four-rank runtime");
+                                     std::unique_ptr<ITokenizer> tokenizer, std::string model_id)
+    : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)) {
+    if (!loader_ || !tokenizer_)
+        throw std::invalid_argument("MiniMax-H3 pipeline requires a loader and tokenizer");
     if (cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking) != cudaSuccess)
         throw std::runtime_error("MiniMax-H3 failed to create its CUDA stream");
 }
@@ -789,7 +564,7 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
             std::to_string(ids.size()));
     std::vector<float> text_embeddings;
     const auto text_begin = Clock::now();
-    if (rank_ == 0) {
+    {
         auto module = loader_("text_encoder_plan", stream_);
         TensorMap inputs;
         inputs.emplace("input_ids",
@@ -800,20 +575,17 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
                        static_cast<std::size_t>(kTextRows) * kTextDim, "text encoder");
         module->sync();
     }
-    broadcast_floats(text_embeddings, static_cast<std::size_t>(kTextRows) * kTextDim,
-                     distributed_communicator_, stream_, rank_);
     const auto text_end = Clock::now();
 
     const auto video_schedule = make_minimax_h3_schedule(kSteps, 12.0F);
     const auto audio_schedule = make_minimax_h3_schedule(kSteps, 3.0F);
     std::vector<StepModulation> modulations;
     const auto adaln_begin = Clock::now();
-    if (rank_ == 0) {
+    {
         auto module = loader_("adaln_precompute_plan", stream_);
         modulations = precompute_modulations(*module, video_schedule, audio_schedule);
         module->sync();
     }
-    broadcast_modulations(modulations, distributed_communicator_, stream_, rank_);
     const auto adaln_end = Clock::now();
 
     auto video_tensor =
@@ -824,11 +596,11 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
     auto video_rows = patchify_video(video_tensor);
     video_tensor.clear();
     video_tensor.shrink_to_fit();
-    auto metadata = make_local_metadata(rank_);
+    auto metadata = make_denoiser_metadata();
 
     const auto denoiser_begin = Clock::now();
     {
-        auto module = loader_("denoiser_plan_cp", stream_);
+        auto module = loader_("denoiser_plan", stream_);
         for (std::size_t step = 0; step < video_schedule.timesteps.size(); ++step) {
             TensorMap inputs;
             inputs.emplace("video_hidden_states",
@@ -838,25 +610,21 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
                 Tensor{audio_rows.data(), {kAudioRows, kAudioChannels}, DType::kFloat32});
             inputs.emplace("encoder_hidden_states",
                            Tensor{text_embeddings.data(), {kTextRows, kTextDim}, DType::kFloat32});
-            inputs.emplace("local_position_ids",
-                           Tensor{metadata.positions.data(), {kLocalRows, 3}, DType::kFloat32});
-            inputs.emplace("local_adaln_indices",
-                           Tensor{metadata.adaln_indices.data(), {kLocalRows}, DType::kInt32});
-            inputs.emplace("local_timestep_indices",
-                           Tensor{metadata.timestep_indices.data(), {kLocalRows}, DType::kInt32});
-            inputs.emplace("rank", Tensor{&rank_, {1}, DType::kInt32});
+            inputs.emplace("position_ids",
+                           Tensor{metadata.positions.data(), {kSequenceRows, 3}, DType::kFloat32});
+            inputs.emplace("adaln_indices",
+                           Tensor{metadata.adaln_indices.data(), {kSequenceRows}, DType::kInt32});
+            inputs.emplace(
+                "timestep_indices",
+                Tensor{metadata.timestep_indices.data(), {kSequenceRows}, DType::kInt32});
             append_modulation_inputs(inputs, modulations[step]);
             const auto outputs = module->forward(inputs);
-            auto local_video_velocity = copy_float(require_output(outputs, "local_video_velocity"),
-                                                   static_cast<std::size_t>(kLocalRows) * kPatchDim,
-                                                   "local video velocity");
-            auto local_audio_velocity = copy_float(
-                require_output(outputs, "local_audio_velocity"),
-                static_cast<std::size_t>(kLocalRows) * kAudioChannels, "local audio velocity");
             auto video_all =
-                all_gather_floats(local_video_velocity, distributed_communicator_, stream_);
-            auto audio_all =
-                all_gather_floats(local_audio_velocity, distributed_communicator_, stream_);
+                copy_float(require_output(outputs, "video_velocity"),
+                           static_cast<std::size_t>(kSequenceRows) * kPatchDim, "video velocity");
+            auto audio_all = copy_float(require_output(outputs, "audio_velocity"),
+                                        static_cast<std::size_t>(kSequenceRows) * kAudioChannels,
+                                        "audio velocity");
             const auto video_begin =
                 video_all.begin() + static_cast<std::ptrdiff_t>(kTextRows + kAudioRows) * kPatchDim;
             std::vector<float> video_velocity(video_begin, video_begin + video_rows.size());
@@ -869,9 +637,8 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
             minimax_h3_scheduler_step(audio_rows.data(), audio_velocity.data(), audio_rows.size(),
                                       audio_schedule.timesteps[step], audio_schedule.sigmas[step],
                                       audio_schedule.sigmas[step + 1]);
-            if (rank_ == 0)
-                std::cerr << "[minimax-h3] denoiser " << (step + 1) << '/'
-                          << video_schedule.timesteps.size() << '\n';
+            std::cerr << "[minimax-h3] denoiser " << (step + 1) << '/'
+                      << video_schedule.timesteps.size() << '\n';
         }
         module->sync();
     }
@@ -892,34 +659,28 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
     const auto vae_begin = Clock::now();
     {
         auto module = loader_("vae_tile_decoder_plan", stream_);
-        constexpr std::size_t local_output_count =
+        constexpr std::size_t output_count =
             static_cast<std::size_t>(kTileBatch) * 3 * kTileFrames * kTileSize * kTileSize;
         for (int32_t clip_index = 0; clip_index < 7; ++clip_index) {
-            auto local_tiles = extract_rank_tiles(latent, clip_index, rank_);
+            auto latent_tiles = extract_tiles(latent, clip_index);
             TensorMap inputs;
-            inputs.emplace("latent_tiles", Tensor{local_tiles.data(),
+            inputs.emplace("latent_tiles", Tensor{latent_tiles.data(),
                                                   {kTileBatch, kLatentChannels, kTileInputFrames,
                                                    kTileLatentSize, kTileLatentSize},
                                                   DType::kFloat32});
             const auto outputs = module->forward(inputs);
-            auto decoded_local = copy_float(require_output(outputs, "decoded_tiles"),
-                                            local_output_count, "VAE decoded tiles");
-            auto decoded_all =
-                gather_tiles(decoded_local, distributed_communicator_, stream_, rank_);
-            if (rank_ == 0) {
-                auto clip = stitch_spatial_tiles(decoded_all);
-                append_temporal_chunk(video, clip, overlap);
-                overlap = trailing_overlap(clip);
-                std::cerr << "[minimax-h3] VAE clip " << (clip_index + 1) << "/7\n";
-            }
+            auto decoded_tiles = copy_float(require_output(outputs, "decoded_tiles"), output_count,
+                                            "VAE decoded tiles");
+            auto clip = stitch_spatial_tiles(decoded_tiles);
+            append_temporal_chunk(video, clip, overlap);
+            overlap = trailing_overlap(clip);
+            std::cerr << "[minimax-h3] VAE clip " << (clip_index + 1) << "/7\n";
         }
         module->sync();
     }
     const auto vae_end = Clock::now();
     latent.clear();
     latent.shrink_to_fit();
-    if (rank_ != 0)
-        return {};
     append_final_overlap(video, overlap);
     const std::size_t expected_pixels =
         static_cast<std::size_t>(3) * kOutputFrames * kOutputHeight * kOutputWidth;

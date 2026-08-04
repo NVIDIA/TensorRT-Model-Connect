@@ -3,8 +3,8 @@
 
 """Plugin-free TensorRT graph vocabulary for MiniMax-H3.
 
-All math in this module uses TensorRT native layers. Distributed collectives
-use TensorRT 11 ``IDistCollectiveLayer`` rather than a model plugin.
+All math in this module uses TensorRT native layers. The qualified single-device
+graph uses fused ``IAttention`` and contains no plugin or distributed layer.
 """
 
 from __future__ import annotations
@@ -235,77 +235,15 @@ def partial_rope(
     return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
 
 
-def add_collective(network, tensor, operation, world_size: int):
-    add = getattr(network, "add_dist_collective", None)
-    if add is None:
-        raise RuntimeError("MiniMax-H3 context parallelism requires TensorRT 11 collectives")
-    reduce_none = getattr(trt.ReduceOperation, "NONE", trt.ReduceOperation.SUM)
-    layer = add(tensor, operation, reduce_none, -1, [])
-    if layer is None or not hasattr(layer, "num_ranks"):
-        raise RuntimeError("TensorRT failed to add a distributed collective")
-    layer.num_ranks = world_size
-    return layer.get_output(0)
+def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int):
+    """Full-sequence single-device fused TensorRT attention."""
 
-
-def slice_replicated_for_rank(network, tensor, rank, local_rows: int):
-    """Select a rank's rows from an identical full input without a collective."""
-
-    width = int(tensor.shape[1])
-    world_size = int(tensor.shape[0]) // local_rows
-    sharded = network.add_shuffle(tensor)
-    sharded.reshape_dims = (world_size, local_rows, width)
-    selected = network.add_gather(sharded.get_output(0), rank, 0)
-    flattened = network.add_shuffle(selected.get_output(0))
-    flattened.reshape_dims = (local_rows, width)
-    return flattened.get_output(0)
-
-
-def ulysses_seq_to_head(network, tensor, *, local_rows: int, heads: int, head_dim: int, cp: int):
-    local_heads = heads // cp
-    routed = network.add_shuffle(tensor)
-    routed.reshape_dims = (local_rows, cp, local_heads, head_dim)
-    routed.second_transpose = trt.Permutation([1, 0, 2, 3])
-    exchanged = add_collective(
-        network, routed.get_output(0), trt.CollectiveOperation.ALL_TO_ALL, cp
-    )
-    full = network.add_shuffle(exchanged)
-    full.first_transpose = trt.Permutation([2, 0, 1, 3])
-    full.reshape_dims = (1, local_heads, local_rows * cp, head_dim)
-    return full.get_output(0)
-
-
-def ulysses_head_to_seq(network, tensor, *, local_rows: int, heads: int, head_dim: int, cp: int):
-    local_heads = heads // cp
-    routed = network.add_shuffle(tensor)
-    routed.reshape_dims = (local_heads, cp, local_rows, head_dim)
-    routed.second_transpose = trt.Permutation([1, 0, 2, 3])
-    exchanged = add_collective(
-        network, routed.get_output(0), trt.CollectiveOperation.ALL_TO_ALL, cp
-    )
-    local = network.add_shuffle(exchanged)
-    local.first_transpose = trt.Permutation([2, 0, 1, 3])
-    local.reshape_dims = (local_rows, heads * head_dim)
-    return local.get_output(0)
-
-
-def ulysses_attention(
-    network, q, k, v, key_mask, *, local_rows: int, heads: int, head_dim: int, cp: int
-):
-    """Ulysses exchange around native fused TensorRT attention."""
-
-    q = ulysses_seq_to_head(
-        network, q, local_rows=local_rows, heads=heads, head_dim=head_dim, cp=cp
-    )
-    k = ulysses_seq_to_head(
-        network, k, local_rows=local_rows, heads=heads, head_dim=head_dim, cp=cp
-    )
-    v = ulysses_seq_to_head(
-        network, v, local_rows=local_rows, heads=heads, head_dim=head_dim, cp=cp
-    )
+    q = rows_to_heads(network, q, rows, heads, head_dim)
+    k = rows_to_heads(network, k, rows, heads, head_dim)
+    v = rows_to_heads(network, v, rows, heads, head_dim)
     # TensorRT's fused FP16 attention has three additional mantissa bits over
-    # BF16. Keep the surrounding block and collectives in checkpoint-native
-    # BF16 while reducing the recurrent numerical drift across 49 denoising
-    # evaluations.
+    # BF16. Keep the surrounding block in checkpoint-native BF16 while
+    # reducing recurrent numerical drift across 49 denoising evaluations.
     q = cast(network, q, trt.float16)
     k = cast(network, k, trt.float16)
     v = cast(network, v, trt.float16)
@@ -319,9 +257,5 @@ def ulysses_attention(
     if layer is None:
         raise RuntimeError("TensorRT failed to add MiniMax-H3 native attention")
     layer.decomposable = False
-    if key_mask is not None:
-        layer.mask = cast(network, key_mask, q.dtype)
     context = cast(network, layer.get_output(0), trt.bfloat16)
-    return ulysses_head_to_seq(
-        network, context, local_rows=local_rows, heads=heads, head_dim=head_dim, cp=cp
-    )
+    return heads_to_rows(network, context, rows, heads * head_dim)

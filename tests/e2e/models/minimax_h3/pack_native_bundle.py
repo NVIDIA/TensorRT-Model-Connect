@@ -26,7 +26,7 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
 PLAN_SECTIONS = {
     "text_encoder_plan": "text_encoder.plan",
     "adaln_precompute_plan": "adaln_precompute.plan",
-    "denoiser_plan_cp": "denoiser_cp.plan",
+    "denoiser_plan": "denoiser.plan",
     "vae_tile_decoder_plan": "vae_tile_decoder.plan",
 }
 
@@ -97,10 +97,10 @@ def main() -> int:
         "text_rows": 537,
         "audio_rows": 414,
         "video_rows": 37296,
-        "padded_sequence_length": 38272,
+        "padded_sequence_length": 38247,
         "max_timestep_count": 4,
-        "context_parallel_size": 4,
-        "vae_tile_batch": 7,
+        "context_parallel_size": 1,
+        "vae_tile_batch": 28,
         "vae_tile_size": 256,
         "vae_tile_overlap": 64,
     }

@@ -28,20 +28,19 @@ def test_sol_engine_profile_matches_public_packed_shape() -> None:
     profile = SOL_ENGINE_1344X768_124F
     profile.validate()
     assert profile.sequence_length == 38247
-    assert profile.context_parallel_size == 4
-    assert profile.padding_rows == 25
-    assert profile.padded_sequence_length // profile.context_parallel_size == 9568
+    assert profile.context_parallel_size == 1
+    assert profile.padding_rows == 0
+    assert profile.padded_sequence_length // profile.context_parallel_size == 38247
     assert profile.attention_size == 7168
     assert profile.video_patch_dim == 96
 
 
-def test_invalid_context_parallel_contract_fails_closed() -> None:
-    with pytest.raises(ValueError, match="padded_sequence_length"):
-        MiniMaxH3Config(padded_sequence_length=38271).validate()
-    with pytest.raises(ValueError, match="num_heads"):
-        MiniMaxH3Config(context_parallel_size=4, num_heads=55).validate()
-    with pytest.raises(ValueError, match="context_parallel_size=4"):
-        MiniMaxH3Config(context_parallel_size=8).validate()
+def test_invalid_single_device_contract_fails_closed() -> None:
+    for padded_rows in (38246, 38248):
+        with pytest.raises(ValueError, match="no packed-sequence padding"):
+            MiniMaxH3Config(padded_sequence_length=padded_rows).validate()
+    with pytest.raises(ValueError, match="context_parallel_size=1"):
+        MiniMaxH3Config(context_parallel_size=4).validate()
 
 
 def test_manifest_discovers_both_public_pipeline_names() -> None:
@@ -82,7 +81,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         "plan_sha256": {
             "text_encoder.plan": "d" * 64,
             "adaln_precompute.plan": "e" * 64,
-            "denoiser_cp.plan": "f" * 64,
+            "denoiser.plan": "f" * 64,
             "vae_tile_decoder.plan": "0" * 64,
         },
     }
@@ -93,7 +92,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     )
     assert result | provenance == result
     assert result["seed"] == 7
-    assert result["context_parallel_size"] == 4
+    assert result["context_parallel_size"] == 1
     with pytest.raises(ValueError, match="runtime profile"):
         MiniMaxH3Plugin().diffusion_bundle_config(
             SimpleNamespace(raw={"video_width": 1}),
@@ -126,6 +125,9 @@ def test_sol_lossless_optimizations_are_structural() -> None:
     assert "fused_qkv" in dit
     assert "UnaryOperation.NEG" in ops
     assert "add_attention" in ops
-    assert "CollectiveOperation.ALL_TO_ALL" in ops
+    assert "native_attention" in ops
+    assert "add_dist_collective" not in ops
+    assert 'network.add_input("rank"' not in dit
+    assert "layer.mask" not in ops
     assert "SolAttn" not in "\n".join((adaln, dit, ops))
     assert "FirstBlockCache" not in "\n".join((adaln, dit, ops))

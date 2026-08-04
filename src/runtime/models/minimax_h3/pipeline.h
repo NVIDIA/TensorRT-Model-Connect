@@ -33,8 +33,7 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
 class MiniMaxH3Pipeline final : public IPipeline {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
-                      void* distributed_communicator, std::shared_ptr<void> distributed_owner,
-                      int32_t rank, int32_t world_size, std::string model_id);
+                      std::string model_id);
     ~MiniMaxH3Pipeline() override;
 
     bool supports_image_generation() const override { return true; }
@@ -45,10 +44,6 @@ class MiniMaxH3Pipeline final : public IPipeline {
   private:
     MiniMaxH3ModuleLoader loader_;
     std::unique_ptr<ITokenizer> tokenizer_;
-    void* distributed_communicator_{nullptr};
-    std::shared_ptr<void> distributed_owner_;
-    int32_t rank_{0};
-    int32_t world_size_{1};
     std::string model_id_;
     cudaStream_t stream_{nullptr};
     std::mutex generation_mutex_;

@@ -17,7 +17,7 @@ from . import graph_ops as op
 
 trt = trt_compat.get_trt()
 
-BATCH = 7  # 28 spatial tiles / four GB300 context-parallel ranks
+BATCH = 28  # Decode every spatial tile in one native single-device batch.
 CHANNELS = 24
 FRAMES = 7
 HEIGHT = 16

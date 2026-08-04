@@ -21,7 +21,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PLAN_FILENAMES = {
     "text_encoder.plan",
     "adaln_precompute.plan",
-    "denoiser_cp.plan",
+    "denoiser.plan",
     "vae_tile_decoder.plan",
 }
 
@@ -91,6 +91,12 @@ def source_revision(case: E2ECase, ctx: RunContext) -> str:
         raise ValueError("MiniMax-H3 bundle has no valid builder_source_sha256")
     if _SHA256.fullmatch(str(config.get("checkpoint_inventory_sha256", ""))) is None:
         raise ValueError("MiniMax-H3 bundle has no valid checkpoint_inventory_sha256")
+    if config.get("context_parallel_size") != 1:
+        raise ValueError("MiniMax-H3 E2E bundle is not single-device")
+    if config.get("padded_sequence_length") != 38247:
+        raise ValueError("MiniMax-H3 E2E bundle does not use the unpadded sequence")
+    if config.get("vae_tile_batch") != 28:
+        raise ValueError("MiniMax-H3 E2E bundle does not decode all spatial tiles in one batch")
     plan_sha = config.get("plan_sha256")
     if not isinstance(plan_sha, dict) or set(plan_sha) != _PLAN_FILENAMES:
         raise ValueError("MiniMax-H3 bundle does not identify exactly all four native plans")

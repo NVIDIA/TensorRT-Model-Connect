@@ -45,7 +45,7 @@ def pytest_generate_tests(metafunc):
         metafunc.parametrize("case_name", _runner.model_case_names(metafunc.config))
 
 
-def test_minimax_h3_manifest_is_truthful_cp4_contract() -> None:
+def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     model = load_model_manifest(_MANIFEST_PATH)
     assert model.name == "minimax-h3-768p"
     assert model.family == "minimax_h3"
@@ -54,13 +54,13 @@ def test_minimax_h3_manifest_is_truthful_cp4_contract() -> None:
     case = model.testcases[0]
     assert case.runtime_strategy == "diffusion_minimax_h3"
     assert case.task_strategy == "diffusion_media_generation"
-    assert case.metadata["ci_tier"] == "multi_device"
+    assert case.metadata["ci_tier"] == "nightly_only"
     assert case.metadata["build_args"]["parallel"] == {
-        "mode": "context_parallel",
-        "cp_size": 4,
+        "mode": "single",
+        "cp_size": 1,
     }
     assert any(
-        requirement.kind == "gpu_count_min" and requirement.args.get("count") == 4
+        requirement.kind == "gpu_count_min" and requirement.args.get("count") == 1
         for requirement in case.preflight
     )
     assert case.inputs["video_num_frames"] == 124
@@ -87,6 +87,7 @@ def test_minimax_h3_comparator_gates_decoded_pixel_drift(tmp_path: Path) -> None
     np.save(reference_path, reference)
     np.save(candidate_path, candidate)
     revision = "1" * 40
+    inventory = "a" * 64
     result = comparator.compare(
         StageOutput(
             stage_name="end_to_end",
@@ -94,6 +95,14 @@ def test_minimax_h3_comparator_gates_decoded_pixel_drift(tmp_path: Path) -> None
                 "returncode": 0,
                 "frames_path": str(candidate_path),
                 "source_revision": revision,
+                "receipt": {
+                    "status": "passed",
+                    "backend": "tensorrt_native_single_device",
+                    "world_size": 1,
+                    "collective_transport": "none",
+                    "source_revision": revision,
+                    "checkpoint_inventory_sha256": inventory,
+                },
             },
         ),
         StageOutput(
@@ -102,6 +111,11 @@ def test_minimax_h3_comparator_gates_decoded_pixel_drift(tmp_path: Path) -> None
                 "returncode": 0,
                 "frames_path": str(reference_path),
                 "source_revision": revision,
+                "receipt": {
+                    "status": "passed",
+                    "source_revision": revision,
+                    "checkpoint_inventory_sha256": inventory,
+                },
             },
         ),
         ThresholdProfile(
@@ -151,6 +165,10 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
     )
     candidate_receipt = {
         "status": "passed",
+        "backend": "tensorrt_native_single_device",
+        "world_size": 1,
+        "collective_transport": "none",
+        "plan_sha256": {"denoiser.plan": "b" * 64},
         "source_revision": revision,
         "checkpoint_inventory_sha256": "a" * 64,
         "request": workload,

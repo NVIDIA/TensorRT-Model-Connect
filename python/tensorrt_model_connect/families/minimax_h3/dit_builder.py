@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native TensorRT Ulysses Omni-DiT for MiniMax-H3."""
+"""Native single-device TensorRT Omni-DiT for MiniMax-H3."""
 
 from __future__ import annotations
 
@@ -86,7 +86,6 @@ def _attention_block(
     *,
     cos=None,
     sin=None,
-    key_mask=None,
 ):
     q, k, v = op.fused_qkv(network, hidden, weights, f"{prefix}.attn")
     q = _per_head_norm(network, q, weights[f"{prefix}.attn.norm_q.weight"], profile, rows)
@@ -113,16 +112,14 @@ def _attention_block(
             head_dim=profile.head_dim,
             rotary_dim=rotary_dim,
         )
-        attended = op.ulysses_attention(
+        attended = op.native_attention(
             network,
             q,
             k,
             v,
-            key_mask,
-            local_rows=rows,
+            rows=rows,
             heads=profile.num_heads,
             head_dim=profile.head_dim,
-            cp=profile.context_parallel_size,
         )
     else:
         attended = _native_attention(network, q, k, v, rows=rows, profile=profile)
@@ -175,11 +172,10 @@ def build_dit_engine(
     *,
     verbose: bool = False,
 ) -> bytes:
-    """Build one rank-independent TensorRT plan for four-rank H3 Ulysses."""
+    """Build the full-sequence single-device H3 TensorRT plan."""
 
     profile.validate()
-    cp = profile.context_parallel_size
-    local_rows = profile.padded_sequence_length // cp
+    rows = profile.sequence_length
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -198,9 +194,9 @@ def build_dit_engine(
     text = network.add_input(
         "encoder_hidden_states", trt.float32, (profile.text_rows, profile.text_dim)
     )
-    local_positions = network.add_input("local_position_ids", trt.float32, (local_rows, 3))
-    local_adaln_indices = network.add_input("local_adaln_indices", trt.int32, (local_rows,))
-    local_timestep_indices = network.add_input("local_timestep_indices", trt.int32, (local_rows,))
+    positions = network.add_input("position_ids", trt.float32, (rows, 3))
+    adaln_indices = network.add_input("adaln_indices", trt.int32, (rows,))
+    timestep_indices = network.add_input("timestep_indices", trt.int32, (rows,))
     block_modulations = [
         network.add_input(
             f"block_modulation_{index}",
@@ -212,10 +208,9 @@ def build_dit_engine(
     final_modulation = network.add_input(
         "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
     )
-    rank = network.add_input("rank", trt.int32, (1,))
-
-    # The public FL2VA profile is packed as text | audio | video | padding.
-    # Projection, text refinement, packing, and CP sharding all remain native TRT.
+    # The public single-device FL2VA profile is packed as text | audio | video.
+    # Projection, text refinement, packing, and full-sequence attention all
+    # remain native TensorRT operations on one device.
     text_hidden = _refine_text(network, text, weights, profile)
     audio_hidden = op.linear(
         network, audio, weights["audio_proj_in.weight"], weights["audio_proj_in.bias"], bf16=False
@@ -225,27 +220,18 @@ def build_dit_engine(
         network, video, weights["proj_in.weight"], weights["proj_in.bias"], bf16=False
     )
     video_hidden = op.cast(network, video_hidden, trt.bfloat16)
-    packed_inputs = [text_hidden, audio_hidden, video_hidden]
-    if profile.padding_rows:
-        padding = op.constant(
-            network,
-            np.zeros((profile.padding_rows, profile.hidden_size), dtype=np.float32),
-        )
-        packed_inputs.append(op.cast(network, padding, trt.bfloat16))
-    packed = network.add_concatenation(packed_inputs)
+    packed = network.add_concatenation((text_hidden, audio_hidden, video_hidden))
     packed.axis = 0
-    hidden = op.slice_replicated_for_rank(network, packed.get_output(0), rank, local_rows)
+    hidden = packed.get_output(0)
 
-    cos, sin = _rope_tables(network, local_positions, profile, local_rows)
-    key_mask_values = np.zeros((1, 1, 1, profile.padded_sequence_length), dtype=np.float32)
-    key_mask_values[..., profile.sequence_length :] = -1.0e30
-    key_mask = op.cast(network, op.constant(network, key_mask_values), trt.bfloat16)
-
+    cos, sin = _rope_tables(network, positions, profile, rows)
+    # Pristine Diffusers packs exactly 38,247 rows on one device, so its
+    # attention mask is None. Preserve that contract without synthetic padding.
     for index in range(profile.num_layers):
         prefix = f"transformer_blocks.{index}"
-        selected = op.gather_rows(network, block_modulations[index], local_adaln_indices)
+        selected = op.gather_rows(network, block_modulations[index], adaln_indices)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            _slice_modulation(network, selected, part, local_rows, profile.hidden_size)
+            _slice_modulation(network, selected, part, rows, profile.hidden_size)
             for part in range(6)
         )
         normalized = op.rms_norm(
@@ -262,10 +248,9 @@ def build_dit_engine(
             weights,
             prefix,
             profile,
-            local_rows,
+            rows,
             cos=cos,
             sin=sin,
-            key_mask=key_mask,
         )
         hidden = op.gated_residual(network, hidden, update, gate_msa)
 
@@ -286,9 +271,9 @@ def build_dit_engine(
         )
         hidden = op.gated_residual(network, hidden, update, gate_mlp)
 
-    selected = op.gather_rows(network, final_modulation, local_timestep_indices)
-    final_shift = _slice_modulation(network, selected, 0, local_rows, profile.hidden_size)
-    final_scale = _slice_modulation(network, selected, 1, local_rows, profile.hidden_size)
+    selected = op.gather_rows(network, final_modulation, timestep_indices)
+    final_shift = _slice_modulation(network, selected, 0, rows, profile.hidden_size)
+    final_scale = _slice_modulation(network, selected, 1, rows, profile.hidden_size)
     hidden = op.rms_norm(
         network, hidden, weights["norm_out.norm.weight"], profile.hidden_size, profile.norm_eps
     )
@@ -304,14 +289,14 @@ def build_dit_engine(
         weights["audio_proj_out.bias"],
         bf16=False,
     )
-    video_all.name = "local_video_velocity"
-    audio_all.name = "local_audio_velocity"
+    video_all.name = "video_velocity"
+    audio_all.name = "audio_velocity"
     network.mark_output(video_all)
     network.mark_output(audio_all)
 
     print(
         f"[minimax-h3] building native DiT: layers={profile.num_layers}, "
-        f"packed={profile.sequence_length}, padded={profile.padded_sequence_length}, cp={cp}",
+        f"packed={profile.sequence_length}, devices=1",
         file=sys.stderr,
     )
     plan = builder.build_serialized_network(network, config)

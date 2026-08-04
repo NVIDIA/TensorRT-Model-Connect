@@ -118,8 +118,8 @@ class MiniMaxH3Plugin:
             raise ValueError("MiniMax-H3 native builds require BF16 checkpoint weights")
         cp_size = int(getattr(parallel_config, "cp_size", 1))
         mode = str(getattr(parallel_config, "mode", "single"))
-        if mode != "context_parallel" or cp_size != 4:
-            raise ValueError("MiniMax-H3 requires parallel.mode=context_parallel and cp_size=4")
+        if mode != "single" or cp_size != 1:
+            raise ValueError("MiniMax-H3 requires parallel.mode=single and cp_size=1")
 
         raw = getattr(config, "raw", {})
         profile = _fixed_profile(raw)
@@ -178,7 +178,7 @@ class MiniMaxH3Plugin:
         plan_sha256 = {
             "text_encoder.plan": hashlib.sha256(text_encoder_plan).hexdigest(),
             "adaln_precompute.plan": hashlib.sha256(adaln_plan).hexdigest(),
-            "denoiser_cp.plan": hashlib.sha256(denoiser_plan).hexdigest(),
+            "denoiser.plan": hashlib.sha256(denoiser_plan).hexdigest(),
             "vae_tile_decoder.plan": hashlib.sha256(vae_decoder_plan).hexdigest(),
         }
 
@@ -209,7 +209,7 @@ class MiniMaxH3Plugin:
         return [
             ("text_encoder_plan", components["text_encoder"]),
             ("adaln_precompute_plan", components["adaln_precompute"]),
-            ("denoiser_plan_cp", components["denoiser"]),
+            ("denoiser_plan", components["denoiser"]),
             ("vae_tile_decoder_plan", components["vae_decoder"]),
             ("tokenizer.json", components["tokenizer_json"]),
         ]
@@ -248,7 +248,7 @@ class MiniMaxH3Plugin:
             "padded_sequence_length": profile.padded_sequence_length,
             "max_timestep_count": profile.max_timestep_count,
             "context_parallel_size": profile.context_parallel_size,
-            "vae_tile_batch": 7,
+            "vae_tile_batch": 28,
             "vae_tile_size": 256,
             "vae_tile_overlap": 64,
         }

@@ -21,7 +21,7 @@ HF_CACHE_REPOSITORY = "models--MiniMaxAI--MiniMax-H3"
 PLAN_FILENAMES = (
     "text_encoder.plan",
     "adaln_precompute.plan",
-    "denoiser_cp.plan",
+    "denoiser.plan",
     "vae_tile_decoder.plan",
 )
 _REQUIRED_SNAPSHOT_FILES = (
@@ -470,7 +470,9 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         "checkpoint_revision": CHECKPOINT_REVISION,
         "source_revision": source_revision,
         "builder_source_sha256": builder_source_sha256(),
-        "context_parallel_size": 4,
+        "context_parallel_size": 1,
+        "padded_sequence_length": 38247,
+        "vae_tile_batch": 28,
     }
     for key, value in expected.items():
         if config.get(key) != value:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import re
 
 import numpy as np
 
@@ -82,6 +83,52 @@ class MiniMaxH3DecodedVideoComparator:
                 stage_name=stage.name,
                 status=StageStatus.ERROR.value,
                 message="TRT and HF receipts do not identify the same source revision",
+            )
+        trt_receipt = trt.data.get("receipt")
+        ref_receipt = ref.data.get("receipt")
+        if not isinstance(trt_receipt, dict) or trt_receipt.get("status") != "passed":
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                message="Native MiniMax-H3 did not produce a passed receipt",
+            )
+        if not isinstance(ref_receipt, dict) or ref_receipt.get("status") != "passed":
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                message="HF MiniMax-H3 did not produce a passed receipt",
+            )
+        if (
+            trt_receipt.get("backend") != "tensorrt_native_single_device"
+            or trt_receipt.get("world_size") != 1
+            or trt_receipt.get("collective_transport") != "none"
+        ):
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                message="Native MiniMax-H3 receipt is not a no-collective single-device run",
+            )
+        expected_revision = trt.data.get("source_revision")
+        if (
+            trt_receipt.get("source_revision") != expected_revision
+            or ref_receipt.get("source_revision") != expected_revision
+        ):
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                message="TRT and HF run receipts identify different source revisions",
+            )
+        trt_inventory = trt_receipt.get("checkpoint_inventory_sha256")
+        ref_inventory = ref_receipt.get("checkpoint_inventory_sha256")
+        if (
+            not isinstance(trt_inventory, str)
+            or re.fullmatch(r"[0-9a-f]{64}", trt_inventory) is None
+            or trt_inventory != ref_inventory
+        ):
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                message="TRT and HF run receipts identify different checkpoints",
             )
 
         reference_path = Path(str(ref.data.get("frames_path", "")))

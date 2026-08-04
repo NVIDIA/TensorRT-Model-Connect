@@ -237,7 +237,9 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
         "source_revision": SOURCE_REVISION,
         "builder_source_sha256": builder_source_sha256(),
         "checkpoint_inventory_sha256": receipt["checkpoint_snapshot"]["inventory_sha256"],
-        "context_parallel_size": 4,
+        "context_parallel_size": 1,
+        "padded_sequence_length": 38247,
+        "vae_tile_batch": 28,
         "plan_sha256": {
             filename: receipt["components"][filename]["sha256"] for filename in PLAN_FILENAMES
         },

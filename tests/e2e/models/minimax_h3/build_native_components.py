@@ -50,7 +50,7 @@ def main() -> int:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-revision", required=True)
-    parser.add_argument("--cp-size", type=int, default=4, choices=(4,))
+    parser.add_argument("--cp-size", type=int, default=1, choices=(1,))
     parser.add_argument(
         "--component",
         action="append",
@@ -148,7 +148,7 @@ def main() -> int:
     from tensorrt_model_connect.families.minimax_h3.dit_builder import build_dit_engine
 
     build_adaln = should_build("adaln_precompute", "adaln_precompute.plan")
-    build_denoiser = should_build("denoiser", "denoiser_cp.plan")
+    build_denoiser = should_build("denoiser", "denoiser.plan")
     if build_adaln or build_denoiser:
         state = load_component_state_dict(model / "transformer")
         weights = numpy_state(state)
@@ -163,7 +163,7 @@ def main() -> int:
         if build_denoiser:
             started = time.perf_counter()
             plan = build_dit_engine(weights, profile)
-            _write(output, "denoiser_cp.plan", plan, time.perf_counter() - started, receipt)
+            _write(output, "denoiser.plan", plan, time.perf_counter() - started, receipt)
             checkpoint_receipt()
             del plan
             gc.collect()

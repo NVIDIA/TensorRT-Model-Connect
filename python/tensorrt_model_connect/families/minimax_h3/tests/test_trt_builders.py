@@ -95,7 +95,7 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         text_rows=2,
         padded_sequence_length=8,
         max_timestep_count=2,
-        context_parallel_size=4,
+        context_parallel_size=1,
     )
     weights = _weights(profile)
     assert build_adaln_precompute_engine(weights, profile)

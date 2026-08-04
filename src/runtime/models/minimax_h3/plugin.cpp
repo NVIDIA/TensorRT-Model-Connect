@@ -6,7 +6,6 @@
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
 #include "runtime/models/minimax_h3/pipeline.h"
-#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/tokenizer.h"
@@ -27,7 +26,7 @@ using SectionMap = std::unordered_map<std::string, BundleSectionInfo>;
 
 SectionMap index_sections(const BundleInfo& info) {
     constexpr std::array<const char*, 4> names = {"text_encoder_plan", "adaln_precompute_plan",
-                                                  "denoiser_plan_cp", "vae_tile_decoder_plan"};
+                                                  "denoiser_plan", "vae_tile_decoder_plan"};
     SectionMap sections;
     for (const char* name : names) {
         const auto it =
@@ -57,21 +56,24 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         if (ctx.backend == nullptr)
             throw std::runtime_error("MiniMax-H3 requires the TensorRT backend");
-        const int32_t cp_size = extract_json_int(ctx.config_json, "context_parallel_size", 4);
-        if (cp_size != 4)
-            throw std::runtime_error(
-                "MiniMax-H3 1344x768 GB300 profile requires context_parallel_size=4");
-        auto group = initialize_tensor_parallel_group(cp_size);
+        const int32_t cp_size = extract_json_int(ctx.config_json, "context_parallel_size", 1);
+        if (cp_size != 1)
+            throw std::runtime_error("MiniMax-H3 requires context_parallel_size=1");
+        const int32_t sequence_rows =
+            extract_json_int(ctx.config_json, "padded_sequence_length", 38247);
+        if (sequence_rows != 38247)
+            throw std::runtime_error("MiniMax-H3 requires 38247 unpadded sequence rows");
+        const int32_t vae_tile_batch = extract_json_int(ctx.config_json, "vae_tile_batch", 28);
+        if (vae_tile_batch != 28)
+            throw std::runtime_error("MiniMax-H3 requires vae_tile_batch=28");
         auto sections = index_sections(ctx.bundle.info);
         const std::string bundle_path = ctx.bundle_path;
         const std::string runtime_cache = ctx.runtime_cache_path;
         IBackend* const backend = ctx.backend;
         const bool cuda_graphs = ctx.cuda_graphs;
-        const auto communicator = group.communicator;
-        const auto owner = group.owner;
         MiniMaxH3ModuleLoader loader = [sections = std::move(sections), bundle_path, runtime_cache,
-                                        backend, cuda_graphs, communicator,
-                                        owner](const std::string& name, cudaStream_t stream) {
+                                        backend,
+                                        cuda_graphs](const std::string& name, cudaStream_t stream) {
             const auto it = sections.find(name);
             if (it == sections.end())
                 throw std::runtime_error("Unknown MiniMax-H3 plan section: " + name);
@@ -80,15 +82,10 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
             options.stream = stream;
             options.runtime_cache_path = runtime_cache.c_str();
             options.cuda_graphs = cuda_graphs;
-            if (name == "denoiser_plan_cp") {
-                options.distributed_communicator = communicator;
-                options.distributed_owner = owner;
-            }
             return backend->create_module(plan.data(), plan.size(), options);
         };
         return std::make_unique<MiniMaxH3Pipeline>(std::move(loader), load_tokenizer(ctx.bundle),
-                                                   group.communicator, group.owner, group.rank,
-                                                   group.world_size, ctx.bundle.info.model_id);
+                                                   ctx.bundle.info.model_id);
     }
 };
 

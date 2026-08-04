@@ -12,19 +12,19 @@
   "build_timeout_s": 14400,
   "build_args": {
     "parallel": {
-      "mode": "context_parallel",
-      "cp_size": 4
+      "mode": "single",
+      "cp_size": 1
     }
   },
   "testcases": [
     {
       "name": "minimax-h3-768p",
-      "trace_id": "IT-E2E-MINIMAX-H3-768P-CP4-01",
-      "ci_tier": "multi_device",
+      "trace_id": "IT-E2E-MINIMAX-H3-768P-CP1-01",
+      "ci_tier": "nightly_only",
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Pinned MiniMax-H3 1344x768 text-to-video-and-audio visual-parity contract on the native four-rank context-parallel runtime",
+      "description": "Pinned MiniMax-H3 1344x768 text-to-video-and-audio visual-parity contract on the native single-device TensorRT runtime",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "video_num_frames": 124,
@@ -42,7 +42,7 @@
         {
           "kind": "gpu_count_min",
           "args": {
-            "count": 4
+            "count": 1
           },
           "gating": true
         },
@@ -76,7 +76,7 @@
           "required": true
         }
       ],
-      "notes": "The production profile is fixed at CP4. This case intentionally stays in the multi_device tier; it must never be represented by a synthetic single-GPU replacement. The HF backend is the pinned Diffusers modular pipeline and the acceptance gate compares all decoded frames."
+      "notes": "The production profile is a real single-device execution: it creates no TensorRT distributed collective and performs no NCCL initialization or communication. The HF backend is the pinned Diffusers modular pipeline and the acceptance gate compares all decoded frames."
     }
   ]
 }

@@ -103,6 +103,15 @@ def main() -> int:
             raise ValueError(f"MiniMax-H3 {label} receipt has no valid checkpoint inventory")
     if reference_inventory != candidate_inventory:
         raise ValueError("MiniMax-H3 comparison receipts use different checkpoint inventories")
+    if "plan_sha256" in candidate_receipt:
+        if candidate_receipt.get("backend") != "tensorrt_native_single_device":
+            raise ValueError(
+                "MiniMax-H3 native candidate is not the qualified single-device backend"
+            )
+        if candidate_receipt.get("world_size") != 1:
+            raise ValueError("MiniMax-H3 native candidate did not run with world_size=1")
+        if candidate_receipt.get("collective_transport") != "none":
+            raise ValueError("MiniMax-H3 single-device candidate unexpectedly used a collective")
     error = candidate - reference
     mse = float(np.mean(np.square(error), dtype=np.float64))
     mae = float(np.mean(np.abs(error), dtype=np.float64))

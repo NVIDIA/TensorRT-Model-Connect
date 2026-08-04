@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Four-rank native MiniMax-H3 E2E runner."""
+"""Single-device native MiniMax-H3 E2E runner."""
 
 from __future__ import annotations
 
