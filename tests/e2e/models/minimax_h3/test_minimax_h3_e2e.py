@@ -114,7 +114,7 @@ def test_minimax_h3_comparator_gates_decoded_pixel_drift(tmp_path: Path) -> None
                 "receipt": {
                     "status": "passed",
                     "source_revision": revision,
-                    "checkpoint_inventory_sha256": inventory,
+                    "checkpoint_snapshot": {"inventory_sha256": inventory},
                 },
             },
         ),

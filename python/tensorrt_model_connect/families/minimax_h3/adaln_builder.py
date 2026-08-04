@@ -32,6 +32,7 @@ def build_adaln_precompute_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    op.configure_builder(config)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     # Match PyTorch's default FP32 matmul policy used by the reference.
     config.clear_flag(trt.BuilderFlag.TF32)
@@ -91,6 +92,7 @@ def build_adaln_precompute_engine(
     final_output = final_reshape.get_output(0)
     final_output.name = "final_modulation"
     network.mark_output(final_output)
+    op.validate_native_network(network, expected_attentions=0, label="AdaLN precompute")
 
     print(
         f"[minimax-h3] building AdaLN precompute: layers={profile.num_layers}, "

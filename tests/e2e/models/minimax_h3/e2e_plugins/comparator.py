@@ -54,6 +54,14 @@ def _decoded_metrics(
     return tuple(reference.shape), squared_sum / count, absolute_sum / count, maximum
 
 
+def _checkpoint_inventory_sha256(receipt: dict) -> str | None:
+    digest = receipt.get("checkpoint_inventory_sha256")
+    if isinstance(digest, str):
+        return digest
+    snapshot = receipt.get("checkpoint_snapshot")
+    return snapshot.get("inventory_sha256") if isinstance(snapshot, dict) else None
+
+
 class MiniMaxH3DecodedVideoComparator:
     @property
     def task_strategy(self) -> str:
@@ -118,8 +126,8 @@ class MiniMaxH3DecodedVideoComparator:
                 status=StageStatus.ERROR.value,
                 message="TRT and HF run receipts identify different source revisions",
             )
-        trt_inventory = trt_receipt.get("checkpoint_inventory_sha256")
-        ref_inventory = ref_receipt.get("checkpoint_inventory_sha256")
+        trt_inventory = _checkpoint_inventory_sha256(trt_receipt)
+        ref_inventory = _checkpoint_inventory_sha256(ref_receipt)
         if (
             not isinstance(trt_inventory, str)
             or re.fullmatch(r"[0-9a-f]{64}", trt_inventory) is None

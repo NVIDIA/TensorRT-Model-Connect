@@ -96,6 +96,7 @@ def build_text_encoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    op.configure_builder(config)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
     input_ids = network.add_input("input_ids", trt.int32, (sequence_length,))
     table = op.constant(network, weights["model.language_model.embed_tokens.weight"])
@@ -151,6 +152,9 @@ def build_text_encoder_engine(
         attention = network.add_attention(q4, k4, v4, trt.AttentionNormalizationOp.SOFTMAX, True)
         if attention is None:
             raise RuntimeError(f"TensorRT failed to add Qwen3-VL attention layer {index}")
+        attention.name = f"{prefix}.self_attn.native_attention"
+        attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
+        attention.get_output(0).name = f"{attention.name}.output"
         attention.decomposable = False
         update = op.heads_to_rows(
             network, attention.get_output(0), sequence_length, NUM_HEADS * HEAD_DIM
@@ -175,6 +179,7 @@ def build_text_encoder_engine(
     output = op.cast(network, hidden, trt.float32)
     output.name = "encoder_hidden_states"
     network.mark_output(output)
+    op.validate_native_network(network, expected_attentions=NUM_LAYERS, label="text encoder")
     print(
         f"[minimax-h3] building native Qwen3-VL text stack: layers={NUM_LAYERS}, "
         f"sequence={sequence_length}",

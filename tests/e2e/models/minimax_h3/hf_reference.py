@@ -165,6 +165,7 @@ def main() -> int:
             "failure_phase": phase,
             "error": f"{type(error).__name__}: {error}",
             "checkpoint_revision": CHECKPOINT_REVISION,
+            "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
             "source_revision": source_revision,
             "builder_source": script_record,
             "checkpoint_snapshot": snapshot_record,
@@ -217,6 +218,7 @@ def main() -> int:
     receipt = {
         "backend": "hf_diffusers_torch_compile" if args.use_compile else "hf_diffusers_eager",
         "checkpoint_revision": CHECKPOINT_REVISION,
+        "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
         "source_revision": source_revision,
         "builder_source": script_record,
         "checkpoint_snapshot": snapshot_record,

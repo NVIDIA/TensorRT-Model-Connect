@@ -120,3 +120,25 @@ def test_native_linear_broadcasts_over_vae_batch() -> None:
     network.mark_output(output)
     assert tuple(output.shape) == (2, 3, 5)
     assert builder.build_serialized_network(network, config)
+
+
+def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    q = network.add_input("q", trt.float16, (1, 2, 4, 8))
+    k = network.add_input("k", trt.float16, (1, 2, 4, 8))
+    v = network.add_input("v", trt.float16, (1, 2, 4, 8))
+    attention = network.add_attention(q, k, v, trt.AttentionNormalizationOp.SOFTMAX, False)
+    assert attention is not None
+    contract = op.validate_native_network(network, expected_attentions=1, label="test network")
+    assert contract == {
+        "attention_input": 1,
+        "attention_output": 1,
+        "plugin": 0,
+        "plugin_v2": 0,
+        "plugin_v3": 0,
+        "dist_collective": 0,
+    }
+    with pytest.raises(RuntimeError, match="native layer contract failed"):
+        op.validate_native_network(network, expected_attentions=2, label="test network")

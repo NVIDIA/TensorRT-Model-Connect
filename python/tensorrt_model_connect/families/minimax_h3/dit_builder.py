@@ -59,7 +59,7 @@ def _rope_tables(network, position_ids, profile: MiniMaxH3Config, rows: int):
     return cos, sin
 
 
-def _native_attention(network, q, k, v, *, rows: int, profile: MiniMaxH3Config):
+def _native_attention(network, q, k, v, *, rows: int, profile: MiniMaxH3Config, name: str):
     q4 = op.rows_to_heads(network, q, rows, profile.num_heads, profile.head_dim)
     k4 = op.rows_to_heads(network, k, rows, profile.num_heads, profile.head_dim)
     v4 = op.rows_to_heads(network, v, rows, profile.num_heads, profile.head_dim)
@@ -72,6 +72,9 @@ def _native_attention(network, q, k, v, *, rows: int, profile: MiniMaxH3Config):
     attention = network.add_attention(q4, k4, v4, trt.AttentionNormalizationOp.SOFTMAX, False)
     if attention is None:
         raise RuntimeError("TensorRT failed to add MiniMax-H3 token-refiner attention")
+    attention.name = name
+    attention.metadata = f"trtmc.native_op=IAttention;source={name}"
+    attention.get_output(0).name = f"{name}.output"
     attention.decomposable = False
     return op.heads_to_rows(network, attention.get_output(0), rows, profile.attention_size)
 
@@ -120,9 +123,18 @@ def _attention_block(
             rows=rows,
             heads=profile.num_heads,
             head_dim=profile.head_dim,
+            name=f"{prefix}.attn.native_attention",
         )
     else:
-        attended = _native_attention(network, q, k, v, rows=rows, profile=profile)
+        attended = _native_attention(
+            network,
+            q,
+            k,
+            v,
+            rows=rows,
+            profile=profile,
+            name=f"{prefix}.attn.native_attention",
+        )
     return op.linear(network, attended, weights[f"{prefix}.attn.to_out.0.weight"])
 
 
@@ -180,6 +192,7 @@ def build_dit_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    op.configure_builder(config)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
     # Hugging Face keeps TF32 disabled for the FP32 input/output projections.
     # Match that contract while retaining native TensorRT GEMMs.
@@ -293,6 +306,12 @@ def build_dit_engine(
     audio_all.name = "audio_velocity"
     network.mark_output(video_all)
     network.mark_output(audio_all)
+
+    op.validate_native_network(
+        network,
+        expected_attentions=profile.num_refiner_layers + profile.num_layers,
+        label="DiT",
+    )
 
     print(
         f"[minimax-h3] building native DiT: layers={profile.num_layers}, "

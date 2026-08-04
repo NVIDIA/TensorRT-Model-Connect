@@ -9,6 +9,7 @@ graph uses fused ``IAttention`` and contains no plugin or distributed layer.
 
 from __future__ import annotations
 
+from collections import Counter
 import math
 
 import numpy as np
@@ -17,6 +18,42 @@ from tensorrt_model_connect import trt_compat
 
 
 trt = trt_compat.get_trt()
+
+
+def configure_builder(config) -> None:
+    """Retain enough engine metadata to audit native TensorRT lowering."""
+
+    config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+
+
+def validate_native_network(network, *, expected_attentions: int, label: str) -> dict[str, int]:
+    """Fail closed if a native H3 graph gains plugins or collectives."""
+
+    counts = Counter(network.get_layer(index).type for index in range(network.num_layers))
+    expected = {
+        trt.LayerType.ATTENTION_INPUT: expected_attentions,
+        trt.LayerType.ATTENTION_OUTPUT: expected_attentions,
+    }
+    forbidden = (
+        trt.LayerType.PLUGIN,
+        trt.LayerType.PLUGIN_V2,
+        trt.LayerType.PLUGIN_V3,
+        trt.LayerType.DIST_COLLECTIVE,
+    )
+    violations = {
+        str(kind): counts[kind] for kind, wanted in expected.items() if counts[kind] != wanted
+    }
+    violations.update({str(kind): counts[kind] for kind in forbidden if counts[kind]})
+    if violations:
+        raise RuntimeError(f"MiniMax-H3 {label} native layer contract failed: {violations}")
+    return {
+        "attention_input": counts[trt.LayerType.ATTENTION_INPUT],
+        "attention_output": counts[trt.LayerType.ATTENTION_OUTPUT],
+        "plugin": 0,
+        "plugin_v2": 0,
+        "plugin_v3": 0,
+        "dist_collective": 0,
+    }
 
 
 def constant(network, value, *, dtype=np.float32):
@@ -235,7 +272,7 @@ def partial_rope(
     return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
 
 
-def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int):
+def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
     """Full-sequence single-device fused TensorRT attention."""
 
     q = rows_to_heads(network, q, rows, heads, head_dim)
@@ -256,6 +293,9 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int):
     layer = network.add_attention(q, k, v, trt.AttentionNormalizationOp.SOFTMAX, False)
     if layer is None:
         raise RuntimeError("TensorRT failed to add MiniMax-H3 native attention")
+    layer.name = name
+    layer.metadata = f"trtmc.native_op=IAttention;source={name}"
+    layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
     context = cast(network, layer.get_output(0), trt.bfloat16)
     return heads_to_rows(network, context, rows, heads * head_dim)

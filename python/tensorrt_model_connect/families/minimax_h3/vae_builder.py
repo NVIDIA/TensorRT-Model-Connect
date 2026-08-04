@@ -178,6 +178,7 @@ def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> by
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
+    op.configure_builder(config)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
     latent = network.add_input(
         "latent_tiles", trt.float32, (BATCH, CHANNELS, FRAMES, HEIGHT, WIDTH)
@@ -230,6 +231,9 @@ def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> by
         attention = network.add_attention(q4, k4, v4, trt.AttentionNormalizationOp.SOFTMAX, False)
         if attention is None:
             raise RuntimeError(f"TensorRT failed to add MiniMax-H3 VAE attention layer {index}")
+        attention.name = f"{prefix}.attn.native_attention"
+        attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
+        attention.get_output(0).name = f"{attention.name}.output"
         attention.decomposable = False
         update = op.linear(
             network,
@@ -281,6 +285,7 @@ def build_vae_tile_decoder_engine(weights: dict, *, verbose: bool = False) -> by
     result = op.cast(network, final.get_output(0), trt.float32)
     result.name = "decoded_tiles"
     network.mark_output(result)
+    op.validate_native_network(network, expected_attentions=LAYERS, label="VAE tile decoder")
     print(
         f"[minimax-h3] building native VAE tile decoder: batch={BATCH}, "
         f"sequence={SEQUENCE}, layers={LAYERS}",
