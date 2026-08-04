@@ -1118,6 +1118,7 @@ def test_public_python_model_id_default_dispatches_without_native_fallback(
         {"precision": "fp16"},
         {"precision": "fp32", "max_cache_length": 256, "max_batch_size": True},
         {**MC_DEFAULT_DEPLOYMENT, "tensor_parallel_size": True},
+        {**MC_DEFAULT_DEPLOYMENT, "context_parallel_size": 2},
         {**MC_DEFAULT_DEPLOYMENT, "quant_calibration_samples": 512.0},
         {**MC_DEFAULT_DEPLOYMENT, "triattention_count_prompt_tokens": 1},
         {**MC_DEFAULT_DEPLOYMENT, "fp8": 0},
