@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -108,6 +109,15 @@ def test_lance_native_build_rejects_generic_dynamic_kv() -> None:
     config.raw["_runtime_dynamic_kv_requested"] = True
     with pytest.raises(ValueError, match="dynamic KV bucket profiles"):
         module.LancePlugin().build_engine(config, {}, 128_000, precision="bf16")
+
+
+def test_lance_runtime_reads_boolean_vision_contract() -> None:
+    source = (
+        Path(__file__).resolve().parents[4]
+        / "src/runtime/models/lance/plugin.cpp"
+    ).read_text(encoding="utf-8")
+    assert 'extract_json_bool(ctx.config_json, "has_vision_engine", false)' in source
+    assert 'extract_json_int(ctx.config_json, "has_vision_engine"' not in source
 
 
 def test_lance_rope_table_can_match_bf16_inv_freq_buffer() -> None:

@@ -284,7 +284,7 @@ class VLPlugin final : public IPipelinePlugin {
         vlc.present_k_pattern = ctx.config.io_map.present_k_pattern;
         vlc.present_v_pattern = ctx.config.io_map.present_v_pattern;
 
-        bool has_vision_engine = extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
+        bool has_vision_engine = extract_json_bool(ctx.config_json, "has_vision_engine", false);
 
         // Try to load the vision encoder engine from the bundle.
         std::unique_ptr<TrtModule> vision_module =
