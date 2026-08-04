@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace trtmc {
 
@@ -20,6 +21,7 @@ struct NemotronHSamplingParams {
     float repetition_penalty{1.0F};
     int32_t seed{-1};
     int32_t eos_token_id{-1};
+    std::vector<int32_t> eos_token_ids;
 };
 
 enum class NemotronHLogitsLocation {
@@ -43,8 +45,13 @@ class NemotronHISampler {
     virtual void reset() {}
 };
 
+NemotronHSamplingParams
+nemotron_h_sampling_params_from_config(const GenerateConfig& cfg,
+                                       const std::vector<int32_t>& default_eos_token_ids);
 NemotronHSamplingParams nemotron_h_sampling_params_from_config(const GenerateConfig& cfg,
                                                                int32_t default_eos = -1);
+
+bool nemotron_h_is_eos_token(const NemotronHSamplingParams& params, int32_t token_id);
 
 std::unique_ptr<NemotronHISampler> create_nemotron_h_sampler(const NemotronHSamplingParams& params);
 

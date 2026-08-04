@@ -319,6 +319,7 @@ RecurrentGenConfig make_recurrent_gen_config(const BaseConfig& cfg) {
     rgc.vocab_size = cfg.vocab_size;
     rgc.id_bos = cfg.id_bos;
     rgc.id_eos = cfg.id_eos;
+    rgc.id_eos_ids = cfg.id_eos_ids;
     return rgc;
 }
 

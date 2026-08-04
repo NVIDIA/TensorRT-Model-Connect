@@ -26,6 +26,7 @@ struct RecurrentGenConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
     int32_t id_eos{0};
+    std::vector<int32_t> id_eos_ids;
     bool has_position_input{false};
     std::string chat_template_format{};
 };

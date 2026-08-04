@@ -26,14 +26,27 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 
 namespace trtmc {
 
+namespace {
+
+RecurrentGenConfig normalize_eos_token_ids(RecurrentGenConfig config) {
+    if (config.id_eos_ids.empty() && config.id_eos >= 0)
+        config.id_eos_ids.push_back(config.id_eos);
+    if (!config.id_eos_ids.empty())
+        config.id_eos = config.id_eos_ids.front();
+    return config;
+}
+
+} // namespace
+
 RecurrentPipeline::RecurrentPipeline(std::unique_ptr<TrtModule> decoder,
                                      std::unique_ptr<NemotronHInferenceState> state,
                                      RecurrentGenConfig config, cudaStream_t stream,
                                      const char* name, std::shared_ptr<ITokenizer> tokenizer,
                                      std::string model_id_str,
                                      std::unique_ptr<NemotronHISampler> sampler)
-    : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
-      name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+    : decoder_(std::move(decoder)), state_(std::move(state)),
+      config_(normalize_eos_token_ids(std::move(config))), stream_(stream), name_(name),
+      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
@@ -64,9 +77,8 @@ TextResult RecurrentPipeline::generate(const std::string& prompt, const Generate
 
     auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 
-    auto sp = nemotron_h_sampling_params_from_config(cfg, eos);
+    auto sp = nemotron_h_sampling_params_from_config(cfg, config_.id_eos_ids);
     auto output_ids = generate_from_ids(input_ids, max_new, sp);
 
     std::vector<int32_t> new_tokens(
@@ -79,8 +91,7 @@ TextResult RecurrentPipeline::generate(const std::string& prompt, const Generate
 RecurrentPipeline::GenerationResult
 RecurrentPipeline::generate_ids(const std::vector<int32_t>& input_ids, const GenerateConfig& cfg) {
     int32_t max_new = cfg.max_new_tokens;
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    auto sp = nemotron_h_sampling_params_from_config(cfg, eos);
+    auto sp = nemotron_h_sampling_params_from_config(cfg, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp)};
 }
 

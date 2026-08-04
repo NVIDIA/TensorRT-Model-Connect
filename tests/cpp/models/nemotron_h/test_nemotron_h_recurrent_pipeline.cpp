@@ -25,6 +25,7 @@
 #include "runtime/models/nemotron_h/hybrid_state.h"
 #include "runtime/models/nemotron_h/kv_cache.h"
 #include "runtime/models/nemotron_h/pipeline.h"
+#include "runtime/models/nemotron_h/plugin_helpers.h"
 #include "runtime/models/nemotron_h/recurrent_state.h"
 #include "trtmc/runtime/trt_module.h"
 // pipeline_interface.h was removed; GenerateConfig is in trtmc/pipeline.h
@@ -84,8 +85,12 @@ class RecordingTokenizer final : public trtmc::ITokenizer {
     mutable std::string last_text;
 };
 
-// Mock decoder: token_id[1] → logits[4] = constant [0.1, 0.2, 0.9, 0.3]
-static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
+// Mock decoder defaults to token_id[1] → logits[4] = [0.1, 0.2, 0.9, 0.3].
+// Tests can select a different vocabulary size and winning token.
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder(int32_t winning_token = 2,
+                                                                     int32_t vocab_size = 4) {
+    if (winning_token < 0 || winning_token >= vocab_size)
+        return nullptr;
     auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder)
         return nullptr;
@@ -94,9 +99,11 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* inp = network->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
-    float const_logits[4] = {0.1f, 0.2f, 0.9f, 0.3f};
+    std::vector<float> const_logits(static_cast<std::size_t>(vocab_size), 0.1F);
+    const_logits[static_cast<std::size_t>(winning_token)] = 0.9F;
     auto* cst = network->addConstant(
-        nvinfer1::Dims{1, {4}}, nvinfer1::Weights{nvinfer1::DataType::kFLOAT, const_logits, 4});
+        nvinfer1::Dims{1, {vocab_size}},
+        nvinfer1::Weights{nvinfer1::DataType::kFLOAT, const_logits.data(), vocab_size});
     cst->getOutput(0)->setName("logits");
     network->markOutput(*cst->getOutput(0));
 
@@ -202,6 +209,58 @@ static void test_mamba_pipeline() {
     check(result.token_ids[1] == 2, "mamba: generated token = 2 (eos)");
 
     cudaStreamDestroy(stream);
+}
+
+static std::vector<int32_t> generate_with_model_eos_ids(int32_t winning_token,
+                                                        int32_t request_eos_token_id = -1) {
+    auto engine = build_mock_decoder(winning_token, 13);
+    if (!engine) {
+        std::cerr << "SKIP: can't build multi-EOS engine\n";
+        return {};
+    }
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                         engine->createExecutionContext(), stream);
+    std::vector<trtmc::NemotronHRecurrentState::TensorSpec> specs = {
+        {"conv_state", {12}},
+        {"ssm_state", {32}},
+    };
+    auto state = std::make_unique<trtmc::NemotronHRecurrentState>(1, specs, stream);
+
+    trtmc::BaseConfig base;
+    base.vocab_size = 13;
+    base.id_eos = 2;
+    base.id_eos_ids = {2, 11, 12};
+    auto config = trtmc::make_recurrent_gen_config(base);
+
+    trtmc::GenerateConfig generate_config;
+    generate_config.max_new_tokens = 3;
+    generate_config.eos_token_id = request_eos_token_id;
+
+    std::vector<int32_t> token_ids;
+    {
+        trtmc::RecurrentPipeline pipeline(std::move(module), std::move(state), std::move(config),
+                                          stream, "NemotronHPipeline");
+        token_ids = pipeline.generate_ids({1}, generate_config).token_ids;
+    }
+    cudaStreamDestroy(stream);
+    return token_ids;
+}
+
+static void test_nemotron_h_multi_eos_stopping() {
+    const auto eos_12 = generate_with_model_eos_ids(12);
+    check(eos_12.size() == 2, "multi-EOS: token 12 stops generation");
+    check(eos_12.size() >= 2 && eos_12[1] == 12, "multi-EOS: token 12 is emitted");
+
+    const auto eos_2 = generate_with_model_eos_ids(2);
+    check(eos_2.size() == 2, "multi-EOS: token 2 still stops generation");
+
+    const auto scalar_override = generate_with_model_eos_ids(12, 3);
+    check(scalar_override.size() == 4,
+          "multi-EOS: explicit scalar override replaces model EOS IDs");
 }
 
 static void test_rwkv_pipeline() {
@@ -369,6 +428,7 @@ int main() {
     test_argmax_recurrent();
     test_recurrent_state_updates_in_place();
     test_mamba_pipeline();
+    test_nemotron_h_multi_eos_stopping();
     test_rwkv_pipeline();
     test_hybrid_pipeline();
     test_generate_applies_chat_template();

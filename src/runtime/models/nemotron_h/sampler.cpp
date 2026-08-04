@@ -17,10 +17,18 @@
 
 namespace trtmc {
 
+bool nemotron_h_is_eos_token(const NemotronHSamplingParams& params, int32_t token_id) {
+    if (!params.eos_token_ids.empty()) {
+        return std::find(params.eos_token_ids.begin(), params.eos_token_ids.end(), token_id) !=
+               params.eos_token_ids.end();
+    }
+    return params.eos_token_id >= 0 && token_id == params.eos_token_id;
+}
+
 namespace {
 
 NemotronHSampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
-                                         int32_t eos_token_id) {
+                                         const NemotronHSamplingParams& params) {
     NemotronHSampleResult result;
     const float* best = logits;
     for (int32_t i = 1; i < vocab_size; ++i) {
@@ -29,7 +37,7 @@ NemotronHSampleResult argmax_over_logits(const float* logits, int32_t vocab_size
     }
     result.token_id = static_cast<int32_t>(best - logits);
     result.logprob = *best;
-    result.is_eos = (result.token_id == eos_token_id);
+    result.is_eos = nemotron_h_is_eos_token(params, result.token_id);
     return result;
 }
 
@@ -166,10 +174,10 @@ class NemotronHGreedySampler final : public NemotronHISampler {
         if (vocab_size <= 0 || logits == nullptr) {
             NemotronHSampleResult result;
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = nemotron_h_is_eos_token(params, 0);
             return result;
         }
-        return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+        return argmax_over_logits(logits, vocab_size, params);
     }
 
     NemotronHLogitsLocation logits_location() const override {
@@ -189,12 +197,12 @@ class NemotronHTopKSampler final : public NemotronHISampler {
         NemotronHSampleResult result;
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = nemotron_h_is_eos_token(params, 0);
             return result;
         }
 
         if (greedy_equivalent(params))
-            return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+            return argmax_over_logits(logits, vocab_size, params);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
 
@@ -210,7 +218,7 @@ class NemotronHTopKSampler final : public NemotronHISampler {
                 result.token_id = dist.indices[static_cast<std::size_t>(i)];
                 result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(i)],
                                                    std::numeric_limits<float>::min()));
-                result.is_eos = (result.token_id == params.eos_token_id);
+                result.is_eos = nemotron_h_is_eos_token(params, result.token_id);
                 return result;
             }
         }
@@ -218,7 +226,7 @@ class NemotronHTopKSampler final : public NemotronHISampler {
         result.token_id = dist.indices[static_cast<std::size_t>(dist.keep - 1)];
         result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(dist.keep - 1)],
                                            std::numeric_limits<float>::min()));
-        result.is_eos = (result.token_id == params.eos_token_id);
+        result.is_eos = nemotron_h_is_eos_token(params, result.token_id);
         return result;
     }
 
@@ -235,16 +243,26 @@ class NemotronHTopKSampler final : public NemotronHISampler {
 
 } // namespace
 
-NemotronHSamplingParams nemotron_h_sampling_params_from_config(const GenerateConfig& cfg,
-                                                               int32_t default_eos) {
+NemotronHSamplingParams
+nemotron_h_sampling_params_from_config(const GenerateConfig& cfg,
+                                       const std::vector<int32_t>& default_eos_token_ids) {
     NemotronHSamplingParams p;
     p.temperature = cfg.temperature;
     p.top_k = cfg.top_k;
     p.top_p = cfg.top_p;
     p.min_p = cfg.min_p;
     p.seed = cfg.seed;
-    p.eos_token_id = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : default_eos;
+    p.eos_token_ids =
+        (cfg.eos_token_id >= 0) ? std::vector<int32_t>{cfg.eos_token_id} : default_eos_token_ids;
+    p.eos_token_id = p.eos_token_ids.empty() ? -1 : p.eos_token_ids.front();
     return p;
+}
+
+NemotronHSamplingParams nemotron_h_sampling_params_from_config(const GenerateConfig& cfg,
+                                                               int32_t default_eos) {
+    const std::vector<int32_t> defaults =
+        default_eos >= 0 ? std::vector<int32_t>{default_eos} : std::vector<int32_t>{};
+    return nemotron_h_sampling_params_from_config(cfg, defaults);
 }
 
 std::unique_ptr<NemotronHISampler>
