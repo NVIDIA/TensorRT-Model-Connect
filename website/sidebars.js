@@ -52,6 +52,7 @@ const sidebars = {
           label: 'Advanced: Optimize, Extend, and Validate',
           items: [
             'tutorials/advanced/quantization-and-runtime-knobs',
+            'tutorials/advanced/multi-device-inference',
             'tutorials/advanced/bring-your-own-kernel',
             'tutorials/advanced/validation-and-benchmarking'
           ]
@@ -140,6 +141,7 @@ const sidebars = {
           type: 'category',
           label: 'Inference Behavior & Optimizations',
           items: [
+            'features/multi-device',
             'features/tvm-ffi',
             'features/sampling',
             'features/triattention',

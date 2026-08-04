@@ -9,6 +9,7 @@
 #include "runtime/models/cosmos3/conditioning.h"
 #include "runtime/models/cosmos3/options.h"
 #include "trtmc/pipeline.h"
+#include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/tokenizer.h"
 
 #include <cstddef>
@@ -28,8 +29,8 @@ class Cosmos3Pipeline final : public IPipeline {
   public:
     Cosmos3Pipeline(Cosmos3ModuleLoader module_loader, std::unique_ptr<ITokenizer> tokenizer,
                     Cosmos3Options options, std::string model_id,
-                    std::shared_ptr<void> distributed_owner = {}, int32_t distributed_rank = 0,
-                    int32_t distributed_world_size = 1);
+                    DistributedRuntimeGroup context_parallel_group = {},
+                    DistributedRuntimeGroup classifier_free_group = {});
     ~Cosmos3Pipeline() override;
 
     bool supports_image_generation() const override { return true; }
@@ -46,21 +47,25 @@ class Cosmos3Pipeline final : public IPipeline {
                                     const std::vector<float>& time_features,
                                     const cosmos3::PromptInputs& prompt_inputs,
                                     ITrtModule& denoiser) const;
+    TensorMap make_denoiser_inputs(const std::vector<float>& patches,
+                                   const std::vector<float>& time_features,
+                                   const cosmos3::PromptInputs& prompt_inputs,
+                                   const ITrtModule& denoiser) const;
     void run_denoising(std::vector<float>& latents, const cosmos3::PromptInputs& conditional_prompt,
                        const cosmos3::PromptInputs& unconditional_prompt,
                        const Cosmos3Request& request, double& engine_load_ms, double& step_prep_ms,
-                       double& denoiser_ms, double& scheduler_ms);
+                       double& denoiser_ms, double& cfg_exchange_ms, double& scheduler_ms);
     ImageResult decode_video(const std::vector<float>& latents);
     void synchronize_stream(const char* transition) const;
     void synchronize_stream_noexcept() const noexcept;
 
-    std::shared_ptr<void> distributed_owner_;
+    DistributedRuntimeGroup context_parallel_group_;
+    DistributedRuntimeGroup classifier_free_group_;
     Cosmos3ModuleLoader module_loader_;
     std::unique_ptr<ITokenizer> tokenizer_;
     Cosmos3Options options_;
     std::string model_id_;
-    int32_t distributed_rank_{0};
-    int32_t distributed_world_size_{1};
+    int32_t context_parallel_rank_{0};
     cudaStream_t stream_{nullptr};
     std::mutex generation_mutex_;
 };

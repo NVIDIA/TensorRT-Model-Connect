@@ -26,7 +26,12 @@ def build_cosmos3_components(
         raise ValueError("Cosmos3-Nano requires BF16 precision")
     profile = select_generation_profile(config.raw)
 
-    from .transformer_builder import build_cosmos3_transformer_engine
+    from .transformer_builder import (
+        _parallel_size,
+        build_cosmos3_transformer_engine,
+        select_cp_execution_sizes,
+    )
+    from .vae_step_builder import _current_cuda_device_profile
     from .vae_step_builder import (
         Cosmos3VaeStepProfile,
         build_vae_step_engine,
@@ -59,7 +64,13 @@ def build_cosmos3_components(
     negative_prompt = (Path(model_dir) / "assets" / "negative_prompt.json").read_text(
         encoding="utf-8"
     )
-    return {
+    requested_cp_size = _parallel_size(parallel_config)
+    compute_capability, _ = _current_cuda_device_profile()
+    denoiser_cp_size, classifier_free_parallel_size = select_cp_execution_sizes(
+        compute_capability,
+        requested_cp_size=requested_cp_size,
+    )
+    components = {
         "denoiser": bytes(denoiser),
         "vae_decoder": bytes(vae_decoder),
         "vae_decoder_first_frame": bytes(vae_decoder_first_frame),
@@ -67,3 +78,7 @@ def build_cosmos3_components(
         "tokenizer_config_json": tokenizer_config_json,
         "negative_prompt": negative_prompt,
     }
+    if classifier_free_parallel_size > 1:
+        components["denoiser_context_parallel_size"] = denoiser_cp_size
+        components["classifier_free_parallel_size"] = classifier_free_parallel_size
+    return components

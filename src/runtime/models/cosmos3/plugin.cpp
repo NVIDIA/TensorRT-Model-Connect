@@ -29,6 +29,8 @@ namespace {
 struct ContextParallelRuntimeConfig {
     bool enabled{false};
     int32_t size{1};
+    int32_t denoiser_size{1};
+    int32_t classifier_free_size{1};
 };
 
 ContextParallelRuntimeConfig parse_context_parallel_config(const std::string& config_json) {
@@ -42,6 +44,17 @@ ContextParallelRuntimeConfig parse_context_parallel_config(const std::string& co
         throw std::invalid_argument("Cosmos3 supports single-device or context parallel runtime");
     if (config.size != 1 && config.size != 2 && config.size != 4 && config.size != 8)
         throw std::invalid_argument("Cosmos3 context_parallel_size must be 1, 2, 4, or 8");
+    config.denoiser_size =
+        extract_json_int(config_json, "denoiser_context_parallel_size", config.size);
+    config.classifier_free_size = extract_json_int(config_json, "classifier_free_parallel_size", 1);
+    if (config.denoiser_size < 1 || config.classifier_free_size < 1 ||
+        config.denoiser_size * config.classifier_free_size != config.size) {
+        throw std::invalid_argument(
+            "Cosmos3 denoiser and classifier-free parallel sizes must multiply to "
+            "context_parallel_size");
+    }
+    if (config.classifier_free_size != 1 && config.classifier_free_size != 2)
+        throw std::invalid_argument("Cosmos3 classifier_free_parallel_size must be 1 or 2");
     return config;
 }
 
@@ -135,16 +148,37 @@ class Cosmos3Plugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         const auto cp_config = parse_context_parallel_config(ctx.config_json);
-        DistributedRuntimeGroup group;
-        if (cp_config.enabled)
-            group = initialize_tensor_parallel_group(cp_config.size);
+        DistributedRuntimeGroup context_group;
+        DistributedRuntimeGroup classifier_free_group;
+        if (cp_config.enabled && cp_config.classifier_free_size == 1) {
+            context_group = initialize_tensor_parallel_group(cp_config.size);
+        } else if (cp_config.enabled) {
+            const int32_t global_world_size = distributed_process_world_size();
+            const int32_t global_rank = distributed_process_rank();
+            if (global_world_size != cp_config.size || global_rank < 0 ||
+                global_rank >= global_world_size) {
+                throw std::runtime_error(
+                    "Cosmos3 classifier-free parallel runtime requires mpirun world size to "
+                    "equal context_parallel_size");
+            }
+            const int32_t context_group_index = global_rank / cp_config.denoiser_size;
+            const int32_t context_rank = global_rank % cp_config.denoiser_size;
+            context_group = initialize_distributed_subgroup(
+                cp_config.denoiser_size, context_rank,
+                "cosmos3_cp_" + std::to_string(context_group_index));
+
+            const int32_t classifier_free_rank = context_group_index;
+            const int32_t classifier_free_pair = context_rank;
+            classifier_free_group = initialize_distributed_subgroup(
+                cp_config.classifier_free_size, classifier_free_rank,
+                "cosmos3_cfg_" + std::to_string(classifier_free_pair));
+        }
         auto tokenizer = load_tokenizer(ctx.bundle);
         auto plans = index_plan_sections(ctx.bundle.info, cp_config.enabled);
-        auto loader = make_staged_loader(ctx, std::move(plans), group, cp_config.enabled);
-        return std::make_unique<Cosmos3Pipeline>(std::move(loader), std::move(tokenizer),
-                                                 parse_cosmos3_options(ctx.config_json),
-                                                 ctx.bundle.info.model_id, group.owner, group.rank,
-                                                 cp_config.enabled ? group.world_size : 1);
+        auto loader = make_staged_loader(ctx, std::move(plans), context_group, cp_config.enabled);
+        return std::make_unique<Cosmos3Pipeline>(
+            std::move(loader), std::move(tokenizer), parse_cosmos3_options(ctx.config_json),
+            ctx.bundle.info.model_id, context_group, classifier_free_group);
     }
 };
 

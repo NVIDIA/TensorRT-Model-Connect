@@ -8,12 +8,14 @@
 #include "runtime/core/cuda_common.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -33,6 +35,10 @@ using NcclGetUniqueIdFn = NcclResult (*)(NcclUniqueId*);
 using NcclCommInitRankFn = NcclResult (*)(NcclComm*, int, NcclUniqueId, int);
 using NcclCommDestroyFn = NcclResult (*)(NcclComm);
 using NcclGetErrorStringFn = const char* (*)(NcclResult);
+using NcclAllGatherFn = NcclResult (*)(const void*, void*, std::size_t, int, NcclComm,
+                                       cudaStream_t);
+
+constexpr int kNcclFloat32 = 7;
 
 int env_int(const char* name, int fallback) {
     const char* raw = std::getenv(name);
@@ -72,17 +78,28 @@ int detect_rank() {
     return env_int("RANK", 0);
 }
 
-std::filesystem::path rendezvous_path() {
+std::filesystem::path rendezvous_path(const std::string& group_key = {}) {
     std::string base = env_string("TRTMC_NCCL_RENDEZVOUS", "");
-    if (!base.empty())
-        return std::filesystem::path(base);
-    std::string job = env_string("OMPI_COMM_WORLD_JOBID", "");
-    if (job.empty())
-        job = env_string("PMIX_NAMESPACE", "");
-    if (job.empty())
-        job = std::to_string(getppid());
-    return std::filesystem::temp_directory_path() /
-           ("trtmc_nccl_" + std::to_string(getuid()) + "_" + job + ".bin");
+    std::filesystem::path path;
+    if (!base.empty()) {
+        path = std::filesystem::path(base);
+    } else {
+        std::string job = env_string("OMPI_COMM_WORLD_JOBID", "");
+        if (job.empty())
+            job = env_string("PMIX_NAMESPACE", "");
+        if (job.empty())
+            job = std::to_string(getppid());
+        path = std::filesystem::temp_directory_path() /
+               ("trtmc_nccl_" + std::to_string(getuid()) + "_" + job + ".bin");
+    }
+    if (group_key.empty())
+        return path;
+    if (group_key.find_first_not_of(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-") !=
+        std::string::npos) {
+        throw std::invalid_argument("NCCL subgroup key contains unsafe characters");
+    }
+    return std::filesystem::path(path.string() + "." + group_key);
 }
 
 class NcclRuntime {
@@ -99,6 +116,7 @@ class NcclRuntime {
         comm_init_rank_ = load<NcclCommInitRankFn>("ncclCommInitRank");
         comm_destroy_ = load<NcclCommDestroyFn>("ncclCommDestroy");
         get_error_string_ = load<NcclGetErrorStringFn>("ncclGetErrorString");
+        all_gather_ = load<NcclAllGatherFn>("ncclAllGather");
     }
 
     ~NcclRuntime() {
@@ -130,6 +148,14 @@ class NcclRuntime {
 
     void* communicator() const { return comm_; }
 
+    void all_gather_float(const void* send_buffer, void* receive_buffer, std::size_t element_count,
+                          cudaStream_t stream) const {
+        if (element_count > static_cast<std::size_t>(std::numeric_limits<int64_t>::max()))
+            throw std::invalid_argument("NCCL all-gather element count is too large");
+        check(all_gather_(send_buffer, receive_buffer, element_count, kNcclFloat32, comm_, stream),
+              "ncclAllGather");
+    }
+
   private:
     template <typename T>
     T load(const char* symbol) {
@@ -154,6 +180,7 @@ class NcclRuntime {
     NcclCommInitRankFn comm_init_rank_{nullptr};
     NcclCommDestroyFn comm_destroy_{nullptr};
     NcclGetErrorStringFn get_error_string_{nullptr};
+    NcclAllGatherFn all_gather_{nullptr};
 };
 
 void write_unique_id(const std::filesystem::path& path, const NcclUniqueId& id) {
@@ -202,26 +229,33 @@ void bind_cuda_device_for_rank(int rank) {
                                  cudaGetErrorString(status));
 }
 
-} // namespace
-
-DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size) {
+DistributedRuntimeGroup initialize_group(int group_size, int group_rank,
+                                         const std::string& group_key, bool require_full_world) {
     DistributedRuntimeGroup group;
-    group.tp_size = tp_size;
-    group.world_size = detect_world_size();
-    group.rank = detect_rank();
+    group.tp_size = group_size;
+    group.world_size = group_size;
+    group.rank = group_rank;
+    group.global_world_size = detect_world_size();
+    group.global_rank = detect_rank();
 
-    if (tp_size <= 1)
-        return group;
-    if (group.world_size != tp_size) {
+    if (group_size <= 0)
+        throw std::invalid_argument("Distributed group size must be positive");
+    if (group_rank < 0 || group_rank >= group_size)
+        throw std::invalid_argument("Distributed group rank is outside the group");
+    if (group.global_rank < 0 || group.global_rank >= group.global_world_size)
+        throw std::runtime_error("Distributed launcher rank is outside the global world");
+    if (require_full_world && group.global_world_size != group_size) {
         throw std::runtime_error("Tensor-parallel runtime requires mpirun world size to equal "
                                  "tensor_parallel_size for this initial implementation");
     }
-    if (group.rank < 0 || group.rank >= tp_size)
-        throw std::runtime_error("Tensor-parallel rank is outside [0, tp_size)");
+    if (group_size > group.global_world_size)
+        throw std::runtime_error("Distributed subgroup is larger than the launcher world");
+    bind_cuda_device_for_rank(group.global_rank);
+    if (group_size == 1)
+        return group;
 
-    bind_cuda_device_for_rank(group.rank);
     auto runtime = std::make_shared<NcclRuntime>();
-    const auto path = rendezvous_path();
+    const auto path = rendezvous_path(group_key);
     NcclUniqueId id{};
     if (group.rank == 0) {
         id = runtime->unique_id();
@@ -229,10 +263,59 @@ DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size) {
     } else {
         id = read_unique_id(path);
     }
-    runtime->init(tp_size, group.rank, id);
+    runtime->init(group_size, group.rank, id);
     group.communicator = runtime->communicator();
-    group.owner = std::move(runtime);
+    group.owner = runtime;
+    group.all_gather_float =
+        [runtime = std::move(runtime)](const void* send_buffer, void* receive_buffer,
+                                       std::size_t element_count, cudaStream_t stream) {
+            runtime->all_gather_float(send_buffer, receive_buffer, element_count, stream);
+        };
     return group;
+}
+
+} // namespace
+
+DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size) {
+    if (tp_size <= 1) {
+        DistributedRuntimeGroup group;
+        group.tp_size = tp_size;
+        group.world_size = detect_world_size();
+        group.rank = detect_rank();
+        group.global_world_size = group.world_size;
+        group.global_rank = group.rank;
+        return group;
+    }
+    const int rank = detect_rank();
+    return initialize_group(tp_size, rank, {}, true);
+}
+
+DistributedRuntimeGroup initialize_distributed_subgroup(int group_size, int group_rank,
+                                                        const std::string& group_key) {
+    if (group_key.empty())
+        throw std::invalid_argument("Distributed subgroup key must not be empty");
+    return initialize_group(group_size, group_rank, group_key, false);
+}
+
+void distributed_all_gather_float(const DistributedRuntimeGroup& group, const void* send_buffer,
+                                  void* receive_buffer, std::size_t element_count,
+                                  cudaStream_t stream) {
+    if (group.world_size <= 1) {
+        throw std::invalid_argument("Distributed all-gather requires a multi-rank group");
+    }
+    if (send_buffer == nullptr || receive_buffer == nullptr || stream == nullptr)
+        throw std::invalid_argument("Distributed all-gather received a null argument");
+    if (!group.all_gather_float)
+        throw std::runtime_error("Distributed group does not provide NCCL all-gather");
+    group.all_gather_float(send_buffer, receive_buffer, element_count, stream);
+}
+
+int distributed_process_world_size() {
+    return detect_world_size();
+}
+
+int distributed_process_rank() {
+    return detect_rank();
 }
 
 } // namespace trtmc

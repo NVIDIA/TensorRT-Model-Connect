@@ -1,0 +1,122 @@
+<!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
+<svg width="651" height="583" role="img" aria-labelledby="tutorials-advanced-multi-device-topologies-svg-title tutorials-advanced-multi-device-topologies-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 651.00 583.00" xmlns="http://www.w3.org/2000/svg">
+<title id="tutorials-advanced-multi-device-topologies-svg-title">Multi-device bundle and runtime topologies</title>
+<desc id="tutorials-advanced-multi-device-topologies-svg-description">A tensor-parallel build packages rank-specific plans while a context-parallel build packages one shared denoiser plan, and both launch one process per GPU before rank zero returns the user-facing result.</desc>
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 558.2)">
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-558.2 625.5,-558.2 625.5,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="73.08" y="-504.8" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Build the topology into the bundle</text>
+<text xml:space="preserve" text-anchor="start" x="40.92" y="-487.6" font-family="Arial" font-size="16.00" fill="#111827">At runtime, launch the recorded world size with one rank per visible GPU.</text>
+<!-- tp_build -->
+<g id="node1" class="node">
+<title>tp_build</title>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M228.46,-481C228.46,-481 56.47,-481 56.47,-481 50.47,-481 44.47,-475 44.47,-469 44.47,-469 44.47,-438.4 44.47,-438.4 44.47,-432.4 50.47,-426.4 56.47,-426.4 56.47,-426.4 228.46,-426.4 228.46,-426.4 234.46,-426.4 240.46,-432.4 240.46,-438.4 240.46,-438.4 240.46,-469 240.46,-469 240.46,-475 234.46,-481 228.46,-481"/>
+<text xml:space="preserve" text-anchor="start" x="58.87" y="-455.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Tensor&#45;parallel build</text>
+<text xml:space="preserve" text-anchor="start" x="62.88" y="-439.8" font-family="Arial" font-size="16.00" fill="#111827">&#45;&#45;tensor&#45;parallel&#45;size 4</text>
+</g>
+<!-- tp_bundle -->
+<g id="node3" class="node">
+<title>tp_bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M272.93,-374.4C272.93,-374.4 12,-374.4 12,-374.4 6,-374.4 0,-368.4 0,-362.4 0,-362.4 0,-331.8 0,-331.8 0,-325.8 6,-319.8 12,-319.8 12,-319.8 272.93,-319.8 272.93,-319.8 278.93,-319.8 284.93,-325.8 284.93,-331.8 284.93,-331.8 284.93,-362.4 284.93,-362.4 284.93,-368.4 278.93,-374.4 272.93,-374.4"/>
+<text xml:space="preserve" text-anchor="start" x="60.78" y="-349.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">One TP .trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-333.2" font-family="Arial" font-size="16.00" fill="#111827">rank0 · rank1 · rank2 · rank3 plans</text>
+</g>
+<!-- tp_build&#45;&gt;tp_bundle -->
+<g id="edge1" class="edge">
+<title>tp_build&#45;&gt;tp_bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M142.47,-425.49C142.47,-413.63 142.47,-399.5 142.47,-386.59"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="145.27,-386.81 142.47,-378.81 139.67,-386.81 145.27,-386.81"/>
+</g>
+<!-- cp_build -->
+<g id="node2" class="node">
+<title>cp_build</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M541.76,-481C541.76,-481 363.17,-481 363.17,-481 357.17,-481 351.17,-475 351.17,-469 351.17,-469 351.17,-438.4 351.17,-438.4 351.17,-432.4 357.17,-426.4 363.17,-426.4 363.17,-426.4 541.76,-426.4 541.76,-426.4 547.76,-426.4 553.76,-432.4 553.76,-438.4 553.76,-438.4 553.76,-469 553.76,-469 553.76,-475 547.76,-481 541.76,-481"/>
+<text xml:space="preserve" text-anchor="start" x="365.57" y="-455.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Context&#45;parallel build</text>
+<text xml:space="preserve" text-anchor="start" x="369.33" y="-439.8" font-family="Arial" font-size="16.00" fill="#111827">&#45;&#45;context&#45;parallel&#45;size 4</text>
+</g>
+<!-- cp_bundle -->
+<g id="node4" class="node">
+<title>cp_bundle</title>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M544.71,-374.4C544.71,-374.4 360.22,-374.4 360.22,-374.4 354.22,-374.4 348.22,-368.4 348.22,-362.4 348.22,-362.4 348.22,-331.8 348.22,-331.8 348.22,-325.8 354.22,-319.8 360.22,-319.8 360.22,-319.8 544.71,-319.8 544.71,-319.8 550.71,-319.8 556.71,-325.8 556.71,-331.8 556.71,-331.8 556.71,-362.4 556.71,-362.4 556.71,-368.4 550.71,-374.4 544.71,-374.4"/>
+<text xml:space="preserve" text-anchor="start" x="369.83" y="-349.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">One CP .trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="362.62" y="-333.2" font-family="Arial" font-size="16.00" fill="#111827">shared denoiser_plan_cp</text>
+</g>
+<!-- cp_build&#45;&gt;cp_bundle -->
+<g id="edge5" class="edge">
+<title>cp_build&#45;&gt;cp_bundle</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M452.47,-425.49C452.47,-413.63 452.47,-399.5 452.47,-386.59"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="455.27,-386.81 452.47,-378.81 449.67,-386.81 455.27,-386.81"/>
+</g>
+<!-- tp_ranks -->
+<g id="node5" class="node">
+<title>tp_ranks</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M245.93,-267.8C245.93,-267.8 39,-267.8 39,-267.8 33,-267.8 27,-261.8 27,-255.8 27,-255.8 27,-225.2 27,-225.2 27,-219.2 33,-213.2 39,-213.2 39,-213.2 245.93,-213.2 245.93,-213.2 251.93,-213.2 257.93,-219.2 257.93,-225.2 257.93,-225.2 257.93,-255.8 257.93,-255.8 257.93,-261.8 251.93,-267.8 245.93,-267.8"/>
+<text xml:space="preserve" text-anchor="start" x="41.4" y="-242.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Four ranks on four GPUs</text>
+<text xml:space="preserve" text-anchor="start" x="58.87" y="-226.6" font-family="Arial" font-size="16.00" fill="#111827">each loads its TP shard</text>
+</g>
+<!-- tp_bundle&#45;&gt;tp_ranks -->
+<g id="edge2" class="edge">
+<title>tp_bundle&#45;&gt;tp_ranks</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M142.47,-318.89C142.47,-307.03 142.47,-292.9 142.47,-279.99"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="145.27,-280.21 142.47,-272.21 139.67,-280.21 145.27,-280.21"/>
+</g>
+<!-- cp_ranks -->
+<g id="node6" class="node">
+<title>cp_ranks</title>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M567.84,-267.8C567.84,-267.8 337.1,-267.8 337.1,-267.8 331.1,-267.8 325.1,-261.8 325.1,-255.8 325.1,-255.8 325.1,-225.2 325.1,-225.2 325.1,-219.2 331.1,-213.2 337.1,-213.2 337.1,-213.2 567.84,-213.2 567.84,-213.2 573.84,-213.2 579.84,-219.2 579.84,-225.2 579.84,-225.2 579.84,-255.8 579.84,-255.8 579.84,-261.8 573.84,-267.8 567.84,-267.8"/>
+<text xml:space="preserve" text-anchor="start" x="351.4" y="-242.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Four ranks on four GPUs</text>
+<text xml:space="preserve" text-anchor="start" x="339.5" y="-226.6" font-family="Arial" font-size="16.00" fill="#111827">each owns one sequence shard</text>
+</g>
+<!-- cp_bundle&#45;&gt;cp_ranks -->
+<g id="edge6" class="edge">
+<title>cp_bundle&#45;&gt;cp_ranks</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M452.47,-318.89C452.47,-307.03 452.47,-292.9 452.47,-279.99"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="455.27,-280.21 452.47,-272.21 449.67,-280.21 455.27,-280.21"/>
+</g>
+<!-- tp_collective -->
+<g id="node7" class="node">
+<title>tp_collective</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M257.75,-161.2C257.75,-161.2 27.18,-161.2 27.18,-161.2 21.18,-161.2 15.18,-155.2 15.18,-149.2 15.18,-149.2 15.18,-118.6 15.18,-118.6 15.18,-112.6 21.18,-106.6 27.18,-106.6 27.18,-106.6 257.75,-106.6 257.75,-106.6 263.75,-106.6 269.75,-112.6 269.75,-118.6 269.75,-118.6 269.75,-149.2 269.75,-149.2 269.75,-155.2 263.75,-161.2 257.75,-161.2"/>
+<text xml:space="preserve" text-anchor="start" x="29.58" y="-136.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">NCCL projection collectives</text>
+<text xml:space="preserve" text-anchor="start" x="31.76" y="-120" font-family="Arial" font-size="16.00" fill="#111827">combine rank&#45;local tensor work</text>
+</g>
+<!-- tp_ranks&#45;&gt;tp_collective -->
+<g id="edge3" class="edge">
+<title>tp_ranks&#45;&gt;tp_collective</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M142.47,-212.29C142.47,-200.43 142.47,-186.3 142.47,-173.39"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="145.27,-173.61 142.47,-165.61 139.67,-173.61 145.27,-173.61"/>
+</g>
+<!-- cp_collective -->
+<g id="node8" class="node">
+<title>cp_collective</title>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M588.3,-161.2C588.3,-161.2 316.63,-161.2 316.63,-161.2 310.63,-161.2 304.63,-155.2 304.63,-149.2 304.63,-149.2 304.63,-118.6 304.63,-118.6 304.63,-112.6 310.63,-106.6 316.63,-106.6 316.63,-106.6 588.3,-106.6 588.3,-106.6 594.3,-106.6 600.3,-112.6 600.3,-118.6 600.3,-118.6 600.3,-149.2 600.3,-149.2 600.3,-155.2 594.3,-161.2 588.3,-161.2"/>
+<text xml:space="preserve" text-anchor="start" x="385.38" y="-136.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Ulysses all&#45;to&#45;all</text>
+<text xml:space="preserve" text-anchor="start" x="319.03" y="-120" font-family="Arial" font-size="16.00" fill="#111827">exchange sequence and head shards</text>
+</g>
+<!-- cp_ranks&#45;&gt;cp_collective -->
+<g id="edge7" class="edge">
+<title>cp_ranks&#45;&gt;cp_collective</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M452.47,-212.29C452.47,-200.43 452.47,-186.3 452.47,-173.39"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="455.27,-173.61 452.47,-165.61 449.67,-173.61 455.27,-173.61"/>
+</g>
+<!-- result -->
+<g id="node9" class="node">
+<title>result</title>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="2" d="M435.93,-54.6C435.93,-54.6 159,-54.6 159,-54.6 153,-54.6 147,-48.6 147,-42.6 147,-42.6 147,-12 147,-12 147,-6 153,0 159,0 159,0 435.93,0 435.93,0 441.93,0 447.93,-6 447.93,-12 447.93,-12 447.93,-42.6 447.93,-42.6 447.93,-48.6 441.93,-54.6 435.93,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="197.33" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Rank 0 returns the result</text>
+<text xml:space="preserve" text-anchor="start" x="161.4" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">all ranks complete the distributed work</text>
+</g>
+<!-- tp_collective&#45;&gt;result -->
+<g id="edge4" class="edge">
+<title>tp_collective&#45;&gt;result</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M182.79,-105.69C202.62,-92.3 226.72,-76.05 247.69,-61.89"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="249,-64.38 254.07,-57.59 245.87,-59.74 249,-64.38"/>
+</g>
+<!-- cp_collective&#45;&gt;result -->
+<g id="edge8" class="edge">
+<title>cp_collective&#45;&gt;result</title>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M412.15,-105.69C392.31,-92.3 368.22,-76.05 347.24,-61.89"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="349.06,-59.74 340.86,-57.59 345.93,-64.38 349.06,-59.74"/>
+</g>
+</g>
+</svg>

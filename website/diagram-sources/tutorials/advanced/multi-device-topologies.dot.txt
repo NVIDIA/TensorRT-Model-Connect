@@ -1,0 +1,92 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// @title: Multi-device bundle and runtime topologies
+// @description: A tensor-parallel build packages rank-specific plans while a context-parallel build packages one shared denoiser plan, and both launch one process per GPU before rank zero returns the user-facing result.
+digraph MultiDeviceTopologies {
+  graph [
+    bgcolor="#fbfcfe",
+    pad="0.35",
+    nodesep="0.48",
+    ranksep="0.72",
+    rankdir="TB",
+    splines="polyline",
+    fontname="Arial",
+    labelloc="t",
+    label=<<B>Build the topology into the bundle</B><BR/><FONT POINT-SIZE="16">At runtime, launch the recorded world size with one rank per visible GPU.</FONT>>,
+    fontsize="28",
+    fontcolor="#111827"
+  ];
+  node [
+    shape="rect",
+    style="rounded,filled",
+    fillcolor="#ffffff",
+    color="#64748b",
+    penwidth="2",
+    fontname="Arial",
+    fontsize="17",
+    fontcolor="#111827",
+    margin="0.20,0.15"
+  ];
+  edge [
+    color="#64748b",
+    penwidth="2.4",
+    arrowsize="0.8",
+    fontname="Arial",
+    fontsize="15",
+    fontcolor="#334155"
+  ];
+
+  tp_build [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>Tensor-parallel build</B><BR/><FONT POINT-SIZE="16">--tensor-parallel-size 4</FONT>>
+  ];
+  cp_build [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>Context-parallel build</B><BR/><FONT POINT-SIZE="16">--context-parallel-size 4</FONT>>
+  ];
+  tp_bundle [
+    fillcolor="#fffbeb",
+    color="#b45309",
+    label=<<B>One TP .trtfb bundle</B><BR/><FONT POINT-SIZE="16">rank0 · rank1 · rank2 · rank3 plans</FONT>>
+  ];
+  cp_bundle [
+    fillcolor="#fffbeb",
+    color="#b45309",
+    label=<<B>One CP .trtfb bundle</B><BR/><FONT POINT-SIZE="16">shared denoiser_plan_cp</FONT>>
+  ];
+  tp_ranks [
+    fillcolor="#ecfeff",
+    color="#0e7490",
+    label=<<B>Four ranks on four GPUs</B><BR/><FONT POINT-SIZE="16">each loads its TP shard</FONT>>
+  ];
+  cp_ranks [
+    fillcolor="#ecfeff",
+    color="#0e7490",
+    label=<<B>Four ranks on four GPUs</B><BR/><FONT POINT-SIZE="16">each owns one sequence shard</FONT>>
+  ];
+  tp_collective [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<B>NCCL projection collectives</B><BR/><FONT POINT-SIZE="16">combine rank-local tensor work</FONT>>
+  ];
+  cp_collective [
+    fillcolor="#ecfccb",
+    color="#4d7c0f",
+    label=<<B>Ulysses all-to-all</B><BR/><FONT POINT-SIZE="16">exchange sequence and head shards</FONT>>
+  ];
+  result [
+    fillcolor="#f5f3ff",
+    color="#7c3aed",
+    label=<<B>Rank 0 returns the result</B><BR/><FONT POINT-SIZE="16">all ranks complete the distributed work</FONT>>
+  ];
+
+  { rank=same; tp_build; cp_build; }
+  { rank=same; tp_bundle; cp_bundle; }
+  { rank=same; tp_ranks; cp_ranks; }
+  { rank=same; tp_collective; cp_collective; }
+
+  tp_build -> tp_bundle -> tp_ranks -> tp_collective -> result;
+  cp_build -> cp_bundle -> cp_ranks -> cp_collective -> result;
+}

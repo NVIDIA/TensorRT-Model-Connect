@@ -5,6 +5,7 @@
 
 #include "runtime/models/cosmos3/pipeline.h"
 
+#include "runtime/core/cuda_common.h"
 #include "runtime/models/cosmos3/cosmos3_unipc_cuda.h"
 #include "runtime/models/cosmos3/torch_cuda_normal.h"
 #include "runtime/models/cosmos3/vae_cache_storage.h"
@@ -32,6 +33,7 @@ constexpr int32_t kVideoChannels = 3;
 constexpr int32_t kVaeCacheCount = 32;
 constexpr int32_t kVaeFirstFrameOutputFrames = 1;
 constexpr int32_t kVaeStepOutputFrames = 4;
+constexpr char kContextParallelRankInput[] = "context_parallel_rank";
 constexpr std::size_t kLatentCount = static_cast<std::size_t>(cosmos3::kLatentChannels) *
                                      cosmos3::kLatentFrames * cosmos3::kLatentHeight *
                                      cosmos3::kLatentWidth;
@@ -91,6 +93,7 @@ void validate_denoiser_contract(const ITrtModule& module) {
                                                       cosmos3::kHeadDimension};
     const std::vector<int64_t> mask_shape = {1, 1, 1,
                                              cosmos3::kTextTokens + cosmos3::kVisionTokens};
+    const bool has_context_parallel_rank = module.has_input(kContextParallelRankInput);
     if (!has_input_contract(module, "input_ids", text_shape, DType::kInt32) ||
         !has_input_contract(module, "vision_patches", patch_shape, DType::kFloat32) ||
         !has_input_contract(module, "timestep_features", time_shape, DType::kFloat32) ||
@@ -99,6 +102,8 @@ void validate_denoiser_contract(const ITrtModule& module) {
         !has_input_contract(module, "vision_rotary_cos", vision_rotary_shape, DType::kFloat32) ||
         !has_input_contract(module, "vision_rotary_sin", vision_rotary_shape, DType::kFloat32) ||
         !has_input_contract(module, "generation_attention_mask", mask_shape, DType::kFloat32) ||
+        (has_context_parallel_rank &&
+         !has_input_contract(module, kContextParallelRankInput, {1}, DType::kInt32)) ||
         !has_output_contract(module, "noise_prediction_patches", patch_shape, DType::kFloat32)) {
         throw std::invalid_argument("Cosmos3 denoiser has an invalid tensor contract");
     }
@@ -250,17 +255,30 @@ void apply_cfg(const std::vector<float>& conditional, const std::vector<float>& 
 
 Cosmos3Pipeline::Cosmos3Pipeline(Cosmos3ModuleLoader module_loader,
                                  std::unique_ptr<ITokenizer> tokenizer, Cosmos3Options options,
-                                 std::string model_id, std::shared_ptr<void> distributed_owner,
-                                 int32_t distributed_rank, int32_t distributed_world_size)
-    : distributed_owner_(std::move(distributed_owner)), module_loader_(std::move(module_loader)),
-      tokenizer_(std::move(tokenizer)), options_(std::move(options)),
-      model_id_(std::move(model_id)), distributed_rank_(distributed_rank),
-      distributed_world_size_(distributed_world_size) {
+                                 std::string model_id,
+                                 DistributedRuntimeGroup context_parallel_group,
+                                 DistributedRuntimeGroup classifier_free_group)
+    : context_parallel_group_(std::move(context_parallel_group)),
+      classifier_free_group_(std::move(classifier_free_group)),
+      module_loader_(std::move(module_loader)), tokenizer_(std::move(tokenizer)),
+      options_(std::move(options)), model_id_(std::move(model_id)),
+      context_parallel_rank_(context_parallel_group_.rank) {
     if (!module_loader_ || !tokenizer_)
         throw std::invalid_argument("Cosmos3 requires a tokenizer and staged module loader");
-    if (distributed_rank_ < 0 || distributed_rank_ >= distributed_world_size_ ||
-        distributed_world_size_ < 1) {
+    if (context_parallel_group_.rank < 0 ||
+        context_parallel_group_.rank >= context_parallel_group_.world_size ||
+        context_parallel_group_.world_size < 1 || context_parallel_group_.global_rank < 0 ||
+        context_parallel_group_.global_rank >= context_parallel_group_.global_world_size) {
         throw std::invalid_argument("Cosmos3 received an invalid distributed rank");
+    }
+    if (classifier_free_group_.world_size > 1 &&
+        (classifier_free_group_.world_size != 2 || classifier_free_group_.rank < 0 ||
+         classifier_free_group_.rank >= classifier_free_group_.world_size ||
+         classifier_free_group_.global_rank != context_parallel_group_.global_rank ||
+         classifier_free_group_.global_world_size != context_parallel_group_.global_world_size ||
+         context_parallel_group_.world_size * classifier_free_group_.world_size !=
+             context_parallel_group_.global_world_size)) {
+        throw std::invalid_argument("Cosmos3 received an invalid classifier-free group");
     }
     const auto status = cudaStreamCreate(&stream_);
     if (status != cudaSuccess) {
@@ -305,6 +323,16 @@ std::vector<float> Cosmos3Pipeline::run_denoiser(const std::vector<float>& patch
                                                  const std::vector<float>& time_features,
                                                  const cosmos3::PromptInputs& prompt_inputs,
                                                  ITrtModule& denoiser) const {
+    const auto outputs =
+        denoiser.forward(make_denoiser_inputs(patches, time_features, prompt_inputs, denoiser));
+    return copy_as_float(required_output(outputs, "noise_prediction_patches", "denoiser"),
+                         kPatchCount, "denoiser output");
+}
+
+TensorMap Cosmos3Pipeline::make_denoiser_inputs(const std::vector<float>& patches,
+                                                const std::vector<float>& time_features,
+                                                const cosmos3::PromptInputs& prompt_inputs,
+                                                const ITrtModule& denoiser) const {
     if (patches.size() != kPatchCount || time_features.size() != 256 ||
         prompt_inputs.input_ids.size() != cosmos3::kTextTokens ||
         prompt_inputs.text_rotary_cos.size() !=
@@ -347,9 +375,11 @@ std::vector<float> Cosmos3Pipeline::run_denoiser(const std::vector<float>& patch
                    Tensor{const_cast<float*>(prompt_inputs.generation_attention_mask.data()),
                           {1, 1, 1, cosmos3::kTextTokens + cosmos3::kVisionTokens},
                           DType::kFloat32});
-    const auto outputs = denoiser.forward(inputs);
-    return copy_as_float(required_output(outputs, "noise_prediction_patches", "denoiser"),
-                         kPatchCount, "denoiser output");
+    if (denoiser.has_input(kContextParallelRankInput)) {
+        inputs.emplace(kContextParallelRankInput,
+                       Tensor{const_cast<int32_t*>(&context_parallel_rank_), {1}, DType::kInt32});
+    }
+    return inputs;
 }
 
 void Cosmos3Pipeline::run_denoising(std::vector<float>& latents,
@@ -357,7 +387,7 @@ void Cosmos3Pipeline::run_denoising(std::vector<float>& latents,
                                     const cosmos3::PromptInputs& unconditional_prompt,
                                     const Cosmos3Request& request, double& engine_load_ms,
                                     double& step_prep_ms, double& denoiser_ms,
-                                    double& scheduler_ms) {
+                                    double& cfg_exchange_ms, double& scheduler_ms) {
     if (latents.size() != kLatentCount)
         throw std::invalid_argument("Cosmos3 denoising latent tensor has an invalid size");
     const auto load_begin = Clock::now();
@@ -366,12 +396,22 @@ void Cosmos3Pipeline::run_denoising(std::vector<float>& latents,
     engine_load_ms = milliseconds(load_begin, load_end);
     step_prep_ms = 0.0;
     denoiser_ms = 0.0;
+    cfg_exchange_ms = 0.0;
     scheduler_ms = 0.0;
     validate_denoiser_contract(*denoiser);
     cosmos3::FlowUniPCCuda scheduler(stream_, request.num_inference_steps, request.flow_shift,
                                      1000);
     std::vector<float> guided_patches(kPatchCount);
     std::vector<float> next(kLatentCount);
+    std::vector<float> conditional(kPatchCount);
+    std::vector<float> unconditional(kPatchCount);
+    const bool classifier_free_parallel = classifier_free_group_.world_size > 1;
+    std::unique_ptr<CudaBuffer> classifier_free_predictions;
+    if (classifier_free_parallel) {
+        classifier_free_predictions = std::make_unique<CudaBuffer>(2 * kPatchCount * sizeof(float));
+        if (!classifier_free_predictions->ok())
+            throw std::runtime_error("Cosmos3 could not allocate classifier-free exchange buffer");
+    }
 
     try {
         for (int32_t step = 0; step < request.num_inference_steps; ++step) {
@@ -382,12 +422,37 @@ void Cosmos3Pipeline::run_denoising(std::vector<float>& latents,
             const auto prep_end = Clock::now();
 
             const auto conditional_begin = Clock::now();
-            const auto conditional =
-                run_denoiser(patches, time_features, conditional_prompt, *denoiser);
-            const auto conditional_end = Clock::now();
-            const auto unconditional =
-                run_denoiser(patches, time_features, unconditional_prompt, *denoiser);
-            const auto unconditional_end = Clock::now();
+            Clock::time_point conditional_end;
+            Clock::time_point unconditional_end;
+            double exchange_duration = 0.0;
+            if (classifier_free_parallel) {
+                const auto& branch_prompt =
+                    classifier_free_group_.rank == 0 ? conditional_prompt : unconditional_prompt;
+                denoiser->forward_async(
+                    make_denoiser_inputs(patches, time_features, branch_prompt, *denoiser));
+                denoiser->sync();
+                conditional_end = Clock::now();
+                unconditional_end = conditional_end;
+
+                const auto exchange_begin = Clock::now();
+                distributed_all_gather_float(
+                    classifier_free_group_, denoiser->device_ptr("noise_prediction_patches"),
+                    classifier_free_predictions->data(), kPatchCount, stream_);
+                const auto prediction_bytes = kPatchCount * sizeof(float);
+                auto* gathered = static_cast<unsigned char*>(classifier_free_predictions->data());
+                cudaMemcpyAsync(conditional.data(), gathered, prediction_bytes,
+                                cudaMemcpyDeviceToHost, stream_);
+                cudaMemcpyAsync(unconditional.data(), gathered + prediction_bytes, prediction_bytes,
+                                cudaMemcpyDeviceToHost, stream_);
+                synchronize_stream("exchanging classifier-free predictions");
+                exchange_duration = milliseconds(exchange_begin, Clock::now());
+            } else {
+                conditional = run_denoiser(patches, time_features, conditional_prompt, *denoiser);
+                conditional_end = Clock::now();
+                unconditional =
+                    run_denoiser(patches, time_features, unconditional_prompt, *denoiser);
+                unconditional_end = Clock::now();
+            }
 
             const auto scheduler_begin = Clock::now();
             apply_cfg(conditional, unconditional, request.guidance_scale, guided_patches);
@@ -403,13 +468,15 @@ void Cosmos3Pipeline::run_denoising(std::vector<float>& latents,
             const double scheduler_duration = milliseconds(scheduler_begin, scheduler_end);
             step_prep_ms += milliseconds(step_begin, prep_end);
             denoiser_ms += conditional_duration + unconditional_duration;
+            cfg_exchange_ms += exchange_duration;
             scheduler_ms += scheduler_duration;
-            if (distributed_rank_ == 0) {
+            if (context_parallel_group_.global_rank == 0) {
                 std::cerr << std::fixed << std::setprecision(3)
                           << "[cosmos3.perf.step] step=" << (step + 1) << " timestep=" << timestep
                           << " prep_ms=" << milliseconds(step_begin, prep_end)
                           << " conditional_ms=" << conditional_duration
                           << " unconditional_ms=" << unconditional_duration
+                          << " cfg_exchange_ms=" << exchange_duration
                           << " scheduler_cfg_ms=" << scheduler_duration
                           << " total_ms=" << milliseconds(step_begin, scheduler_end) << '\n';
             }
@@ -516,10 +583,12 @@ ImageResult Cosmos3Pipeline::generate_image(const std::string& prompt,
     auto unconditional_prompt =
         cosmos3::prepare_prompt_inputs(*tokenizer_, request.negative_prompt, true);
     const auto prompt_end = Clock::now();
-    if (distributed_rank_ == 0) {
+    if (context_parallel_group_.global_rank == 0) {
         std::cerr << "[cosmos3] prompt_tokens=" << conditional_prompt.real_text_tokens
                   << " negative_tokens=" << unconditional_prompt.real_text_tokens
-                  << " seed=" << request.seed << " cp=" << distributed_world_size_ << '\n';
+                  << " seed=" << request.seed << " cp=" << context_parallel_group_.global_world_size
+                  << " denoiser_cp=" << context_parallel_group_.world_size
+                  << " cfg_parallel=" << classifier_free_group_.world_size << '\n';
     }
 
     const auto initial_prep_begin = Clock::now();
@@ -529,15 +598,16 @@ ImageResult Cosmos3Pipeline::generate_image(const std::string& prompt,
     double engine_load_ms = 0.0;
     double step_prep_ms = 0.0;
     double denoiser_ms = 0.0;
+    double cfg_exchange_ms = 0.0;
     double scheduler_ms = 0.0;
     run_denoising(latents, conditional_prompt, unconditional_prompt, request, engine_load_ms,
-                  step_prep_ms, denoiser_ms, scheduler_ms);
+                  step_prep_ms, denoiser_ms, cfg_exchange_ms, scheduler_ms);
     const auto denoise_end = Clock::now();
 
     conditional_prompt = {};
     unconditional_prompt = {};
 
-    if (distributed_world_size_ > 1 && distributed_rank_ != 0) {
+    if (context_parallel_group_.global_world_size > 1 && context_parallel_group_.global_rank != 0) {
         ImageResult empty;
         empty.num_frames = 0;
         return empty;
@@ -557,9 +627,13 @@ ImageResult Cosmos3Pipeline::generate_image(const std::string& prompt,
               << "[cosmos3.perf] prompt_conditioning_ms=" << prompt_ms
               << " denoise_prep_ms=" << denoise_prep_ms
               << " denoiser_engine_load_ms=" << engine_load_ms << " denoiser_ms=" << denoiser_ms
-              << " scheduler_cfg_ms=" << scheduler_ms << " vae_decoder_ms=" << vae_ms
+              << " cfg_exchange_ms=" << cfg_exchange_ms << " scheduler_cfg_ms=" << scheduler_ms
+              << " vae_decoder_ms=" << vae_ms
               << " generation_excluding_denoiser_load_ms=" << (total_ms - engine_load_ms)
-              << " total_ms=" << total_ms << " cp_size=" << distributed_world_size_
+              << " total_ms=" << total_ms
+              << " cp_size=" << context_parallel_group_.global_world_size
+              << " denoiser_cp_size=" << context_parallel_group_.world_size
+              << " cfg_parallel_size=" << classifier_free_group_.world_size
               << " seed=" << request.seed << '\n';
     (void)denoise_end;
     return result;

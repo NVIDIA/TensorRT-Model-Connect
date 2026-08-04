@@ -142,6 +142,13 @@ class Cosmos3Plugin:
     def diffusion_bundle_config(self, config, *, components: dict) -> dict:
         bundle_config = self.get_diffusion_config(config)
         bundle_config["negative_prompt"] = components["negative_prompt"]
+        if "classifier_free_parallel_size" in components:
+            bundle_config["denoiser_context_parallel_size"] = components[
+                "denoiser_context_parallel_size"
+            ]
+            bundle_config["classifier_free_parallel_size"] = components[
+                "classifier_free_parallel_size"
+            ]
         return bundle_config
 
     def diffusion_tokenizer_add_special_tokens(
