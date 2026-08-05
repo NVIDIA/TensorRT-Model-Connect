@@ -10799,6 +10799,20 @@ def run_full_duplex_bench_comparison(
     return summary
 
 
+def validate_full_duplex_bench_answers(answers: Path) -> None:
+    """Reject non-formal slices before starting either inference backend."""
+    from tools.full_duplex_bench_score import validate_requests_manifest
+
+    payload = json.loads(answers.read_text(encoding="utf-8"))
+    try:
+        validate_requests_manifest(payload)
+    except ValueError as error:
+        raise ValueError(
+            "Full-Duplex-Bench formal validation input is invalid before "
+            f"inference: {error}"
+        ) from error
+
+
 def eval_one_model(
     *,
     suite: dict[str, Any],
@@ -10843,6 +10857,9 @@ def eval_one_model(
         sample_seed=args.sample_seed,
         validation_config=validation_config,
     )
+    answers_path = work_dir / "answers.json"
+    if scorer == "full_duplex_bench_behavior_parity":
+        validate_full_duplex_bench_answers(answers_path)
     precision_contract = (
         None
         if no_hf_reference
@@ -10869,7 +10886,6 @@ def eval_one_model(
             ),
         )
 
-    answers_path = work_dir / "answers.json"
     hf_reused = False
     if not no_hf_reference:
         # Run HF in its own process so its GPU memory is fully reclaimed before
@@ -11051,7 +11067,12 @@ def eval_one_model(
                 "samples_per_category": summary.get(
                     "samples_per_category", 0
                 ),
-                "evaluator_revision": summary.get("evaluator_revision", ""),
+                "metric_definition_revision": summary.get(
+                    "metric_definition_revision", ""
+                ),
+                "metric_implementation": summary.get(
+                    "metric_implementation", ""
+                ),
                 "asr_model": summary.get("asr_model", ""),
                 "asr_revision": summary.get("asr_revision", ""),
             },

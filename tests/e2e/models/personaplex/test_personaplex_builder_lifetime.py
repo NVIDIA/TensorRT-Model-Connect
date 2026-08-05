@@ -299,12 +299,12 @@ def test_builder_context_wrapper_is_lazy(monkeypatch) -> None:
     assert dispatch_only() == b"dispatched"
 
 
-def test_mimi_codec_capacity_follows_bundle_cache_length() -> None:
-    assert personaplex_plugin._mimi_codec_capacity(512) == (512, 983_040)
-    assert personaplex_plugin._mimi_codec_capacity(0) == (1, 1_920)
+def test_mimi_frame_capacity_follows_bundle_cache_length() -> None:
+    assert personaplex_plugin._mimi_frame_capacity(512) == 512
+    assert personaplex_plugin._mimi_frame_capacity(0) == 1
 
 
-def test_extra_engines_share_the_bundle_cache_capacity(monkeypatch) -> None:
+def test_fp16_bundle_builds_streaming_encoder_in_required_fp32(monkeypatch) -> None:
     captured: dict[str, int | str] = {}
 
     monkeypatch.setattr(
@@ -335,9 +335,9 @@ def test_extra_engines_share_the_bundle_cache_capacity(monkeypatch) -> None:
             or b"decoder"
         ),
     )
-    config = SimpleNamespace(
-        raw={"_model_dir": "/model", "_fp32_layers": [2, 3]}
-    )
+    # Mirrors the L0 user contract: temporal and depth are selected for FP32,
+    # while the bundle precision remains FP16.
+    config = SimpleNamespace(raw={"_model_dir": "/model", "_fp32_layers": [0, 1]})
     weights = {
         "_depth_hidden": 8,
         "_depth_num_layers": 1,
@@ -350,7 +350,7 @@ def test_extra_engines_share_the_bundle_cache_capacity(monkeypatch) -> None:
     }
 
     extras = personaplex_plugin.PersonaPlexPlugin().build_extra_engines(
-        config, weights, max_cache_length=512, precision="bf16"
+        config, weights, max_cache_length=512, precision="fp16"
     )
 
     assert captured == {
@@ -358,7 +358,7 @@ def test_extra_engines_share_the_bundle_cache_capacity(monkeypatch) -> None:
         "encoder_codebooks": 8,
         "encoder_precision": "fp32",
         "decoder_frames": 512,
-        "decoder_precision": "fp32",
+        "decoder_precision": "fp16",
     }
     assert extras["mimi_encoder_plan"] == b"encoder"
     assert extras["mimi_decoder_plan"] == b"decoder"
@@ -378,7 +378,6 @@ def test_standard_decoder_uses_stable_fp32_tactics() -> None:
 @pytest.mark.parametrize(
     "function_name",
     (
-        "_build_mimi_encoder_engine",
         "_build_mimi_streaming_encoder_engine",
         "_build_mimi_decoder_engine",
     ),
@@ -410,7 +409,6 @@ def test_mimi_decoder_workspace_supports_long_form_profile() -> None:
         ("default_dual_profile_decoder", "build_dual_profile_decoder_engine"),
         ("default_dual_profile_decoder_tp", "build_dual_profile_tp_decoder_engine"),
         ("decoder_tp_builder", "build_personaplex_tp_decoder_engine"),
-        ("plugin", "_build_mimi_encoder_engine"),
         ("plugin", "_build_mimi_streaming_encoder_engine"),
         ("plugin", "_build_mimi_decoder_engine"),
     ),

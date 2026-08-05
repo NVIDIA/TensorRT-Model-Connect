@@ -172,15 +172,4 @@ inline bool collect_output_codes_from_delay_cache(const DelayCacheState& delay_s
     return true;
 }
 
-inline bool collect_output_text_from_delay_cache(const DelayCacheState& delay_state, int32_t offset,
-                                                 int32_t max_delay, int32_t& output_text) {
-    if (offset <= max_delay) {
-        return false;
-    }
-    const int32_t out_pos = offset - max_delay;
-    const int32_t gather_pos = out_pos + delay_state.delays[0];
-    output_text = delay_state.cache[delay_cache_index(delay_state, 0, gather_pos)];
-    return true;
-}
-
 } // namespace trtmc

@@ -21,6 +21,7 @@ import pytest
 from PIL import Image
 
 from tools import prepare_media_validation_datasets as prepare_media
+from tools import prepare_full_duplex_bench_validation as prepare_fdb
 from tools.validation import engine as validation_engine
 
 
@@ -95,6 +96,32 @@ def test_full_duplex_bench_scorer_rejects_stale_summary_after_crash(
             },
             local_files_only=True,
         )
+
+
+def test_full_duplex_bench_rejects_short_slice_before_inference(tmp_path: Path) -> None:
+    answers = {
+        "schema_version": "trtmc.full-duplex-bench-validation/v1",
+        "source_revision": prepare_fdb.FDB_REVISION,
+        "sampling": {"seed": prepare_fdb.SELECTION_SEED},
+        "requests": [
+            {"sample_id": f"{category}-0", "category": category}
+            for category in (
+                "synthetic_pause_handling",
+                "candor_pause_handling",
+                "icc_backchannel",
+                "candor_turn_taking",
+                "synthetic_user_interruption",
+            )
+        ],
+    }
+    answers_path = tmp_path / "answers.json"
+    answers_path.write_text(json.dumps(answers), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="invalid before inference.*exactly 30 samples per category",
+    ):
+        validation_engine.validate_full_duplex_bench_answers(answers_path)
 
 
 def _write_mmlu(path: Path) -> None:

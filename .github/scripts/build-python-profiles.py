@@ -10,22 +10,15 @@ import os
 from pathlib import Path
 
 from tensorrt_model_connect.python_profiles import (
-    DEFAULT_PROFILE,
     load_python_profile_registry,
+    prebuilt_python_profile_names,
     profile_root,
     resolve_profile_python,
 )
 
 
 def main() -> None:
-    profiles = load_python_profile_registry()["profiles"]
-    names = sorted(
-        name
-        for name, spec in profiles.items()
-        if name != DEFAULT_PROFILE
-        and isinstance(spec, dict)
-        and bool(spec.get("prebuild", True))
-    )
+    names = prebuilt_python_profile_names(load_python_profile_registry())
     if not names:
         raise SystemExit("no family-owned Python profiles were declared")
 

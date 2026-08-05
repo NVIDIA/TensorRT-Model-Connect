@@ -1782,6 +1782,11 @@ suites:
       model_names: [personaplex-7b]
     scoring:
       scorer: model_plugin_parity
+    model_overrides:
+      by_model:
+        personaplex-7b:
+          comparison_precision: bf16
+          trtmc_fp32_layers: [2, 3]
     gates:
       min_sample_pass_rate: 1.0
     ci:

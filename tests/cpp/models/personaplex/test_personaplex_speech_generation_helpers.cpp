@@ -93,11 +93,6 @@ void test_delay_cache_reads_and_collects_outputs() {
     check(collected, "delay cache collects output after max delay");
     check(output_codes == std::vector<int32_t>({501, 502}),
           "delay cache collects mimi codebooks only");
-    int32_t output_text = -1;
-    const bool text_collected =
-        trtmc::collect_output_text_from_delay_cache(state, 2, state.max_delay, output_text);
-    check(text_collected, "delay cache collects output text after max delay");
-    check(output_text == 9100, "delay cache collects aligned output text token");
 }
 
 void test_waveform_trim_and_peak_normalize() {

@@ -358,18 +358,6 @@ void log_first_n_tokens(const char* label, const std::vector<int32_t>& tokens, i
     std::cerr << std::endl;
 }
 
-void log_mimi_input_frames(const std::vector<int32_t>& tokens, int32_t frames, int32_t codebooks) {
-    for (int32_t frame = 0; frame < frames; ++frame) {
-        std::cerr << "[speech] Input frame " << frame << ":";
-        for (int32_t codebook = 0; codebook < codebooks; ++codebook) {
-            const auto index = static_cast<std::size_t>(frame) * codebooks + codebook;
-            if (index < tokens.size())
-                std::cerr << " " << tokens[index];
-        }
-        std::cerr << std::endl;
-    }
-}
-
 } // anonymous namespace
 
 std::vector<int32_t> SpeechPipeline::run_mimi_encode(const float* samples, int32_t num_samples) {
@@ -432,7 +420,6 @@ std::vector<int32_t> SpeechPipeline::run_mimi_encode(const float* samples, int32
     last_encode_codebooks_ = shapes.enc_codebooks;
 
     log_first_n_tokens("[speech] Encoder tokens [0:16]: ", tokens);
-    log_mimi_input_frames(tokens, plan.valid_frames, shapes.enc_codebooks);
 
     return tokens;
 }
@@ -965,14 +952,6 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
                                               text_provided, frame_codes, settings.num_cb);
         if (collect_output_codes_from_delay_cache(delay_state, offset, delay_state.max_delay,
                                                   settings.mimi_cb, output_codes)) {
-            int32_t output_text_token = settings.text_pad_id;
-            if (!collect_output_text_from_delay_cache(delay_state, offset, delay_state.max_delay,
-                                                      output_text_token)) {
-                throw std::runtime_error(
-                    "PersonaPlex delay cache failed to collect aligned output text");
-            }
-            std::cerr << "[speech] Output text frame " << frames_collected << ": "
-                      << output_text_token << std::endl;
             ++frames_collected;
         }
 

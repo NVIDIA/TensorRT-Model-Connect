@@ -111,6 +111,27 @@ def load_python_profile_registry() -> dict[str, Any]:
     return registry
 
 
+def prebuilt_python_profile_names(
+    registry: Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Return non-default profiles that belong in the shared CI image."""
+    selected = (
+        registry if registry is not None else load_python_profile_registry()
+    )
+    profiles = selected.get("profiles", {})
+    if not isinstance(profiles, Mapping):
+        raise ValueError("Python profile registry is missing a profiles mapping")
+    return tuple(
+        sorted(
+            name
+            for name, spec in profiles.items()
+            if name != DEFAULT_PROFILE
+            and isinstance(spec, Mapping)
+            and bool(spec.get("prebuild", True))
+        )
+    )
+
+
 def _read_package_text(path_spec: str) -> str:
     path = Path(path_spec)
     if path.is_absolute():

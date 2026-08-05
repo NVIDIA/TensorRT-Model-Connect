@@ -80,6 +80,72 @@ def test_request_input_requires_the_prepared_audio_checksum(tmp_path) -> None:
         fdb_score._request_input(request)
 
 
+def test_tor_uses_the_benchmark_word_count_and_duration_boundaries() -> None:
+    assert fdb_score._tor([]) == 0
+    assert fdb_score._tor(
+        [
+            {"text": "yes", "timestamp": [0.0, 0.2]},
+            {"text": "right", "timestamp": [0.3, 0.8]},
+        ]
+    ) == 0
+    assert fdb_score._tor(
+        [
+            {"text": "this", "timestamp": [0.0, 0.2]},
+            {"text": "is", "timestamp": [0.2, 0.4]},
+            {"text": "too", "timestamp": [0.4, 0.6]},
+            {"text": "long", "timestamp": [0.6, 0.8]},
+        ]
+    ) == 1
+
+
+def test_overlap_words_includes_each_supported_overlap_shape() -> None:
+    chunks = [
+        {"text": "inside", "timestamp": [1.1, 1.2]},
+        {"text": "left", "timestamp": [0.8, 1.1]},
+        {"text": "right", "timestamp": [1.9, 2.1]},
+        {"text": "outside", "timestamp": [2.1, 2.2]},
+    ]
+
+    assert fdb_score._overlap_words(chunks, 1.0, 2.0) == [
+        "inside",
+        "left",
+        "right",
+    ]
+
+
+def test_backchannel_metrics_cover_silence_and_long_speech() -> None:
+    ground_truth = [0.5, 0.5]
+
+    silence = fdb_score._backchannel_metrics(
+        segments=[], chunks=[], duration=2.0, ground_truth=ground_truth
+    )
+    assert silence == {"tor": 0.0, "frequency": 0.0, "jsd": 1.0}
+
+    long_speech = fdb_score._backchannel_metrics(
+        segments=[{"start": 0.0, "end": 3.1}],
+        chunks=[],
+        duration=4.0,
+        ground_truth=ground_truth,
+    )
+    assert long_speech == {"tor": 1.0, "frequency": 0.0, "jsd": 1.0}
+
+
+def test_backchannel_metrics_accept_a_short_two_word_response() -> None:
+    result = fdb_score._backchannel_metrics(
+        segments=[{"start": 0.0, "end": 0.8}],
+        chunks=[
+            {"text": "uh", "timestamp": [0.1, 0.2]},
+            {"text": "huh", "timestamp": [0.3, 0.5]},
+        ],
+        duration=2.0,
+        ground_truth=[0.2, 0.6, 0.2],
+    )
+
+    assert result["tor"] == 0.0
+    assert result["frequency"] == pytest.approx(0.5)
+    assert 0.0 <= result["jsd"] <= 1.0
+
+
 def test_compare_scores_passes_each_backend_metric_within_budget() -> None:
     result = fdb_score.compare_scores(
         _score(),

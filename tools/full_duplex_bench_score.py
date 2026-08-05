@@ -2,7 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Score aligned HF/TRTMC outputs with Full-Duplex-Bench metrics."""
+"""Score aligned HF/TRTMC outputs with Full-Duplex-Bench metric definitions.
+
+Metric provenance: https://github.com/DanielLin94144/Full-Duplex-Bench at the
+immutable ``FDB_REVISION`` below. This is a paired TRTMC implementation for
+Dev/QA comparison; it does not execute or claim byte-equivalence with the
+upstream evaluator scripts.
+"""
 
 from __future__ import annotations
 
@@ -259,8 +265,6 @@ def _score_backchannel(
     import numpy as np
     import torch
     import torchaudio
-    from scipy.interpolate import interp1d
-    from scipy.spatial.distance import jensenshannon
     from silero_vad import get_speech_timestamps
 
     audio, sample_rate = _aligned_output(wav_path, input_path)
@@ -269,25 +273,46 @@ def _score_backchannel(
         waveform = torchaudio.functional.resample(waveform, sample_rate, 16_000)
         sample_rate = 16_000
     segments = get_speech_timestamps(waveform, vad_model, return_seconds=True)
-    chunks = transcription["chunks"]
+    duration = waveform.shape[-1] / sample_rate
+    return _backchannel_metrics(
+        segments=segments,
+        chunks=transcription["chunks"],
+        duration=duration,
+        ground_truth=ground_truth,
+    )
+
+
+def _backchannel_metrics(
+    *,
+    segments: Iterable[Mapping[str, Any]],
+    chunks: Iterable[Mapping[str, Any]],
+    duration: float,
+    ground_truth: Sequence[float],
+) -> dict[str, float]:
+    """Compute the benchmark's TOR, frequency, and timing-distribution metrics."""
+    import numpy as np
+
+    if duration <= 0.0:
+        raise ValueError("backchannel audio duration must be positive")
+
+    chunks = list(chunks)
     predicted: list[list[float]] = []
     tor = 0
     for segment in segments:
         start = float(segment["start"])
         end = float(segment["end"])
-        duration = end - start
-        if duration > 3.0:
+        segment_duration = end - start
+        if segment_duration > 3.0:
             tor = 1
             break
         words = _overlap_words(chunks, start, end)
         if len(words) > 3:
             tor = 1
-        elif duration < 1.0:
+        elif segment_duration < 1.0:
             tor = 0 if len(words) <= 2 else 1
         else:
             tor = 1
         predicted.append([start, end])
-    duration = waveform.shape[-1] / sample_rate
     frequency = len(predicted) / duration
     if not predicted:
         jsd = 1.0
@@ -300,14 +325,22 @@ def _score_backchannel(
         intervals += 1.0e-10
         intervals /= intervals.sum()
         ground_truth_array = np.asarray(ground_truth, dtype=np.float64)
-        interpolator = interp1d(
-            np.linspace(0, 1, len(ground_truth_array)),
+        resized = np.interp(
+            np.linspace(0.0, 1.0, len(intervals)),
+            np.linspace(0.0, 1.0, len(ground_truth_array)),
             ground_truth_array,
-            kind="linear",
-            fill_value="extrapolate",
         )
-        resized = interpolator(np.linspace(0, 1, len(intervals)))
-        jsd = float(jensenshannon(intervals, resized))
+        resized /= resized.sum()
+        midpoint = 0.5 * (intervals + resized)
+        left = np.sum(
+            intervals[intervals > 0.0]
+            * np.log(intervals[intervals > 0.0] / midpoint[intervals > 0.0])
+        )
+        right = np.sum(
+            resized[resized > 0.0]
+            * np.log(resized[resized > 0.0] / midpoint[resized > 0.0])
+        )
+        jsd = float(np.sqrt(0.5 * (left + right)))
     return {"tor": float(tor), "frequency": frequency, "jsd": jsd}
 
 
@@ -576,7 +609,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "dataset_source_revision": answers["source_revision"],
             "dataset_selection_seed": answers["sampling"]["seed"],
             "samples_per_category": VALIDATION_SAMPLES_PER_CATEGORY,
-            "evaluator_revision": FDB_REVISION,
+            "metric_definition_revision": FDB_REVISION,
+            "metric_implementation": "trtmc_paired_full_duplex_bench_v1",
             "asr_model": ASR_MODEL,
             "asr_revision": ASR_REVISION,
         }

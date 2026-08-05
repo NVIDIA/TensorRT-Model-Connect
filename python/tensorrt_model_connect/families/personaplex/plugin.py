@@ -54,8 +54,6 @@ Real weight key structure (nvidia/personaplex-7b-v1):
 
 from __future__ import annotations
 
-import math
-
 import re
 import sys
 from pathlib import Path
@@ -87,20 +85,14 @@ _DEPTH_COMPONENT = 1
 _MIMI_ENCODER_COMPONENT = 2
 _MIMI_DECODER_COMPONENT = 3
 _TEMPORAL_LAYER_SELECTOR_BASE = 4
-_PERSONAPLEX_SAMPLE_RATE = 24_000
-_PERSONAPLEX_FRAME_RATE = 12.5
 _PERSONAPLEX_MIMI_CHUNK_SAMPLES = 1_920
 _PERSONAPLEX_MIMI_CODEBOOKS = 8
 _PERSONAPLEX_MIMI_ATTENTION_CONTEXT = 250
 
 
-def _mimi_codec_capacity(max_cache_length: int) -> tuple[int, int]:
-    """Return the shared Mimi frame and input-sample capacity for a bundle."""
-    frame_capacity = max(1, int(max_cache_length))
-    sample_capacity = math.ceil(
-        frame_capacity * _PERSONAPLEX_SAMPLE_RATE / _PERSONAPLEX_FRAME_RATE
-    )
-    return frame_capacity, sample_capacity
+def _mimi_frame_capacity(max_cache_length: int) -> int:
+    """Return the shared Mimi frame capacity for a bundle."""
+    return max(1, int(max_cache_length))
 
 
 def _component_precision(
@@ -408,9 +400,13 @@ class PersonaPlexPlugin:
         depth_intermediate = weights["_depth_intermediate"]
         num_codebooks = weights["_num_codebooks"]
         depth_precision = _component_precision(config, _DEPTH_COMPONENT, precision)
-        mimi_encoder_precision = _component_precision(config, _MIMI_ENCODER_COMPONENT, precision)
+        # The streaming encoder intentionally uses FP32 regardless of the
+        # temporal/depth bundle precision. Its graph currently only implements
+        # the official Mimi codec numerics in FP32, so an FP16 model build must
+        # not accidentally request an unsupported encoder engine.
+        mimi_encoder_precision = "fp32"
         mimi_decoder_precision = _component_precision(config, _MIMI_DECODER_COMPONENT, precision)
-        mimi_frame_capacity, _ = _mimi_codec_capacity(max_cache_length)
+        mimi_frame_capacity = _mimi_frame_capacity(max_cache_length)
 
         # --- Per-codebook Depth Transformer engines ---
         # The depth transformer has per-codebook attention (Q,K,V,O), MLP, and
@@ -1438,351 +1434,6 @@ def _build_mimi_rope_tables(seq_len, head_dim, base=10000.0):
     cos_full = np.concatenate([cos_table, cos_table], axis=1)  # [seq_len, head_dim]
     sin_full = np.concatenate([sin_table, sin_table], axis=1)
     return cos_full, sin_full
-
-
-@with_builder_context(
-    workspace_bytes=1 << 30,
-    explicit_batch=True,
-    disable_tf32=True,
-    builder_optimization_level=0,
-    max_num_tactics=1,
-)
-def _build_mimi_encoder_engine(
-    weights: WeightDict,
-    *,
-    precision: str = "fp32",
-    verbose: bool = False,
-    model_dir: str | Path | None = None,
-    _builder_context_factory: BuilderContextFactory,
-) -> bytes | None:
-    """Build Mimi encoder as a native TRT engine.
-
-    Architecture: Conv1d encoder -> 8-layer Transformer (RoPE, GELU, LayerScale)
-                  -> Downsample conv -> RVQ quantize -> codec tokens
-
-    Input: audio_input [1, 1, num_samples] (24kHz float32)
-    Output: codec_tokens [32, num_frames] (int32 codebook indices)
-    """
-    if trt is None or graph_ops is None:
-        if verbose:
-            print("[trtmc build] Skipping Mimi encoder (TRT not available)",
-                  file=sys.stderr)
-        return None
-
-    print("[trtmc build] Building Mimi encoder TRT engine ...", file=sys.stderr)
-
-    mimi_w, mimi_cfg = _load_mimi_weights(model_dir)
-    work_np_dtype = np.float16 if precision == "fp16" else np.float32
-    work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
-
-    # Config
-    hidden_size = mimi_cfg["hidden_size"]       # 512
-    num_heads = mimi_cfg["num_attention_heads"]  # 8
-    head_dim = mimi_cfg["head_dim"]              # 64
-    intermediate_size = mimi_cfg["intermediate_size"]  # 2048
-    num_layers = mimi_cfg["num_hidden_layers"]   # 8
-    norm_eps = mimi_cfg["norm_eps"]              # 1e-5
-    codebook_dim = mimi_cfg["codebook_dim"]      # 256
-    codebook_size = mimi_cfg["codebook_size"]    # 2048
-    rope_theta = mimi_cfg.get("rope_theta", 10000.0)
-    compress = mimi_cfg.get("compress", 2)
-    upsampling_ratios = mimi_cfg["upsampling_ratios"]  # [8, 6, 5, 4]
-    num_filters = mimi_cfg["num_filters"]        # 64
-    kernel_size = mimi_cfg["kernel_size"]        # 7
-    residual_kernel_size = mimi_cfg.get("residual_kernel_size", 3)
-    last_kernel_size = mimi_cfg.get("last_kernel_size", 3)
-
-    # Input size: 100800 samples = 4.2s at 24kHz
-    # Handles Recording.wav (99844 samples after 48kHz->24kHz resample, zero-padded).
-    # HF Mimi uses ceil-mode causal convolutions; with the corrected extra_padding
-    # this produces the same 53 frames as HF for 100800 input samples.
-    num_input_samples = 100800
-
-    builder_context = _builder_context_factory()
-    builder = builder_context.builder
-    network = builder_context.network
-    config = builder_context.config
-
-    # Input: [1, 1, num_input_samples]
-    audio_input = network.add_input(
-        "audio_input", trt.float32, (1, 1, num_input_samples))
-
-    # ===== Encoder ConvNet =====
-    # Encoder structure from weights:
-    # layers.0: Conv1d(1, 64, 7) -- input conv
-    # layers.1: ResBlock(64, compress=2)
-    # layers.3: Conv1d(64, 128, 8, stride=4) -- downsample
-    # layers.4: ResBlock(128, compress=2)
-    # layers.6: Conv1d(128, 256, 10, stride=5) -- downsample
-    # layers.7: ResBlock(256, compress=2)
-    # layers.9: Conv1d(256, 512, 12, stride=6) -- downsample
-    # layers.10: ResBlock(512, compress=2)
-    # layers.12: Conv1d(512, 1024, 16, stride=8) -- downsample
-    # layers.14: Conv1d(1024, 512, 3) -- output conv
-
-    # Encoder layer indices and their configs
-    channels = [num_filters * (2 ** i) for i in range(len(upsampling_ratios) + 1)]
-    # channels = [64, 128, 256, 512, 1024] for upsampling_ratios=[8,6,5,4], num_filters=64
-
-    x = audio_input
-    if work_trt_dtype != trt.float32:
-        x = network.add_cast(x, work_trt_dtype).get_output(0)
-
-    # Layer 0: input conv
-    x = _add_mimi_conv1d_causal(
-        network, x,
-        mimi_w["encoder.layers.0.conv.weight"],
-        mimi_w["encoder.layers.0.conv.bias"],
-        channels[0], kernel_size, dtype=work_np_dtype)
-
-    # Encoder blocks (for each upsampling ratio)
-    # Layer indices: resblock at 1,4,7,10; downsample conv at 3,6,9,12
-    enc_layer_map = [
-        (1, 3, upsampling_ratios[3]),   # resblock(64), downsample(64->128, stride=4)
-        (4, 6, upsampling_ratios[2]),   # resblock(128), downsample(128->256, stride=5)
-        (7, 9, upsampling_ratios[1]),   # resblock(256), downsample(256->512, stride=6)
-        (10, 12, upsampling_ratios[0]), # resblock(512), downsample(512->1024, stride=8)
-    ]
-
-    for i, (res_idx, down_idx, ratio) in enumerate(enc_layer_map):
-        in_ch = channels[i]
-        out_ch = channels[i + 1]
-
-        # Residual block
-        x = _add_mimi_resblock(
-            network, x, in_ch, compress,
-            mimi_w[f"encoder.layers.{res_idx}.block.1.conv.weight"],
-            mimi_w[f"encoder.layers.{res_idx}.block.1.conv.bias"],
-            mimi_w[f"encoder.layers.{res_idx}.block.3.conv.weight"],
-            mimi_w[f"encoder.layers.{res_idx}.block.3.conv.bias"],
-            residual_kernel_size, dtype=work_np_dtype)
-
-        # ELU activation between resblock and downsample
-        # (HF encoder has ELU at layers 2, 5, 8, 11)
-        x = graph_ops.add_elu(network, x)
-
-        # Downsample conv (stride = ratio, kernel = 2*ratio)
-        ds_kernel = 2 * ratio
-        x = _add_mimi_conv1d_causal(
-            network, x,
-            mimi_w[f"encoder.layers.{down_idx}.conv.weight"],
-            mimi_w[f"encoder.layers.{down_idx}.conv.bias"],
-            out_ch, ds_kernel, stride=ratio, dtype=work_np_dtype)
-
-    # ELU before output conv (HF encoder layer 13)
-    x = graph_ops.add_elu(network, x)
-
-    # Output conv: Conv1d(1024, 512, last_kernel_size)
-    x = _add_mimi_conv1d_causal(
-        network, x,
-        mimi_w["encoder.layers.14.conv.weight"],
-        mimi_w["encoder.layers.14.conv.bias"],
-        hidden_size, last_kernel_size, dtype=work_np_dtype)
-
-    # ===== Encoder Transformer =====
-    # x is [1, hidden_size, seq_len_after_conv]
-    # Transformer expects [seq_len, hidden_size]
-    # Transpose: [1, C, L] -> [L, C]
-    enc_conv_out = x
-    enc_seq_len = enc_conv_out.shape[2]
-
-    # Reshape [1, hidden_size, enc_seq_len] -> [enc_seq_len, hidden_size]
-    shuf = network.add_shuffle(enc_conv_out)
-    shuf.first_transpose = trt.Permutation([0, 2, 1])  # [1, L, C]
-    shuf.reshape_dims = (enc_seq_len, hidden_size)
-    x = shuf.get_output(0)
-
-    # Build RoPE tables
-    cos_table, sin_table = _build_mimi_rope_tables(
-        enc_seq_len, head_dim, rope_theta)
-    # Tile across all heads: [seq_len, head_dim] -> [seq_len, hidden_size]
-    cos_full = np.tile(cos_table, (1, num_heads)).astype(np.float32)
-    sin_full = np.tile(sin_table, (1, num_heads)).astype(np.float32)
-
-    for layer_idx in range(num_layers):
-        prefix = f"encoder_transformer.layers.{layer_idx}"
-        layer_w = {
-            "input_layernorm.weight": mimi_w[f"{prefix}.input_layernorm.weight"],
-            "input_layernorm.bias": mimi_w[f"{prefix}.input_layernorm.bias"],
-            "self_attn.q_proj.weight": mimi_w[f"{prefix}.self_attn.q_proj.weight"].T.copy(),
-            "self_attn.k_proj.weight": mimi_w[f"{prefix}.self_attn.k_proj.weight"].T.copy(),
-            "self_attn.v_proj.weight": mimi_w[f"{prefix}.self_attn.v_proj.weight"].T.copy(),
-            "self_attn.o_proj.weight": mimi_w[f"{prefix}.self_attn.o_proj.weight"].T.copy(),
-            "self_attn_layer_scale.scale": mimi_w[f"{prefix}.self_attn_layer_scale.scale"],
-            "post_attention_layernorm.weight": mimi_w[f"{prefix}.post_attention_layernorm.weight"],
-            "post_attention_layernorm.bias": mimi_w[f"{prefix}.post_attention_layernorm.bias"],
-            "mlp.fc1.weight": mimi_w[f"{prefix}.mlp.fc1.weight"].T.copy(),
-            "mlp.fc2.weight": mimi_w[f"{prefix}.mlp.fc2.weight"].T.copy(),
-            "mlp_layer_scale.scale": mimi_w[f"{prefix}.mlp_layer_scale.scale"],
-            "_cos_table": cos_full,
-            "_sin_table": sin_full,
-        }
-        x = _add_mimi_transformer_layer(
-            network, x, enc_seq_len, hidden_size, num_heads, head_dim,
-            intermediate_size, norm_eps, layer_w, dtype=work_np_dtype)
-
-    # Transformer output: [enc_seq_len, hidden_size]
-    # Back to [1, hidden_size, enc_seq_len]
-    shuf2 = network.add_shuffle(x)
-    shuf2.reshape_dims = (1, enc_seq_len, hidden_size)
-    shuf2.second_transpose = trt.Permutation([0, 2, 1])  # [1, C, L]
-    x = shuf2.get_output(0)
-
-    # ===== Downsample =====
-    # downsample.conv.weight: [512, 512, 4], stride=compress(=2)
-    ds_w = mimi_w["downsample.conv.weight"]
-    x = _add_mimi_conv1d_causal(
-        network, x, ds_w, None, hidden_size, 4, stride=compress,
-        dtype=work_np_dtype)
-
-    ds_seq_len = x.shape[2]  # seq_len after downsample
-
-    # ===== RVQ Quantization =====
-    # input_proj: Conv1d(512, 256, 1) -- project to codebook dim
-    # Then for each codebook: find nearest entry, subtract quantized
-
-    # Semantic quantizer (1 codebook)
-    sem_input_proj_w = mimi_w[
-        "quantizer.semantic_residual_vector_quantizer.input_proj.weight"]
-    # [256, 512, 1] -> Conv1d(512, 256, 1) with no bias
-
-    # Project to codebook dim
-    sem_projected = graph_ops.add_conv1d(
-        network, x, sem_input_proj_w, None, codebook_dim, 1,
-        dtype=work_np_dtype)
-
-    # Quantize semantic codebook (codebook 0)
-    sem_cb = mimi_w[
-        "quantizer.semantic_residual_vector_quantizer.layers.0.codebook.embedding"]
-    # [2048, 256]
-
-    # Find nearest: argmax(x @ cb.T) which is equivalent to argmin(||x - cb||^2)
-    # ||x - cb||^2 = ||x||^2 - 2*x*cb + ||cb||^2
-    # argmin = argmax(2*x*cb - ||cb||^2) = argmax(x @ cb.T) when ||cb|| is uniform
-    # More precisely: argmax(x @ cb.T - 0.5 * ||cb||^2)
-
-    # sem_projected: [1, codebook_dim, ds_seq_len]
-    # Reshape to [ds_seq_len, codebook_dim]
-    sp_shuf = network.add_shuffle(sem_projected)
-    sp_shuf.first_transpose = trt.Permutation([0, 2, 1])  # [1, L, D]
-    sp_shuf.reshape_dims = (ds_seq_len, codebook_dim)
-    sp_flat = sp_shuf.get_output(0)
-
-    # Codebook norms: [1, 2048]
-    cb_norms_sq = np.sum(sem_cb ** 2, axis=1, keepdims=True).T  # [1, 2048]
-
-    # Similarity: [L, D] @ [D, 2048] = [L, 2048]
-    cb_const = graph_ops.add_constant(
-        network, (codebook_dim, codebook_size), sem_cb.T.copy(),
-        dtype=work_np_dtype)
-    sim = network.add_matrix_multiply(
-        sp_flat, trt.MatrixOperation.NONE,
-        cb_const, trt.MatrixOperation.NONE).get_output(0)
-
-    # Subtract 0.5 * ||cb||^2
-    half_norms = graph_ops.add_constant(
-        network, (1, codebook_size), (-0.5 * cb_norms_sq),
-        dtype=work_np_dtype)
-    sim = network.add_elementwise(
-        sim, half_norms, trt.ElementWiseOperation.SUM).get_output(0)
-
-    # Argmax: [L, 2048] -> [L, 1]
-    sem_topk = network.add_topk(sim, trt.TopKOperation.MAX, 1, 1 << 1)
-    sem_indices = sem_topk.get_output(1)  # [L, 1] int32
-
-    # Collect all codebook indices: will be [32, L]
-    all_indices = [sem_indices]  # Start with semantic
-
-    # For the residual: we need to subtract the quantized embedding
-    # quantized = gather(codebook, indices)
-    # But for subsequent RVQ layers, the input is the residual
-    # This is complex in TRT; we do it iteratively
-
-    # Acoustic quantizer: 31 codebooks applied to the same projected input
-    acou_input_proj_w = mimi_w[
-        "quantizer.acoustic_residual_vector_quantizer.input_proj.weight"]
-    acou_projected = graph_ops.add_conv1d(
-        network, x, acou_input_proj_w, None, codebook_dim, 1,
-        dtype=work_np_dtype)
-
-    # Reshape to [ds_seq_len, codebook_dim]
-    ap_shuf = network.add_shuffle(acou_projected)
-    ap_shuf.first_transpose = trt.Permutation([0, 2, 1])
-    ap_shuf.reshape_dims = (ds_seq_len, codebook_dim)
-    acou_residual = ap_shuf.get_output(0)
-
-    for cb_idx in range(31):
-        acou_cb = mimi_w[
-            f"quantizer.acoustic_residual_vector_quantizer.layers.{cb_idx}.codebook.embedding"]
-
-        # Similarity
-        acou_cb_const = graph_ops.add_constant(
-            network, (codebook_dim, codebook_size), acou_cb.T.copy(),
-            dtype=work_np_dtype)
-        acou_cb_norms_sq = np.sum(acou_cb ** 2, axis=1, keepdims=True).T
-        acou_half_norms = graph_ops.add_constant(
-            network, (1, codebook_size),
-            -0.5 * acou_cb_norms_sq, dtype=work_np_dtype)
-
-        acou_sim = network.add_matrix_multiply(
-            acou_residual, trt.MatrixOperation.NONE,
-            acou_cb_const, trt.MatrixOperation.NONE).get_output(0)
-        acou_sim = network.add_elementwise(
-            acou_sim, acou_half_norms, trt.ElementWiseOperation.SUM).get_output(0)
-
-        # Argmax
-        acou_topk = network.add_topk(acou_sim, trt.TopKOperation.MAX, 1, 1 << 1)
-        acou_idx = acou_topk.get_output(1)  # [L, 1]
-        all_indices.append(acou_idx)
-
-        # Subtract quantized from residual for next codebook
-        # Gather: select rows from codebook by index
-        # acou_cb: [2048, 256], acou_idx: [L, 1]
-        # Reshape index to [L]
-        idx_flat = network.add_shuffle(acou_idx)
-        idx_flat.reshape_dims = (ds_seq_len,)
-
-        acou_cb_2d = graph_ops.add_constant(
-            network, (codebook_size, codebook_dim), acou_cb.copy(),
-            dtype=work_np_dtype)
-        gathered = network.add_gather(
-            acou_cb_2d, idx_flat.get_output(0), axis=0).get_output(0)
-        # gathered: [L, 256]
-
-        acou_residual = network.add_elementwise(
-            acou_residual, gathered, trt.ElementWiseOperation.SUB).get_output(0)
-
-    # Stack all indices: each is [L, 1], concat to [L, 32], then transpose to [32, L]
-    concat = network.add_concatenation(all_indices)
-    concat.axis = 1  # concat along dim 1: [L, 32]
-    stacked = concat.get_output(0)
-
-    # Transpose to [32, L]
-    out_shuf = network.add_shuffle(stacked)
-    out_shuf.first_transpose = trt.Permutation([1, 0])
-    codec_tokens = out_shuf.get_output(0)
-
-    # Cast to float32 for output (TRT output must be float; C++ will cast to int32)
-    cast_layer = network.add_cast(codec_tokens, trt.float32)
-    codec_out = cast_layer.get_output(0)
-
-    codec_out.name = "codec_tokens"
-    network.mark_output(codec_out)
-
-    if verbose:
-        print(f"[trtmc build] Mimi encoder: {num_input_samples} samples -> "
-              f"{ds_seq_len} frames x 32 codebooks", file=sys.stderr)
-
-    plan = builder.build_serialized_network(network, config)
-    if plan is None:
-        print("[trtmc build] ERROR: Mimi encoder engine build failed",
-              file=sys.stderr)
-        return None
-
-    plan_bytes = bytes(plan)
-    print(f"[trtmc build] Mimi encoder engine built ({len(plan_bytes) / (1024*1024):.1f} MB)",
-          file=sys.stderr)
-    return plan_bytes
 
 
 @with_builder_context(

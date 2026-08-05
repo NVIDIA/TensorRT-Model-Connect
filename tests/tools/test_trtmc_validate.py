@@ -53,10 +53,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         "e2e" not in spec.get("workloads", [])
         for spec in catalog["models"].values()
     )
-    assert (
-        catalog["models"]["personaplex-7b"]["reference_cache_identity"]
-        == "personaplex-official-greedy-bf16-full-duplex-v5"
-    )
+    assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
     assert (
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
         == catalog["models"]["flux-2-dev-fp8"]["reference_cache_identity"]

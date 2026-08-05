@@ -135,12 +135,9 @@ python tools/prepare_full_duplex_bench_validation.py \
 ```
 
 The resulting 150 samples contain 30 fixed SHA-ranked inputs from each of the
-five benchmark categories. Twenty thousand stratified resamples of the
-complete run showed that 100 samples left up to 0.090 aggregate TOR sampling
-error at the 95th percentile, while 150 reduced it to about 0.057; increasing
-to 200 improved it to about 0.040
-but increased the cold HF+TRTMC runtime from about 66 to 87 minutes. The fixed
-150-sample slice is therefore the default validation tradeoff.
+five benchmark categories. This fixed, balanced slice is the formal validation
+contract; changing its size requires reviewing both the sampling uncertainty
+and the metric-delta gates rather than silently changing `--limit`.
 
 The source root must include its managed `DATASET_MANIFEST.json`; preparation
 rejects a different upstream revision, subset count, or license declaration.
@@ -155,8 +152,14 @@ remain non-commercial and subject to their upstream terms.
 Prepared 24 kHz mono float WAVs use deterministic headers, and the scorer
 verifies every prepared-audio SHA before evaluation.
 Because those aggregate gates are sized for 30 samples per category, the
-formal scorer rejects a reduced `--limit` instead of reporting a statistically
-unsupported pass.
+validation engine rejects a reduced `--limit` before launching HF or TRTMC
+instead of reporting a statistically unsupported pass.
+
+PersonaPlex also retains `full_duplex_bench_speech_parity` as a five-sample
+diagnostic regression. It contains the original `000000` and `000002`
+synthetic-interruption failures from issue #767 and provides per-sample token,
+waveform, and vanilla reproduction evidence. It complements the aggregate
+behavior suite; it does not replace the 150-sample behavioral gate.
 
 LocateAnything grounding accuracy uses the public `lscpku/RefCOCO_rec`
 dataset pinned at revision

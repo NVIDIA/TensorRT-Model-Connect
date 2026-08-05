@@ -149,16 +149,12 @@ class DockerImageManager:
 
     def _read_requirements(self) -> ImageRequirements:
         registry = self._load_profile_registry()
-        default_profile = self._default_profile_name()
         profiles = registry["profiles"]
+        profile_module = importlib.import_module(
+            "tensorrt_model_connect.python_profiles"
+        )
         expected_profiles = ",".join(
-            sorted(
-                name
-                for name, spec in profiles.items()
-                if name != default_profile
-                and isinstance(spec, dict)
-                and bool(spec.get("prebuild", True))
-            )
+            profile_module.prebuilt_python_profile_names(registry)
         )
         if not expected_profiles:
             raise CiError("No family-owned Python execution profiles were declared")
@@ -206,10 +202,6 @@ class DockerImageManager:
             return module.load_python_profile_registry()
         finally:
             sys.path.remove(package_path)
-
-    def _default_profile_name(self) -> str:
-        module = importlib.import_module("tensorrt_model_connect.python_profiles")
-        return str(module.DEFAULT_PROFILE)
 
     def _fingerprint_inputs(self, inputs: tuple[Path, ...], semantic: str) -> str:
         digest = hashlib.sha256()
