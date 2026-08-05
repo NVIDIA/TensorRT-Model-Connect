@@ -73,9 +73,16 @@ def test_plugin_aliases_are_exact() -> None:
 
 def test_plugin_fails_closed_on_unqualified_profile_or_source(monkeypatch) -> None:
     monkeypatch.delenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", raising=False)
+    monkeypatch.delenv("TRTMC_ENGINE_BUILD_REVISION", raising=False)
     monkeypatch.delenv("GITHUB_SHA", raising=False)
     with pytest.raises(ValueError, match="SOURCE_REVISION"):
         _build_source_revision()
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "not-a-sha")
+    monkeypatch.setenv("GITHUB_SHA", "C" * 40)
+    with pytest.raises(ValueError, match="40-character Git SHA"):
+        _build_source_revision()
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "B" * 40)
+    assert _build_source_revision() == "b" * 40
     monkeypatch.setenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", "A" * 40)
     assert _build_source_revision() == "a" * 40
     assert _fixed_profile({}) is SOL_ENGINE_1344X768_124F

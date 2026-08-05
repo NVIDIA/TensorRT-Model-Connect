@@ -26,13 +26,17 @@ from .provenance import (
 
 
 def _build_source_revision() -> str:
-    for name in ("TRTMC_MINIMAX_H3_SOURCE_REVISION", "GITHUB_SHA"):
+    for name in (
+        "TRTMC_MINIMAX_H3_SOURCE_REVISION",
+        "TRTMC_ENGINE_BUILD_REVISION",
+        "GITHUB_SHA",
+    ):
         revision = os.environ.get(name, "").strip().lower()
         if revision:
             return validate_source_revision(revision)
     raise ValueError(
         "MiniMax-H3 native builds require TRTMC_MINIMAX_H3_SOURCE_REVISION "
-        "(or GITHUB_SHA in GitHub Actions)"
+        "(or TRTMC_ENGINE_BUILD_REVISION / GITHUB_SHA in CI)"
     )
 
 
