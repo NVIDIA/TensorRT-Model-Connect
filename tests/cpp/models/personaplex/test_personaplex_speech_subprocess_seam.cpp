@@ -113,6 +113,22 @@ void test_output_plan_large_target_clamps_to_max_output() {
     check(plan.total_iters == 65, "output plan: large target total iters");
 }
 
+void test_output_plan_keeps_the_final_partial_codec_frame() {
+    trtmc::SpeechOutputPlanInput input;
+    input.sample_rate = 24000;
+    input.frame_rate = 12.5F;
+    input.num_frames = 345;
+    input.num_input_samples = 661632;
+    input.input_sample_rate = 24000;
+    input.max_output_frames = 400;
+    input.max_delay = 1;
+
+    const auto plan = trtmc::ComputeSpeechOutputPlan(input);
+
+    check(plan.effective_frames == 343, "output plan: partial frame uses ceil semantics");
+    check(plan.output_frames == 343, "output plan: partial frame matches official output length");
+}
+
 class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
   public:
     int rc{0};
@@ -197,6 +213,7 @@ int main() {
     test_output_plan_frame_rate_disabled_and_clamped();
     test_output_plan_small_inputs_do_not_go_negative();
     test_output_plan_large_target_clamps_to_max_output();
+    test_output_plan_keeps_the_final_partial_codec_frame();
 
     test_tokenize_runtime_success_parses_tokens();
     test_tokenize_runtime_failure_propagates_rc_and_stderr();

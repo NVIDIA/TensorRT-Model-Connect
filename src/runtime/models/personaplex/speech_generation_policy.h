@@ -42,7 +42,8 @@ inline SpeechOutputPlan ComputeSpeechOutputPlan(const SpeechOutputPlanInput& inp
             effective_input_samples =
                 (effective_input_samples * input.sample_rate) / input.input_sample_rate;
         }
-        nominal_input_frames = static_cast<int32_t>(effective_input_samples / nominal_frame_size);
+        nominal_input_frames = static_cast<int32_t>(
+            (effective_input_samples + nominal_frame_size - 1) / nominal_frame_size);
     }
 
     SpeechOutputPlan plan;

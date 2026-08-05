@@ -12,6 +12,7 @@
 #include "runtime/models/personaplex/speech_depth_plan.h"
 #include "runtime/models/personaplex/speech_generation_policy.h"
 #include "runtime/models/personaplex/speech_mimi_decode_plan.h"
+#include "runtime/models/personaplex/speech_mimi_encode_plan.h"
 #include "runtime/models/personaplex/speech_performance.h"
 #include "runtime/models/personaplex/speech_runtime_plan.h"
 #include "runtime/models/personaplex/speech_temporal_embed_plan.h"
@@ -20,6 +21,7 @@
 #include "utils/wav_reader.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -29,6 +31,7 @@
 #include <stdexcept>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <unordered_map>
 
 namespace trtmc {
 
@@ -256,6 +259,13 @@ struct MimiEncoderShapes {
     int32_t enc_frames{0};
 };
 
+struct MimiHostState {
+    std::vector<float> values;
+    std::vector<int64_t> shape;
+};
+
+using MimiHostStates = std::unordered_map<std::string, MimiHostState>;
+
 MimiEncoderShapes query_mimi_encoder_shapes(const TrtModule& module) {
     MimiEncoderShapes s;
     for (const auto& info : module.input_info()) {
@@ -271,18 +281,74 @@ MimiEncoderShapes query_mimi_encoder_shapes(const TrtModule& module) {
     return s;
 }
 
-std::vector<int32_t> transpose_codec_tokens_to_frame_major(const float* data, int32_t codebooks,
-                                                           int32_t frames) {
-    const auto output_elems = static_cast<std::size_t>(codebooks) * frames;
-    std::vector<int32_t> tokens(output_elems);
-    for (int32_t cb = 0; cb < codebooks; ++cb) {
-        for (int32_t frame = 0; frame < frames; ++frame) {
-            const auto src = static_cast<std::size_t>(cb) * frames + frame;
-            const auto dst = static_cast<std::size_t>(frame) * codebooks + cb;
-            tokens[dst] = static_cast<int32_t>(std::round(data[src]));
+bool is_mimi_control_input(const std::string& name) {
+    return name == "audio_input" || name == "mimi_position_ids" || name == "mimi_cache_indices" ||
+           name == "mimi_attention_mask";
+}
+
+std::size_t mimi_state_element_count(const std::vector<int64_t>& shape) {
+    std::size_t elements = 1;
+    for (const auto dimension : shape)
+        elements *= static_cast<std::size_t>(dimension);
+    return elements;
+}
+
+bool initialize_mimi_host_states(const TrtModule& module, MimiHostStates& states) {
+    for (const auto& info : module.input_info()) {
+        if (is_mimi_control_input(info.name))
+            continue;
+        if (info.dtype != DType::kFloat32 || info.shape.empty()) {
+            std::cerr << "[speech] Mimi encoder state '" << info.name
+                      << "' does not use the expected FP32 static shape" << std::endl;
+            return false;
         }
+        const auto elements = mimi_state_element_count(info.shape);
+        states.emplace(info.name, MimiHostState{std::vector<float>(elements, 0.0F), info.shape});
     }
-    return tokens;
+    return true;
+}
+
+TensorMap make_mimi_streaming_inputs(std::vector<float>& audio_chunk,
+                                     const MimiEncoderShapes& shapes,
+                                     MimiRingAttentionInputs& attention, MimiHostStates& states) {
+    TensorMap inputs;
+    inputs["audio_input"] =
+        Tensor{audio_chunk.data(), {1, 1, shapes.engine_input_samples}, DType::kFloat32};
+    inputs["mimi_position_ids"] =
+        Tensor{attention.position_ids.data(), {kMimiFrontendTokensPerFrame}, DType::kInt32};
+    inputs["mimi_cache_indices"] =
+        Tensor{attention.cache_indices.data(), {kMimiFrontendTokensPerFrame, 1}, DType::kInt32};
+    inputs["mimi_attention_mask"] =
+        Tensor{attention.mask.data(),
+               {1, 1, kMimiFrontendTokensPerFrame, kMimiAttentionContext},
+               DType::kFloat32};
+    for (auto& [name, state] : states)
+        inputs[name] = Tensor{state.values.data(), state.shape, DType::kFloat32};
+    return inputs;
+}
+
+bool consume_mimi_streaming_outputs(const TensorMap& outputs, int32_t codebooks,
+                                    MimiHostStates& states, std::vector<int32_t>& tokens) {
+    const auto codec = outputs.find("codec_tokens");
+    if (codec == outputs.end()) {
+        std::cerr << "[speech] Mimi encoder: no 'codec_tokens' output" << std::endl;
+        return false;
+    }
+    const auto* codec_values = static_cast<const float*>(codec->second.data);
+    for (int32_t codebook = 0; codebook < codebooks; ++codebook)
+        tokens.push_back(static_cast<int32_t>(std::round(codec_values[codebook])));
+
+    for (auto& [name, state] : states) {
+        const auto output = outputs.find(name + "_out");
+        if (output == outputs.end() ||
+            output->second.nbytes() != state.values.size() * sizeof(float)) {
+            std::cerr << "[speech] Mimi encoder: invalid state output for '" << name << "'"
+                      << std::endl;
+            return false;
+        }
+        std::memcpy(state.values.data(), output->second.data, output->second.nbytes());
+    }
+    return true;
 }
 
 void log_first_n_tokens(const char* label, const std::vector<int32_t>& tokens, int32_t n = 16) {
@@ -290,6 +356,18 @@ void log_first_n_tokens(const char* label, const std::vector<int32_t>& tokens, i
     for (int32_t i = 0; i < std::min(n, static_cast<int32_t>(tokens.size())); ++i)
         std::cerr << tokens[static_cast<std::size_t>(i)] << " ";
     std::cerr << std::endl;
+}
+
+void log_mimi_input_frames(const std::vector<int32_t>& tokens, int32_t frames, int32_t codebooks) {
+    for (int32_t frame = 0; frame < frames; ++frame) {
+        std::cerr << "[speech] Input frame " << frame << ":";
+        for (int32_t codebook = 0; codebook < codebooks; ++codebook) {
+            const auto index = static_cast<std::size_t>(frame) * codebooks + codebook;
+            if (index < tokens.size())
+                std::cerr << " " << tokens[index];
+        }
+        std::cerr << std::endl;
+    }
 }
 
 } // anonymous namespace
@@ -304,50 +382,57 @@ std::vector<int32_t> SpeechPipeline::run_mimi_encode(const float* samples, int32
     }
 
     const auto shapes = query_mimi_encoder_shapes(*mimi_encoder_);
+    const auto max_input_samples =
+        shapes.engine_input_samples * std::max(config_.mimi_max_frames, 0);
+    const auto plan = build_mimi_encode_plan(num_samples, max_input_samples,
+                                             std::max(config_.mimi_max_frames, 0));
 
-    if (num_samples != shapes.engine_input_samples) {
-        std::cerr << "[speech] WARNING: input samples " << num_samples << " != engine expects "
-                  << shapes.engine_input_samples << ", using engine size" << std::endl;
+    if (!plan.input_fits) {
+        std::cerr << "[speech] Mimi encoder input " << num_samples
+                  << " samples exceeds or cannot use the engine capacity of " << max_input_samples
+                  << " samples" << std::endl;
+        return {};
     }
-
-    std::cerr << "[speech] Mimi encoder TRT: input [1,1," << shapes.engine_input_samples
-              << "], output [" << shapes.enc_codebooks << "," << shapes.enc_frames << "]"
-              << std::endl;
-
-    // Prepare input: pad or truncate to match engine size.
-    const auto input_elems = static_cast<std::size_t>(shapes.engine_input_samples);
-    std::vector<float> input_buf(input_elems, 0.0F);
-    const auto copy_n = std::min(static_cast<std::size_t>(num_samples), input_elems);
-    std::memcpy(input_buf.data(), samples, copy_n * sizeof(float));
-
-    Tensor audio_input_tensor;
-    audio_input_tensor.data = input_buf.data();
-    audio_input_tensor.shape = {1, 1, static_cast<int64_t>(shapes.engine_input_samples)};
-    audio_input_tensor.dtype = DType::kFloat32;
-
-    TensorMap inputs;
-    inputs["audio_input"] = audio_input_tensor;
-
-    TensorMap outputs = mimi_encoder_->forward(inputs);
-
-    auto it = outputs.find("codec_tokens");
-    if (it == outputs.end()) {
-        std::cerr << "[speech] Mimi encoder: no 'codec_tokens' output" << std::endl;
+    if (shapes.engine_input_samples <= 0 || shapes.enc_codebooks <= 0 || shapes.enc_frames != 1) {
+        std::cerr << "[speech] Mimi encoder has an invalid streaming shape" << std::endl;
         return {};
     }
 
-    const auto& out_tensor = it->second;
-    auto tokens = transpose_codec_tokens_to_frame_major(static_cast<const float*>(out_tensor.data),
-                                                        shapes.enc_codebooks, shapes.enc_frames);
+    MimiHostStates states;
+    if (!initialize_mimi_host_states(*mimi_encoder_, states))
+        return {};
 
-    std::cerr << "[speech] Mimi encode (TRT): " << num_samples << " samples -> "
-              << shapes.enc_frames << " frames x " << shapes.enc_codebooks << " codebooks"
+    std::vector<int32_t> tokens;
+    tokens.reserve(static_cast<std::size_t>(plan.valid_frames) * shapes.enc_codebooks);
+    std::vector<float> audio_chunk(static_cast<std::size_t>(shapes.engine_input_samples), 0.0F);
+
+    std::cerr << "[speech] Mimi encoder TRT streaming: " << plan.valid_frames << " chunks x "
+              << shapes.engine_input_samples << " samples, " << shapes.enc_codebooks << " codebooks"
               << std::endl;
 
-    last_encode_frames_ = shapes.enc_frames;
+    for (int32_t frame = 0; frame < plan.valid_frames; ++frame) {
+        std::fill(audio_chunk.begin(), audio_chunk.end(), 0.0F);
+        const auto source_offset = static_cast<std::size_t>(frame) * shapes.engine_input_samples;
+        const auto remaining = static_cast<std::size_t>(num_samples) - source_offset;
+        const auto copy_samples = std::min(audio_chunk.size(), remaining);
+        std::memcpy(audio_chunk.data(), samples + source_offset, copy_samples * sizeof(float));
+
+        auto attention = build_mimi_ring_attention_inputs(frame);
+        auto inputs = make_mimi_streaming_inputs(audio_chunk, shapes, attention, states);
+        TensorMap outputs = mimi_encoder_->forward(inputs);
+        if (!consume_mimi_streaming_outputs(outputs, shapes.enc_codebooks, states, tokens))
+            return {};
+    }
+
+    std::cerr << "[speech] Mimi encode (TRT): " << num_samples << " samples -> "
+              << plan.valid_frames << " frames x " << shapes.enc_codebooks << " codebooks"
+              << std::endl;
+
+    last_encode_frames_ = plan.valid_frames;
     last_encode_codebooks_ = shapes.enc_codebooks;
 
     log_first_n_tokens("[speech] Encoder tokens [0:16]: ", tokens);
+    log_mimi_input_frames(tokens, plan.valid_frames, shapes.enc_codebooks);
 
     return tokens;
 }
@@ -880,6 +965,14 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
                                               text_provided, frame_codes, settings.num_cb);
         if (collect_output_codes_from_delay_cache(delay_state, offset, delay_state.max_delay,
                                                   settings.mimi_cb, output_codes)) {
+            int32_t output_text_token = settings.text_pad_id;
+            if (!collect_output_text_from_delay_cache(delay_state, offset, delay_state.max_delay,
+                                                      output_text_token)) {
+                throw std::runtime_error(
+                    "PersonaPlex delay cache failed to collect aligned output text");
+            }
+            std::cerr << "[speech] Output text frame " << frames_collected << ": "
+                      << output_text_token << std::endl;
             ++frames_collected;
         }
 

@@ -4,6 +4,7 @@
 """Speech-to-speech comparator.
 
 Compares TRT PersonaPlex-style speech output against reference with metrics:
+- Frame count match
 - Depth token match rate
 - Audio token match rate
 - Frame exact match rate
@@ -18,6 +19,97 @@ import logging
 from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, StageStatus, ThresholdProfile
 
 logger = logging.getLogger(__name__)
+
+
+def _first_mismatch_frame(trt_arr, ref_arr) -> int | None:
+    """Return the first differing frame, including a trailing length mismatch."""
+    import numpy as np
+
+    if trt_arr.ndim == 0 or ref_arr.ndim == 0:
+        return None if np.array_equal(trt_arr, ref_arr) else 0
+    if trt_arr.shape[1:] != ref_arr.shape[1:]:
+        return 0
+    common_frames = min(trt_arr.shape[0], ref_arr.shape[0])
+    for frame in range(common_frames):
+        if not np.array_equal(trt_arr[frame], ref_arr[frame]):
+            return frame
+    if trt_arr.shape[0] != ref_arr.shape[0]:
+        return common_frames
+    return None
+
+
+def _compare_exact_stream(
+    trt_tokens,
+    ref_tokens,
+    *,
+    availability_metric: str,
+    frame_metric: str,
+    token_metric: str,
+    token_threshold: float,
+) -> tuple[dict[str, MetricResult], bool, int | None]:
+    """Compare an optional frame-major token stream exactly."""
+    import numpy as np
+
+    if trt_tokens is None and ref_tokens is None:
+        return {}, True, None
+    if trt_tokens is None or ref_tokens is None:
+        return {
+            availability_metric: MetricResult(
+                value=0.0,
+                threshold=1.0,
+                operator="==",
+                passed=False,
+                note=(
+                    f"TRT available={trt_tokens is not None}, "
+                    f"reference available={ref_tokens is not None}"
+                ),
+            )
+        }, False, 0
+
+    trt_arr = np.asarray(trt_tokens)
+    ref_arr = np.asarray(ref_tokens)
+    mismatch = _first_mismatch_frame(trt_arr, ref_arr)
+    frame_count_ok = (
+        trt_arr.ndim >= 1
+        and ref_arr.ndim >= 1
+        and trt_arr.shape[0] == ref_arr.shape[0]
+    )
+    common_frames = (
+        min(trt_arr.shape[0], ref_arr.shape[0])
+        if trt_arr.ndim >= 1 and ref_arr.ndim >= 1
+        else 0
+    )
+    layout_ok = trt_arr.shape[1:] == ref_arr.shape[1:]
+    match_rate = (
+        float(np.mean(trt_arr[:common_frames] == ref_arr[:common_frames]))
+        if common_frames > 0 and layout_ok
+        else 0.0
+    )
+    tokens_ok = match_rate >= token_threshold
+    metrics = {
+        frame_metric: MetricResult(
+            value=1.0 if frame_count_ok else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=frame_count_ok,
+            note=(
+                f"TRT frames={trt_arr.shape[0] if trt_arr.ndim else 0}, "
+                f"reference frames={ref_arr.shape[0] if ref_arr.ndim else 0}"
+            ),
+        ),
+        token_metric: MetricResult(
+            value=match_rate,
+            threshold=token_threshold,
+            operator=">=",
+            passed=tokens_ok,
+            note=(
+                "exact match"
+                if mismatch is None
+                else f"first mismatch frame={mismatch}"
+            ),
+        ),
+    }
+    return metrics, frame_count_ok and tokens_ok, mismatch
 
 
 class SpeechToSpeechComparator:
@@ -39,6 +131,7 @@ class SpeechToSpeechComparator:
         metrics: dict[str, MetricResult] = {}
         thresholds = threshold.metrics
         all_pass = True
+        first_divergence: tuple[str, int] | None = None
 
         # Check TRT returncode
         if trt.data.get("returncode", -1) != 0:
@@ -49,13 +142,64 @@ class SpeechToSpeechComparator:
                 message=f"TRT speech-to-speech failed (rc={trt.data.get('returncode')})",
             )
 
-        # Get token arrays
+        # The codec is FP32 on both sides, so input Mimi tokens must be exact.
+        input_metrics, input_ok, input_mismatch = _compare_exact_stream(
+            trt.data.get("input_codec_tokens"),
+            ref.data.get("reference_input_codec_tokens"),
+            availability_metric="input_mimi_tokens_available",
+            frame_metric="input_mimi_frame_count_match",
+            token_metric="input_mimi_token_match_rate",
+            token_threshold=thresholds.get("input_mimi_token_match_rate", 1.0),
+        )
+        metrics.update(input_metrics)
+        all_pass = all_pass and input_ok
+        if input_mismatch is not None:
+            first_divergence = ("input_mimi", input_mismatch)
+
+        # The temporal text stream precedes depth/audio generation.
+        trt_text_tokens = trt.data.get("output_text_tokens")
+        ref_text_tokens = ref.data.get("reference_text_tokens")
+        if trt_text_tokens is not None:
+            trt_text_tokens = np.asarray(trt_text_tokens).reshape(-1)
+        if ref_text_tokens is not None:
+            ref_text_tokens = np.asarray(ref_text_tokens).reshape(-1)
+        text_metrics, text_ok, text_mismatch = _compare_exact_stream(
+            trt_text_tokens,
+            ref_text_tokens,
+            availability_metric="output_text_tokens_available",
+            frame_metric="output_text_frame_count_match",
+            token_metric="output_text_token_match_rate",
+            token_threshold=thresholds.get("output_text_token_match_rate", 1.0),
+        )
+        metrics.update(text_metrics)
+        all_pass = all_pass and text_ok
+        if first_divergence is None and text_mismatch is not None:
+            first_divergence = ("temporal_text", text_mismatch)
+
+        # Get final audio token arrays.
         trt_tokens = trt.data.get("output_tokens")
         ref_tokens = ref.data.get("reference_tokens")
 
         if trt_tokens is not None and ref_tokens is not None:
             trt_arr = np.asarray(trt_tokens)
             ref_arr = np.asarray(ref_tokens)
+            output_mismatch = _first_mismatch_frame(trt_arr, ref_arr)
+            if first_divergence is None and output_mismatch is not None:
+                first_divergence = ("depth_audio", output_mismatch)
+
+            frame_count_ok = trt_arr.shape[0] == ref_arr.shape[0]
+            metrics["frame_count_match"] = MetricResult(
+                value=1.0 if frame_count_ok else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=frame_count_ok,
+                note=(
+                    f"TRT frames={trt_arr.shape[0]}, "
+                    f"reference frames={ref_arr.shape[0]}"
+                ),
+            )
+            if not frame_count_ok:
+                all_pass = False
 
             # Align frame count
             n_frames = min(trt_arr.shape[0], ref_arr.shape[0])
@@ -120,7 +264,16 @@ class SpeechToSpeechComparator:
             )
             frame_ok = frame_rate >= frame_thresh
             metrics["frame_exact_match_rate"] = MetricResult(
-                value=frame_rate, threshold=frame_thresh, operator=">=", passed=frame_ok)
+                value=frame_rate,
+                threshold=frame_thresh,
+                operator=">=",
+                passed=frame_ok,
+                note=(
+                    "exact match"
+                    if output_mismatch is None
+                    else f"first mismatch frame={output_mismatch}"
+                ),
+            )
             if not frame_ok:
                 all_pass = False
 
@@ -155,13 +308,21 @@ class SpeechToSpeechComparator:
                 all_pass = False
 
         n_passed = sum(1 for m in metrics.values() if m.passed)
+        divergence_message = (
+            "first divergence=none"
+            if first_divergence is None
+            else (
+                f"first divergence={first_divergence[0]} "
+                f"frame={first_divergence[1]}"
+            )
+        )
         return CompareResult(
             stage_name=stage.name,
             status=StageStatus.PASSED.value if all_pass else StageStatus.FAILED.value,
             metrics=metrics,
             composite_rule="all metrics must pass",
             message=f"{'PASS' if all_pass else 'FAIL'}: "
-                    f"{n_passed}/{len(metrics)} metrics passed",
+                    f"{n_passed}/{len(metrics)} metrics passed; {divergence_message}",
         )
 
 

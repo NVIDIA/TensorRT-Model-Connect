@@ -23,6 +23,8 @@ pytest.importorskip(
 
 personaplex_utils = importlib.import_module(
     "tensorrt_model_connect.families.personaplex.utils")
+personaplex_plugin = importlib.import_module(
+    "tensorrt_model_connect.families.personaplex.plugin")
 
 
 @pytest.fixture(autouse=True)
@@ -297,6 +299,71 @@ def test_builder_context_wrapper_is_lazy(monkeypatch) -> None:
     assert dispatch_only() == b"dispatched"
 
 
+def test_mimi_codec_capacity_follows_bundle_cache_length() -> None:
+    assert personaplex_plugin._mimi_codec_capacity(512) == (512, 983_040)
+    assert personaplex_plugin._mimi_codec_capacity(0) == (1, 1_920)
+
+
+def test_extra_engines_share_the_bundle_cache_capacity(monkeypatch) -> None:
+    captured: dict[str, int | str] = {}
+
+    monkeypatch.setattr(
+        personaplex_plugin,
+        "build_standard_decoder_engine",
+        lambda *_args, **_kwargs: b"depth",
+    )
+    monkeypatch.setattr(
+        personaplex_plugin,
+        "_build_mimi_streaming_encoder_engine",
+        lambda *_args, **kwargs: (
+            captured.update(
+                encoder_frames=kwargs["max_frames"],
+                encoder_codebooks=kwargs["num_output_codebooks"],
+                encoder_precision=kwargs["precision"],
+            )
+            or b"encoder"
+        ),
+    )
+    monkeypatch.setattr(
+        personaplex_plugin,
+        "_build_mimi_decoder_engine",
+        lambda *_args, **kwargs: (
+            captured.update(
+                decoder_frames=kwargs["num_frames"],
+                decoder_precision=kwargs["precision"],
+            )
+            or b"decoder"
+        ),
+    )
+    config = SimpleNamespace(
+        raw={"_model_dir": "/model", "_fp32_layers": [2, 3]}
+    )
+    weights = {
+        "_depth_hidden": 8,
+        "_depth_num_layers": 1,
+        "_depth_num_heads": 1,
+        "_depth_head_dim": 8,
+        "_depth_intermediate": 16,
+        "_num_codebooks": 2,
+        "_audio_vocab": 32,
+        "_num_depformer_emb": 0,
+    }
+
+    extras = personaplex_plugin.PersonaPlexPlugin().build_extra_engines(
+        config, weights, max_cache_length=512, precision="bf16"
+    )
+
+    assert captured == {
+        "encoder_frames": 512,
+        "encoder_codebooks": 8,
+        "encoder_precision": "fp32",
+        "decoder_frames": 512,
+        "decoder_precision": "fp32",
+    }
+    assert extras["mimi_encoder_plan"] == b"encoder"
+    assert extras["mimi_decoder_plan"] == b"decoder"
+
+
 def test_standard_decoder_uses_stable_fp32_tactics() -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.personaplex.default_decoder")
@@ -310,7 +377,11 @@ def test_standard_decoder_uses_stable_fp32_tactics() -> None:
 
 @pytest.mark.parametrize(
     "function_name",
-    ("_build_mimi_encoder_engine", "_build_mimi_decoder_engine"),
+    (
+        "_build_mimi_encoder_engine",
+        "_build_mimi_streaming_encoder_engine",
+        "_build_mimi_decoder_engine",
+    ),
 )
 def test_mimi_codec_uses_stable_builder_tactics(function_name: str) -> None:
     module = importlib.import_module(
@@ -323,6 +394,15 @@ def test_mimi_codec_uses_stable_builder_tactics(function_name: str) -> None:
     assert builder_context_options["max_num_tactics"] == 1
 
 
+def test_mimi_decoder_workspace_supports_long_form_profile() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.personaplex.plugin")
+    builder_context_options = inspect.getclosurevars(
+        module._build_mimi_decoder_engine).nonlocals
+
+    assert builder_context_options["workspace_bytes"] >= 2 << 30
+
+
 @pytest.mark.parametrize(
     ("module_name", "function_name"),
     (
@@ -331,6 +411,7 @@ def test_mimi_codec_uses_stable_builder_tactics(function_name: str) -> None:
         ("default_dual_profile_decoder_tp", "build_dual_profile_tp_decoder_engine"),
         ("decoder_tp_builder", "build_personaplex_tp_decoder_engine"),
         ("plugin", "_build_mimi_encoder_engine"),
+        ("plugin", "_build_mimi_streaming_encoder_engine"),
         ("plugin", "_build_mimi_decoder_engine"),
     ),
 )

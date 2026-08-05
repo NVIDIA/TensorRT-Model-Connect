@@ -37,13 +37,23 @@ def test_personaplex_builds_require_an_exclusive_gpu(manifest_name: str) -> None
     "manifest_name",
     ("personaplex-7b.json", "personaplex-7b-l0.json"),
 )
-def test_personaplex_keeps_the_token_decoders_in_full_fp32(
+def test_personaplex_uses_official_component_precisions(
     manifest_name: str,
 ) -> None:
     manifest = json.loads((_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
 
-    assert manifest["precision"] == "fp16"
-    assert manifest["fp32_layers"] == [0, 1]
+    assert manifest["precision"] == "bf16"
+    assert manifest["fp32_layers"] == [2, 3]
+
+
+def test_personaplex_full_reference_matches_bundle_precision() -> None:
+    manifest = json.loads(
+        (_MANIFEST_DIR / "personaplex-7b.json").read_text(encoding="utf-8")
+    )
+
+    testcase = manifest["testcases"][0]
+    assert manifest["precision"] == "bf16"
+    assert testcase["reference_precision"] == manifest["precision"]
 
 
 def _thresholds() -> ThresholdProfile:

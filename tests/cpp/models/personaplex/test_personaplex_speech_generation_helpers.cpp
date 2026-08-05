@@ -15,9 +15,12 @@
 // =============================================================================
 
 #include "runtime/models/personaplex/speech_delay_cache.h"
+#include "runtime/models/personaplex/speech_mimi_encode_plan.h"
 #include "runtime/models/personaplex/speech_waveform_postprocess.h"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -90,6 +93,11 @@ void test_delay_cache_reads_and_collects_outputs() {
     check(collected, "delay cache collects output after max delay");
     check(output_codes == std::vector<int32_t>({501, 502}),
           "delay cache collects mimi codebooks only");
+    int32_t output_text = -1;
+    const bool text_collected =
+        trtmc::collect_output_text_from_delay_cache(state, 2, state.max_delay, output_text);
+    check(text_collected, "delay cache collects output text after max delay");
+    check(output_text == 9100, "delay cache collects aligned output text token");
 }
 
 void test_waveform_trim_and_peak_normalize() {
@@ -135,6 +143,63 @@ void test_waveform_postprocess_skips_invalid_or_safe_inputs() {
           "waveform normalize skips empty waveform");
 }
 
+void test_mimi_encode_plan_keeps_only_the_causal_input_prefix() {
+    const auto exact = trtmc::build_mimi_encode_plan(658560, 983040, 512);
+    check(exact.input_fits, "Mimi long input fits declared engine capacity");
+    check(exact.valid_frames == 343, "Mimi exact-hop input keeps 343 frames");
+
+    const auto partial = trtmc::build_mimi_encode_plan(99844, 983040, 512);
+    check(partial.input_fits, "Mimi short input fits declared engine capacity");
+    check(partial.valid_frames == 53, "Mimi partial-hop input rounds up to 53 frames");
+
+    const auto oversized = trtmc::build_mimi_encode_plan(983041, 983040, 512);
+    check(!oversized.input_fits, "Mimi oversized input is rejected instead of truncated");
+    check(oversized.valid_frames == 0, "Mimi oversized input exposes no encoded frames");
+}
+
+int count_allowed_mimi_keys(const trtmc::MimiRingAttentionInputs& inputs, int32_t query) {
+    int allowed = 0;
+    for (int32_t column = 0; column < trtmc::kMimiAttentionContext; ++column) {
+        const auto index = static_cast<std::size_t>(query) * trtmc::kMimiAttentionContext +
+                           static_cast<std::size_t>(column);
+        allowed += inputs.mask[index] == 0.0F ? 1 : 0;
+    }
+    return allowed;
+}
+
+void test_mimi_ring_attention_matches_official_cache_wrap() {
+    const auto first = trtmc::build_mimi_ring_attention_inputs(0);
+    check(first.position_ids == std::array<int32_t, 2>{0, 1},
+          "Mimi first chunk uses absolute positions zero and one");
+    check(first.cache_indices == std::array<int32_t, 2>{0, 1},
+          "Mimi first chunk writes the first two ring slots");
+    check(count_allowed_mimi_keys(first, 0) == 1, "Mimi first query attends only to itself");
+    check(count_allowed_mimi_keys(first, 1) == 2,
+          "Mimi second query attends to both first-chunk tokens");
+
+    const auto wrap = trtmc::build_mimi_ring_attention_inputs(124);
+    check(wrap.position_ids == std::array<int32_t, 2>{248, 249},
+          "Mimi wrap chunk keeps absolute positions");
+    check(wrap.cache_indices == std::array<int32_t, 2>{248, 249},
+          "Mimi wrap chunk fills the final ring slots");
+    check(wrap.mask[0] == trtmc::kMimiAttentionMaskPenalty,
+          "Mimi full-ring mask excludes the end pointer slot");
+    check(count_allowed_mimi_keys(wrap, 0) == 248,
+          "Mimi wrap first query matches official physical-ring visibility");
+    check(count_allowed_mimi_keys(wrap, 1) == 249,
+          "Mimi wrap second query matches official physical-ring visibility");
+
+    const auto wrapped = trtmc::build_mimi_ring_attention_inputs(125);
+    check(wrapped.cache_indices == std::array<int32_t, 2>{0, 1},
+          "Mimi cache indices wrap to the first two slots");
+    check(wrapped.mask[2] == trtmc::kMimiAttentionMaskPenalty,
+          "Mimi wrapped mask excludes the new end pointer slot");
+    check(count_allowed_mimi_keys(wrapped, 0) == 248,
+          "Mimi wrapped first query retains official context");
+    check(count_allowed_mimi_keys(wrapped, 1) == 249,
+          "Mimi wrapped second query retains official context");
+}
+
 } // namespace
 
 int main() {
@@ -142,6 +207,8 @@ int main() {
     test_delay_cache_reads_and_collects_outputs();
     test_waveform_trim_and_peak_normalize();
     test_waveform_postprocess_skips_invalid_or_safe_inputs();
+    test_mimi_encode_plan_keeps_only_the_causal_input_prefix();
+    test_mimi_ring_attention_matches_official_cache_wrap();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " speech generation helper test(s) failed\n";

@@ -59,6 +59,10 @@ def test_runner_uses_total_frame_budget_without_adding_tail_frames(
             returncode=0,
             stdout="generated",
             stderr=(
+                "[speech] Input frame 0: 101 102 103 104 105 106 107 108\n"
+                "[speech] Input frame 1: 109 110 111 112 113 114 115 116\n"
+                "[speech] Output text frame 0: 201\n"
+                "[speech] Output text frame 1: 202\n"
                 "[speech] Output frame 0: 1 2 3 4 5 6 7 8\n"
                 "[speech] Output frame 1: 9 10 11 12 13 14 15 16\n"
             ),
@@ -73,5 +77,13 @@ def test_runner_uses_total_frame_budget_without_adding_tail_frames(
     assert seen_command[seen_command.index("--max-new-tokens") + 1] == "100"
     assert "--tail-frames" not in seen_command
     assert output.data["num_frames"] == 2
+    np.testing.assert_array_equal(
+        output.data["input_codec_tokens"],
+        np.arange(101, 117, dtype=np.int32).reshape(2, 8),
+    )
+    np.testing.assert_array_equal(
+        output.data["output_text_tokens"],
+        np.array([201, 202], dtype=np.int32),
+    )
     assert output.data["wav_exists"] is True
     assert Path(output.data["wav_path"]).is_file()

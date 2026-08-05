@@ -17,6 +17,7 @@ struct SpeechConfig {
     int32_t num_codebooks{8};
     int32_t codebook_size{2048};
     float frame_rate{12.5F};
+    int32_t mimi_max_frames{512};
 
     int32_t temporal_hidden_size{0};
     int32_t temporal_num_layers{0};

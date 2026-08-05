@@ -332,8 +332,9 @@ def build_standard_decoder_engine(
         sin_half_tensor = _cast_work_dtype(sin_half_tensor)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
-        position_embed_table = graph_ops.add_constant(
-            network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype)
+        position_embed_table = const_in_work_dtype(
+            network, pos_embed_np.shape, pos_embed_np,
+            work_np_dtype, work_trt_dtype)
     elif position_type == "alibi":
         alibi_slopes_np = graph_ops.compute_alibi_slopes(num_heads)
         alibi_slopes_tensor = graph_ops.add_constant(

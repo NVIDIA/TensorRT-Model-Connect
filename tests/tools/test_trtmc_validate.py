@@ -55,7 +55,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     )
     assert (
         catalog["models"]["personaplex-7b"]["reference_cache_identity"]
-        == "personaplex-official-greedy-fp16-v1"
+        == "personaplex-official-greedy-bf16-stage-trace-v4"
     )
     assert (
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]

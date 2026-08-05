@@ -97,6 +97,8 @@ def run(arguments: argparse.Namespace) -> None:
     generator.reset_streaming()
 
     source_audio = load_audio(str(arguments.input_wav), mimi.sample_rate)
+    input_tokens = []
+    output_text_tokens = []
     output_tokens = []
     output_audio = []
     with torch.inference_mode():
@@ -110,9 +112,15 @@ def run(arguments: argparse.Namespace) -> None:
             max_batch=1,
         ):
             for index in range(encoded.shape[-1]):
+                input_tokens.append(
+                    encoded[0, :, index].detach().cpu().numpy()
+                )
                 tokens = generator.step(encoded[:, :, index : index + 1])
                 if tokens is None:
                     continue
+                output_text_tokens.append(
+                    tokens[0, 0, 0].detach().cpu().numpy()
+                )
                 output_tokens.append(
                     tokens[0, 1:9, 0].detach().cpu().numpy()
                 )
@@ -128,10 +136,14 @@ def run(arguments: argparse.Namespace) -> None:
 
     if not output_tokens or not output_audio:
         raise RuntimeError("official PersonaPlex produced no speech frames")
+    input_tokens_array = np.stack(input_tokens).astype(np.int32, copy=False)
+    text_tokens_array = np.stack(output_text_tokens).astype(np.int32, copy=False)
     tokens_array = np.stack(output_tokens).astype(np.int32, copy=False)
     audio_array = np.concatenate(output_audio).astype(np.float32, copy=False)
     arguments.tokens_output.parent.mkdir(parents=True, exist_ok=True)
     np.save(arguments.tokens_output, tokens_array, allow_pickle=False)
+    np.save(arguments.input_tokens_output, input_tokens_array, allow_pickle=False)
+    np.save(arguments.text_tokens_output, text_tokens_array, allow_pickle=False)
     _write_pcm16(arguments.audio_output, audio_array, int(mimi.sample_rate))
     arguments.metadata_output.write_text(
         json.dumps(
@@ -149,6 +161,8 @@ def run(arguments: argparse.Namespace) -> None:
                 "num_samples": int(audio_array.size),
                 "num_frames": int(tokens_array.shape[0]),
                 "token_shape": list(tokens_array.shape),
+                "input_token_shape": list(input_tokens_array.shape),
+                "text_token_shape": list(text_tokens_array.shape),
             },
             indent=2,
         )
@@ -171,6 +185,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="bf16",
     )
     parser.add_argument("--tokens-output", type=Path, required=True)
+    parser.add_argument("--input-tokens-output", type=Path, required=True)
+    parser.add_argument("--text-tokens-output", type=Path, required=True)
     parser.add_argument("--audio-output", type=Path, required=True)
     parser.add_argument("--metadata-output", type=Path, required=True)
     parser.add_argument("--local-files-only", action="store_true")

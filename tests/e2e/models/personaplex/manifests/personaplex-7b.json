@@ -7,10 +7,10 @@
   "runtime_strategy": "personaplex_speech_to_speech",
   "task_strategy": "speech_to_speech",
   "e2e_parallel_resource": "exclusive_gpu",
-  "precision": "fp16",
+  "precision": "bf16",
   "fp32_layers": [
-    0,
-    1
+    2,
+    3
   ],
   "max_cache_length": 512,
   "trust_remote_code": true,
@@ -33,7 +33,7 @@
       "speech_test_max_frames": 300,
       "prompt": "",
       "max_new_tokens": 1000,
-      "notes": "The temporal and depth decoders run in full FP32 while the Mimi codec remains FP16. Selectors 0 and 1 keep temporal embeddings, all 32 temporal blocks, KV caches, final norm, heads, and all 16 autoregressive depth decoders in FP32 with TF32 disabled; this stabilizes freshly selected TensorRT tactics while preserving the unchanged checkpoint-owned token contract.",
+      "notes": "The temporal and depth engines follow the official BF16 language-model dtype. Component selectors 2 and 3 keep the Mimi encoder and decoder in FP32, matching the official codec loader.",
       "metadata": {
         "runtime_cli_requires_hf_python": true
       }

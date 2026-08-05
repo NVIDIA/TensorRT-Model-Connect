@@ -3,7 +3,9 @@
     "audio_token_match_rate": 0.7,
     "depth_token_match_rate": 0.7,
     "frame_exact_match_rate": 0.5,
+    "input_mimi_token_match_rate": 1.0,
     "logit_atol": 0.01,
+    "output_text_token_match_rate": 1.0,
     "speech_min_frame_exact": 0.7,
     "speech_min_rms": 0.001,
     "speech_min_token_match": 0.8

@@ -246,9 +246,9 @@ class SpeechToSpeechRunner:
                 except Exception as e:
                     data["token_load_error"] = str(e)
 
-            # Parse tokens from stderr if not dumped via env var
-            if "output_tokens" not in data:
-                self._parse_tokens_from_stderr(result.stderr, data)
+            # Input Mimi and temporal text traces are emitted on stderr. The
+            # final audio trace is also the fallback when no token dump exists.
+            self._parse_tokens_from_stderr(result.stderr, data)
 
             # Check output audio
             if os.path.exists(wav_path):
@@ -280,9 +280,11 @@ class SpeechToSpeechRunner:
 
     @staticmethod
     def _parse_tokens_from_stderr(stderr: str, data: dict) -> None:
-        """Try to parse frame tokens from C++ stderr output."""
+        """Parse input Mimi, temporal text, and output audio token traces."""
         import numpy as np
-        frames = []
+        input_frames = []
+        text_frames = []
+        output_frames = []
         for raw_line in (stderr or "").splitlines():
             rank, line = _untag_ranked_mpirun_line(raw_line)
             if rank not in (None, 0):
@@ -298,9 +300,27 @@ class SpeechToSpeechRunner:
                             for t in val.split(","):
                                 token_strs.append(int(t))
                     if token_strs:
-                        frames.append(token_strs)
+                        output_frames.append(token_strs)
                 except (ValueError, IndexError):
                     pass
+                continue
+
+            match = re.search(r"\[speech\]\s+Input frame\s+\d+:\s*(.*)$", line)
+            if match:
+                try:
+                    token_strs = [int(t) for t in match.group(1).split()]
+                    if token_strs:
+                        input_frames.append(token_strs)
+                except ValueError:
+                    pass
+                continue
+
+            match = re.search(
+                r"\[speech\]\s+Output text frame\s+\d+:\s*(-?\d+)\s*$",
+                line,
+            )
+            if match:
+                text_frames.append(int(match.group(1)))
                 continue
 
             match = re.search(r"\[speech\]\s+Output frame\s+\d+:\s*(.*)$", line)
@@ -308,12 +328,16 @@ class SpeechToSpeechRunner:
                 try:
                     token_strs = [int(t) for t in match.group(1).split()]
                     if token_strs:
-                        frames.append(token_strs)
+                        output_frames.append(token_strs)
                 except ValueError:
                     pass
-        if frames:
-            data["output_tokens"] = np.array(frames, dtype=np.int32)
-            data["num_frames"] = len(frames)
+        if input_frames:
+            data["input_codec_tokens"] = np.array(input_frames, dtype=np.int32)
+        if text_frames:
+            data["output_text_tokens"] = np.array(text_frames, dtype=np.int32)
+        if output_frames and "output_tokens" not in data:
+            data["output_tokens"] = np.array(output_frames, dtype=np.int32)
+            data["num_frames"] = len(output_frames)
 
 
 plugin = SpeechToSpeechRunner()

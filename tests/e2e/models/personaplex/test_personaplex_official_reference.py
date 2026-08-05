@@ -96,6 +96,30 @@ def test_personaplex_audio_compat_reads_supported_24khz_wav(
     assert environment["PYTHONPATH"].endswith(":/existing/python/path")
 
 
+def test_personaplex_user_contract_audio_is_native_24khz_mono() -> None:
+    input_wav = MODEL_DIR / "data" / "Recording.wav"
+    environment = official_personaplex._reference_environment(os.environ)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sphn, sys\n"
+                "audio, rate = sphn.read(sys.argv[1])\n"
+                "assert rate == 24000\n"
+                "assert audio.shape == (1, 99840)\n"
+                "assert audio.dtype.name == 'float32'\n"
+            ),
+            str(input_wav),
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_personaplex_audio_compat_reads_float32_wav(tmp_path: Path) -> None:
     input_wav = tmp_path / "input-float.wav"
     _write_float_wav(input_wav)
@@ -137,19 +161,21 @@ def test_official_reference_runs_same_audio_and_frame_budget(
     def run(command, **_kwargs):
         captured.extend(command)
         token_path = Path(command[command.index("--tokens-output") + 1])
+        input_token_path = Path(command[command.index("--input-tokens-output") + 1])
+        text_token_path = Path(command[command.index("--text-tokens-output") + 1])
         audio_path = Path(command[command.index("--audio-output") + 1])
         metadata_path = Path(command[command.index("--metadata-output") + 1])
         token_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(token_path, np.zeros((5, 8), dtype=np.int32))
+        np.save(input_token_path, np.ones((7, 8), dtype=np.int32))
+        np.save(text_token_path, np.arange(5, dtype=np.int32))
         _write_wav(audio_path)
         metadata_path.write_text(
             json.dumps(
                 {
                     "model_id": "nvidia/personaplex-7b-v1",
                     "resolved_revision": "a" * 40,
-                    "reference_source_revision": (
-                        official_personaplex.REFERENCE_SOURCE_REVISION
-                    ),
+                    "reference_source_revision": (official_personaplex.REFERENCE_SOURCE_REVISION),
                     "decoding": "greedy",
                 }
             ),
@@ -182,6 +208,8 @@ def test_official_reference_runs_same_audio_and_frame_budget(
     assert captured[captured.index("--official-repo") + 1] == str(source)
     assert captured[captured.index("--precision") + 1] == "fp16"
     assert output.data["reference_tokens"].shape == (5, 8)
+    assert output.data["reference_input_codec_tokens"].shape == (7, 8)
+    assert output.data["reference_text_tokens"].shape == (5,)
     assert output.data["num_frames"] == 5
     assert output.data["sample_rate"] == 24_000
     assert output.data["rms"] == 0.0

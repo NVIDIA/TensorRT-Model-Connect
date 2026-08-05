@@ -112,6 +112,7 @@ SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std
     sc.num_codebooks = extract_json_int(json, "num_codebooks", 8);
     sc.codebook_size = extract_json_int(json, "codebook_size", 2048);
     sc.frame_rate = extract_json_float(json, "frame_rate", 12.5F);
+    sc.mimi_max_frames = base.max_cache_length;
     int32_t depth_num_layers = extract_json_int(json, "depth_num_layers", 6);
     sc.depth_num_layers = extract_json_int(json, "fine_num_layers", depth_num_layers);
     int32_t depth_hidden_size = extract_json_int(json, "depth_hidden_size", base.hidden_size);
