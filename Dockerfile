@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Repository-wide ARM64 development container. It provides the TensorRT,
+# CUDA, Python, and all declared execution-profile dependencies used to develop
+# and build any TRTMC model supported by the selected target. Project source is
+# mounted at runtime; this image does not contain a model or choose a runtime.
+
 ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541
 FROM ${TENSORRT_IMAGE} AS ci-base
 
@@ -10,8 +15,10 @@ ARG TORCH_VERSION=2.12.0+cu130
 ARG TORCHVISION_VERSION=0.27.0+cu130
 ARG TORCHAUDIO_VERSION=2.11.0+cu130
 ARG MODELOPT_VERSION=0.44.0
+ARG TRTMC_TORCH_CUDA_ARCH_LIST=10.0
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV TORCH_CUDA_ARCH_LIST=${TRTMC_TORCH_CUDA_ARCH_LIST}
 
 # ── System packages ──────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -79,7 +86,7 @@ RUN pip install \
     ml_dtypes \
     datasets
 
-# PyTorch ecosystem. The CI image is Ubuntu 24.04 to match the
+# PyTorch ecosystem. The development image is Ubuntu 24.04 to match the
 # manylinux_2_39/glibc floor used by the native wheel.
 RUN pip install \
       "torch==${TORCH_VERSION}" \
@@ -148,7 +155,7 @@ ENV TRT_LIB_DIR=/usr/lib/aarch64-linux-gnu
 ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
 
-# GB300/Blackwell uses the system CUDA 13 cuBLAS kernels. Keep PyTorch/HF
+# ARM64 Blackwell targets use the system CUDA 13 cuBLAS kernels. Keep PyTorch/HF
 # reference inference on the system cuBLAS instead of pip-installed CUDA libs.
 ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 
@@ -157,7 +164,7 @@ ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 #   python3 -m pytest --help | grep -- '--cov' && \
 #   gcovr --version && lcov --version && genhtml --version
 
-# Keep the final layer small and cache-friendly. Model proof containers have
+# Keep the final layer small and cache-friendly. Isolated validation runs have
 # networking disabled, so CMake must find nlohmann/json in the image instead of
 # falling back to FetchContent during each isolated scratch build.
 RUN apt-get update && \
@@ -173,20 +180,21 @@ FROM ci-base AS python-profile-builder
 ENV PYTHONPATH=/opt/trtmc-profile-source
 ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
 # sphn publishes no aarch64 wheel. Keep its Rust build toolchain in this
-# throwaway builder stage; ci-runtime receives only the verified profile.
+# throwaway builder stage; the final development stage receives only the
+# verified profile.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends cargo rustc && \
     rm -rf /var/lib/apt/lists/* && \
     pip install "maturin==1.14.1"
-# This image targets the GB300/Blackwell runners. Avoid compiling profile-local
-# CUDA extensions for every architecture known to a GPU-less Docker build.
-ENV TORCH_CUDA_ARCH_LIST=10.0
+# Avoid compiling profile-local CUDA extensions for every architecture known
+# to a GPU-less Docker build. Keep 10.0 as the existing default; Jetson AGX
+# Thor callers pass 11.0 for SM110.
 COPY python/tensorrt_model_connect /opt/trtmc-profile-source/tensorrt_model_connect
 COPY .github/scripts/build-python-profiles.py /opt/trtmc-build-python-profiles.py
 RUN python3 /opt/trtmc-build-python-profiles.py \
     && chmod -R a+rX /opt/trtmc-python-profiles
 
-# Do not retain the full builder source tree in the proof image. Only the
+# Do not retain the full builder source tree in the development image. Only the
 # verified virtual environments cross the stage boundary, so sibling model
 # implementations cannot satisfy imports in an isolated source projection.
 FROM ci-base AS ci-runtime
@@ -194,6 +202,8 @@ FROM ci-base AS ci-runtime
 COPY --from=python-profile-builder \
     /opt/trtmc-python-profiles /opt/trtmc-python-profiles
 ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
+# Execution-profile environments are part of the dev-image contract. Rebuild
+# the image after changing their lock or verification files.
 ENV TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1
 
 WORKDIR /workspace/tensorrt-model-connect
