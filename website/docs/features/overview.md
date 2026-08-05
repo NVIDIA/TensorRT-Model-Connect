@@ -43,9 +43,10 @@ boundaries.
 
 ### Inference behavior and optimizations
 
-Use these pages for sampling, TriAttention, cache behavior, and the evidence
-behind runtime optimizations.
+Use these pages for multi-device execution, sampling, TriAttention, cache
+behavior, and the evidence behind runtime optimizations.
 
+- [Multi-Device Execution](multi-device.md)
 - [Sampling](sampling.md)
 - [TriAttention](triattention.md)
 - [TriAttention native C++ worklog](../context/triattention-native-cpp-worklog.md)

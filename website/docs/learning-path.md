@@ -98,15 +98,21 @@ preprocessing, engine components, public task method, and returned result type.
 Read:
 
 - [Quantization and Runtime Knobs](tutorials/advanced/quantization-and-runtime-knobs.md)
+- [Run Inference on Multiple GPUs](tutorials/advanced/multi-device-inference.md)
 - [Sampling](features/sampling.md)
 - [Quantization](features/quantization.md)
+- [Multi-Device Execution](features/multi-device.md)
 - [Configuration and Backends](features/config-and-backends.md)
 
 Change one variable at a time and inspect the resulting bundle. A smaller or
-faster build is not automatically an accuracy-equivalent build.
+faster build is not automatically an accuracy-equivalent build. Multi-device
+topologies also require an exact model manifest and one runtime rank per GPU;
+the generic build flag alone does not establish support.
 
 **Milestone:** you can identify whether a setting belongs to build-time model
-conversion, bundle metadata, runtime configuration, or request-time decoding.
+conversion, bundle metadata, runtime configuration, or request-time decoding,
+and can distinguish build-time topology metadata from launcher/runtime process
+count.
 
 ## Stage 5: Validate and benchmark
 
