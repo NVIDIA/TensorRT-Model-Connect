@@ -8,11 +8,39 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+from functools import wraps
+from typing import Callable, ParamSpec, TypeVar
+
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
 
 trt = trt_compat.get_trt()
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+_CONSTANT_BUFFERS: ContextVar[list[np.ndarray] | None] = ContextVar(
+    "m2m_100_constant_buffers",
+    default=None,
+)
+
+
+def retain_constant_buffers(build: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Keep NumPy-owned TensorRT constant buffers alive for one engine build."""
+
+    @wraps(build)
+    def wrapped(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        if _CONSTANT_BUFFERS.get() is not None:
+            return build(*args, **kwargs)
+
+        token = _CONSTANT_BUFFERS.set([])
+        try:
+            return build(*args, **kwargs)
+        finally:
+            _CONSTANT_BUFFERS.reset(token)
+
+    return wrapped
 
 
 def _cast_back_to_trt_dtype(
@@ -37,7 +65,13 @@ def add_constant(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Add a constant tensor in the given *dtype* (default float32)."""
-    weights = trt.Weights(np.ascontiguousarray(values, dtype=dtype))
+    buffers = _CONSTANT_BUFFERS.get()
+    if buffers is None:
+        raise RuntimeError("M2M-100 constants must be created inside an engine build")
+
+    buffer = np.ascontiguousarray(values, dtype=dtype)
+    buffers.append(buffer)
+    weights = trt.Weights(buffer)
     layer = network.add_constant(shape, weights)
     return layer.get_output(0)
 

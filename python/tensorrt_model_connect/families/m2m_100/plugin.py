@@ -41,6 +41,16 @@ from . import graph_blocks
 
 
 trt = trt_compat.get_trt()
+_PROCESS_LOGGERS: dict[bool, trt.Logger] = {}
+
+
+def _get_process_logger(*, verbose: bool) -> trt.Logger:
+    """Return the logger that must outlive every TensorRT builder in this process."""
+    logger = _PROCESS_LOGGERS.get(verbose)
+    if logger is None:
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        _PROCESS_LOGGERS[verbose] = logger
+    return logger
 
 
 def _make_sinusoidal_pos_embed(
@@ -243,6 +253,7 @@ class M2M100Plugin:
 
         return weights
 
+    @graph_ops.retain_constant_buffers
     def build_engine(
         self,
         config: ModelConfig,
@@ -274,7 +285,7 @@ class M2M100Plugin:
         # This determines the encoder output dimension the decoder cross-attends to.
         max_source_length = 128
 
-        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        logger = _get_process_logger(verbose=verbose)
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
@@ -481,6 +492,7 @@ class M2M100Plugin:
         }
 
 
+@graph_ops.retain_constant_buffers
 def _build_m2m100_encoder(
     config,
     weights,
@@ -504,7 +516,7 @@ def _build_m2m100_encoder(
     else:
         raise ValueError(f"Unsupported M2M-100 precision {precision!r}; expected fp32 or fp16")
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = _get_process_logger(verbose=verbose)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
