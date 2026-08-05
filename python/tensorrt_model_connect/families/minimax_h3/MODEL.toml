@@ -22,6 +22,7 @@ hf_allow_patterns = [
   "text_encoder/**",
   "tokenizer/**",
   "transformer/**",
+  "transformer_ref/**",
   "vae/**",
   "audio_vae/**",
 ]

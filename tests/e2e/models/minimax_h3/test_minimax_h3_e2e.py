@@ -17,6 +17,10 @@ import pytest
 
 from tests.e2e.models.minimax_h3 import e2e_plugins as minimax_h3_e2e_plugins
 from tests.e2e.models.minimax_h3.e2e_plugins.comparator import comparator
+from tests.e2e.models.minimax_h3.e2e_plugins.reference import (
+    _model_snapshot,
+    _reference_allow_patterns,
+)
 from tensorrt_model_connect.families.minimax_h3.provenance import file_record
 from tests.e2e_harness.contracts import RunContext, StageOutput, StageSpec, ThresholdProfile
 from tests.e2e_harness.manifest_loader import load_model_manifest
@@ -80,6 +84,39 @@ def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
     assert get_runner("diffusion_media_generation") is not None
     assert get_reference("hf_diffusers") is not None
     assert get_comparator("diffusion_media_generation") is not None
+
+
+def test_minimax_h3_reference_resolves_complete_family_snapshot_offline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    case = load_model_manifest(_MANIFEST_PATH).testcases[0]
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_snapshot_download(repo_id: str, **kwargs: object) -> str:
+        calls.append((repo_id, kwargs))
+        return str(snapshot)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+
+    assert _model_snapshot(case) == snapshot.resolve()
+    assert calls == [
+        (
+            case.hf_id,
+            {
+                "revision": case.hf_revision,
+                "allow_patterns": _reference_allow_patterns(),
+                "local_files_only": True,
+            },
+        )
+    ]
+    patterns = set(_reference_allow_patterns())
+    assert len(patterns) == 11
+    assert not patterns & {"FL2VA/**", "Ref2VA/**", "assets/**"}
 
 
 @pytest.mark.parametrize("nested", [True, False])

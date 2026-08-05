@@ -52,8 +52,19 @@ def test_manifest_discovers_both_public_pipeline_names() -> None:
         "MiniMaxH3ModularPipeline",
         "MiniMaxH3Pipeline",
     }
-    assert "transformer/**" in manifest["hf_allow_patterns"]
-    assert "vae/**" in manifest["hf_allow_patterns"]
+    assert set(manifest["hf_allow_patterns"]) == {
+        "model_index.json",
+        "modular_model_index.json",
+        "processor/**",
+        "scheduler/**",
+        "audio_scheduler/**",
+        "text_encoder/**",
+        "tokenizer/**",
+        "transformer/**",
+        "transformer_ref/**",
+        "vae/**",
+        "audio_vae/**",
+    }
 
 
 def test_family_registry_loads_native_plugin_for_public_pipelines() -> None:

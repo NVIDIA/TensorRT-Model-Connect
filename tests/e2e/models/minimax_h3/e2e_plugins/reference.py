@@ -11,6 +11,11 @@ import subprocess
 import sys
 import time
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
+
 from . import (
     MODEL_DIR,
     PROJECT_DIR,
@@ -24,6 +29,22 @@ from .contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 
 _GENERATION_STAGES = {"end_to_end", "end_to_end_video", "generate", "frame_quality"}
+_FAMILY_MANIFEST = (
+    PROJECT_DIR / "python" / "tensorrt_model_connect" / "families" / "minimax_h3" / "MODEL.toml"
+)
+
+
+def _reference_allow_patterns() -> tuple[str, ...]:
+    manifest = tomllib.loads(_FAMILY_MANIFEST.read_text(encoding="utf-8"))
+    patterns = manifest.get("hf_allow_patterns")
+    if (
+        not isinstance(patterns, list)
+        or not patterns
+        or any(not isinstance(pattern, str) or not pattern for pattern in patterns)
+        or len(set(patterns)) != len(patterns)
+    ):
+        raise ValueError("MiniMax-H3 MODEL.toml requires unique non-empty hf_allow_patterns")
+    return tuple(patterns)
 
 
 def _model_snapshot(case: E2ECase) -> Path:
@@ -35,7 +56,14 @@ def _model_snapshot(case: E2ECase) -> Path:
 
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(case.hf_id, revision=case.hf_revision)).resolve()
+    return Path(
+        snapshot_download(
+            case.hf_id,
+            revision=case.hf_revision,
+            allow_patterns=_reference_allow_patterns(),
+            local_files_only=True,
+        )
+    ).resolve()
 
 
 class MiniMaxH3HfReference:
