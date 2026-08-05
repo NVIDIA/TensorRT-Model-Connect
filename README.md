@@ -324,15 +324,19 @@ The model ID and build-configuration columns come from each profile's E2E
 manifest at that same source revision; `hf_id` is the CLI input and the TRTMC
 profile is the internal test name.
 
-The platform-specialization column is family-level metadata, not a benchmark
-result. It records whether the row's model family declares an optimized runtime
-provider for qualified deployment tuples. At this revision, TensorRT Edge-LLM
-is the only such provider and is owned by the dense Qwen family. Its currently
-qualified dispatch target is Linux x86_64 on NVIDIA A100 80GB PCIe (SM80).
-Provider selection still requires an exact model ID, immutable revision,
-target, precision, and option match; a provider shown on a row does not mean
-that the row's measured configuration used that provider. `—` means that the
-family declares no platform-specialization provider. See
+The platform-specialization column is checkpoint-level integration metadata,
+not a benchmark result. At this revision, TensorRT Edge-LLM is the only
+integrated provider; its currently qualified Model Connect dispatch tuple is
+dense Qwen on Linux x86_64 with NVIDIA A100 80GB PCIe (SM80) and FP16. A
+`Qualified TRTMC dispatch target: Coming soon` entry means that the exact
+`hf_id` appears in both the Edge-LLM supported-checkpoint list and this table,
+but Model Connect does not yet claim a qualified dispatch target for that
+checkpoint. For a checkpoint that already has a qualified tuple, `Additional
+tuples: Coming soon` marks broader planned coverage. Provider selection still
+requires an exact model ID, immutable revision, target, precision, and option
+match; a provider shown on a row does not mean that the row's measured
+configuration used that provider. `—` means that no platform-specialization
+integration is currently identified for that exact checkpoint. See
 [Qualified optimized implementations](website/docs/features/model-families.md#qualified-optimized-implementations)
 for the current qualification boundary.
 
@@ -368,7 +372,7 @@ A traffic light is emitted only after the row's output and measurement
 contracts match. It is performance evidence for this exact snapshot, not a
 general correctness or compatibility guarantee.
 
-| Hugging Face model ID (`hf_id`, CLI input) | TRTMC profile | Build precision | Quantization | Platform specialization runtime provider (family-level) | GB300 |
+| Hugging Face model ID (`hf_id`, CLI input) | TRTMC profile | Build precision | Quantization | Platform specialization runtime provider | GB300 |
 | --- | --- | --- | --- | --- | --- |
 | `albert/albert-base-v2` | `albert-base` | `FP16` | None | — | 🟢 Green |
 | `sentence-transformers/all-MiniLM-L6-v2` | `all-minilm-l6-v2` | `FP16` | None | — | 🟢 Green |
@@ -405,8 +409,8 @@ general correctness or compatibility guarantee.
 | `openai-community/gpt2` | `gpt2-125m` | `FP32` | None | — | 🟢 Green |
 | `ibm-granite/granite-3.1-2b-base` | `granite-3.1-2b` | `FP16` | None | — | 🟢 Green |
 | `internlm/internlm2-math-plus-1_8b` | `internlm2-1.8b` | `FP16` | None | — | 🟢 Green |
-| `OpenGVLab/InternVL3-2B-hf` | `internvl3-2b` | `FP16` | None | — | 🟢 Green |
-| `OpenGVLab/InternVL3-8B-hf` | `internvl3-8b` | `FP16` | None | — | 🟢 Green |
+| `OpenGVLab/InternVL3-2B-hf` | `internvl3-2b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
+| `OpenGVLab/InternVL3-8B-hf` | `internvl3-8b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `bytedance-research/Lance` | `lance-3b-x2t-image` | `BF16` | None | — | 🟢 Green |
 | `nvidia/LocateAnything-3B` | `locateanything-3b` | `FP16` | None | — | 🟢 Green |
 | `nvidia/magpie_tts_multilingual_357m`<br />Revision: `34d7e40da85cabc97f92198889b65cea27bc7fd1` | `magpie-tts-357m` | `FP32` | None | — | 🟢 Green |
@@ -417,9 +421,9 @@ general correctness or compatibility guarantee.
 | `mistralai/Mistral-7B-Instruct-v0.1` | `mistral-7b` | `FP16` | None | — | 🟢 Green |
 | `ggml-org/stories15M_MOE` | `mixtral-stories-15m` | `FP16`<br />FP32 layers: `4` | None | — | 🟢 Green |
 | `answerdotai/ModernBERT-base` | `modernbert-base` | `FP32` | None | — | 🟢 Green |
-| `nvidia/nemotron-3.5-asr-streaming-0.6b` | `nemotron-3.5-asr-streaming-0.6b` | `FP16` | None | — | 🟢 Green |
+| `nvidia/nemotron-3.5-asr-streaming-0.6b` | `nemotron-3.5-asr-streaming-0.6b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `nvidia/llama-nemotron-embed-vl-1b-v2` | `nemotron-embed-vl-1b-v2` | `FP16` | None | — | 🟢 Green |
-| `nvidia/NVIDIA-Nemotron-Nano-9B-v2` | `nemotron-h-nano-9b` | `FP16` | None | — | 🟢 Green |
+| `nvidia/NVIDIA-Nemotron-Nano-9B-v2` | `nemotron-h-nano-9b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `nvidia/Nemotron-4-Mini-Hindi-4B-Base` | `nemotron-hindi-4b` | `FP16` | None | — | 🟢 Green |
 | `nvidia/Nemotron-Labs-Diffusion-8B` | `nemotron-labs-diffusion-8b` | `BF16` | None | — | 🟢 Green |
 | `nvidia/Nemotron-Mini-4B-Instruct` | `nemotron-mini-4b` | `FP16` | None | — | 🟢 Green |
@@ -437,22 +441,22 @@ general correctness or compatibility guarantee.
 | `nvidia/personaplex-7b-v1` | `personaplex-7b` | `FP16`<br />FP32 layers: `0, 1` | None | — | 🟢 Green |
 | `microsoft/Phi-tiny-MoE-instruct` | `phi-moe` | `FP16` | None | — | 🟢 Green |
 | `microsoft/Phi-3-mini-4k-instruct` | `phi3-mini` | `FP16` | None | — | 🟢 Green |
-| `microsoft/Phi-4-multimodal-instruct` | `phi4-multimodal` | `FP16` | None | — | 🟢 Green |
+| `microsoft/Phi-4-multimodal-instruct` | `phi4-multimodal` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `PixArt-alpha/PixArt-Sigma-XL-2-1024-MS` | `pixart-sigma-1024` | `FP16`<br />FP32 layers: `0` | None | — | 🟢 Green |
 | `EleutherAI/pythia-70m` | `pythia-70m` | `FP32` | None | — | 🟢 Green |
 | `Qwen/Qwen-Image` | `qwen-image` | `BF16` | None | — | 🟢 Green |
 | `Qwen/Qwen-Image-2512` | `qwen-image-2512` | `BF16` | None | — | 🟢 Green |
 | `Qwen/Qwen-Image-Edit-2511` | `qwen-image-edit-2511` | `BF16` | None | — | 🟢 Green |
-| `Qwen/Qwen2.5-VL-3B-Instruct` | `qwen25vl-3b` | `FP16` | None | — | 🟢 Green |
-| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp16` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80) | 🟢 Green |
-| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp8` | `BF16` | `format=fp8`<br />`scale_source=modelopt`<br />`calibration_samples=64` | TensorRT Edge-LLM<br />Qualified dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80) | 🟢 Green |
-| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-topp` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80) | 🟢 Green |
-| `Qwen/Qwen3-4B-Instruct-2507` | `qwen3-4b-instruct-2507` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80) | 🟢 Green |
+| `Qwen/Qwen2.5-VL-3B-Instruct` | `qwen25vl-3b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp16` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp8` | `BF16` | `format=fp8`<br />`scale_source=modelopt`<br />`calibration_samples=64` | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-topp` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-4B-Instruct-2507` | `qwen3-4b-instruct-2507` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
 | `Qwen/Qwen3-30B-A3B` | `qwen3-moe-30b-a3b` | `FP16` | None | — | 🟢 Green |
 | `amd-quark/tiny-random-qwen3_moe` | `qwen3-moe-tiny-random` | `FP16` | None | — | 🟢 Green |
 | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | `qwen3-omni-30b-a3b-instruct` | `BF16` | None | — | 🔴 Red |
-| `Qwen/Qwen3-VL-2B-Instruct` | `qwen3-vl-2b` | `FP16`<br />FP32 layers: `0, 1, 2` | None | — | 🟢 Green |
-| `Qwen/Qwen3.5-9B` | `qwen35-9b` | `FP16` | None | — | 🟢 Green |
+| `Qwen/Qwen3-VL-2B-Instruct` | `qwen3-vl-2b` | `FP16`<br />FP32 layers: `0, 1, 2` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
+| `Qwen/Qwen3.5-9B` | `qwen35-9b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
 | `nvidia/Riva-Translate-4B-Instruct-v1.1` | `riva-translate-4b` | `FP16` | None | — | 🟢 Green |
 | `FacebookAI/roberta-base` | `roberta-base` | `FP16` | None | — | 🟢 Green |
 | `FacebookAI/roberta-large` | `roberta-large` | `FP16` | None | — | 🟢 Green |
