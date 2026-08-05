@@ -20,7 +20,6 @@
     {
       "name": "minimax-h3-768p",
       "trace_id": "IT-E2E-MINIMAX-H3-768P-CP1-01",
-      "ci_tier": "nightly_only",
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",

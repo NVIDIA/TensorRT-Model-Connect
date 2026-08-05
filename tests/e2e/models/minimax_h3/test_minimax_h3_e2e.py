@@ -54,7 +54,7 @@ def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     case = model.testcases[0]
     assert case.runtime_strategy == "diffusion_minimax_h3"
     assert case.task_strategy == "diffusion_media_generation"
-    assert case.metadata["ci_tier"] == "nightly_only"
+    assert "ci_tier" not in case.metadata
     assert case.metadata["build_args"]["parallel"] == {
         "mode": "single",
         "cp_size": 1,
