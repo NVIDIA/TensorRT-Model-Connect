@@ -37,23 +37,13 @@ def test_personaplex_builds_require_an_exclusive_gpu(manifest_name: str) -> None
     "manifest_name",
     ("personaplex-7b.json", "personaplex-7b-l0.json"),
 )
-def test_personaplex_uses_official_component_precisions(
+def test_personaplex_keeps_the_token_decoders_in_full_fp32(
     manifest_name: str,
 ) -> None:
     manifest = json.loads((_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
 
-    assert manifest["precision"] == "bf16"
-    assert manifest["fp32_layers"] == [2, 3]
-
-
-def test_personaplex_full_reference_matches_bundle_precision() -> None:
-    manifest = json.loads(
-        (_MANIFEST_DIR / "personaplex-7b.json").read_text(encoding="utf-8")
-    )
-
-    testcase = manifest["testcases"][0]
-    assert manifest["precision"] == "bf16"
-    assert testcase["reference_precision"] == manifest["precision"]
+    assert manifest["precision"] == "fp16"
+    assert manifest["fp32_layers"] == [0, 1]
 
 
 def _thresholds() -> ThresholdProfile:
@@ -90,18 +80,22 @@ def test_contract_compares_runner_tokens_with_official_reference_tokens() -> Non
     )
 
     assert result.passed
-    assert result.metrics["free_generation_token_match_rate"].value == 1.0
-    assert result.metrics["free_generation_token_match_rate"].threshold is None
-    assert result.metrics["free_generation_depth_token_match_rate"].passed
-    assert result.metrics["free_generation_audio_token_match_rate"].passed
-    assert result.metrics["free_generation_frame_exact_match_rate"].threshold is None
+    assert result.metrics["token_match"].value == 1.0
+    assert result.metrics["token_match"].threshold == 0.8
+    assert result.metrics["depth_token_match_rate"].passed
+    assert result.metrics["depth_token_match_rate"].threshold == 0.7
+    assert result.metrics["audio_token_match_rate"].passed
+    assert result.metrics["audio_token_match_rate"].threshold == 0.7
+    assert result.metrics["frame_exact_match_rate"].threshold == 0.7
     assert result.metrics["rms"].threshold == 0.001
 
 
-def test_contract_reports_free_generation_divergence_without_failing() -> None:
+def test_contract_rejects_nightly_token_match_below_declared_minimum() -> None:
     reference = np.zeros((25, 8), dtype=np.int32)
     actual = reference.copy()
     actual.reshape(-1)[149:] = 1
+    thresholds = _thresholds()
+    thresholds.metrics["contract_token_match"] = 0.5
     result = PersonaPlexSpeechToSpeechPlugin().verify(
         StageOutput(
             stage_name="full_generation",
@@ -116,17 +110,16 @@ def test_contract_reports_free_generation_divergence_without_failing() -> None:
             data={"reference_tokens": reference},
         ),
         _case(),
-        _thresholds(),
+        thresholds,
     )
 
-    assert result.passed
-    metric = result.metrics["free_generation_token_match_rate"]
-    assert metric.value == pytest.approx(0.745)
-    assert metric.threshold is None
-    assert metric.passed
-    assert result.metrics["free_generation_depth_token_match_rate"].passed
-    assert result.metrics["free_generation_audio_token_match_rate"].passed
-    assert result.metrics["free_generation_frame_exact_match_rate"].passed
+    assert not result.passed
+    assert result.metrics["token_match"].value == pytest.approx(0.745)
+    assert result.metrics["token_match"].threshold == 0.8
+    assert not result.metrics["token_match"].passed
+    assert result.metrics["depth_token_match_rate"].passed
+    assert result.metrics["audio_token_match_rate"].passed
+    assert result.metrics["frame_exact_match_rate"].passed
 
 
 def test_contract_rejects_missing_reference_tokens() -> None:
@@ -166,4 +159,4 @@ def test_contract_rejects_extra_runtime_frames() -> None:
 
     assert not result.passed
     assert not result.metrics["frame_count_match"].passed
-    assert result.metrics["free_generation_token_match_rate"].passed
+    assert result.metrics["token_match"].passed

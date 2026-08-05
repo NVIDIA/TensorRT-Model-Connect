@@ -197,11 +197,6 @@ void test_audio_and_solve_flags() {
           "transcribe att context");
     check(transcribe.pad_and_drop_preencoded, "transcribe pad/drop");
 
-    auto speak = parse({"trtmc", "speak", "bundle.trtfb", "--audio-in", "input.wav", "--audio-out",
-                        "output.wav", "--speech-teacher-tokens", "teacher.txt"});
-    check(!speak.parse_error, "speak teacher trace parses");
-    check(speak.speech_teacher_tokens == "teacher.txt", "speak teacher trace path");
-
     auto solve =
         parse({"trtmc", "solve", "bundle.trtfb", "--branch-input", "1,2", "--trunk-input", "3,4"});
     check(solve.branch_input == "1,2", "solve branch");

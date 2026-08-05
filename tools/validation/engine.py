@@ -2998,25 +2998,21 @@ def _write_dataset_benchmark_reproduction(
 
 
 _NATIVE_TRTMC_COMMANDS = "trtfb_native_commands.jsonl"
-_NATIVE_TRTMC_TEACHER_COMMANDS = "trtfb_teacher_native_commands.jsonl"
 
 
 def _reset_native_trtmc_commands(work_dir: Path) -> None:
     (work_dir / _NATIVE_TRTMC_COMMANDS).write_text("", encoding="utf-8")
-    (work_dir / _NATIVE_TRTMC_TEACHER_COMMANDS).write_text("", encoding="utf-8")
 
 
 def _append_native_trtmc_command(
     work_dir: Path,
     sample_id: str,
     command: Sequence[Any],
-    *,
-    filename: str = _NATIVE_TRTMC_COMMANDS,
 ) -> None:
     tokens = [str(token) for token in command]
     if not tokens:
         return
-    with (work_dir / filename).open("a", encoding="utf-8") as output:
+    with (work_dir / _NATIVE_TRTMC_COMMANDS).open("a", encoding="utf-8") as output:
         output.write(
             json.dumps(
                 {"sample_id": sample_id, "command": tokens},
@@ -3061,14 +3057,6 @@ def _record_output_native_command(
     command = _native_command_from_metadata(metadata)
     if command:
         _append_native_trtmc_command(work_dir, sample_id, command)
-    teacher_command = _command_tokens(metadata.get("teacher_forced_command"))
-    if teacher_command:
-        _append_native_trtmc_command(
-            work_dir,
-            sample_id,
-            teacher_command,
-            filename=_NATIVE_TRTMC_TEACHER_COMMANDS,
-        )
 
 
 def run_vlm_trtfb(args: argparse.Namespace) -> None:
@@ -8567,26 +8555,6 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
-def _model_plugin_reference_outputs(work_dir: Path) -> dict[str, Any]:
-    """Load model-plugin StageOutputs by sample for reference-guided TRT runs."""
-    predictions_path = work_dir / "hf_predictions.json"
-    if not predictions_path.is_file():
-        return {}
-    payload = json.loads(predictions_path.read_text(encoding="utf-8"))
-    rows = payload.get("responses", []) if isinstance(payload, Mapping) else []
-    outputs: dict[str, Any] = {}
-    for row in rows:
-        if not isinstance(row, Mapping) or not isinstance(row.get("stage_output"), Mapping):
-            continue
-        sample_id = str(row.get("sample_id", "") or "")
-        if not sample_id:
-            continue
-        if sample_id in outputs:
-            raise ValueError(f"Duplicate HF model-plugin sample_id {sample_id!r}")
-        outputs[sample_id] = deserialize_stage_output(row["stage_output"])
-    return outputs
-
-
 def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
@@ -8604,7 +8572,6 @@ def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
     metadata_path = work_dir / (args.log or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
-    reference_outputs = _model_plugin_reference_outputs(work_dir)
     _reset_native_trtmc_commands(work_dir)
     with (
         raw_path.open("w", encoding="utf-8") as raw_file,
@@ -8640,7 +8607,6 @@ def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
                 model_plugin_dir=str(
                     getattr(args, "model_plugin_dir", "") or ""
                 ),
-                reference_output=reference_outputs.get(sample_id),
             )
             output = runner.run_stage(case, stage, context)
             _record_output_native_command(work_dir, sample_id, output)
@@ -9231,23 +9197,30 @@ def apply_comparison_precision(
     model: Mapping[str, Any],
     validation_config: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Apply one validation base precision to both TRTMC and its reference."""
+    """Apply validation-owned precision settings without changing CI manifests."""
 
     configured = validation_config.get("comparison_precision")
     updated = copy.deepcopy(dict(model))
-    if configured in (None, ""):
-        return updated
-    quantization = _model_quantization_format(updated)
-    if quantization:
-        model_name = str(updated.get("name", "") or "quantized model")
-        raise ValueError(
-            f"{model_name} uses {quantization.upper()} quantization; "
-            "comparison_precision may only override unquantized base precision"
+    fp32_layers = validation_config.get("trtmc_fp32_layers")
+    if configured not in (None, ""):
+        quantization = _model_quantization_format(updated)
+        if quantization:
+            model_name = str(updated.get("name", "") or "quantized model")
+            raise ValueError(
+                f"{model_name} uses {quantization.upper()} quantization; "
+                "comparison_precision may only override unquantized base precision"
+            )
+        updated["precision"] = _canonical_reference_precision(
+            configured,
+            field="validation.comparison_precision",
         )
-    updated["precision"] = _canonical_reference_precision(
-        configured,
-        field="task_eval.comparison_precision",
-    )
+    if fp32_layers is not None:
+        if not isinstance(fp32_layers, list) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in fp32_layers
+        ):
+            raise ValueError("validation.trtmc_fp32_layers must be non-negative integers")
+        updated["fp32_layers"] = list(fp32_layers)
     return updated
 
 

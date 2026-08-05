@@ -581,11 +581,6 @@ def build_disagreement_artifact(
     native_trtmc_commands = _native_trtmc_commands(
         work_dir / "trtfb_native_commands.jsonl"
     )
-    native_trtmc_commands.update(
-        _native_trtmc_commands(
-            work_dir / "trtfb_teacher_native_commands.jsonl"
-        )
-    )
     records = []
     for index, comparison in enumerate(comparison_rows):
         sample_id = _sample_id(comparison, f"sample-{index}")

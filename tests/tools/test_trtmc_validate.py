@@ -1805,63 +1805,6 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         assert wrapper not in json.dumps(records)
 
 
-def test_disagreement_prefers_teacher_forced_native_command(tmp_path):
-    case_dir = tmp_path / "personaplex-7b" / "speech-to-speech"
-    work_dir = case_dir / "validation" / "speech-to-speech" / "personaplex-7b"
-    work_dir.mkdir(parents=True)
-    sample_id = "sample-7"
-    (work_dir / "prompts.jsonl").write_text(
-        json.dumps({"sample_id": sample_id, "audio": "/data/input.wav"}) + "\n",
-        encoding="utf-8",
-    )
-    (work_dir / "summary.json").write_text(
-        json.dumps({"disagreements": [{"sample_id": sample_id}]}),
-        encoding="utf-8",
-    )
-    for name in ("hf_predictions.json", "trtfb_predictions.json"):
-        (work_dir / name).write_text(
-            json.dumps({"responses": [{"sample_id": sample_id}]}),
-            encoding="utf-8",
-        )
-    free_command = [
-        "/workspace/build/trtmc",
-        "speak",
-        "personaplex-7b.trtfb",
-        "--audio-in",
-        "/data/input.wav",
-    ]
-    teacher_command = [
-        *free_command,
-        "--speech-teacher-tokens",
-        "/runs/results/teacher_tokens.txt",
-    ]
-    (work_dir / "trtfb_native_commands.jsonl").write_text(
-        json.dumps({"sample_id": sample_id, "command": free_command}) + "\n",
-        encoding="utf-8",
-    )
-    (work_dir / "trtfb_teacher_native_commands.jsonl").write_text(
-        json.dumps({"sample_id": sample_id, "command": teacher_command}) + "\n",
-        encoding="utf-8",
-    )
-
-    reproduction = trtmc_validate._commands_from_logs(work_dir)
-    assert reproduction["trtmc"] == [
-        shlex.join(free_command),
-        shlex.join(teacher_command),
-    ]
-    assert reproduction["command_count"]["trtmc"] == 2
-
-    result = trtmc_disagreements.build_disagreement_artifact(
-        work_dir=work_dir,
-        case_dir=case_dir,
-    )
-
-    record = json.loads(
-        (case_dir / result["path"]).read_text(encoding="utf-8").splitlines()[0]
-    )
-    assert record["reproduce"]["trtmc"] == shlex.join(teacher_command)
-
-
 def test_cached_reference_command_is_relocated_to_current_work_dir(
     tmp_path: Path,
 ) -> None:

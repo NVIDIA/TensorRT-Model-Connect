@@ -256,9 +256,9 @@ class SpeechToSpeechRunner:
                 except Exception as e:
                     data["token_load_error"] = str(e)
 
-            # Input Mimi and temporal text traces are emitted on stderr. The
-            # final audio trace is also the fallback when no token dump exists.
-            self._parse_tokens_from_stderr(result.stderr, data)
+            # Parse tokens from stderr if not dumped via env var
+            if "output_tokens" not in data:
+                self._parse_tokens_from_stderr(result.stderr, data)
 
             # Check output audio
             if os.path.exists(wav_path):
@@ -281,167 +281,18 @@ class SpeechToSpeechRunner:
             if audio_input:
                 data["input_audio_path"] = audio_input
 
-            teacher_command = None
-            teacher_trace = (
-                None
-                if case.inputs.get("disable_teacher_replay", False)
-                else self._reference_teacher_trace(ctx.reference_output)
-            )
-            if result.returncode == 0 and teacher_trace is not None:
-                teacher_text, teacher_audio = teacher_trace
-                teacher_tokens_path = Path(tmpdir) / "teacher_tokens.txt"
-                if artifact_dir is not None:
-                    teacher_tokens_path = artifact_dir / "teacher_tokens.txt"
-                self._write_teacher_trace(
-                    teacher_tokens_path,
-                    teacher_text,
-                    teacher_audio,
-                )
-                teacher_wav_path = (
-                    artifact_dir / "teacher_speech_out.wav"
-                    if artifact_dir is not None
-                    else Path(tmpdir) / "teacher_output.wav"
-                )
-                teacher_command = [
-                    binary,
-                    "speak",
-                    bundle_path,
-                    "--audio-in",
-                    audio_input,
-                    "--audio-out",
-                    str(teacher_wav_path),
-                    "--max-new-tokens",
-                    str(max_frames),
-                    "--speech-teacher-tokens",
-                    str(teacher_tokens_path),
-                ]
-                if ctx.model_plugin_dir:
-                    teacher_command.extend(
-                        ["--model-plugin-dir", ctx.model_plugin_dir]
-                    )
-                teacher_started = time.monotonic()
-                teacher_result = subprocess.run(
-                    teacher_command,
-                    capture_output=True,
-                    text=True,
-                    timeout=600,
-                    env=env,
-                )
-                data["teacher_replay_timing_s"] = time.monotonic() - teacher_started
-                data["teacher_replay_returncode"] = teacher_result.returncode
-                teacher_stderr, teacher_stderr_log = save_full_stderr(
-                    teacher_result.stderr or "",
-                    ctx.artifacts_dir or "",
-                    "personaplex_teacher_forced_replay",
-                    case.name,
-                )
-                data["teacher_replay_stderr"] = teacher_stderr
-                if teacher_stderr_log:
-                    data["teacher_replay_stderr_log"] = teacher_stderr_log
-                if teacher_result.returncode != 0:
-                    raise RuntimeError(
-                        "PersonaPlex teacher-forced replay failed "
-                        f"(rc={teacher_result.returncode})"
-                    )
-                self._parse_teacher_predictions_from_stderr(
-                    teacher_result.stderr,
-                    data,
-                )
-
             return StageOutput(
                 stage_name=stage.name,
                 data=data,
                 timing_s=elapsed,
-                metadata={
-                    "command": cmd,
-                    "teacher_forced_command": teacher_command,
-                },
+                metadata={"command": cmd},
             )
-
-    @staticmethod
-    def _reference_teacher_trace(reference_output: StageOutput | None):
-        if reference_output is None:
-            return None
-        import numpy as np
-
-        text = reference_output.data.get("reference_text_tokens")
-        audio = reference_output.data.get("reference_tokens")
-        if text is None or audio is None:
-            return None
-        text_array = np.asarray(text, dtype=np.int32).reshape(-1)
-        audio_array = np.asarray(audio, dtype=np.int32)
-        if (
-            text_array.size == 0
-            or audio_array.ndim != 2
-            or audio_array.shape[0] != text_array.shape[0]
-            or audio_array.shape[1] <= 0
-        ):
-            raise ValueError(
-                "PersonaPlex teacher trace requires text [frames] and audio "
-                "[frames, codebooks] with matching frame counts"
-            )
-        return text_array, audio_array
-
-    @staticmethod
-    def _write_teacher_trace(path: Path, text_tokens, audio_tokens) -> None:
-        path.write_text(
-            "".join(
-                " ".join(
-                    [str(int(text_tokens[frame]))]
-                    + [str(int(token)) for token in audio_tokens[frame]]
-                )
-                + "\n"
-                for frame in range(text_tokens.shape[0])
-            ),
-            encoding="utf-8",
-        )
-
-    @staticmethod
-    def _parse_teacher_predictions_from_stderr(stderr: str, data: dict) -> None:
-        import numpy as np
-
-        text_targets = []
-        text_predictions = []
-        audio_targets = []
-        audio_predictions = []
-        pattern = re.compile(
-            r"\[speech\.teacher\]\s+frame\s+(\d+)\s+"
-            r"text_target=(-?\d+)\s+text_pred=(-?\d+)\s+"
-            r"audio_target=([\d,-]+)\s+audio_pred=([\d,-]+)\s*$"
-        )
-        for raw_line in (stderr or "").splitlines():
-            rank, line = _untag_ranked_mpirun_line(raw_line)
-            if rank not in (None, 0):
-                continue
-            match = pattern.search(line)
-            if not match:
-                continue
-            target_audio = [int(token) for token in match.group(4).split(",")]
-            predicted_audio = [int(token) for token in match.group(5).split(",")]
-            if len(target_audio) != len(predicted_audio):
-                raise ValueError("PersonaPlex teacher replay emitted mismatched audio rows")
-            text_targets.append(int(match.group(2)))
-            text_predictions.append(int(match.group(3)))
-            audio_targets.append(target_audio)
-            audio_predictions.append(predicted_audio)
-        if not text_targets:
-            raise ValueError("PersonaPlex teacher replay emitted no prediction trace")
-        data["teacher_text_target_tokens"] = np.asarray(text_targets, dtype=np.int32)
-        data["teacher_text_predicted_tokens"] = np.asarray(
-            text_predictions, dtype=np.int32
-        )
-        data["teacher_audio_target_tokens"] = np.asarray(audio_targets, dtype=np.int32)
-        data["teacher_audio_predicted_tokens"] = np.asarray(
-            audio_predictions, dtype=np.int32
-        )
 
     @staticmethod
     def _parse_tokens_from_stderr(stderr: str, data: dict) -> None:
-        """Parse input Mimi, temporal text, and output audio token traces."""
+        """Try to parse frame tokens from C++ stderr output."""
         import numpy as np
-        input_frames = []
-        text_frames = []
-        output_frames = []
+        frames = []
         for raw_line in (stderr or "").splitlines():
             rank, line = _untag_ranked_mpirun_line(raw_line)
             if rank not in (None, 0):
@@ -457,27 +308,9 @@ class SpeechToSpeechRunner:
                             for t in val.split(","):
                                 token_strs.append(int(t))
                     if token_strs:
-                        output_frames.append(token_strs)
+                        frames.append(token_strs)
                 except (ValueError, IndexError):
                     pass
-                continue
-
-            match = re.search(r"\[speech\]\s+Input frame\s+\d+:\s*(.*)$", line)
-            if match:
-                try:
-                    token_strs = [int(t) for t in match.group(1).split()]
-                    if token_strs:
-                        input_frames.append(token_strs)
-                except ValueError:
-                    pass
-                continue
-
-            match = re.search(
-                r"\[speech\]\s+Output text frame\s+\d+:\s*(-?\d+)\s*$",
-                line,
-            )
-            if match:
-                text_frames.append(int(match.group(1)))
                 continue
 
             match = re.search(r"\[speech\]\s+Output frame\s+\d+:\s*(.*)$", line)
@@ -485,16 +318,12 @@ class SpeechToSpeechRunner:
                 try:
                     token_strs = [int(t) for t in match.group(1).split()]
                     if token_strs:
-                        output_frames.append(token_strs)
+                        frames.append(token_strs)
                 except ValueError:
                     pass
-        if input_frames:
-            data["input_codec_tokens"] = np.array(input_frames, dtype=np.int32)
-        if text_frames:
-            data["output_text_tokens"] = np.array(text_frames, dtype=np.int32)
-        if output_frames and "output_tokens" not in data:
-            data["output_tokens"] = np.array(output_frames, dtype=np.int32)
-            data["num_frames"] = len(output_frames)
+        if frames:
+            data["output_tokens"] = np.array(frames, dtype=np.int32)
+            data["num_frames"] = len(frames)
 
 
 plugin = SpeechToSpeechRunner()

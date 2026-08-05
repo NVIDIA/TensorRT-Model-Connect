@@ -80,10 +80,7 @@ class SpeechPipeline final : public IPipeline {
                                    const SpeechOutputPlan& plan, DelayCacheState& delay_state,
                                    const std::vector<int32_t>& codec_tokens,
                                    std::vector<int32_t>& output_codes, int32_t& frames_collected,
-                                   SpeechPerformanceTimings& timings,
-                                   const std::vector<int32_t>& teacher_text,
-                                   const std::vector<int32_t>& teacher_audio,
-                                   int32_t teacher_codebooks);
+                                   SpeechPerformanceTimings& timings);
     void speak_postprocess_waveform(std::vector<float>& waveform, int32_t generated_frames) const;
 
     std::unique_ptr<TrtModule> temporal_;

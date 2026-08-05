@@ -288,7 +288,6 @@ def prepare_dataset(
                         "audio": str(relative_audio),
                         "speech_test_max_frames": audio_metadata["max_frames"],
                         "max_new_tokens": audio_metadata["max_frames"],
-                        "disable_teacher_replay": True,
                         "reference_mode": "official_greedy",
                     },
                     "preprocessing": {

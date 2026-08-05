@@ -25,13 +25,9 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <functional>
 #include <iostream>
-#include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -42,63 +38,6 @@ namespace trtmc {
 // ─── PosixSubprocessRunner (moved from speech_backend.cpp) ───
 
 namespace {
-
-constexpr const char* kSpeechTeacherTraceEnvironment =
-    "_TRTMC_INTERNAL_SPEECH_TEACHER_TOKENS";
-
-struct SpeechTeacherTrace {
-    std::vector<int32_t> text;
-    std::vector<int32_t> audio;
-    int32_t audio_codebooks{0};
-};
-
-SpeechTeacherTrace load_speech_teacher_trace(int32_t expected_audio_codebooks) {
-    const char* path = std::getenv(kSpeechTeacherTraceEnvironment);
-    if (path == nullptr || *path == '\0') {
-        return {};
-    }
-
-    std::ifstream input(path);
-    if (!input) {
-        throw std::invalid_argument("Could not open PersonaPlex teacher trace: " +
-                                    std::string(path));
-    }
-
-    SpeechTeacherTrace trace;
-    std::string line;
-    int32_t line_number = 0;
-    while (std::getline(input, line)) {
-        ++line_number;
-        if (line.empty()) {
-            continue;
-        }
-        std::istringstream row(line);
-        std::vector<int32_t> tokens;
-        int64_t token = 0;
-        while (row >> token) {
-            if (token < std::numeric_limits<int32_t>::min() ||
-                token > std::numeric_limits<int32_t>::max()) {
-                throw std::invalid_argument(
-                    "PersonaPlex teacher token is outside int32 range at line " +
-                    std::to_string(line_number));
-            }
-            tokens.push_back(static_cast<int32_t>(token));
-        }
-        if (!row.eof() || tokens.size() != static_cast<std::size_t>(expected_audio_codebooks + 1)) {
-            throw std::invalid_argument(
-                "PersonaPlex teacher trace must contain one text token and exactly " +
-                std::to_string(expected_audio_codebooks) + " output audio tokens at line " +
-                std::to_string(line_number));
-        }
-        trace.text.push_back(tokens[0]);
-        trace.audio.insert(trace.audio.end(), tokens.begin() + 1, tokens.end());
-    }
-    if (trace.text.empty()) {
-        throw std::invalid_argument("PersonaPlex teacher trace is empty: " + std::string(path));
-    }
-    trace.audio_codebooks = expected_audio_codebooks;
-    return trace;
-}
 
 // ---------------------------------------------------------------------------
 // Subprocess pipe helpers (extracted from PosixSubprocessRunner::run)
@@ -940,44 +879,6 @@ void speech_log_output_frames_debug(const std::vector<int32_t>& output_codes,
     }
 }
 
-void speech_log_teacher_predictions(const std::vector<int32_t>& teacher_text,
-                                    const std::vector<int32_t>& teacher_audio,
-                                    int32_t audio_codebooks,
-                                    const SpeechTeacherPredictions& predictions) {
-    for (int32_t frame = 0; frame < predictions.num_frames; ++frame) {
-        const auto text_index = static_cast<std::size_t>(frame);
-        if (predictions.text_available[text_index] == 0) {
-            continue;
-        }
-        bool audio_complete = true;
-        const auto audio_offset = static_cast<std::size_t>(frame) * audio_codebooks;
-        for (int32_t cb = 0; cb < audio_codebooks; ++cb) {
-            if (predictions.audio_available[audio_offset + static_cast<std::size_t>(cb)] == 0) {
-                audio_complete = false;
-                break;
-            }
-        }
-        if (!audio_complete) {
-            continue;
-        }
-        std::cerr << "[speech.teacher] frame " << frame
-                  << " text_target=" << teacher_text[text_index]
-                  << " text_pred=" << predictions.text[text_index] << " audio_target=";
-        for (int32_t cb = 0; cb < audio_codebooks; ++cb) {
-            if (cb > 0)
-                std::cerr << ',';
-            std::cerr << teacher_audio[audio_offset + static_cast<std::size_t>(cb)];
-        }
-        std::cerr << " audio_pred=";
-        for (int32_t cb = 0; cb < audio_codebooks; ++cb) {
-            if (cb > 0)
-                std::cerr << ',';
-            std::cerr << predictions.audio[audio_offset + static_cast<std::size_t>(cb)];
-        }
-        std::cerr << std::endl;
-    }
-}
-
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -997,12 +898,13 @@ bool SpeechPipeline::speak_validate_dual_stream() const {
     return true;
 }
 
-void SpeechPipeline::speak_run_generation_loop(
-    const SpeechGenerationSettings& settings, const SpeechOutputPlan& plan,
-    DelayCacheState& delay_state, const std::vector<int32_t>& codec_tokens,
-    std::vector<int32_t>& output_codes, int32_t& frames_collected,
-    SpeechPerformanceTimings& timings, const std::vector<int32_t>& teacher_text,
-    const std::vector<int32_t>& teacher_audio, int32_t teacher_codebooks) {
+void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& settings,
+                                               const SpeechOutputPlan& plan,
+                                               DelayCacheState& delay_state,
+                                               const std::vector<int32_t>& codec_tokens,
+                                               std::vector<int32_t>& output_codes,
+                                               int32_t& frames_collected,
+                                               SpeechPerformanceTimings& timings) {
     const int32_t hidden = settings.hidden;
     SpeechDecodeStopState stop_state;
     speech_log_stop_configuration(config_, plan.extra_tail);
@@ -1016,22 +918,13 @@ void SpeechPipeline::speak_run_generation_loop(
     std::vector<int32_t> frame_codes(static_cast<std::size_t>(settings.num_cb));
     CudaStageTimer temporal_timer;
     CudaStageTimer depth_timer;
-    const bool teacher_enabled =
-        !teacher_text.empty() && teacher_codebooks == settings.stream_cb &&
-        teacher_audio.size() == teacher_text.size() * static_cast<std::size_t>(teacher_codebooks);
-    auto teacher_predictions = make_speech_teacher_predictions(
-        teacher_enabled ? static_cast<int32_t>(teacher_text.size()) : 0,
-        teacher_enabled ? teacher_codebooks : 0);
+
     frames_collected = 0;
     for (int32_t offset = 0; offset < plan.total_iters && frames_collected < plan.output_frames;
          ++offset) {
         write_user_tokens_to_delay_cache(delay_state, codec_tokens, offset, settings.stream_cb,
                                          settings.num_frames, settings.encode_codebooks,
                                          settings.audio_bos);
-        if (teacher_enabled) {
-            write_speech_teacher_frame_to_delay_cache(delay_state, teacher_text, teacher_audio,
-                                                      teacher_codebooks, offset - 1, offset);
-        }
         fill_initial_delay_tokens(delay_state, offset, settings.text_bos, settings.audio_bos);
         if (offset == 0) {
             seed_delay_offset_zero(delay_state, settings.text_bos, settings.audio_bos);
@@ -1062,11 +955,6 @@ void SpeechPipeline::speak_run_generation_loop(
                   target_audio_provided.data());
         depth_timer.stop(stream_);
         download_selected_frame_tokens(selected_frame_tokens);
-        if (teacher_enabled) {
-            capture_speech_teacher_predictions(delay_state, teacher_text, teacher_audio,
-                                               teacher_codebooks, offset, selected_frame_tokens,
-                                               teacher_predictions);
-        }
         timings.temporal_ms += temporal_timer.elapsed_ms();
         timings.depth_ms += depth_timer.elapsed_ms();
         const int32_t sampled_text_token = selected_frame_tokens[0];
@@ -1104,10 +992,6 @@ void SpeechPipeline::speak_run_generation_loop(
         speech_maybe_log_interleaved_debug(offset, text_input, sampled_text_token, frame_codes);
         if (stop_decision.should_break)
             break;
-    }
-    if (teacher_enabled) {
-        speech_log_teacher_predictions(teacher_text, teacher_audio, teacher_codebooks,
-                                       teacher_predictions);
     }
 }
 
@@ -1208,12 +1092,10 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
 
     const SpeechGenerationSettings settings =
         make_speech_generation_settings(config_, hidden, encoder_shape);
-    const SpeechTeacherTrace teacher_trace = load_speech_teacher_trace(settings.stream_cb);
 
     int32_t frames_collected = 0;
     speak_run_generation_loop(settings, plan, delay_state, codec_tokens, output_codes,
-                              frames_collected, timings, teacher_trace.text, teacher_trace.audio,
-                              teacher_trace.audio_codebooks);
+                              frames_collected, timings);
 
     const int32_t generated_frames = frames_collected;
     std::cerr << "[speech] Depth: generated " << generated_frames << " frames x " << num_cb

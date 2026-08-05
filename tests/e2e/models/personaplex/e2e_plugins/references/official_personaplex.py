@@ -110,8 +110,6 @@ class OfficialPersonaPlexReference:
             )
         )
         tokens_path = artifact_dir / "official_tokens.npy"
-        input_tokens_path = artifact_dir / "official_input_tokens.npy"
-        text_tokens_path = artifact_dir / "official_text_tokens.npy"
         audio_path = artifact_dir / "official_speech.wav"
         metadata_path = artifact_dir / "official_metadata.json"
         max_frames = int(
@@ -140,10 +138,6 @@ class OfficialPersonaPlexReference:
             _reference_precision(case),
             "--tokens-output",
             str(tokens_path),
-            "--input-tokens-output",
-            str(input_tokens_path),
-            "--text-tokens-output",
-            str(text_tokens_path),
             "--audio-output",
             str(audio_path),
             "--metadata-output",
@@ -179,8 +173,6 @@ class OfficialPersonaPlexReference:
         import numpy as np
 
         tokens = np.load(tokens_path, allow_pickle=False)
-        input_tokens = np.load(input_tokens_path, allow_pickle=False)
-        text_tokens = np.load(text_tokens_path, allow_pickle=False)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         with wave.open(str(audio_path), "rb") as wav:
             sample_rate = wav.getframerate()
@@ -199,26 +191,18 @@ class OfficialPersonaPlexReference:
             tokens.ndim != 2
             or tokens.shape[0] < 1
             or tokens.shape[1] != 8
-            or input_tokens.ndim != 2
-            or input_tokens.shape[0] < 1
-            or input_tokens.shape[1] != 8
-            or text_tokens.ndim != 1
-            or text_tokens.shape[0] != tokens.shape[0]
             or sample_rate != REFERENCE_SAMPLE_RATE
             or num_samples < 1
         ):
             raise RuntimeError(
                 "PersonaPlex official reference emitted invalid artifacts: "
-                f"tokens={tokens.shape}, input_tokens={input_tokens.shape}, "
-                f"text_tokens={text_tokens.shape}, sample_rate={sample_rate}, "
+                f"tokens={tokens.shape}, sample_rate={sample_rate}, "
                 f"num_samples={num_samples}"
             )
         return StageOutput(
             stage_name=stage.name,
             data={
                 "reference_tokens": tokens,
-                "reference_input_codec_tokens": input_tokens,
-                "reference_text_tokens": text_tokens,
                 "num_frames": int(tokens.shape[0]),
                 "token_shape": list(tokens.shape),
                 "wav_path": str(audio_path),

@@ -2158,101 +2158,6 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
     assert summary["cases"][0]["passed"] is True
 
 
-def test_model_plugin_trtfb_receives_matching_reference_output(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from tests.e2e_harness.contracts import E2ECase, StageOutput, StageSpec
-    from tools.validation.model_plugin_contract import serialize_stage_output
-
-    work_dir = tmp_path / "work"
-    work_dir.mkdir()
-    (work_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "dataset_kind": "model_plugin_json",
-                "task_eval": {"model_manifest": "model.json"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (work_dir / "prompts.jsonl").write_text(
-        json.dumps(
-            {
-                "sample_id": "sample-1",
-                "testcase": "model-case",
-                "stage": "full_generation",
-                "inputs": {},
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    reference = StageOutput(
-        stage_name="full_generation",
-        data={"reference_text_tokens": np.array([11, 12], dtype=np.int32)},
-    )
-    serialized_reference = serialize_stage_output(
-        reference,
-        artifact_dir=work_dir / "hf_serialized",
-        sample_id="sample-1",
-    )
-    validation_engine.write_predictions(
-        work_dir / "hf_predictions.json",
-        [
-            {
-                "sample_id": "sample-1",
-                "stage_output": serialized_reference,
-            }
-        ],
-    )
-    case = E2ECase(
-        name="model-case",
-        hf_id="org/model",
-        family="custom",
-        runtime_strategy="custom",
-        task_strategy="custom",
-        bundle="model.trtfb",
-        metadata={
-            "model_test_dir": "tests/e2e/models/custom",
-            "validation_manifest_case_name": "model-case",
-        },
-    )
-    stage = StageSpec(name="full_generation")
-
-    class Runner:
-        def run_stage(self, _case, _stage, context):
-            assert context.reference_output is not None
-            np.testing.assert_array_equal(
-                context.reference_output.data["reference_text_tokens"],
-                np.array([11, 12], dtype=np.int32),
-            )
-            return StageOutput(
-                stage_name="full_generation",
-                data={"returncode": 0},
-            )
-
-    monkeypatch.setattr(
-        validation_engine, "select_case", lambda *_args, **_kwargs: (case, stage)
-    )
-    monkeypatch.setattr(validation_engine, "activate_model_plugins", lambda _path: None)
-    monkeypatch.setattr(validation_engine, "get_runner", lambda _strategy: Runner())
-    args = argparse.Namespace(
-        work_dir=str(work_dir),
-        bundle=str(tmp_path / "engines" / "model.trtfb"),
-        trtmc_binary="/runtime/trtmc",
-        hf_python="/profiles/reference/bin/python",
-        model_plugin_dir="/runtime/models",
-        raw_output="trtfb_raw.jsonl",
-        predictions="trtfb_predictions.json",
-        log="trtfb_run.log",
-    )
-
-    validation_engine.run_model_plugin_trtfb(args)
-
-    output = json.loads((work_dir / "trtfb_predictions.json").read_text())
-    assert output["responses"][0]["sample_id"] == "sample-1"
-
-
 def test_compare_model_plugin_marks_native_returncode_as_execution_error(
     tmp_path: Path,
     monkeypatch,
@@ -4776,6 +4681,58 @@ def test_comparison_precision_overrides_both_candidate_and_reference(
     assert contract["comparison"] == "aligned"
 
 
+def test_validation_can_override_component_precision_without_changing_manifest() -> None:
+    original = {
+        "name": "personaplex-7b",
+        "precision": "fp16",
+        "fp32_layers": [0, 1],
+    }
+
+    model = validation_engine.apply_comparison_precision(
+        original,
+        {
+            "comparison_precision": "bf16",
+            "trtmc_fp32_layers": [2, 3],
+        },
+    )
+
+    assert original == {
+        "name": "personaplex-7b",
+        "precision": "fp16",
+        "fp32_layers": [0, 1],
+    }
+    assert model["precision"] == "bf16"
+    assert model["fp32_layers"] == [2, 3]
+
+
+def test_personaplex_behavior_suite_owns_precision_outside_ci_manifest() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "full_duplex_bench_behavior_parity",
+    )
+    model = next(
+        record
+        for record in validation_engine.load_manifest_records()
+        if record["name"] == "personaplex-7b"
+    )
+
+    config = validation_engine.effective_validation_config(suite, model)
+    resolved = validation_engine.apply_comparison_precision(model, config)
+
+    assert model["precision"] == "fp16"
+    assert model["fp32_layers"] == [0, 1]
+    assert resolved["precision"] == "bf16"
+    assert resolved["fp32_layers"] == [2, 3]
+    command = validation_engine.build_bundle_command(
+        resolved,
+        trtmc_binary="/runtime/trtmc",
+        bundle_path=Path("/runs/engines/personaplex-7b.trtfb"),
+        max_cache_length=1280,
+    )
+    assert command[command.index("--precision") + 1] == "bf16"
+    assert command[command.index("--fp32-layers") + 1] == "2,3"
+
+
 @pytest.mark.parametrize("model_name", ["fnet-base", "xlnet-base"])
 def test_encoder_validation_compares_candidate_and_reference_in_fp32(
     model_name: str,
@@ -5461,13 +5418,6 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
                     "hello",
                 ]
             },
-            "teacher_forced_command": [
-                "/workspace/build/trtmc",
-                "speak",
-                "/runs/engines/model.trtfb",
-                "--speech-teacher-tokens",
-                "/runs/results/teacher_tokens.txt",
-            ],
         }
     )
 
@@ -5483,19 +5433,6 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
     assert row["sample_id"] == "sample-7"
     assert row["command"][0:2] == ["/workspace/build/trtmc", "run"]
     assert "validation_engine.py" not in " ".join(row["command"])
-
-    teacher_row = json.loads(
-        (tmp_path / "trtfb_teacher_native_commands.jsonl").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert teacher_row["sample_id"] == "sample-7"
-    assert teacher_row["command"][0:2] == ["/workspace/build/trtmc", "speak"]
-    assert teacher_row["command"][-2:] == [
-        "--speech-teacher-tokens",
-        "/runs/results/teacher_tokens.txt",
-    ]
-
 
 def test_run_diffusion_trtfb_writes_image_artifact_predictions(
     tmp_path: Path, monkeypatch

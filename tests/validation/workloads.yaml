@@ -1747,6 +1747,11 @@ suites:
     scoring:
       scorer: full_duplex_bench_behavior_parity
       python_profile: personaplex_full_duplex_evaluator
+    model_overrides:
+      by_model:
+        personaplex-7b:
+          comparison_precision: bf16
+          trtmc_fp32_layers: [2, 3]
     build:
       min_max_cache_length: 1280
     # Equivalence margins describe material behavioral shifts: ten TOR
@@ -1764,12 +1769,9 @@ suites:
 
   - id: full_duplex_bench_speech_parity
     description: >
-      PersonaPlex conditional decision accuracy on five public Full-Duplex-Bench
-      synthetic interruption and pause-handling inputs. The official BF16 trace
-      is replayed teacher-forced through TRTMC; input Mimi tokens, replay trace,
-      conditional top-1 rates, output length, and waveform liveness are gated.
-      Both paths also run greedy free generation without an injected assistant
-      persona, whose token agreement is reported only for divergence diagnosis.
+      Speech-response token and waveform consistency on five public
+      Full-Duplex-Bench synthetic interruption and pause-handling inputs.
+      Both paths use greedy decoding without an injected assistant persona.
     user_contract: speech_response
     default_model_names: [personaplex-7b]
     dataset:
