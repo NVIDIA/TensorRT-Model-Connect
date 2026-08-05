@@ -1,0 +1,74 @@
+{
+  "name": "nemotron-3-super-120b-tp8",
+  "hf_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "hf_revision": "d51eab0d1f979ebc26b546e634a04f450d99158e",
+  "bundle": "nemotron-3-super-120b-tp8.trtfb",
+  "family": "nemotron_h",
+  "runtime_strategy": "nemotron_h_hybrid_mamba_attention",
+  "task_strategy": "text_generation_causal",
+  "precision": "bf16",
+  "max_cache_length": 128,
+  "trust_remote_code": true,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 21600,
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 8
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 8,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "testcases": [
+    {
+      "name": "nemotron-3-super-120b-tp8",
+      "trace_id": "IT-E2E-NM3SUP-MD-TP8-01",
+      "reference_backend": "golden_snapshot",
+      "oracle_level": "L3_snapshot_regression",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "ci_tier": "multi_device",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 8
+          },
+          "gating": true
+        }
+      ],
+      "metadata": {
+        "golden_snapshot_path": "data/nemotron_3_super_120b_golden.json",
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      },
+      "notes": "Nemotron-3-Super 120B-A12B BF16 TP8 smoke qualification. Attention Q/O and expert intermediate dimensions are sharded; each rank owns the single KV-head slice aligned with its local Q-head group, while router and latent projections are replicated. Each MoE layer reduces its routed latent in FP32 before fc2 and reduces the shared-expert output separately. The text-only gate compares normalized output exactly with a human-authored semantic oracle; it does not claim captured logits or per-GPU memory admission."
+    }
+  ]
+}

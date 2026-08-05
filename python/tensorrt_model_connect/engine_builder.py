@@ -9,6 +9,7 @@ import importlib
 import inspect
 import json
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -36,7 +37,12 @@ from .families import (
     resolve_nemo_archive_model_dir,
 )
 from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
-from .bundle_writer import BundleInfo, BundleSection, write_bundle
+from .bundle_writer import (
+    BundleInfo,
+    BundleSection,
+    _bundle_section_from_file,
+    write_bundle,
+)
 from . import trt_compat
 from .triattention_export import (
     TriAttentionBundleConfig,
@@ -102,6 +108,94 @@ def _untracked_compile_time(
     tracked_compile_elapsed = max(
         0.0, compile_after_components - compile_before_components)
     return max(0.0, measured_compile_elapsed - tracked_compile_elapsed)
+
+
+def _stage_tp_engine_plan(
+    staging_dir: Path,
+    rank: int,
+    plan: bytes,
+) -> tuple[BundleSection, int]:
+    """Persist one TP plan and return its file-backed bundle section."""
+    section_name = rank_engine_section(rank)
+    plan_path = staging_dir / f"{section_name}.plan"
+    plan_path.write_bytes(plan)
+    return _bundle_section_from_file(section_name, plan_path), len(plan)
+
+
+def _preflight_staged_tp_bundle_disk_space(
+    output_path: str | Path,
+    tp_engine_plan_sizes: dict[int, int],
+) -> None:
+    """Require room for the atomic output copy of all staged TP plans."""
+    required_bytes = sum(tp_engine_plan_sizes.values())
+    if required_bytes <= 0:
+        return
+
+    output_parent = Path(output_path).expanduser().resolve().parent
+    free_bytes = shutil.disk_usage(output_parent).free
+    if free_bytes < required_bytes:
+        raise OSError(
+            "Insufficient disk space to assemble the staged TP bundle "
+            f"atomically in {output_parent}: {free_bytes} bytes free, but at "
+            f"least {required_bytes} additional bytes are required for one "
+            "complete TP-plan set in the output bundle. The staged rank plans "
+            "already occupy another complete set. Free disk space or choose "
+            "an output path on a larger filesystem."
+        )
+
+
+def _apply_staged_tp_bundle_loading(
+    plugin: object,
+    sections: list[BundleSection],
+) -> list[BundleSection]:
+    """Add an exact staged-loading partition for an opted-in TP family."""
+    if getattr(plugin, "staged_tp_bundle_loading", False) is not True:
+        return sections
+
+    section_names = [section.name for section in sections]
+    lazy_sections = [
+        name for name in section_names
+        if name.startswith("engine_plan_tp_rank")
+    ]
+    if not lazy_sections:
+        return sections
+    if len(set(section_names)) != len(section_names):
+        raise ValueError(
+            "Staged TP bundle loading requires unique bundle section names"
+        )
+
+    config_indexes = [
+        index for index, section in enumerate(sections)
+        if section.name == "config.json"
+    ]
+    if len(config_indexes) != 1:
+        raise ValueError(
+            "Staged TP bundle loading requires exactly one config.json section"
+        )
+
+    config_index = config_indexes[0]
+    config = json.loads(sections[config_index].data)
+    if not isinstance(config, dict):
+        raise ValueError(
+            "Staged TP bundle loading requires config.json to contain an object"
+        )
+
+    eager_sections = [
+        name for name in section_names
+        if not name.startswith("engine_plan_tp_rank")
+    ]
+    config["bundle_loading"] = {
+        "mode": "staged",
+        "eager_sections": eager_sections,
+        "lazy_sections": lazy_sections,
+    }
+
+    rewritten = list(sections)
+    rewritten[config_index] = BundleSection(
+        "config.json",
+        json.dumps(config, indent=2).encode("utf-8"),
+    )
+    return rewritten
 
 
 # Backward-compatible alias for existing callers and builder contract tests.
@@ -1226,7 +1320,17 @@ def build_bundle(
 
     engine_plan: bytes
     prefill_engine_plan: bytes | None = None
-    tp_engine_plans: dict[int, bytes] = {}
+    tp_engine_sections: dict[int, BundleSection] = {}
+    tp_engine_plan_sizes: dict[int, int] = {}
+    tp_plan_staging = None
+    if (
+        parallel.enabled
+        and getattr(plugin, "staged_tp_bundle_loading", False) is True
+    ):
+        tp_plan_staging = tempfile.TemporaryDirectory(
+            prefix=".trtmc-tp-plans-",
+            dir=Path(output_path).expanduser().resolve().parent,
+        )
     actual_decoder_engine_layout = "single"
     engine_t0 = time.monotonic()
     try:
@@ -1236,10 +1340,22 @@ def build_bundle(
                 rank_kwargs["parallel_config"] = parallel.for_rank(rank)
                 print(f"[trtmc-build]   rank {rank}/{parallel.tp_size} ...",
                       file=sys.stderr)
-                tp_engine_plans[rank] = plugin.build_engine(
+                rank_plan = plugin.build_engine(
                     config, weights, max_cache_length, verbose=verbose,
                     **rank_kwargs)
-            engine_plan = tp_engine_plans[0]
+                if tp_plan_staging is not None:
+                    rank_section, rank_plan_size = _stage_tp_engine_plan(
+                        Path(tp_plan_staging.name), rank, rank_plan
+                    )
+                    del rank_plan
+                else:
+                    rank_section = BundleSection(
+                        rank_engine_section(rank), rank_plan
+                    )
+                    rank_plan_size = len(rank_plan)
+                tp_engine_sections[rank] = rank_section
+                tp_engine_plan_sizes[rank] = rank_plan_size
+            engine_plan = b""
             actual_decoder_engine_layout = "dual_profile"
         elif split_supported:
             print(
@@ -1292,7 +1408,7 @@ def build_bundle(
         print(f"[trtmc build] Split engines built [{engine_elapsed:.1f}s] "
               f"({total_mb:.1f} MB total)", file=sys.stderr)
     elif parallel.enabled:
-        total_mb = sum(len(plan) for plan in tp_engine_plans.values()) / (1024 * 1024)
+        total_mb = sum(tp_engine_plan_sizes.values()) / (1024 * 1024)
         print(f"[trtmc-build] Tensor-parallel engines built [{engine_elapsed:.1f}s] "
               f"({total_mb:.1f} MB total)", file=sys.stderr)
     else:
@@ -1417,8 +1533,7 @@ def build_bundle(
 
     if parallel.enabled:
         sections = [
-            BundleSection(rank_engine_section(rank), plan)
-            for rank, plan in sorted(tp_engine_plans.items())
+            tp_engine_sections[rank] for rank in sorted(tp_engine_sections)
         ]
     else:
         # For split decoder bundles, keep ``engine_plan`` as the decode-only
@@ -1585,7 +1700,17 @@ def build_bundle(
         sections.append(BundleSection("kernel_manifest.json", manifest_json))
 
     write_t0 = time.monotonic()
-    write_bundle(output_path, info, sections)
+    try:
+        sections = _apply_staged_tp_bundle_loading(plugin, sections)
+        if tp_plan_staging is not None:
+            _preflight_staged_tp_bundle_disk_space(
+                output_path,
+                tp_engine_plan_sizes,
+            )
+        write_bundle(output_path, info, sections)
+    finally:
+        if tp_plan_staging is not None:
+            tp_plan_staging.cleanup()
     _add_build_timing(build_timing, "bundle_write_s", time.monotonic() - write_t0)
     t4 = time.monotonic()
     build_timing["total_s"] = t4 - t0

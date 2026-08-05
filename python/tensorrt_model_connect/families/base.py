@@ -41,6 +41,11 @@ class FamilyPlugin(Protocol):
             shared builder packages its bytes instead of the checkpoint's
             tokenizer.json so a family can preserve the tokenizer behavior
             exposed by the HF runtime wrapper without mutating the HF cache.
+        staged_tp_bundle_loading: If True, the builder stages completed TP
+            engine plans as file-backed sections and writes them into the bundle
+            without retaining every plan in memory. The runtime eagerly loads
+            non-rank sections and lazily reads only the selected rank engine
+            plan. Default is False.
     """
 
     name: str

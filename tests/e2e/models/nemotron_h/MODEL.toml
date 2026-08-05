@@ -6,6 +6,8 @@ plugin = "nemotron_h"
 test_manifests = [
   "manifests/nemotron-h-nano-9b-tp4.json",
   "manifests/nemotron-h-nano-9b.json",
+  "manifests/nemotron-3-super-120b-tp8.json",
+  "manifests/nemotron-3-super-120b.json",
 ]
 
 [e2e_defaults.text_generation_causal]

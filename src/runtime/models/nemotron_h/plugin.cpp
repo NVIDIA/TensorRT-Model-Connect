@@ -7,6 +7,7 @@
 // Nemotron-H style models with interleaved attention and Mamba layers,
 // using NemotronHKvCache for attention layers and NemotronHRecurrentState for SSM layers.
 
+#include "bundle/bundle_format.h"
 #include "plugin_helpers.h"
 #include "runtime/models/nemotron_h/hybrid_state.h"
 #include "runtime/models/nemotron_h/pipeline.h"
@@ -17,7 +18,10 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace trtmc {
 
@@ -45,6 +49,47 @@ std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
 }
 
+int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
+    if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
+        return -1;
+    const int64_t value = shape[static_cast<std::size_t>(dim)];
+    if (value <= 0 || value > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(value);
+}
+
+int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& tensor_name) {
+    const int32_t static_dim = dim_at(module.tensor_shape(tensor_name), 1);
+    if (static_dim > 0)
+        return static_dim;
+    const int32_t profile_count = module.optimization_profile_count();
+    for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
+        const int32_t profile_dim = dim_at(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 1);
+        if (profile_dim > 0)
+            return profile_dim;
+    }
+    throw std::runtime_error("Unable to infer KV row width from engine tensor '" + tensor_name +
+                             "'");
+}
+
+int64_t positive_numel_from_module(const TrtModule& module, const std::string& tensor_name) {
+    const auto shape = module.tensor_shape(tensor_name);
+    if (shape.empty())
+        throw std::runtime_error("Unable to infer positive element count from engine tensor '" +
+                                 tensor_name + "'");
+
+    int64_t numel = 1;
+    for (const int64_t dim : shape) {
+        if (dim <= 0 || numel > std::numeric_limits<int64_t>::max() / dim)
+            throw std::runtime_error(
+                "Unable to infer positive element count from engine tensor '" + tensor_name +
+                "'");
+        numel *= dim;
+    }
+    return numel;
+}
+
 } // namespace
 
 class NemotronHPlugin final : public IPipelinePlugin {
@@ -68,15 +113,30 @@ class NemotronHPlugin final : public IPipelinePlugin {
         const std::string engine_section = tp_runtime.config.enabled
                                                ? tp_engine_section_name(tp_runtime.group.rank)
                                                : std::string("engine_plan");
+        const std::vector<char>* engine_plan = find_section(ctx.bundle, engine_section);
+        std::vector<char> lazy_engine_plan;
+        if (engine_plan == nullptr) {
+            const auto section_info = std::find_if(
+                ctx.bundle.info.sections.begin(), ctx.bundle.info.sections.end(),
+                [&engine_section](const BundleSectionInfo& section) {
+                    return section.name == engine_section;
+                });
+            if (section_info != ctx.bundle.info.sections.end()) {
+                lazy_engine_plan = ReadBundleSection(ctx.bundle_path, *section_info);
+                engine_plan = &lazy_engine_plan;
+            }
+        }
         auto loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, engine_section), engine_section.c_str(), opts);
+            ctx.backend, engine_plan, engine_section.c_str(), opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         cudaStream_t stream = loaded.module->stream();
-        int32_t kv_dim = compute_kv_dim(ctx.config);
 
         int32_t num_attention_layers = extract_json_int(ctx.config_json, "num_attention_layers", 0);
         int32_t num_mamba_layers = extract_json_int(ctx.config_json, "num_mamba_layers", 0);
+        const int32_t kv_dim = num_attention_layers > 0
+                                   ? cache_row_dim_from_module(*loaded.module, "cache_k_0")
+                                   : compute_kv_dim(ctx.config);
         int32_t d_inner = extract_json_int(ctx.config_json, "d_inner", ctx.config.hidden_size * 2);
         int32_t mamba_d_state = extract_json_int(ctx.config_json, "mamba_d_state", 128);
         int32_t mamba_d_conv = extract_json_int(ctx.config_json, "mamba_d_conv", 4);
@@ -95,9 +155,14 @@ class NemotronHPlugin final : public IPipelinePlugin {
 
         // NemotronHRecurrentState for the Mamba/SSM layers (conv_state + ssm_state)
         int32_t effective_conv_dim = (conv_dim > 0) ? conv_dim : d_inner;
-        int64_t conv_elems = static_cast<int64_t>(effective_conv_dim) * mamba_d_conv;
-        int64_t ssm_elems =
-            static_cast<int64_t>(mamba_nheads) * std::max(mamba_head_dim, 1) * mamba_d_state;
+        const int64_t conv_elems =
+            num_mamba_layers > 0
+                ? positive_numel_from_module(*loaded.module, "conv_state_0")
+                : static_cast<int64_t>(effective_conv_dim) * mamba_d_conv;
+        const int64_t ssm_elems =
+            num_mamba_layers > 0
+                ? positive_numel_from_module(*loaded.module, "ssm_state_0")
+                : static_cast<int64_t>(mamba_nheads) * std::max(mamba_head_dim, 1) * mamba_d_state;
 
         auto ssm = std::make_unique<NemotronHRecurrentState>(
             num_mamba_layers,

@@ -1,0 +1,36 @@
+{
+  "name": "nemotron-3-super-120b",
+  "hf_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "hf_revision": "d51eab0d1f979ebc26b546e634a04f450d99158e",
+  "bundle": "nemotron-3-super-120b.trtfb",
+  "family": "nemotron_h",
+  "runtime_strategy": "nemotron_h_hybrid_mamba_attention",
+  "task_strategy": "text_generation_causal",
+  "precision": "bf16",
+  "max_cache_length": 128,
+  "trust_remote_code": true,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "e2e_min_free_gpu_memory_mib": 260000,
+  "build_timeout_s": 21600,
+  "testcases": [
+    {
+      "name": "nemotron-3-super-120b",
+      "trace_id": "IT-E2E-NM3SUP-SD-01",
+      "reference_backend": "golden_snapshot",
+      "oracle_level": "L3_snapshot_regression",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "ci_tier": "nightly_only",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "metadata": {
+        "golden_snapshot_path": "data/nemotron_3_super_120b_golden.json",
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      },
+      "notes": "Nemotron-3-Super 120B-A12B BF16 single-device smoke qualification for a high-memory GPU (provisional 260000 MiB free minimum). The text-only gate compares normalized output exactly with the human-authored one-word semantic oracle; it does not claim captured logits or determinism coverage."
+    }
+  ]
+}
