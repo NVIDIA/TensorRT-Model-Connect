@@ -15,9 +15,10 @@ import sys
 import numpy as np
 import pytest
 
+from tests.e2e.models.minimax_h3 import e2e_plugins as minimax_h3_e2e_plugins
 from tests.e2e.models.minimax_h3.e2e_plugins.comparator import comparator
 from tensorrt_model_connect.families.minimax_h3.provenance import file_record
-from tests.e2e_harness.contracts import StageOutput, StageSpec, ThresholdProfile
+from tests.e2e_harness.contracts import RunContext, StageOutput, StageSpec, ThresholdProfile
 from tests.e2e_harness.manifest_loader import load_model_manifest
 from tests.e2e_harness.registry import (
     activate_model_plugins,
@@ -79,6 +80,68 @@ def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
     assert get_runner("diffusion_media_generation") is not None
     assert get_reference("hf_diffusers") is not None
     assert get_comparator("diffusion_media_generation") is not None
+
+
+@pytest.mark.parametrize("nested", [True, False])
+def test_minimax_h3_model_plugin_dir_accepts_proof_and_direct_layouts(
+    tmp_path: Path,
+    nested: bool,
+) -> None:
+    root = tmp_path / "model-plugins"
+    plugin_dir = root / "minimax_h3" if nested else root
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "libtrtmc_model_minimax_h3.so").write_bytes(b"model plugin")
+    case = load_model_manifest(_MANIFEST_PATH).testcases[0]
+
+    resolved = minimax_h3_e2e_plugins.model_plugin_dir(
+        RunContext(case=case, model_plugin_dir=str(root))
+    )
+
+    assert resolved == plugin_dir.resolve()
+
+
+def test_minimax_h3_model_plugin_dir_prefers_isolated_proof_layout(tmp_path: Path) -> None:
+    root = tmp_path / "model-plugins"
+    nested = root / "minimax_h3"
+    nested.mkdir(parents=True)
+    for plugin_dir in (root, nested):
+        (plugin_dir / "libtrtmc_model_minimax_h3.so").write_bytes(b"model plugin")
+    case = load_model_manifest(_MANIFEST_PATH).testcases[0]
+
+    resolved = minimax_h3_e2e_plugins.model_plugin_dir(
+        RunContext(case=case, model_plugin_dir=str(root))
+    )
+
+    assert resolved == nested.resolve()
+
+
+def test_minimax_h3_model_plugin_dir_preserves_local_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_dir = tmp_path / "source"
+    plugin_dir = project_dir / "build" / "models" / "minimax_h3"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "libtrtmc_model_minimax_h3.so").write_bytes(b"model plugin")
+    monkeypatch.setattr(minimax_h3_e2e_plugins, "PROJECT_DIR", project_dir)
+    case = load_model_manifest(_MANIFEST_PATH).testcases[0]
+
+    resolved = minimax_h3_e2e_plugins.model_plugin_dir(RunContext(case=case))
+
+    assert resolved == plugin_dir.resolve()
+
+
+def test_minimax_h3_model_plugin_dir_fails_closed_without_dso(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(minimax_h3_e2e_plugins, "PROJECT_DIR", tmp_path / "source")
+    case = load_model_manifest(_MANIFEST_PATH).testcases[0]
+
+    with pytest.raises(FileNotFoundError, match="libtrtmc_model_minimax_h3.so"):
+        minimax_h3_e2e_plugins.model_plugin_dir(
+            RunContext(case=case, model_plugin_dir=str(tmp_path / "model-plugins"))
+        )
 
 
 def _visual_thresholds(

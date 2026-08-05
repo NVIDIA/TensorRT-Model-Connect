@@ -117,7 +117,8 @@ def source_revision(case: E2ECase, ctx: RunContext) -> str:
 def model_plugin_dir(ctx: RunContext) -> Path:
     candidates = []
     if ctx.model_plugin_dir:
-        candidates.append(Path(ctx.model_plugin_dir))
+        root = Path(ctx.model_plugin_dir)
+        candidates.extend((root / "minimax_h3", root))
     candidates.append(PROJECT_DIR / "build" / "models" / "minimax_h3")
     for candidate in candidates:
         if (candidate / "libtrtmc_model_minimax_h3.so").is_file():
