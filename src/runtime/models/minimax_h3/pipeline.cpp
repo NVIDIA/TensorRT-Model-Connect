@@ -58,6 +58,11 @@ constexpr int32_t kTileInputFrames = 7;
 constexpr int32_t kTileCount = 28;
 static_assert(kTileBatch == kTileCount);
 
+constexpr std::array<int32_t, 3> kTileHeightOverlaps = {96, 80, 80};
+constexpr std::array<int32_t, 6> kTileWidthOverlaps = {80, 80, 80, 80, 64, 64};
+constexpr std::array<int32_t, 4> kTileOutputY = {0, 160, 336, 512};
+constexpr std::array<int32_t, 7> kTileOutputX = {0, 176, 352, 528, 704, 896, 1088};
+
 constexpr std::array<float, kLatentChannels> kLatentMean = {
     0.8580903411F,  -0.9606591463F, 1.0661640167F,  -0.5090325475F, -0.2727581859F, -1.3675414324F,
     -0.2553254962F, -0.2690755427F, -0.5376840830F, -0.0464097299F, 0.6657370329F,  0.1969012767F,
@@ -190,6 +195,18 @@ std::vector<float> unpatchify_video(const std::vector<float>& rows) {
     return latent;
 }
 
+void fill_audio_position_ids(std::vector<float>& positions,
+                             const std::array<double, kLatentWidth / kPatchWidth>& width_grid) {
+    for (int32_t channel = 0; channel < 2; ++channel) {
+        for (int32_t index = 0; index < kAudioLatents; ++index) {
+            const int32_t row = kTextRows + channel * kAudioLatents + index;
+            positions[static_cast<std::size_t>(row) * 3] = static_cast<float>(kTextRows + index);
+            positions[static_cast<std::size_t>(row) * 3 + 2] =
+                static_cast<float>(channel == 0 ? width_grid.front() : width_grid.back());
+        }
+    }
+}
+
 std::vector<float> make_position_ids() {
     std::vector<float> positions(static_cast<std::size_t>(kSequenceRows) * 3, 0.0F);
     for (int32_t index = 0; index < kTextRows; ++index)
@@ -209,14 +226,7 @@ std::vector<float> make_position_ids() {
         width_grid[i] =
             (width_left + static_cast<double>(i) * width_ratio / width_grid.size()) * 32.0;
 
-    for (int32_t channel = 0; channel < 2; ++channel) {
-        for (int32_t index = 0; index < kAudioLatents; ++index) {
-            const int32_t row = kTextRows + channel * kAudioLatents + index;
-            positions[static_cast<std::size_t>(row) * 3] = static_cast<float>(kTextRows + index);
-            positions[static_cast<std::size_t>(row) * 3 + 2] =
-                static_cast<float>(channel == 0 ? width_grid.front() : width_grid.back());
-        }
-    }
+    fill_audio_position_ids(positions, width_grid);
 
     double time = kTextRows;
     int32_t row = kTextRows + kAudioRows;
@@ -342,59 +352,64 @@ std::vector<float> extract_tiles(const std::vector<float>& latent, int32_t clip)
     return result;
 }
 
-std::vector<float> stitch_spatial_tiles(const std::vector<float>& tiles) {
-    constexpr std::array<int32_t, 3> height_overlaps = {96, 80, 80};
-    constexpr std::array<int32_t, 6> width_overlaps = {80, 80, 80, 80, 64, 64};
-    constexpr std::array<int32_t, 4> output_y = {0, 160, 336, 512};
-    constexpr std::array<int32_t, 7> output_x = {0, 176, 352, 528, 704, 896, 1088};
-    const std::size_t one_tile = static_cast<std::size_t>(3) * kTileFrames * kTileSize * kTileSize;
-    if (tiles.size() != static_cast<std::size_t>(kTileCount) * one_tile)
-        throw std::runtime_error("MiniMax-H3 decoded VAE tile count is invalid");
-    std::vector<float> clip(static_cast<std::size_t>(3) * kTileFrames * kOutputHeight *
-                            kOutputWidth);
-    const auto tile_value = [&](int32_t tile, int32_t channel, int32_t frame, int32_t y,
+void stitch_one_spatial_tile(const std::vector<float>& tiles, std::vector<float>& clip,
+                             int32_t tile_y, int32_t tile_x, int32_t kept_height,
+                             int32_t kept_width) {
+    const int32_t tile = tile_y * 7 + tile_x;
+    const auto tile_value = [&](int32_t source_tile, int32_t channel, int32_t frame, int32_t y,
                                 int32_t x) {
-        return tiles[((((static_cast<std::size_t>(tile) * 3 + channel) * kTileFrames + frame) *
+        return tiles[((((static_cast<std::size_t>(source_tile) * 3 + channel) * kTileFrames +
+                        frame) *
                            kTileSize +
                        y) *
                       kTileSize) +
                      x];
     };
-    for (int32_t tile_y = 0; tile_y < 4; ++tile_y) {
-        const int32_t kept_height = tile_y < 3 ? kTileSize - height_overlaps[tile_y] : kTileSize;
-        for (int32_t tile_x = 0; tile_x < 7; ++tile_x) {
-            const int32_t kept_width = tile_x < 6 ? kTileSize - width_overlaps[tile_x] : kTileSize;
-            const int32_t tile = tile_y * 7 + tile_x;
-            for (int32_t channel = 0; channel < 3; ++channel) {
-                for (int32_t frame = 0; frame < kTileFrames; ++frame) {
-                    for (int32_t y = 0; y < kept_height; ++y) {
-                        for (int32_t x = 0; x < kept_width; ++x) {
-                            float value = tile_value(tile, channel, frame, y, x);
-                            if (tile_y > 0 && y < height_overlaps[tile_y - 1]) {
-                                const int32_t overlap = height_overlaps[tile_y - 1];
-                                const float weight_b = static_cast<float>(y) / overlap;
-                                const float upper = tile_value(tile - 7, channel, frame,
-                                                               kTileSize - overlap + y, x);
-                                value = upper * (1.0F - weight_b) + value * weight_b;
-                            }
-                            if (tile_x > 0 && x < width_overlaps[tile_x - 1]) {
-                                const int32_t overlap = width_overlaps[tile_x - 1];
-                                const float weight_b = static_cast<float>(x) / overlap;
-                                const float left = tile_value(tile - 1, channel, frame, y,
-                                                              kTileSize - overlap + x);
-                                value = left * (1.0F - weight_b) + value * weight_b;
-                            }
-                            const auto target =
-                                ((((static_cast<std::size_t>(channel) * kTileFrames + frame) *
-                                       kOutputHeight +
-                                   output_y[tile_y] + y) *
-                                  kOutputWidth) +
-                                 output_x[tile_x] + x);
-                            clip[target] = value;
-                        }
+    for (int32_t channel = 0; channel < 3; ++channel) {
+        for (int32_t frame = 0; frame < kTileFrames; ++frame) {
+            for (int32_t y = 0; y < kept_height; ++y) {
+                for (int32_t x = 0; x < kept_width; ++x) {
+                    float value = tile_value(tile, channel, frame, y, x);
+                    if (tile_y > 0 && y < kTileHeightOverlaps[tile_y - 1]) {
+                        const int32_t overlap = kTileHeightOverlaps[tile_y - 1];
+                        const float weight_b = static_cast<float>(y) / overlap;
+                        const float upper =
+                            tile_value(tile - 7, channel, frame, kTileSize - overlap + y, x);
+                        value = upper * (1.0F - weight_b) + value * weight_b;
                     }
+                    if (tile_x > 0 && x < kTileWidthOverlaps[tile_x - 1]) {
+                        const int32_t overlap = kTileWidthOverlaps[tile_x - 1];
+                        const float weight_b = static_cast<float>(x) / overlap;
+                        const float left =
+                            tile_value(tile - 1, channel, frame, y, kTileSize - overlap + x);
+                        value = left * (1.0F - weight_b) + value * weight_b;
+                    }
+                    const auto target =
+                        ((((static_cast<std::size_t>(channel) * kTileFrames + frame) *
+                               kOutputHeight +
+                           kTileOutputY[tile_y] + y) *
+                          kOutputWidth) +
+                         kTileOutputX[tile_x] + x);
+                    clip[target] = value;
                 }
             }
+        }
+    }
+}
+
+std::vector<float> stitch_spatial_tiles(const std::vector<float>& tiles) {
+    const std::size_t one_tile = static_cast<std::size_t>(3) * kTileFrames * kTileSize * kTileSize;
+    if (tiles.size() != static_cast<std::size_t>(kTileCount) * one_tile)
+        throw std::runtime_error("MiniMax-H3 decoded VAE tile count is invalid");
+    std::vector<float> clip(static_cast<std::size_t>(3) * kTileFrames * kOutputHeight *
+                            kOutputWidth);
+    for (int32_t tile_y = 0; tile_y < 4; ++tile_y) {
+        const int32_t kept_height =
+            tile_y < 3 ? kTileSize - kTileHeightOverlaps[tile_y] : kTileSize;
+        for (int32_t tile_x = 0; tile_x < 7; ++tile_x) {
+            const int32_t kept_width =
+                tile_x < 6 ? kTileSize - kTileWidthOverlaps[tile_x] : kTileSize;
+            stitch_one_spatial_tile(tiles, clip, tile_y, tile_x, kept_height, kept_width);
         }
     }
     return clip;
@@ -499,6 +514,14 @@ std::vector<float> to_frame_major_rgb(const std::vector<float>& video) {
     return pixels;
 }
 
+void validate_generate_config(const GenerateConfig& cfg) {
+    if ((cfg.height > 0 && cfg.height != kOutputHeight) ||
+        (cfg.width > 0 && cfg.width != kOutputWidth) ||
+        (cfg.num_steps > 0 && cfg.num_steps != kSteps))
+        throw std::invalid_argument(
+            "MiniMax-H3 native profile is fixed at 124 frames, 768x1344, 50 grid points");
+}
+
 } // namespace
 
 MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
@@ -549,11 +572,7 @@ MiniMaxH3Pipeline::~MiniMaxH3Pipeline() {
 ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
                                               const GenerateConfig& cfg) {
     std::lock_guard<std::mutex> lock(generation_mutex_);
-    if ((cfg.height > 0 && cfg.height != kOutputHeight) ||
-        (cfg.width > 0 && cfg.width != kOutputWidth) ||
-        (cfg.num_steps > 0 && cfg.num_steps != kSteps))
-        throw std::invalid_argument(
-            "MiniMax-H3 native profile is fixed at 124 frames, 768x1344, 50 grid points");
+    validate_generate_config(cfg);
     const int64_t seed = cfg.seed >= 0 ? cfg.seed : 0;
     const auto total_begin = Clock::now();
 
