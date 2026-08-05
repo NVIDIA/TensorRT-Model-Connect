@@ -15,7 +15,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import os
 import statistics
 import tempfile
@@ -138,21 +137,25 @@ def _request_input(request: Mapping[str, Any]) -> Path:
 def _aligned_output(path: Path, input_path: Path):
     import numpy as np
     import soundfile as sf
-    from scipy.signal import resample_poly
 
     output, output_rate = sf.read(str(path), dtype="float32", always_2d=True)
     output = np.asarray(output.mean(axis=1), dtype=np.float32)
     input_info = sf.info(str(input_path))
     input_rate = int(input_info.samplerate)
     if output_rate != input_rate:
-        divisor = math.gcd(int(output_rate), input_rate)
-        output = np.asarray(
-            resample_poly(
-                output,
-                up=input_rate // divisor,
-                down=int(output_rate) // divisor,
-            ),
-            dtype=np.float32,
+        import torch
+        import torchaudio
+
+        waveform = torch.from_numpy(np.ascontiguousarray(output[None, :]))
+        output = (
+            torchaudio.functional.resample(
+                waveform,
+                int(output_rate),
+                input_rate,
+            )
+            .squeeze(0)
+            .numpy()
+            .astype(np.float32, copy=False)
         )
         output_rate = input_rate
     target_samples = int(input_info.frames)

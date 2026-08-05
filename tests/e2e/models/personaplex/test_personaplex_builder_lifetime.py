@@ -376,15 +376,18 @@ def test_standard_decoder_uses_stable_fp32_tactics() -> None:
 
 
 @pytest.mark.parametrize(
-    "function_name",
+    ("module_name", "function_name"),
     (
-        "_build_mimi_streaming_encoder_engine",
-        "_build_mimi_decoder_engine",
+        ("mimi_streaming_encoder", "_build_mimi_streaming_encoder_engine"),
+        ("plugin", "_build_mimi_decoder_engine"),
     ),
 )
-def test_mimi_codec_uses_stable_builder_tactics(function_name: str) -> None:
+def test_mimi_codec_uses_stable_builder_tactics(
+    module_name: str,
+    function_name: str,
+) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.personaplex.plugin")
+        f"tensorrt_model_connect.families.personaplex.{module_name}")
     builder_context_options = inspect.getclosurevars(
         getattr(module, function_name)).nonlocals
 
@@ -409,7 +412,7 @@ def test_mimi_decoder_workspace_supports_long_form_profile() -> None:
         ("default_dual_profile_decoder", "build_dual_profile_decoder_engine"),
         ("default_dual_profile_decoder_tp", "build_dual_profile_tp_decoder_engine"),
         ("decoder_tp_builder", "build_personaplex_tp_decoder_engine"),
-        ("plugin", "_build_mimi_streaming_encoder_engine"),
+        ("mimi_streaming_encoder", "_build_mimi_streaming_encoder_engine"),
         ("plugin", "_build_mimi_decoder_engine"),
     ),
 )

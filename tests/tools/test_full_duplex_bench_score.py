@@ -130,7 +130,7 @@ def test_backchannel_metrics_cover_silence_and_long_speech() -> None:
     assert long_speech == {"tor": 1.0, "frequency": 0.0, "jsd": 1.0}
 
 
-def test_backchannel_metrics_accept_a_short_two_word_response() -> None:
+def test_backchannel_metrics_match_pinned_definition_golden() -> None:
     result = fdb_score._backchannel_metrics(
         segments=[{"start": 0.0, "end": 0.8}],
         chunks=[
@@ -143,7 +143,9 @@ def test_backchannel_metrics_accept_a_short_two_word_response() -> None:
 
     assert result["tor"] == 0.0
     assert result["frequency"] == pytest.approx(0.5)
-    assert 0.0 <= result["jsd"] <= 1.0
+    # Golden value from the pinned Full-Duplex-Bench 0.2-second histogram,
+    # linear-resize, and Jensen-Shannon-distance definitions.
+    assert result["jsd"] == pytest.approx(0.5143306819821533)
 
 
 def test_compare_scores_passes_each_backend_metric_within_budget() -> None:

@@ -1756,8 +1756,7 @@ suites:
       min_max_cache_length: 1280
     # Equivalence margins describe material behavioral shifts: ten TOR
     # percentage points, one backchannel event per 100 seconds, and two JSD
-    # points. They are wider than the measured 30-per-category sampling error
-    # and are not derived from the candidate TRTMC result.
+    # points. They are fixed independently of the candidate TRTMC result.
     gates:
       max_tor_abs_delta: 0.10
       max_backchannel_frequency_abs_delta: 0.01

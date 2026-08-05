@@ -33,7 +33,10 @@ def test_personaplex_full_duplex_profile_pins_evaluator_dependencies() -> None:
         "python_profile_requirements/full_duplex_evaluator.lock.txt"
     ).read_text(encoding="utf-8")
 
+    assert "huggingface-hub==1.22.0" in requirements
     assert "nemo_toolkit[asr]==2.7.3" in requirements
+    assert "numpy==1.26.4" in requirements
+    assert "scipy==1.15.3" in requirements
     assert "silero-vad==6.2.1" in requirements
     profile = load_python_profile_registry()["profiles"][
         "personaplex_full_duplex_evaluator"

@@ -25,6 +25,8 @@ from tensorrt_model_connect.parallel_config import ParallelConfig, shard_standar
 
 personaplex_plugin = importlib.import_module(
     "tensorrt_model_connect.families.personaplex.plugin")
+personaplex_mimi_weights = importlib.import_module(
+    "tensorrt_model_connect.families.personaplex.mimi_weights")
 
 
 _LAYERS = 2
@@ -36,7 +38,7 @@ _VOCAB = 32
 
 def test_personaplex_mimi_loader_requires_checkpoint_owned_weights(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="checkpoint-owned Mimi codec"):
-        personaplex_plugin._load_mimi_weights(tmp_path)
+        personaplex_mimi_weights._load_mimi_weights(tmp_path)
 
 
 def _personaplex_tp_builder_module():
@@ -436,7 +438,7 @@ def test_personaplex_mimi_mapping_uses_checkpoint_owned_layout():
             np.eye(hidden, dtype=np.float32)),
     }
 
-    mapped = personaplex_plugin._translate_personaplex_mimi_weights(source)
+    mapped = personaplex_mimi_weights._translate_personaplex_mimi_weights(source)
 
     np.testing.assert_array_equal(
         mapped["encoder.layers.0.conv.weight"],

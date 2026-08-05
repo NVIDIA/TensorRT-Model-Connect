@@ -151,6 +151,11 @@ manifest preserves the per-category source licenses; CANDOR and ICC subsets
 remain non-commercial and subject to their upstream terms.
 Prepared 24 kHz mono float WAVs use deterministic headers, and the scorer
 verifies every prepared-audio SHA before evaluation.
+The scorer is TRTMC-owned code following the metric definitions from
+`DanielLin94144/Full-Duplex-Bench` revision
+`3e799c45a045256f47d5f1c9cda90157e2d2ec9e`; the repository does not vendor or
+execute the upstream evaluator source. Dataset use remains governed by the
+per-category licenses recorded in the prepared manifest.
 Because those aggregate gates are sized for 30 samples per category, the
 validation engine rejects a reduced `--limit` before launching HF or TRTMC
 instead of reporting a statistically unsupported pass.
