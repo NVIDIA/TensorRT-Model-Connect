@@ -282,7 +282,7 @@ def test_family_file_assets_are_scoped_to_selected_manifests() -> None:
         "        continue"
     )
     family_assets = (
-        'file_assets.extend(_family_hf_warm_files(d.get("family", "")))'
+        'file_assets.extend(_family_hf_warm_file_specs(d.get("family", "")))'
     )
 
     assert text.index(selection_guard) < text.index(family_assets)
