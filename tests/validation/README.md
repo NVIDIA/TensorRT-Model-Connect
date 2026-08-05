@@ -122,6 +122,42 @@ read the existing root-level public `VBench` asset directly. Dev/QA machines
 and NAS mirrors should copy the six directories without changing their
 relative layouts and verify the manifest after transfer.
 
+PersonaPlex's default `full_duplex_bench_behavior_parity` workload uses a
+separate, deterministic behavioral slice of the public Full-Duplex-Bench v1.0
+asset. Prepare it from the complete 727-sample benchmark:
+
+```bash
+python tools/prepare_full_duplex_bench_validation.py \
+  --source-root /mnt/data/FullDuplexBench-v1.0-public \
+  --icc-distribution /mnt/data/FullDuplexBench-v1.0-public/icc_backchannel/all_data_distribution.json \
+  --output-root /mnt/data/FullDuplexBench-v1.0-public/trtmc-validate-v1 \
+  --samples-per-category 30
+```
+
+The resulting 150 samples contain 30 fixed SHA-ranked inputs from each of the
+five benchmark categories. Twenty thousand stratified resamples of the
+complete run showed that 100 samples left up to 0.090 aggregate TOR sampling
+error at the 95th percentile, while 150 reduced it to about 0.057; increasing
+to 200 improved it to about 0.040
+but increased the cold HF+TRTMC runtime from about 66 to 87 minutes. The fixed
+150-sample slice is therefore the default validation tradeoff.
+
+The source root must include its managed `DATASET_MANIFEST.json`; preparation
+rejects a different upstream revision, subset count, or license declaration.
+
+HF and TRTMC process the exact same normalized audio independently. Each
+backend is then scored with pinned Full-Duplex-Bench TOR, backchannel frequency,
+and JSD definitions. Validation gates the absolute backend delta at 0.10 TOR,
+0.01 backchannel events/second, and 0.02 JSD. These are behavioral consistency
+gates, not paper-score or semantic-content accuracy gates. The generated
+manifest preserves the per-category source licenses; CANDOR and ICC subsets
+remain non-commercial and subject to their upstream terms.
+Prepared 24 kHz mono float WAVs use deterministic headers, and the scorer
+verifies every prepared-audio SHA before evaluation.
+Because those aggregate gates are sized for 30 samples per category, the
+formal scorer rejects a reduced `--limit` instead of reporting a statistically
+unsupported pass.
+
 LocateAnything grounding accuracy uses the public `lscpku/RefCOCO_rec`
 dataset pinned at revision
 `566810e1ad62821ed3c6ab569ea33d80f5bdb874`. Stage that exact Hugging Face

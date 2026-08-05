@@ -34,6 +34,7 @@ struct CliArgs {
     std::string audio_in;
     std::vector<std::string> audio_inputs;
     std::string audio_out;
+    std::string speech_teacher_tokens;
     std::string field_input;
     std::string branch_input;
     std::string trunk_input;

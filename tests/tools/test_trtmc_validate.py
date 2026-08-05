@@ -55,7 +55,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     )
     assert (
         catalog["models"]["personaplex-7b"]["reference_cache_identity"]
-        == "personaplex-official-greedy-bf16-stage-trace-v4"
+        == "personaplex-official-greedy-bf16-full-duplex-v5"
     )
     assert (
         catalog["models"]["flux-2-dev"]["reference_cache_identity"]
@@ -115,7 +115,8 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
     }
-    assert max(catalog["sample_limits"].values()) == 100
+    assert max(catalog["sample_limits"].values()) == 150
+    assert catalog["sample_limits"]["full_duplex_bench_behavior_parity"] == 150
     assert catalog["sample_limits"]["mmlu_five_shot_mcq"] == 20
     assert catalog["sample_limits"]["dpg_bench_diffusion_image"] == 5
     assert catalog["sample_limits"]["gedit_bench_image_edit"] == 5
@@ -853,6 +854,31 @@ def test_model_specific_reference_environment_keeps_common_validation_base() -> 
     )
 
 
+def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
+    profiles = trtmc_validate._binding_profiles(
+        trtmc_validate.Binding("personaplex-7b", "full-duplex"),
+        task_models={
+            "personaplex-7b": {
+                "family": "personaplex",
+                "runtime_strategy": "personaplex_speech_to_speech",
+                "reference_backend": "torch_reference",
+            }
+        },
+        suites={
+            "full-duplex": {
+                "scoring": {
+                    "python_profile": "personaplex_full_duplex_evaluator"
+                }
+            }
+        },
+    )
+
+    assert profiles == (
+        trtmc_validate.COMMON_REFERENCE_PROFILE,
+        "personaplex_full_duplex_evaluator",
+    )
+
+
 def test_ensure_environments_reports_create_only_when_resolver_creates(monkeypatch, capsys):
     calls = 0
 
@@ -1356,6 +1382,27 @@ def test_mcq_report_exposes_reference_tie_equivalence_metrics():
     assert comparison["metrics"]["reference_tie_equivalent_count"] == 1
 
 
+def test_full_duplex_report_uses_metric_gate_pass_rate() -> None:
+    comparison = trtmc_validate._comparison_details(
+        {
+            "status": "passed",
+            "mode": "full_duplex_bench_behavior_parity",
+            "metric_gate_pass_rate": 1.0,
+            "metrics": {
+                "icc_backchannel.jsd.abs_delta": {"mean": 0.006},
+            },
+        },
+        {"status": "completed"},
+    )
+
+    assert comparison["status"] == "agreement"
+    assert comparison["primary_metric"] == {
+        "name": "metric_gate_pass_rate",
+        "value": 1.0,
+    }
+    assert comparison["metrics"]["icc_backchannel.jsd.abs_delta"] == 0.006
+
+
 def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
     case_dir = tmp_path / "model-a" / "e2e"
     case_dir.mkdir(parents=True)
@@ -1758,6 +1805,63 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         assert wrapper not in json.dumps(records)
 
 
+def test_disagreement_prefers_teacher_forced_native_command(tmp_path):
+    case_dir = tmp_path / "personaplex-7b" / "speech-to-speech"
+    work_dir = case_dir / "validation" / "speech-to-speech" / "personaplex-7b"
+    work_dir.mkdir(parents=True)
+    sample_id = "sample-7"
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": sample_id, "audio": "/data/input.wav"}) + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "summary.json").write_text(
+        json.dumps({"disagreements": [{"sample_id": sample_id}]}),
+        encoding="utf-8",
+    )
+    for name in ("hf_predictions.json", "trtfb_predictions.json"):
+        (work_dir / name).write_text(
+            json.dumps({"responses": [{"sample_id": sample_id}]}),
+            encoding="utf-8",
+        )
+    free_command = [
+        "/workspace/build/trtmc",
+        "speak",
+        "personaplex-7b.trtfb",
+        "--audio-in",
+        "/data/input.wav",
+    ]
+    teacher_command = [
+        *free_command,
+        "--speech-teacher-tokens",
+        "/runs/results/teacher_tokens.txt",
+    ]
+    (work_dir / "trtfb_native_commands.jsonl").write_text(
+        json.dumps({"sample_id": sample_id, "command": free_command}) + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "trtfb_teacher_native_commands.jsonl").write_text(
+        json.dumps({"sample_id": sample_id, "command": teacher_command}) + "\n",
+        encoding="utf-8",
+    )
+
+    reproduction = trtmc_validate._commands_from_logs(work_dir)
+    assert reproduction["trtmc"] == [
+        shlex.join(free_command),
+        shlex.join(teacher_command),
+    ]
+    assert reproduction["command_count"]["trtmc"] == 2
+
+    result = trtmc_disagreements.build_disagreement_artifact(
+        work_dir=work_dir,
+        case_dir=case_dir,
+    )
+
+    record = json.loads(
+        (case_dir / result["path"]).read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert record["reproduce"]["trtmc"] == shlex.join(teacher_command)
+
+
 def test_cached_reference_command_is_relocated_to_current_work_dir(
     tmp_path: Path,
 ) -> None:
@@ -1799,6 +1903,10 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
         "$ python validation/engine.py run-trtfb\n",
         encoding="utf-8",
     )
+    (work_dir / "full_duplex_bench_score.log").write_text(
+        "$ python tools/full_duplex_bench_score.py --trtmc-predictions out.json\n",
+        encoding="utf-8",
+    )
     commands = (
         {
             "sample_id": "sample-1",
@@ -1823,6 +1931,7 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
     assert reproduction["command_logs"]["trtmc"] == [
         "trtfb_native_commands.jsonl"
     ]
+    assert "full_duplex_bench_score.py" not in json.dumps(reproduction)
 
 
 def test_commands_from_logs_prefer_native_reference_jsonl(tmp_path: Path) -> None:

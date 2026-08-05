@@ -100,6 +100,40 @@ void test_delay_cache_reads_and_collects_outputs() {
     check(output_text == 9100, "delay cache collects aligned output text token");
 }
 
+void test_teacher_trace_is_written_and_predictions_are_realigned() {
+    auto state = trtmc::make_delay_cache_state({0, 0, 1, 1, 0, 1, 1}, 6);
+    const std::vector<int32_t> teacher_text = {101, 102};
+    const std::vector<int32_t> teacher_audio = {
+        201, 202, 203, 211, 212, 213,
+    };
+    auto predictions = trtmc::make_speech_teacher_predictions(2, 3);
+
+    trtmc::write_speech_teacher_frame_to_delay_cache(state, teacher_text, teacher_audio, 3, 0, 1);
+    check(state.cache[trtmc::delay_cache_index(state, 0, 1)] == 101,
+          "teacher trace writes text at its delayed position");
+    check(state.cache[trtmc::delay_cache_index(state, 1, 1)] == 201,
+          "teacher trace writes delay-zero audio");
+    check(state.cache[trtmc::delay_cache_index(state, 2, 2)] == 202,
+          "teacher trace writes delay-one audio");
+    check(state.provided[trtmc::delay_cache_index(state, 3, 2)] == 1,
+          "teacher trace marks forced audio as provided");
+    check(state.provided[trtmc::delay_cache_index(state, 4, 1)] == 0,
+          "teacher trace leaves user streams untouched");
+
+    trtmc::capture_speech_teacher_predictions(state, teacher_text, teacher_audio, 3, 1,
+                                              {101, 201, 999, 999}, predictions);
+    trtmc::write_speech_teacher_frame_to_delay_cache(state, teacher_text, teacher_audio, 3, 1, 2);
+    trtmc::capture_speech_teacher_predictions(state, teacher_text, teacher_audio, 3, 2,
+                                              {999, 211, 202, 203}, predictions);
+    trtmc::capture_speech_teacher_predictions(state, teacher_text, teacher_audio, 3, 3,
+                                              {999, 999, 212, 213}, predictions);
+
+    check(predictions.text == std::vector<int32_t>({101, 999}),
+          "teacher text predictions align by logical frame");
+    check(predictions.audio == std::vector<int32_t>({201, 202, 203, 211, 212, 213}),
+          "teacher audio predictions undo codebook delays");
+}
+
 void test_waveform_trim_and_peak_normalize() {
     std::vector<float> waveform(20, 0.0F);
     const auto trim_result = trtmc::trim_speech_waveform_to_generated_frames(10, 2.0F, 3, waveform);
@@ -205,6 +239,7 @@ void test_mimi_ring_attention_matches_official_cache_wrap() {
 int main() {
     test_default_speech_delays_generalize_to_num_codebooks();
     test_delay_cache_reads_and_collects_outputs();
+    test_teacher_trace_is_written_and_predictions_are_realigned();
     test_waveform_trim_and_peak_normalize();
     test_waveform_postprocess_skips_invalid_or_safe_inputs();
     test_mimi_encode_plan_keeps_only_the_causal_input_prefix();

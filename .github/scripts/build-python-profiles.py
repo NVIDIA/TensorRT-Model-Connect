@@ -19,7 +19,13 @@ from tensorrt_model_connect.python_profiles import (
 
 def main() -> None:
     profiles = load_python_profile_registry()["profiles"]
-    names = sorted(name for name in profiles if name != DEFAULT_PROFILE)
+    names = sorted(
+        name
+        for name, spec in profiles.items()
+        if name != DEFAULT_PROFILE
+        and isinstance(spec, dict)
+        and bool(spec.get("prebuild", True))
+    )
     if not names:
         raise SystemExit("no family-owned Python profiles were declared")
 

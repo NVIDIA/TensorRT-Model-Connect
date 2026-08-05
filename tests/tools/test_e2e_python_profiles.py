@@ -235,6 +235,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "lance_reference",
         "magpie_tts_reference",
         "nemotron_h_reference",
+        "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
         "sana_wm_reference",
         "reference_common",

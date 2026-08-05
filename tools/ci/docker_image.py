@@ -151,7 +151,15 @@ class DockerImageManager:
         registry = self._load_profile_registry()
         default_profile = self._default_profile_name()
         profiles = registry["profiles"]
-        expected_profiles = ",".join(sorted(name for name in profiles if name != default_profile))
+        expected_profiles = ",".join(
+            sorted(
+                name
+                for name, spec in profiles.items()
+                if name != default_profile
+                and isinstance(spec, dict)
+                and bool(spec.get("prebuild", True))
+            )
+        )
         if not expected_profiles:
             raise CiError("No family-owned Python execution profiles were declared")
 

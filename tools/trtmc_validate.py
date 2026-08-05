@@ -450,6 +450,7 @@ def _binding_profiles(
     binding: Binding,
     *,
     task_models: Mapping[str, dict[str, Any]],
+    suites: Mapping[str, dict[str, Any]] | None = None,
 ) -> tuple[str, ...]:
     if not binding.runnable:
         raise ValidationError(
@@ -462,11 +463,19 @@ def _binding_profiles(
         reference_backend=str(model.get("reference_backend", "") or ""),
         execution_profiles=model.get("execution_profiles"),
     )
-    return (
-        (COMMON_REFERENCE_PROFILE,)
-        if profile == COMMON_REFERENCE_PROFILE
-        else (COMMON_REFERENCE_PROFILE, profile)
+    profiles = [COMMON_REFERENCE_PROFILE]
+    if profile != COMMON_REFERENCE_PROFILE:
+        profiles.append(profile)
+    suite = (suites or {}).get(binding.workload, {})
+    scoring = suite.get("scoring", {}) if isinstance(suite, Mapping) else {}
+    scoring_profile = (
+        str(scoring.get("python_profile", "") or "")
+        if isinstance(scoring, Mapping)
+        else ""
     )
+    if scoring_profile and scoring_profile not in profiles:
+        profiles.append(scoring_profile)
+    return tuple(profiles)
 
 
 def ensure_environments(
@@ -718,6 +727,11 @@ def _comparison_command(
 
 
 MAX_REPRO_COMMANDS_PER_BACKEND = 3
+_REPRO_COMMAND_LOG_NAMES = {
+    "hf_native_run.log",
+    "hf_run.log",
+    "trtfb_run.log",
+}
 _FAILED_SAMPLE_STATUSES = {"disagreement", "fail", "failed", "mismatch"}
 _FAILED_SAMPLE_FIELDS = (
     "agreement_match",
@@ -956,10 +970,13 @@ def _commands_from_logs(root: Path) -> dict[str, Any]:
     disagreement_id = _first_disagreement_id(root)
     representative_id = disagreement_id or (sample_ids[0] if sample_ids else "")
     log_paths = sorted(
-        {
-            *root.rglob("*.log"),
-            *root.rglob("*_native_commands.jsonl"),
-        }
+        path
+        for path in root.rglob("*")
+        if path.is_file()
+        and (
+            path.name in _REPRO_COMMAND_LOG_NAMES
+            or path.name.endswith("_native_commands.jsonl")
+        )
     )
     commands, counts, logs = _collect_command_logs(
         root,
@@ -988,6 +1005,7 @@ def _append_unique(commands: dict[str, list[str]], kind: str, command: str) -> N
 
 
 _PRIMARY_COMPARISON_METRICS = (
+    "metric_gate_pass_rate",
     "sample_pass_rate",
     "sample_agreement_rate",
     "prediction_agreement_rate",
@@ -1005,6 +1023,7 @@ _PRIMARY_METRIC_BY_MODE = {
     "diffusion_image_clip_parity": "overall_pass_rate",
     "diffusion_text_parity": "token_agreement_rate",
     "encoder_embedding_parity": "vector_pass_rate",
+    "full_duplex_bench_behavior_parity": "metric_gate_pass_rate",
     "image_classification_parity": "top1_agreement",
     "model_plugin_parity": "sample_pass_rate",
     "ocrbench_v2": "prediction_agreement_rate",
@@ -1406,6 +1425,7 @@ def run_binding(
     profiles = _binding_profiles(
         binding,
         task_models=task_models,
+        suites=suites,
     )
     environment = ensure_environments(profiles, str(arguments.hf_python))
     reference_sources = ensure_reference_sources(

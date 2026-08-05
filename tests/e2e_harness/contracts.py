@@ -554,6 +554,8 @@ class RunContext:
         ld_library_path: LD_LIBRARY_PATH with TRT/CUDA libs.
         engine_dir: Directory containing .trtfb bundles.
         model_plugin_dir: Directory containing isolated model plugin DSOs.
+        reference_output: Optional already-computed reference output for TRT
+            validation runners that need a teacher trace or shared inputs.
         rebuild: If True, force rebuild bundles from HF.
         verbose: If True, emit extra debug output.
     """
@@ -571,6 +573,7 @@ class RunContext:
     ld_library_path: str = ""
     engine_dir: str = ""
     model_plugin_dir: str = ""
+    reference_output: Optional[StageOutput] = None
     rebuild: bool = False
     verbose: bool = False
 

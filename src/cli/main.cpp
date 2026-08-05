@@ -1454,6 +1454,15 @@ int cmd_speak(const CliArgs& args) {
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : -1;
     cfg.tail_frames = args.tail_frames;
+    if (!args.speech_teacher_tokens.empty()) {
+        constexpr const char* kTeacherTraceEnvironment =
+            "_TRTMC_INTERNAL_SPEECH_TEACHER_TOKENS";
+        if (setenv(kTeacherTraceEnvironment, args.speech_teacher_tokens.c_str(), 1) != 0) {
+            std::cerr << "Error: Could not configure speech teacher trace: "
+                      << std::strerror(errno) << '\n';
+            return EXIT_FAILURE;
+        }
+    }
 
     auto result = pipeline->speak(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
                                   cfg, audio.sample_rate);

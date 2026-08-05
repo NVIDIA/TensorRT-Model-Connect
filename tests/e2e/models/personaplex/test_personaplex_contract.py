@@ -90,22 +90,18 @@ def test_contract_compares_runner_tokens_with_official_reference_tokens() -> Non
     )
 
     assert result.passed
-    assert result.metrics["token_match"].value == 1.0
-    assert result.metrics["token_match"].threshold == 0.8
-    assert result.metrics["depth_token_match_rate"].passed
-    assert result.metrics["depth_token_match_rate"].threshold == 0.7
-    assert result.metrics["audio_token_match_rate"].passed
-    assert result.metrics["audio_token_match_rate"].threshold == 0.7
-    assert result.metrics["frame_exact_match_rate"].threshold == 0.7
+    assert result.metrics["free_generation_token_match_rate"].value == 1.0
+    assert result.metrics["free_generation_token_match_rate"].threshold is None
+    assert result.metrics["free_generation_depth_token_match_rate"].passed
+    assert result.metrics["free_generation_audio_token_match_rate"].passed
+    assert result.metrics["free_generation_frame_exact_match_rate"].threshold is None
     assert result.metrics["rms"].threshold == 0.001
 
 
-def test_contract_rejects_nightly_token_match_below_declared_minimum() -> None:
+def test_contract_reports_free_generation_divergence_without_failing() -> None:
     reference = np.zeros((25, 8), dtype=np.int32)
     actual = reference.copy()
     actual.reshape(-1)[149:] = 1
-    thresholds = _thresholds()
-    thresholds.metrics["contract_token_match"] = 0.5
     result = PersonaPlexSpeechToSpeechPlugin().verify(
         StageOutput(
             stage_name="full_generation",
@@ -120,16 +116,17 @@ def test_contract_rejects_nightly_token_match_below_declared_minimum() -> None:
             data={"reference_tokens": reference},
         ),
         _case(),
-        thresholds,
+        _thresholds(),
     )
 
-    assert not result.passed
-    assert result.metrics["token_match"].value == pytest.approx(0.745)
-    assert result.metrics["token_match"].threshold == 0.8
-    assert not result.metrics["token_match"].passed
-    assert result.metrics["depth_token_match_rate"].passed
-    assert result.metrics["audio_token_match_rate"].passed
-    assert result.metrics["frame_exact_match_rate"].passed
+    assert result.passed
+    metric = result.metrics["free_generation_token_match_rate"]
+    assert metric.value == pytest.approx(0.745)
+    assert metric.threshold is None
+    assert metric.passed
+    assert result.metrics["free_generation_depth_token_match_rate"].passed
+    assert result.metrics["free_generation_audio_token_match_rate"].passed
+    assert result.metrics["free_generation_frame_exact_match_rate"].passed
 
 
 def test_contract_rejects_missing_reference_tokens() -> None:
@@ -169,4 +166,4 @@ def test_contract_rejects_extra_runtime_frames() -> None:
 
     assert not result.passed
     assert not result.metrics["frame_count_match"].passed
-    assert result.metrics["token_match"].passed
+    assert result.metrics["free_generation_token_match_rate"].passed

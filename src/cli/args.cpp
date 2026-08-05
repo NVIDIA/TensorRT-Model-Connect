@@ -231,7 +231,8 @@ void print_usage() {
            "[--segment-overlap-seconds F] [--lcs-merge] "
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
-           "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
+           "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav "
+           "[--speech-teacher-tokens PATH]\n"
            "  trtmc inspect         <bundle.trtfb> [--list-engines]\n"
            "  trtmc version\n"
            "\n"
@@ -618,6 +619,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--audio-out" && need_value(arg)) {
             args.audio_out = argv[++i];
+            continue;
+        }
+        if (arg == "--speech-teacher-tokens" && need_value(arg)) {
+            args.speech_teacher_tokens = argv[++i];
             continue;
         }
         if (arg == "--audio" && need_value(arg)) {

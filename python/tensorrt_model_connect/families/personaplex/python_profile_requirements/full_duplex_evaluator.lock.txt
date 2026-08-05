@@ -1,0 +1,4 @@
+nemo_toolkit[asr]==2.7.3
+scipy==1.18.0
+silero-vad==6.2.1
+soundfile==0.14.0

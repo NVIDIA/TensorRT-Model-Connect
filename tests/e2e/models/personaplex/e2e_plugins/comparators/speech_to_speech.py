@@ -1,15 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Speech-to-speech comparator.
+"""PersonaPlex speech-to-speech accuracy comparator.
 
-Compares TRT PersonaPlex-style speech output against reference with metrics:
-- Frame count match
-- Depth token match rate
-- Audio token match rate
-- Frame exact match rate
-- RMS floor check
-- Optional ASR consistency (transcript similarity)
+The official and TRTMC free-running decoders are autoregressive. A one-logit
+numeric difference can therefore change all later tokens even when the model's
+conditional predictions remain equivalent. Free-generation agreement is kept
+for diagnosis; teacher-forced top-1 agreement is the accuracy gate.
 """
 
 from __future__ import annotations
@@ -46,11 +43,23 @@ def _compare_exact_stream(
     frame_metric: str,
     token_metric: str,
     token_threshold: float,
+    token_gates: bool = True,
+    required: bool = False,
 ) -> tuple[dict[str, MetricResult], bool, int | None]:
     """Compare an optional frame-major token stream exactly."""
     import numpy as np
 
     if trt_tokens is None and ref_tokens is None:
+        if required:
+            return {
+                availability_metric: MetricResult(
+                    value=0.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=False,
+                    note="TRT available=False, reference available=False",
+                )
+            }, False, 0
         return {}, True, None
     if trt_tokens is None or ref_tokens is None:
         return {
@@ -99,17 +108,20 @@ def _compare_exact_stream(
         ),
         token_metric: MetricResult(
             value=match_rate,
-            threshold=token_threshold,
-            operator=">=",
-            passed=tokens_ok,
+            threshold=token_threshold if token_gates else None,
+            operator=">=" if token_gates else "info",
+            passed=tokens_ok if token_gates else True,
             note=(
                 "exact match"
                 if mismatch is None
-                else f"first mismatch frame={mismatch}"
+                else (
+                    f"first mismatch frame={mismatch}"
+                    + ("" if token_gates else "; free-running diagnostic")
+                )
             ),
         ),
     }
-    return metrics, frame_count_ok and tokens_ok, mismatch
+    return metrics, frame_count_ok and (tokens_ok or not token_gates), mismatch
 
 
 class SpeechToSpeechComparator:
@@ -150,13 +162,16 @@ class SpeechToSpeechComparator:
             frame_metric="input_mimi_frame_count_match",
             token_metric="input_mimi_token_match_rate",
             token_threshold=thresholds.get("input_mimi_token_match_rate", 1.0),
+            required="input_mimi_token_match_rate" in thresholds,
         )
         metrics.update(input_metrics)
         all_pass = all_pass and input_ok
         if input_mismatch is not None:
             first_divergence = ("input_mimi", input_mismatch)
 
-        # The temporal text stream precedes depth/audio generation.
+        # The free-running temporal stream is useful for locating the first
+        # divergence, but is not an accuracy gate: autoregressive divergence
+        # amplifies a single numeric difference into a different token trace.
         trt_text_tokens = trt.data.get("output_text_tokens")
         ref_text_tokens = ref.data.get("reference_text_tokens")
         if trt_text_tokens is not None:
@@ -168,8 +183,9 @@ class SpeechToSpeechComparator:
             ref_text_tokens,
             availability_metric="output_text_tokens_available",
             frame_metric="output_text_frame_count_match",
-            token_metric="output_text_token_match_rate",
-            token_threshold=thresholds.get("output_text_token_match_rate", 1.0),
+            token_metric="free_generation_text_token_match_rate",
+            token_threshold=1.0,
+            token_gates=False,
         )
         metrics.update(text_metrics)
         all_pass = all_pass and text_ok
@@ -179,8 +195,20 @@ class SpeechToSpeechComparator:
         # Get final audio token arrays.
         trt_tokens = trt.data.get("output_tokens")
         ref_tokens = ref.data.get("reference_tokens")
+        audio_tokens_available = trt_tokens is not None and ref_tokens is not None
+        metrics["free_generation_audio_tokens_available"] = MetricResult(
+            value=1.0 if audio_tokens_available else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=audio_tokens_available,
+            note=(
+                f"TRT available={trt_tokens is not None}, "
+                f"reference available={ref_tokens is not None}"
+            ),
+        )
+        all_pass = all_pass and audio_tokens_available
 
-        if trt_tokens is not None and ref_tokens is not None:
+        if audio_tokens_available:
             trt_arr = np.asarray(trt_tokens)
             ref_arr = np.asarray(ref_tokens)
             output_mismatch = _first_mismatch_frame(trt_arr, ref_arr)
@@ -188,7 +216,7 @@ class SpeechToSpeechComparator:
                 first_divergence = ("depth_audio", output_mismatch)
 
             frame_count_ok = trt_arr.shape[0] == ref_arr.shape[0]
-            metrics["frame_count_match"] = MetricResult(
+            metrics["free_generation_frame_count_match"] = MetricResult(
                 value=1.0 if frame_count_ok else 0.0,
                 threshold=1.0,
                 operator="==",
@@ -218,12 +246,13 @@ class SpeechToSpeechComparator:
             if trt_aligned.ndim >= 2 and trt_aligned.shape[1] >= 1:
                 depth_matches = np.sum(trt_aligned[:, 0] == ref_aligned[:, 0])
                 depth_rate = float(depth_matches) / n_frames
-                depth_thresh = thresholds.get("depth_token_match_rate", 0.7)
-                depth_ok = depth_rate >= depth_thresh
-                metrics["depth_token_match_rate"] = MetricResult(
-                    value=depth_rate, threshold=depth_thresh, operator=">=", passed=depth_ok)
-                if not depth_ok:
-                    all_pass = False
+                metrics["free_generation_depth_token_match_rate"] = MetricResult(
+                    value=depth_rate,
+                    threshold=None,
+                    operator="info",
+                    passed=True,
+                    note="free-running diagnostic",
+                )
 
                 # Audio token match (remaining columns)
                 if trt_aligned.shape[1] > 1:
@@ -232,12 +261,13 @@ class SpeechToSpeechComparator:
                     audio_matches = np.sum(audio_cols == ref_audio_cols)
                     total_audio = audio_cols.size
                     audio_rate = float(audio_matches) / total_audio if total_audio > 0 else 0.0
-                    audio_thresh = thresholds.get("audio_token_match_rate", 0.7)
-                    audio_ok = audio_rate >= audio_thresh
-                    metrics["audio_token_match_rate"] = MetricResult(
-                        value=audio_rate, threshold=audio_thresh, operator=">=", passed=audio_ok)
-                    if not audio_ok:
-                        all_pass = False
+                    metrics["free_generation_audio_token_match_rate"] = MetricResult(
+                        value=audio_rate,
+                        threshold=None,
+                        operator="info",
+                        passed=True,
+                        note="free-running diagnostic",
+                    )
             else:
                 # 1D token comparison (flat match)
                 flat_trt = trt_aligned.flatten()
@@ -245,12 +275,13 @@ class SpeechToSpeechComparator:
                 n_compare = min(len(flat_trt), len(flat_ref))
                 if n_compare > 0:
                     match_rate = float(np.sum(flat_trt[:n_compare] == flat_ref[:n_compare])) / n_compare
-                    token_thresh = thresholds.get("speech_min_token_match", 0.8)
-                    token_ok = match_rate >= token_thresh
-                    metrics["speech_min_token_match"] = MetricResult(
-                        value=match_rate, threshold=token_thresh, operator=">=", passed=token_ok)
-                    if not token_ok:
-                        all_pass = False
+                    metrics["free_generation_token_match_rate"] = MetricResult(
+                        value=match_rate,
+                        threshold=None,
+                        operator="info",
+                        passed=True,
+                        note="free-running diagnostic",
+                    )
 
             # Frame exact match rate
             frame_exact = 0
@@ -258,29 +289,147 @@ class SpeechToSpeechComparator:
                 if np.array_equal(trt_aligned[i], ref_aligned[i]):
                     frame_exact += 1
             frame_rate = float(frame_exact) / n_frames
-            frame_thresh = thresholds.get(
-                "frame_exact_match_rate",
-                thresholds.get("speech_min_frame_exact", 0.7),
-            )
-            frame_ok = frame_rate >= frame_thresh
-            metrics["frame_exact_match_rate"] = MetricResult(
+            metrics["free_generation_frame_exact_match_rate"] = MetricResult(
                 value=frame_rate,
-                threshold=frame_thresh,
-                operator=">=",
-                passed=frame_ok,
+                threshold=None,
+                operator="info",
+                passed=True,
                 note=(
-                    "exact match"
+                    "exact match; free-running diagnostic"
                     if output_mismatch is None
-                    else f"first mismatch frame={output_mismatch}"
+                    else (
+                        f"first mismatch frame={output_mismatch}; "
+                        "free-running diagnostic"
+                    )
                 ),
             )
-            if not frame_ok:
-                all_pass = False
 
         elif trt_tokens is None:
             logger.warning("No TRT output tokens available")
         elif ref_tokens is None:
             logger.warning("No reference tokens available for comparison")
+
+        # Teacher-forced replay preserves the official history and measures
+        # the TRT model's conditional top-1 choice before forcing the target.
+        # Trace/reference identity protects the validity of the replay. The
+        # conditional top-1 rates then gate the model decision accuracy without
+        # allowing free-running cascade amplification to dominate the result.
+        teacher_fields = (
+            "teacher_text_target_tokens",
+            "teacher_text_predicted_tokens",
+            "teacher_audio_target_tokens",
+            "teacher_audio_predicted_tokens",
+        )
+        teacher_values = [trt.data.get(name) for name in teacher_fields]
+        teacher_required = any(
+            name in thresholds
+            for name in (
+                "teacher_text_top1_match_rate",
+                "teacher_depth_top1_match_rate",
+                "teacher_audio_top1_match_rate",
+            )
+        )
+        if teacher_required or any(value is not None for value in teacher_values):
+            teacher_available = all(value is not None for value in teacher_values)
+            metrics["teacher_replay_available"] = MetricResult(
+                value=1.0 if teacher_available else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=teacher_available,
+            )
+            all_pass = all_pass and teacher_available
+            if teacher_available:
+                text_target = np.asarray(teacher_values[0]).reshape(-1)
+                text_predicted = np.asarray(teacher_values[1]).reshape(-1)
+                audio_target = np.asarray(teacher_values[2])
+                audio_predicted = np.asarray(teacher_values[3])
+                replay_shapes_ok = (
+                    text_target.shape == text_predicted.shape
+                    and audio_target.shape == audio_predicted.shape
+                    and audio_target.ndim == 2
+                    and audio_target.shape[0] == text_target.shape[0]
+                    and audio_target.shape[1] >= 1
+                    and text_target.size > 0
+                )
+                metrics["teacher_replay_shape_valid"] = MetricResult(
+                    value=1.0 if replay_shapes_ok else 0.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=replay_shapes_ok,
+                )
+                all_pass = all_pass and replay_shapes_ok
+                if replay_shapes_ok:
+                    ref_text_array = (
+                        np.asarray(ref_text_tokens).reshape(-1)
+                        if ref_text_tokens is not None
+                        else np.empty(0, dtype=np.int32)
+                    )
+                    ref_audio_array = (
+                        np.asarray(ref_tokens)
+                        if ref_tokens is not None
+                        else np.empty((0, audio_target.shape[1]), dtype=np.int32)
+                    )
+                    trace_matches_reference = (
+                        np.array_equal(text_target, ref_text_array)
+                        and np.array_equal(audio_target, ref_audio_array)
+                    )
+                    metrics["teacher_trace_reference_exact"] = MetricResult(
+                        value=1.0 if trace_matches_reference else 0.0,
+                        threshold=1.0,
+                        operator="==",
+                        passed=trace_matches_reference,
+                    )
+                    all_pass = all_pass and trace_matches_reference
+
+                    text_rate = float(np.mean(text_predicted == text_target))
+                    depth_rate = float(
+                        np.mean(audio_predicted[:, 0] == audio_target[:, 0])
+                    )
+                    if audio_target.shape[1] > 1:
+                        audio_rate = float(
+                            np.mean(audio_predicted[:, 1:] == audio_target[:, 1:])
+                        )
+                    else:
+                        audio_rate = depth_rate
+                    frame_rate = float(
+                        np.mean(np.all(audio_predicted == audio_target, axis=1))
+                    )
+                    for name, value, default_threshold, note in (
+                        (
+                            "teacher_text_top1_match_rate",
+                            text_rate,
+                            0.99,
+                            "conditional temporal top-1",
+                        ),
+                        (
+                            "teacher_depth_top1_match_rate",
+                            depth_rate,
+                            0.99,
+                            "conditional first audio codebook top-1",
+                        ),
+                        (
+                            "teacher_audio_top1_match_rate",
+                            audio_rate,
+                            0.98,
+                            "conditional remaining audio codebooks top-1",
+                        ),
+                    ):
+                        metric_threshold = thresholds.get(name, default_threshold)
+                        metrics[name] = MetricResult(
+                            value=value,
+                            threshold=metric_threshold,
+                            operator=">=",
+                            passed=value >= metric_threshold,
+                            note=note,
+                        )
+                        all_pass = all_pass and value >= metric_threshold
+                    metrics["teacher_frame_top1_exact_rate"] = MetricResult(
+                        value=frame_rate,
+                        threshold=None,
+                        operator="info",
+                        passed=True,
+                        note="all audio codebooks conditionally exact; diagnostic",
+                    )
 
         # RMS floor check
         rms = trt.data.get("rms", 0.0)

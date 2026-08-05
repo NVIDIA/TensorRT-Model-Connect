@@ -21,6 +21,29 @@ struct DelayCacheState {
     std::vector<uint8_t> provided;
 };
 
+struct SpeechTeacherPredictions {
+    int32_t num_frames{0};
+    int32_t audio_codebooks{0};
+    std::vector<int32_t> text;
+    std::vector<uint8_t> text_available;
+    std::vector<int32_t> audio;
+    std::vector<uint8_t> audio_available;
+};
+
+inline SpeechTeacherPredictions make_speech_teacher_predictions(int32_t num_frames,
+                                                                int32_t audio_codebooks) {
+    SpeechTeacherPredictions predictions;
+    predictions.num_frames = std::max(num_frames, 0);
+    predictions.audio_codebooks = std::max(audio_codebooks, 0);
+    predictions.text.assign(static_cast<std::size_t>(predictions.num_frames), -1);
+    predictions.text_available.assign(static_cast<std::size_t>(predictions.num_frames), 0);
+    const auto audio_size = static_cast<std::size_t>(predictions.num_frames) *
+                            static_cast<std::size_t>(predictions.audio_codebooks);
+    predictions.audio.assign(audio_size, -1);
+    predictions.audio_available.assign(audio_size, 0);
+    return predictions;
+}
+
 inline std::vector<int32_t> make_default_speech_delays(int32_t num_codebooks) {
     const int32_t stream_cb = std::max(num_codebooks / 2, 0);
     std::vector<int32_t> delays(static_cast<std::size_t>(num_codebooks + 1), 1);
@@ -81,6 +104,73 @@ inline void write_user_tokens_to_delay_cache(DelayCacheState& delay_state,
             delay_state, k, offset + delay_state.delays[static_cast<std::size_t>(k)]);
         delay_state.cache[widx] = user_tok;
         delay_state.provided[widx] = 1;
+    }
+}
+
+inline void write_speech_teacher_frame_to_delay_cache(
+    DelayCacheState& delay_state, const std::vector<int32_t>& teacher_text_tokens,
+    const std::vector<int32_t>& teacher_audio_tokens, int32_t teacher_audio_codebooks,
+    int32_t logical_frame, int32_t model_offset) {
+    if (logical_frame < 0 || logical_frame >= static_cast<int32_t>(teacher_text_tokens.size()) ||
+        teacher_audio_codebooks <= 0 ||
+        teacher_audio_tokens.size() <
+            teacher_text_tokens.size() * static_cast<std::size_t>(teacher_audio_codebooks)) {
+        return;
+    }
+
+    const auto text_index = delay_cache_index(delay_state, 0, model_offset + delay_state.delays[0]);
+    delay_state.cache[text_index] = teacher_text_tokens[static_cast<std::size_t>(logical_frame)];
+    delay_state.provided[text_index] = 1;
+
+    const int32_t output_codebooks = std::min(teacher_audio_codebooks, delay_state.total_k - 1);
+    for (int32_t cb = 0; cb < output_codebooks; ++cb) {
+        const int32_t stream = 1 + cb;
+        const auto cache_index =
+            delay_cache_index(delay_state, stream,
+                              model_offset + delay_state.delays[static_cast<std::size_t>(stream)]);
+        const auto teacher_index = static_cast<std::size_t>(logical_frame) *
+                                       static_cast<std::size_t>(teacher_audio_codebooks) +
+                                   static_cast<std::size_t>(cb);
+        delay_state.cache[cache_index] = teacher_audio_tokens[teacher_index];
+        delay_state.provided[cache_index] = 1;
+    }
+}
+
+inline void capture_speech_teacher_predictions(const DelayCacheState& delay_state,
+                                               const std::vector<int32_t>& teacher_text_tokens,
+                                               const std::vector<int32_t>& teacher_audio_tokens,
+                                               int32_t teacher_audio_codebooks,
+                                               int32_t model_offset,
+                                               const std::vector<int32_t>& selected_frame_tokens,
+                                               SpeechTeacherPredictions& predictions) {
+    if (selected_frame_tokens.empty() || teacher_audio_codebooks <= 0 ||
+        teacher_audio_tokens.size() <
+            teacher_text_tokens.size() * static_cast<std::size_t>(teacher_audio_codebooks)) {
+        return;
+    }
+
+    const int32_t text_frame = model_offset - delay_state.delays[0] - 1;
+    if (text_frame >= 0 && text_frame < predictions.num_frames) {
+        const auto index = static_cast<std::size_t>(text_frame);
+        predictions.text[index] = selected_frame_tokens[0];
+        predictions.text_available[index] = 1;
+    }
+
+    const int32_t output_codebooks =
+        std::min({teacher_audio_codebooks, predictions.audio_codebooks,
+                  static_cast<int32_t>(selected_frame_tokens.size()) - 1, delay_state.total_k - 1});
+    for (int32_t cb = 0; cb < output_codebooks; ++cb) {
+        const int32_t stream = 1 + cb;
+        const int32_t logical_frame =
+            model_offset - delay_state.delays[static_cast<std::size_t>(stream)] - 1;
+        if (logical_frame < 0 || logical_frame >= predictions.num_frames) {
+            continue;
+        }
+        const auto index = static_cast<std::size_t>(logical_frame) *
+                               static_cast<std::size_t>(predictions.audio_codebooks) +
+                           static_cast<std::size_t>(cb);
+        predictions.audio[index] = selected_frame_tokens[static_cast<std::size_t>(1 + cb)];
+        predictions.audio_available[index] = 1;
     }
 }
 

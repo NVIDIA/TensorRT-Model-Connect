@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from tests.e2e.models.personaplex.e2e_plugins.comparators.speech_to_speech import (
     SpeechToSpeechComparator,
@@ -70,21 +71,16 @@ def test_speech_comparator_rejects_truncated_output_with_matching_prefix() -> No
         ),
         ThresholdProfile(
             task_strategy="speech_to_speech",
-            metrics={
-                "depth_token_match_rate": 0.7,
-                "audio_token_match_rate": 0.7,
-                "frame_exact_match_rate": 0.5,
-                "speech_min_rms": 0.001,
-            },
+            metrics={"speech_min_rms": 0.001},
         ),
         StageSpec(name="full_generation"),
     )
 
     assert result.status == "failed"
-    assert not result.metrics["frame_count_match"].passed
-    assert result.metrics["depth_token_match_rate"].passed
-    assert result.metrics["audio_token_match_rate"].passed
-    assert result.metrics["frame_exact_match_rate"].passed
+    assert not result.metrics["free_generation_frame_count_match"].passed
+    assert result.metrics["free_generation_depth_token_match_rate"].passed
+    assert result.metrics["free_generation_audio_token_match_rate"].passed
+    assert result.metrics["free_generation_frame_exact_match_rate"].passed
 
 
 def _compare_pipeline_tokens(
@@ -121,10 +117,6 @@ def _compare_pipeline_tokens(
             task_strategy="speech_to_speech",
             metrics={
                 "input_mimi_token_match_rate": 1.0,
-                "output_text_token_match_rate": 1.0,
-                "depth_token_match_rate": 0.7,
-                "audio_token_match_rate": 0.7,
-                "frame_exact_match_rate": 0.5,
                 "speech_min_rms": 0.001,
             },
         ),
@@ -154,6 +146,36 @@ def test_speech_comparator_reports_input_mimi_as_first_divergence() -> None:
     assert "first mismatch frame=2" in result.metrics["input_mimi_token_match_rate"].note
 
 
+def test_speech_comparator_requires_configured_input_mimi_trace() -> None:
+    tokens = np.arange(32, dtype=np.int32).reshape(4, 8)
+    result = SpeechToSpeechComparator().compare(
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "returncode": 0,
+                "output_tokens": tokens,
+                "rms": 0.04,
+                "wav_exists": True,
+            },
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={"reference_tokens": tokens, "rms": 0.04},
+        ),
+        ThresholdProfile(
+            task_strategy="speech_to_speech",
+            metrics={
+                "input_mimi_token_match_rate": 1.0,
+                "speech_min_rms": 0.001,
+            },
+        ),
+        StageSpec(name="full_generation"),
+    )
+
+    assert result.status == "failed"
+    assert not result.metrics["input_mimi_tokens_available"].passed
+
+
 def test_speech_comparator_reports_temporal_text_as_first_divergence() -> None:
     input_tokens = np.arange(32, dtype=np.int32).reshape(4, 8)
     text_tokens = np.arange(4, dtype=np.int32)
@@ -170,8 +192,9 @@ def test_speech_comparator_reports_temporal_text_as_first_divergence() -> None:
         ref_audio=audio_tokens,
     )
 
-    assert result.status == "failed"
-    assert not result.metrics["output_text_token_match_rate"].passed
+    assert result.status == "passed"
+    assert result.metrics["free_generation_text_token_match_rate"].passed
+    assert result.metrics["free_generation_text_token_match_rate"].threshold is None
     assert "first divergence=temporal_text frame=3" in result.message
 
 
@@ -193,7 +216,9 @@ def test_speech_comparator_reports_depth_audio_as_first_divergence() -> None:
 
     assert result.status == "passed"
     assert "first divergence=depth_audio frame=4" in result.message
-    assert "first mismatch frame=4" in result.metrics["frame_exact_match_rate"].note
+    assert "first mismatch frame=4" in result.metrics[
+        "free_generation_frame_exact_match_rate"
+    ].note
 
 
 def test_speech_comparator_reports_no_divergence_for_exact_pipeline() -> None:
@@ -212,3 +237,86 @@ def test_speech_comparator_reports_no_divergence_for_exact_pipeline() -> None:
 
     assert result.status == "passed"
     assert "first divergence=none" in result.message
+
+
+def test_speech_comparator_gates_teacher_forced_accuracy() -> None:
+    reference_audio = np.arange(16, dtype=np.int32).reshape(2, 8)
+    teacher_audio_predictions = reference_audio.copy()
+    teacher_audio_predictions[1, 3] += 1
+    result = SpeechToSpeechComparator().compare(
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "returncode": 0,
+                "output_text_tokens": np.array([10, 11], dtype=np.int32),
+                "output_tokens": reference_audio.copy(),
+                "teacher_text_target_tokens": np.array([10, 11], dtype=np.int32),
+                "teacher_text_predicted_tokens": np.array([10, 99], dtype=np.int32),
+                "teacher_audio_target_tokens": reference_audio,
+                "teacher_audio_predicted_tokens": teacher_audio_predictions,
+                "rms": 0.04,
+                "wav_exists": True,
+            },
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "reference_text_tokens": np.array([10, 11], dtype=np.int32),
+                "reference_tokens": reference_audio,
+                "rms": 0.04,
+            },
+        ),
+        ThresholdProfile(
+            task_strategy="speech_to_speech",
+            metrics={
+                "speech_min_rms": 0.001,
+                "teacher_text_top1_match_rate": 0.99,
+                "teacher_depth_top1_match_rate": 0.99,
+                "teacher_audio_top1_match_rate": 0.98,
+            },
+        ),
+        StageSpec(name="full_generation"),
+    )
+
+    assert result.status == "failed"
+    assert result.metrics["teacher_text_top1_match_rate"].value == 0.5
+    assert result.metrics["teacher_depth_top1_match_rate"].value == 1.0
+    assert result.metrics["teacher_audio_top1_match_rate"].value == pytest.approx(13 / 14)
+    assert result.metrics["teacher_frame_top1_exact_rate"].value == 0.5
+    assert not result.metrics["teacher_text_top1_match_rate"].passed
+    assert result.metrics["teacher_text_top1_match_rate"].threshold == 0.99
+    assert result.metrics["teacher_depth_top1_match_rate"].passed
+    assert not result.metrics["teacher_audio_top1_match_rate"].passed
+    assert result.metrics["teacher_frame_top1_exact_rate"].threshold is None
+
+
+def test_speech_comparator_requires_teacher_replay_when_accuracy_is_gated() -> None:
+    tokens = np.arange(16, dtype=np.int32).reshape(2, 8)
+    result = SpeechToSpeechComparator().compare(
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "returncode": 0,
+                "output_text_tokens": np.array([10, 11], dtype=np.int32),
+                "output_tokens": tokens,
+                "rms": 0.04,
+                "wav_exists": True,
+            },
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "reference_text_tokens": np.array([10, 11], dtype=np.int32),
+                "reference_tokens": tokens,
+                "rms": 0.04,
+            },
+        ),
+        ThresholdProfile(
+            task_strategy="speech_to_speech",
+            metrics={"teacher_text_top1_match_rate": 0.99},
+        ),
+        StageSpec(name="full_generation"),
+    )
+
+    assert result.status == "failed"
+    assert not result.metrics["teacher_replay_available"].passed

@@ -1728,11 +1728,48 @@ suites:
       lane: local_only
       notes: GB300-only native-reference consistency.
 
+  - id: full_duplex_bench_behavior_parity
+    description: >
+      PersonaPlex behavioral consistency on a fixed, outcome-independent,
+      stratified 150-sample Full-Duplex-Bench v1.0 slice. HF and TRTMC consume
+      identical normalized audio and are scored separately with the pinned
+      benchmark TOR, backchannel frequency, and backchannel JSD definitions.
+      Pass/fail is based on the absolute HF/TRTMC metric deltas; the paper's
+      descriptive absolute scores are not treated as correctness thresholds.
+    user_contract: speech_response
+    default_model_names: [personaplex-7b]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/FullDuplexBench-v1.0-public/trtmc-validate-v1/dataset.json
+      input_asset_fields: [audio]
+    selectors:
+      model_names: [personaplex-7b]
+    scoring:
+      scorer: full_duplex_bench_behavior_parity
+      python_profile: personaplex_full_duplex_evaluator
+    build:
+      min_max_cache_length: 1280
+    # Equivalence margins describe material behavioral shifts: ten TOR
+    # percentage points, one backchannel event per 100 seconds, and two JSD
+    # points. They are wider than the measured 30-per-category sampling error
+    # and are not derived from the candidate TRTMC result.
+    gates:
+      max_tor_abs_delta: 0.10
+      max_backchannel_frequency_abs_delta: 0.01
+      max_backchannel_jsd_abs_delta: 0.02
+    ci:
+      eligible: false
+      lane: local_only
+      notes: GB300-only aggregate behavioral reference consistency.
+
   - id: full_duplex_bench_speech_parity
     description: >
-      Speech-response token and waveform consistency on five public
-      Full-Duplex-Bench synthetic interruption and pause-handling inputs.
-      Both paths use greedy decoding without an injected assistant persona.
+      PersonaPlex conditional decision accuracy on five public Full-Duplex-Bench
+      synthetic interruption and pause-handling inputs. The official BF16 trace
+      is replayed teacher-forced through TRTMC; input Mimi tokens, replay trace,
+      conditional top-1 rates, output length, and waveform liveness are gated.
+      Both paths also run greedy free generation without an injected assistant
+      persona, whose token agreement is reported only for divergence diagnosis.
     user_contract: speech_response
     default_model_names: [personaplex-7b]
     dataset:

@@ -24,6 +24,79 @@ from tools import prepare_media_validation_datasets as prepare_media
 from tools.validation import engine as validation_engine
 
 
+def test_full_duplex_bench_scorer_runs_in_reference_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        seen.extend(command)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "status": "passed",
+                    "metrics": {},
+                    "gate_failures": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="scored", stderr="")
+
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    result = validation_engine.run_full_duplex_bench_comparison(
+        python="/profiles/personaplex/bin/python",
+        hf_predictions=tmp_path / "hf.json",
+        trtfb_predictions=tmp_path / "trtmc.json",
+        answers=tmp_path / "answers.json",
+        work_dir=tmp_path,
+        gates={
+            "max_tor_abs_delta": 0.10,
+            "max_backchannel_frequency_abs_delta": 0.01,
+            "max_backchannel_jsd_abs_delta": 0.02,
+        },
+        local_files_only=True,
+    )
+
+    assert result["status"] == "passed"
+    assert seen[0] == "/profiles/personaplex/bin/python"
+    assert seen[1].endswith("tools/full_duplex_bench_score.py")
+    assert "--local-files-only" in seen
+    assert "--max-tor-abs-delta" in seen
+
+
+def test_full_duplex_bench_scorer_rejects_stale_summary_after_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "summary.json").write_text(
+        json.dumps({"status": "passed"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        validation_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=2, stdout="", stderr="crashed"
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="scorer failed"):
+        validation_engine.run_full_duplex_bench_comparison(
+            python="/profiles/personaplex/bin/python",
+            hf_predictions=tmp_path / "hf.json",
+            trtfb_predictions=tmp_path / "trtmc.json",
+            answers=tmp_path / "answers.json",
+            work_dir=tmp_path,
+            gates={
+                "max_tor_abs_delta": 0.10,
+                "max_backchannel_frequency_abs_delta": 0.01,
+                "max_backchannel_jsd_abs_delta": 0.02,
+            },
+            local_files_only=True,
+        )
+
+
 def _write_mmlu(path: Path) -> None:
     payload = {
         "apply_chat_template": False,
@@ -2083,6 +2156,101 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
     assert summary["sample_pass_rate"] == 1.0
     assert summary["metrics"]["score"]["mean"] == 1.0
     assert summary["cases"][0]["passed"] is True
+
+
+def test_model_plugin_trtfb_receives_matching_reference_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tests.e2e_harness.contracts import E2ECase, StageOutput, StageSpec
+    from tools.validation.model_plugin_contract import serialize_stage_output
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "model_plugin_json",
+                "task_eval": {"model_manifest": "model.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps(
+            {
+                "sample_id": "sample-1",
+                "testcase": "model-case",
+                "stage": "full_generation",
+                "inputs": {},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    reference = StageOutput(
+        stage_name="full_generation",
+        data={"reference_text_tokens": np.array([11, 12], dtype=np.int32)},
+    )
+    serialized_reference = serialize_stage_output(
+        reference,
+        artifact_dir=work_dir / "hf_serialized",
+        sample_id="sample-1",
+    )
+    validation_engine.write_predictions(
+        work_dir / "hf_predictions.json",
+        [
+            {
+                "sample_id": "sample-1",
+                "stage_output": serialized_reference,
+            }
+        ],
+    )
+    case = E2ECase(
+        name="model-case",
+        hf_id="org/model",
+        family="custom",
+        runtime_strategy="custom",
+        task_strategy="custom",
+        bundle="model.trtfb",
+        metadata={
+            "model_test_dir": "tests/e2e/models/custom",
+            "validation_manifest_case_name": "model-case",
+        },
+    )
+    stage = StageSpec(name="full_generation")
+
+    class Runner:
+        def run_stage(self, _case, _stage, context):
+            assert context.reference_output is not None
+            np.testing.assert_array_equal(
+                context.reference_output.data["reference_text_tokens"],
+                np.array([11, 12], dtype=np.int32),
+            )
+            return StageOutput(
+                stage_name="full_generation",
+                data={"returncode": 0},
+            )
+
+    monkeypatch.setattr(
+        validation_engine, "select_case", lambda *_args, **_kwargs: (case, stage)
+    )
+    monkeypatch.setattr(validation_engine, "activate_model_plugins", lambda _path: None)
+    monkeypatch.setattr(validation_engine, "get_runner", lambda _strategy: Runner())
+    args = argparse.Namespace(
+        work_dir=str(work_dir),
+        bundle=str(tmp_path / "engines" / "model.trtfb"),
+        trtmc_binary="/runtime/trtmc",
+        hf_python="/profiles/reference/bin/python",
+        model_plugin_dir="/runtime/models",
+        raw_output="trtfb_raw.jsonl",
+        predictions="trtfb_predictions.json",
+        log="trtfb_run.log",
+    )
+
+    validation_engine.run_model_plugin_trtfb(args)
+
+    output = json.loads((work_dir / "trtfb_predictions.json").read_text())
+    assert output["responses"][0]["sample_id"] == "sample-1"
 
 
 def test_compare_model_plugin_marks_native_returncode_as_execution_error(
@@ -5292,7 +5460,14 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
                     "--prompt",
                     "hello",
                 ]
-            }
+            },
+            "teacher_forced_command": [
+                "/workspace/build/trtmc",
+                "speak",
+                "/runs/engines/model.trtfb",
+                "--speech-teacher-tokens",
+                "/runs/results/teacher_tokens.txt",
+            ],
         }
     )
 
@@ -5308,6 +5483,18 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
     assert row["sample_id"] == "sample-7"
     assert row["command"][0:2] == ["/workspace/build/trtmc", "run"]
     assert "validation_engine.py" not in " ".join(row["command"])
+
+    teacher_row = json.loads(
+        (tmp_path / "trtfb_teacher_native_commands.jsonl").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert teacher_row["sample_id"] == "sample-7"
+    assert teacher_row["command"][0:2] == ["/workspace/build/trtmc", "speak"]
+    assert teacher_row["command"][-2:] == [
+        "--speech-teacher-tokens",
+        "/runs/results/teacher_tokens.txt",
+    ]
 
 
 def test_run_diffusion_trtfb_writes_image_artifact_predictions(

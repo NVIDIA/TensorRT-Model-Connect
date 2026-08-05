@@ -20,7 +20,7 @@ sample_limits:
   librispeech_clean_asr: 10
   librispeech_clean_asr_streaming: 5
   flores200_en_fr_seq2seq_parity: 10
-  full_duplex_bench_speech_parity: 5
+  full_duplex_bench_behavior_parity: 150
   mmlu_continuation_parity: 10
   mmlu_five_shot_mcq: 20
   mmlu_generation_mode_parity: 8
@@ -246,9 +246,9 @@ models:
     default: etth1_time_series_parity
     workloads: [etth1_time_series_parity]
   personaplex-7b:
-    default: full_duplex_bench_speech_parity
-    workloads: [full_duplex_bench_speech_parity]
-    reference_cache_identity: personaplex-official-greedy-bf16-stage-trace-v4
+    default: full_duplex_bench_behavior_parity
+    workloads: [full_duplex_bench_behavior_parity]
+    reference_cache_identity: personaplex-official-greedy-bf16-full-duplex-v5
   phi-moe:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]

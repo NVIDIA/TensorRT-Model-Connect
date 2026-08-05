@@ -2998,21 +2998,25 @@ def _write_dataset_benchmark_reproduction(
 
 
 _NATIVE_TRTMC_COMMANDS = "trtfb_native_commands.jsonl"
+_NATIVE_TRTMC_TEACHER_COMMANDS = "trtfb_teacher_native_commands.jsonl"
 
 
 def _reset_native_trtmc_commands(work_dir: Path) -> None:
     (work_dir / _NATIVE_TRTMC_COMMANDS).write_text("", encoding="utf-8")
+    (work_dir / _NATIVE_TRTMC_TEACHER_COMMANDS).write_text("", encoding="utf-8")
 
 
 def _append_native_trtmc_command(
     work_dir: Path,
     sample_id: str,
     command: Sequence[Any],
+    *,
+    filename: str = _NATIVE_TRTMC_COMMANDS,
 ) -> None:
     tokens = [str(token) for token in command]
     if not tokens:
         return
-    with (work_dir / _NATIVE_TRTMC_COMMANDS).open("a", encoding="utf-8") as output:
+    with (work_dir / filename).open("a", encoding="utf-8") as output:
         output.write(
             json.dumps(
                 {"sample_id": sample_id, "command": tokens},
@@ -3057,6 +3061,14 @@ def _record_output_native_command(
     command = _native_command_from_metadata(metadata)
     if command:
         _append_native_trtmc_command(work_dir, sample_id, command)
+    teacher_command = _command_tokens(metadata.get("teacher_forced_command"))
+    if teacher_command:
+        _append_native_trtmc_command(
+            work_dir,
+            sample_id,
+            teacher_command,
+            filename=_NATIVE_TRTMC_TEACHER_COMMANDS,
+        )
 
 
 def run_vlm_trtfb(args: argparse.Namespace) -> None:
@@ -8555,6 +8567,26 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
+def _model_plugin_reference_outputs(work_dir: Path) -> dict[str, Any]:
+    """Load model-plugin StageOutputs by sample for reference-guided TRT runs."""
+    predictions_path = work_dir / "hf_predictions.json"
+    if not predictions_path.is_file():
+        return {}
+    payload = json.loads(predictions_path.read_text(encoding="utf-8"))
+    rows = payload.get("responses", []) if isinstance(payload, Mapping) else []
+    outputs: dict[str, Any] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or not isinstance(row.get("stage_output"), Mapping):
+            continue
+        sample_id = str(row.get("sample_id", "") or "")
+        if not sample_id:
+            continue
+        if sample_id in outputs:
+            raise ValueError(f"Duplicate HF model-plugin sample_id {sample_id!r}")
+        outputs[sample_id] = deserialize_stage_output(row["stage_output"])
+    return outputs
+
+
 def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
@@ -8572,6 +8604,7 @@ def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
     metadata_path = work_dir / (args.log or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    reference_outputs = _model_plugin_reference_outputs(work_dir)
     _reset_native_trtmc_commands(work_dir)
     with (
         raw_path.open("w", encoding="utf-8") as raw_file,
@@ -8607,6 +8640,7 @@ def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
                 model_plugin_dir=str(
                     getattr(args, "model_plugin_dir", "") or ""
                 ),
+                reference_output=reference_outputs.get(sample_id),
             )
             output = runner.run_stage(case, stage, context)
             _record_output_native_command(work_dir, sample_id, output)
@@ -10720,6 +10754,78 @@ def compare_model_plugin_prediction_sets(
     }
 
 
+def run_full_duplex_bench_comparison(
+    *,
+    python: str,
+    hf_predictions: Path,
+    trtfb_predictions: Path,
+    answers: Path,
+    work_dir: Path,
+    gates: Mapping[str, Any],
+    local_files_only: bool,
+) -> dict[str, Any]:
+    """Run the dependency-heavy paper metric scorer in the reference env."""
+    required_gates = (
+        "max_tor_abs_delta",
+        "max_backchannel_frequency_abs_delta",
+        "max_backchannel_jsd_abs_delta",
+    )
+    missing = [name for name in required_gates if name not in gates]
+    if missing:
+        raise ValueError(
+            "Full-Duplex-Bench scoring requires gates: " + ", ".join(missing)
+        )
+    output_path = work_dir / "summary.json"
+    command = [
+        python,
+        str(REPO_ROOT / "tools" / "full_duplex_bench_score.py"),
+        "--hf-predictions",
+        str(hf_predictions),
+        "--trtmc-predictions",
+        str(trtfb_predictions),
+        "--requests",
+        str(answers),
+        "--cache-root",
+        str(work_dir / "full_duplex_bench_score_cache"),
+        "--output",
+        str(output_path),
+        "--max-tor-abs-delta",
+        str(float(gates["max_tor_abs_delta"])),
+        "--max-backchannel-frequency-abs-delta",
+        str(float(gates["max_backchannel_frequency_abs_delta"])),
+        "--max-backchannel-jsd-abs-delta",
+        str(float(gates["max_backchannel_jsd_abs_delta"])),
+    ]
+    if local_files_only:
+        command.append("--local-files-only")
+    completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    (work_dir / "full_duplex_bench_score.log").write_text(
+        f"$ {' '.join(shlex.quote(token) for token in command)}\n"
+        f"{completed.stdout}{completed.stderr}",
+        encoding="utf-8",
+    )
+    if completed.returncode not in {0, 1}:
+        raise RuntimeError(
+            "Full-Duplex-Bench scorer failed "
+            f"(rc={completed.returncode}); see "
+            f"{work_dir / 'full_duplex_bench_score.log'}"
+        )
+    if not output_path.is_file():
+        raise RuntimeError(
+            "Full-Duplex-Bench scorer failed without producing summary.json "
+            f"(rc={completed.returncode}); see "
+            f"{work_dir / 'full_duplex_bench_score.log'}"
+        )
+    summary = json.loads(output_path.read_text(encoding="utf-8"))
+    expected_status = "passed" if completed.returncode == 0 else "failed"
+    if summary.get("status") != expected_status:
+        raise RuntimeError(
+            "Full-Duplex-Bench scorer exit status does not match summary; "
+            f"see {work_dir / 'full_duplex_bench_score.log'}"
+        )
+    return summary
+
+
 def eval_one_model(
     *,
     suite: dict[str, Any],
@@ -10917,7 +11023,77 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "model_plugin_parity":
+    if scorer == "full_duplex_bench_behavior_parity":
+        scoring = suite.get("scoring", {})
+        scorer_profile = str(scoring.get("python_profile", "") or "")
+        base_python = str(getattr(args, "hf_python", "") or sys.executable)
+        scorer_python = (
+            resolve_profile_python(scorer_profile, base_python)
+            if scorer_profile
+            else model_reference_python(model, base_python)
+        )
+        summary = run_full_duplex_bench_comparison(
+            python=scorer_python,
+            hf_predictions=work_dir / "hf_predictions.json",
+            trtfb_predictions=work_dir / "trtfb_predictions.json",
+            answers=answers_path,
+            work_dir=work_dir,
+            gates=suite.get("gates", {}),
+            local_files_only=bool(args.local_files_only),
+        )
+        report_metrics: dict[str, dict[str, float]] = {}
+        for metric_name, metric in summary["metrics"].items():
+            for value_name in (
+                "hf",
+                "trtmc",
+                "abs_delta",
+                "threshold",
+                "paired_changed_count",
+                "paired_mean_abs_delta",
+                "paired_max_abs_delta",
+            ):
+                report_metrics[f"{metric_name}.{value_name}"] = {
+                    "mean": float(metric[value_name])
+                }
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "sample_count": summary["sample_count"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "metric_gate_count": summary["metric_gate_count"],
+            "metric_gate_pass_rate": summary["metric_gate_pass_rate"],
+            "metrics": report_metrics,
+            "gates": summary["gates"],
+            "gate_failures": summary["gate_failures"],
+            "benchmark_provenance": {
+                "dataset": summary.get("dataset", ""),
+                "dataset_source_revision": summary.get(
+                    "dataset_source_revision", ""
+                ),
+                "dataset_selection_seed": summary.get(
+                    "dataset_selection_seed", ""
+                ),
+                "samples_per_category": summary.get(
+                    "samples_per_category", 0
+                ),
+                "evaluator_revision": summary.get("evaluator_revision", ""),
+                "asr_model": summary.get("asr_model", ""),
+                "asr_revision": summary.get("asr_revision", ""),
+            },
+        }
+        if summary["gate_failures"]:
+            result.update(
+                {
+                    "error_type": "BenchmarkGateError",
+                    "error": (
+                        f"{len(summary['gate_failures'])} Full-Duplex-Bench "
+                        "HF/TRTMC metric delta gate(s) failed"
+                    ),
+                }
+            )
+    elif scorer == "model_plugin_parity":
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
@@ -11762,6 +11938,13 @@ def write_diffusion_text_summary_markdown(summary: dict[str, Any], path: Path) -
 
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
+    if result.get("mode") == "full_duplex_bench_behavior_parity":
+        return (
+            f"model={model['name']} metric_gate_pass_rate="
+            f"{result['metric_gate_pass_rate']:.4f} "
+            f"passed={result['passed_count']}/{result['metric_gate_count']} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "reranking_parity":
         return (
             f"model={model['name']} sample_pass_rate={result['sample_pass_rate']:.4f} "

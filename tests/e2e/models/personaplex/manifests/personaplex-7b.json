@@ -12,7 +12,7 @@
     2,
     3
   ],
-  "max_cache_length": 512,
+  "max_cache_length": 1280,
   "trust_remote_code": true,
   "testcases": [
     {
