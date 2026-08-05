@@ -2,3 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Native TensorRT support for MiniMaxAI/MiniMax-H3."""
+
+from .plugin import plugin
+
+__all__ = ["plugin"]
