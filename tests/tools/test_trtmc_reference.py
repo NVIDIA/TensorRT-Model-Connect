@@ -229,8 +229,23 @@ def test_reference_cache_identity_shares_equivalent_trtmc_variants(
     cache_dir = tmp_path / "cache"
     first = tmp_path / "first"
     second = tmp_path / "second"
-    _prepare_work(first, model_manifest="manifests/model-fp16.json")
-    _prepare_work(second, model_manifest="manifests/model-fp8.json")
+    model_dir = tmp_path / "model"
+    manifest_dir = model_dir / "manifests"
+    plugins_dir = model_dir / "e2e_plugins"
+    manifest_dir.mkdir(parents=True)
+    plugins_dir.mkdir()
+    fp16_manifest = manifest_dir / "model-fp16.json"
+    fp8_manifest = manifest_dir / "model-fp8.json"
+    fp16_manifest.write_text('{"precision": "fp16"}', encoding="utf-8")
+    fp8_manifest.write_text('{"precision": "fp8"}', encoding="utf-8")
+    (plugins_dir / "reference.py").write_text("REFERENCE = 1\n", encoding="utf-8")
+    _prepare_work(first, model_manifest=str(fp16_manifest))
+    _prepare_work(second, model_manifest=str(fp8_manifest))
+    for work_dir in (first, second):
+        manifest_path = work_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["dataset_kind"] = "diffusion_prompt_json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     calls = 0
 
     def fake_reference(args) -> None:
@@ -358,6 +373,83 @@ def test_reference_cache_keeps_variant_manifests_separate_without_identity(
     second_key, _ = trtmc_reference.reference_key(_args(second, cache_dir))
 
     assert first_key != second_key
+
+
+def test_plugin_reference_cache_key_tracks_model_owned_implementation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    model_dir = tmp_path / "z_image"
+    manifest_path = model_dir / "manifests" / "z-image-turbo.json"
+    reference_path = (
+        model_dir / "e2e_plugins" / "references" / "hf_diffusers.py"
+    )
+    manifest_path.parent.mkdir(parents=True)
+    reference_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "name": "z-image-turbo",
+                "testcases": [
+                    {
+                        "name": "z-image-turbo",
+                        "reference_precision": "fp16",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    reference_path.write_text("REFERENCE_DTYPE = 'fp16'\n", encoding="utf-8")
+
+    def prepare_work(name: str) -> Path:
+        work_dir = tmp_path / name
+        _prepare_work(work_dir, model_manifest=str(manifest_path))
+        work_manifest_path = work_dir / "manifest.json"
+        work_manifest = json.loads(
+            work_manifest_path.read_text(encoding="utf-8")
+        )
+        work_manifest["dataset_kind"] = "diffusion_prompt_json"
+        work_manifest_path.write_text(
+            json.dumps(work_manifest),
+            encoding="utf-8",
+        )
+        return work_dir
+
+    calls = 0
+
+    def fake_reference(args) -> None:
+        nonlocal calls
+        calls += 1
+        Path(args.work_dir, "hf_predictions.json").write_text(
+            json.dumps(
+                {"responses": [{"sample_id": "one", "output_text": "A"}]}
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        trtmc_reference,
+        "_run_reference_inference",
+        fake_reference,
+    )
+
+    first = prepare_work("first")
+    assert trtmc_reference.run_reference(_args(first, cache_dir)) == "generated"
+    model_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    model_manifest["testcases"][0]["reference_precision"] = "bf16"
+    manifest_path.write_text(json.dumps(model_manifest), encoding="utf-8")
+    second = prepare_work("second")
+    assert trtmc_reference.run_reference(_args(second, cache_dir)) == "generated"
+    reference_path.write_text("REFERENCE_DTYPE = 'bf16'\n", encoding="utf-8")
+    third = prepare_work("third")
+    assert trtmc_reference.run_reference(_args(third, cache_dir)) == "generated"
+    fourth = prepare_work("fourth")
+    assert trtmc_reference.run_reference(_args(fourth, cache_dir)) == "reused"
+
+    assert calls == 3
+    assert len(list(cache_dir.iterdir())) == 3
 
 
 def test_reference_cache_key_changes_with_inference_setting(

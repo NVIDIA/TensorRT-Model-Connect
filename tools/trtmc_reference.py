@@ -33,6 +33,7 @@ from tools.validation.artifacts import (  # noqa: E402
 CACHE_SCHEMA = "trtmc.reference-cache/v1"
 CACHE_IMPLEMENTATION = 1
 REFERENCE_CACHE_IDENTITY_IMPLEMENTATION = 2
+MODEL_OWNED_REFERENCE_IDENTITY_IMPLEMENTATION = 1
 _CACHE_METADATA = "reference.json"
 _WORK_METADATA = "hf_cache.json"
 _NATIVE_RUN_LOG = "hf_native_run.log"
@@ -158,6 +159,64 @@ def _hash_file(
             hasher.update(chunk)
 
 
+def _model_owned_reference_identity(args: argparse.Namespace) -> str:
+    work_manifest_path = Path(args.work_dir).resolve() / "manifest.json"
+    if not work_manifest_path.is_file():
+        return ""
+    try:
+        work_manifest = json.loads(
+            work_manifest_path.read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return ""
+    dataset_kind = str(work_manifest.get("dataset_kind", "") or "")
+    if dataset_kind not in _NATIVE_PLUGIN_DATASET_KINDS:
+        return ""
+    task_config = work_manifest.get("task_eval", {})
+    task_config = task_config if isinstance(task_config, dict) else {}
+    manifest_ref = str(task_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        return ""
+    model_manifest = Path(manifest_ref)
+    if not model_manifest.is_absolute():
+        model_manifest = REPO_ROOT / model_manifest
+    if not model_manifest.is_file():
+        return ""
+
+    model_root = (
+        model_manifest.parent.parent
+        if model_manifest.parent.name == "manifests"
+        else model_manifest.parent
+    )
+    sources: list[tuple[str, Path]] = []
+    if not str(getattr(args, "reference_cache_identity", "") or ""):
+        sources.append((f"manifest/{model_manifest.name}", model_manifest))
+    owner_manifest = model_root / "MODEL.toml"
+    if owner_manifest.is_file():
+        sources.append(("MODEL.toml", owner_manifest))
+    plugins_root = model_root / "e2e_plugins"
+    if plugins_root.is_dir():
+        sources.extend(
+            (
+                f"e2e_plugins/{path.relative_to(plugins_root).as_posix()}",
+                path,
+            )
+            for path in sorted(plugins_root.rglob("*.py"))
+            if path.is_file()
+        )
+
+    if not sources:
+        return ""
+    hasher = hashlib.sha256()
+    for label, path in sources:
+        hasher.update(label.encode())
+        hasher.update(b"\0")
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                hasher.update(chunk)
+    return hasher.hexdigest()
+
+
 def _settings(args: argparse.Namespace) -> dict[str, Any]:
     native_runner = _native_reference_runner(args)
     settings = {
@@ -185,6 +244,14 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
         "min_p": args.min_p,
         "seed": args.seed,
     }
+    model_owned_reference_identity = _model_owned_reference_identity(args)
+    if model_owned_reference_identity:
+        settings["model_owned_reference_identity"] = (
+            model_owned_reference_identity
+        )
+        settings["model_owned_reference_identity_implementation"] = (
+            MODEL_OWNED_REFERENCE_IDENTITY_IMPLEMENTATION
+        )
     reference_cache_identity = str(
         getattr(args, "reference_cache_identity", "") or ""
     )
