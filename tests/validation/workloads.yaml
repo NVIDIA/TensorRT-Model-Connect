@@ -1704,6 +1704,10 @@ suites:
       runtime_strategies: [diffusion_minimax_h3]
       user_contracts: [diffusion_video]
       families: [minimax_h3]
+    model_overrides:
+      by_model:
+        minimax-h3-768p:
+          reference_source_revision: current
     scoring:
       scorer: model_plugin_parity
     gates:

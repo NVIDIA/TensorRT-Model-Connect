@@ -223,15 +223,22 @@ def _model_manifest_path(manifest: Mapping[str, Any]) -> Path:
     return manifest_path if manifest_path.is_absolute() else REPO_ROOT / manifest_path
 
 
+def _apply_reference_task_metadata(
+    case: Any,
+    manifest: Mapping[str, Any],
+) -> None:
+    task_config = manifest.get("task_eval", {})
+    if not isinstance(task_config, Mapping):
+        return
+    for name in ("reference_precision", "reference_source_revision"):
+        value = str(task_config.get(name, "") or "")
+        if value:
+            case.metadata[name] = value
+
+
 def _load_reference_plugin(manifest: Mapping[str, Any]) -> tuple[Any, Any]:
     case = load_manifest(_model_manifest_path(manifest))
-    task_config = manifest.get("task_eval", {})
-    if isinstance(task_config, Mapping):
-        reference_precision = str(
-            task_config.get("reference_precision", "") or ""
-        )
-        if reference_precision:
-            case.metadata["reference_precision"] = reference_precision
+    _apply_reference_task_metadata(case, manifest)
     activate_model_plugins(str(case.metadata.get("model_test_dir", "") or ""))
     reference = get_reference(case.reference_backend)
     if reference is None:
@@ -693,13 +700,7 @@ def _run_model_plugin(
             prompt_row,
             source_index=source_index,
         )
-        task_config = manifest.get("task_eval", {})
-        if isinstance(task_config, Mapping):
-            reference_precision = str(
-                task_config.get("reference_precision", "") or ""
-            )
-            if reference_precision:
-                case.metadata["reference_precision"] = reference_precision
+        _apply_reference_task_metadata(case, manifest)
         activate_model_plugins(str(case.metadata.get("model_test_dir", "") or ""))
         reference = get_reference(case.reference_backend)
         if reference is None:

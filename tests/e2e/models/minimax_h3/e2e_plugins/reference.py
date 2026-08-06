@@ -12,6 +12,10 @@ import subprocess
 import sys
 import time
 
+from tensorrt_model_connect.families.minimax_h3.provenance import (
+    validate_source_revision,
+)
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
@@ -34,6 +38,14 @@ _DIFFUSERS_REPO_ENV = "TRTMC_MINIMAX_H3_DIFFUSERS_REPO"
 _FAMILY_MANIFEST = (
     PROJECT_DIR / "python" / "tensorrt_model_connect" / "families" / "minimax_h3" / "MODEL.toml"
 )
+
+
+def _reference_source_revision(case: E2ECase, ctx: RunContext) -> str:
+    if case.metadata.get("validation_sample_id"):
+        return validate_source_revision(
+            str(case.metadata.get("reference_source_revision", ""))
+        )
+    return source_revision(case, ctx)
 
 
 def _reference_environment(ctx: RunContext) -> dict[str, str]:
@@ -122,7 +134,7 @@ class MiniMaxH3HfReference:
         validate_fixed_profile(case)
         output_dir = artifact_dir(ctx, case, "hf_reference")
         python = ctx.reference_python_path() or sys.executable
-        revision = source_revision(case, ctx)
+        revision = _reference_source_revision(case, ctx)
         command = [
             python,
             str(MODEL_DIR / "hf_reference.py"),

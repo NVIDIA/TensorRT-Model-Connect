@@ -370,6 +370,70 @@ def _deep_merge_mappings(*values: Any) -> dict[str, Any]:
     return merged
 
 
+_EXACT_SOURCE_REVISION = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _current_source_revision() -> str:
+    for name in (
+        "TRTMC_VALIDATION_SOURCE_REVISION",
+        "TRTMC_ENGINE_BUILD_REVISION",
+        "GITHUB_SHA",
+    ):
+        configured = os.environ.get(name, "").strip().lower()
+        if not configured:
+            continue
+        if _EXACT_SOURCE_REVISION.fullmatch(configured) is None:
+            raise ValueError(f"{name} must be an exact Git SHA")
+        return configured
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=REPO_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise ValueError(
+            "cannot resolve current validation source revision"
+        ) from error
+    revision = result.stdout.strip().lower()
+    if result.returncode != 0 or _EXACT_SOURCE_REVISION.fullmatch(revision) is None:
+        detail = result.stderr.strip() or revision or "git rev-parse returned no revision"
+        raise ValueError(
+            "cannot resolve current validation source revision as an exact Git SHA: "
+            f"{detail}"
+        )
+    return revision
+
+
+def resolve_reference_source_revision(
+    validation_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve source-bound reference contracts before preparing cache inputs."""
+
+    resolved = copy.deepcopy(dict(validation_config))
+    configured = resolved.get("reference_source_revision")
+    if configured is None:
+        return resolved
+    if not isinstance(configured, str) or not configured.strip():
+        raise ValueError(
+            "validation.reference_source_revision must be 'current' or an exact Git SHA"
+        )
+    revision = (
+        _current_source_revision()
+        if configured.strip() == "current"
+        else configured.strip().lower()
+    )
+    if _EXACT_SOURCE_REVISION.fullmatch(revision) is None:
+        raise ValueError(
+            "validation.reference_source_revision must resolve to an exact Git SHA; "
+            f"got {configured!r}"
+        )
+    resolved["reference_source_revision"] = revision
+    return resolved
+
+
 def effective_validation_config(
     suite: dict[str, Any], model: dict[str, Any]
 ) -> dict[str, Any]:
@@ -8987,6 +9051,19 @@ def _bundle_can_be_reused(
     return not bundle_abi or not runtime_abi or bundle_abi == runtime_abi
 
 
+def _bundle_source_revision(bundle_path: Path) -> str:
+    try:
+        config = json.loads(
+            _read_bundle_section(bundle_path, "config.json").decode("utf-8")
+        )
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(config, dict):
+        return ""
+    revision = str(config.get("source_revision", "") or "").strip().lower()
+    return revision if _EXACT_SOURCE_REVISION.fullmatch(revision) else ""
+
+
 def _remove_bundle_before_or_after_replacement(
     bundle_path: Path,
     replace_existing: bool,
@@ -9006,7 +9083,14 @@ def ensure_bundle(
     extra_build_args: list[str] | None = None,
     log_path: Path | None = None,
     cuda_visible_devices: str = "",
+    expected_source_revision: str = "",
 ) -> tuple[Path, bool]:
+    expected_source_revision = str(expected_source_revision or "").strip().lower()
+    if (
+        expected_source_revision
+        and _EXACT_SOURCE_REVISION.fullmatch(expected_source_revision) is None
+    ):
+        raise ValueError("expected_source_revision must be an exact Git SHA")
     expected_precision = _canonical_reference_precision(
         model.get("precision", "fp32"),
         field="TRTMC base precision",
@@ -9018,6 +9102,9 @@ def ensure_bundle(
             max_cache_length=max_cache_length,
             expected_precision=expected_precision,
             allow_unknown=not replace_existing,
+        ) and (
+            not expected_source_revision
+            or _bundle_source_revision(bundle_path) == expected_source_revision
         ):
             return bundle_path, False
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -9035,9 +9122,12 @@ def ensure_bundle(
     log_path = log_path or bundle_path.with_suffix(".build.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     build_env = None
-    if cuda_visible_devices:
+    if cuda_visible_devices or expected_source_revision:
         build_env = os.environ.copy()
-        build_env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        if cuda_visible_devices:
+            build_env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        if expected_source_revision:
+            build_env["TRTMC_ENGINE_BUILD_REVISION"] = expected_source_revision
     with log_path.open("w", encoding="utf-8") as log_f:
         log_f.write(f"$ {shlex.join(cmd)}\n")
         log_f.flush()
@@ -9056,6 +9146,15 @@ def ensure_bundle(
         )
         raise RuntimeError(
             f"Bundle build failed for {model['name']} rc={proc.returncode}; see {log_path}"
+        )
+    actual_source_revision = (
+        _bundle_source_revision(bundle_path) if expected_source_revision else ""
+    )
+    if expected_source_revision and actual_source_revision != expected_source_revision:
+        _remove_bundle_before_or_after_replacement(bundle_path, replace_existing)
+        raise RuntimeError(
+            f"Bundle build for {model['name']} produced source_revision "
+            f"{actual_source_revision or '<missing>'}, expected {expected_source_revision}"
         )
     return bundle_path, True
 
@@ -10832,7 +10931,9 @@ def eval_one_model(
     reference_backend = reference_mode or str(
         model.get("reference_backend", "hf_transformers") or "hf_transformers"
     )
-    validation_config = effective_validation_config(suite, model)
+    validation_config = resolve_reference_source_revision(
+        effective_validation_config(suite, model)
+    )
     model = apply_comparison_precision(model, validation_config)
     suite_reference = suite.get("reference", {})
     if isinstance(suite_reference, dict) and suite_reference:
@@ -10962,6 +11063,9 @@ def eval_one_model(
         extra_build_args=args.extra_build_arg,
         log_path=work_dir / "build.log",
         cuda_visible_devices=args.cuda_visible_devices,
+        expected_source_revision=str(
+            validation_config.get("reference_source_revision", "") or ""
+        ),
     )
 
     if (

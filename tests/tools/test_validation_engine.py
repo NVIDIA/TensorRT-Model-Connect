@@ -22,7 +22,30 @@ from PIL import Image
 
 from tools import prepare_media_validation_datasets as prepare_media
 from tools import prepare_full_duplex_bench_validation as prepare_fdb
+from tools import trtmc_reference
+from tools.reference import plugin_reference
 from tools.validation import engine as validation_engine
+
+
+def _write_bundle_config(path: Path, config: dict[str, Any]) -> None:
+    config_data = json.dumps(config).encode("utf-8")
+    header_data = json.dumps(
+        {
+            "sections": {
+                "config.json": {
+                    "offset": 0,
+                    "size": len(config_data),
+                }
+            }
+        }
+    ).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        b"TRTFB\x00\x01\x00"
+        + struct.pack("<Q", len(header_data))
+        + header_data
+        + config_data
+    )
 
 
 def test_full_duplex_bench_scorer_runs_in_reference_environment(
@@ -2324,6 +2347,139 @@ def test_non_gpt_oss_mmlu_model_keeps_suite_defaults() -> None:
     assert validation_engine.effective_validation_config(suite, model) == {}
 
 
+def test_reference_source_revision_current_resolves_to_exact_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "a" * 40
+    monkeypatch.setattr(
+        validation_engine,
+        "_current_source_revision",
+        lambda: revision,
+    )
+
+    resolved = validation_engine.resolve_reference_source_revision(
+        {
+            "reference_source_revision": "current",
+            "reference_precision": "bf16",
+        }
+    )
+
+    assert resolved == {
+        "reference_source_revision": revision,
+        "reference_precision": "bf16",
+    }
+
+
+def test_reference_source_revision_current_fails_closed_without_exact_sha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in (
+        "TRTMC_VALIDATION_SOURCE_REVISION",
+        "TRTMC_ENGINE_BUILD_REVISION",
+        "GITHUB_SHA",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        validation_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="not-an-exact-sha\n",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot resolve current validation source revision as an exact Git SHA",
+    ):
+        validation_engine.resolve_reference_source_revision(
+            {"reference_source_revision": "current"}
+        )
+
+
+def test_current_source_revision_prefers_exact_ci_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRTMC_VALIDATION_SOURCE_REVISION", "A" * 40)
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "B" * 40)
+    monkeypatch.setenv("GITHUB_SHA", "C" * 40)
+    monkeypatch.setattr(
+        validation_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("exact CI revision must avoid git fallback"),
+    )
+
+    assert validation_engine._current_source_revision() == "a" * 40
+
+
+def test_model_plugin_reference_cache_key_tracks_resolved_source_revision(
+    tmp_path: Path,
+) -> None:
+    def reference_key(name: str, revision: str) -> str:
+        work_dir = tmp_path / name
+        work_dir.mkdir()
+        (work_dir / "answers.json").write_text(
+            json.dumps({"requests": [{"sample_id": "one"}]}),
+            encoding="utf-8",
+        )
+        (work_dir / "prompts.jsonl").write_text(
+            json.dumps({"sample_id": "one", "prompt": "hello"}) + "\n",
+            encoding="utf-8",
+        )
+        (work_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "dataset_kind": "model_plugin_json",
+                    "files": {
+                        "answers": str(work_dir / "answers.json"),
+                        "prompts": str(work_dir / "prompts.jsonl"),
+                    },
+                    "task_eval": {
+                        "model_manifest": "tests/e2e/models/example.json",
+                        "reference_source_revision": revision,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        arguments = trtmc_reference.build_parser().parse_args(
+            [
+                "run",
+                "--model",
+                "org/model",
+                "--family",
+                "example",
+                "--work-dir",
+                str(work_dir),
+                "--reference-cache-identity",
+                "example-reference-v1",
+            ]
+        )
+        return trtmc_reference.reference_key(arguments)[0]
+
+    assert reference_key("first", "a" * 40) != reference_key("second", "b" * 40)
+
+
+def test_plugin_reference_injects_source_revision_into_case_metadata() -> None:
+    case = SimpleNamespace(metadata={})
+
+    plugin_reference._apply_reference_task_metadata(
+        case,
+        {
+            "task_eval": {
+                "reference_precision": "bf16",
+                "reference_source_revision": "a" * 40,
+            }
+        },
+    )
+
+    assert case.metadata == {
+        "reference_precision": "bf16",
+        "reference_source_revision": "a" * 40,
+    }
+
+
 @pytest.mark.parametrize(
     ("model_name", "prompt_token_limit"),
     [
@@ -4053,6 +4209,148 @@ def test_ensure_bundle_applies_selected_cuda_device_to_build(
     )
 
     assert captured["cuda_visible_devices"] == "selected-device"
+
+
+def test_ensure_bundle_reuses_matching_source_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "a" * 40
+    bundle = tmp_path / "shared" / "model.trtfb"
+    _write_bundle_config(bundle, {"source_revision": revision})
+    monkeypatch.setattr(
+        validation_engine,
+        "bundle_inspection",
+        lambda *_args: {"Precision": "fp32"},
+    )
+    monkeypatch.setattr(
+        validation_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("matching bundle must be reused"),
+    )
+
+    result, built = validation_engine.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        replace_existing=True,
+        expected_source_revision=revision,
+    )
+
+    assert result == bundle
+    assert built is False
+
+
+def test_ensure_bundle_rebuilds_mismatched_source_revision_with_expected_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_revision = "a" * 40
+    bundle = tmp_path / "shared" / "model.trtfb"
+    _write_bundle_config(bundle, {"source_revision": "b" * 40})
+    monkeypatch.setattr(
+        validation_engine,
+        "bundle_inspection",
+        lambda *_args: {"Precision": "fp32"},
+    )
+
+    def fake_run(command, **kwargs):
+        assert not bundle.exists()
+        assert kwargs["env"]["TRTMC_ENGINE_BUILD_REVISION"] == expected_revision
+        _write_bundle_config(bundle, {"source_revision": expected_revision})
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    result, built = validation_engine.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        replace_existing=True,
+        expected_source_revision=expected_revision,
+    )
+
+    assert result == bundle
+    assert built is True
+    assert validation_engine._bundle_source_revision(bundle) == expected_revision
+
+
+def test_source_bound_bundle_preserves_existing_file_without_replace_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_revision = "a" * 40
+    existing_revision = "b" * 40
+    bundle = tmp_path / "shared" / "model.trtfb"
+    _write_bundle_config(bundle, {"source_revision": existing_revision})
+    monkeypatch.setattr(
+        validation_engine,
+        "bundle_inspection",
+        lambda *_args: {"Precision": "fp32"},
+    )
+
+    def fake_run(_command, **kwargs):
+        assert bundle.is_file()
+        assert kwargs["env"]["TRTMC_ENGINE_BUILD_REVISION"] == expected_revision
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Bundle build failed"):
+        validation_engine.ensure_bundle(
+            {
+                "name": "model",
+                "hf_id": "org/model",
+                "precision": "fp32",
+            },
+            bundle_path=bundle,
+            trtmc_binary="trtmc",
+            replace_existing=False,
+            expected_source_revision=expected_revision,
+        )
+
+    assert validation_engine._bundle_source_revision(bundle) == existing_revision
+
+
+def test_ensure_bundle_rejects_wrong_source_revision_after_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_revision = "a" * 40
+    bundle = tmp_path / "shared" / "model.trtfb"
+
+    def fake_run(command, **kwargs):
+        assert kwargs["env"]["TRTMC_ENGINE_BUILD_REVISION"] == expected_revision
+        _write_bundle_config(bundle, {"source_revision": "b" * 40})
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    with pytest.raises(
+        RuntimeError,
+        match="produced source_revision .* expected",
+    ):
+        validation_engine.ensure_bundle(
+            {
+                "name": "model",
+                "hf_id": "org/model",
+                "precision": "fp32",
+            },
+            bundle_path=bundle,
+            trtmc_binary="trtmc",
+            replace_existing=True,
+            expected_source_revision=expected_revision,
+        )
+
+    assert not bundle.exists()
 
 
 def test_ensure_bundle_removes_partial_replacement_after_failed_build(
@@ -6145,6 +6443,56 @@ def test_eval_one_model_passes_model_manifest_to_diffusion_prepare(
 
     assert captured["model_manifest"] == model["manifest"]
     assert captured["family"] == "flux"
+
+
+def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    revision = "a" * 40
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "minimax_h3_official_profile_parity",
+    )
+    model = {
+        "name": "minimax-h3-768p",
+        "manifest": "tests/e2e/models/minimax_h3/manifests/minimax-h3-768p.json",
+        "hf_id": "MiniMaxAI/MiniMax-H3",
+        "bundle": "minimax-h3-768p.trtfb",
+        "family": "minimax_h3",
+        "task_eval": {},
+    }
+    captured: dict[str, Any] = {}
+
+    class Prepared(Exception):
+        pass
+
+    def fake_prepare(**kwargs):
+        captured.update(kwargs["validation_config"])
+        raise Prepared
+
+    monkeypatch.setattr(
+        validation_engine,
+        "_current_source_revision",
+        lambda: revision,
+    )
+    monkeypatch.setattr(validation_engine, "prepare_task_dataset", fake_prepare)
+
+    with pytest.raises(Prepared):
+        validation_engine.eval_one_model(
+            suite=suite,
+            model=model,
+            args=argparse.Namespace(
+                work_root=str(tmp_path / "work"),
+                dataset=str(tmp_path / "minimax-h3-768p.json"),
+                limit=1,
+                subject="",
+                sample_seed=None,
+            ),
+        )
+
+    assert captured["reference_source_revision"] == revision
+    assert captured["model_manifest"] == model["manifest"]
 
 
 def test_flux_validation_build_command_preserves_diffusion_shape(tmp_path: Path) -> None:

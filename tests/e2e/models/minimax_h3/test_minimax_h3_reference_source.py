@@ -94,6 +94,34 @@ def test_reference_environment_prioritizes_pinned_diffusers(
     assert environment["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
+def test_model_plugin_reference_uses_validation_revision_without_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = SimpleNamespace(
+        metadata={
+            "validation_sample_id": "fixed-profile",
+            "reference_source_revision": "a" * 40,
+        }
+    )
+    ctx = RunContext(case=case)
+    monkeypatch.setattr(
+        reference,
+        "source_revision",
+        lambda *_args: pytest.fail("validation reference must not require a bundle"),
+    )
+
+    revision = reference._reference_source_revision(case, ctx)
+
+    assert revision == "a" * 40
+
+
+def test_model_plugin_reference_requires_exact_validation_revision() -> None:
+    case = SimpleNamespace(metadata={"validation_sample_id": "fixed-profile"})
+
+    with pytest.raises(ValueError, match="lowercase 40-character Git SHA"):
+        reference._reference_source_revision(case, RunContext(case=case))
+
+
 def test_reference_evidence_is_resolved_from_context_and_passed_explicitly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
