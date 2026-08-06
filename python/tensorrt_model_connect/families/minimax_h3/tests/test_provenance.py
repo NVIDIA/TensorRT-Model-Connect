@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -29,13 +30,95 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
     validate_build_receipt,
     validate_component_build_receipt,
     validate_file_identity,
+    validate_git_archive_source_unchanged,
     validate_native_bundle_config,
+    validated_git_archive_source_record,
     validated_git_source_record,
 )
 
 FAMILY_ROOT = Path(__file__).resolve().parents[1]
 BUILD_HELPER = FAMILY_ROOT.parents[3] / "tests/e2e/models/minimax_h3/build_native_components.py"
 SOURCE_REVISION = "a" * 40
+
+
+def _test_archive_inventory(root: Path) -> dict[str, int | str]:
+    """Reproduce the documented path/kind/size/content inventory independently."""
+
+    digest = hashlib.sha256()
+    entry_count = 0
+    total_bytes = 0
+    paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+    for path in paths:
+        if path.is_dir():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            kind = "L"
+            payload = os.fsencode(os.readlink(path))
+        else:
+            kind = "F"
+            payload = path.read_bytes()
+        content_sha256 = hashlib.sha256(payload).hexdigest()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(kind.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(len(payload)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(content_sha256.encode("ascii"))
+        digest.update(b"\n")
+        entry_count += 1
+        total_bytes += len(payload)
+    return {
+        "entry_count": entry_count,
+        "bytes": total_bytes,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _git_archive_fixture(tmp_path: Path, monkeypatch):
+    storage_root = tmp_path / "reference-private"
+    archive_root = storage_root / provenance.DIFFUSERS_REFERENCE_RELATIVE_PATH
+    entrypoint = archive_root / provenance.DIFFUSERS_REFERENCE_ENTRYPOINT
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_bytes(b'__version__ = "test"\n')
+    (archive_root / "README.md").write_bytes(b"reference archive\n")
+    agents = archive_root / ".ai" / "AGENTS.md"
+    agents.parent.mkdir()
+    agents.write_bytes(b"archive guidance\n")
+    (archive_root / "AGENTS.md").symlink_to(".ai/AGENTS.md")
+
+    inventory = _test_archive_inventory(archive_root)
+    entrypoint_record = file_record(entrypoint)
+    monkeypatch.setattr(provenance, "DIFFUSERS_REFERENCE_CONTAINER_ROOT", str(storage_root))
+    monkeypatch.setattr(
+        provenance, "DIFFUSERS_REFERENCE_ENTRYPOINT_BYTES", entrypoint_record["bytes"]
+    )
+    monkeypatch.setattr(
+        provenance,
+        "DIFFUSERS_REFERENCE_ENTRYPOINT_SHA256",
+        entrypoint_record["sha256"],
+    )
+    monkeypatch.setattr(provenance, "DIFFUSERS_REFERENCE_ARCHIVE_ENTRIES", inventory["entry_count"])
+    monkeypatch.setattr(provenance, "DIFFUSERS_REFERENCE_ARCHIVE_BYTES", inventory["bytes"])
+    monkeypatch.setattr(provenance, "DIFFUSERS_REFERENCE_ARCHIVE_SHA256", inventory["sha256"])
+
+    evidence = {
+        "schema_version": 1,
+        "model": "minimax_h3",
+        "isolation": "selected-pinned-private",
+        "repository": provenance.DIFFUSERS_REFERENCE_REPOSITORY,
+        "reference_revision": provenance.DIFFUSERS_REFERENCE_REVISION,
+        "reference_tree": provenance.DIFFUSERS_REFERENCE_TREE,
+        "relative_path": provenance.DIFFUSERS_REFERENCE_RELATIVE_PATH,
+        "entrypoint": provenance.DIFFUSERS_REFERENCE_ENTRYPOINT,
+        "container_storage_root": str(storage_root),
+        "copy_method": "git-archive",
+    }
+    evidence_path = tmp_path / "artifacts" / "model-reference-cache.json"
+    evidence_path.parent.mkdir()
+    evidence_path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return entrypoint, evidence_path, archive_root, evidence
 
 
 def _link_blob(snapshot: Path, relative: str, blob_id: str, payload: bytes) -> Path:
@@ -351,3 +434,190 @@ def test_git_source_record_requires_exact_clean_head(tmp_path: Path) -> None:
     entrypoint.write_text('__version__ = "dirty"\n')
     with pytest.raises(ValueError, match="tracked modifications"):
         validated_git_source_record(entrypoint, expected_revision=revision, label="test source")
+
+
+def test_diffusers_git_archive_contract_is_exact() -> None:
+    assert (
+        provenance.DIFFUSERS_REFERENCE_REPOSITORY == "https://github.com/huggingface/diffusers.git"
+    )
+    assert provenance.DIFFUSERS_REFERENCE_REVISION == "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc"
+    assert provenance.DIFFUSERS_REFERENCE_TREE == "a9aeec5268dd9661565a3e0af9b298744eb416b2"
+    assert (
+        provenance.DIFFUSERS_REFERENCE_RELATIVE_PATH
+        == "minimax_h3/reference/diffusers-abc5e9bf71fd"
+    )
+    assert provenance.DIFFUSERS_REFERENCE_ENTRYPOINT == "src/diffusers/__init__.py"
+    assert provenance.DIFFUSERS_REFERENCE_ENTRYPOINT_BYTES == 65_047
+    assert (
+        provenance.DIFFUSERS_REFERENCE_ENTRYPOINT_SHA256
+        == "78bac2aa899c34b6d504e8dfb128d9475ad7baee179b3ad97d09ccef25999916"
+    )
+    assert provenance.DIFFUSERS_REFERENCE_ARCHIVE_ENTRIES == 2_772
+    assert provenance.DIFFUSERS_REFERENCE_ARCHIVE_BYTES == 50_469_043
+    assert (
+        provenance.DIFFUSERS_REFERENCE_ARCHIVE_SHA256
+        == "372c820aece801258bd4cea2458a2b85ad536e9262d7b0bbcdd450eda2d664a9"
+    )
+    assert provenance.DIFFUSERS_REFERENCE_CONTAINER_ROOT == "/work/reference-private"
+
+
+def test_git_archive_source_record_accepts_exact_private_copy(tmp_path: Path, monkeypatch) -> None:
+    entrypoint, evidence_path, _archive_root, _evidence = _git_archive_fixture(
+        tmp_path, monkeypatch
+    )
+
+    record = validated_git_archive_source_record(
+        entrypoint,
+        evidence_path=evidence_path,
+        label="Diffusers reference",
+    )
+
+    assert record["qualification"] == "selected-pinned-git-archive"
+    assert record["repository"] == provenance.DIFFUSERS_REFERENCE_REPOSITORY
+    assert record["revision"] == provenance.DIFFUSERS_REFERENCE_REVISION
+    assert record["tree"] == provenance.DIFFUSERS_REFERENCE_TREE
+    assert record["entrypoint_record"] == file_record(entrypoint)
+    assert record["archive_inventory"] == _test_archive_inventory(
+        Path(provenance.DIFFUSERS_REFERENCE_CONTAINER_ROOT)
+        / provenance.DIFFUSERS_REFERENCE_RELATIVE_PATH
+    )
+    validate_git_archive_source_unchanged(
+        entrypoint,
+        evidence_path=evidence_path,
+        expected_record=record,
+        label="Diffusers reference",
+    )
+
+
+def test_git_archive_source_record_rejects_symlinked_evidence(tmp_path: Path, monkeypatch) -> None:
+    entrypoint, evidence_path, _archive_root, _evidence = _git_archive_fixture(
+        tmp_path, monkeypatch
+    )
+    symlink = evidence_path.with_name("linked-model-reference-cache.json")
+    symlink.symlink_to(evidence_path)
+
+    with pytest.raises(ValueError, match="evidence must not be a symlink"):
+        validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=symlink,
+            label="Diffusers reference",
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schema_version",
+        "model",
+        "isolation",
+        "repository",
+        "reference_revision",
+        "reference_tree",
+        "relative_path",
+        "entrypoint",
+        "container_storage_root",
+        "copy_method",
+    ],
+)
+def test_git_archive_source_record_rejects_evidence_mismatch(
+    tmp_path: Path, monkeypatch, field: str
+) -> None:
+    entrypoint, evidence_path, _archive_root, evidence = _git_archive_fixture(tmp_path, monkeypatch)
+    evidence[field] = False if field == "schema_version" else "wrong"
+    evidence_path.write_text(json.dumps(evidence))
+
+    with pytest.raises(ValueError, match=f"evidence mismatch for {field}"):
+        validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers reference",
+        )
+
+
+def test_git_archive_source_record_rejects_unsupported_or_duplicate_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    entrypoint, evidence_path, _archive_root, evidence = _git_archive_fixture(tmp_path, monkeypatch)
+    evidence["unexpected"] = True
+    evidence_path.write_text(json.dumps(evidence))
+    with pytest.raises(ValueError, match="unsupported fields"):
+        validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers reference",
+        )
+
+    evidence_path.write_text('{"schema_version":1,"schema_version":1}')
+    with pytest.raises(ValueError, match="duplicate keys"):
+        validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers reference",
+        )
+
+
+@pytest.mark.parametrize("mutation", ["add", "delete", "modify"])
+def test_git_archive_source_revalidation_detects_inventory_mutation(
+    tmp_path: Path, monkeypatch, mutation: str
+) -> None:
+    entrypoint, evidence_path, archive_root, _evidence = _git_archive_fixture(tmp_path, monkeypatch)
+    record = validated_git_archive_source_record(
+        entrypoint,
+        evidence_path=evidence_path,
+        label="Diffusers reference",
+    )
+
+    readme = archive_root / "README.md"
+    if mutation == "add":
+        (archive_root / "added.py").write_bytes(b"added\n")
+    elif mutation == "delete":
+        readme.unlink()
+    else:
+        readme.write_bytes(b"tampered archive\n")
+
+    with pytest.raises(ValueError, match="archive inventory"):
+        validate_git_archive_source_unchanged(
+            entrypoint,
+            evidence_path=evidence_path,
+            expected_record=record,
+            label="Diffusers reference",
+        )
+
+
+def test_git_archive_source_record_rejects_escaping_symlink(tmp_path: Path, monkeypatch) -> None:
+    entrypoint, evidence_path, archive_root, _evidence = _git_archive_fixture(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"outside\n")
+    (archive_root / "escape.py").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="escaping symlink"):
+        validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers reference",
+        )
+
+
+def test_git_archive_source_record_rejects_wrong_import_or_git_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    entrypoint, evidence_path, archive_root, _evidence = _git_archive_fixture(tmp_path, monkeypatch)
+    wrong_entrypoint = tmp_path / "diffusers" / "__init__.py"
+    wrong_entrypoint.parent.mkdir()
+    wrong_entrypoint.write_bytes(entrypoint.read_bytes())
+    with pytest.raises(ValueError, match="was not imported"):
+        validated_git_archive_source_record(
+            wrong_entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers reference",
+        )
+
+    git_config = archive_root / ".git" / "config"
+    git_config.parent.mkdir()
+    git_config.write_bytes(b"[core]\n")
+    with pytest.raises(ValueError, match="must not contain Git metadata"):
+        validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers reference",
+        )

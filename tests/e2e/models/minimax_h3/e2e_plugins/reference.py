@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -29,9 +30,49 @@ from .contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 
 _GENERATION_STAGES = {"end_to_end", "end_to_end_video", "generate", "frame_quality"}
+_DIFFUSERS_REPO_ENV = "TRTMC_MINIMAX_H3_DIFFUSERS_REPO"
 _FAMILY_MANIFEST = (
     PROJECT_DIR / "python" / "tensorrt_model_connect" / "families" / "minimax_h3" / "MODEL.toml"
 )
+
+
+def _reference_environment(ctx: RunContext) -> dict[str, str]:
+    environment = subprocess_env(ctx)
+    source_value = environment.get(_DIFFUSERS_REPO_ENV, "").strip()
+    if not source_value:
+        raise ValueError(
+            f"MiniMax-H3 HF reference requires {_DIFFUSERS_REPO_ENV} to select "
+            "the pinned Diffusers source"
+        )
+    source = Path(source_value)
+    if source.is_symlink():
+        raise ValueError("MiniMax-H3 pinned Diffusers source must not be a symlink")
+    source = source.resolve(strict=True)
+    entrypoint = source / "src" / "diffusers" / "__init__.py"
+    if not source.is_dir() or entrypoint.is_symlink() or not entrypoint.is_file():
+        raise ValueError("MiniMax-H3 pinned Diffusers source is incomplete")
+    existing = environment.get("PYTHONPATH", "").strip()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        value for value in (str(source / "src"), existing) if value
+    )
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
+
+
+def _reference_evidence_path(ctx: RunContext) -> Path | None:
+    if not ctx.artifacts_dir:
+        return None
+    artifacts_root = Path(ctx.artifacts_dir)
+    candidates = (
+        artifacts_root / "model-reference-cache.json",
+        artifacts_root.parent / "model-reference-cache.json",
+    )
+    # Preserve the lexical path so the provenance validator can reject evidence
+    # supplied through a symlink instead of silently accepting its target.
+    matches = [candidate.absolute() for candidate in candidates if candidate.is_file()]
+    if len(matches) > 1 and matches[0] != matches[1]:
+        raise ValueError("MiniMax-H3 found ambiguous model reference cache evidence")
+    return matches[0] if matches else None
 
 
 def _reference_allow_patterns() -> tuple[str, ...]:
@@ -102,6 +143,9 @@ class MiniMaxH3HfReference:
             "--output-type",
             "np",
         ]
+        evidence_path = _reference_evidence_path(ctx)
+        if evidence_path is not None:
+            command.extend(("--diffusers-evidence", str(evidence_path)))
         timeout_s = int(case.metadata.get("reference_timeout_s", 7200))
         started = time.monotonic()
         result = subprocess.run(
@@ -112,7 +156,7 @@ class MiniMaxH3HfReference:
             encoding="utf-8",
             errors="replace",
             timeout=timeout_s,
-            env=subprocess_env(ctx),
+            env=_reference_environment(ctx),
         )
         elapsed = time.monotonic() - started
         receipt_path = output_dir / "hf_receipt.json"

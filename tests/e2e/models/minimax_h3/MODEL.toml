@@ -5,6 +5,13 @@ id = "minimax_h3"
 plugin = "minimax_h3"
 test_manifests = ["manifests/minimax-h3-768p.json"]
 
+[model_reference_cache]
+repository = "https://github.com/huggingface/diffusers.git"
+revision = "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc"
+relative_path = "minimax_h3/reference/diffusers-abc5e9bf71fd"
+entrypoint = "src/diffusers/__init__.py"
+environment_variable = "TRTMC_MINIMAX_H3_DIFFUSERS_REPO"
+
 [e2e_defaults.diffusion_media_generation]
 reference_backend = "hf_diffusers"
 oracle_level = "L1_external_reference"

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import subprocess
 import time
 from pathlib import Path
 from types import MethodType
@@ -21,12 +22,139 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
     file_identity,
     stable_file_record,
     validate_file_identity,
+    validate_git_archive_source_unchanged,
     validate_source_revision,
+    validated_git_archive_source_record,
     validated_git_source_record,
 )
 
 DIFFUSERS_REVISION = "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc"
 TRANSFORMERS_COMPAT_REVISION = "bed02e1faee69e866e382f835b4f7b0a3c7b8431"
+BASE_TRANSFORMERS_VERSION = "5.2.0"
+BASE_TRANSFORMERS_ENTRYPOINT = Path(
+    "/opt/venv/lib/python3.12/site-packages/transformers/__init__.py"
+)
+BASE_TRANSFORMERS_ENTRYPOINT_RECORD = {
+    "bytes": 38424,
+    "sha256": "91b2c544c6848f4ce8213c770aaa705ce682ee656c995f4ce58352c4b7368ee7",
+}
+
+
+def _has_git_checkout(entrypoint: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(entrypoint.resolve(strict=True).parent),
+                "rev-parse",
+                "--show-toplevel",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def qualified_diffusers_source(entrypoint: Path, evidence_path: Path | None) -> dict:
+    if evidence_path is not None:
+        return validated_git_archive_source_record(
+            entrypoint,
+            evidence_path=evidence_path,
+            label="Diffusers source",
+        )
+    return {
+        "qualification": "clean_git_checkout",
+        **validated_git_source_record(
+            entrypoint,
+            expected_revision=DIFFUSERS_REVISION,
+            label="Diffusers source",
+        ),
+    }
+
+
+def qualified_transformers_source(entrypoint: Path, version: str) -> dict:
+    entrypoint = entrypoint.resolve(strict=True)
+    if _has_git_checkout(entrypoint):
+        return {
+            "qualification": "clean_git_checkout",
+            **validated_git_source_record(
+                entrypoint,
+                expected_revision=TRANSFORMERS_COMPAT_REVISION,
+                label="Transformers source",
+            ),
+        }
+    if entrypoint != BASE_TRANSFORMERS_ENTRYPOINT.resolve():
+        raise ValueError(
+            "MiniMax-H3 Transformers source is neither the pinned Git checkout "
+            "nor the qualified immutable CI base"
+        )
+    if version != BASE_TRANSFORMERS_VERSION:
+        raise ValueError(
+            "MiniMax-H3 immutable base Transformers version mismatch: "
+            f"expected {BASE_TRANSFORMERS_VERSION}, got {version}"
+        )
+    entrypoint_record, _ = stable_file_record(entrypoint, "Transformers base entrypoint")
+    if entrypoint_record != BASE_TRANSFORMERS_ENTRYPOINT_RECORD:
+        raise ValueError("MiniMax-H3 immutable base Transformers entrypoint mismatch")
+    return {
+        "qualification": "immutable_base_5_2_plus_local_shim",
+        "version": version,
+        "entrypoint": str(entrypoint),
+        "entrypoint_record": entrypoint_record,
+    }
+
+
+def create_mm_token_type_ids(processor, input_ids):
+    def modality_ids(name):
+        plural = getattr(processor, f"{name}_token_ids", None)
+        return plural if plural is not None else [getattr(processor, f"{name}_token_id", None)]
+
+    result = []
+    for tokenizer_input in input_ids:
+        if not isinstance(tokenizer_input, list):
+            tokenizer_input = tokenizer_input.tolist()
+        tokenizer_input = np.asarray(tokenizer_input)
+        token_types = np.zeros_like(tokenizer_input)
+        token_types[np.isin(tokenizer_input, modality_ids("image"))] = 1
+        token_types[np.isin(tokenizer_input, modality_ids("video"))] = 2
+        token_types[np.isin(tokenizer_input, modality_ids("audio"))] = 3
+        result.append(token_types.tolist())
+    return result
+
+
+def _processor_method_identity(processor) -> tuple[object, object]:
+    method = getattr(processor, "create_mm_token_type_ids", None)
+    if not callable(method):
+        raise ValueError("MiniMax-H3 processor has no callable create_mm_token_type_ids")
+    return getattr(method, "__self__", None), getattr(method, "__func__", method)
+
+
+def prepare_processor_compat(processor, transformers_source: dict) -> tuple[str | None, tuple]:
+    qualification = transformers_source.get("qualification")
+    if qualification == "immutable_base_5_2_plus_local_shim":
+        if hasattr(processor, "create_mm_token_type_ids"):
+            raise ValueError(
+                "MiniMax-H3 immutable Transformers base unexpectedly provides "
+                "create_mm_token_type_ids"
+            )
+        processor.create_mm_token_type_ids = MethodType(create_mm_token_type_ids, processor)
+        identity = _processor_method_identity(processor)
+        if identity != (processor, create_mm_token_type_ids):
+            raise ValueError("MiniMax-H3 could not bind its local processor compatibility helper")
+        return "local-create-mm-token-type-ids-for-transformers-5.2.0", identity
+    if qualification != "clean_git_checkout":
+        raise ValueError("MiniMax-H3 Transformers source has an unknown qualification")
+    return None, _processor_method_identity(processor)
+
+
+def validate_processor_method_unchanged(processor, expected: tuple[object, object]) -> None:
+    current = _processor_method_identity(processor)
+    if current[0] is not expected[0] or current[1] is not expected[1]:
+        raise ValueError("MiniMax-H3 processor compatibility helper changed during the run")
 
 
 def main() -> int:
@@ -35,6 +163,7 @@ def main() -> int:
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-revision", required=True)
+    parser.add_argument("--diffusers-evidence")
     parser.add_argument("--compile", action="store_true", dest="use_compile")
     parser.add_argument("--compile-mode", default="max-autotune-no-cudagraphs")
     parser.add_argument("--warmup", type=int, default=1)
@@ -77,10 +206,14 @@ def main() -> int:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    diffusers_source = validated_git_source_record(
+    # Keep the lexical evidence path intact. The provenance validator owns
+    # existence, stability, and no-symlink enforcement.
+    diffusers_evidence = (
+        Path(args.diffusers_evidence).absolute() if args.diffusers_evidence else None
+    )
+    diffusers_source = qualified_diffusers_source(
         Path(diffusers.__file__),
-        expected_revision=DIFFUSERS_REVISION,
-        label="Diffusers source",
+        diffusers_evidence,
     )
     manager = ComponentsManager()
     started = time.perf_counter()
@@ -90,38 +223,13 @@ def main() -> int:
     pipe.load_components(dtype=torch.bfloat16, pretrained_model_name_or_path=args.model_path)
     import transformers
 
-    transformers_source = validated_git_source_record(
+    transformers_source = qualified_transformers_source(
         Path(transformers.__file__),
-        expected_revision=TRANSFORMERS_COMPAT_REVISION,
-        label="Transformers source",
+        transformers.__version__,
     )
-    processor_compat = None
-    if not hasattr(pipe.processor, "create_mm_token_type_ids"):
-        # Diffusers H3 uses the ProcessorMixin helper added immediately after
-        # Transformers 5.2. Keep this exact upstream behavior for the pinned run.
-        def create_mm_token_type_ids(processor, input_ids):
-            def modality_ids(name):
-                plural = getattr(processor, f"{name}_token_ids", None)
-                return (
-                    plural if plural is not None else [getattr(processor, f"{name}_token_id", None)]
-                )
-
-            result = []
-            for tokenizer_input in input_ids:
-                if not isinstance(tokenizer_input, list):
-                    tokenizer_input = tokenizer_input.tolist()
-                tokenizer_input = np.asarray(tokenizer_input)
-                token_types = np.zeros_like(tokenizer_input)
-                token_types[np.isin(tokenizer_input, modality_ids("image"))] = 1
-                token_types[np.isin(tokenizer_input, modality_ids("video"))] = 2
-                token_types[np.isin(tokenizer_input, modality_ids("audio"))] = 3
-                result.append(token_types.tolist())
-            return result
-
-        pipe.processor.create_mm_token_type_ids = MethodType(
-            create_mm_token_type_ids, pipe.processor
-        )
-        processor_compat = "transformers-main-bed02e1-create-mm-token-type-ids"
+    processor_compat, processor_method_identity = prepare_processor_compat(
+        pipe.processor, transformers_source
+    )
     pipe.to("cuda:0")
     torch.cuda.synchronize()
     load_s = time.perf_counter() - started
@@ -195,24 +303,21 @@ def main() -> int:
     frames_record, _ = stable_file_record(frames_path, "HF decoded frames")
     validate_file_identity(prompt_path, prompt_hashed_identity, "prompt file")
     validate_file_identity(script_path, script_identity, "HF reference helper")
-    if (
-        validated_git_source_record(
+    if diffusers_evidence is not None:
+        validate_git_archive_source_unchanged(
             Path(diffusers.__file__),
-            expected_revision=DIFFUSERS_REVISION,
+            evidence_path=diffusers_evidence,
+            expected_record=diffusers_source,
             label="Diffusers source",
         )
-        != diffusers_source
-    ):
+    elif qualified_diffusers_source(Path(diffusers.__file__), None) != diffusers_source:
         raise ValueError("MiniMax-H3 Diffusers source changed during the HF reference run")
     if (
-        validated_git_source_record(
-            Path(transformers.__file__),
-            expected_revision=TRANSFORMERS_COMPAT_REVISION,
-            label="Transformers source",
-        )
+        qualified_transformers_source(Path(transformers.__file__), transformers.__version__)
         != transformers_source
     ):
         raise ValueError("MiniMax-H3 Transformers source changed during the HF reference run")
+    validate_processor_method_unchanged(pipe.processor, processor_method_identity)
     if checkpoint_snapshot_record(model_path) != snapshot_record:
         raise ValueError("MiniMax-H3 checkpoint snapshot changed during the HF reference run")
     receipt = {

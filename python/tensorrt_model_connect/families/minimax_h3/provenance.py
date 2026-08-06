@@ -18,6 +18,21 @@ from pathlib import Path
 CHECKPOINT_REVISION = "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
 CHECKPOINT_REPOSITORY = "MiniMaxAI/MiniMax-H3"
 HF_CACHE_REPOSITORY = "models--MiniMaxAI--MiniMax-H3"
+DIFFUSERS_REFERENCE_REPOSITORY = "https://github.com/huggingface/diffusers.git"
+DIFFUSERS_REFERENCE_REVISION = "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc"
+DIFFUSERS_REFERENCE_TREE = "a9aeec5268dd9661565a3e0af9b298744eb416b2"
+DIFFUSERS_REFERENCE_RELATIVE_PATH = "minimax_h3/reference/diffusers-abc5e9bf71fd"
+DIFFUSERS_REFERENCE_ENTRYPOINT = "src/diffusers/__init__.py"
+DIFFUSERS_REFERENCE_ENTRYPOINT_BYTES = 65_047
+DIFFUSERS_REFERENCE_ENTRYPOINT_SHA256 = (
+    "78bac2aa899c34b6d504e8dfb128d9475ad7baee179b3ad97d09ccef25999916"
+)
+DIFFUSERS_REFERENCE_ARCHIVE_ENTRIES = 2_772
+DIFFUSERS_REFERENCE_ARCHIVE_BYTES = 50_469_043
+DIFFUSERS_REFERENCE_ARCHIVE_SHA256 = (
+    "372c820aece801258bd4cea2458a2b85ad536e9262d7b0bbcdd450eda2d664a9"
+)
+DIFFUSERS_REFERENCE_CONTAINER_ROOT = "/work/reference-private"
 PLAN_FILENAMES = (
     "text_encoder.plan",
     "adaln_precompute.plan",
@@ -340,6 +355,248 @@ def validated_git_source_record(entrypoint: Path, *, expected_revision: str, lab
         "entrypoint_record": entrypoint_record,
         "tracked_worktree_clean": True,
     }
+
+
+def _lstat_identity(path: Path) -> tuple[int, int, int, int, int, int]:
+    metadata = path.lstat()
+    return (
+        metadata.st_mode,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _archive_layout(root: Path, label: str) -> list[tuple[str, str]]:
+    try:
+        paths = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+    except OSError as error:
+        raise ValueError(f"MiniMax-H3 {label} archive could not be inventoried") from error
+
+    layout: list[tuple[str, str]] = []
+    populated_directories: set[str] = set()
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        if ".git" in Path(relative).parts:
+            raise ValueError(f"MiniMax-H3 {label} archive must not contain Git metadata")
+        try:
+            mode = path.lstat().st_mode
+        except OSError as error:
+            raise ValueError(
+                f"MiniMax-H3 {label} archive entry is unavailable: {relative}"
+            ) from error
+        if stat.S_ISDIR(mode):
+            kind = "D"
+        elif stat.S_ISREG(mode):
+            kind = "F"
+        elif stat.S_ISLNK(mode):
+            kind = "L"
+            try:
+                target = path.resolve(strict=True)
+            except OSError as error:
+                raise ValueError(
+                    f"MiniMax-H3 {label} archive has a broken symlink: {relative}"
+                ) from error
+            if not target.is_relative_to(root):
+                raise ValueError(f"MiniMax-H3 {label} archive has an escaping symlink: {relative}")
+        else:
+            raise ValueError(f"MiniMax-H3 {label} archive contains a special file: {relative}")
+        layout.append((relative, kind))
+        if kind != "D":
+            parent = Path(relative).parent
+            while parent != Path("."):
+                populated_directories.add(parent.as_posix())
+                parent = parent.parent
+
+    empty_directories = sorted(
+        relative
+        for relative, kind in layout
+        if kind == "D" and relative not in populated_directories
+    )
+    if empty_directories:
+        raise ValueError(
+            f"MiniMax-H3 {label} archive contains untracked empty directories: {empty_directories}"
+        )
+    return layout
+
+
+def _archive_inventory_record(root: Path, label: str) -> dict[str, int | str]:
+    layout_before = _archive_layout(root, label)
+    digest = hashlib.sha256()
+    entry_count = 0
+    total_bytes = 0
+    for relative, kind in layout_before:
+        if kind == "D":
+            continue
+        path = root / relative
+        try:
+            identity_before = _lstat_identity(path)
+            if kind == "L":
+                payload = os.fsencode(os.readlink(path))
+                size = len(payload)
+                content_sha256 = hashlib.sha256(payload).hexdigest()
+            else:
+                size = identity_before[3]
+                content_sha256 = sha256_file(path)
+            identity_after = _lstat_identity(path)
+        except OSError as error:
+            raise ValueError(
+                f"MiniMax-H3 {label} archive entry changed while hashing: {relative}"
+            ) from error
+        if identity_after != identity_before or identity_before[3] != size:
+            raise ValueError(f"MiniMax-H3 {label} archive entry changed while hashing: {relative}")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(kind.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(size).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(content_sha256.encode("ascii"))
+        digest.update(b"\n")
+        entry_count += 1
+        total_bytes += size
+
+    if _archive_layout(root, label) != layout_before:
+        raise ValueError(f"MiniMax-H3 {label} archive changed while hashing")
+    return {
+        "entry_count": entry_count,
+        "bytes": total_bytes,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _stable_json_object(path: Path, label: str) -> tuple[dict, dict[str, int | str]]:
+    if path.is_symlink():
+        raise ValueError(f"MiniMax-H3 {label} evidence must not be a symlink")
+    try:
+        identity_before = file_identity(path)
+        payload = path.read_bytes()
+        identity_after = file_identity(path)
+    except OSError as error:
+        raise ValueError(f"MiniMax-H3 {label} evidence is unavailable: {path}") from error
+    if identity_after != identity_before:
+        raise ValueError(f"MiniMax-H3 {label} evidence changed while it was being read")
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"MiniMax-H3 {label} evidence contains duplicate keys")
+            result[key] = value
+        return result
+
+    try:
+        decoded = json.loads(payload, object_pairs_hook=unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"MiniMax-H3 {label} evidence is not valid JSON") from error
+    if not isinstance(decoded, dict):
+        raise ValueError(f"MiniMax-H3 {label} evidence must be a JSON object")
+    return decoded, {
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def validated_git_archive_source_record(
+    entrypoint: Path,
+    *,
+    evidence_path: Path,
+    label: str,
+) -> dict:
+    """Bind the imported Diffusers source to the exact proof-private Git archive."""
+
+    evidence_path = Path(evidence_path).absolute()
+    evidence, evidence_record = _stable_json_object(evidence_path, label)
+    expected_evidence = {
+        "schema_version": 1,
+        "model": "minimax_h3",
+        "isolation": "selected-pinned-private",
+        "repository": DIFFUSERS_REFERENCE_REPOSITORY,
+        "reference_revision": DIFFUSERS_REFERENCE_REVISION,
+        "reference_tree": DIFFUSERS_REFERENCE_TREE,
+        "relative_path": DIFFUSERS_REFERENCE_RELATIVE_PATH,
+        "entrypoint": DIFFUSERS_REFERENCE_ENTRYPOINT,
+        "container_storage_root": DIFFUSERS_REFERENCE_CONTAINER_ROOT,
+        "copy_method": "git-archive",
+    }
+    if set(evidence) != set(expected_evidence):
+        raise ValueError(f"MiniMax-H3 {label} evidence has unsupported fields")
+    for key, expected in expected_evidence.items():
+        actual = evidence.get(key)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ValueError(f"MiniMax-H3 {label} evidence mismatch for {key}")
+
+    storage_root = Path(DIFFUSERS_REFERENCE_CONTAINER_ROOT)
+    if not storage_root.is_absolute():
+        raise ValueError(f"MiniMax-H3 {label} container storage root is not absolute")
+    archive_root = storage_root / DIFFUSERS_REFERENCE_RELATIVE_PATH
+    try:
+        resolved_root = archive_root.resolve(strict=True)
+    except OSError as error:
+        raise ValueError(f"MiniMax-H3 {label} archive root is unavailable") from error
+    if archive_root.is_symlink() or not archive_root.is_dir() or resolved_root != archive_root:
+        raise ValueError(f"MiniMax-H3 {label} archive root is not canonical")
+
+    expected_entrypoint = archive_root / DIFFUSERS_REFERENCE_ENTRYPOINT
+    imported_entrypoint = Path(entrypoint).absolute()
+    if imported_entrypoint != expected_entrypoint or imported_entrypoint.is_symlink():
+        raise ValueError(f"MiniMax-H3 {label} was not imported from the selected Git archive")
+    try:
+        if imported_entrypoint.resolve(strict=True) != expected_entrypoint:
+            raise ValueError(f"MiniMax-H3 {label} imported entrypoint is not canonical")
+    except OSError as error:
+        raise ValueError(f"MiniMax-H3 {label} imported entrypoint is unavailable") from error
+
+    entrypoint_record, _ = stable_file_record(imported_entrypoint, f"{label} entrypoint")
+    expected_entrypoint_record = {
+        "bytes": DIFFUSERS_REFERENCE_ENTRYPOINT_BYTES,
+        "sha256": DIFFUSERS_REFERENCE_ENTRYPOINT_SHA256,
+    }
+    if entrypoint_record != expected_entrypoint_record:
+        raise ValueError(f"MiniMax-H3 {label} entrypoint does not match the pinned source")
+
+    archive_inventory = _archive_inventory_record(archive_root, label)
+    expected_inventory = {
+        "entry_count": DIFFUSERS_REFERENCE_ARCHIVE_ENTRIES,
+        "bytes": DIFFUSERS_REFERENCE_ARCHIVE_BYTES,
+        "sha256": DIFFUSERS_REFERENCE_ARCHIVE_SHA256,
+    }
+    if archive_inventory != expected_inventory:
+        raise ValueError(f"MiniMax-H3 {label} archive inventory does not match the pinned source")
+    return {
+        "qualification": "selected-pinned-git-archive",
+        "repository": DIFFUSERS_REFERENCE_REPOSITORY,
+        "revision": DIFFUSERS_REFERENCE_REVISION,
+        "tree": DIFFUSERS_REFERENCE_TREE,
+        "entrypoint": DIFFUSERS_REFERENCE_ENTRYPOINT,
+        "entrypoint_record": entrypoint_record,
+        "archive_inventory": archive_inventory,
+        "evidence_record": evidence_record,
+        "copy_method": "git-archive",
+        "container_storage_root": DIFFUSERS_REFERENCE_CONTAINER_ROOT,
+    }
+
+
+def validate_git_archive_source_unchanged(
+    entrypoint: Path,
+    *,
+    evidence_path: Path,
+    expected_record: dict,
+    label: str,
+) -> None:
+    """Revalidate an imported Git archive after the reference run."""
+
+    if not isinstance(expected_record, dict):
+        raise ValueError(f"MiniMax-H3 {label} expected archive record is invalid")
+    current = validated_git_archive_source_record(
+        entrypoint,
+        evidence_path=evidence_path,
+        label=label,
+    )
+    if current != expected_record:
+        raise ValueError(f"MiniMax-H3 {label} archive changed while it was in use")
 
 
 def serialized_profile(profile) -> dict:
