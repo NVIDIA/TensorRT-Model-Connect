@@ -45,7 +45,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 105
+    assert len(catalog["models"]) == len(ready_models) == 106
     assert sum(
         "not_compared_reason" in spec for spec in catalog["models"].values()
     ) == 0
@@ -71,6 +71,59 @@ def test_model_workload_catalog_covers_every_ready_model():
         )
     }
     assert len(qwen_identities) == 1
+
+
+def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
+    catalog = trtmc_validate.load_catalog()
+    suites = validation_catalog.load_suites()
+    suite = next(
+        value
+        for value in suites
+        if value["id"] == "minimax_h3_official_profile_parity"
+    )
+    model = next(
+        value
+        for value in validation_catalog.load_manifest_records(
+            trtmc_validate.DEFAULT_MODELS
+        )
+        if value["name"] == "minimax-h3-768p"
+    )
+
+    assert catalog["models"]["minimax-h3-768p"] == {
+        "default": "minimax_h3_official_profile_parity",
+        "workloads": ["minimax_h3_official_profile_parity"],
+    }
+    assert validation_catalog.suite_match_reason(suite, model) == (
+        True,
+        "selected",
+    )
+    assert suite["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": (
+            "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
+        ),
+    }
+    assert suite["scoring"] == {"scorer": "model_plugin_parity"}
+    assert suite["gates"] == {"min_sample_pass_rate": 1.0}
+
+    dataset_path = trtmc_validate.REPO_ROOT / suite["dataset"]["default_path"]
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    assert dataset["requests"] == [
+        {
+            "sample_id": "minimax-h3-768p-official-profile",
+            "testcase": "minimax-h3-768p",
+            "stage": "end_to_end",
+            "category": "official-profile",
+            "inputs": {},
+        }
+    ]
+    resolved = validation_catalog.resolve_suite_for_model(suite, model)
+    assert resolved["generation"] == {
+        "video_num_frames": 124,
+        "video_height": 768,
+        "video_width": 1344,
+        "num_inference_steps": 50,
+    }
 
 
 def test_validation_ready_models_exclude_l0_only_profiles():
@@ -109,6 +162,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         for workload, limit in catalog["sample_limits"].items()
         if limit == 1
     } == {
+        "minimax_h3_official_profile_parity",
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
     }
@@ -148,7 +202,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 105
+    assert len({model for model, _workload in bindings}) == 106
 
 
 def test_resolve_binding_defaults_and_rejects_undeclared_workload():

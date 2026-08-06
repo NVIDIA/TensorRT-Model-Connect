@@ -21,6 +21,7 @@ from tests.e2e.models.minimax_h3.e2e_plugins.reference import (
     _model_snapshot,
     _reference_allow_patterns,
 )
+from tensorrt_model_connect.families import find_diffusion_plugin, load_plugin_by_id
 from tensorrt_model_connect.families.minimax_h3.provenance import file_record
 from tests.e2e_harness.contracts import RunContext, StageOutput, StageSpec, ThresholdProfile
 from tests.e2e_harness.manifest_loader import load_model_manifest
@@ -84,6 +85,14 @@ def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
     assert get_runner("diffusion_media_generation") is not None
     assert get_reference("hf_diffusers") is not None
     assert get_comparator("diffusion_media_generation") is not None
+
+
+def test_family_registry_loads_native_plugin_for_public_pipelines() -> None:
+    plugin = load_plugin_by_id("minimax_h3")
+    assert plugin is not None
+    assert plugin.name == "minimax_h3"
+    for pipeline_class in ("MiniMaxH3ModularPipeline", "MiniMaxH3Pipeline"):
+        assert find_diffusion_plugin(pipeline_class) is plugin
 
 
 def test_minimax_h3_reference_resolves_complete_family_snapshot_offline(

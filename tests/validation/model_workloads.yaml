@@ -27,6 +27,7 @@ sample_limits:
   mmlu_generation_mode_parity: 8
   mmmu_pro_vision_plugin_parity: 5
   mmmu_pro_vision_square_plugin_parity: 5
+  minimax_h3_official_profile_parity: 1
   newstest2019_en_ru_marian_translation_parity: 10
   ocrbench_v2_unified: 5
   openwebtext_elf_diffusion_text: 5
@@ -180,6 +181,9 @@ models:
   marian-en-ru:
     default: newstest2019_en_ru_marian_translation_parity
     workloads: [newstest2019_en_ru_marian_translation_parity]
+  minimax-h3-768p:
+    default: minimax_h3_official_profile_parity
+    workloads: [minimax_h3_official_profile_parity]
   minitron-4b-depth:
     default: mmlu_continuation_parity
     workloads: [mmlu_continuation_parity]

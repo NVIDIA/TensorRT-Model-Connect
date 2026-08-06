@@ -17,6 +17,12 @@ defaults:
     input_preparation_included: true
     asset_loading_included: false
 
+excluded_profiles:
+  - model: minimax-h3-768p
+    reason: >-
+      The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
+      into the release performance runner.
+
 entries:
   - id: albert.encode
     family: albert

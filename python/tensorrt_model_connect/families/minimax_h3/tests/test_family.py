@@ -10,7 +10,6 @@ import tomllib
 
 import pytest
 
-from tensorrt_model_connect.families import find_diffusion_plugin, load_plugin_by_id
 from tensorrt_model_connect.families.minimax_h3.config import (
     DEFAULT_WORKSPACE_LIMIT_BYTES,
     MiniMaxH3Config,
@@ -65,14 +64,6 @@ def test_manifest_discovers_both_public_pipeline_names() -> None:
         "vae/**",
         "audio_vae/**",
     }
-
-
-def test_family_registry_loads_native_plugin_for_public_pipelines() -> None:
-    plugin = load_plugin_by_id("minimax_h3")
-    assert plugin is not None
-    assert plugin.name == "minimax_h3"
-    for pipeline_class in ("MiniMaxH3ModularPipeline", "MiniMaxH3Pipeline"):
-        assert find_diffusion_plugin(pipeline_class) is plugin
 
 
 def test_plugin_aliases_are_exact() -> None:

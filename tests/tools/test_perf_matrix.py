@@ -23,6 +23,10 @@ from tools import perf_matrix
 REPOSITORY = Path(__file__).resolve().parents[2]
 SUITE = REPOSITORY / "benchmarks/performance/release.yaml"
 GB300_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/gb300.yaml"
+MINIMAX_H3_EXCLUSION_REASON = (
+    "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
+    "into the release performance runner."
+)
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
     "canary.transcribe": "nemo-asr",
@@ -248,7 +252,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert len(cases) == 105
     assert len(raw_entries) == 77
     assert len(raw_additional) == 28
-    assert excluded_profiles == {}
+    assert excluded_profiles == {
+        "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
+    }
     assert all(
         set(entry["workload"]) <= {"testcase", "request", "runtime"}
         for entry in raw_entries
@@ -256,7 +262,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert all(entry["workload"].get("testcase") for entry in raw_entries)
     assert all(entry.get("model") and entry.get("inherit") for entry in raw_additional)
     assert not any("priority" in entry for entry in raw_entries)
-    assert {case["model"] for case in cases} == ready_profiles
+    assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(perf_matrix._is_l0_profile(case["model"]) for case in cases)
     assert len({(case["family"], case["operation"]) for case in cases}) == 77
     assert len({case["family"] for case in cases}) == 76
@@ -1265,9 +1271,14 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles,
-        "explicitly_excluded_profiles": 0,
-        "explicit_exclusions": [],
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 1,
+        "explicitly_excluded_profiles": 1,
+        "explicit_exclusions": [
+            {
+                "model": "minimax-h3-768p",
+                "reason": MINIMAX_H3_EXCLUSION_REASON,
+            }
+        ],
         "excluded_l0_profiles": excluded_l0_profiles,
         "distributed_profiles": catalog_counts["distributed"],
         "other_profiles": sum(
@@ -1307,7 +1318,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "76 model types" in report
     assert "105 model comparisons" in report
     assert "105 single-process profiles" in report
-    assert "0 explicitly excluded profiles" in report
+    assert "1 explicitly excluded profile" in report
     assert (
         f"{expected_catalog_coverage['excluded_l0_profiles']} duplicate L0 profiles are excluded"
     ) in report
