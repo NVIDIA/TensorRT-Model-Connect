@@ -95,8 +95,8 @@ std::string build_bundle_header_json(const std::vector<BundleSectionSpec>& secti
 void write_bundle_with_sections(const std::filesystem::path& path,
                                 const std::vector<BundleSectionSpec>& sections,
                                 const std::string& model_id = "runtime-regression-test") {
-    // Internal .bundle magic: "BUNDLE\0\1\0"
-    static constexpr unsigned char kBundleMagic[8] = {'T', 'R', 'T', 'F', 'B', '\0', '\x01', '\0'};
+    // Internal .bundle magic: "BUNDLE\x01\x00"
+    static constexpr unsigned char kBundleMagic[8] = {'B', 'U', 'N', 'D', 'L', 'E', '\x01', '\0'};
 
     const std::string header = build_bundle_header_json(sections, model_id);
     std::ofstream out(path, std::ios::binary | std::ios::trunc);

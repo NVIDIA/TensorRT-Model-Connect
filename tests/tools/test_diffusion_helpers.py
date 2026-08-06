@@ -127,7 +127,7 @@ def _write_synthetic_bundle(path, config_dict, pp_weights):
     """Create a minimal .bundle artifact with config.json and preprocessor_weights.
 
     Bundle format:
-      8 bytes: magic "BUNDLE\\x00\\x01\\x00"
+      8 bytes: magic "BUNDLE\\x01\\x00"
       8 bytes: uint64 LE header JSON length
       N bytes: header JSON (with sections)
       body bytes: section data concatenated

@@ -4,7 +4,7 @@
 """Write .bundle artifact files — 1:1 compatible with C++ ReadBundleFile().
 
 Format:
-  Bytes 0-7:   Magic "BUNDLE\\x00\\x01\\x00"
+  Bytes 0-7:   Magic "BUNDLE\\x01\\x00"
   Bytes 8-15:  uint64_t json_header_length (LE)
   Bytes 16..N: JSON metadata header (UTF-8)
   Bytes N..EOF: Binary sections
