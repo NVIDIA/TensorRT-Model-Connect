@@ -10,4 +10,5 @@ runtime_tests = [
   "test_minimax_h3_config_schema|test_minimax_h3_config_schema.cpp|trtmc_model_minimax_h3|_|_",
   "test_minimax_h3_math|test_minimax_h3_math.cpp|trtmc_model_minimax_h3|_|_",
   "test_minimax_h3_cuda_rng|test_minimax_h3_cuda_rng.cpp|trtmc_model_minimax_h3|_|REQUIRES_GPU",
+  "test_minimax_h3_trt_module_bind_external|test_minimax_h3_trt_module_bind_external.cpp|trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

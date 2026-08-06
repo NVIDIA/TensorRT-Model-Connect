@@ -26,6 +26,11 @@ namespace {
 
 using SectionMap = std::unordered_map<std::string, BundleSectionInfo>;
 
+struct CacheConfig {
+    bool enabled{false};
+    float threshold{0.08F};
+};
+
 SectionMap index_sections(const BundleInfo& info, bool first_block_cache) {
     constexpr std::array<const char*, 4> monolithic_names = {
         "text_encoder_plan", "adaln_precompute_plan", "denoiser_plan", "vae_tile_decoder_plan"};
@@ -61,63 +66,70 @@ std::unique_ptr<ITokenizer> load_tokenizer(const BundleFile& bundle) {
     return tokenizer;
 }
 
+void validate_profile(const PipelineContext& ctx) {
+    if (ctx.backend == nullptr)
+        throw std::runtime_error("MiniMax-H3 requires the TensorRT backend");
+    if (extract_json_int(ctx.config_json, "context_parallel_size", 1) != 1)
+        throw std::runtime_error("MiniMax-H3 requires context_parallel_size=1");
+    if (extract_json_int(ctx.config_json, "padded_sequence_length", 38247) != 38247)
+        throw std::runtime_error("MiniMax-H3 requires 38247 unpadded sequence rows");
+    if (extract_json_int(ctx.config_json, "vae_tile_batch", 28) != 28)
+        throw std::runtime_error("MiniMax-H3 requires vae_tile_batch=28");
+}
+
+CacheConfig load_cache_config(const PipelineContext& ctx) {
+    CacheConfig result;
+    const std::string mode =
+        extract_json_string(ctx.config_json, "denoiser_cache_mode", "monolithic");
+    if (mode != "monolithic" && mode != "first_block")
+        throw std::runtime_error("MiniMax-H3 bundle has an invalid denoiser_cache_mode");
+    result.enabled = extract_json_bool(ctx.config_json, "first_block_cache", false);
+    if (result.enabled != (mode == "first_block"))
+        throw std::runtime_error("MiniMax-H3 bundle cache mode and profile flag disagree");
+    result.threshold =
+        extract_json_float(ctx.config_json, "first_block_cache_threshold", result.threshold);
+    if (ctx.runtime_config != nullptr &&
+        ctx.runtime_config->source_of("minimax_h3", "first_block_cache_threshold") !=
+            config::Layer::SchemaDefault) {
+        result.threshold = static_cast<float>(
+            ctx.runtime_config->get<double>("minimax_h3", "first_block_cache_threshold"));
+    }
+    if (!std::isfinite(result.threshold) || result.threshold <= 0.0F)
+        throw std::runtime_error(
+            "MiniMax-H3 first_block_cache_threshold must be finite and positive");
+    return result;
+}
+
+MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap sections) {
+    const std::string bundle_path = ctx.bundle_path;
+    const std::string runtime_cache = ctx.runtime_cache_path;
+    IBackend* const backend = ctx.backend;
+    const bool cuda_graphs = ctx.cuda_graphs;
+    return [sections = std::move(sections), bundle_path, runtime_cache, backend,
+            cuda_graphs](const std::string& name, cudaStream_t stream) {
+        const auto it = sections.find(name);
+        if (it == sections.end())
+            throw std::runtime_error("Unknown MiniMax-H3 plan section: " + name);
+        auto plan = ReadBundleSection(bundle_path, it->second);
+        ModuleCreateOptions options;
+        options.stream = stream;
+        options.runtime_cache_path = runtime_cache.c_str();
+        options.cuda_graphs = cuda_graphs;
+        return backend->create_module(plan.data(), plan.size(), options);
+    };
+}
+
 } // namespace
 
 class MiniMaxH3Plugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        if (ctx.backend == nullptr)
-            throw std::runtime_error("MiniMax-H3 requires the TensorRT backend");
-        const int32_t cp_size = extract_json_int(ctx.config_json, "context_parallel_size", 1);
-        if (cp_size != 1)
-            throw std::runtime_error("MiniMax-H3 requires context_parallel_size=1");
-        const int32_t sequence_rows =
-            extract_json_int(ctx.config_json, "padded_sequence_length", 38247);
-        if (sequence_rows != 38247)
-            throw std::runtime_error("MiniMax-H3 requires 38247 unpadded sequence rows");
-        const int32_t vae_tile_batch = extract_json_int(ctx.config_json, "vae_tile_batch", 28);
-        if (vae_tile_batch != 28)
-            throw std::runtime_error("MiniMax-H3 requires vae_tile_batch=28");
-        const std::string cache_mode =
-            extract_json_string(ctx.config_json, "denoiser_cache_mode", "monolithic");
-        if (cache_mode != "monolithic" && cache_mode != "first_block")
-            throw std::runtime_error("MiniMax-H3 bundle has an invalid denoiser_cache_mode");
-        const bool first_block_cache =
-            extract_json_bool(ctx.config_json, "first_block_cache", false);
-        if (first_block_cache != (cache_mode == "first_block"))
-            throw std::runtime_error("MiniMax-H3 bundle cache mode and profile flag disagree");
-        float cache_threshold =
-            extract_json_float(ctx.config_json, "first_block_cache_threshold", 0.08F);
-        if (ctx.runtime_config != nullptr &&
-            ctx.runtime_config->source_of("minimax_h3", "first_block_cache_threshold") !=
-                config::Layer::SchemaDefault) {
-            cache_threshold = static_cast<float>(
-                ctx.runtime_config->get<double>("minimax_h3", "first_block_cache_threshold"));
-        }
-        if (!std::isfinite(cache_threshold) || cache_threshold <= 0.0F)
-            throw std::runtime_error(
-                "MiniMax-H3 first_block_cache_threshold must be finite and positive");
-        auto sections = index_sections(ctx.bundle.info, first_block_cache);
-        const std::string bundle_path = ctx.bundle_path;
-        const std::string runtime_cache = ctx.runtime_cache_path;
-        IBackend* const backend = ctx.backend;
-        const bool cuda_graphs = ctx.cuda_graphs;
-        MiniMaxH3ModuleLoader loader = [sections = std::move(sections), bundle_path, runtime_cache,
-                                        backend,
-                                        cuda_graphs](const std::string& name, cudaStream_t stream) {
-            const auto it = sections.find(name);
-            if (it == sections.end())
-                throw std::runtime_error("Unknown MiniMax-H3 plan section: " + name);
-            auto plan = ReadBundleSection(bundle_path, it->second);
-            ModuleCreateOptions options;
-            options.stream = stream;
-            options.runtime_cache_path = runtime_cache.c_str();
-            options.cuda_graphs = cuda_graphs;
-            return backend->create_module(plan.data(), plan.size(), options);
-        };
+        validate_profile(ctx);
+        const CacheConfig cache = load_cache_config(ctx);
+        auto loader = make_module_loader(ctx, index_sections(ctx.bundle.info, cache.enabled));
         return std::make_unique<MiniMaxH3Pipeline>(std::move(loader), load_tokenizer(ctx.bundle),
-                                                   ctx.bundle.info.model_id, first_block_cache,
-                                                   cache_threshold);
+                                                   ctx.bundle.info.model_id, cache.enabled,
+                                                   cache.threshold);
     }
 };
 
