@@ -699,11 +699,5 @@ def test_elf_l0_manifests_use_upstream_replay_contract() -> None:
             assert build_env["TRTMC_TRT_TIMING_CACHE_PATH"] == ""
             assert build_env["TRTMC_TRT_TIMING_CACHE_DIR"] == ""
             assert build_env["TRTMC_ELF_TIMING_CACHE_GENERATE"] == "0"
-            assert build_env["TRTMC_ELF_TIMING_CACHE_PATH"] == {
-                "required_from_env": True,
-                "path_like": True,
-            }
-            assert build_env["TRTMC_ELF_TIMING_CACHE_METADATA_PATH"] == {
-                "required_from_env": True,
-                "path_like": True,
-            }
+            assert build_env["TRTMC_ELF_TIMING_CACHE_PATH"] == ""
+            assert build_env["TRTMC_ELF_TIMING_CACHE_METADATA_PATH"] == ""

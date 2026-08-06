@@ -53,7 +53,7 @@ def test_large_acceptance_build_has_a_precision_matched_l0() -> None:
     assert replacement_threshold == small_threshold
 
 
-def test_acceptance_build_requires_an_injected_verified_timing_cache() -> None:
+def test_acceptance_build_disables_timing_caches() -> None:
     model_dir = Path(__file__).parent
     manifest_path = model_dir / "manifests" / "bark-small.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -61,12 +61,9 @@ def test_acceptance_build_requires_an_injected_verified_timing_cache() -> None:
 
     assert manifest["precision"] == "fp16"
     assert build_env == {
-        "TRTMC_BARK_TIMING_CACHE_MODE": "verified",
-        "TRTMC_BARK_TIMING_CACHE_PATH": {
-            "required_from_env": True,
-            "path_like": True,
-        },
-        "TRTMC_BARK_TIMING_CACHE_SHA256": {
-            "required_from_env": True,
-        },
+        "TRTMC_TRT_TIMING_CACHE_PATH": "",
+        "TRTMC_TRT_TIMING_CACHE_DIR": "",
+        "TRTMC_BARK_TIMING_CACHE_MODE": "off",
+        "TRTMC_BARK_TIMING_CACHE_PATH": "",
+        "TRTMC_BARK_TIMING_CACHE_SHA256": "",
     }

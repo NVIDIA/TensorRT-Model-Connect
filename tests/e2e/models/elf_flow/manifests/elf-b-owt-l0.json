@@ -14,14 +14,8 @@
     "TRTMC_TRT_TIMING_CACHE_PATH": "",
     "TRTMC_TRT_TIMING_CACHE_DIR": "",
     "TRTMC_ELF_TIMING_CACHE_GENERATE": "0",
-    "TRTMC_ELF_TIMING_CACHE_PATH": {
-      "required_from_env": true,
-      "path_like": true
-    },
-    "TRTMC_ELF_TIMING_CACHE_METADATA_PATH": {
-      "required_from_env": true,
-      "path_like": true
-    }
+    "TRTMC_ELF_TIMING_CACHE_PATH": "",
+    "TRTMC_ELF_TIMING_CACHE_METADATA_PATH": ""
   },
   "max_cache_length": 1024,
   "testcases": [
