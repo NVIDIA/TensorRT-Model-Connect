@@ -12,6 +12,6 @@ def cpu_profile_matrix_specs() -> list[dict]:
         "strategy": "rwkv_recurrent",
         "label": "rwkv_recurrent\n(rwkv-169m)",
         "hf_id": "RWKV/rwkv-4-169m-pile",
-        "bundle": "rwkv-169m.trtfb",
+        "bundle": "rwkv-169m.bundle",
         "runner": "family",
     }]

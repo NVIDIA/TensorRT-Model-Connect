@@ -20,7 +20,7 @@ def _case(inputs: dict) -> E2ECase:
         family="eagle_vlm",
         runtime_strategy="eagle_vlm_reranking",
         task_strategy="reranking",
-        bundle="rerank.trtfb",
+        bundle="rerank.bundle",
         inputs=inputs,
     )
 

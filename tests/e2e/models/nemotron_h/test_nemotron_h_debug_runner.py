@@ -15,7 +15,7 @@ def _make_bundle_bytes(
     engine_plan: bytes = b"FAKE_ENGINE_PLAN",
     extra_sections: dict[str, bytes] | None = None,
 ) -> bytes:
-    magic = b"TRTFB\x00\x01\x00"
+    magic = b"BUNDLE\x01\x00"
     sections: dict[str, dict] = {}
     body = b""
 
@@ -53,7 +53,7 @@ def test_hybrid_engine_section_and_communicator_forwarded(tmp_path):
         },
     )
 
-    path = tmp_path / "hybrid_tp_dispatch.trtfb"
+    path = tmp_path / "hybrid_tp_dispatch.bundle"
     path.write_bytes(bundle)
 
     communicator = object()

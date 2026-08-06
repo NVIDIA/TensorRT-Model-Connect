@@ -1,7 +1,7 @@
 {
   "name": "qwen-image-2512",
   "hf_id": "Qwen/Qwen-Image-2512",
-  "bundle": "qwen-image-2512.trtfb",
+  "bundle": "qwen-image-2512.bundle",
   "family": "qwen_image",
   "runtime_strategy": "diffusion_qwen_image",
   "task_strategy": "diffusion_media_generation",

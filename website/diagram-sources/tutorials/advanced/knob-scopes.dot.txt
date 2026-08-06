@@ -42,12 +42,12 @@ digraph KnobScopes {
   native [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>Native .trtfb</B><BR/><FONT POINT-SIZE="16">runtime_strategy + plans</FONT>>
+    label=<<B>Native .bundle</B><BR/><FONT POINT-SIZE="16">runtime_strategy + plans</FONT>>
   ];
   optimized [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>Optimized .trtfb</B><BR/><FONT POINT-SIZE="16">descriptor + embedded implementation</FONT>>
+    label=<<B>Optimized .bundle</B><BR/><FONT POINT-SIZE="16">descriptor + embedded implementation</FONT>>
   ];
   load_flags [
     fillcolor="#f5f3ff",

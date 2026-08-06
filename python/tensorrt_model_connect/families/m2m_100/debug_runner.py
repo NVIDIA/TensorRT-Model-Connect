@@ -50,14 +50,14 @@ def _require_trt_runtime() -> None:
         raise ImportError("cuda-python is required for family debug_runner execution")
 
 def load_vision_engine_from_bundle(bundle_path: str) -> tuple[bytes | None, dict]:
-    """Load vision engine plan bytes from this family's .trtfb bundle."""
+    """Load vision engine plan bytes from this family's .bundle artifact."""
     import json
     import struct
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -81,8 +81,8 @@ def load_engine_from_bundle(
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -96,14 +96,14 @@ def load_engine_from_bundle(
     return engine_plan, header
 
 def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
-    """Load a named raw section from this family's .trtfb bundle."""
+    """Load a named raw section from this family's .bundle artifact."""
     import json
     import struct
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -114,7 +114,7 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
         return f.read(meta["size"])
 
 def load_config_from_bundle(bundle_path: str) -> dict:
-    """Load and parse this family's config.json from a .trtfb bundle."""
+    """Load and parse this family's config.json from a .bundle artifact."""
     import json
 
     data = load_section_from_bundle(bundle_path, "config.json")

@@ -18,7 +18,7 @@ def _make_case(inputs: dict | None = None) -> E2ECase:
         hf_id="example/diffusion-model",
         family="flux",
         runtime_strategy="diffusion_flux",
-        bundle="generic-media-case.trtfb",
+        bundle="generic-media-case.bundle",
         inputs=inputs or {},
     )
 

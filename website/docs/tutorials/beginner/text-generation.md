@@ -44,7 +44,7 @@ export TRTMC=trtmc
 After this tutorial, you should be able to explain:
 
 - Why a Hugging Face checkpoint must be converted before this C++ runtime can serve it.
-- What is inside the `.trtfb` bundle.
+- What is inside the `.bundle` bundle.
 - How `family` differs from `runtime_strategy`.
 - What prefill, decode, KV cache, logits, and sampling mean during generation.
 - Which source-level building blocks are involved in `IPipeline::generate`.
@@ -106,7 +106,7 @@ What happens:
 | --- | --- |
 | `--precision` | The eligible dense Qwen3 family selects BF16 for its native default. |
 | `--max-cache-length` | The family selects the checkpoint's full `max_position_embeddings` capacity: 40960 for this model. |
-| `-o` / `--output` | The CLI derives `Qwen3-0.6B.trtfb` from the model name. |
+| `-o` / `--output` | The CLI derives `Qwen3-0.6B.bundle` from the model name. |
 
 :::danger Required task
 Save the build command in your learning log and record whether the failure point, if any, was model resolution, Python dependency setup, TensorRT engine construction, or bundle writing.
@@ -130,7 +130,7 @@ The first run may download model files from Hugging Face and compile TensorRT en
 Inspect the bundle metadata:
 
 ```bash
-$TRTMC inspect Qwen3-0.6B.trtfb
+$TRTMC inspect Qwen3-0.6B.bundle
 ```
 
 Confirm that the output reports:
@@ -142,7 +142,7 @@ Confirm that the output reports:
 Then list engine sections:
 
 ```bash
-$TRTMC inspect Qwen3-0.6B.trtfb --list-engines
+$TRTMC inspect Qwen3-0.6B.bundle --list-engines
 ```
 
 You are looking for the pieces that the C++ runtime will later consume:
@@ -171,7 +171,7 @@ implementation path first.
 ## Stage 4: Run Deterministic Generation
 
 ```bash
-$TRTMC run Qwen3-0.6B.trtfb \
+$TRTMC run Qwen3-0.6B.bundle \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy
@@ -230,7 +230,7 @@ python -m pytest 'tests/test_e2e.py::test_e2e[qwen3-0.6b-native-l0]' -v \
   --rebuild-engines
 ```
 
-E2E manifests are the best source for canonical prompts, tolerances, and runtime contracts. This command uses the native-default manifest and `--engine-dir`; it is not simply reusing `Qwen3-0.6B.trtfb` from the earlier tutorial step.
+E2E manifests are the best source for canonical prompts, tolerances, and runtime contracts. This command uses the native-default manifest and `--engine-dir`; it is not simply reusing `Qwen3-0.6B.bundle` from the earlier tutorial step.
 
 :::note Further reading
 Read [Advanced Tutorial - Validation and Benchmarking](/tutorials/advanced/validation-and-benchmarking) when you need parity checks, performance numbers, or artifact-level evidence.

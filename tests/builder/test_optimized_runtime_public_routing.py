@@ -40,7 +40,7 @@ def test_internal_dispatch_resolves_exactly_one_model_family_before_discovery(
 
     model = tmp_path / "model"
     model.mkdir()
-    output = tmp_path / "model.trtfb"
+    output = tmp_path / "model.bundle"
     calls: list[tuple[str, str, dict]] = []
     selected = object()
 
@@ -101,14 +101,14 @@ def test_python_build_delegates_before_native_with_explicit_options(
 
     engine_builder.build(
         "example/model",
-        "model.trtfb",
+        "model.bundle",
         precision="fp16",
         max_cache_length=4096,
     )
 
     assert len(calls) == 1
     model, output, options = calls[0]
-    assert (model, output) == ("example/model", "model.trtfb")
+    assert (model, output) == ("example/model", "model.bundle")
     assert options["max_cache_length"] == 4096
     assert options["precision"] == "fp16"
     assert options["max_batch_size"] == 1
@@ -133,10 +133,10 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("native build was selected")),
     )
 
-    engine_builder.build("example/model", "omitted.trtfb")
+    engine_builder.build("example/model", "omitted.bundle")
     engine_builder.build(
         "example/model",
-        "explicit.trtfb",
+        "explicit.bundle",
         256,
         precision="fp32",
         max_batch_size=1,
@@ -165,17 +165,17 @@ def test_python_build_preserves_omitted_native_capacity_for_family_default(
         lambda **kwargs: native_calls.append(kwargs),
     )
 
-    engine_builder.build("native/model", "native.trtfb")
+    engine_builder.build("native/model", "native.bundle")
 
     assert len(native_calls) == 1
     assert native_calls[0]["model_id_or_path"] == "native/model"
-    assert native_calls[0]["output_path"] == "native.trtfb"
+    assert native_calls[0]["output_path"] == "native.bundle"
     assert native_calls[0]["precision"] is None
     assert native_calls[0]["max_cache_length"] is None
 
     engine_builder.build(
         "native/model",
-        "explicit.trtfb",
+        "explicit.bundle",
         max_cache_length=256,
     )
 
@@ -202,7 +202,7 @@ def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypat
     args = argparse.Namespace(
         command="build",
         model="example/model",
-        output="model.trtfb",
+        output="model.bundle",
         precision="fp16",
         max_cache_length=256,
     )
@@ -211,7 +211,7 @@ def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypat
     assert calls == [
         (
             "example/model",
-            "model.trtfb",
+            "model.bundle",
             {"max_cache_length": 256, "precision": "fp16"},
         )
     ]
@@ -231,7 +231,7 @@ def test_cli_delegation_preserves_explicit_default_options(monkeypatch) -> None:
     args = argparse.Namespace(
         command="build",
         model="example/model",
-        output="model.trtfb",
+        output="model.bundle",
         precision="fp32",
         max_cache_length=256,
         max_batch_size=1,
@@ -253,7 +253,7 @@ def test_cli_delegation_preserves_optimized_precision_default() -> None:
     args = argparse.Namespace(
         command="build",
         model="example/model",
-        output="model.trtfb",
+        output="model.bundle",
         precision=None,
         max_cache_length=256,
         max_batch_size=1,
@@ -273,7 +273,7 @@ def test_cli_omits_only_the_inert_context_parallel_default() -> None:
             argparse.Namespace(
                 command="build",
                 model="example/model",
-                output="model.trtfb",
+                output="model.bundle",
                 precision=None,
                 max_cache_length=None,
                 context_parallel_size=context_parallel_size,
@@ -305,7 +305,7 @@ def test_cli_treats_model_revision_as_identity_not_plugin_option(monkeypatch) ->
         command="build",
         model="example/model",
         model_revision="0123456789abcdef0123456789abcdef01234567",
-        output="model.trtfb",
+        output="model.bundle",
         precision="fp32",
         max_cache_length=256,
     )
@@ -342,7 +342,7 @@ def test_cli_native_fallback_does_not_probe_capsules_twice(monkeypatch) -> None:
     args = argparse.Namespace(
         command="build",
         model="native/model",
-        output="native.trtfb",
+        output="native.bundle",
         max_cache_length=256,
         precision="fp32",
         method="trt",

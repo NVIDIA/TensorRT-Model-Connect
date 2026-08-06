@@ -66,9 +66,9 @@ pilot.
 Current reproducible PR-tip validation:
 
 - TriAttention bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.bundle`
 - dense control bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense12288-dynkv-fp16-manual-samefam.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense12288-dynkv-fp16-manual-samefam.bundle`
 - runtime overrides:
   `TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=6144`
   `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
@@ -447,9 +447,9 @@ The final fair comparison used the upstream plain-prompt recipe and a true
 full-KV dense baseline:
 
 - dense full-KV bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense32768-dynkv-fp16-manual-fullkv.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense32768-dynkv-fp16-manual-fullkv.bundle`
 - TriAttention bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.bundle`
 
 Prompt recipe:
 
@@ -567,7 +567,7 @@ sample.
 ### One old long-window artifact was proven invalid as an apples-to-apples control
 
 The older artifact
-`artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-apple.trtfb`
+`artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-apple.bundle`
 turned out not to be a valid same-family long-window baseline.
 
 Even under conservative no-compaction settings and greedy decode, it diverged
@@ -661,13 +661,13 @@ suspect for the remaining long-window drift. That led to the next experiment:
 Instead of waiting for another full engine rebuild, a direct control bundle was
 constructed by taking the exact dense full-KV engine plan and tokenizer assets
 from
-`artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense32768-dynkv-fp16-manual-fullkv.trtfb`
+`artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-dense32768-dynkv-fp16-manual-fullkv.bundle`
 and grafting only the TriAttention metadata block plus
 `triattention_stats.json` from the stale `tri32768` artifact.
 
 The resulting hybrid bundle was:
 
-- `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+- `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.bundle`
 
 This gave a same-family long-window comparison point with:
 
@@ -1355,7 +1355,7 @@ the built-in compaction profile logs.
 Using the same native current bundle on the exact benchmark prompt:
 
 - bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri12288-b3072-r128-dynkv-fp16-manual-current.bundle`
 - dataset row:
   `tmp/aime25_rescue_samples/aime25_09.jsonl`
 - runtime flags:
@@ -1474,7 +1474,7 @@ not restore full accuracy parity on the aggressive bundle.
 The fair same-family run was already live on:
 
 - bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.bundle`
 - runtime overrides:
   - `TRTMC_TRIATTN_OVERRIDE_KV_BUDGET=6144`
   - `TRTMC_TRIATTN_OVERRIDE_DIVIDE_LENGTH=1024`
@@ -1679,7 +1679,7 @@ To move from aggregate scores to token-level diffing, a dedicated native trace
 run was started for sample9 on the same-family hybrid path:
 
 - bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.bundle`
 - runtime overrides:
   `kv_budget=6144`, `divide_length=1024`, `bucket_rows=32`
 - trace target:
@@ -1710,7 +1710,7 @@ To test whether sample9 would recover under a larger decode budget on the
 same-family native hybrid path, a dedicated native run was executed with:
 
 - bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.bundle`
 - runtime overrides:
   `kv_budget=8192`, `divide_length=1024`, `bucket_rows=32`
 - sample file:
@@ -1988,7 +1988,7 @@ single-row repro was rebuilt directly from:
 - seed: `1234`
 - effective sample seed: `1240`
 - same-family bundle:
-  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.trtfb`
+  `artifacts/triattention/qwen3-8b-nonflash/qwen3-8b-tri32768-b3072-r128-dynkv-fp16-manual-denseengine-hybrid.bundle`
 
 Standalone results on that exact prompt/seed:
 

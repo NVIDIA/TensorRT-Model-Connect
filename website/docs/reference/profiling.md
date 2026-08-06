@@ -29,7 +29,7 @@ Profile an existing native bundle and include the C++ runtime:
 ```bash
 PYTHONPATH=python:. python3 tools/trtmc_profile.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /path/to/qwen3-0.6b.trtfb \
+  --bundle /path/to/qwen3-0.6b.bundle \
   --trtmc-binary ./build/trtmc \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
@@ -60,7 +60,7 @@ For an optimized-runtime bundle, use its family-owned qualification workflow
 and the public C++ benchmark path instead:
 
 ```bash
-./build/trtmc run /path/to/optimized.trtfb \
+./build/trtmc run /path/to/optimized.bundle \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --warmup 1 \
@@ -120,7 +120,7 @@ directly:
 ```bash
 PYTHONPATH=python:. python3 tools/cpu_profile.py \
   --model Qwen/Qwen3-0.6B \
-  --bundle /path/to/qwen3-0.6b.trtfb \
+  --bundle /path/to/qwen3-0.6b.bundle \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --warmup 1 \

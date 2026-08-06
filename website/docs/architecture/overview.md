@@ -6,13 +6,13 @@ description: The build, bundle, and runtime boundaries of TensorRT-Model-Connect
 import Diagram from '@site/src/components/Diagram';
 
 TensorRT-Model-Connect turns a Hugging Face checkpoint or local model directory
-into a deployable `.trtfb` bundle, then loads that bundle behind task-oriented
+into a deployable `.bundle` bundle, then loads that bundle behind task-oriented
 C++ APIs.
 
 The most important boundary is the bundle:
 
 - Python owns source-model diversity and artifact construction.
-- `.trtfb` carries the contract from build time to run time.
+- `.bundle` carries the contract from build time to run time.
 - C++ owns bundle loading, task dispatch, and request execution.
 
 Read the [Glossary](../getting-started/glossary.md) first if terms such as
@@ -85,7 +85,7 @@ parity from the existence of a family package alone.
 | --- | --- |
 | Which source unit owns a behavior? | [Units and Ownership](units-and-ownership.md) |
 | How does a checkpoint become a bundle? | [Build Pipeline](build-pipeline.md) |
-| What is physically stored in `.trtfb`? | [Bundle Format](bundle-format.md) |
+| What is physically stored in `.bundle`? | [Bundle Format](bundle-format.md) |
 | How does a bundle become an `IPipeline` and serve requests? | [Runtime Lifecycle](runtime-lifecycle.md) |
 | How are native targets, DSOs, and wheels assembled? | [Build System](build-system.md) |
 | Which evidence layer proves which contract? | [Validation Design](validation-design.md) |

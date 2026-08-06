@@ -193,7 +193,7 @@ def test_manifest_loader_keeps_text_prompt_contract(tmp_path) -> None:
             {
                 "name": "sam3",
                 "hf_id": "facebook/sam3",
-                "bundle": "sam3.trtfb",
+                "bundle": "sam3.bundle",
                 "family": "sam3",
                 "runtime_strategy": "sam3_prompted_segmentation",
                 "testcases": [

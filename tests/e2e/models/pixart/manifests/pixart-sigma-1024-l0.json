@@ -1,7 +1,7 @@
 {
   "name": "pixart-sigma-1024-l0",
   "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
-  "bundle": "pixart-sigma-1024-l0.trtfb",
+  "bundle": "pixart-sigma-1024-l0.bundle",
   "family": "pixart",
   "runtime_strategy": "diffusion_pixart",
   "task_strategy": "diffusion_media_generation",

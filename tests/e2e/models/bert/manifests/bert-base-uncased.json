@@ -1,7 +1,7 @@
 {
   "name": "bert-base-uncased",
   "hf_id": "google-bert/bert-base-uncased",
-  "bundle": "bert-base-uncased.trtfb",
+  "bundle": "bert-base-uncased.bundle",
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",

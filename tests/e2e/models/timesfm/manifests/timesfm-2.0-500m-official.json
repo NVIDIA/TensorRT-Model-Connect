@@ -1,7 +1,7 @@
 {
   "name": "timesfm-2.0-500m-official",
   "hf_id": "google/timesfm-2.0-500m-pytorch",
-  "bundle": "timesfm-2.0-500m-official.trtfb",
+  "bundle": "timesfm-2.0-500m-official.bundle",
   "family": "timesfm",
   "runtime_strategy": "timesfm_trt",
   "task_strategy": "neural_operator",

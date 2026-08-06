@@ -1,7 +1,7 @@
 {
   "name": "deepseek-v2-lite",
   "hf_id": "deepseek-ai/DeepSeek-V2-Lite",
-  "bundle": "deepseek-v2-lite.trtfb",
+  "bundle": "deepseek-v2-lite.bundle",
   "family": "deepseek_v2",
   "runtime_strategy": "deepseek_v2_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

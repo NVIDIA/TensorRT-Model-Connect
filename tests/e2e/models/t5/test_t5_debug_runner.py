@@ -33,7 +33,7 @@ def test_t5_text_to_text_engine_section_and_communicator_forwarded(tmp_path) -> 
         },
     )
 
-    path = tmp_path / "t5_text_to_text_tp_dispatch.trtfb"
+    path = tmp_path / "t5_text_to_text_tp_dispatch.bundle"
     path.write_bytes(bundle)
 
     communicator = object()

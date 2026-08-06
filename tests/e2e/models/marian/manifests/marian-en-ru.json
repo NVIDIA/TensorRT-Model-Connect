@@ -1,7 +1,7 @@
 {
   "name": "marian-en-ru",
   "hf_id": "Helsinki-NLP/opus-mt-en-ru",
-  "bundle": "marian-en-ru.trtfb",
+  "bundle": "marian-en-ru.bundle",
   "family": "marian",
   "runtime_strategy": "marian_translation",
   "task_strategy": "text_generation_causal",

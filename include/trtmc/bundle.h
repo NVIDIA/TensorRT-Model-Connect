@@ -50,7 +50,7 @@ struct BundleInfo {
 // Read metadata without loading the engine.
 BundleInfo InspectBundle(const std::string& bundle_path);
 
-// Check if path is a .trtfb file (valid magic bytes).
+// Check if path is a .bundle file (valid magic bytes).
 bool IsBundle(const std::string& path);
 
 } // namespace trtmc

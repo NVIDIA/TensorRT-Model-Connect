@@ -6,8 +6,8 @@
 // trtmc CLI — command-line interface using the new C++ library API.
 //
 // Usage:
-//   trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]
-//   trtmc run             <bundle.trtfb> --prompt "text" [--max-new-tokens N] [--benchmark N]
+//   trtmc build           <hf-model-or-dir> -o <bundle.bundle> [builder args...]
+//   trtmc run             <bundle.bundle> --prompt "text" [--max-new-tokens N] [--benchmark N]
 //                        [--warmup N] [--generation-mode MODE] [--block-length N]
 //                        [--threshold F] [--num-samples N] [--num-steps N]
 //                        [--guidance-scale S] [--cfg-scale S] [--sde-gamma S]
@@ -17,15 +17,15 @@
 //                        Image-generation extras:
 //                        [--negative-prompt "text"] [--num-inference-steps N]
 //                        [--height N] [--width N]
-//   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--beam-size N]
+//   trtmc transcribe      <bundle.bundle> --audio FILE.wav [--beam-size N]
 //                        [--source-language TAG] [--target-language TAG]
 //                        [--task transcribe|translate] [--timestamps]
-//   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
-//   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
+//   trtmc speak           <bundle.bundle> --audio-in INPUT.wav --audio-out OUTPUT.wav
+//   trtmc generate-video  <bundle.bundle> --prompt "text" --output DIR [--num-steps N]
 //                        [--negative-prompt "text"] [--height N] [--width N]
-//   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
-//   trtmc detect          <bundle.trtfb> --image PATH [--output-json PATH]
-//   trtmc inspect         <bundle.trtfb> [--list-engines]
+//   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
+//   trtmc detect          <bundle.bundle> --image PATH [--output-json PATH]
+//   trtmc inspect         <bundle.bundle> [--list-engines]
 //   trtmc version
 
 #include "cli/args.h"
@@ -398,7 +398,7 @@ void write_text_sample_jsonl(std::ostream& out, int32_t id, const trtmc::TextRes
 
 int cmd_run(const CliArgs& args) {
     if (args.bundle_path.empty()) {
-        std::cerr << "Error: run requires a .trtfb bundle file\n";
+        std::cerr << "Error: run requires a .bundle artifact file\n";
         return EXIT_FAILURE;
     }
     if (!trtmc::cli::has_run_input_source(args)) {
@@ -1124,7 +1124,7 @@ int cmd_segment_prompted(const CliArgs& args) {
 //   - EOF on stdin exits
 //
 // Usage:
-//   echo "Hello world" | trtmc serve-audio bundle.trtfb > out.raw
+//   echo "Hello world" | trtmc serve-audio bundle.bundle > out.raw
 //   (or pipe multiple prompts, one per line)
 // ---------------------------------------------------------------------------
 int cmd_serve_audio(const CliArgs& args) {
@@ -1298,7 +1298,7 @@ std::vector<float> parse_numeric_csv(const std::string& csv) {
 
 int cmd_solve(const CliArgs& args) {
     if (args.bundle_path.empty()) {
-        std::cerr << "Error: solve requires a .trtfb bundle file\n";
+        std::cerr << "Error: solve requires a .bundle artifact file\n";
         return EXIT_FAILURE;
     }
 
@@ -1521,7 +1521,7 @@ int cmd_inspect(const CliArgs& args) {
     }
 
     if (!trtmc::IsBundle(args.bundle_path)) {
-        std::cerr << "Error: not a valid .trtfb bundle: " << args.bundle_path << '\n';
+        std::cerr << "Error: not a valid .bundle artifact: " << args.bundle_path << '\n';
         return EXIT_FAILURE;
     }
 

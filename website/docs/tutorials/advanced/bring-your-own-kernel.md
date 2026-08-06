@@ -103,14 +103,14 @@ export BINDING_ID=qwen.decode_logits_copy@1
 
 "$TRTMC" build "${BUILD_ARGS[@]}" \
   --recipe "$BINDING_ID" decoder.logits_zero_bias \
-  -o "$WORK/qwen3-slot-ready.trtfb"
+  -o "$WORK/qwen3-slot-ready.bundle"
 ```
 
 The command internally performs the existing capture, Recipe resolution,
 `select_region()`, and `--graph-patch` steps. It writes two files:
 
 ```text
-qwen3-slot-ready.trtfb
+qwen3-slot-ready.bundle
 qwen3-slot-ready.selection.json
 ```
 
@@ -214,7 +214,7 @@ and every slot in the bundle must be bound exactly once.
 Load and run:
 
 ```bash
-"$TRTMC" run "$WORK/qwen3-slot-ready.trtfb" \
+"$TRTMC" run "$WORK/qwen3-slot-ready.bundle" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
   --prompt "Explain grouped-query attention in one sentence." \
   --max-new-tokens 32 \
@@ -230,7 +230,7 @@ Editing a manifest does not affect an existing pipeline.
 Build the native comparison with the same arguments:
 
 ```bash
-"$TRTMC" build "${BUILD_ARGS[@]}" -o "$WORK/qwen3-native.trtfb"
+"$TRTMC" build "${BUILD_ARGS[@]}" -o "$WORK/qwen3-native.bundle"
 ```
 
 Compare deterministic output:
@@ -239,12 +239,12 @@ Compare deterministic output:
 TEST_PROMPT='Explain grouped-query attention, KV caching, and decode latency.'
 MAX_NEW_TOKENS=64
 
-"$TRTMC" run "$WORK/qwen3-native.trtfb" \
+"$TRTMC" run "$WORK/qwen3-native.bundle" \
   --prompt "$TEST_PROMPT" \
   --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --output "$WORK/native.jsonl"
 
-"$TRTMC" run "$WORK/qwen3-slot-ready.trtfb" \
+"$TRTMC" run "$WORK/qwen3-slot-ready.bundle" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
   --prompt "$TEST_PROMPT" \
   --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
@@ -259,11 +259,11 @@ complete numerical qualification.
 Benchmark both bundles on the same idle GPU:
 
 ```bash
-"$TRTMC" run "$WORK/qwen3-native.trtfb" \
+"$TRTMC" run "$WORK/qwen3-native.bundle" \
   --prompt "$TEST_PROMPT" --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --warmup 3 --benchmark 10 > "$WORK/native.perf.log" 2>&1
 
-"$TRTMC" run "$WORK/qwen3-slot-ready.trtfb" \
+"$TRTMC" run "$WORK/qwen3-slot-ready.bundle" \
   --kernel-bindings "$WORK/kernel-bindings.json" \
   --prompt "$TEST_PROMPT" --max-new-tokens "$MAX_NEW_TOKENS" --greedy \
   --warmup 3 --benchmark 10 > "$WORK/external.perf.log" 2>&1
@@ -307,7 +307,7 @@ Qwen also records one decode-attention Recipe per layer:
 "$TRTMC" build "${BUILD_ARGS[@]}" \
   --recipe qwen.decode_attention_region@2 \
            decoder.layers.0.decode_attention \
-  -o "$WORK/qwen3-attention-slot.trtfb"
+  -o "$WORK/qwen3-attention-slot.bundle"
 ```
 
 For Qwen3-8B layer 0, the printed boundary in
@@ -384,7 +384,7 @@ cat > "$WORK/attention-kernel-bindings.json" <<EOF
 }
 EOF
 
-"$TRTMC" run "$WORK/qwen3-attention-slot.trtfb" \
+"$TRTMC" run "$WORK/qwen3-attention-slot.bundle" \
   --kernel-bindings "$WORK/attention-kernel-bindings.json" \
   --prompt "Explain grouped-query attention in one sentence." \
   --max-new-tokens 32 \
@@ -480,7 +480,7 @@ Build the slot-ready bundle through the existing advanced path:
 ```bash
 "$TRTMC" build "${BUILD_ARGS[@]}" \
   --graph-patch "$WORK/manual.selection.json" \
-  -o "$WORK/qwen3-manual-slot-ready.trtfb"
+  -o "$WORK/qwen3-manual-slot-ready.bundle"
 ```
 
 For this same logits boundary, reuse the identity-copy DSO. For any other
@@ -638,10 +638,10 @@ Build the slot-ready and matched native bundles:
 ```bash
 "$TRTMC" build "${CUTE_BUILD_ARGS[@]}" \
   --graph-patch "$CUTE_WORK/residual-add.selection.json" \
-  -o "$CUTE_WORK/distilbert-slot-ready.trtfb"
+  -o "$CUTE_WORK/distilbert-slot-ready.bundle"
 
 "$TRTMC" build "${CUTE_BUILD_ARGS[@]}" \
-  -o "$CUTE_WORK/distilbert-native.trtfb"
+  -o "$CUTE_WORK/distilbert-native.bundle"
 ```
 
 Bind the new DSO using the ABI hash computed from the selected boundary:
@@ -678,11 +678,11 @@ point can produce small differences that propagate through later layers:
 ```bash
 CUTE_PROMPT='The quick brown fox jumps over the lazy dog.'
 
-"$TRTMC" embed "$CUTE_WORK/distilbert-native.trtfb" \
+"$TRTMC" embed "$CUTE_WORK/distilbert-native.bundle" \
   --prompt "$CUTE_PROMPT" \
   > "$CUTE_WORK/native.json" 2> "$CUTE_WORK/native.stderr"
 
-"$TRTMC" embed "$CUTE_WORK/distilbert-slot-ready.trtfb" \
+"$TRTMC" embed "$CUTE_WORK/distilbert-slot-ready.bundle" \
   --kernel-bindings "$CUTE_WORK/kernel-bindings.json" \
   --prompt "$CUTE_PROMPT" \
   > "$CUTE_WORK/byok.json" 2> "$CUTE_WORK/byok.stderr"

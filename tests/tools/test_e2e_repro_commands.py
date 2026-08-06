@@ -27,7 +27,7 @@ def _make_ctx(tmp_path) -> RunContext:
             hf_id="dummy/model",
             family="dummy",
             runtime_strategy="dummy_decoder_kv_cache",
-            bundle="case-a.trtfb",
+            bundle="case-a.bundle",
             stages=[],
         ),
         artifacts_dir=str(tmp_path),
@@ -134,7 +134,7 @@ def test_repro_commands_use_segment_prompted_for_prompted_segmentation(tmp_path)
         family="prompted_text_segmentation_family",
         runtime_strategy="prompted_text_segmentation_family_prompted_segmentation",
         task_strategy="prompted_segmentation",
-        bundle="prompted-segmentation-point.trtfb",
+        bundle="prompted-segmentation-point.bundle",
         inputs={
             "test_image": "data/test_img.jpeg",
             "point_x": 0.5,
@@ -145,7 +145,7 @@ def test_repro_commands_use_segment_prompted_for_prompted_segmentation(tmp_path)
     repro = _build_repro_commands(
         case,
         _make_ctx(tmp_path),
-        "/tmp/engines/prompted-segmentation-point.trtfb",
+        "/tmp/engines/prompted-segmentation-point.bundle",
         {},
     )
 
@@ -165,7 +165,7 @@ def test_repro_commands_use_text_prompt_for_prompted_segmentation(tmp_path) -> N
         runtime_strategy="prompted_text_segmentation_family_prompted_segmentation",
         task_strategy="prompted_segmentation",
         reference_family="prompted_text_segmentation",
-        bundle="prompted-segmentation-text.trtfb",
+        bundle="prompted-segmentation-text.bundle",
         inputs={
             "image": "data/test_img.jpeg",
             "prompt": "car",
@@ -175,7 +175,7 @@ def test_repro_commands_use_text_prompt_for_prompted_segmentation(tmp_path) -> N
     repro = _build_repro_commands(
         case,
         _make_ctx(tmp_path),
-        "/tmp/engines/prompted-segmentation-text.trtfb",
+        "/tmp/engines/prompted-segmentation-text.bundle",
         {},
     )
 
@@ -196,7 +196,7 @@ def test_repro_commands_use_model_owned_provider_for_diffusion(tmp_path) -> None
         family="diffusion_media_family",
         runtime_strategy="diffusion",
         task_strategy="diffusion_media_generation",
-        bundle="diffusion-media.trtfb",
+        bundle="diffusion-media.bundle",
         inputs={
             "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
             "num_inference_steps": 28,
@@ -208,7 +208,7 @@ def test_repro_commands_use_model_owned_provider_for_diffusion(tmp_path) -> None
     repro = _build_repro_commands(
         case,
         _make_ctx(tmp_path),
-        "/tmp/engines/diffusion-media.trtfb",
+        "/tmp/engines/diffusion-media.bundle",
         {},
     )
 
@@ -229,14 +229,14 @@ def test_repro_commands_can_use_runner_owned_hook(tmp_path) -> None:
         family="runner_owned_family",
         runtime_strategy="runner_owned_repro_strategy",
         task_strategy="runner_owned_repro_strategy",
-        bundle="runner-owned.trtfb",
+        bundle="runner-owned.bundle",
         inputs={},
         stages=[],
     )
     repro = _build_repro_commands(
         case,
         _make_ctx(tmp_path),
-        "/tmp/engines/runner-owned.trtfb",
+        "/tmp/engines/runner-owned.bundle",
         {},
     )
 

@@ -51,11 +51,11 @@ paths, correctness metrics, and the performance protocol.
 Try only formats supported by the current CLI and owning family:
 
 ```bash
-./build/trtmc build <model> -o <bundle>.trtfb \
+./build/trtmc build <model> -o <bundle>.bundle \
   --precision fp16 \
   --max-cache-length <N>
 
-./build/trtmc build <model> -o <bundle>.trtfb \
+./build/trtmc build <model> -o <bundle>.bundle \
   --precision fp16 \
   --quantize <supported-format> \
   --quant-calibration-samples <N> \
@@ -74,8 +74,8 @@ switch between native and optimized runtime implementations. Inspect every
 bundle:
 
 ```bash
-./build/trtmc inspect <bundle>.trtfb
-sha256sum <bundle>.trtfb
+./build/trtmc inspect <bundle>.bundle
+sha256sum <bundle>.bundle
 ```
 
 Compare two configurations only when their implementation path, model revision,
@@ -118,7 +118,7 @@ Run the model-first binding with the candidate bundle:
 ```bash
 PYTHONPATH=python:. python3 tools/trtmc_validate.py \
   <model> <workload> \
-  --bundle <candidate.trtfb> \
+  --bundle <candidate.bundle> \
   --output <candidate-artifacts>
 ```
 

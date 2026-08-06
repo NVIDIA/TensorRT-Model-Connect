@@ -34,11 +34,11 @@ controls without repeating setup.
 
 ```bash
 $TRTMC build Qwen/Qwen2.5-VL-3B-Instruct \
-  -o /tmp/qwen25vl.trtfb \
+  -o /tmp/qwen25vl.bundle \
   --precision fp16 \
   --max-cache-length 384
 
-$TRTMC run /tmp/qwen25vl.trtfb \
+$TRTMC run /tmp/qwen25vl.bundle \
   --prompt "Describe this image." \
   --image tests/assets/test_image.jpg \
   --max-new-tokens 48
@@ -52,17 +52,17 @@ use their own strategy keys and DSOs even when they implement the same public
 ## Speech and audio
 
 ```bash
-$TRTMC build openai/whisper-large-v3-turbo -o /tmp/whisper.trtfb --precision fp16
+$TRTMC build openai/whisper-large-v3-turbo -o /tmp/whisper.bundle --precision fp16
 
-$TRTMC transcribe /tmp/whisper.trtfb \
+$TRTMC transcribe /tmp/whisper.bundle \
   --audio tests/e2e/models/whisper/data/Recording.wav \
   --max-new-tokens 224
 ```
 
 ```bash
-$TRTMC build nvidia/magpie_tts_multilingual_357m -o /tmp/magpie.trtfb --precision fp16
+$TRTMC build nvidia/magpie_tts_multilingual_357m -o /tmp/magpie.bundle --precision fp16
 
-$TRTMC generate-audio /tmp/magpie.trtfb \
+$TRTMC generate-audio /tmp/magpie.bundle \
   --prompt "A clear short test sentence." \
   --output /tmp/magpie.wav
 ```
@@ -84,10 +84,10 @@ ID through inference:
 
 ```bash
 $TRTMC build nvidia/segformer-b0-finetuned-ade-512-512 \
-  -o /tmp/segformer-b0-ade.trtfb \
+  -o /tmp/segformer-b0-ade.bundle \
   --precision fp16
 
-$TRTMC segment /tmp/segformer-b0-ade.trtfb \
+$TRTMC segment /tmp/segformer-b0-ade.bundle \
   --image tests/e2e/models/segformer/data/test_img.jpeg \
   --output /tmp/segformer-b0-ade-mask.png
 ```
@@ -119,10 +119,10 @@ This build-to-solve example follows
 
 ```bash
 $TRTMC build amazon/chronos-bolt-tiny \
-  -o /tmp/chronos-bolt-tiny-official.trtfb \
+  -o /tmp/chronos-bolt-tiny-official.bundle \
   --precision fp32
 
-$TRTMC solve /tmp/chronos-bolt-tiny-official.trtfb \
+$TRTMC solve /tmp/chronos-bolt-tiny-official.bundle \
   --branch-input "100.1,100.15,100.18,100.22,100.21,100.27,100.31,100.35,100.37,100.4,100.44,100.5"
 ```
 

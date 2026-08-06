@@ -10,7 +10,7 @@ Current ownership:
 
 - `api/trtmc_c.cpp`: exported C-linkage validation, error mapping, pipeline
   creation, and batch-result conversion.
-- `src/bundle/`: `.trtfb` format and bundle-view implementations.
+- `src/bundle/`: `.bundle` format and bundle-view implementations.
 - `src/runtime/config/`: layered runtime configuration and schema handling.
 - `src/runtime/registry/pipeline_factory.cpp`: bundle-to-pipeline selection.
   It recognizes an embedded optimized-runtime implementation before using the

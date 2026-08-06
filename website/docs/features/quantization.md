@@ -25,7 +25,7 @@ framework:
 trtmc build /path/to/model \
   --quantize fp8 \
   --quant-scales /path/to/scales.json \
-  -o /path/to/model-fp8.trtfb
+  -o /path/to/model-fp8.bundle
 ```
 
 The current parser accepts:
@@ -146,7 +146,7 @@ hooks instead of `QuantContext`:
 ```bash
 trtmc build /path/to/model \
   --fp8 \
-  -o /path/to/model-fp8.trtfb
+  -o /path/to/model-fp8.bundle
 ```
 
 `--fp8` first asks the family for packaged scales and then calls its
@@ -191,7 +191,7 @@ the implementation path.
 After the build, inspect the bundle:
 
 ```bash
-trtmc inspect /path/to/model-fp8.trtfb
+trtmc inspect /path/to/model-fp8.bundle
 ```
 
 An `optimized_runtime.json` section identifies an optimized bundle. Native

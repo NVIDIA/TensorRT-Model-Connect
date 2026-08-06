@@ -8,7 +8,7 @@
 // trtmc public C++ API — the only header users need.
 //
 // Usage:
-//   auto pipe = trtmc::load("model.trtfb");
+//   auto pipe = trtmc::load("model.bundle");
 //   auto result = pipe->generate("Hello", {.max_new_tokens = 20});
 //   std::cout << result.text << std::endl;
 

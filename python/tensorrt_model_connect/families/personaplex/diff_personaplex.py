@@ -15,7 +15,7 @@ Usage:
     # Stage-by-stage comparison (needs GPU + official repo installed)
     python -m tensorrt_model_connect.families.personaplex.diff_personaplex \
         --input-wav test_input.wav \
-        --bundle /path/to/personaplex.trtfb \
+        --bundle /path/to/personaplex.bundle \
         --trtmc-binary ./build/trtmc \
         --hf-python .venv/bin/python \
         --official-repo /path/to/personaplex/moshi
@@ -29,7 +29,7 @@ Usage:
     # TRT-only run (compares against saved reference)
     python -m tensorrt_model_connect.families.personaplex.diff_personaplex \
         --input-wav test_input.wav \
-        --bundle /path/to/personaplex.trtfb \
+        --bundle /path/to/personaplex.bundle \
         --trtmc-binary ./build/trtmc \
         --hf-python .venv/bin/python \
         --reference-dir /path/to/saved_reference
@@ -544,7 +544,7 @@ def compare_results(ref: dict, trt: dict, tolerances: dict = None) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Diff test: TRT PersonaPlex vs official code")
     parser.add_argument("--input-wav", required=True, help="Path to input WAV file")
-    parser.add_argument("--bundle", help="Path to PersonaPlex .trtfb bundle")
+    parser.add_argument("--bundle", help="Path to PersonaPlex .bundle artifact")
     parser.add_argument("--trtmc-binary", default="./build/trtmc", help="Path to trtmc binary")
     parser.add_argument("--hf-python", default="", help="Path to Python with HF transformers")
     parser.add_argument("--official-repo", help="Path to cloned NVIDIA/personaplex/moshi directory")

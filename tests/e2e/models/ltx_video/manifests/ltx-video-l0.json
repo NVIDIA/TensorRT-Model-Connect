@@ -1,7 +1,7 @@
 {
   "name": "ltx-video-l0",
   "hf_id": "Lightricks/LTX-Video",
-  "bundle": "ltx-video-l0.trtfb",
+  "bundle": "ltx-video-l0.bundle",
   "family": "ltx_video",
   "runtime_strategy": "diffusion_ltx",
   "task_strategy": "diffusion_media_generation",

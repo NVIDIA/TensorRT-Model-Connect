@@ -55,7 +55,7 @@ before making performance claims:
 ```bash
 PYTHONPATH=python:. python3 tools/trtmc_validate.py \
   <model> <workload> \
-  --bundle <bundle.trtfb> \
+  --bundle <bundle.bundle> \
   --output <validation-artifacts>
 ```
 
@@ -67,7 +67,7 @@ the same model revision and workload when moving to profiling.
 ```bash
 PYTHONPATH=python:. python3 tools/trtmc_profile.py \
   --model <model> \
-  --bundle <bundle.trtfb> \
+  --bundle <bundle.bundle> \
   --prompt "<owned-testcase-prompt>" \
   --max-new-tokens <N> \
   --warmup 3 \

@@ -15,8 +15,8 @@ def make_bundle_bytes(
     vision_plan: bytes | None = None,
     extra_sections: dict[str, bytes] | None = None,
 ) -> bytes:
-    """Build a minimal ``.trtfb`` bundle in memory."""
-    magic = b"TRTFB\x00\x01\x00"
+    """Build a minimal ``.bundle`` bundle in memory."""
+    magic = b"BUNDLE\x01\x00"
     sections: dict[str, dict[str, int]] = {}
     body = b""
 

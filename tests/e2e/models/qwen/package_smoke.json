@@ -2,7 +2,7 @@
   "default": true,
   "name": "qwen3-0.6b",
   "model_id": "Qwen/Qwen3-0.6B",
-  "bundle": "qwen3-0.6b.trtfb",
+  "bundle": "qwen3-0.6b.bundle",
   "timing_cache": "qwen3-0.6b.timing.cache",
   "max_cache": 64,
   "max_new_tokens": 8,

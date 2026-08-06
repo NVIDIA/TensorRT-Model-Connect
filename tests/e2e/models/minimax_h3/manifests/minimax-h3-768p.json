@@ -2,7 +2,7 @@
   "name": "minimax-h3-768p",
   "hf_id": "MiniMaxAI/MiniMax-H3",
   "hf_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
-  "bundle": "minimax-h3-768p.trtfb",
+  "bundle": "minimax-h3-768p.bundle",
   "family": "minimax_h3",
   "runtime_strategy": "diffusion_minimax_h3",
   "task_strategy": "diffusion_media_generation",

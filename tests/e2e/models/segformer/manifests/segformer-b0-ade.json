@@ -1,7 +1,7 @@
 {
   "name": "segformer-b0-ade",
   "hf_id": "nvidia/segformer-b0-finetuned-ade-512-512",
-  "bundle": "segformer-b0-ade.trtfb",
+  "bundle": "segformer-b0-ade.bundle",
   "family": "segformer",
   "runtime_strategy": "segformer_segmentation",
   "task_strategy": "segmentation",

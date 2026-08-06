@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// @title: Physical layout of a .trtfb bundle
+// @title: Physical layout of a .bundle artifact
 // @description: A bundle begins with fixed magic and header-length fields, followed by a UTF-8 JSON header and contiguous binary payloads whose section table selects either native assets or optimized implementation artifacts.
 digraph BundleLayout {
   graph [
@@ -12,7 +12,7 @@ digraph BundleLayout {
     splines="polyline",
     fontname="Arial",
     labelloc="t",
-    label=<<B>model.trtfb physical layout</B><BR/><FONT POINT-SIZE="16">The JSON section table indexes payload offsets relative to the payload area.</FONT>>,
+    label=<<B>model.bundle physical layout</B><BR/><FONT POINT-SIZE="16">The JSON section table indexes payload offsets relative to the payload area.</FONT>>,
     fontsize="28",
     fontcolor="#111827"
   ];
@@ -44,7 +44,7 @@ digraph BundleLayout {
     penwidth="2";
     fontsize="18";
     fontcolor="#78350f";
-    magic [label=<<B>Bytes 0-7</B><BR/><FONT POINT-SIZE="16">TRTFB magic</FONT>>];
+    magic [label=<<B>Bytes 0-7</B><BR/><FONT POINT-SIZE="16">BUNDLE magic</FONT>>];
     length [label=<<B>Bytes 8-15</B><BR/><FONT POINT-SIZE="16">little-endian JSON length</FONT>>];
     header [label=<<B>UTF-8 JSON header</B><BR/><FONT POINT-SIZE="16">metadata + section table</FONT>>];
     payloads [label=<<B>Binary payload area</B><BR/><FONT POINT-SIZE="16">contiguous named sections</FONT>>];

@@ -650,7 +650,7 @@ def test_elf_trtmc_run_generates_text_from_diffusion_decode(tmp_path: Path) -> N
         "elf_denoiser_p_std": 0.8,
         "elf_t_eps": 0.05,
     }
-    bundle_path = tmp_path / "tiny-elf.trtfb"
+    bundle_path = tmp_path / "tiny-elf.bundle"
     write_bundle(
         bundle_path,
         BundleInfo(

@@ -1,7 +1,7 @@
 {
   "name": "all-minilm-l6-v2",
   "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
-  "bundle": "all-minilm-l6-v2.trtfb",
+  "bundle": "all-minilm-l6-v2.bundle",
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",

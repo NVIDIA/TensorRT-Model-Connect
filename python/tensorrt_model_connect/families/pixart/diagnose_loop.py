@@ -8,7 +8,7 @@ import json
 import math
 import numpy as np
 
-BUNDLE = "/workspace/tensorrt-model-connect/engines/pixart_sigma_v6.trtfb"
+BUNDLE = "/workspace/tensorrt-model-connect/engines/pixart_sigma_v6.bundle"
 MODEL_DIR = "/root/.cache/huggingface/hub/models--PixArt-alpha--PixArt-Sigma-XL-2-1024-MS/snapshots/e102b3591cc82e97071b8b4cb90d834d0c487207"
 
 def load_bundle_sections(path):

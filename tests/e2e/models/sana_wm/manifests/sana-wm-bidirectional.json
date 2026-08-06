@@ -1,7 +1,7 @@
 {
   "name": "sana-wm-bidirectional",
   "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
-  "bundle": "sana-wm-bidirectional.trtfb",
+  "bundle": "sana-wm-bidirectional.bundle",
   "family": "sana_wm",
   "precision": "bf16",
   "runtime_strategy": "diffusion_sana_wm",

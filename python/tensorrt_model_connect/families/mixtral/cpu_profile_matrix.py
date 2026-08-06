@@ -12,6 +12,6 @@ def cpu_profile_matrix_specs() -> list[dict]:
         "strategy": "mixtral_decoder_moe",
         "label": "mixtral_decoder_moe\n(mixtral-stories-15m)",
         "hf_id": "RichardErkhov/mistralai_-_Mixtral-8x7B-v0.1-Stories-15M",
-        "bundle": "mixtral-stories-15m.trtfb",
+        "bundle": "mixtral-stories-15m.bundle",
         "runner": "decoder",
     }]

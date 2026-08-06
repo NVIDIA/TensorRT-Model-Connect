@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Write .trtfb bundle files — 1:1 compatible with C++ ReadBundleFile().
+"""Write .bundle artifact files — 1:1 compatible with C++ ReadBundleFile().
 
 Format:
-  Bytes 0-7:   Magic "TRTFB\\x00\\x01\\x00"
+  Bytes 0-7:   Magic "BUNDLE\\x00\\x01\\x00"
   Bytes 8-15:  uint64_t json_header_length (LE)
   Bytes 16..N: JSON metadata header (UTF-8)
   Bytes N..EOF: Binary sections
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
-BUNDLE_MAGIC = b"TRTFB\x00\x01\x00"
+BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 _MAX_BUNDLE_HEADER_SIZE = 100 * 1024 * 1024
 
 
@@ -266,7 +266,7 @@ def write_bundle(
     info: BundleInfo,
     sections: list[BundleSection],
 ) -> None:
-    """Write a .trtfb bundle file."""
+    """Write a .bundle artifact file."""
     if any(isinstance(section, _FileBundleSection) for section in sections):
         _write_file_backed_bundle(path, info, sections)
         return

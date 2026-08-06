@@ -22,7 +22,7 @@ Usage:
     # Override the representative model for a strategy
     python tools/cpu_profile_matrix.py \\
       --engine-dir /path/to/engines \\
-      --model-override strategy_name=org/model:model.trtfb
+      --model-override strategy_name=org/model:model.bundle
 
     # Save JSON and HTML report
     python tools/cpu_profile_matrix.py \\
@@ -566,7 +566,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Cross-strategy CPU phase bottleneck comparison harness")
     parser.add_argument("--engine-dir",
-                        help="Directory containing pre-built .trtfb bundles")
+                        help="Directory containing pre-built .bundle artifacts")
     parser.add_argument("--hf-cache",
                         help="HuggingFace model cache dir "
                              "(default: ~/.cache/huggingface/hub)")
@@ -577,7 +577,7 @@ def main() -> None:
     parser.add_argument(
         "--model-override", nargs="+", metavar="STRATEGY=HF_ID:BUNDLE",
         help="Override the model for a strategy, e.g. "
-             "strategy_name=org/model:model.trtfb")
+             "strategy_name=org/model:model.bundle")
     parser.add_argument("--prompt",
                         default="The capital of France is",
                         help="Input prompt for all strategies")

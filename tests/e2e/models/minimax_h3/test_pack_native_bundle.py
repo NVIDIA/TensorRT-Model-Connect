@@ -122,7 +122,7 @@ def test_packer_preserves_validated_workspace_mapping(tmp_path: Path, monkeypatc
             "--model-path",
             str(model),
             "--output",
-            str(tmp_path / "model.trtfb"),
+            str(tmp_path / "model.bundle"),
             "--source-revision",
             "1" * 40,
         ],

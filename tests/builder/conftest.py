@@ -35,8 +35,8 @@ if _TEST_INSTALLED_WHEEL:
 # Bundle round-trip helper (shared across bundle_writer / schema tests)
 # ---------------------------------------------------------------------------
 
-def read_trtfb_bundle(path: str | Path) -> tuple[dict, dict[str, bytes]]:
-    """Parse a .trtfb file into (header_dict, sections_data).
+def read_bundle_file(path: str | Path) -> tuple[dict, dict[str, bytes]]:
+    """Parse a .bundle file into (header_dict, sections_data).
 
     Verifies BUNDLE_MAGIC, reads the JSON header, then seeks to each
     section payload by offset/size. Used by tests that need to inspect

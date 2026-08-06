@@ -1,7 +1,7 @@
 {
   "name": "t5-small-tp4",
   "hf_id": "google-t5/t5-small",
-  "bundle": "t5-small-tp4.trtfb",
+  "bundle": "t5-small-tp4.bundle",
   "family": "t5",
   "runtime_strategy": "t5_text_to_text",
   "task_strategy": "text_generation_causal",

@@ -290,7 +290,7 @@ def test_recipe_build_orchestrates_existing_graph_paths(monkeypatch, tmp_path):
             )
         return 0
 
-    output = tmp_path / "model.trtfb"
+    output = tmp_path / "model.bundle"
     arguments = SimpleNamespace(
         recipe=("family.known_region@1", "decoder.layer.0"),
         output=str(output),

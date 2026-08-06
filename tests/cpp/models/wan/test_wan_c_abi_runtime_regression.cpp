@@ -94,7 +94,7 @@ bool message_contains_any(const std::string& msg, std::initializer_list<const ch
 void test_legacy_diffusion_alias_reports_wan_section_guard() {
     trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
-        std::filesystem::path(dir.path()) / "wan_legacy_alias_missing_sections.trtfb";
+        std::filesystem::path(dir.path()) / "wan_legacy_alias_missing_sections.bundle";
 
     const std::string config = R"({
   "runtime_strategy": "diffusion",

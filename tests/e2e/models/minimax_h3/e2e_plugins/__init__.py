@@ -66,7 +66,7 @@ def validate_fixed_profile(case: E2ECase) -> None:
 
 def _bundle_config(path: Path) -> dict:
     with path.open("rb") as bundle:
-        if bundle.read(8) != b"TRTFB\x00\x01\x00":
+        if bundle.read(8) != b"BUNDLE\x01\x00":
             raise ValueError(f"Not a valid TRTMC bundle: {path}")
         header_length = struct.unpack("<Q", bundle.read(8))[0]
         header = json.loads(bundle.read(header_length).decode("utf-8"))

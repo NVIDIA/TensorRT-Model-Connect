@@ -17,7 +17,7 @@ def _make_qwen_image_case(inputs: dict | None = None) -> E2ECase:
         hf_id="Qwen/Qwen-Image",
         family="qwen_image",
         runtime_strategy="diffusion_qwen_image",
-        bundle="qwen-image-case.trtfb",
+        bundle="qwen-image-case.bundle",
         inputs=inputs or {},
     )
 

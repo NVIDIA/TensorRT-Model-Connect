@@ -12,15 +12,15 @@ Tests:
 
 Usage:
   # Vision feature comparison (requires torch + transformers)
-  python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
+  python3 tools/diff_vl.py --bundle model.bundle --image test.jpg \
     --model example-org/example-vl-model --atol 0.1
 
   # Full VL generation with C++ binary
-  python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg \
+  python3 tools/diff_vl.py --bundle model.bundle --image test.jpg \
     --binary ./build/trtmc --hf-python .venv/bin/python
 
   # Vision-only (no HF model needed)
-  python3 tools/diff_vl.py --bundle model.trtfb --image test.jpg --vision-only
+  python3 tools/diff_vl.py --bundle model.bundle --image test.jpg --vision-only
 """
 
 from __future__ import annotations
@@ -108,8 +108,8 @@ def _find_family_diff_vl_handler(model_type: str) -> ModuleType | None:
 def _read_bundle_header(bundle_path: str) -> dict:
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         return json.loads(f.read(header_len).decode("utf-8"))
 
@@ -626,7 +626,7 @@ def test_debug_layers(
 
 def main():
     parser = argparse.ArgumentParser(description="VL diff testing")
-    parser.add_argument("--bundle", required=True, help="Path to .trtfb bundle")
+    parser.add_argument("--bundle", required=True, help="Path to .bundle artifact")
     parser.add_argument("--image", default=None, help="Path to test image")
     parser.add_argument("--model", default=None,
                         help="HF model ID for reference comparison")

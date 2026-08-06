@@ -33,7 +33,7 @@ def _build_ld_library_path(ctx: RunContext) -> str:
 
 
 def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
-    bundle_name = case.bundle or case.inputs.get("bundle", "") or f"{case.name}.trtfb"
+    bundle_name = case.bundle or case.inputs.get("bundle", "") or f"{case.name}.bundle"
     if os.path.isabs(bundle_name):
         return bundle_name
     return os.path.join(ctx.engine_dir, bundle_name)

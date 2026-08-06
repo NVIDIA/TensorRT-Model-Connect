@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for bundle_writer.py — .trtfb binary format round-trip.
+"""Tests for bundle_writer.py — .bundle binary format round-trip.
 
 Pure Python, no TRT needed.
 
 Trace: ARCH-BDL-001, UD-BDL-01
-Intent: Validate that .trtfb bundles are written with correct magic, header, and section layout and can be read back faithfully.
+Intent: Validate that .bundle artifacts are written with correct magic, header, and section layout and can be read back faithfully.
 Preconditions: tensorrt_model_connect is importable; no TRT or GPU required.
 Postconditions: Bundle magic bytes, header JSON, section offsets/sizes, and payload data survive a write-then-read round-trip.
 """
@@ -29,12 +29,12 @@ from tensorrt_model_connect.bundle_writer import (
     write_bundle,
 )
 
-from tests.builder.conftest import read_trtfb_bundle
+from tests.builder.conftest import read_bundle_file
 
 
 class TestBundleMagic:
     def test_magic_bytes(self):
-        assert BUNDLE_MAGIC == b"TRTFB\x00\x01\x00"
+        assert BUNDLE_MAGIC == b"BUNDLE\x01\x00"
         assert len(BUNDLE_MAGIC) == 8
 
 
@@ -45,7 +45,7 @@ def test_bundle_section_public_constructor_remains_name_and_bytes_only():
 
 class TestWriteBundle:
     def _read_bundle(self, path: str) -> tuple[dict, dict[str, bytes]]:
-        return read_trtfb_bundle(path)
+        return read_bundle_file(path)
 
     def test_single_section(self, tmp_path):
         info = BundleInfo(
@@ -60,7 +60,7 @@ class TestWriteBundle:
         data = b"fake engine plan data here"
         sections = [BundleSection("engine_plan", data)]
 
-        out_path = str(tmp_path / "test.trtfb")
+        out_path = str(tmp_path / "test.bundle")
         write_bundle(out_path, info, sections)
 
         header, sdata = self._read_bundle(out_path)
@@ -79,7 +79,7 @@ class TestWriteBundle:
         section2 = BundleSection("config.json", b'{"test": true}')
         section3 = BundleSection("tokenizer.json", b'{"vocab": []}')
 
-        out_path = str(tmp_path / "multi.trtfb")
+        out_path = str(tmp_path / "multi.bundle")
         write_bundle(out_path, info, [section1, section2, section3])
 
         header, sdata = self._read_bundle(out_path)
@@ -99,7 +99,7 @@ class TestWriteBundle:
             BundleSection("s3", s3_data),
         ]
 
-        out_path = str(tmp_path / "offsets.trtfb")
+        out_path = str(tmp_path / "offsets.bundle")
         write_bundle(out_path, info, sections)
 
         header, _ = self._read_bundle(out_path)
@@ -114,7 +114,7 @@ class TestWriteBundle:
     def test_empty_section(self, tmp_path):
         info = BundleInfo(model_id="empty")
         sections = [BundleSection("empty_sec", b"")]
-        out_path = str(tmp_path / "empty.trtfb")
+        out_path = str(tmp_path / "empty.bundle")
         write_bundle(out_path, info, sections)
 
         header, sdata = self._read_bundle(out_path)
@@ -123,7 +123,7 @@ class TestWriteBundle:
 
     def test_no_sections(self, tmp_path):
         info = BundleInfo(model_id="nosec")
-        out_path = str(tmp_path / "nosec.trtfb")
+        out_path = str(tmp_path / "nosec.bundle")
         write_bundle(out_path, info, [])
 
         header, sdata = self._read_bundle(out_path)
@@ -137,7 +137,7 @@ class TestWriteBundle:
 
         info = BundleInfo(model_id="binary")
         sections = [BundleSection("engine_plan", binary_data)]
-        out_path = str(tmp_path / "binary.trtfb")
+        out_path = str(tmp_path / "binary.bundle")
         write_bundle(out_path, info, sections)
 
         _, sdata = self._read_bundle(out_path)
@@ -155,7 +155,7 @@ class TestWriteBundle:
             ),
         )
 
-        out_path = tmp_path / "file-backed.trtfb"
+        out_path = tmp_path / "file-backed.bundle"
         write_bundle(
             out_path,
             BundleInfo(model_id="edge"),
@@ -169,7 +169,7 @@ class TestWriteBundle:
     def test_file_backed_digest_mismatch_is_not_published(self, tmp_path):
         source = tmp_path / "mutable.engine"
         source.write_bytes(b"engine")
-        destination = tmp_path / "must-not-exist.trtfb"
+        destination = tmp_path / "must-not-exist.bundle"
 
         with pytest.raises(RuntimeError, match="changed after validation"):
             write_bundle(
@@ -203,7 +203,7 @@ class TestWriteBundle:
             num_key_value_heads=8,
             max_cache_length=512,
         )
-        out_path = str(tmp_path / "full.trtfb")
+        out_path = str(tmp_path / "full.bundle")
         write_bundle(out_path, info, [BundleSection("engine_plan", b"x")])
 
         header, _ = self._read_bundle(out_path)
@@ -216,7 +216,7 @@ class TestWriteBundle:
 
 
 def _read_bundle_from_bytes(data: bytes) -> tuple[dict, dict[str, bytes]]:
-    """Parse a .trtfb bundle from raw bytes. Raises on any format error."""
+    """Parse a .bundle artifact from raw bytes. Raises on any format error."""
     if len(data) < 8:
         raise ValueError("File too short to contain magic bytes")
     magic = data[:8]
@@ -289,7 +289,7 @@ class TestCorruptedBundles:
     def test_truncated_before_magic(self):
         """File shorter than 8 bytes cannot contain valid magic."""
         with pytest.raises(ValueError, match="too short to contain magic"):
-            _read_bundle_from_bytes(b"TRTFB")
+            _read_bundle_from_bytes(b"BUNDLE")
 
     def test_empty_file(self):
         """Empty file should raise ValueError."""
@@ -363,13 +363,13 @@ def test_max_batch_size_roundtrip_and_back_compat(tmp_path):
         model_id="batched-model", family="batched_family",
         max_batch_size={"dit": 4, "text_encoder": 8, "vae": 1},
     )
-    new_path = str(tmp_path / "new.trtfb")
+    new_path = str(tmp_path / "new.bundle")
     write_bundle(new_path, new, [BundleSection("engine_plan", b"x")])
-    new_header, _ = read_trtfb_bundle(new_path)
+    new_header, _ = read_bundle_file(new_path)
     assert new_header["max_batch_size"] == {"dit": 4, "text_encoder": 8, "vae": 1}
 
     legacy = BundleInfo(model_id="legacy", family="legacy_family")
-    legacy_path = str(tmp_path / "legacy.trtfb")
+    legacy_path = str(tmp_path / "legacy.bundle")
     write_bundle(legacy_path, legacy, [BundleSection("engine_plan", b"x")])
-    legacy_header, _ = read_trtfb_bundle(legacy_path)
+    legacy_header, _ = read_bundle_file(legacy_path)
     assert "max_batch_size" not in legacy_header

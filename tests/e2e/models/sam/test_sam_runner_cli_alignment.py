@@ -19,7 +19,7 @@ def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
         family="sam",
         runtime_strategy="sam_prompted_segmentation",
         task_strategy="prompted_segmentation",
-        bundle="sam-case.trtfb",
+        bundle="sam-case.bundle",
         inputs=inputs or {},
     )
     defaults.update(overrides)

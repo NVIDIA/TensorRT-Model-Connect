@@ -32,7 +32,7 @@ def _parity_root(ctx: RunContext) -> Path:
     if not ctx.artifacts_dir:
         return Path(tempfile.gettempdir()) / "trtmc_pixart_parity"
     artifacts_dir = Path(ctx.artifacts_dir)
-    if artifacts_dir.name in {"hf_artifacts", "trtfb_artifacts"}:
+    if artifacts_dir.name in {"hf_artifacts", "bundle_artifacts"}:
         return artifacts_dir.parent / "shared_initial_latents"
     return artifacts_dir / "shared_initial_latents"
 

@@ -381,7 +381,7 @@ def test_public_builder_routes_wan_to_component_bundle(
         lambda output, info, sections: captured.update(output=output, info=info, sections=sections),
     )
 
-    output_path = str(tmp_path / "wan22.trtfb")
+    output_path = str(tmp_path / "wan22.bundle")
     engine_builder.build_bundle(
         str(tmp_path),
         output_path,

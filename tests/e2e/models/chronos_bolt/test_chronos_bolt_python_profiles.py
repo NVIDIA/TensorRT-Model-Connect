@@ -21,7 +21,7 @@ def _make_case(**kwargs) -> E2ECase:
         family="chronos_bolt",
         runtime_strategy="chronos_bolt_trt",
         task_strategy="neural_operator",
-        bundle="chronos-bolt-case.trtfb",
+        bundle="chronos-bolt-case.bundle",
         inputs={"branch_input": [1.0, 2.0, 3.0]},
         stages=[],
         reference_backend="torch_reference",

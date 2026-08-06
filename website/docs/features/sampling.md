@@ -41,7 +41,7 @@ to disabled top-p behavior.
 
 ### CLI
 ```bash
-$TRTMC run bundle.trtfb --prompt "Once upon a time" \
+$TRTMC run bundle.bundle --prompt "Once upon a time" \
   --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 --seed 42
 ```
 

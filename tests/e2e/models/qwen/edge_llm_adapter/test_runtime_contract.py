@@ -279,7 +279,7 @@ def _create_request(artifact, metadata: dict) -> tuple[CreateRequest, bytes]:
         implementation_id=IMPLEMENTATION_ID.encode(),
         model_id=str(artifact.descriptor["model"]["id"]).encode(),
         profile_id=str(artifact.descriptor["profile_id"]).encode(),
-        bundle_path=b"fake.trtfb",
+        bundle_path=b"fake.bundle",
         artifact_path=str(artifact.artifacts_path).encode(),
         implementation_metadata=metadata_bytes,
         implementation_metadata_size=len(metadata_bytes),
@@ -518,7 +518,7 @@ int main(int argc, char** argv) {
     request.implementation_id = factory->implementation_id;
     request.model_id = "Qwen/Qwen3-0.6B";
     request.profile_id = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11.1";
-    request.bundle_path = "fake.trtfb";
+    request.bundle_path = "fake.bundle";
     request.artifact_path = argv[2];
     request.implementation_metadata = metadata.data();
     request.implementation_metadata_size = metadata.size();

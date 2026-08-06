@@ -43,7 +43,7 @@ def test_large_acceptance_build_has_a_precision_matched_l0() -> None:
     for field in ("family", "runtime_strategy", "precision", "quantization"):
         assert large.get(field) == replacement.get(field)
     assert replacement["hf_id"] == "suno/bark-small"
-    assert replacement["bundle"] == "bark-small-fp32-l0.trtfb"
+    assert replacement["bundle"] == "bark-small-fp32-l0.bundle"
     assert replacement["e2e_parallel_resource"] == "exclusive_gpu"
     assert replacement["testcases"][0]["ci_tier"] == "l0_only"
     assert replacement["testcases"][0]["reference_precision"] == "fp32"

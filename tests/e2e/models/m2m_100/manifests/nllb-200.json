@@ -1,7 +1,7 @@
 {
   "name": "nllb-200-distilled-600m",
   "hf_id": "facebook/nllb-200-distilled-600M",
-  "bundle": "nllb-200-distilled-600m.trtfb",
+  "bundle": "nllb-200-distilled-600m.bundle",
   "family": "m2m_100",
   "runtime_strategy": "m2m_100_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",

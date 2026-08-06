@@ -1,7 +1,7 @@
 {
   "name": "internvl3-8b",
   "hf_id": "OpenGVLab/InternVL3-8B-hf",
-  "bundle": "internvl3-8b-vl.trtfb",
+  "bundle": "internvl3-8b-vl.bundle",
   "family": "internvl",
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",

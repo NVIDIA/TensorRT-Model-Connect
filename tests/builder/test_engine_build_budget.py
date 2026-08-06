@@ -128,7 +128,7 @@ def test_guard_allows_one_full_bundle_build_and_rejects_the_second(
     guard_dir = _enable_guard(monkeypatch, tmp_path)
     calls: list[str] = []
     build_bundle = _guarded_builder(calls)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
 
     build_bundle("/models/unit", str(bundle_path), build_timing_path=str(timing_path))
@@ -164,7 +164,7 @@ def test_guard_rejects_concurrent_duplicate_builds_atomically(
         try:
             build_bundle(
                 f"/models/unit-{index}",
-                str(tmp_path / f"unit-{index}.trtfb"),
+                str(tmp_path / f"unit-{index}.bundle"),
                 build_timing_path=str(tmp_path / f"timing-{index}.json"),
             )
         except RuntimeError as exc:
@@ -187,7 +187,7 @@ def test_guard_recovers_one_abandoned_sigsegv_attempt(
     tmp_path: Path,
 ) -> None:
     guard_dir = _enable_guard(monkeypatch, tmp_path)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build("/models/unit", bundle_path, timing_path)
     _request_sigsegv_recovery(monkeypatch)
@@ -225,7 +225,7 @@ def test_guard_recovers_same_nemo_archive_from_new_staging_directory(
     second_staging = _stage_nemo_archive(
         tmp_path, "staging-second", second_parent / archive_path.name
     )
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build(str(first_staging), bundle_path, timing_path)
     _request_sigsegv_recovery(monkeypatch)
@@ -283,7 +283,7 @@ def test_guard_recovery_rejects_a_different_model_source(
                 '{"version": "changed"}\n',
                 encoding="utf-8",
             )
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build(str(first_model_dir), bundle_path, timing_path)
     _request_sigsegv_recovery(monkeypatch)
@@ -307,7 +307,7 @@ def test_guard_recovery_still_rejects_changed_build_options(
     archive_path.write_bytes(b"nemo archive")
     first_staging = _stage_nemo_archive(tmp_path, "staging-first", archive_path)
     second_staging = _stage_nemo_archive(tmp_path, "staging-second", archive_path)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build(str(first_staging), bundle_path, timing_path)
     _request_sigsegv_recovery(monkeypatch)
@@ -331,7 +331,7 @@ def test_guard_recovery_rejects_same_path_archive_mutation(
     archive_path = tmp_path / "model.nemo"
     archive_path.write_bytes(b"first archive")
     first_staging = _stage_nemo_archive(tmp_path, "staging-first", archive_path)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build(str(first_staging), bundle_path, timing_path)
     previous_stat = archive_path.stat()
@@ -362,7 +362,7 @@ def test_guard_recovery_does_not_canonicalize_non_nemo_files(
     archive_path.write_bytes(b"not a NeMo archive")
     first_staging = _stage_nemo_archive(tmp_path, "staging-first", archive_path)
     second_staging = _stage_nemo_archive(tmp_path, "staging-second", archive_path)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build(str(first_staging), bundle_path, timing_path)
     _request_sigsegv_recovery(monkeypatch)
@@ -384,7 +384,7 @@ def test_guard_recovery_rejects_boolean_ledger_counts(
     field: str,
 ) -> None:
     guard_dir = _enable_guard(monkeypatch, tmp_path)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build("/models/unit", bundle_path, timing_path)
     record_path = next(guard_dir.glob("*.json"))
@@ -423,7 +423,7 @@ def test_guard_recovery_rejects_malformed_process_evidence(
     value: object,
 ) -> None:
     guard_dir = _enable_guard(monkeypatch, tmp_path)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build("/models/unit", bundle_path, timing_path)
     record_path = next(guard_dir.glob("*.json"))
@@ -448,7 +448,7 @@ def test_guard_allows_only_one_concurrent_recovery(
     tmp_path: Path,
 ) -> None:
     guard_dir = _enable_guard(monkeypatch, tmp_path)
-    bundle_path = tmp_path / "unit.trtfb"
+    bundle_path = tmp_path / "unit.bundle"
     timing_path = tmp_path / "build_timing.json"
     _start_abandoned_build("/models/unit", bundle_path, timing_path)
     _request_sigsegv_recovery(monkeypatch)
@@ -492,7 +492,7 @@ def test_guard_fails_closed_without_manifest_identity(
     build_bundle = _guarded_builder(calls)
 
     with pytest.raises(RuntimeError, match="TRTMC_ENGINE_BUILD_IDENTITY is required"):
-        build_bundle("/models/unit", str(tmp_path / "unit.trtfb"))
+        build_bundle("/models/unit", str(tmp_path / "unit.bundle"))
 
     assert calls == []
     assert not guard_dir.exists()

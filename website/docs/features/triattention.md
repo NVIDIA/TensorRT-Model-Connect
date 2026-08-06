@@ -43,7 +43,7 @@ trtmc build /path/to/qwen-model \
   --triattention-kv-budget 6144 \
   --triattention-divide-length 1024 \
   --triattention-recent-window 128 \
-  -o /path/to/model-triattention.trtfb
+  -o /path/to/model-triattention.bundle
 ```
 
 The stats must match the Qwen model's attention dimensions and rotary-position
@@ -92,7 +92,7 @@ Core policy values are registered in the `triattention` config namespace.
 Runtime `--set` values can tune a compatible bundle without rebuilding:
 
 ```bash
-trtmc run /path/to/model-triattention.trtfb \
+trtmc run /path/to/model-triattention.bundle \
   --prompt "Explain why reproducibility matters." \
   --max-new-tokens 128 \
   --kv-cache-size 12GiB \

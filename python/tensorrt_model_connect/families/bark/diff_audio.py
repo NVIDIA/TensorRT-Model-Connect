@@ -29,20 +29,20 @@ Staged comparison to isolate audio quality issues:
 Usage:
     # Stage 1: Quick smoke test -- does C++ produce speech?
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtmc \\
+      --bundle bark.bundle --binary ./build/trtmc \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python --stage 1
 
     # Stage 2: Token distribution comparison
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtmc \\
+      --bundle bark.bundle --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python --stage 2
 
     # Stage 3: Codec waveform comparison
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtmc \\
+      --bundle bark.bundle --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python --stage 3
@@ -54,7 +54,7 @@ Usage:
 
     # All stages 1-3 (default)
     python3 tools/diff_audio.py \\
-      --bundle bark.trtfb --binary ./build/trtmc \\
+      --bundle bark.bundle --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
       --hf-python .venv/bin/python
@@ -1153,7 +1153,7 @@ Stages:
 
 Examples:
   # Quick smoke test
-  python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtmc \\
+  python3 tools/diff_audio.py --bundle bark.bundle --binary ./build/trtmc \\
     --prompt "Hello, my dog is cute" --hf-python .venv/bin/python --stage 1
 
   # Greedy parity (TRT engine vs HF)
@@ -1161,14 +1161,14 @@ Examples:
     --max-semantic-tokens 100
 
   # Stages 1-3 comparison
-  python3 tools/diff_audio.py --bundle bark.trtfb --binary ./build/trtmc \\
+  python3 tools/diff_audio.py --bundle bark.bundle --binary ./build/trtmc \\
     --model suno/bark-small --prompt "Hello, my dog is cute" \\
     --hf-python .venv/bin/python
 """)
     parser.add_argument("--model", default=None,
                         help="HF model ID (e.g. suno/bark-small)")
     parser.add_argument("--bundle", default=None,
-                        help="Path to .trtfb bundle")
+                        help="Path to .bundle artifact")
     parser.add_argument("--binary", default=None,
                         help="Path to trtmc binary (e.g. ./build/trtmc)")
     parser.add_argument("--prompt", default="Hello, my dog is cute.",

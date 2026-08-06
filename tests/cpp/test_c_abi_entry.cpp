@@ -36,7 +36,7 @@
 //   values and side effects (error messages via trtmc_last_error). Tests are
 //   designed to succeed in any environment -- GPU, CPU-only, or CI sandbox --
 //   by testing error paths and null handling rather than successful pipeline
-//   creation (which requires a pre-built .trtfb bundle).
+//   creation (which requires a pre-built .bundle artifact).
 //
 // Test categories:
 //   - Version/capability queries: trtmc_version, trtmc_has_trt
@@ -123,12 +123,12 @@ static void test_create_empty_returns_null()
 // Intention: Verify that passing a nonexistent filesystem path as bundle_path
 //   returns nullptr and sets an error message (bundle validation fails).
 // Setup: None.
-// Mechanism: Calls trtmc_create_pipeline("/nonexistent/path/to/bundle.trtfb", 0),
+// Mechanism: Calls trtmc_create_pipeline("/nonexistent/path/to/bundle.bundle", 0),
 //   asserts nullptr return, checks trtmc_last_error() is non-null and non-empty.
 // -----------------------------------------------------------------------------
 static void test_create_bad_path_returns_null()
 {
-    auto* p = trtmc_create_pipeline("/nonexistent/path/to/bundle.trtfb", 0);
+    auto* p = trtmc_create_pipeline("/nonexistent/path/to/bundle.bundle", 0);
     check(p == nullptr, "bad path returns nullptr");
     const char* err = trtmc_last_error();
     check(err != nullptr && std::strlen(err) > 0, "last_error has message after bad path");
@@ -213,7 +213,7 @@ static void test_create_ex_with_options()
     opts.hf_python = "/nonexistent/python";
     opts.image_path = "/nonexistent/image.png";
 
-    auto* p = trtmc_create_pipeline_ex("/nonexistent/bundle.trtfb", &opts);
+    auto* p = trtmc_create_pipeline_ex("/nonexistent/bundle.bundle", &opts);
     check(p == nullptr, "bad bundle with options returns null");
     const char* err = trtmc_last_error();
     check(err != nullptr && std::strlen(err) > 0, "error set with options");

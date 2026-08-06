@@ -21,7 +21,7 @@
 // Purpose:
 //   Validates the new C-ABI entry point for batch image generation. The
 //   existing C-ABI tests (`test_c_abi_entry`, `test_c_abi_runtime_regression`)
-//   skip pipeline creation because it requires a real `.trtfb` bundle and a
+//   skip pipeline creation because it requires a real `.bundle` bundle and a
 //   GPU. We follow the same pattern here for the argument-validation cases
 //   (null handle / null prompts / mismatched lengths) and additionally use a
 //   tiny in-test fake IPipeline to exercise the happy path end-to-end without

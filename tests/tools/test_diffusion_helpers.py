@@ -124,10 +124,10 @@ class TestGeluTanh:
 # ---------------------------------------------------------------------------
 
 def _write_synthetic_bundle(path, config_dict, pp_weights):
-    """Create a minimal .trtfb bundle with config.json and preprocessor_weights.
+    """Create a minimal .bundle artifact with config.json and preprocessor_weights.
 
     Bundle format:
-      8 bytes: magic "TRTFB\\x00\\x01\\x00"
+      8 bytes: magic "BUNDLE\\x00\\x01\\x00"
       8 bytes: uint64 LE header JSON length
       N bytes: header JSON (with sections)
       body bytes: section data concatenated
@@ -158,7 +158,7 @@ def _write_synthetic_bundle(path, config_dict, pp_weights):
     }
 
     header = json.dumps({"sections": sections}).encode("utf-8")
-    magic = b"TRTFB\x00\x01\x00"
+    magic = b"BUNDLE\x01\x00"
 
     with open(path, "wb") as f:
         f.write(magic)
@@ -174,7 +174,7 @@ class TestLoadBundleConfig:
     def test_round_trip(self, tmp_path):
         mod = _import_diffusion_helpers()
         config = {"model_type": "test_dit", "hidden_size": 128}
-        bundle_path = str(tmp_path / "test.trtfb")
+        bundle_path = str(tmp_path / "test.bundle")
         _write_synthetic_bundle(bundle_path, config, {})
 
         loaded = mod.load_bundle_config(bundle_path)
@@ -190,7 +190,7 @@ class TestLoadBundleConfig:
             "runtime_strategy": "diffusion",
             "nested": {"key": "value"},
         }
-        bundle_path = str(tmp_path / "complex.trtfb")
+        bundle_path = str(tmp_path / "complex.bundle")
         _write_synthetic_bundle(bundle_path, config, {})
 
         loaded = mod.load_bundle_config(bundle_path)
@@ -205,7 +205,7 @@ class TestLoadPpWeights:
         mod = _import_diffusion_helpers()
         w = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
         pp_weights = {"condition_embedder.time_embedding.0.weight": w}
-        bundle_path = str(tmp_path / "test.trtfb")
+        bundle_path = str(tmp_path / "test.bundle")
         _write_synthetic_bundle(bundle_path, {"model_type": "test"}, pp_weights)
 
         loaded = mod.load_pp_weights(bundle_path)
@@ -220,7 +220,7 @@ class TestLoadPpWeights:
             "w2": np.array([[4.0, 5.0], [6.0, 7.0]], dtype=np.float32),
             "b1": np.array([0.1], dtype=np.float32),
         }
-        bundle_path = str(tmp_path / "multi.trtfb")
+        bundle_path = str(tmp_path / "multi.bundle")
         _write_synthetic_bundle(bundle_path, {"model_type": "test"}, pp_weights)
 
         loaded = mod.load_pp_weights(bundle_path)
@@ -233,7 +233,7 @@ class TestLoadPpWeights:
         mod = _import_diffusion_helpers()
         w = np.random.randn(8, 16).astype(np.float32)
         pp_weights = {"matrix": w}
-        bundle_path = str(tmp_path / "shape.trtfb")
+        bundle_path = str(tmp_path / "shape.bundle")
         _write_synthetic_bundle(bundle_path, {"model_type": "test"}, pp_weights)
 
         loaded = mod.load_pp_weights(bundle_path)

@@ -22,7 +22,7 @@ def _make_ctx(tmp_path) -> RunContext:
             hf_id="dummy/model",
             family="dummy",
             runtime_strategy="diffusion_qwen_image",
-            bundle="case-a.trtfb",
+            bundle="case-a.bundle",
             stages=[],
         ),
         artifacts_dir=str(tmp_path),
@@ -41,7 +41,7 @@ def test_qwen_image_repro_command_comes_from_model_plugin(tmp_path) -> None:
             family="qwen_image",
             runtime_strategy="diffusion_qwen_image",
             task_strategy="diffusion_media_generation",
-            bundle="qwen-image-case.trtfb",
+            bundle="qwen-image-case.bundle",
             inputs={
                 "prompt": "A red apple on a wooden table",
                 "negative_prompt": " ",
@@ -56,7 +56,7 @@ def test_qwen_image_repro_command_comes_from_model_plugin(tmp_path) -> None:
         repro = _build_repro_commands(
             case,
             _make_ctx(tmp_path),
-            "/tmp/engines/qwen-image-case.trtfb",
+            "/tmp/engines/qwen-image-case.bundle",
             {},
         )
     finally:

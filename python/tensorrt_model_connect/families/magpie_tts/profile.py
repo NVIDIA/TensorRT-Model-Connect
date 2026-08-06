@@ -93,7 +93,7 @@ def profile_with_cuda_events(bundle_path: str, prompt: str,
 
 def main():
     parser = argparse.ArgumentParser(description="Profile MagpieTTS")
-    parser.add_argument("--bundle", required=True, help="Path to .trtfb bundle")
+    parser.add_argument("--bundle", required=True, help="Path to .bundle artifact")
     parser.add_argument("--trtmc-binary", default="./build/trtmc",
                         help="Path to C++ trtmc binary")
     parser.add_argument("--prompt", default="Hello, this is a test of text to speech synthesis.",

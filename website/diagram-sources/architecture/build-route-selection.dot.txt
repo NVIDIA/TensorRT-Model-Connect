@@ -81,12 +81,12 @@ digraph BuildRouteSelection {
   native_bundle [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>Native .trtfb</B><BR/><FONT POINT-SIZE="16">runtime_strategy + plans + assets</FONT>>
+    label=<<B>Native .bundle</B><BR/><FONT POINT-SIZE="16">runtime_strategy + plans + assets</FONT>>
   ];
   optimized_bundle [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>Optimized .trtfb</B><BR/><FONT POINT-SIZE="16">descriptor + embedded implementation DSO</FONT>>
+    label=<<B>Optimized .bundle</B><BR/><FONT POINT-SIZE="16">descriptor + embedded implementation DSO</FONT>>
   ];
   terminal [
     fillcolor="#fef2f2",

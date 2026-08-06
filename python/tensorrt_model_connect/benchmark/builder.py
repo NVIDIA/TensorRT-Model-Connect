@@ -726,7 +726,7 @@ def _gpu_identity() -> str:
 
 def _temporary_bundle(parent: Path) -> Path:
     descriptor, raw_path = tempfile.mkstemp(
-        prefix=".trtmc-bench-build-", suffix=".trtfb", dir=parent
+        prefix=".trtmc-bench-build-", suffix=".bundle", dir=parent
     )
     os.close(descriptor)
     path = Path(raw_path)

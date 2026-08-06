@@ -10,7 +10,7 @@ identifies the root cause(s) of noisy output.
 
 Usage:
     python tools/debug_diffusion_pipeline.py \
-        --bundle /mnt/storage/tensorrt-model-connect/engines/wan21-t2v-1.3b.trtfb \
+        --bundle /mnt/storage/tensorrt-model-connect/engines/wan21-t2v-1.3b.bundle \
         [--model-id Wan-AI/Wan2.1-T2V-1.3B-Diffusers] \
         [--atol 0.01] [--num-steps 10]
 """

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// @title: What a TRTFB bundle carries
-// @description: A TRTFB bundle records shared identity metadata plus either native configuration, engine plans, and assets or an optimized runtime descriptor and integrity-bound artifact tree.
+// @title: What a BUNDLE bundle carries
+// @description: A BUNDLE bundle records shared identity metadata plus either native configuration, engine plans, and assets or an optimized runtime descriptor and integrity-bound artifact tree.
 digraph BundleContents {
   graph [
     bgcolor="#fbfcfe",
@@ -29,7 +29,7 @@ digraph BundleContents {
   ];
   edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
 
-  bundle [fillcolor="#fffbeb", color="#b45309", label=<<FONT POINT-SIZE="20"><B>model.trtfb</B></FONT><BR/><FONT POINT-SIZE="16">portable deployment boundary</FONT>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<FONT POINT-SIZE="20"><B>model.bundle</B></FONT><BR/><FONT POINT-SIZE="16">portable deployment boundary</FONT>>];
   header [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Shared header identity</B><BR/><FONT POINT-SIZE="16">model · family · precision · TensorRT ABI</FONT>>];
   native [fillcolor="#eff6ff", color="#2563eb", label=<<B>Native sections</B><BR/><FONT POINT-SIZE="16">config.json · engine plans · tokenizer/assets</FONT>>];
   optimized [fillcolor="#ecfeff", color="#0e7490", label=<<B>Optimized sections</B><BR/><FONT POINT-SIZE="16">optimized_runtime.json · embedded DSO · artifact tree</FONT>>];

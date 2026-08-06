@@ -1,7 +1,7 @@
 {
   "name": "qwen3-vl-2b-tp4",
   "hf_id": "Qwen/Qwen3-VL-2B-Instruct",
-  "bundle": "qwen3-vl-2b-tp4.trtfb",
+  "bundle": "qwen3-vl-2b-tp4.bundle",
   "family": "qwen_vl",
   "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation",

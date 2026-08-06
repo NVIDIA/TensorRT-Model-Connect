@@ -30,7 +30,7 @@ class TestBuildArgs:
         """Verify build command parses all arguments."""
         test_args = [
             "trtmc", "build", "example-org/example-model",
-            "-o", "/tmp/out.trtfb",
+            "-o", "/tmp/out.bundle",
             "--max-cache-length", "512",
             "--verbose",
         ]
@@ -46,7 +46,7 @@ class TestBuildArgs:
             args = parser.parse_args(test_args[1:])
             assert args.command == "build"
             assert args.model == "example-org/example-model"
-            assert args.output == "/tmp/out.trtfb"
+            assert args.output == "/tmp/out.bundle"
             assert args.max_cache_length == 512
             assert args.verbose is True
 
@@ -60,7 +60,7 @@ class TestBuildArgs:
         build_p.add_argument("--max-cache-length", type=int, default=256)
         build_p.add_argument("--verbose", action="store_true")
 
-        args = parser.parse_args(["build", "model-dir", "-o", "out.trtfb"])
+        args = parser.parse_args(["build", "model-dir", "-o", "out.bundle"])
         assert args.max_cache_length == 256
         assert args.verbose is False
 
@@ -132,7 +132,7 @@ class TestMainParser:
                 "build",
                 "example-org/remote-code-model",
                 "-o",
-                str(tmp_path / "out.trtfb"),
+                str(tmp_path / "out.bundle"),
                 "--max-cache-length",
                 "256",
                 "--trust-remote-code",
@@ -179,9 +179,9 @@ def test_default_bundle_path_uses_model_name():
 
     assert (
         _default_bundle_path("example-org/GenericDecoder-0.6B")
-        == "GenericDecoder-0.6B.trtfb"
+        == "GenericDecoder-0.6B.bundle"
     )
-    assert _default_bundle_path("/models/My Model/") == "My-Model.trtfb"
+    assert _default_bundle_path("/models/My Model/") == "My-Model.bundle"
 
 
 def test_cmd_build_derives_output_and_keeps_native_capacity_unset(monkeypatch):
@@ -221,7 +221,7 @@ def test_cmd_build_derives_output_and_keeps_native_capacity_unset(monkeypatch):
     )
 
     assert cli._cmd_build(args) == 0
-    assert captured["output_path"] == "GenericDecoder-0.6B.trtfb"
+    assert captured["output_path"] == "GenericDecoder-0.6B.bundle"
     assert captured["max_cache_length"] is None
     assert optimized_call == {}
 
@@ -233,9 +233,9 @@ class TestInspectArgs:
         inspect_p = subparsers.add_parser("inspect")
         inspect_p.add_argument("bundle_path")
 
-        args = parser.parse_args(["inspect", "/path/to/bundle.trtfb"])
+        args = parser.parse_args(["inspect", "/path/to/bundle.bundle"])
         assert args.command == "inspect"
-        assert args.bundle_path == "/path/to/bundle.trtfb"
+        assert args.bundle_path == "/path/to/bundle.bundle"
 
 
 class TestVersionCommand:
@@ -250,7 +250,7 @@ class TestCmdBuildValidation:
     def test_missing_model(self):
         """_cmd_build returns 1 when model is empty."""
         from tensorrt_model_connect.build_cli import _cmd_build
-        args = argparse.Namespace(model="", output="out.trtfb", quantize=None, quant_scales=None, quant_calibration_samples=512,
+        args = argparse.Namespace(model="", output="out.bundle", quantize=None, quant_scales=None, quant_calibration_samples=512,
                                   max_cache_length=256, verbose=False, _skip_profile_resolution=True)
         result = _cmd_build(args)
         assert result == 1
@@ -268,11 +268,11 @@ class TestCmdInspect:
     """Tests for _cmd_inspect with real and invalid bundle files."""
 
     def test_inspect_valid_bundle(self, tmp_path, capsys):
-        """Inspect a real (synthetic) .trtfb bundle and verify output."""
+        """Inspect a real (synthetic) .bundle artifact and verify output."""
         import json
         import struct
 
-        bundle_path = tmp_path / "test.trtfb"
+        bundle_path = tmp_path / "test.bundle"
         header = {
             "model_id": "test-model",
             "model_type": "example_decoder",
@@ -293,7 +293,7 @@ class TestCmdInspect:
         header_json = json.dumps(header).encode("utf-8")
 
         with open(bundle_path, "wb") as f:
-            f.write(b"TRTFB\x00\x01\x00")
+            f.write(b"BUNDLE\x01\x00")
             f.write(struct.pack("<Q", len(header_json)))
             f.write(header_json)
             f.write(b"\x00" * 100)  # fake engine plan
@@ -313,7 +313,7 @@ class TestCmdInspect:
         import json
         import struct
 
-        bundle_path = tmp_path / "split.trtfb"
+        bundle_path = tmp_path / "split.bundle"
         header = {
             "model_id": "test-model",
             "model_type": "example_decoder",
@@ -335,7 +335,7 @@ class TestCmdInspect:
         header_json = json.dumps(header).encode("utf-8")
 
         with open(bundle_path, "wb") as f:
-            f.write(b"TRTFB\x00\x01\x00")
+            f.write(b"BUNDLE\x01\x00")
             f.write(struct.pack("<Q", len(header_json)))
             f.write(header_json)
             f.write(b"\x00" * 300)
@@ -350,13 +350,13 @@ class TestCmdInspect:
         """_cmd_inspect returns 1 for non-existent file."""
         from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(
-            bundle_path="/nonexistent/path/bundle.trtfb"))
+            bundle_path="/nonexistent/path/bundle.bundle"))
         assert result == 1
 
     def test_inspect_invalid_magic(self, tmp_path):
         """_cmd_inspect returns 1 for file with wrong magic bytes."""
-        bundle_path = tmp_path / "bad.trtfb"
-        bundle_path.write_bytes(b"NOT_TRTFB_MAGIC_1234567890")
+        bundle_path = tmp_path / "bad.bundle"
+        bundle_path.write_bytes(b"NOT_BUNDLE_MAGIC_1234567890")
 
         from tensorrt_model_connect.build_cli import _cmd_inspect
         result = _cmd_inspect(argparse.Namespace(
@@ -377,7 +377,7 @@ class TestCmdBuildMocked:
     def _fp8_build_args(tmp_path, scales_path):
         return argparse.Namespace(
             model="some-model",
-            output=str(tmp_path / "out.trtfb"),
+            output=str(tmp_path / "out.bundle"),
             max_cache_length=256,
             precision="fp16",
             method="trt",
@@ -409,7 +409,7 @@ class TestCmdBuildMocked:
         try:
             args = argparse.Namespace(
                 model="/path/to/model",
-                output=str(tmp_path / "out.trtfb"),
+                output=str(tmp_path / "out.bundle"),
                 max_cache_length=512,
                 precision="fp32",
                 method="trt",
@@ -425,7 +425,7 @@ class TestCmdBuildMocked:
             assert result == 0
             assert captured_kwargs["model_id_or_path"] == "/path/to/model"
             assert captured_kwargs["output_path"] == str(
-                tmp_path / "out.trtfb")
+                tmp_path / "out.bundle")
             assert captured_kwargs["max_cache_length"] == 512
             assert captured_kwargs["verbose"] is True
         finally:
@@ -456,7 +456,7 @@ class TestCmdBuildMocked:
         )
         args = argparse.Namespace(
             model="example-org/example-model",
-            output=str(tmp_path / "out.trtfb"),
+            output=str(tmp_path / "out.bundle"),
             max_cache_length=256,
             precision="fp16",
             method="trt",
@@ -490,14 +490,14 @@ class TestCmdBuildMocked:
         eb._build_native_impl = mock_build
         try:
             args = argparse.Namespace(
-                model="some-model", output=str(tmp_path / "out.trtfb"),
+                model="some-model", output=str(tmp_path / "out.bundle"),
                 max_cache_length=256, precision="fp32", method="trt", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=True, _skip_profile_resolution=True)
             _cmd_build(args)
             assert received_verbose == [True]
 
             received_verbose.clear()
             args = argparse.Namespace(
-                model="some-model", output=str(tmp_path / "out.trtfb"),
+                model="some-model", output=str(tmp_path / "out.bundle"),
                 max_cache_length=256, precision="fp32", method="trt", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, _skip_profile_resolution=True)
             _cmd_build(args)
             assert received_verbose == [False]
@@ -521,7 +521,7 @@ class TestCmdBuildMocked:
             for cache_len in [128, 1024, 4096]:
                 args = argparse.Namespace(
                     model="some-model",
-                    output=str(tmp_path / "out.trtfb"),
+                    output=str(tmp_path / "out.bundle"),
                     max_cache_length=cache_len,
                     precision="fp32",
                     method="trt",
@@ -552,7 +552,7 @@ class TestCmdBuildMocked:
         try:
             args = argparse.Namespace(
                 model="some-model",
-                output=str(tmp_path / "out.trtfb"),
+                output=str(tmp_path / "out.bundle"),
                 max_cache_length=256,
                 dynamic_kv_cache=True,
                 precision="fp32",
@@ -584,7 +584,7 @@ class TestCmdBuildMocked:
         try:
             args = argparse.Namespace(
                 model="some-model",
-                output=str(tmp_path / "out.trtfb"),
+                output=str(tmp_path / "out.bundle"),
                 max_cache_length=256,
                 dynamic_kv_cache=True,
                 dynamic_kv_profile_rows=[32, 64, 128],
@@ -629,7 +629,7 @@ class TestCmdBuildMocked:
         try:
             args = argparse.Namespace(
                 model="some-model",
-                output=str(tmp_path / "out.trtfb"),
+                output=str(tmp_path / "out.bundle"),
                 max_cache_length=256,
                 decoder_engine_layout="dual_profile",
                 dynamic_kv_cache=False,
@@ -672,7 +672,7 @@ class TestCmdBuildMocked:
         try:
             args = argparse.Namespace(
                 model="some-model",
-                output=str(tmp_path / "out.trtfb"),
+                output=str(tmp_path / "out.bundle"),
                 max_cache_length=256,
                 precision="fp32",
                 method="trt",
@@ -794,7 +794,7 @@ class TestCmdBuildMocked:
 
         args = argparse.Namespace(
             model="example-org/profiled-model",
-            output=str(tmp_path / "out.trtfb"),
+            output=str(tmp_path / "out.bundle"),
             max_cache_length=256,
             precision="fp32",
             quantize=None,
@@ -814,7 +814,7 @@ class TestCmdBuildMocked:
                 "build",
                 "example-org/profiled-model",
                 "-o",
-                str(tmp_path / "out.trtfb"),
+                str(tmp_path / "out.bundle"),
             ],
         ):
             assert cli._cmd_build(args) == 0
@@ -831,7 +831,7 @@ class TestCmdBuildMocked:
             "build",
             "example-org/profiled-model",
             "-o",
-            str(tmp_path / "out.trtfb"),
+            str(tmp_path / "out.bundle"),
             "--active-python-profile",
             "example_profile",
         ]

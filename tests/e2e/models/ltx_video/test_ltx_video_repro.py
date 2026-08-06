@@ -22,7 +22,7 @@ def _make_ctx(tmp_path) -> RunContext:
             hf_id="dummy/model",
             family="dummy",
             runtime_strategy="diffusion",
-            bundle="case-a.trtfb",
+            bundle="case-a.bundle",
             stages=[],
         ),
         artifacts_dir=str(tmp_path),
@@ -41,7 +41,7 @@ def test_ltx_video_repro_initial_latents_comes_from_model_plugin(tmp_path) -> No
             family="ltx_video",
             runtime_strategy="diffusion",
             task_strategy="diffusion_media_generation",
-            bundle="ltx-video.trtfb",
+            bundle="ltx-video.bundle",
             inputs={
                 "prompt": "A slow pan over mountains",
                 "num_inference_steps": 8,
@@ -53,7 +53,7 @@ def test_ltx_video_repro_initial_latents_comes_from_model_plugin(tmp_path) -> No
         repro = _build_repro_commands(
             case,
             _make_ctx(tmp_path),
-            "/tmp/engines/ltx-video.trtfb",
+            "/tmp/engines/ltx-video.bundle",
             {},
         )
     finally:

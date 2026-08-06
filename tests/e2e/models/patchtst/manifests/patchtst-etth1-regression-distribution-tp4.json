@@ -1,7 +1,7 @@
 {
   "name": "patchtst-etth1-regression-distribution-tp4",
   "hf_id": "ibm-research/patchtst-etth1-regression-distribution",
-  "bundle": "patchtst-etth1-regression-distribution-tp4.trtfb",
+  "bundle": "patchtst-etth1-regression-distribution-tp4.bundle",
   "family": "patchtst",
   "runtime_strategy": "patchtst_trt",
   "task_strategy": "neural_operator",

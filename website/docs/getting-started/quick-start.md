@@ -48,7 +48,7 @@ $TRTMC build Qwen/Qwen3-0.6B
 declares a model-owned native default, so this model-only command skips the
 optimized-provider probe and builds BF16 split prefill/decode engines with the
 checkpoint's full context capacity. The omitted output path is derived as
-`Qwen3-0.6B.trtfb`.
+`Qwen3-0.6B.bundle`.
 
 First builds can be slow because the builder may download model files and compile TensorRT engines. If the command fails before TensorRT starts, check model ID, Hugging Face auth, network/cache, and Python dependencies first.
 
@@ -57,8 +57,8 @@ First builds can be slow because the builder may download model files and compil
 Inspect the bundle:
 
 ```bash
-$TRTMC inspect Qwen3-0.6B.trtfb
-$TRTMC inspect Qwen3-0.6B.trtfb --list-engines
+$TRTMC inspect Qwen3-0.6B.bundle
+$TRTMC inspect Qwen3-0.6B.bundle --list-engines
 ```
 
 Expected fields include:
@@ -84,7 +84,7 @@ as native plan sections.
 ## 4. Run Deterministic Inference
 
 ```bash
-$TRTMC run Qwen3-0.6B.trtfb \
+$TRTMC run Qwen3-0.6B.bundle \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy
@@ -141,9 +141,9 @@ Then run these two native Model Connect commands:
 trtmc build Wan-AI/Wan2.2-TI2V-5B \
   --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e \
   --fp8 \
-  -o wan22-thor.trtfb
+  -o wan22-thor.bundle
 
-trtmc generate-video wan22-thor.trtfb \
+trtmc generate-video wan22-thor.bundle \
   --set wan2_2_ti2v.easycache_enabled=true \
   --set wan2_2_ti2v.easycache_threshold=1.0 \
   --set wan2_2_ti2v.easycache_max_consecutive_reuse=4 \

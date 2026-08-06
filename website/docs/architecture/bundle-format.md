@@ -1,11 +1,11 @@
 ---
 title: Bundle Format
-description: The physical and semantic contract carried by a .trtfb artifact.
+description: The physical and semantic contract carried by a .bundle artifact.
 ---
 
 import Diagram from '@site/src/components/Diagram';
 
-`.trtfb` is the build/run boundary of TensorRT-Model-Connect. It is a
+`.bundle` is the build/run boundary of TensorRT-Model-Connect. It is a
 self-describing container with a JSON header and named binary sections.
 
 Two payload shapes use the same outer format:
@@ -19,7 +19,7 @@ Two payload shapes use the same outer format:
 
 <Diagram
   src="/img/diagrams/architecture/bundle-layout.svg"
-  alt="Physical model.trtfb layout with magic bytes, JSON header length, metadata and section table, then native or optimized binary payloads"
+  alt="Physical model.bundle layout with magic bytes, JSON header length, metadata and section table, then native or optimized binary payloads"
   caption="The fixed prefix locates the JSON header; its section table addresses named entries inside the contiguous payload area."
 />
 
@@ -128,7 +128,7 @@ Successful schema-driven configuration resolution may write
 `<bundle>.effective_config.json` beside a bundle. Build timing and validation
 reports may also be stored nearby.
 
-Those files are diagnostics/evidence, not `.trtfb` sections. Moving the bundle
+Those files are diagnostics/evidence, not `.bundle` sections. Moving the bundle
 does not move its sidecars automatically.
 
 ## Inspection
@@ -138,15 +138,15 @@ Use the public C++ API to inspect metadata without constructing a pipeline:
 ```cpp
 #include <trtmc/bundle.h>
 
-auto info = trtmc::InspectBundle("/tmp/model.trtfb");
-bool has_magic = trtmc::IsBundle("/tmp/model.trtfb");
+auto info = trtmc::InspectBundle("/tmp/model.bundle");
+bool has_magic = trtmc::IsBundle("/tmp/model.bundle");
 ```
 
 The CLI provides the same user workflow:
 
 ```bash
-trtmc inspect /tmp/model.trtfb
-trtmc inspect /tmp/model.trtfb --list-engines
+trtmc inspect /tmp/model.bundle
+trtmc inspect /tmp/model.bundle --list-engines
 ```
 
 `--list-engines` recognizes native plan naming conventions. Optimized artifacts

@@ -23,7 +23,7 @@ internal architecture page.
 | --- | --- | --- |
 | 1 | [Prerequisites and Environment](environment-and-repro.md) | You have selected a supported wheel or source-build path, the GPU is visible, and you understand the first model's resource boundary. |
 | 2 | [Installation](installation.md) | Either `trtmc version` or `./build/trtmc version` succeeds in the environment where you will build and run the model. |
-| 3 | [Quick Start](quick-start.md) | You have built and inspected `Qwen3-0.6B.trtfb`, then received generated text from the native C++ runtime. |
+| 3 | [Quick Start](quick-start.md) | You have built and inspected `Qwen3-0.6B.bundle`, then received generated text from the native C++ runtime. |
 | 4 | [Learning Path](../learning-path.md) | You can choose the next tutorial without repeating the setup or first build. |
 
 Keep the [Glossary](glossary.md) open when a term is unfamiliar. You do not
@@ -37,7 +37,7 @@ model-owned Qwen path:
 ```text
 Qwen/Qwen3-0.6B
   -> Python family resolution and TensorRT build
-  -> Qwen3-0.6B.trtfb
+  -> Qwen3-0.6B.bundle
   -> native C++ runtime
   -> deterministic generated text
 ```

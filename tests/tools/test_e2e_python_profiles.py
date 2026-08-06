@@ -27,7 +27,7 @@ def _make_case(runtime_strategy: str = "example_decoder_decoder_kv_cache", **kwa
         family="dummy",
         runtime_strategy=runtime_strategy,
         task_strategy=kwargs.pop("task_strategy", runtime_strategy),
-        bundle="case-a.trtfb",
+        bundle="case-a.bundle",
         inputs=kwargs.pop("inputs", {}),
         stages=[],
     )
@@ -347,7 +347,7 @@ def test_repro_commands_record_profile_exports(tmp_path):
         reference_profile="specialized",
         engine_dir="/tmp/engines",
     )
-    repro = _build_repro_commands(case, ctx, "/tmp/engines/case-a.trtfb", {})
+    repro = _build_repro_commands(case, ctx, "/tmp/engines/case-a.bundle", {})
     assert repro["build_bundle"].startswith(
         "/tmp/specialized-python -m tensorrt_model_connect.__main__ build"
     )

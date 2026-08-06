@@ -2,7 +2,7 @@
   "name": "deepseek-v2-tiny",
   "hf_id": "katuni4ka/tiny-random-deepseek-v3",
   "hf_revision": "ba144b0d3331a5892aa588d82722d382be2b6e6b",
-  "bundle": "deepseek-v2-tiny.trtfb",
+  "bundle": "deepseek-v2-tiny.bundle",
   "family": "deepseek_v2",
   "runtime_strategy": "deepseek_v2_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

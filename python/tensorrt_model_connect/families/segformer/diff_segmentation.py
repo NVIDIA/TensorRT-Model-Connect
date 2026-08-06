@@ -24,7 +24,7 @@ import numpy as np
 def main():
     parser = argparse.ArgumentParser(description="SegFormer TRT vs HF diff")
     parser.add_argument("--model", required=True, help="HF model ID or local path")
-    parser.add_argument("--bundle", default=None, help="Path to .trtfb bundle")
+    parser.add_argument("--bundle", default=None, help="Path to .bundle artifact")
     parser.add_argument("--image", required=True, help="Test image path")
     parser.add_argument("--atol", type=float, default=0.5, help="Absolute tolerance for logits")
     parser.add_argument("--verbose", action="store_true")

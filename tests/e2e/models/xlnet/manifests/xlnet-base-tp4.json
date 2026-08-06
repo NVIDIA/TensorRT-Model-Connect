@@ -1,7 +1,7 @@
 {
   "name": "xlnet-base-tp4",
   "hf_id": "xlnet/xlnet-base-cased",
-  "bundle": "xlnet-base-tp4.trtfb",
+  "bundle": "xlnet-base-tp4.bundle",
   "family": "xlnet",
   "runtime_strategy": "xlnet_encoder_only",
   "task_strategy": "encoder_only_nlp",

@@ -293,7 +293,7 @@ class TestBuildBundleOrchestration:
             tmp_path, model_type="nonexistent_model_xyz")
 
         with pytest.raises(ValueError, match="No family plugin"):
-            build_bundle(str(model_dir), str(tmp_path / "out.trtfb"))
+            build_bundle(str(model_dir), str(tmp_path / "out.bundle"))
 
     def test_unknown_model_type_lists_supported(self, tmp_path):
         """Error message for unknown model_type lists supported families."""
@@ -301,18 +301,18 @@ class TestBuildBundleOrchestration:
             tmp_path, model_type="nonexistent_model_xyz")
 
         with pytest.raises(ValueError, match="Supported:"):
-            build_bundle(str(model_dir), str(tmp_path / "out.trtfb"))
+            build_bundle(str(model_dir), str(tmp_path / "out.bundle"))
 
     def test_missing_config_json_raises(self, tmp_path):
         """Missing config.json raises FileNotFoundError."""
         # Empty directory — no config.json
         with pytest.raises(FileNotFoundError):
-            build_bundle(str(tmp_path), str(tmp_path / "out.trtfb"))
+            build_bundle(str(tmp_path), str(tmp_path / "out.bundle"))
 
     def test_orchestration_flow(self, tmp_path):
         """Verify the correct flow: config -> plugin -> weights -> engine -> bundle."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         # Create a mock plugin
         mock_plugin = MagicMock()
@@ -366,7 +366,7 @@ class TestBuildBundleOrchestration:
     def test_engine_plan_in_sections(self, tmp_path):
         """Verify engine_plan is the first section."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -400,7 +400,7 @@ class TestBuildBundleOrchestration:
     def test_max_cache_length_forwarded(self, tmp_path):
         """max_cache_length is forwarded to plugin.build_engine."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -434,7 +434,7 @@ class TestBuildBundleOrchestration:
     def test_config_json_embedded_in_sections(self, tmp_path):
         """config.json from model dir is embedded in bundle sections."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -470,7 +470,7 @@ class TestBuildBundleOrchestration:
         (model_dir / "processor_config.json").write_text(
             json.dumps({"image_processor": {"image_mean": [0.5, 0.5, 0.5]}})
         )
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -503,7 +503,7 @@ class TestBuildBundleOrchestration:
     def test_runtime_strategy_injected(self, tmp_path):
         """runtime_strategy from plugin is injected into config.json section."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -543,7 +543,7 @@ class TestBuildBundleOrchestration:
     def test_bundle_info_max_cache_length(self, tmp_path):
         """BundleInfo records the max_cache_length."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -577,7 +577,7 @@ class TestBuildBundleOrchestration:
     def test_triattention_embeds_stats_and_config(self, tmp_path):
         """TriAttention build options add config and stats sections."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -641,7 +641,7 @@ class TestBuildBundleOrchestration:
 
     def test_large_triattention_budget_adds_lower_warmup_profile(self, tmp_path):
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         mock_plugin = MagicMock()
         mock_plugin.name = EXAMPLE_DECODER_FAMILY
@@ -689,7 +689,7 @@ class TestBuildBundleOrchestration:
     def test_load_weights_precision_forwarded_when_supported(self, tmp_path):
         """build_bundle forwards precision to load_weights when supported."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
         seen = {}
 
         class _Plugin:
@@ -721,7 +721,7 @@ class TestBuildBundleOrchestration:
     def test_vision_engine_precision_forwarded_when_supported(self, tmp_path):
         """build_bundle forwards precision to optional vision engines."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
         seen = {}
 
         class _Plugin:
@@ -773,7 +773,7 @@ class TestBuildBundleOrchestration:
     def test_family_can_opt_out_of_tokenizer_packaging(self, tmp_path):
         """Non-text families own the tokenizer-packaging opt-out."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         class _Plugin:
             name = "image_family"
@@ -802,7 +802,7 @@ class TestBuildBundleOrchestration:
     def test_split_decoder_builds_use_role_scoped_timing_caches(self, tmp_path, monkeypatch):
         """Split prefill/decode builds should not share the global timing cache."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
         scopes = []
 
         @contextmanager
@@ -857,7 +857,7 @@ class TestBuildBundleOrchestration:
         model_dir = tmp_path / f"{plugin_name}_diffusers"
         model_dir.mkdir()
         (model_dir / "model_index.json").write_text(json.dumps({"_class_name": pipeline_class}))
-        output_path = str(tmp_path / f"{plugin_name}.trtfb")
+        output_path = str(tmp_path / f"{plugin_name}.bundle")
         seen = {}
 
         class _DiffusionPlugin:
@@ -968,7 +968,7 @@ class TestBuildBundleOrchestration:
     def test_load_weights_precision_not_forwarded_when_unsupported(self, tmp_path):
         """build_bundle remains compatible with plugins that do not accept precision."""
         model_dir = self._make_model_dir(tmp_path)
-        output_path = str(tmp_path / "output.trtfb")
+        output_path = str(tmp_path / "output.bundle")
 
         class _Plugin:
             name = EXAMPLE_DECODER_FAMILY

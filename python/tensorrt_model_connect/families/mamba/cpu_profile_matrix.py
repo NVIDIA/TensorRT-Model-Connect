@@ -12,6 +12,6 @@ def cpu_profile_matrix_specs() -> list[dict]:
         "strategy": "ssm_recurrent",
         "label": "ssm_recurrent\n(mamba-130m)",
         "hf_id": "state-spaces/mamba-130m-hf",
-        "bundle": "mamba-130m.trtfb",
+        "bundle": "mamba-130m.bundle",
         "runner": "family",
     }]

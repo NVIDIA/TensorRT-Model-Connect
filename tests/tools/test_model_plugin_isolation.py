@@ -1237,7 +1237,7 @@ def test_verify_builds_accepts_exactly_one_completed_build_per_model(
     models_file.write_text("decoder-small\nencoder-small\n", encoding="utf-8")
     ledger_dir = tmp_path / "engine-builds"
     for model_name in ("decoder-small", "encoder-small"):
-        bundle_path = tmp_path / f"{model_name}.trtfb"
+        bundle_path = tmp_path / f"{model_name}.bundle"
         bundle_path.write_bytes(b"bundle")
         timing_path = tmp_path / f"{model_name}-timing.json"
         timing_path.write_text("{}\n", encoding="utf-8")
@@ -1274,7 +1274,7 @@ def test_verify_builds_accepts_one_recorded_sigsegv_recovery(
     models_file = tmp_path / "models.txt"
     models_file.write_text("decoder-small\n", encoding="utf-8")
     ledger_dir = tmp_path / "engine-builds"
-    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path = tmp_path / "decoder-small.bundle"
     bundle_path.write_bytes(b"bundle")
     timing_path = tmp_path / "decoder-small-timing.json"
     timing_path.write_text("{}\n", encoding="utf-8")
@@ -1330,7 +1330,7 @@ def test_verify_builds_rejects_incomplete_fresh_process_recovery_evidence(
     models_file = tmp_path / "models.txt"
     models_file.write_text("decoder-small\n", encoding="utf-8")
     ledger_dir = tmp_path / "engine-builds"
-    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path = tmp_path / "decoder-small.bundle"
     bundle_path.write_bytes(b"bundle")
     timing_path = tmp_path / "decoder-small-timing.json"
     timing_path.write_text("{}\n", encoding="utf-8")
@@ -1404,7 +1404,7 @@ def test_verify_builds_rejects_malformed_process_evidence(
     models_file = tmp_path / "models.txt"
     models_file.write_text("decoder-small\n", encoding="utf-8")
     ledger_dir = tmp_path / "engine-builds"
-    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path = tmp_path / "decoder-small.bundle"
     bundle_path.write_bytes(b"bundle")
     timing_path = tmp_path / "decoder-small-timing.json"
     timing_path.write_text("{}\n", encoding="utf-8")
@@ -1453,7 +1453,7 @@ def test_verify_builds_rejects_invalid_recovery_records(
     models_file = tmp_path / "models.txt"
     models_file.write_text("decoder-small\n", encoding="utf-8")
     ledger_dir = tmp_path / "engine-builds"
-    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path = tmp_path / "decoder-small.bundle"
     bundle_path.write_bytes(b"bundle")
     timing_path = tmp_path / "decoder-small-timing.json"
     timing_path.write_text("{}\n", encoding="utf-8")
@@ -1487,7 +1487,7 @@ def test_verify_builds_rejects_boolean_invocation_count(tmp_path: Path) -> None:
     models_file = tmp_path / "models.txt"
     models_file.write_text("decoder-small\n", encoding="utf-8")
     ledger_dir = tmp_path / "engine-builds"
-    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path = tmp_path / "decoder-small.bundle"
     bundle_path.write_bytes(b"bundle")
     timing_path = tmp_path / "decoder-small-timing.json"
     timing_path.write_text("{}\n", encoding="utf-8")
@@ -1517,7 +1517,7 @@ def test_verify_builds_rejects_a_missing_or_failed_build(tmp_path: Path) -> None
     models_file = tmp_path / "models.txt"
     models_file.write_text("decoder-small\nencoder-small\n", encoding="utf-8")
     ledger_dir = tmp_path / "engine-builds"
-    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path = tmp_path / "decoder-small.bundle"
     bundle_path.write_bytes(b"bundle")
     timing_path = tmp_path / "decoder-small-timing.json"
     timing_path.write_text("{}\n", encoding="utf-8")

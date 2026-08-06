@@ -120,7 +120,7 @@ Vision-language:
 
 ```bash
 PYTHONPATH=python:. python3 tools/diff_vl.py \
-  --bundle /tmp/model.trtfb \
+  --bundle /tmp/model.bundle \
   --image /path/to/test.jpg \
   --model <model> \
   --binary ./build/trtmc \
@@ -132,7 +132,7 @@ Audio:
 
 ```bash
 PYTHONPATH=python:. python3 tools/diff_audio.py \
-  --bundle /tmp/model.trtfb \
+  --bundle /tmp/model.bundle \
   --binary ./build/trtmc \
   --model <model> \
   --hf-python <python> \
@@ -146,7 +146,7 @@ Diffusion:
 
 ```bash
 PYTHONPATH=python:. python3 tools/debug_diffusion_pipeline.py \
-  --bundle /tmp/model.trtfb \
+  --bundle /tmp/model.bundle \
   --model-id <model> \
   --num-steps <small-reproducer-steps>
 ```
@@ -160,7 +160,7 @@ When Python/reference parity passes but the C++ result differs:
 
 ```bash
 PYTHONPATH=python:. python3 tools/test_runner_parity.py \
-  --bundle /tmp/model.trtfb \
+  --bundle /tmp/model.bundle \
   --binary ./build/trtmc \
   --hf-python <python> \
   --prompt "The capital of France is" \

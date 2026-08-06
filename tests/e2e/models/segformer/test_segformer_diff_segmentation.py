@@ -71,7 +71,7 @@ class TestArgParser:
         parser.add_argument("--model", required=True,
                             help="HF model ID or local path")
         parser.add_argument("--bundle", default=None,
-                            help="Path to .trtfb bundle")
+                            help="Path to .bundle artifact")
         parser.add_argument("--image", required=True,
                             help="Test image path")
         parser.add_argument("--atol", type=float, default=0.5,
@@ -96,11 +96,11 @@ class TestArgParser:
         args = parser.parse_args([
             "--model", "nvidia/segformer-b0-finetuned-ade-512-512",
             "--image", "test.jpg",
-            "--bundle", "seg.trtfb",
+            "--bundle", "seg.bundle",
             "--atol", "0.1",
             "--verbose",
         ])
-        assert args.bundle == "seg.trtfb"
+        assert args.bundle == "seg.bundle"
         assert args.atol == pytest.approx(0.1)
         assert args.verbose is True
 

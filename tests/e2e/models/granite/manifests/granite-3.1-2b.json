@@ -1,7 +1,7 @@
 {
   "name": "granite-3.1-2b",
   "hf_id": "ibm-granite/granite-3.1-2b-base",
-  "bundle": "granite-3.1-2b.trtfb",
+  "bundle": "granite-3.1-2b.bundle",
   "family": "granite",
   "runtime_strategy": "granite_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

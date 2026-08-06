@@ -1,7 +1,7 @@
 {
   "name": "roberta-large",
   "hf_id": "FacebookAI/roberta-large",
-  "bundle": "roberta-large.trtfb",
+  "bundle": "roberta-large.bundle",
   "family": "roberta",
   "runtime_strategy": "roberta_encoder_only",
   "task_strategy": "encoder_only_nlp",

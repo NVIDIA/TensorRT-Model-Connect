@@ -86,7 +86,7 @@
 <g id="node7" class="node">
 <title>bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M665.62,-161.2C665.62,-161.2 262.38,-161.2 262.38,-161.2 256.38,-161.2 250.38,-155.2 250.38,-149.2 250.38,-149.2 250.38,-115.6 250.38,-115.6 250.38,-109.6 256.38,-103.6 262.38,-103.6 262.38,-103.6 665.62,-103.6 665.62,-103.6 671.62,-103.6 677.62,-109.6 677.62,-115.6 677.62,-115.6 677.62,-149.2 677.62,-149.2 677.62,-155.2 671.62,-161.2 665.62,-161.2"/>
-<text xml:space="preserve" text-anchor="start" x="340.1" y="-133.4" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.trtfb deployment contract</text>
+<text xml:space="preserve" text-anchor="start" x="327.32" y="-133.4" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.bundle deployment contract</text>
 <text xml:space="preserve" text-anchor="start" x="264.78" y="-117" font-family="Arial" font-size="16.00" fill="#111827">metadata · plans or embedded implementation · assets</text>
 </g>
 <!-- native&#45;&gt;bundle -->

@@ -1,12 +1,12 @@
 <!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
-<svg width="999" height="239" role="img" aria-labelledby="getting-started-qwen3-first-inference-svg-title getting-started-qwen3-first-inference-svg-description" preserveAspectRatio="xMidYMid meet"
- viewBox="0.00 0.00 999.00 239.00" xmlns="http://www.w3.org/2000/svg">
+<svg width="1020" height="239" role="img" aria-labelledby="getting-started-qwen3-first-inference-svg-title getting-started-qwen3-first-inference-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 1020.00 239.00" xmlns="http://www.w3.org/2000/svg">
 <title id="getting-started-qwen3-first-inference-svg-title">Your first Qwen3 inference</title>
 <desc id="getting-started-qwen3-first-inference-svg-description">The verified path builds a Qwen3 bundle, inspects its identity and sections, loads its native runtime strategy, generates deterministic text, and returns a typed result.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 217.04)">
-<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-217.04 977.48,-217.04 977.48,21.6 -21.6,21.6"/>
-<text xml:space="preserve" text-anchor="start" x="299.78" y="-167.24" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">Your first Qwen3 inference</text>
-<text xml:space="preserve" text-anchor="start" x="266.7" y="-150.04" font-family="Arial" font-size="16.00" fill="#101828">Build once, inspect the artifact, then prove native execution.</text>
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-217.04 998.48,-217.04 998.48,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="310.28" y="-167.24" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">Your first Qwen3 inference</text>
+<text xml:space="preserve" text-anchor="start" x="277.2" y="-150.04" font-family="Arial" font-size="16.00" fill="#101828">Build once, inspect the artifact, then prove native execution.</text>
 <!-- build -->
 <g id="node1" class="node">
 <title>build</title>
@@ -17,67 +17,67 @@
 <!-- bundle -->
 <g id="node2" class="node">
 <title>bundle</title>
-<path fill="#fffbeb" stroke="#b45309" stroke-width="1.6" d="M333.52,-143.44C333.52,-143.44 195.58,-143.44 195.58,-143.44 189.58,-143.44 183.58,-137.44 183.58,-131.44 183.58,-131.44 183.58,-103.72 183.58,-103.72 183.58,-97.72 189.58,-91.72 195.58,-91.72 195.58,-91.72 333.52,-91.72 333.52,-91.72 339.52,-91.72 345.52,-97.72 345.52,-103.72 345.52,-103.72 345.52,-131.44 345.52,-131.44 345.52,-137.44 339.52,-143.44 333.52,-143.44"/>
-<text xml:space="preserve" text-anchor="start" x="196.54" y="-119.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Qwen3&#45;0.6B.trtfb</text>
-<text xml:space="preserve" text-anchor="start" x="209.39" y="-103.68" font-family="Arial" font-size="16.00" fill="#101828">portable bundle</text>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="1.6" d="M354.38,-143.44C354.38,-143.44 194.72,-143.44 194.72,-143.44 188.72,-143.44 182.72,-137.44 182.72,-131.44 182.72,-131.44 182.72,-103.72 182.72,-103.72 182.72,-97.72 188.72,-91.72 194.72,-91.72 194.72,-91.72 354.38,-91.72 354.38,-91.72 360.38,-91.72 366.38,-97.72 366.38,-103.72 366.38,-103.72 366.38,-131.44 366.38,-131.44 366.38,-137.44 360.38,-143.44 354.38,-143.44"/>
+<text xml:space="preserve" text-anchor="start" x="195.68" y="-119.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Qwen3&#45;0.6B.bundle</text>
+<text xml:space="preserve" text-anchor="start" x="219.39" y="-103.68" font-family="Arial" font-size="16.00" fill="#101828">portable bundle</text>
 </g>
 <!-- build&#45;&gt;bundle -->
 <g id="edge1" class="edge">
 <title>build&#45;&gt;bundle</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M161.79,-118C161.79,-118 171.63,-118 171.63,-118"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="171.63,-120.8 179.63,-118 171.63,-115.2 171.63,-120.8"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M161.7,-118C161.7,-118 170.8,-118 170.8,-118"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="170.8,-120.8 178.8,-118 170.8,-115.2 170.8,-120.8"/>
 </g>
 <!-- inspect -->
 <g id="node3" class="node">
 <title>inspect</title>
-<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6" d="M551.88,-143.44C551.88,-143.44 379.22,-143.44 379.22,-143.44 373.22,-143.44 367.22,-137.44 367.22,-131.44 367.22,-131.44 367.22,-103.72 367.22,-103.72 367.22,-97.72 373.22,-91.72 379.22,-91.72 379.22,-91.72 551.88,-91.72 551.88,-91.72 557.88,-91.72 563.88,-97.72 563.88,-103.72 563.88,-103.72 563.88,-131.44 563.88,-131.44 563.88,-137.44 557.88,-143.44 551.88,-143.44"/>
-<text xml:space="preserve" text-anchor="start" x="435.79" y="-119.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Inspect</text>
-<text xml:space="preserve" text-anchor="start" x="380.18" y="-103.68" font-family="Arial" font-size="16.00" fill="#101828">identity · sections · ABI</text>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6" d="M572.88,-143.44C572.88,-143.44 400.22,-143.44 400.22,-143.44 394.22,-143.44 388.22,-137.44 388.22,-131.44 388.22,-131.44 388.22,-103.72 388.22,-103.72 388.22,-97.72 394.22,-91.72 400.22,-91.72 400.22,-91.72 572.88,-91.72 572.88,-91.72 578.88,-91.72 584.88,-97.72 584.88,-103.72 584.88,-103.72 584.88,-131.44 584.88,-131.44 584.88,-137.44 578.88,-143.44 572.88,-143.44"/>
+<text xml:space="preserve" text-anchor="start" x="456.79" y="-119.78" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Inspect</text>
+<text xml:space="preserve" text-anchor="start" x="401.18" y="-103.68" font-family="Arial" font-size="16.00" fill="#101828">identity · sections · ABI</text>
 </g>
 <!-- bundle&#45;&gt;inspect -->
 <g id="edge2" class="edge">
 <title>bundle&#45;&gt;inspect</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M346.3,-118C346.3,-118 355.41,-118 355.41,-118"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="355.41,-120.8 363.41,-118 355.41,-115.2 355.41,-120.8"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M366.92,-118C366.92,-118 376.12,-118 376.12,-118"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="376.12,-120.8 384.12,-118 376.12,-115.2 376.12,-120.8"/>
 </g>
 <!-- load -->
 <g id="node4" class="node">
 <title>load</title>
-<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M557.24,-51.72C557.24,-51.72 373.86,-51.72 373.86,-51.72 367.86,-51.72 361.86,-45.72 361.86,-39.72 361.86,-39.72 361.86,-12 361.86,-12 361.86,-6 367.86,0 373.86,0 373.86,0 557.24,0 557.24,0 563.24,0 569.24,-6 569.24,-12 569.24,-12 569.24,-39.72 569.24,-39.72 569.24,-45.72 563.24,-51.72 557.24,-51.72"/>
-<text xml:space="preserve" text-anchor="start" x="382.89" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Load native strategy</text>
-<text xml:space="preserve" text-anchor="start" x="374.82" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">qwen_decoder_kv_cache</text>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M578.24,-51.72C578.24,-51.72 394.86,-51.72 394.86,-51.72 388.86,-51.72 382.86,-45.72 382.86,-39.72 382.86,-39.72 382.86,-12 382.86,-12 382.86,-6 388.86,0 394.86,0 394.86,0 578.24,0 578.24,0 584.24,0 590.24,-6 590.24,-12 590.24,-12 590.24,-39.72 590.24,-39.72 590.24,-45.72 584.24,-51.72 578.24,-51.72"/>
+<text xml:space="preserve" text-anchor="start" x="403.89" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">Load native strategy</text>
+<text xml:space="preserve" text-anchor="start" x="395.82" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">qwen_decoder_kv_cache</text>
 </g>
 <!-- inspect&#45;&gt;load -->
 <g id="edge3" class="edge">
 <title>inspect&#45;&gt;load</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M465.55,-91.05C465.55,-91.05 465.55,-63.66 465.55,-63.66"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="468.35,-63.66 465.55,-55.66 462.75,-63.66 468.35,-63.66"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M486.55,-91.05C486.55,-91.05 486.55,-63.66 486.55,-63.66"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="489.35,-63.66 486.55,-55.66 483.75,-63.66 489.35,-63.66"/>
 </g>
 <!-- generate -->
 <g id="node5" class="node">
 <title>generate</title>
-<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.6" d="M757.56,-51.72C757.56,-51.72 603.54,-51.72 603.54,-51.72 597.54,-51.72 591.54,-45.72 591.54,-39.72 591.54,-39.72 591.54,-12 591.54,-12 591.54,-6 597.54,0 603.54,0 603.54,0 757.56,0 757.56,0 763.56,0 769.56,-6 769.56,-12 769.56,-12 769.56,-39.72 769.56,-39.72 769.56,-45.72 763.56,-51.72 757.56,-51.72"/>
-<text xml:space="preserve" text-anchor="start" x="604.5" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">IPipeline::generate</text>
-<text xml:space="preserve" text-anchor="start" x="627.18" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">greedy request</text>
+<path fill="#ecfeff" stroke="#0e7490" stroke-width="1.6" d="M778.56,-51.72C778.56,-51.72 624.54,-51.72 624.54,-51.72 618.54,-51.72 612.54,-45.72 612.54,-39.72 612.54,-39.72 612.54,-12 612.54,-12 612.54,-6 618.54,0 624.54,0 624.54,0 778.56,0 778.56,0 784.56,0 790.56,-6 790.56,-12 790.56,-12 790.56,-39.72 790.56,-39.72 790.56,-45.72 784.56,-51.72 778.56,-51.72"/>
+<text xml:space="preserve" text-anchor="start" x="625.5" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">IPipeline::generate</text>
+<text xml:space="preserve" text-anchor="start" x="648.18" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">greedy request</text>
 </g>
 <!-- load&#45;&gt;generate -->
 <g id="edge4" class="edge">
 <title>load&#45;&gt;generate</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M569.9,-26C569.9,-26 579.69,-26 579.69,-26"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="579.69,-28.8 587.69,-26 579.69,-23.2 579.69,-28.8"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M590.9,-26C590.9,-26 600.69,-26 600.69,-26"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="600.69,-28.8 608.69,-26 600.69,-23.2 600.69,-28.8"/>
 </g>
 <!-- result -->
 <g id="node6" class="node">
 <title>result</title>
-<path fill="#f0fdf4" stroke="#15803d" stroke-width="1.6" d="M943.88,-51.72C943.88,-51.72 803.22,-51.72 803.22,-51.72 797.22,-51.72 791.22,-45.72 791.22,-39.72 791.22,-39.72 791.22,-12 791.22,-12 791.22,-6 797.22,0 803.22,0 803.22,0 943.88,0 943.88,0 949.88,0 955.88,-6 955.88,-12 955.88,-12 955.88,-39.72 955.88,-39.72 955.88,-45.72 949.88,-51.72 943.88,-51.72"/>
-<text xml:space="preserve" text-anchor="start" x="830.1" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">TextResult</text>
-<text xml:space="preserve" text-anchor="start" x="804.18" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">deterministic output</text>
+<path fill="#f0fdf4" stroke="#15803d" stroke-width="1.6" d="M964.88,-51.72C964.88,-51.72 824.22,-51.72 824.22,-51.72 818.22,-51.72 812.22,-45.72 812.22,-39.72 812.22,-39.72 812.22,-12 812.22,-12 812.22,-6 818.22,0 824.22,0 824.22,0 964.88,0 964.88,0 970.88,0 976.88,-6 976.88,-12 976.88,-12 976.88,-39.72 976.88,-39.72 976.88,-45.72 970.88,-51.72 964.88,-51.72"/>
+<text xml:space="preserve" text-anchor="start" x="851.1" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">TextResult</text>
+<text xml:space="preserve" text-anchor="start" x="825.18" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">deterministic output</text>
 </g>
 <!-- generate&#45;&gt;result -->
 <g id="edge5" class="edge">
 <title>generate&#45;&gt;result</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M770.27,-26C770.27,-26 779.32,-26 779.32,-26"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="779.32,-28.8 787.32,-26 779.32,-23.2 779.32,-28.8"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M791.27,-26C791.27,-26 800.32,-26 800.32,-26"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="800.32,-28.8 808.32,-26 800.32,-23.2 800.32,-28.8"/>
 </g>
 </g>
 </svg>

@@ -29,7 +29,7 @@ void check(bool condition, const char* name) {
 }
 
 std::filesystem::path temporary_directory() {
-    char pattern[] = "/tmp/trtfb_materialization_XXXXXX";
+    char pattern[] = "/tmp/bundle_materialization_XXXXXX";
     char* directory = mkdtemp(pattern);
     if (directory == nullptr)
         throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
@@ -65,7 +65,7 @@ const trtmc::BundleSection* find_section(const trtmc::BundleFile& bundle, const 
 
 void test_staged_policy_leaves_plan_bytes_unread() {
     const auto directory = temporary_directory();
-    const auto path = directory / "staged.trtfb";
+    const auto path = directory / "staged.bundle";
     const std::string config =
         R"({"bundle_loading":{"mode":"staged","eager_sections":["config.json"],"lazy_sections":["denoiser_plan"]}})";
     const std::uint64_t absent_plan_size = 1ULL << 40;
@@ -87,7 +87,7 @@ void test_staged_policy_leaves_plan_bytes_unread() {
 
 void test_invalid_partition_fails_before_plan_read() {
     const auto directory = temporary_directory();
-    const auto path = directory / "invalid.trtfb";
+    const auto path = directory / "invalid.bundle";
     const std::string config =
         R"({"bundle_loading":{"mode":"staged","eager_sections":["config.json"],"lazy_sections":["config.json"]}})";
     write_bundle(path, two_section_header(config.size(), 1ULL << 40),
@@ -109,7 +109,7 @@ void test_invalid_partition_fails_before_plan_read() {
 
 void test_bundle_without_policy_preserves_read_all_behavior() {
     const auto directory = temporary_directory();
-    const auto path = directory / "legacy.trtfb";
+    const auto path = directory / "legacy.bundle";
     const std::string config = R"({"runtime_strategy":"legacy_decoder"})";
     const std::vector<char> plan = {'P', 'L', 'A', 'N'};
     std::vector<char> payload(config.begin(), config.end());

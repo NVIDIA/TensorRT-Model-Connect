@@ -103,8 +103,8 @@ the literal model, revision, and bundle name to the contribution under review:
 
 ```bash
 trtmc build Qwen/Qwen3-0.6B \
-  -o /tmp/qwen3-0.6b-native-l0.trtfb
-trtmc inspect /tmp/qwen3-0.6b-native-l0.trtfb
+  -o /tmp/qwen3-0.6b-native-l0.bundle
+trtmc inspect /tmp/qwen3-0.6b-native-l0.bundle
 ```
 
 For a native bundle, verify the exact `runtime_strategy`, precision, engine

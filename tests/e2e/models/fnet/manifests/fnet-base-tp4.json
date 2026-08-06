@@ -1,7 +1,7 @@
 {
   "name": "fnet-base-tp4",
   "hf_id": "google/fnet-base",
-  "bundle": "fnet-base-tp4.trtfb",
+  "bundle": "fnet-base-tp4.bundle",
   "family": "fnet",
   "runtime_strategy": "fnet_encoder_only",
   "task_strategy": "encoder_only_nlp",

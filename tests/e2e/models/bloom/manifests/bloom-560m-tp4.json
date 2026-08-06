@@ -1,7 +1,7 @@
 {
   "name": "bloom-560m-tp4",
   "hf_id": "bigscience/bloom-560m",
-  "bundle": "bloom-560m-tp4.trtfb",
+  "bundle": "bloom-560m-tp4.bundle",
   "family": "bloom",
   "runtime_strategy": "bloom_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

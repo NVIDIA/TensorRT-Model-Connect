@@ -20,7 +20,7 @@ def test_runner_uses_detection_alias_flags(tmp_path, monkeypatch) -> None:
         family="locateanything",
         runtime_strategy="locateanything_vision_language",
         task_strategy="object_detection",
-        bundle="locateanything-case.trtfb",
+        bundle="locateanything-case.bundle",
         inputs={"image": str(image_path), "score_threshold": 0.42},
     )
     binary_path = tmp_path / "trtmc"

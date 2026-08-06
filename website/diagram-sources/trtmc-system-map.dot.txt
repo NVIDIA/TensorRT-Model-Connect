@@ -9,7 +9,7 @@ digraph SystemMap {
 
   checkpoint [fillcolor="#eff6ff", color="#2563eb", label=<<FONT POINT-SIZE="20"><B>Checkpoint</B></FONT><BR/><FONT POINT-SIZE="16">weights · config · tokenizer</FONT><BR/><FONT POINT-SIZE="16">Hugging Face or local</FONT>>];
   build [fillcolor="#eff6ff", color="#2563eb", label=<<FONT POINT-SIZE="20"><B>trtmc build</B></FONT><BR/><FONT POINT-SIZE="16">native FamilyPlugin</FONT><BR/><FONT POINT-SIZE="16">or exact optimized profile</FONT>>];
-  bundle [fillcolor="#fffbeb", color="#b45309", penwidth="3", label=<<FONT POINT-SIZE="20"><B>.trtfb bundle</B></FONT><BR/><FONT POINT-SIZE="16">plans + runtime_strategy</FONT><BR/><FONT POINT-SIZE="16">or embedded implementation DSO</FONT>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", penwidth="3", label=<<FONT POINT-SIZE="20"><B>.bundle artifact</B></FONT><BR/><FONT POINT-SIZE="16">plans + runtime_strategy</FONT><BR/><FONT POINT-SIZE="16">or embedded implementation DSO</FONT>>];
   runtime [fillcolor="#ecfccb", color="#4d7c0f", label=<<FONT POINT-SIZE="20"><B>C++ runtime</B></FONT><BR/><FONT POINT-SIZE="16">native: model + backend DSO</FONT><BR/><FONT POINT-SIZE="16">optimized: implementation DSO</FONT>>];
   result [fillcolor="#f5f3ff", color="#7c3aed", label=<<FONT POINT-SIZE="20"><B>Typed task result</B></FONT><BR/><FONT POINT-SIZE="16">text · image · audio</FONT><BR/><FONT POINT-SIZE="16">segmentation · forecast · more</FONT>>];
 

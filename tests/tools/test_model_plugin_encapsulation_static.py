@@ -3546,7 +3546,7 @@ def test_shared_perf_profile_tools_and_tests_use_neutral_fixtures() -> None:
     forbidden = (
         "Qwen/",
         "qwen3-0.6b",
-        "qwen3.trtfb",
+        "qwen3.bundle",
         "qwen_profile",
         "MAMBA_PHASES",
     )
@@ -3582,7 +3582,7 @@ def test_shared_report_impact_and_profile_surfaces_use_neutral_fixtures() -> Non
         "qwen_",
         "qwen-",
         "qwen_profile",
-        "qwen3.trtfb",
+        "qwen3.bundle",
     )
     violations = []
     for path in (*SHARED_REPORT_AND_IMPACT_TEST_FILES, *SHARED_REPORT_AND_PROFILE_TOOLS):
@@ -3613,7 +3613,7 @@ def test_qwen_perf_parity_test_is_model_owned() -> None:
         violations.append((owned_path, 0, "missing Qwen-owned parity test"))
     else:
         text = owned_path.read_text(encoding="utf-8")
-        for needle in ("Qwen/Qwen3-0.6B", "qwen3-0.6b.trtfb"):
+        for needle in ("Qwen/Qwen3-0.6B", "qwen3-0.6b.bundle"):
             if needle not in text:
                 violations.append((owned_path, 0, f"missing Qwen parity fixture {needle}"))
 
@@ -4530,7 +4530,7 @@ def test_shared_diffusion_domains_do_not_carry_single_owner_generation_plans() -
 def test_shared_bundle_writer_has_no_model_specific_section_names() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: keep bundle serialization generic; model section schemas live with models.
-    Preconditions: bundle_writer.py owns only generic .trtfb serialization.
+    Preconditions: bundle_writer.py owns only generic .bundle serialization.
     Postconditions: model-specific section constants are absent from bundle_writer.py.
     """
     text = BUNDLE_WRITER.read_text(encoding="utf-8")

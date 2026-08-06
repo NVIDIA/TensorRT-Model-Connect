@@ -6,7 +6,7 @@ description: How a checkpoint is resolved, routed, compiled, and packaged.
 import Diagram from '@site/src/components/Diagram';
 
 The build pipeline accepts a Hugging Face model ID or local directory and writes
-one `.trtfb` bundle. The public entry points are:
+one `.bundle` bundle. The public entry points are:
 
 - `trtmc build`, implemented by
   `python/tensorrt_model_connect/build_cli.py`;
@@ -110,7 +110,7 @@ selection.
 | Family graph helpers/builders | Express model-specific TensorRT graph semantics |
 | Quantization units | Plan calibration, scales, formats, and exclusions |
 | `BundleInfo` / `BundleSection` | Describe native metadata and ordered payloads |
-| `write_bundle()` | Atomically serialize the final `.trtfb` |
+| `write_bundle()` | Atomically serialize the final `.bundle` |
 
 Graph helpers stay under their owning family. There is no supported
 repository-root `graph_ops.py`, `graph_blocks.py`, or one-size-fits-all decoder

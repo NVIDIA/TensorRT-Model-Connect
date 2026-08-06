@@ -1,7 +1,7 @@
 {
   "name": "falcon3-1b",
   "hf_id": "tiiuae/Falcon3-1B-Base",
-  "bundle": "falcon3-1b.trtfb",
+  "bundle": "falcon3-1b.bundle",
   "family": "llama",
   "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

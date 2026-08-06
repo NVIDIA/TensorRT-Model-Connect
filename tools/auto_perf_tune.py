@@ -124,7 +124,7 @@ def run_cmd(cmd: Sequence[str], timeout: int = 600,
 
 def step_build(model: str, output: str, precision: str = "fp32",
                max_cache: int = 256, dry_run: bool = False) -> bool:
-    """Build a .trtfb bundle."""
+    """Build a .bundle artifact."""
     cmd = [
         "./build/trtmc",
         "build",
@@ -450,7 +450,7 @@ def auto_tune_model(
     print(f"{'='*60}")
 
     # --- Step 1: Build FP32 baseline ---
-    fp32_bundle = f"{output_dir}/{safe_name}_fp32.trtfb"
+    fp32_bundle = f"{output_dir}/{safe_name}_fp32.bundle"
     if not step_build(model, fp32_bundle, "fp32", max_cache, dry_run):
         result.status = "failed"
         result.error = "FP32 build failed"
@@ -520,7 +520,7 @@ def auto_tune_model(
     all_results = []
 
     for precision in ("fp16", "bf16"):
-        bundle = f"{output_dir}/{safe_name}_{precision}.trtfb"
+        bundle = f"{output_dir}/{safe_name}_{precision}.bundle"
         if not step_build(model, bundle, precision, max_cache, dry_run):
             print(f"[optimize] {precision.upper()} build failed, skipping")
             continue

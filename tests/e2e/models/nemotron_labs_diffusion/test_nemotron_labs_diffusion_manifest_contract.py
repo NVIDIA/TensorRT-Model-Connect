@@ -18,7 +18,7 @@ def test_nemotron_labs_diffusion_manifests_cover_model_card_modes() -> None:
 
     modes = {case.inputs["generation_mode"] for case in cases}
     assert modes == {"ar", "diffusion", "linear_spec", "linear_spec_lora"}
-    assert {case.bundle for case in cases} == {"nemotron-labs-diffusion-8b.trtfb"}
+    assert {case.bundle for case in cases} == {"nemotron-labs-diffusion-8b.bundle"}
     assert all(case.runtime_strategy == "nemotron_labs_diffusion" for case in cases)
     assert all(case.reference_family == "nemotron_labs_diffusion_model_card" for case in cases)
     assert all(case.user_contract == "model_card_generation_parity" for case in cases)

@@ -233,7 +233,7 @@ expensive engine build instead of producing a bundle that cannot be loaded.
 Use an existing bundle explicitly when required:
 
 ```bash
-trtmc-bench run --model distilgpt2 --bundle /engines/distilgpt2.trtfb
+trtmc-bench run --model distilgpt2 --bundle /engines/distilgpt2.bundle
 ```
 
 Use `--no-build` for a strict CI run that must fail when no bundle exists, or
@@ -318,7 +318,7 @@ replaces an empty directory or a directory containing a recognized
 Omit `-o` to create a new timestamped result directory for every invocation.
 
 The YAML reuses the repository's existing model names, manifests,
-`task_strategy`, `runtime_strategy`, testcase inputs, and `.trtfb` bundle
+`task_strategy`, `runtime_strategy`, testcase inputs, and `.bundle` bundle
 names. It does not introduce a second model catalog.
 
 ### Combine separate model runs in one report

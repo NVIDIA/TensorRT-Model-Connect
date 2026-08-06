@@ -42,7 +42,7 @@ Usage:
     # Use a pre-built bundle (skips engine build)
     python tools/cpu_profile.py \\
       --model example-org/example-decoder \\
-      --bundle /path/to/model.trtfb \\
+      --bundle /path/to/model.bundle \\
       --max-new-tokens 10
 """
 from __future__ import annotations
@@ -356,7 +356,7 @@ def main():
     parser.add_argument("--model", required=True,
                         help="HF repo ID or local model directory")
     parser.add_argument("--bundle",
-                        help="Pre-built .trtfb bundle (skips engine build)")
+                        help="Pre-built .bundle artifact (skips engine build)")
     parser.add_argument("--prompt", default="The capital of France is",
                         help="Input prompt")
     parser.add_argument("--max-new-tokens", type=int, default=10,

@@ -108,7 +108,7 @@ class TestStrategySpec:
             "strategy": "custom_runtime",
             "label": "custom",
             "hf_id": "org/model",
-            "bundle": "model.trtfb",
+            "bundle": "model.bundle",
             "runner": "custom",
         }
         import pytest

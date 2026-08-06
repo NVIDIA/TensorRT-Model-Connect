@@ -134,7 +134,7 @@
 <g id="node9" class="node">
 <title>native_bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M966.94,-62.6C966.94,-62.6 722.02,-62.6 722.02,-62.6 716.02,-62.6 710.02,-56.6 710.02,-50.6 710.02,-50.6 710.02,-20 710.02,-20 710.02,-14 716.02,-8 722.02,-8 722.02,-8 966.94,-8 966.94,-8 972.94,-8 978.94,-14 978.94,-20 978.94,-20 978.94,-50.6 978.94,-50.6 978.94,-56.6 972.94,-62.6 966.94,-62.6"/>
-<text xml:space="preserve" text-anchor="start" x="797.25" y="-37.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native .trtfb</text>
+<text xml:space="preserve" text-anchor="start" x="786.39" y="-37.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native .bundle</text>
 <text xml:space="preserve" text-anchor="start" x="724.42" y="-21.4" font-family="Arial" font-size="16.00" fill="#111827">runtime_strategy + plans + assets</text>
 </g>
 <!-- native&#45;&gt;native_bundle -->
@@ -147,7 +147,7 @@
 <g id="node10" class="node">
 <title>optimized_bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M332.96,-62.6C332.96,-62.6 12,-62.6 12,-62.6 6,-62.6 0,-56.6 0,-50.6 0,-50.6 0,-20 0,-20 0,-14 6,-8 12,-8 12,-8 332.96,-8 332.96,-8 338.96,-8 344.96,-14 344.96,-20 344.96,-20 344.96,-50.6 344.96,-50.6 344.96,-56.6 338.96,-62.6 332.96,-62.6"/>
-<text xml:space="preserve" text-anchor="start" x="109.68" y="-37.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Optimized .trtfb</text>
+<text xml:space="preserve" text-anchor="start" x="98.82" y="-37.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Optimized .bundle</text>
 <text xml:space="preserve" text-anchor="start" x="14.4" y="-21.4" font-family="Arial" font-size="16.00" fill="#111827">descriptor + embedded implementation DSO</text>
 </g>
 <!-- optimized&#45;&gt;optimized_bundle -->

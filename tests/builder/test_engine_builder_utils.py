@@ -609,4 +609,4 @@ class TestBuildBundleErrors:
         (tmp_path / "config.json").write_text(json.dumps(config))
 
         with pytest.raises(ValueError, match="No family plugin"):
-            build_bundle(str(tmp_path), str(tmp_path / "out.trtfb"))
+            build_bundle(str(tmp_path), str(tmp_path / "out.bundle"))

@@ -22,7 +22,7 @@ def _make_ctx(tmp_path) -> RunContext:
             hf_id="dummy/model",
             family="dummy",
             runtime_strategy="sam3_prompted_segmentation",
-            bundle="case-a.trtfb",
+            bundle="case-a.bundle",
             stages=[],
         ),
         artifacts_dir=str(tmp_path),
@@ -41,7 +41,7 @@ def test_sam3_repro_command_comes_from_model_plugin(tmp_path) -> None:
             family="sam3",
             runtime_strategy="sam3_prompted_segmentation",
             task_strategy="prompted_segmentation",
-            bundle="sam3-case.trtfb",
+            bundle="sam3-case.bundle",
             inputs={
                 "image": "data/test_img.jpeg",
                 "prompt": "red car",
@@ -51,7 +51,7 @@ def test_sam3_repro_command_comes_from_model_plugin(tmp_path) -> None:
         repro = _build_repro_commands(
             case,
             _make_ctx(tmp_path),
-            "/tmp/engines/sam3-case.trtfb",
+            "/tmp/engines/sam3-case.bundle",
             {},
         )
     finally:

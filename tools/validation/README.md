@@ -36,7 +36,7 @@ The engine must preserve these invariants:
 - Reference and TRTMC consume the same prepared sample IDs and generation
   settings.
 - Reference cache keys include the effective inference contract.
-- Shared `.trtfb` bundles are replaced in place instead of accumulating per
+- Shared `.bundle` bundles are replaced in place instead of accumulating per
   run.
 - Missing native reference runners fail closed.
 - One model failure is recorded without corrupting later model runs unless the

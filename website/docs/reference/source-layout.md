@@ -26,7 +26,7 @@ source of truth.
 | Path | Purpose |
 | --- | --- |
 | `include/trtmc/` | Public C++ headers, including the current C-linkage C++ subset in `pipeline.h`; this is not a C-compatible header or complete stable C ABI |
-| `src/bundle/` | `.trtfb` bundle parsing |
+| `src/bundle/` | `.bundle` bundle parsing |
 | `src/cabi/api/` | Implementation of the C-linkage C++ subset; it uses C++ types and currently has no pipeline-destroy entry point |
 | `src/runtime/backend/` | Backend loading and implementations |
 | `src/runtime/config/` | Runtime config schemas and layered resolution |

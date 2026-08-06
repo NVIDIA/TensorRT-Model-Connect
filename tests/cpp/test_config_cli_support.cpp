@@ -345,7 +345,7 @@ void test_write_effective_config_next_to_places_file(std::string tmp_dir) {
     namespace fs = std::filesystem;
     register_demo_schema();
     auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"});
-    fs::path bundle_path = fs::path(tmp_dir) / "some" / "bundle.trtfb";
+    fs::path bundle_path = fs::path(tmp_dir) / "some" / "bundle.bundle";
     fs::create_directories(bundle_path.parent_path());
     std::string written =
         trtmc::config::write_effective_config_next_to(bundle, bundle_path.string());
@@ -359,7 +359,7 @@ void test_try_write_effective_config_reports_unwritable_sidecar() {
     auto bundle = trtmc::config::resolve_cli_config("", {"triattention.kv_budget=8192"});
 
     const auto result =
-        trtmc::config::try_write_effective_config_next_to(bundle, "/dev/null/bundle.trtfb");
+        trtmc::config::try_write_effective_config_next_to(bundle, "/dev/null/bundle.bundle");
 
     check(!result.path.has_value(), "try_write_effective: unwritable path is non-fatal");
     check(result.error.find("cannot create directories") != std::string::npos,
@@ -369,7 +369,7 @@ void test_try_write_effective_config_reports_unwritable_sidecar() {
 void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
     register_demo_schema();
     auto resolved = trtmc::detail::resolve_runtime_config(
-        R"({"defaults":{"triattention":{"kv_budget":4096}}})", "/dev/null/bundle.trtfb", "",
+        R"({"defaults":{"triattention":{"kv_budget":4096}}})", "/dev/null/bundle.bundle", "",
         {"triattention.kv_budget=8192"});
 
     check(resolved.has_value(), "runtime resolution: unwritable sidecar retains config");

@@ -57,7 +57,7 @@ def _make_repo(tmp_path: Path) -> Path:
                 "name": name,
                 "family": "decoder_family",
                 "runtime_strategy": "llama_decoder_kv_cache",
-                "bundle": f"{name}.trtfb",
+                "bundle": f"{name}.bundle",
                 "ci_tier": ci_tier,
             }),
             encoding="utf-8",
@@ -540,8 +540,8 @@ def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> 
     plugin_lib.write_bytes(b"fake-so")
     current_engines.mkdir()
     baseline_engines.mkdir()
-    (current_engines / "decoder-small.trtfb").write_bytes(b"current")
-    (baseline_engines / "decoder-small.trtfb").write_bytes(b"baseline")
+    (current_engines / "decoder-small.bundle").write_bytes(b"current")
+    (baseline_engines / "decoder-small.bundle").write_bytes(b"baseline")
 
     assert e2e_origin_main_parity.main([
         "plan",
@@ -572,7 +572,7 @@ def test_plan_cli_reports_ready_models_and_writes_ready_file(tmp_path: Path) -> 
 
     entry = report["models"][0]
     assert entry["model"] == "decoder-small"
-    assert entry["bundle"] == "decoder-small.trtfb"
+    assert entry["bundle"] == "decoder-small.bundle"
     assert entry["current_bundle_exists"] is True
     assert entry["baseline_bundle_exists"] is True
     assert entry["ready"] is True
@@ -604,7 +604,7 @@ def test_plan_cli_fails_when_requested_and_baseline_bundle_is_missing(
     plugin_lib.write_bytes(b"fake-so")
     current_engines.mkdir()
     baseline_engines.mkdir()
-    (current_engines / "decoder-small.trtfb").write_bytes(b"current")
+    (current_engines / "decoder-small.bundle").write_bytes(b"current")
 
     assert e2e_origin_main_parity.main([
         "plan",

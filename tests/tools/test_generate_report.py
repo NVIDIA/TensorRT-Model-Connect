@@ -544,7 +544,7 @@ class TestLoadModelManifests:
                 {
                     "name": "canary-1b-v2",
                     "family": "canary",
-                    "bundle": "canary.trtfb",
+                    "bundle": "canary.bundle",
                     "task_strategy": "speech_to_text",
                     "testcases": [
                         {"name": "canary-1b-v2"},
@@ -696,8 +696,8 @@ class TestRenderReport:
         mod = _import_report()
         r = _make_result(
             repro_commands={
-                "build_bundle": "./build/trtmc build X -o y.trtfb",
-                "trt_inference": "./trtmc run y.trtfb --prompt 'Hi'",
+                "build_bundle": "./build/trtmc build X -o y.bundle",
+                "trt_inference": "./trtmc run y.bundle --prompt 'Hi'",
             }
         )
         html = mod.render_report([r])
@@ -2600,7 +2600,7 @@ class TestSummaryDashboard:
             {
                 "name": "canary-1b-v2",
                 "family": "canary",
-                "bundle": "canary.trtfb",
+                "bundle": "canary.bundle",
                 "testcases": [
                     {
                         "name": "canary-1b-v2",
@@ -2639,7 +2639,7 @@ class TestSummaryDashboard:
             {
                 "name": "nemotron-labs-diffusion-8b",
                 "family": "nemotron_labs_diffusion",
-                "bundle": "nemotron-labs-diffusion-8b.trtfb",
+                "bundle": "nemotron-labs-diffusion-8b.bundle",
                 "testcases": [
                     {
                         "name": "nemotron-labs-diffusion-8b-ar",

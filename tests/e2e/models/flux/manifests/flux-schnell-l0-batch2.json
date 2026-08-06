@@ -1,7 +1,7 @@
 {
   "name": "flux-schnell-l0-batch2",
   "hf_id": "black-forest-labs/FLUX.1-schnell",
-  "bundle": "flux-schnell-l0-batch2.trtfb",
+  "bundle": "flux-schnell-l0-batch2.bundle",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
   "task_strategy": "diffusion_media_generation",

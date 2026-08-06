@@ -10,14 +10,14 @@
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-CABI-01
 // Intent:         C ABI runtime regression: invalid engine plans report errors without crashing
-// Preconditions:  Syntactically valid .trtfb with invalid engine_plan payload
+// Preconditions:  Syntactically valid .bundle with invalid engine_plan payload
 // Postconditions: trtmc_last_error() returns descriptive message, no crash on repeated calls
 // =============================================================================
 
 // =============================================================================
 // C ABI runtime regression tests for bundle -> TRT runtime -> deserialize path.
 //
-// These tests build a syntactically valid .trtfb file with an invalid
+// These tests build a syntactically valid .bundle file with an invalid
 // engine_plan payload, then call trtmc_create_pipeline repeatedly. This catches
 // crashes in runtime/logger lifetime and validates that failures are reported
 // through trtmc_last_error().
@@ -95,7 +95,7 @@ std::string build_bundle_header_json(const std::vector<BundleSectionSpec>& secti
 void write_bundle_with_sections(const std::filesystem::path& path,
                                 const std::vector<BundleSectionSpec>& sections,
                                 const std::string& model_id = "runtime-regression-test") {
-    // Internal .trtfb magic: "TRTFB\0\1\0"
+    // Internal .bundle magic: "BUNDLE\0\1\0"
     static constexpr unsigned char kBundleMagic[8] = {'T', 'R', 'T', 'F', 'B', '\0', '\x01', '\0'};
 
     const std::string header = build_bundle_header_json(sections, model_id);
@@ -158,7 +158,7 @@ void expect_invalid_bundle_creation_fails(const std::string& bundle_path, const 
 void test_invalid_plan_bundle_reports_error() {
     trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
-        std::filesystem::path(dir.path()) / "invalid_engine_plan.trtfb";
+        std::filesystem::path(dir.path()) / "invalid_engine_plan.bundle";
     write_invalid_engine_bundle(bundle_path);
     expect_invalid_bundle_creation_fails(bundle_path.string(),
                                          "invalid plan bundle returns nullptr");
@@ -167,7 +167,7 @@ void test_invalid_plan_bundle_reports_error() {
 void test_missing_engine_plan_bundle_reports_error() {
     trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
-        std::filesystem::path(dir.path()) / "missing_engine_plan.trtfb";
+        std::filesystem::path(dir.path()) / "missing_engine_plan.bundle";
 
     // Preconditions: valid bundle + model-owned config.json section, but no
     // engine_plan section.
@@ -197,7 +197,7 @@ void test_missing_engine_plan_bundle_reports_error() {
 void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error() {
     trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
-        std::filesystem::path(dir.path()) / "unknown_strategy_missing_engine_plan.trtfb";
+        std::filesystem::path(dir.path()) / "unknown_strategy_missing_engine_plan.bundle";
 
     const std::string config = R"({
   "runtime_strategy": "future_unknown_strategy",
@@ -226,7 +226,7 @@ void test_unknown_strategy_reports_new_runtime_unsupported_strategy_error() {
 void test_invalid_plan_bundle_repeatable() {
     trtmc_test::TempDirGuard dir;
     const std::filesystem::path bundle_path =
-        std::filesystem::path(dir.path()) / "invalid_engine_plan_loop.trtfb";
+        std::filesystem::path(dir.path()) / "invalid_engine_plan_loop.bundle";
     write_invalid_engine_bundle(bundle_path);
 
     for (int i = 0; i < 25; ++i) {

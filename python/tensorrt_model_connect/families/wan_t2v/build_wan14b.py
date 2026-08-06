@@ -6,7 +6,7 @@
 
 Usage (inside container):
     /opt/venv/bin/python -m tensorrt_model_connect.families.wan_t2v.build_wan14b --frames 33 \
-        -o ./engines/wan21-14b-33fr.trtfb
+        -o ./engines/wan21-14b-33fr.bundle
 """
 import argparse
 import json

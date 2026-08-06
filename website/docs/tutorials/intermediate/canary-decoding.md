@@ -22,11 +22,11 @@ Canary archive. No remote model identifier is required.
 CANARY_NEMO=/models/canary-1b-v2.nemo
 
 $TRTMC build "$CANARY_NEMO" \
-  -o /tmp/canary-1b-v2.trtfb \
+  -o /tmp/canary-1b-v2.bundle \
   --precision fp16 \
   --max-cache-length 128
 
-$TRTMC inspect /tmp/canary-1b-v2.trtfb --list-engines
+$TRTMC inspect /tmp/canary-1b-v2.bundle --list-engines
 ```
 
 The builder reads `model_config.yaml`, the checkpoint weights, prompt defaults,
@@ -40,7 +40,7 @@ Omitting the new controls preserves English greedy transcription with
 punctuation and no timestamps:
 
 ```bash
-$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.bundle \
   --audio /data/input.wav \
   --max-new-tokens 80
 ```
@@ -49,7 +49,7 @@ $TRTMC transcribe /tmp/canary-1b-v2.trtfb \
 The explicit form is:
 
 ```bash
-$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.bundle \
   --audio /data/french.wav \
   --source-language fr \
   --target-language fr \
@@ -62,7 +62,7 @@ Canary 1B v2 translates between English and each other supported language.
 The source and target must differ for `translate`; one of them must be `en`.
 
 ```bash
-$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.bundle \
   --audio /data/english.wav \
   --source-language en \
   --target-language fr \
@@ -88,7 +88,7 @@ remove remaining punctuation from decoded text. `--punctuation` is the default.
 ## Duration, segmentation, and timestamps
 
 ```bash
-$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.bundle \
   --audio /data/long.wav \
   --segment-length-seconds 20 \
   --max-input-seconds 300 \
@@ -126,7 +126,7 @@ Repeat `--audio` to process more than one input. Decoding flags are batch-wide,
 results retain input order, and every output line starts with its source path.
 
 ```bash
-$TRTMC transcribe /tmp/canary-1b-v2.trtfb \
+$TRTMC transcribe /tmp/canary-1b-v2.bundle \
   --audio /data/one.wav \
   --audio /data/two.wav \
   --source-language en \
@@ -147,7 +147,7 @@ The C++ batch API carries a complete configuration per request:
 ```cpp
 #include <trtmc/pipeline.h>
 
-auto pipeline = trtmc::load("/tmp/canary-1b-v2.trtfb");
+auto pipeline = trtmc::load("/tmp/canary-1b-v2.bundle");
 
 trtmc::TranscriptionRequest english;
 english.audio_samples = english_pcm;

@@ -1,7 +1,7 @@
 {
   "name": "patchtsmixer-granite-official-tp4",
   "hf_id": "ibm-granite/granite-timeseries-patchtsmixer",
-  "bundle": "patchtsmixer-granite-official-tp4.trtfb",
+  "bundle": "patchtsmixer-granite-official-tp4.bundle",
   "family": "patchtsmixer",
   "runtime_strategy": "patchtsmixer_trt",
   "task_strategy": "neural_operator",

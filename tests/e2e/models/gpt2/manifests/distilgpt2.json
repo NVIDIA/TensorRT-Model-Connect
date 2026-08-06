@@ -1,7 +1,7 @@
 {
   "name": "distilgpt2",
   "hf_id": "distilbert/distilgpt2",
-  "bundle": "distilgpt2.trtfb",
+  "bundle": "distilgpt2.bundle",
   "family": "gpt2",
   "runtime_strategy": "gpt2_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

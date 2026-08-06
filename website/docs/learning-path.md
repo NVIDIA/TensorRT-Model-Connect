@@ -36,7 +36,7 @@ Read and run these pages in order:
 3. [Quick Start](getting-started/quick-start.md)
 
 **Milestone:** `trtmc run` (or `./build/trtmc run`) returns generated text from
-`Qwen3-0.6B.trtfb`, and `inspect` reports the `qwen` family and
+`Qwen3-0.6B.bundle`, and `inspect` reports the `qwen` family and
 `qwen_decoder_kv_cache` runtime strategy.
 
 If that milestone does not pass, stay in Getting Started. Architecture,
@@ -58,12 +58,12 @@ identify which evidence came from model conversion, which was stored in the
 bundle, and which was produced only when the C++ runtime loaded it.
 
 **Milestone:** you can explain why a Hugging Face checkpoint, a TensorRT engine,
-and a `.trtfb` bundle are different artifacts.
+and a `.bundle` bundle are different artifacts.
 
 ## Stage 2: Control text generation
 
 Continue with [Text Generation](tutorials/beginner/text-generation.md). Reuse
-`Qwen3-0.6B.trtfb` to compare deterministic greedy decoding with sampling
+`Qwen3-0.6B.bundle` to compare deterministic greedy decoding with sampling
 controls such as temperature, top-k, top-p, min-p, and a fixed seed.
 
 Use the [CLI Reference](api/cli-reference.md) when you need the exact option

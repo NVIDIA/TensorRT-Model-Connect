@@ -41,7 +41,7 @@ profile claims the request is terminal.
 
 ```bash
 $TRTMC build Qwen/Qwen3-0.6B \
-  -o /tmp/qwen3-fp16.trtfb \
+  -o /tmp/qwen3-fp16.bundle \
   --precision fp16
 ```
 
@@ -68,7 +68,7 @@ native default do not re-enter provider selection when precision changes.
 
 ```bash
 $TRTMC build Qwen/Qwen3-0.6B \
-  -o /tmp/qwen3-fp8.trtfb \
+  -o /tmp/qwen3-fp8.bundle \
   --quantize fp8 \
   --quant-calibration-samples 512
 ```
@@ -107,7 +107,7 @@ native builder without probing a provider.
 
 ```bash
 $TRTMC build black-forest-labs/FLUX.2-dev \
-  -o /tmp/flux2-fp8.trtfb \
+  -o /tmp/flux2-fp8.bundle \
   --fp8-scales tests/e2e/models/flux/data/flux2-fp8-scales.json
 ```
 
@@ -117,7 +117,7 @@ Use `--save-fp8-scales` when you want to reuse calibrated scales across builds.
 
 ```bash
 $TRTMC build Qwen/Qwen3-0.6B \
-  -o /tmp/qwen3-dynamic.trtfb \
+  -o /tmp/qwen3-dynamic.bundle \
   --dynamic-kv-cache \
   --dynamic-kv-profile-rows 256,512,1024
 ```
@@ -125,7 +125,7 @@ $TRTMC build Qwen/Qwen3-0.6B \
 At runtime, override the cache memory budget with:
 
 ```bash
-$TRTMC run /tmp/qwen3-dynamic.trtfb \
+$TRTMC run /tmp/qwen3-dynamic.bundle \
   --prompt "Summarize dynamic KV cache." \
   --kv-cache-size 512MB
 ```
@@ -151,7 +151,7 @@ decode.
 ## Native backend DSO search
 
 ```bash
-$TRTMC run /tmp/model.trtfb \
+$TRTMC run /tmp/model.bundle \
   --prompt "Hello" \
   --backend-dir /opt/trtmc/backends
 ```
@@ -172,14 +172,14 @@ Build an RTX-targeted bundle:
 
 ```bash
 $TRTMC build Qwen/Qwen3-0.6B \
-  -o /tmp/qwen3-rtx.trtfb \
+  -o /tmp/qwen3-rtx.bundle \
   --rtx
 ```
 
 Run with a runtime cache:
 
 ```bash
-$TRTMC run /tmp/qwen3-rtx.trtfb \
+$TRTMC run /tmp/qwen3-rtx.bundle \
   --prompt "Hello" \
   --runtime-cache /tmp/trtmc-rtx.cache \
   --cuda-graphs
@@ -199,7 +199,7 @@ otherwise reproduces an optimized implementation's qualified path.
 
 ## Advanced knob checklist
 
-First run regular `trtmc inspect /tmp/model.trtfb` and record whether the section
+First run regular `trtmc inspect /tmp/model.bundle` and record whether the section
 list contains `optimized_runtime.json`. Regular inspection proves the bundle
 kind but does not decode the optimized implementation/profile fields. Changing
 precision or quantization can switch between optimized and native builds, so

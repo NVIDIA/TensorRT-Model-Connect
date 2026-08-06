@@ -8,7 +8,7 @@ import ModelSupportInventory from '@site/src/components/ModelSupportInventory';
 import Diagram from '@site/src/components/Diagram';
 
 TensorRT-Model-Connect turns a Hugging Face or local checkpoint into a
-deployable `.trtfb` bundle, then runs that bundle through a native C++ task API.
+deployable `.bundle` bundle, then runs that bundle through a native C++ task API.
 
 If you are new to the project, your first goal is deliberately small:
 
@@ -74,7 +74,7 @@ entry path for that goal.
 | --- | --- |
 | Checkpoint | Model config, weights, tokenizer/processor assets, and related metadata released by a training ecosystem. |
 | TensorRT engine | A target-specific compiled execution plan. It is not the original checkpoint. |
-| `.trtfb` bundle | The artifact boundary between Python-first build logic and native runtime execution. |
+| `.bundle` bundle | The artifact boundary between Python-first build logic and native runtime execution. |
 | Family | The model-owned Python implementation that recognizes a checkpoint and builds its artifacts. |
 | Pipeline | The native task implementation returned to an application after the bundle is loaded. |
 

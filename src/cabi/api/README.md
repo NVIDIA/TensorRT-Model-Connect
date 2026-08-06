@@ -9,7 +9,7 @@ pipeline-destroy function.
 Focus areas:
 
 - Pipeline option and handle validation with thread-local error reporting.
-- `.trtfb` validation followed by bundle-kind selection through
+- `.bundle` validation followed by bundle-kind selection through
   `PipelineFactory::from_bundle`: embedded optimized-runtime factory or native
   strategy/plugin composition.
 - C-linkage wrappers for pipeline creation and batch image generation.

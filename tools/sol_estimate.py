@@ -23,7 +23,7 @@ Usage:
     python3 tools/sol_estimate.py --model org/model --benchmark-json results.json
 
     # From bundle metadata
-    python3 tools/sol_estimate.py --bundle /tmp/model.trtfb
+    python3 tools/sol_estimate.py --bundle /tmp/model.bundle
 
     # JSON output
     python3 tools/sol_estimate.py --model org/model --json
@@ -187,7 +187,7 @@ def load_model_arch_from_hf(model_id: str) -> ModelArch:
 
 
 def load_model_arch_from_bundle(bundle_path: str) -> ModelArch:
-    """Load model architecture from a .trtfb bundle."""
+    """Load model architecture from a .bundle artifact."""
     try:
         sys.path.insert(0, "python")
         from tensorrt_model_connect.bundle_writer import BundleReader
@@ -900,7 +900,7 @@ def main():
         description="Estimate Speed-of-Light (SOL) throughput for TRT decode.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--model", help="HuggingFace model ID")
-    group.add_argument("--bundle", help="Path to .trtfb bundle")
+    group.add_argument("--bundle", help="Path to .bundle artifact")
 
     parser.add_argument("--gpu", default=None, choices=list(GPU_SPECS.keys()),
                         help=f"GPU model (default: auto-detect or {DEFAULT_GPU})")

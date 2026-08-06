@@ -1,7 +1,7 @@
 {
   "name": "bge-small-en-v1.5",
   "hf_id": "BAAI/bge-small-en-v1.5",
-  "bundle": "bge-small-en-v1.5.trtfb",
+  "bundle": "bge-small-en-v1.5.bundle",
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",

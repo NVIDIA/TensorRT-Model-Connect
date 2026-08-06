@@ -22,7 +22,7 @@ def _case() -> E2ECase:
         family="nemotron_labs_diffusion",
         runtime_strategy="nemotron_labs_diffusion",
         task_strategy="text_generation_causal",
-        bundle="case-a.trtfb",
+        bundle="case-a.bundle",
         ci_lane="acceptance",
         reference_family="nemotron_labs_diffusion_model_card",
         user_contract="model_card_generation_parity",

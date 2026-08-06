@@ -20,17 +20,17 @@ Both TRT BF16 and torch.compile produce visually identical cat images.
 
 Usage (inside container):
     # Benchmark denoiser only (requires pre-built bundle):
-    python -m tensorrt_model_connect.families.flux.bench_flux2_perf --bundle /tmp/flux2_bf16.trtfb
+    python -m tensorrt_model_connect.families.flux.bench_flux2_perf --bundle /tmp/flux2_bf16.bundle
 
     # Full comparison including torch baselines:
     LD_PRELOAD="/usr/local/cuda/lib64/libcublas.so.13:/usr/local/cuda/lib64/libcublasLt.so.13" \\
     python -m tensorrt_model_connect.families.flux.bench_flux2_perf \\
-        --bundle /tmp/flux2_bf16.trtfb \\
+        --bundle /tmp/flux2_bf16.bundle \\
         --output-dir /tmp/flux2_bench \\
         --backends torch_eager torch_compile trt_denoiser
 
     # Generate a cat image with TRT BF16 (via C++ binary):
-    ./build/trtmc generate-video /tmp/flux2_bf16.trtfb \\
+    ./build/trtmc generate-video /tmp/flux2_bf16.bundle \\
         --prompt "A photo of a cat sitting on a windowsill at sunset" \\
         --output /tmp/flux2_out --num-steps 28 \\
         --hf-python /opt/venv/bin/python

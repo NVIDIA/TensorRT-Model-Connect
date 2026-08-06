@@ -6,7 +6,7 @@
 #pragma once
 
 // PipelineFactory: config-driven pipeline assembly.
-// Reads config.json from a .trtfb bundle, dispatches on runtime_strategy,
+// Reads config.json from a .bundle artifact, dispatches on runtime_strategy,
 // loads TRT engines, creates tokenizers, and assembles the appropriate pipeline.
 //
 // This is the single entry point for creating pipelines from bundles.

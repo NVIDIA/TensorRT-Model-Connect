@@ -60,7 +60,7 @@ def test_yaml_only_elf_synthesizes_config_json_section(tmp_path):
         ]),
         encoding="utf-8",
     )
-    output_path = str(tmp_path / "output.trtfb")
+    output_path = str(tmp_path / "output.bundle")
 
     mock_plugin = _elf_plugin_mock()
 

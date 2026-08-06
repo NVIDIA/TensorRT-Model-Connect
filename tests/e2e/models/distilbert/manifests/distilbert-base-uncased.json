@@ -1,7 +1,7 @@
 {
   "name": "distilbert-base-uncased",
   "hf_id": "distilbert/distilbert-base-uncased",
-  "bundle": "distilbert-base-uncased.trtfb",
+  "bundle": "distilbert-base-uncased.bundle",
   "family": "distilbert",
   "runtime_strategy": "distilbert_encoder_only",
   "task_strategy": "encoder_only_nlp",

@@ -51,7 +51,7 @@ Classifier-Free Guidance (CFG):
                  --set audio_magpie.cfg_scale=2.5 \\
                  --set audio_magpie.finished_limit=10
   Or via CLI flags:
-    ./build/trtmc generate-audio bundle.trtfb --prompt "text" --output out.wav --cfg-scale 2.5 --greedy
+    ./build/trtmc generate-audio bundle.bundle --prompt "text" --output out.wav --cfg-scale 2.5 --greedy
 """
 
 from __future__ import annotations

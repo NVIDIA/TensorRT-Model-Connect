@@ -66,7 +66,7 @@ class TestBundleKernelManifest:
             BundleSection("kernel_manifest.json", manifest_json),
         ]
 
-        with tempfile.NamedTemporaryFile(suffix=".trtfb", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".bundle", delete=False) as f:
             bundle_path = f.name
 
         try:
@@ -74,7 +74,7 @@ class TestBundleKernelManifest:
 
             # Read back and verify
             data = Path(bundle_path).read_bytes()
-            assert data[:5] == b"TRTFB", "Bundle magic bytes missing"
+            assert data[:6] == b"BUNDLE", "Bundle magic bytes missing"
 
             # Parse header
             header_len = struct.unpack("<Q", data[8:16])[0]
@@ -105,7 +105,7 @@ class TestBundleKernelManifest:
         info = BundleInfo(model_id="test-model", model_type="test")
         sections = [BundleSection("config.json", b"{}")]
 
-        with tempfile.NamedTemporaryFile(suffix=".trtfb", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".bundle", delete=False) as f:
             bundle_path = f.name
 
         try:
@@ -141,7 +141,7 @@ class TestBundleKernelManifest:
             BundleSection("kernel_manifest.json", json.dumps(manifest).encode()),
         ]
 
-        with tempfile.NamedTemporaryFile(suffix=".trtfb", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".bundle", delete=False) as f:
             bundle_path = f.name
 
         try:

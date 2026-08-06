@@ -496,7 +496,7 @@ def _parity_case(seed: int = 42) -> E2ECase:
         hf_id="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         family="wan_t2v",
         runtime_strategy="diffusion_wan",
-        bundle="wan21-t2v-1.3b-l0.trtfb",
+        bundle="wan21-t2v-1.3b-l0.bundle",
         inputs={
             "prompt": "A red robot walks through a garden",
             "video_num_frames": 5,
@@ -512,7 +512,7 @@ def _parity_case(seed: int = 42) -> E2ECase:
 def test_hf_and_trtmc_resolve_the_same_initial_latent(tmp_path) -> None:
     case = _parity_case(seed=43)
     hf_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "hf_artifacts"))
-    trt_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "trtfb_artifacts"))
+    trt_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "bundle_artifacts"))
 
     hf = ensure_initial_latents(case, hf_ctx)
     trt = ensure_initial_latents(case, trt_ctx)
@@ -546,7 +546,7 @@ def test_trtmc_runner_consumes_and_reports_shared_initial_latent(
     binary.write_text("", encoding="utf-8")
     ctx = RunContext(
         case=case,
-        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        artifacts_dir=str(tmp_path / "bundle_artifacts"),
         binary_path=str(binary),
         engine_dir=str(tmp_path),
     )
@@ -573,7 +573,7 @@ def test_trtmc_runner_normalizes_prompt_before_tokenization(
     case.inputs["prompt"] = "  A&amp;B\u00a0\n  moves  "
     ctx = RunContext(
         case=case,
-        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        artifacts_dir=str(tmp_path / "bundle_artifacts"),
         binary_path=str(tmp_path / "trtmc"),
         engine_dir=str(tmp_path),
     )

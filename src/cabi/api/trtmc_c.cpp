@@ -105,7 +105,7 @@ trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
     try {
         const std::string path(bundle_path);
         if (!trtmc::IsBundle(path)) {
-            set_last_error("Not a valid .trtfb bundle: " + path);
+            set_last_error("Not a valid .bundle artifact: " + path);
             return nullptr;
         }
 

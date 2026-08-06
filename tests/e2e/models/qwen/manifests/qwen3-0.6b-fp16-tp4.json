@@ -1,7 +1,7 @@
 {
   "name": "qwen3-0.6b-fp16-tp4",
   "hf_id": "Qwen/Qwen3-0.6B",
-  "bundle": "qwen3-0.6b-fp16-tp4.trtfb",
+  "bundle": "qwen3-0.6b-fp16-tp4.bundle",
   "family": "qwen",
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

@@ -9,7 +9,7 @@
 //
 // Usage:
 //   #include <trtmc/trtmc_io.hpp>
-//   auto pipe = trtmc::load("model.trtfb");
+//   auto pipe = trtmc::load("model.bundle");
 //   auto img = pipe->generate_image("a cat");
 //   trtmc::io::save_png(img, "output.png");
 

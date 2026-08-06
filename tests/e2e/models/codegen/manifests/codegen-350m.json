@@ -1,7 +1,7 @@
 {
   "name": "codegen-350m",
   "hf_id": "Salesforce/codegen-350M-mono",
-  "bundle": "codegen-350m.trtfb",
+  "bundle": "codegen-350m.bundle",
   "family": "codegen",
   "runtime_strategy": "codegen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

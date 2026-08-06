@@ -827,11 +827,11 @@ def _run_cpp_audio_generation(binary, bundle_path, prompt, output_wav,
 
 
 def _load_bundle_sections(bundle_path: str) -> tuple[dict, list[tuple[str, bytes]]]:
-    """Load a .trtfb bundle header and all raw sections."""
+    """Load a .bundle artifact header and all raw sections."""
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
 
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
@@ -850,7 +850,7 @@ def _load_bundle_sections(bundle_path: str) -> tuple[dict, list[tuple[str, bytes
 def _write_bundle_sections(
     out_path: str | Path, header: dict, sections: list[tuple[str, bytes]],
 ) -> None:
-    """Write a .trtfb bundle from header metadata + raw section bytes."""
+    """Write a .bundle artifact from header metadata + raw section bytes."""
     section_meta: dict[str, dict[str, int]] = {}
     offset = 0
     for name, data in sections:
@@ -862,7 +862,7 @@ def _write_bundle_sections(
     header_json = json.dumps(out_header, indent=2).encode("utf-8")
 
     with open(out_path, "wb") as f:
-        f.write(b"TRTFB\x00\x01\x00")
+        f.write(b"BUNDLE\x01\x00")
         f.write(struct.pack("<Q", len(header_json)))
         f.write(header_json)
         for _, data in sections:
@@ -1151,7 +1151,7 @@ def test_speech_to_speech_pipeline(model_entry, trtmc_binary, hf_python,
 
     temp_dir = Path("/tmp/claude") / f"{entry['name']}_speech"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    greedy_bundle = temp_dir / f"{Path(bundle_path).stem}.greedy.trtfb"
+    greedy_bundle = temp_dir / f"{Path(bundle_path).stem}.greedy.bundle"
     output_wav = temp_dir / f"{entry['name']}_speech_output.wav"
 
     _make_speech_greedy_bundle(bundle_path, greedy_bundle)

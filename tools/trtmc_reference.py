@@ -74,9 +74,9 @@ _IGNORED_INPUT_NAMES = {
     "hf_run.log",
     "summary.json",
     "summary.md",
-    "trtfb_predictions.json",
-    "trtfb_raw.jsonl",
-    "trtfb_run.log",
+    "bundle_predictions.json",
+    "bundle_raw.jsonl",
+    "bundle_run.log",
     "visual_review.html",
 }
 _NATIVE_RUNNER_VARIANT_TASK_KEYS = {
@@ -102,7 +102,7 @@ def _is_reference_output(name: str) -> bool:
 def _is_non_input(name: str) -> bool:
     return (
         _is_reference_output(name)
-        or name.startswith("trtfb_")
+        or name.startswith("bundle_")
         or name in _IGNORED_INPUT_NAMES
     )
 

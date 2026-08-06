@@ -1,7 +1,7 @@
 {
   "name": "elf-b-xsum-l0",
   "hf_id": "embedded-language-flows/ELF-B-xsum",
-  "bundle": "elf-b-xsum-l0.trtfb",
+  "bundle": "elf-b-xsum-l0.bundle",
   "family": "elf_flow",
   "runtime_strategy": "elf_flow",
   "task_strategy": "diffusion_text_generation",

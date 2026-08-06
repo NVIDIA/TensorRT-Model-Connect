@@ -79,8 +79,8 @@ def load_engine_from_bundle(
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -94,14 +94,14 @@ def load_engine_from_bundle(
     return engine_plan, header
 
 def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
-    """Load a named raw section from this family's .trtfb bundle."""
+    """Load a named raw section from this family's .bundle artifact."""
     import json
     import struct
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -112,7 +112,7 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
         return f.read(meta["size"])
 
 def load_config_from_bundle(bundle_path: str) -> dict:
-    """Load and parse this family's config.json from a .trtfb bundle."""
+    """Load and parse this family's config.json from a .bundle artifact."""
     import json
 
     data = load_section_from_bundle(bundle_path, "config.json")
@@ -122,7 +122,7 @@ def load_config_from_bundle(bundle_path: str) -> dict:
 
 
 class QwenImageDebugRunner:
-    """Pure-Python TRT runner for Qwen-Image (T2I) ``.trtfb`` bundles.
+    """Pure-Python TRT runner for Qwen-Image (T2I) ``.bundle`` bundles.
 
     Loads the bundle, deserialises the three engines (``text_encoder_0``,
     ``denoiser``, ``vae_decoder``), and implements the full T2I pipeline:
@@ -159,9 +159,9 @@ class QwenImageDebugRunner:
         # --- Parse bundle header. ----------------------------------------
         with open(self.bundle_path, "rb") as f:
             magic = f.read(8)
-            if magic != b"TRTFB\x00\x01\x00":
+            if magic != b"BUNDLE\x01\x00":
                 raise ValueError(
-                    f"not a valid .trtfb bundle: magic={magic!r}")
+                    f"not a valid .bundle artifact: magic={magic!r}")
             header_len = struct.unpack("<Q", f.read(8))[0]
             header_bytes = f.read(header_len)
         header = json.loads(header_bytes.decode("utf-8"))

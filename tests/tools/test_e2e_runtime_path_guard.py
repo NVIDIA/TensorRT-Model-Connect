@@ -28,7 +28,7 @@ def _make_case(strategy: str) -> E2ECase:
         hf_id="hf/test-model",
         family="unit",
         runtime_strategy=strategy,
-        bundle="guard-case.trtfb",
+        bundle="guard-case.bundle",
         stages=[],
     )
 
@@ -78,7 +78,7 @@ def test_runtime_guard_accepts_new_runtime_marker_in_metadata(tmp_path: Path) ->
     output = StageOutput(
         stage_name="full_generation",
         metadata={
-            "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
+            "command": [ctx.binary_path, "run", "/tmp/model.bundle"],
             "stderr": "[trtmc] Runtime ready (backend=trt_new_runtime_default, strategy=decoder_kv_cache)",
         },
     )
@@ -107,7 +107,7 @@ def test_runtime_guard_rejects_legacy_runtime_marker(tmp_path: Path) -> None:
     output = StageOutput(
         stage_name="full_generation",
         metadata={
-            "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
+            "command": [ctx.binary_path, "run", "/tmp/model.bundle"],
             "stderr": "[trtmc] Runtime path: compatibility factory mode",
         },
     )
@@ -123,7 +123,7 @@ def test_runtime_guard_rejects_missing_new_runtime_confirmation(tmp_path: Path) 
     output = StageOutput(
         stage_name="full_generation",
         metadata={
-            "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
+            "command": [ctx.binary_path, "run", "/tmp/model.bundle"],
             "stderr": "tokens: 1 2 3 4",
         },
     )
@@ -148,7 +148,7 @@ def test_runtime_guard_reads_stderr_log_from_stage_data(tmp_path: Path) -> None:
             "stderr": "truncated tail",
         },
         metadata={
-            "command": [ctx.binary_path, "transcribe", "/tmp/model.trtfb"],
+            "command": [ctx.binary_path, "transcribe", "/tmp/model.bundle"],
         },
     )
 
@@ -162,7 +162,7 @@ def test_runtime_guard_ignores_legacy_marker_from_unrelated_subprocess(tmp_path:
         stage_name="full_generation",
         metadata={
             "cpp": {
-                "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
+                "command": [ctx.binary_path, "run", "/tmp/model.bundle"],
                 "stderr": "[trtmc] Runtime ready (backend=trt_new_runtime_default, strategy=decoder_kv_cache)",
             },
             "debug_runner": {
@@ -181,7 +181,7 @@ def test_runtime_guard_skips_unknown_strategies(tmp_path: Path) -> None:
     output = StageOutput(
         stage_name="full_generation",
         metadata={
-            "command": [ctx.binary_path, "run", "/tmp/model.trtfb"],
+            "command": [ctx.binary_path, "run", "/tmp/model.bundle"],
             "stderr": "[trtmc] Runtime path: compatibility factory mode",
         },
     )
@@ -195,7 +195,7 @@ def test_runtime_guard_ignores_nonzero_cli_parse_errors_without_runtime_markers(
     output = StageOutput(
         stage_name="full_inference",
         metadata={
-            "command": [ctx.binary_path, "segment", "/tmp/model.trtfb"],
+            "command": [ctx.binary_path, "segment", "/tmp/model.bundle"],
             "returncode": 1,
             "stderr": "Error: Unknown flag: --point",
         },

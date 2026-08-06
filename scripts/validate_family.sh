@@ -138,7 +138,7 @@ PY
 
 # Derive a safe bundle filename from the model ID.
 SAFE_NAME="$(echo "$MODEL" | tr '/' '_' | tr ' ' '_')"
-BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.trtfb"
+BUNDLE_PATH="${BUNDLE_DIR}/${SAFE_NAME}.bundle"
 
 # Container-baked Python with HF/TRT deps
 HF_PYTHON="${HF_PYTHON:-/opt/venv/bin/python}"

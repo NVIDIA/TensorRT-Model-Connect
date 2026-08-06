@@ -12,6 +12,6 @@ def cpu_profile_matrix_specs() -> list[dict]:
         "strategy": "qwen_decoder_kv_cache",
         "label": "qwen_decoder_kv_cache\n(qwen3-0.6b)",
         "hf_id": "Qwen/Qwen3-0.6B",
-        "bundle": "qwen3-0.6b.trtfb",
+        "bundle": "qwen3-0.6b.bundle",
         "runner": "decoder",
     }]

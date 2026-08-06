@@ -13,13 +13,13 @@
 ## What is TensorRT-Model-Connect?
 
 TensorRT-Model-Connect (TRTMC) turns a supported Hugging Face or local
-checkpoint into a deployable `.trtfb` bundle, then runs that bundle through
+checkpoint into a deployable `.bundle` bundle, then runs that bundle through
 task-oriented C++ APIs. Python owns checkpoint resolution and TensorRT engine
 construction at build time. Native profiles execute model inference in C++
 without PyTorch. A small number of hybrid profiles explicitly invoke a helper
 Python executable; their E2E manifests declare that runtime dependency.
 
-The `.trtfb` bundle is the handoff between those environments. Native bundles
+The `.bundle` bundle is the handoff between those environments. Native bundles
 resolve their matching model and TensorRT backend DSOs at runtime; exactly
 qualified optimized-runtime bundles can carry their implementation DSO. Both
 forms still require a compatible NVIDIA driver, CUDA/TensorRT cohort, dynamic
@@ -38,7 +38,7 @@ are different.
 
 | Starting point | Interface | When to use it |
 | --- | --- | --- |
-| Hugging Face or local checkpoint | **TensorRT-Model-Connect** | Build a supported checkpoint into a `.trtfb` bundle for native C++ task inference. |
+| Hugging Face or local checkpoint | **TensorRT-Model-Connect** | Build a supported checkpoint into a `.bundle` bundle for native C++ task inference. |
 | PyTorch model | **Torch-TensorRT** | Keep the model in the PyTorch ecosystem while compiling its execution with TensorRT. |
 | Portable framework interchange | **ONNX** | Use an exchange format when portability across originating frameworks is the primary requirement. |
 
@@ -72,7 +72,7 @@ PyTorch → ONNX or TorchScript → TensorRT → model-specific C++ integration
 TRTMC reduces that path to:
 
 ```text
-Hugging Face checkpoint → .trtfb bundle → native C++ task API
+Hugging Face checkpoint → .bundle artifact → native C++ task API
 ```
 
 | Traditional pain point | TRTMC boundary |
@@ -119,8 +119,8 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
 ./build/trtmc build Qwen/Qwen3-0.6B
-./build/trtmc inspect Qwen3-0.6B.trtfb
-./build/trtmc run Qwen3-0.6B.trtfb \
+./build/trtmc inspect Qwen3-0.6B.bundle
+./build/trtmc run Qwen3-0.6B.bundle \
   --prompt "The capital of France is" \
   --max-new-tokens 20 \
   --greedy

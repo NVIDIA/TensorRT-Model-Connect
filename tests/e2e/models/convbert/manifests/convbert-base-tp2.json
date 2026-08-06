@@ -1,7 +1,7 @@
 {
   "name": "convbert-base-tp2",
   "hf_id": "YituTech/conv-bert-base",
-  "bundle": "convbert-base-tp2.trtfb",
+  "bundle": "convbert-base-tp2.bundle",
   "family": "convbert",
   "runtime_strategy": "convbert_encoder_only",
   "task_strategy": "encoder_only_nlp",

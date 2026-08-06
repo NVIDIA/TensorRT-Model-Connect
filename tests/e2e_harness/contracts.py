@@ -366,7 +366,7 @@ class E2ECase:
         reference_backend: Which reference implementation to compare against
             (e.g. "hf_transformers", "torch_reference", "golden_snapshot").
         oracle_level: Strength of the reference oracle. See OracleLevel.
-        bundle: Bundle filename (e.g. "example-model.trtfb").
+        bundle: Bundle filename (e.g. "example-model.bundle").
         inputs: Task-specific inputs (prompt, image path, audio path, etc.).
         preflight: List of prerequisites to check before running.
         stages: Ordered list of stages to execute.
@@ -552,7 +552,7 @@ class RunContext:
         runtime_profile: Symbolic profile name selected for runtime helpers.
         reference_profile: Symbolic profile name selected for references.
         ld_library_path: LD_LIBRARY_PATH with TRT/CUDA libs.
-        engine_dir: Directory containing .trtfb bundles.
+        engine_dir: Directory containing .bundle artifacts.
         model_plugin_dir: Directory containing isolated model plugin DSOs.
         rebuild: If True, force rebuild bundles from HF.
         verbose: If True, emit extra debug output.

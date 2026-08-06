@@ -30,7 +30,7 @@ class TestMissingBundle:
         """Non-existent bundle path -> non-zero exit with error message."""
         env = {"LD_LIBRARY_PATH": ld_library_path}
         result = subprocess.run(
-            [str(trtmc_binary), "run", "/nonexistent/path.trtfb",
+            [str(trtmc_binary), "run", "/nonexistent/path.bundle",
              "--prompt", "hello"],
             capture_output=True, text=True, timeout=30, env=env)
 
@@ -61,7 +61,7 @@ class TestMalformedBundle:
 
     def test_truncated_bundle(self, tmp_path, trtmc_binary, ld_library_path):
         """Truncated/corrupt bundle -> non-zero exit with error."""
-        bad_bundle = tmp_path / "truncated.trtfb"
+        bad_bundle = tmp_path / "truncated.bundle"
         bad_bundle.write_bytes(b"NOT_A_VALID_BUNDLE_FILE")
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
@@ -75,7 +75,7 @@ class TestMalformedBundle:
 
     def test_empty_file_as_bundle(self, tmp_path, trtmc_binary, ld_library_path):
         """Zero-byte file -> non-zero exit."""
-        empty = tmp_path / "empty.trtfb"
+        empty = tmp_path / "empty.bundle"
         empty.write_bytes(b"")
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
@@ -89,7 +89,7 @@ class TestMalformedBundle:
 
     def test_random_bytes_bundle(self, tmp_path, trtmc_binary, ld_library_path):
         """Random bytes -> non-zero exit (no crash/segfault)."""
-        bad_bundle = tmp_path / "random.trtfb"
+        bad_bundle = tmp_path / "random.bundle"
         bad_bundle.write_bytes(os.urandom(4096))
 
         env = {"LD_LIBRARY_PATH": ld_library_path}
@@ -134,7 +134,7 @@ class TestBadArguments:
     def test_run_missing_prompt(self, tmp_path, trtmc_binary, ld_library_path):
         """run subcommand without --prompt -> non-zero exit."""
         # Create a dummy file so we get past the "file not found" check
-        dummy = tmp_path / "dummy.trtfb"
+        dummy = tmp_path / "dummy.bundle"
         dummy.write_bytes(b"dummy")
 
         env = {"LD_LIBRARY_PATH": ld_library_path}

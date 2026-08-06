@@ -1,7 +1,7 @@
 {
   "name": "stablelm2-1.6b",
   "hf_id": "stabilityai/stablelm-2-1_6b",
-  "bundle": "stablelm2-1.6b.trtfb",
+  "bundle": "stablelm2-1.6b.bundle",
   "family": "stablelm",
   "runtime_strategy": "stablelm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

@@ -1,7 +1,7 @@
 {
   "name": "bark-small-tp4",
   "hf_id": "suno/bark-small",
-  "bundle": "bark-small-tp4.trtfb",
+  "bundle": "bark-small-tp4.bundle",
   "family": "bark",
   "runtime_strategy": "text_to_audio_bark",
   "task_strategy": "text_to_audio",

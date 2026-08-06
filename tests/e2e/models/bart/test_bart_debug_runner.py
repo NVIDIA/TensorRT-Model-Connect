@@ -66,7 +66,7 @@ def test_bart_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> Non
         },
     )
 
-    path = tmp_path / "bart_seq2seq_tp_dispatch.trtfb"
+    path = tmp_path / "bart_seq2seq_tp_dispatch.bundle"
     path.write_bytes(bundle)
 
     communicator = object()

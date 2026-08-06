@@ -59,7 +59,7 @@ digraph ByokWorkflow {
   bundle [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>Slot-ready .trtfb</B><BR/><FONT POINT-SIZE="16">selection receipt · no kernel DSO</FONT>>
+    label=<<B>Slot-ready .bundle</B><BR/><FONT POINT-SIZE="16">selection receipt · no kernel DSO</FONT>>
   ];
   binding [
     fillcolor="#f5f3ff",

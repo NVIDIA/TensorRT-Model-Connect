@@ -25,7 +25,7 @@ Usage:
     # Pre-built bundle, custom prompt, save JSONs
     python tools/profile.py \\
       --model example-org/example-decoder \\
-      --bundle /path/to/model.trtfb \\
+      --bundle /path/to/model.bundle \\
       --prompt "The capital of France is" \\
       --max-new-tokens 20 \\
       --warmup 3 --iterations 10 \\
@@ -345,7 +345,7 @@ def main():
     parser.add_argument("--model", required=True,
                         help="HF repo ID or local model directory")
     parser.add_argument("--bundle",
-                        help="Pre-built .trtfb bundle (skips engine build)")
+                        help="Pre-built .bundle artifact (skips engine build)")
     parser.add_argument("--prompt", default="The capital of France is",
                         help="Input prompt")
     parser.add_argument("--max-new-tokens", type=int, default=20)

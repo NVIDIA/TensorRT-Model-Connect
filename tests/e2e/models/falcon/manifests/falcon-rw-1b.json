@@ -1,7 +1,7 @@
 {
   "name": "falcon-rw-1b",
   "hf_id": "tiiuae/falcon-rw-1b",
-  "bundle": "falcon-rw-1b.trtfb",
+  "bundle": "falcon-rw-1b.bundle",
   "family": "falcon",
   "runtime_strategy": "falcon_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

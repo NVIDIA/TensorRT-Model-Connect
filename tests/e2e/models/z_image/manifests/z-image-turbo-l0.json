@@ -1,7 +1,7 @@
 {
   "name": "z-image-turbo-l0",
   "hf_id": "Tongyi-MAI/Z-Image-Turbo",
-  "bundle": "z-image-turbo-l0.trtfb",
+  "bundle": "z-image-turbo-l0.bundle",
   "family": "z_image",
   "runtime_strategy": "diffusion_zimage",
   "task_strategy": "diffusion_media_generation",

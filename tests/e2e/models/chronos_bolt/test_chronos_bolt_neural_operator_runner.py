@@ -18,7 +18,7 @@ def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
         family="chronos_bolt",
         runtime_strategy="chronos_bolt_trt",
         task_strategy="neural_operator",
-        bundle="chronos-bolt-case.trtfb",
+        bundle="chronos-bolt-case.bundle",
         inputs=inputs or {},
     )
     defaults.update(overrides)

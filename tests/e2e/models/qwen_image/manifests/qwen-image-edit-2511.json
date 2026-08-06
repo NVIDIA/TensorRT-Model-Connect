@@ -1,7 +1,7 @@
 {
   "name": "qwen-image-edit-2511",
   "hf_id": "Qwen/Qwen-Image-Edit-2511",
-  "bundle": "qwen-image-edit-2511.trtfb",
+  "bundle": "qwen-image-edit-2511.bundle",
   "family": "qwen_image",
   "runtime_strategy": "diffusion_qwen_image",
   "task_strategy": "diffusion_media_generation",

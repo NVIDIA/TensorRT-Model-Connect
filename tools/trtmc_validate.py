@@ -730,7 +730,7 @@ MAX_REPRO_COMMANDS_PER_BACKEND = 3
 _REPRO_COMMAND_LOG_NAMES = {
     "hf_native_run.log",
     "hf_run.log",
-    "trtfb_run.log",
+    "bundle_run.log",
 }
 _FAILED_SAMPLE_STATUSES = {"disagreement", "fail", "failed", "mismatch"}
 _FAILED_SAMPLE_FIELDS = (
@@ -883,7 +883,7 @@ def _command_log_kind(
         return None
     if has_native_reference_commands and path.name == "hf_native_run.log":
         return None
-    if has_native_trtmc and path.name == "trtfb_run.log":
+    if has_native_trtmc and path.name == "bundle_run.log":
         return None
     return "hf" if "hf" in path.name.lower() else "trtmc"
 
@@ -936,7 +936,7 @@ def _collect_command_logs(
         path.name == "hf_native_commands.jsonl" for path in log_paths
     )
     has_native_trtmc = any(
-        path.name == "trtfb_native_commands.jsonl" for path in log_paths
+        path.name == "bundle_native_commands.jsonl" for path in log_paths
     )
     for path in log_paths:
         kind = _command_log_kind(
@@ -947,7 +947,7 @@ def _collect_command_logs(
         )
         if kind is None:
             continue
-        indexed_sample_ids = sample_ids if path.name == "trtfb_run.log" else ()
+        indexed_sample_ids = sample_ids if path.name == "bundle_run.log" else ()
         count, representative = _summarize_command_log(
             path,
             sample_ids=indexed_sample_ids,
@@ -1043,18 +1043,18 @@ _COMPARISON_METRICS = (
     "divergence_rate",
     "divergent_count",
     "hf_accuracy",
-    "trtfb_accuracy",
-    "accuracy_delta_trtfb_minus_hf",
-    "tie_adjusted_accuracy_delta_trtfb_minus_hf",
+    "bundle_accuracy",
+    "accuracy_delta_bundle_minus_hf",
+    "tie_adjusted_accuracy_delta_bundle_minus_hf",
     "tie_adjusted_exact_match_rate",
     "accuracy_drop_from_hf",
     "raw_accuracy_drop_from_hf",
     "reference_tie_equivalent_count",
     "hf_top1_accuracy",
-    "trtfb_top1_accuracy",
+    "bundle_top1_accuracy",
     "top1_accuracy_drop_from_hf",
     "hf_mean_iou",
-    "trtfb_mean_iou",
+    "bundle_mean_iou",
     "backend_mean_iou",
     "mean_iou_drop_from_hf",
     "mean_vector_cosine",

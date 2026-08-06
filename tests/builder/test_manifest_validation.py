@@ -223,7 +223,7 @@ class TestManifestValidation:
             "name": "example-test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
-            "bundle": "example-test.trtfb",
+            "bundle": "example-test.bundle",
             "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
             "max_cache_length": 256,
             "max_new_tokens": 20,

@@ -1,7 +1,7 @@
 {
   "name": "pythia-70m-tp4",
   "hf_id": "EleutherAI/pythia-70m",
-  "bundle": "pythia-70m-tp4.trtfb",
+  "bundle": "pythia-70m-tp4.bundle",
   "family": "gpt_neox",
   "runtime_strategy": "gpt_neox_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

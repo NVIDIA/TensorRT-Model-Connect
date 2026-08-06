@@ -104,7 +104,7 @@ def _write_bundle(
     if header_mutator is not None:
         encoded_header = header_mutator(encoded_header)
     with path.open("wb") as handle:
-        handle.write(b"TRTFB\x00\x01\x00")
+        handle.write(b"BUNDLE\x01\x00")
         handle.write(struct.pack("<Q", len(encoded_header)))
         handle.write(encoded_header)
         for payload in payload_chunks:
@@ -281,7 +281,7 @@ class _FakeProbeRunner:
 
 
 def test_sam3_runtime_artifact_audit_accepts_native_tensorrt_release(tmp_path: Path) -> None:
-    bundle = _write_bundle(tmp_path / "sam3.trtfb")
+    bundle = _write_bundle(tmp_path / "sam3.bundle")
     dsos = _write_runtime_dsos(tmp_path)
     cache = tmp_path / "CMakeCache.txt"
     cache.write_text(_valid_cmake_cache_text(cache_dir=tmp_path), encoding="utf-8")
@@ -311,7 +311,7 @@ def test_sam3_runtime_artifact_audit_accepts_native_tensorrt_release(tmp_path: P
 
 
 def test_sam3_runtime_artifact_audit_binds_dsos_to_cmake_build_tree(tmp_path: Path) -> None:
-    bundle = _write_bundle(tmp_path / "sam3.trtfb")
+    bundle = _write_bundle(tmp_path / "sam3.bundle")
     dsos = _write_runtime_dsos(tmp_path)
     build_dir = tmp_path / "build"
     build_dir.mkdir()
@@ -331,7 +331,7 @@ def test_sam3_runtime_artifact_audit_binds_dsos_to_cmake_build_tree(tmp_path: Pa
 def test_sam3_bundle_audit_requires_exact_native_plan_and_asset_sections(tmp_path: Path) -> None:
     payloads = _valid_section_payloads()
     payloads["tracker_aoti.pt2"] = b"PK\x03\x04"
-    bundle = _write_bundle(tmp_path / "sam3-extra.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-extra.bundle", section_payloads=payloads)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="unexpected=.*tracker_aoti.pt2"):
         audit.audit_sam3_bundle(bundle)
@@ -346,7 +346,7 @@ def test_sam3_bundle_audit_rejects_duplicate_header_key(tmp_path: Path) -> None:
         )
 
     bundle = _write_bundle(
-        tmp_path / "sam3-duplicate-header.trtfb",
+        tmp_path / "sam3-duplicate-header.bundle",
         header_mutator=duplicate_model_type,
     )
 
@@ -360,7 +360,7 @@ def test_sam3_bundle_audit_rejects_duplicate_json_asset_key(tmp_path: Path) -> N
         b'{"detector_config":{"text_config":{"vocab_size":3,"vocab_size":4}},'
         b'"sam3_video_tracking_supported":true}'
     )
-    bundle = _write_bundle(tmp_path / "sam3-duplicate-asset.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-duplicate-asset.bundle", section_payloads=payloads)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="duplicate JSON object key"):
         audit.audit_sam3_bundle(bundle)
@@ -379,7 +379,7 @@ def test_sam3_bundle_audit_rejects_unaccounted_payload_bytes(
         if payload_location == "gap"
         else {"trailing_payload": b"hidden-aoti-package"}
     )
-    bundle = _write_bundle(tmp_path / f"sam3-{payload_location}.trtfb", **kwargs)
+    bundle = _write_bundle(tmp_path / f"sam3-{payload_location}.bundle", **kwargs)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="unaccounted payload bytes"):
         audit.audit_sam3_bundle(bundle)
@@ -392,7 +392,7 @@ def test_sam3_bundle_audit_rejects_non_tensorrt_plan_payload(
 ) -> None:
     payloads = _valid_section_payloads()
     payloads["sam3_tracker_step_engine_plan"] = payload
-    bundle = _write_bundle(tmp_path / "sam3-bad-plan.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-bad-plan.bundle", section_payloads=payloads)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="not a serialized TensorRT plan"):
         audit.audit_sam3_bundle(bundle)
@@ -415,7 +415,7 @@ def test_sam3_bundle_audit_rejects_bridge_marker_inside_plan(
 ) -> None:
     payloads = _valid_section_payloads()
     payloads["sam3_tracker_step_engine_plan"] = b"ftrt" + marker
-    bundle = _write_bundle(tmp_path / "sam3-bridge-plan.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-bridge-plan.bundle", section_payloads=payloads)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="forbidden marker"):
         audit.audit_sam3_bundle(bundle)
@@ -438,7 +438,7 @@ def test_sam3_bundle_audit_rejects_bridge_marker_inside_asset(
 ) -> None:
     payloads = _valid_section_payloads()
     payloads["config.json"] = b'{"hidden_runtime": "' + marker + b'"}'
-    bundle = _write_bundle(tmp_path / "sam3-bridge-asset.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-bridge-asset.bundle", section_payloads=payloads)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="forbidden marker"):
         audit.audit_sam3_bundle(bundle)
@@ -461,7 +461,7 @@ def test_sam3_bundle_audit_rejects_malformed_asset_payload(
 ) -> None:
     payloads = _valid_section_payloads()
     payloads[asset] = payload
-    bundle = _write_bundle(tmp_path / "sam3-malformed-asset.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-malformed-asset.bundle", section_payloads=payloads)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match=message):
         audit.audit_sam3_bundle(bundle)
@@ -479,7 +479,7 @@ def test_sam3_bundle_audit_requires_video_tracking_live_load(
             "sam3_video_tracking_supported": value,
         }
     ).encode()
-    bundle = _write_bundle(tmp_path / "sam3-no-video-tracking.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-no-video-tracking.bundle", section_payloads=payloads)
 
     with pytest.raises(
         audit.Sam3RuntimeContractError,
@@ -505,7 +505,7 @@ def test_sam3_bundle_audit_rejects_unusable_native_bpe_tokenizer(
     payloads["tokenizer.json"] = json.dumps(
         {"model": {"type": "BPE", "vocab": vocab, "merges": merges}}
     ).encode()
-    bundle = _write_bundle(tmp_path / "sam3-invalid-bpe.trtfb", section_payloads=payloads)
+    bundle = _write_bundle(tmp_path / "sam3-invalid-bpe.bundle", section_payloads=payloads)
 
     with pytest.raises(audit.Sam3RuntimeContractError, match=message):
         audit.audit_sam3_bundle(bundle)
@@ -721,7 +721,7 @@ def test_sam3_native_live_load_requires_every_plan_and_exact_size(
 
     with pytest.raises(audit.Sam3RuntimeContractError, match=message):
         audit._audit_native_live_load(
-            tmp_path / "sam3.trtfb",
+            tmp_path / "sam3.bundle",
             roles,
             plan_sizes,
             probe_runner=_FakeProbeRunner(dsos, **runner_kwargs),
@@ -740,7 +740,7 @@ def test_sam3_native_live_load_accepts_one_tracker_init_deserialize_record(
     }
 
     audit._audit_native_live_load(
-        tmp_path / "sam3.trtfb",
+        tmp_path / "sam3.bundle",
         roles,
         plan_sizes,
         probe_runner=_FakeProbeRunner(dsos, tracker_init_count=1),
@@ -760,7 +760,7 @@ def test_sam3_native_live_load_rejects_missing_optional_tracker_init_module(
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="without a usable tracker-init"):
         audit._audit_native_live_load(
-            tmp_path / "sam3.trtfb",
+            tmp_path / "sam3.bundle",
             roles,
             plan_sizes,
             probe_runner=_FakeProbeRunner(
@@ -786,7 +786,7 @@ def test_sam3_native_live_load_requires_exact_mapped_dso_identities(tmp_path: Pa
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="did not map exactly"):
         audit._audit_native_live_load(
-            tmp_path / "sam3.trtfb",
+            tmp_path / "sam3.bundle",
             roles,
             plan_sizes,
             probe_runner=_FakeProbeRunner(
@@ -809,7 +809,7 @@ def test_sam3_native_live_load_rejects_forbidden_mapping_delta(tmp_path: Path) -
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="Forbidden runtime dependency"):
         audit._audit_native_live_load(
-            tmp_path / "sam3.trtfb",
+            tmp_path / "sam3.bundle",
             roles,
             plan_sizes,
             probe_runner=_FakeProbeRunner(dsos, extra_mapped_dsos=(forbidden_dso,)),
@@ -831,7 +831,7 @@ def test_sam3_native_live_load_rejects_unaudited_model_connect_mapping(
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="unaudited Model Connect DSO"):
         audit._audit_native_live_load(
-            tmp_path / "sam3.trtfb",
+            tmp_path / "sam3.bundle",
             roles,
             plan_sizes,
             probe_runner=_FakeProbeRunner(dsos, extra_mapped_dsos=(unaudited_dso,)),
@@ -850,7 +850,7 @@ def test_sam3_native_live_load_allows_platform_mapping_delta(tmp_path: Path) -> 
     }
 
     audit._audit_native_live_load(
-        tmp_path / "sam3.trtfb",
+        tmp_path / "sam3.bundle",
         roles,
         plan_sizes,
         probe_runner=_FakeProbeRunner(dsos, extra_mapped_dsos=(platform_dso,)),
@@ -871,7 +871,7 @@ def test_sam3_native_live_load_surfaces_probe_process_failure(tmp_path: Path) ->
 
     with pytest.raises(audit.Sam3RuntimeContractError, match="native deserialize failed"):
         audit._audit_native_live_load(
-            tmp_path / "sam3.trtfb",
+            tmp_path / "sam3.bundle",
             roles,
             {name: 1 for name in audit.SAM3_PLAN_SECTIONS},
             probe_runner=failed_probe,
@@ -885,7 +885,7 @@ def test_sam3_runtime_audit_cli_requires_cmake_cache() -> None:
         parser.parse_args(
             [
                 "--bundle",
-                "sam3.trtfb",
+                "sam3.bundle",
                 "--dso",
                 "libtrtmc_core.so",
             ]

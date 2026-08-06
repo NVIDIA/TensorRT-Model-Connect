@@ -167,7 +167,7 @@ Validation for each model:
 
 ```text
 pytest builder/<model>/tests -v
-python -m tensorrt_model_connect build <model-or-dir> -o /tmp/<model>.trtfb
+python -m tensorrt_model_connect build <model-or-dir> -o /tmp/<model>.bundle
 ```
 
 Pass criteria:

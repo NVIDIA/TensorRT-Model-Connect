@@ -1,7 +1,7 @@
 {
   "name": "whisper-large-v3-turbo-tp4",
   "hf_id": "openai/whisper-large-v3-turbo",
-  "bundle": "whisper-large-v3-turbo-tp4.trtfb",
+  "bundle": "whisper-large-v3-turbo-tp4.bundle",
   "family": "whisper",
   "runtime_strategy": "whisper_speech_to_text",
   "task_strategy": "speech_to_text",

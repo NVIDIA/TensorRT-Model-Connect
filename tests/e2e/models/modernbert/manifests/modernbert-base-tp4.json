@@ -1,7 +1,7 @@
 {
   "name": "modernbert-base-tp4",
   "hf_id": "answerdotai/ModernBERT-base",
-  "bundle": "modernbert-base-tp4.trtfb",
+  "bundle": "modernbert-base-tp4.bundle",
   "family": "modernbert",
   "runtime_strategy": "modernbert_encoder_only",
   "task_strategy": "encoder_only_nlp",

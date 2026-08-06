@@ -33,7 +33,7 @@ def test_m2m_100_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> 
         },
     )
 
-    path = tmp_path / "m2m_100_seq2seq_tp_dispatch.trtfb"
+    path = tmp_path / "m2m_100_seq2seq_tp_dispatch.bundle"
     path.write_bytes(bundle)
 
     communicator = object()

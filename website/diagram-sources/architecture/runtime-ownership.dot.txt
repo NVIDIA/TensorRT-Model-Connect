@@ -44,7 +44,7 @@ digraph RuntimeOwnership {
   bundle [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>.trtfb bundle</B><BR/><FONT POINT-SIZE="16">dispatch identity + artifacts</FONT>>
+    label=<<B>.bundle artifact</B><BR/><FONT POINT-SIZE="16">dispatch identity + artifacts</FONT>>
   ];
   shared [
     fillcolor="#f8fafc",

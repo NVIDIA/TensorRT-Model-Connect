@@ -18,7 +18,7 @@ def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
         family="magpie_tts",
         runtime_strategy="text_to_audio_magpie",
         task_strategy="text_to_audio",
-        bundle="magpie-case.trtfb",
+        bundle="magpie-case.bundle",
         inputs=inputs or {},
     )
     defaults.update(overrides)

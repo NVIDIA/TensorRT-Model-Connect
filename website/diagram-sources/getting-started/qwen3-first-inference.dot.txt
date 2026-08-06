@@ -30,7 +30,7 @@ digraph QwenFirstInference {
   edge [color="#64748b", penwidth="2.2", arrowsize="0.8", fontname="Arial", fontsize="16", fontcolor="#334155"];
 
   build [fillcolor="#eff6ff", color="#2563eb", label=<<B>trtmc build</B><BR/><FONT POINT-SIZE="16">Qwen/Qwen3-0.6B</FONT>>];
-  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>Qwen3-0.6B.trtfb</B><BR/><FONT POINT-SIZE="16">portable bundle</FONT>>];
+  bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>Qwen3-0.6B.bundle</B><BR/><FONT POINT-SIZE="16">portable bundle</FONT>>];
   inspect [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Inspect</B><BR/><FONT POINT-SIZE="16">identity · sections · ABI</FONT>>];
   load [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Load native strategy</B><BR/><FONT POINT-SIZE="16">qwen_decoder_kv_cache</FONT>>];
   generate [fillcolor="#ecfeff", color="#0e7490", label=<<B>IPipeline::generate</B><BR/><FONT POINT-SIZE="16">greedy request</FONT>>];

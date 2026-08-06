@@ -1,7 +1,7 @@
 {
   "name": "internlm2-1.8b-tp4",
   "hf_id": "internlm/internlm2-math-plus-1_8b",
-  "bundle": "internlm2-1.8b-tp4.trtfb",
+  "bundle": "internlm2-1.8b-tp4.bundle",
   "family": "internlm",
   "runtime_strategy": "internlm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

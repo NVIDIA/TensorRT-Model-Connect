@@ -1,7 +1,7 @@
 {
   "name": "dpr-ctx-encoder-tp4",
   "hf_id": "facebook/dpr-ctx_encoder-single-nq-base",
-  "bundle": "dpr-ctx-encoder-tp4.trtfb",
+  "bundle": "dpr-ctx-encoder-tp4.bundle",
   "family": "dpr",
   "runtime_strategy": "dpr_encoder_only",
   "task_strategy": "encoder_only_nlp",

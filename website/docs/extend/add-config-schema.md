@@ -8,7 +8,7 @@ configuration. The public surface stays:
 ## Why use schemas
 
 ```bash
-./build/trtmc run model.trtfb \
+./build/trtmc run model.bundle \
   --prompt "Hello from the configured runtime" \
   --config profile.json \
   --set runtime.prefer_gpu_greedy=true

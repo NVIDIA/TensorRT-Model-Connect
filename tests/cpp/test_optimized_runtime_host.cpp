@@ -239,7 +239,7 @@ std::size_t count_line(const std::vector<std::string>& lines, const std::string&
 void test_model_owned_text_pipeline_and_eager_load() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
-    const fs::path bundle = root / "optimized.trtfb";
+    const fs::path bundle = root / "optimized.bundle";
     const fs::path events = root / "events.txt";
     write_bundle(bundle, text_spec());
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
@@ -284,7 +284,7 @@ void test_model_owned_text_pipeline_and_eager_load() {
 void test_legacy_load_overload_delegates_to_optimized_runtime() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
-    const fs::path bundle = root / "legacy-load.trtfb";
+    const fs::path bundle = root / "legacy-load.bundle";
     const fs::path events = root / "events.txt";
     write_bundle(bundle, text_spec());
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
@@ -301,7 +301,7 @@ void test_legacy_load_overload_delegates_to_optimized_runtime() {
 void test_c_abi_create_loads_optimized_runtime_bundle() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
-    const fs::path bundle = root / "c-abi-load.trtfb";
+    const fs::path bundle = root / "c-abi-load.bundle";
     const fs::path events = root / "events.txt";
     const std::string runtime_cache = (root / "cache").string();
     write_bundle(bundle, text_spec());
@@ -324,7 +324,7 @@ void test_c_abi_create_loads_optimized_runtime_bundle() {
 void test_non_text_pipeline_uses_same_host() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
-    const fs::path bundle = root / "embedding.trtfb";
+    const fs::path bundle = root / "embedding.bundle";
     write_bundle(bundle, embedding_spec());
     auto pipeline = trtmc::load(bundle.string(), load_options(root / "cache"));
     check(std::string(pipeline->pipeline_type()) == kEmbeddingPipelineType,
@@ -344,7 +344,7 @@ void test_non_text_pipeline_uses_same_host() {
 void test_public_pipeline_pool_fails_before_loading_optimized_runtime() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
-    const fs::path bundle = root / "pool.trtfb";
+    const fs::path bundle = root / "pool.bundle";
     const fs::path events = root / "events.txt";
     write_bundle(bundle, text_spec());
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
@@ -364,7 +364,7 @@ void test_public_pipeline_pool_fails_before_loading_optimized_runtime() {
 void test_concurrent_repeated_loads_share_published_cache_and_dso() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
-    const fs::path bundle = root / "concurrent.trtfb";
+    const fs::path bundle = root / "concurrent.bundle";
     const fs::path events = root / "events.txt";
     write_bundle(bundle, text_spec());
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
@@ -420,8 +420,8 @@ void test_descriptor_is_strict_and_fail_closed() {
     const fs::path root(temporary.path());
     const RuntimeSpec spec = text_spec();
     const std::string descriptor = descriptor_json(spec);
-    const fs::path unknown = root / "unknown.trtfb";
-    const fs::path duplicate = root / "duplicate.trtfb";
+    const fs::path unknown = root / "unknown.bundle";
+    const fs::path duplicate = root / "duplicate.bundle";
     write_bundle(unknown, spec,
                  replace_once(descriptor, "{\"schema_version\":2",
                               "{\"unknown\":true,\"schema_version\":2"));
@@ -446,7 +446,7 @@ void test_artifact_integrity_and_cache_tamper_fail_closed() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
     const RuntimeSpec spec = text_spec();
-    const fs::path bad_bundle = root / "bad-hash.trtfb";
+    const fs::path bad_bundle = root / "bad-hash.bundle";
     write_bundle(bad_bundle, spec, descriptor_json(spec, 1, std::string(64, '0')));
     bool hash_threw = false;
     try {
@@ -456,7 +456,7 @@ void test_artifact_integrity_and_cache_tamper_fail_closed() {
     }
     check(hash_threw, "artifact hash mismatch fails before DSO loading");
 
-    const fs::path bundle = root / "good.trtfb";
+    const fs::path bundle = root / "good.bundle";
     const fs::path cache = root / "cache";
     write_bundle(bundle, spec);
     {
@@ -483,7 +483,7 @@ void test_exact_embedded_dso_identity() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
     RuntimeSpec spec = text_spec(TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_DSO);
-    const fs::path bundle = root / "wrong-identity.trtfb";
+    const fs::path bundle = root / "wrong-identity.bundle";
     write_bundle(bundle, spec);
     bool threw = false;
     try {
@@ -500,7 +500,7 @@ void test_pipeline_abi_version_fails_before_create() {
     const fs::path root(temporary.path());
     const fs::path events = root / "events.txt";
     const RuntimeSpec spec = text_spec(TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_ABI_DSO);
-    const fs::path bundle = root / "wrong-pipeline-abi.trtfb";
+    const fs::path bundle = root / "wrong-pipeline-abi.bundle";
     write_bundle(bundle, spec);
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
 
@@ -523,7 +523,7 @@ void test_toolchain_abi_fails_before_create() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
     const fs::path events = root / "events.txt";
-    const fs::path bundle = root / "wrong-toolchain-abi.trtfb";
+    const fs::path bundle = root / "wrong-toolchain-abi.bundle";
     write_bundle(bundle, text_spec());
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
     trtmc_test::EnvVarGuard mismatch_guard("TRTMC_FAKE_OPTIMIZED_WRONG_TOOLCHAIN_ABI", "1");

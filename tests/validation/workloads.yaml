@@ -88,7 +88,7 @@ suites:
   - id: mmlu_continuation_parity
     description: >
       Base / completion-model continuation parity. Both the HF reference and the
-      TRTFB bundle greedily continue the same plain-text MMLU prompt; the two
+      .bundle artifact greedily continue the same plain-text MMLU prompt; the two
       continuations are compared token-level (no gold answer, no logits). This
       measures conversion fidelity for completion models rather than task
       accuracy.
@@ -490,15 +490,15 @@ suites:
       lane: local_only
       notes: >
         First step is local execution on a sampled subset. Nightly/premerge
-        gates should be enabled only after the HF/TRTFB baselines are calibrated
+        gates should be enabled only after the HF/BUNDLE baselines are calibrated
         for each VLM family.
 
   - id: vlm_mmmu_pro_vision_fixed_mcq
     description: >
       Fixed-input VLM multiple-choice parity evaluation on MMMU-Pro-Vision.
-      Images are normalized to the current Qwen/InternVL fixed-size TRTFB
+      Images are normalized to the current Qwen/InternVL fixed-size BUNDLE
       contract and prompts are normalized to a single user image-first message
-      so HF native and TRTFB consume the same controlled input shape.
+      so HF native and BUNDLE consume the same controlled input shape.
     user_contract: vl_answer
     default_model_names:
       - internvl3-2b

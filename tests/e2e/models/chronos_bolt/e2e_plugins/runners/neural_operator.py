@@ -110,7 +110,7 @@ class NeuralOperatorRunner:
 
 
 def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
-    bundle = case.bundle or f"{case.name}.trtfb"
+    bundle = case.bundle or f"{case.name}.bundle"
     if os.path.isabs(bundle):
         return bundle
     return os.path.join(ctx.engine_dir, bundle)

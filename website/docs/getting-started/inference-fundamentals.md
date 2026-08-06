@@ -123,7 +123,7 @@ intent, but they do not use the same artifact or dispatch path:
 | Model execution | A framework model runs eagerly or through framework compilation. | Python builds native TensorRT plans or invokes an exact qualified provider; C++ runs the bundle through `IPipeline`. |
 | Family selection | Auto classes and checkpoint config select Python model code. | Family `MODEL.toml` descriptors and plugin matching select the owning builder. |
 | Weights | Framework modules load checkpoint tensors. | A native family mapper feeds a TensorRT graph, or a qualified family adapter owns conversion. |
-| Artifact | Checkpoint, config, and tokenizer files. | A self-describing `.trtfb` bundle. |
+| Artifact | Checkpoint, config, and tokenizer files. | A self-describing `.bundle` bundle. |
 | Runtime dispatch | A Python model class. | A native strategy selects one model DSO/plugin, or `optimized_runtime.json` selects the embedded implementation DSO. |
 | Validation role | External reference oracle. | Deployment system being validated. |
 
@@ -134,11 +134,11 @@ bundle, code revision, and comparison artifact.
 
 ## Why bundles exist
 
-The `.trtfb` bundle is the handoff between build and runtime.
+The `.bundle` bundle is the handoff between build and runtime.
 
 <Diagram
-  src="/img/diagrams/getting-started/trtfb-bundle-contents.svg"
-  alt="TRTFB bundle contents including header identity, native plans and assets, and optimized runtime artifacts"
+  src="/img/diagrams/getting-started/bundle-contents.svg"
+  alt=".bundle artifact contents including header identity, native plans and assets, and optimized runtime artifacts"
   caption="Inspect the header and section inventory before deciding which runtime path and implementation the bundle requires."
 />
 

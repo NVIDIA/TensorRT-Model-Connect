@@ -22,7 +22,7 @@ Usage:
 
     # VL model with bundle + image
     python tools/diff.py run --model example-org/example-vl \
-      --bundle /path/vl.trtfb --image test.jpg --json result.json
+      --bundle /path/vl.bundle --image test.jpg --json result.json
 """
 from __future__ import annotations
 
@@ -127,7 +127,7 @@ def main():
                        help="HF repo ID or local model directory")
     p_run.add_argument("--test", action="append",
                        help="Specific test(s) to run (repeatable)")
-    p_run.add_argument("--bundle", help="Pre-built .trtfb bundle")
+    p_run.add_argument("--bundle", help="Pre-built .bundle artifact")
     p_run.add_argument("--binary", default="./build/trtmc",
                        help="C++ trtmc binary path")
     p_run.add_argument("--hf-python", help="Python for HF tokenizer bridge")

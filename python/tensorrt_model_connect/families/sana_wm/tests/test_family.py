@@ -1955,7 +1955,7 @@ def test_sana_wm_build_bundle_rejects_missing_native_sections(tmp_path, monkeypa
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
-    output_path = str(tmp_path / "sana-wm.trtfb")
+    output_path = str(tmp_path / "sana-wm.bundle")
 
     monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda rtx=False: None)
     monkeypatch.setattr(engine_builder.trt_compat, "resolved_summary", lambda: "mock TensorRT")
@@ -1983,7 +1983,7 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
         '{"add_bos_token": true}',
         encoding="utf-8",
     )
-    output_path = str(tmp_path / "sana-wm.trtfb")
+    output_path = str(tmp_path / "sana-wm.bundle")
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda rtx=False: None)

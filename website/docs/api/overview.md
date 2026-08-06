@@ -8,7 +8,7 @@ if you have not yet built and run a bundle.
 
 | API | Entry point | Best for |
 | --- | --- | --- |
-| Python builder | `tensorrt_model_connect.build()` and `trtmc build` | Building `.trtfb` bundles from Hugging Face IDs or local model directories. |
+| Python builder | `tensorrt_model_connect.build()` and `trtmc build` | Building `.bundle` bundles from Hugging Face IDs or local model directories. |
 | Python runtime wrapper | `tensorrt_model_connect.Pipeline` | Text and vision-language generation through the native `trtmc` executable from Python. |
 | C++ runtime | `#include <trtmc/pipeline.h>` and `trtmc::load()` | Native applications that want task-specific inference results. |
 | C-linkage subset | `trtmc_create_pipeline_ex()` and `trtmc_generate_batch()` | C++ shims and experimental FFI integration; the current header/handle is not yet a complete pure-C ownership API. |
@@ -25,7 +25,7 @@ The core contract is always the same:
 ```text
 Hugging Face model or local model directory
   -> trtmc build
-  -> model.trtfb
+  -> model.bundle
   -> trtmc::load() or trtmc run
   -> task-specific output
 ```

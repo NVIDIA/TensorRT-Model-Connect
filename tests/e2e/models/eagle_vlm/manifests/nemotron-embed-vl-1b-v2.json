@@ -1,7 +1,7 @@
 {
   "name": "nemotron-embed-vl-1b-v2",
   "hf_id": "nvidia/llama-nemotron-embed-vl-1b-v2",
-  "bundle": "nemotron-embed-vl-1b-v2.trtfb",
+  "bundle": "nemotron-embed-vl-1b-v2.bundle",
   "family": "eagle_vlm",
   "runtime_strategy": "eagle_vlm_embedding",
   "task_strategy": "embedding",

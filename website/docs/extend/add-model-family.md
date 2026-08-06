@@ -237,11 +237,11 @@ inspection, but it is a separate smoke artifact:
 MODEL_REF=example-org/example-small
 
 ./build/trtmc build "$MODEL_REF" \
-  -o /tmp/example-small.trtfb \
+  -o /tmp/example-small.bundle \
   --precision fp16 \
   --max-cache-length 256
 
-./build/trtmc inspect /tmp/example-small.trtfb --list-engines
+./build/trtmc inspect /tmp/example-small.bundle --list-engines
 ```
 
 Run the family validator separately and give its output directory an explicit
@@ -263,8 +263,8 @@ Inspect the direct smoke bundle before inference. Confirm that `family`,
 `runtime_strategy`, section layout, precision, and TensorRT metadata match the
 three descriptors.
 
-`validate_family.sh` does not consume `/tmp/example-small.trtfb`. It builds
-`$VALIDATION_DIR/example-org_example-small.trtfb` directly, then runs the
+`validate_family.sh` does not consume `/tmp/example-small.bundle`. It builds
+`$VALIDATION_DIR/example-org_example-small.bundle` directly, then runs the
 applicable inspection and parity checks. If a matching E2E manifest is found,
 the script invokes that pytest node with `--rebuild-engines`; that E2E run
 builds the manifest's configured checkpoint independently rather than testing

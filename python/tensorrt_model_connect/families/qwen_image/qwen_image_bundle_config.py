@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build Qwen-Image .trtfb bundle config.json from a diffusers repo.
+"""Build Qwen-Image .bundle artifact config.json from a diffusers repo.
 
 Pure data transformation: takes a HuggingFace diffusers-format Qwen-Image
 repository directory (with ``model_index.json`` + per-component
@@ -126,7 +126,7 @@ def build_bundle_config(
     """Convert a diffusers Qwen-Image repo into the bundle config dict.
 
     The returned dict is JSON-serializable and is written into the
-    ``config`` section of every Qwen-Image ``.trtfb``.
+    ``config`` section of every Qwen-Image ``.bundle``.
     """
     repo = Path(repo_dir)
     task_mode = _detect_task_mode(repo)

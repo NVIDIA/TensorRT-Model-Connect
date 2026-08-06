@@ -20,7 +20,7 @@ This script writes a staged directory (symlinks, no copies of large weights):
 
 Then build it (understanding path):
 
-    ./build/trtmc build <out> -o /tmp/lance.trtfb --max-cache-length 384 --precision bf16
+    ./build/trtmc build <out> -o /tmp/lance.bundle --max-cache-length 384 --precision bf16
 
 Generation/editing tasks (t2i/t2v/edit) are not supported yet; this stages the
 understanding sub-model that the ``lance`` family plugin builds.
@@ -129,9 +129,9 @@ def main() -> int:
     print(f"  LLM : {llm_dir}")
     print(f"  ViT : {vit_path}")
     print("Build with:")
-    print(f"  ./build/trtmc build {out} -o /tmp/lance.trtfb "
+    print(f"  ./build/trtmc build {out} -o /tmp/lance.bundle "
           f"--max-cache-length 384 --precision bf16")
-    print("  ./build/trtmc run /tmp/lance.trtfb --prompt 'Describe this image.' "
+    print("  ./build/trtmc run /tmp/lance.bundle --prompt 'Describe this image.' "
           "--image <img> --max-new-tokens 40 --greedy")
     return 0
 

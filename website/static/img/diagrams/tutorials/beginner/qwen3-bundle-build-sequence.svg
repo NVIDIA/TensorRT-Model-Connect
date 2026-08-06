@@ -1,7 +1,7 @@
 <!-- Generated from the adjacent pinned sequence source by website/scripts/render-diagrams.mjs. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="1088" viewBox="0 0 1100 1088" role="img" aria-labelledby="tutorials-beginner-qwen3-bundle-build-sequence-svg-arrow-title tutorials-beginner-qwen3-bundle-build-sequence-svg-arrow-description" preserveAspectRatio="xMidYMid meet">
 <title id="tutorials-beginner-qwen3-bundle-build-sequence-svg-arrow-title">Build the Qwen3 bundle</title>
-<desc id="tutorials-beginner-qwen3-bundle-build-sequence-svg-arrow-description">The build CLI normalizes the model configuration, resolves Qwen family ownership, loads weights, builds the default split prefill and decode TensorRT plans, and writes both plans with metadata into Qwen3-0.6B.trtfb.</desc>
+<desc id="tutorials-beginner-qwen3-bundle-build-sequence-svg-arrow-description">The build CLI normalizes the model configuration, resolves Qwen family ownership, loads weights, builds the default split prefill and decode TensorRT plans, and writes both plans with metadata into Qwen3-0.6B.bundle.</desc>
 <defs>
   <marker id="tutorials-beginner-qwen3-bundle-build-sequence-svg-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10Z" fill="#64748b"/></marker>
 </defs>
@@ -55,5 +55,5 @@
 <text x="781" y="862" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#111827">9. Write both plan sections</text>
 <line x1="1004" y1="942" x2="96" y2="942" stroke="#64748b" stroke-width="2.5" stroke-dasharray="7 6" marker-end="url(#tutorials-beginner-qwen3-bundle-build-sequence-svg-arrow)"/>
 <rect x="100" y="915" width="900" height="23" rx="5" fill="#fbfcfe"/>
-<text x="550" y="932" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#111827">10. Return .trtfb</text>
+<text x="550" y="932" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="16" fill="#111827">10. Return .bundle</text>
 </svg>

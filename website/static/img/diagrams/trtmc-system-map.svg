@@ -42,7 +42,7 @@
 <g id="node3" class="node">
 <title>bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="3" d="M786.59,-180.32C786.59,-180.32 538.32,-180.32 538.32,-180.32 532.32,-180.32 526.32,-174.32 526.32,-168.32 526.32,-168.32 526.32,-120.16 526.32,-120.16 526.32,-114.16 532.32,-108.16 538.32,-108.16 538.32,-108.16 786.59,-108.16 786.59,-108.16 792.59,-108.16 798.59,-114.16 798.59,-120.16 798.59,-120.16 798.59,-168.32 798.59,-168.32 798.59,-174.32 792.59,-180.32 786.59,-180.32"/>
-<text xml:space="preserve" text-anchor="start" x="604.14" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="590.78" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.bundle artifact</text>
 <text xml:space="preserve" text-anchor="start" x="574.63" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">plans + runtime_strategy</text>
 <text xml:space="preserve" text-anchor="start" x="539.28" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">or embedded implementation DSO</text>
 </g>

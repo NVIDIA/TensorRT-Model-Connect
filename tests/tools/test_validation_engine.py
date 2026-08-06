@@ -41,7 +41,7 @@ def _write_bundle_config(path: Path, config: dict[str, Any]) -> None:
     ).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(
-        b"TRTFB\x00\x01\x00"
+        b"BUNDLE\x01\x00"
         + struct.pack("<Q", len(header_data))
         + header_data
         + config_data
@@ -73,7 +73,7 @@ def test_full_duplex_bench_scorer_runs_in_reference_environment(
     result = validation_engine.run_full_duplex_bench_comparison(
         python="/profiles/personaplex/bin/python",
         hf_predictions=tmp_path / "hf.json",
-        trtfb_predictions=tmp_path / "trtmc.json",
+        bundle_predictions=tmp_path / "trtmc.json",
         answers=tmp_path / "answers.json",
         work_dir=tmp_path,
         gates={
@@ -109,7 +109,7 @@ def test_full_duplex_bench_scorer_rejects_stale_summary_after_crash(
         validation_engine.run_full_duplex_bench_comparison(
             python="/profiles/personaplex/bin/python",
             hf_predictions=tmp_path / "hf.json",
-            trtfb_predictions=tmp_path / "trtmc.json",
+            bundle_predictions=tmp_path / "trtmc.json",
             answers=tmp_path / "answers.json",
             work_dir=tmp_path,
             gates={
@@ -430,7 +430,7 @@ def test_time_series_case_replaces_manifest_probe_inputs() -> None:
     assert template.inputs == {"field_input": [999], "stale": True}
 
 
-def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
+def test_time_series_bundle_reuses_model_runner_and_writes_run_log(
     tmp_path: Path, monkeypatch
 ) -> None:
     work_dir = tmp_path / "work"
@@ -452,7 +452,7 @@ def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
         name="template",
         inputs={"field_input": [999.0]},
         stages=[],
-        bundle="template.trtfb",
+        bundle="template.bundle",
     )
     captured_inputs: list[dict] = []
 
@@ -470,13 +470,13 @@ def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
         "_load_time_series_validation_plugins",
         lambda _work_dir: (template, object(), FakeRunner()),
     )
-    validation_engine.run_time_series_trtfb(
+    validation_engine.run_time_series_bundle(
         SimpleNamespace(
             work_dir=str(work_dir),
             raw_output="",
             predictions="",
             log="",
-            bundle=str(tmp_path / "model.trtfb"),
+            bundle=str(tmp_path / "model.bundle"),
             trtmc_binary="trtmc",
             hf_python="python",
             model_plugin_dir="",
@@ -484,9 +484,9 @@ def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
     )
 
     predictions = json.loads(
-        (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        (work_dir / "bundle_predictions.json").read_text(encoding="utf-8")
     )
-    log_row = validation_engine.load_jsonl(work_dir / "trtfb_run.log")[0]
+    log_row = validation_engine.load_jsonl(work_dir / "bundle_run.log")[0]
     assert captured_inputs == [{"field_input": [1.0, 2.0, 3.0]}]
     assert predictions["responses"][0]["output_values"] == [1.5, 2.5]
     assert log_row["sample_id"] == "etth1_011520"
@@ -500,7 +500,7 @@ def test_time_series_parity_requires_every_sample_to_pass() -> None:
             {"sample_id": "b", "output_values": [3.0, 4.0]},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "a", "output_values": [1.0, 2.0001]},
             {"sample_id": "b", "output_values": [3.0, 4.1]},
@@ -509,7 +509,7 @@ def test_time_series_parity_requires_every_sample_to_pass() -> None:
 
     summary = validation_engine.compare_time_series_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         gates={
             "max_relative_l2": 1e-3,
             "max_absolute_error": 1e-3,
@@ -807,7 +807,7 @@ def test_reranking_parity_records_each_low_agreement_sample() -> None:
             {"sample_id": "disagree", "scores": [0.9, 0.2, 0.1]},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "agree", "scores": [0.8, 0.3, 0.1]},
             {"sample_id": "disagree", "scores": [0.1, 0.2, 0.9]},
@@ -816,7 +816,7 @@ def test_reranking_parity_records_each_low_agreement_sample() -> None:
 
     summary = validation_engine.compare_reranking_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         gates={
             "pairwise_ordering_agreement": 1.0,
@@ -903,7 +903,7 @@ def test_image_classification_parity_separates_accuracy_and_agreement() -> None:
         ]
     }
     hf = {"responses": [{"sample_id": "a", "top_class": 1}, {"sample_id": "b", "top_class": 0}]}
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "a", "top_class": 1},
             {"sample_id": "b", "top_class": 0},
@@ -911,12 +911,12 @@ def test_image_classification_parity_separates_accuracy_and_agreement() -> None:
     }
 
     summary = validation_engine.compare_image_classification_prediction_sets(
-        hf, trtfb, answers, gates={"min_top1_agreement": 1.0}
+        hf, bundle, answers, gates={"min_top1_agreement": 1.0}
     )
 
     assert summary["status"] == "passed"
     assert summary["hf_top1_accuracy"] == 0.5
-    assert summary["trtfb_top1_accuracy"] == 0.5
+    assert summary["bundle_top1_accuracy"] == 0.5
     assert summary["top1_agreement"] == 1.0
 
 
@@ -958,21 +958,21 @@ def test_semantic_segmentation_parity_reports_dataset_miou(tmp_path: Path) -> No
 
     ground = np.array([[0, 0], [1, 1]], dtype=np.uint8)
     hf_map = ground.copy()
-    trtfb_map = ground.copy()
+    bundle_map = ground.copy()
     paths = {}
-    for name, values in (("ground", ground), ("hf", hf_map), ("trtfb", trtfb_map)):
+    for name, values in (("ground", ground), ("hf", hf_map), ("bundle", bundle_map)):
         path = tmp_path / f"{name}.npy"
         np.save(path, values)
         paths[name] = path
     answers = {"requests": [{"sample_id": "seg", "mask": str(paths["ground"])}]}
     hf = {"responses": [{"sample_id": "seg", "class_map_path": str(paths["hf"])}]}
-    trtfb = {
-        "responses": [{"sample_id": "seg", "class_map_path": str(paths["trtfb"])}]
+    bundle = {
+        "responses": [{"sample_id": "seg", "class_map_path": str(paths["bundle"])}]
     }
 
     summary = validation_engine.compare_semantic_segmentation_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         gates={},
         num_classes=2,
@@ -981,7 +981,7 @@ def test_semantic_segmentation_parity_reports_dataset_miou(tmp_path: Path) -> No
 
     assert summary["status"] == "passed"
     assert summary["hf_mean_iou"] == 1.0
-    assert summary["trtfb_mean_iou"] == 1.0
+    assert summary["bundle_mean_iou"] == 1.0
     assert summary["backend_pixel_agreement"] == 1.0
 
 
@@ -993,13 +993,13 @@ def test_semantic_segmentation_uses_raw_hf_map_for_backend_parity(
     ground = np.array([[0, 0], [1, 1]], dtype=np.uint8)
     hf_postprocessed = ground.copy()
     hf_raw = np.array([[0]], dtype=np.uint8)
-    trtfb_raw = hf_raw.copy()
+    bundle_raw = hf_raw.copy()
     paths = {}
     for name, values in (
         ("ground", ground),
         ("hf", hf_postprocessed),
         ("hf_raw", hf_raw),
-        ("trtfb", trtfb_raw),
+        ("bundle", bundle_raw),
     ):
         path = tmp_path / f"{name}.npy"
         np.save(path, values)
@@ -1014,13 +1014,13 @@ def test_semantic_segmentation_uses_raw_hf_map_for_backend_parity(
             }
         ]
     }
-    trtfb = {
-        "responses": [{"sample_id": "seg", "class_map_path": str(paths["trtfb"])}]
+    bundle = {
+        "responses": [{"sample_id": "seg", "class_map_path": str(paths["bundle"])}]
     }
 
     summary = validation_engine.compare_semantic_segmentation_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         gates={"max_mean_iou_drop_from_hf": 1.0},
         num_classes=2,
@@ -1039,10 +1039,10 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
     masks = np.stack([ground, np.zeros_like(ground)])
     ground_path = tmp_path / "ground.npy"
     hf_path = tmp_path / "hf.npy"
-    trtfb_path = tmp_path / "trtfb.npy"
+    bundle_path = tmp_path / "bundle.npy"
     np.save(ground_path, ground)
     np.save(hf_path, masks)
-    np.save(trtfb_path, masks)
+    np.save(bundle_path, masks)
     answers = {
         "requests": [
             {
@@ -1058,11 +1058,11 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
             {"sample_id": "prompt", "masks_path": str(hf_path), "mask_scores": [0.9, 0.1]}
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {
                 "sample_id": "prompt",
-                "masks_path": str(trtfb_path),
+                "masks_path": str(bundle_path),
                 "mask_scores": [0.9, 0.1],
             }
         ]
@@ -1070,7 +1070,7 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
 
     point = validation_engine.compare_prompted_segmentation_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         gates={},
         prompt_mode="point",
@@ -1078,7 +1078,7 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
     )
     text = validation_engine.compare_prompted_segmentation_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         gates={},
         prompt_mode="text",
@@ -1117,7 +1117,7 @@ def test_prompted_segmentation_empty_prediction_is_a_comparison_failure(
             }
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {
                 "sample_id": "prompt",
@@ -1132,7 +1132,7 @@ def test_prompted_segmentation_empty_prediction_is_a_comparison_failure(
 
     summary = validation_engine.compare_prompted_segmentation_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         gates={},
         prompt_mode="text",
@@ -1142,7 +1142,7 @@ def test_prompted_segmentation_empty_prediction_is_a_comparison_failure(
     assert summary["status"] == "failed"
     assert summary["valid_count"] == 1
     assert summary["mean_backend_mask_iou"] == 0.0
-    assert summary["cases"][0]["trtfb_empty_prediction"] is True
+    assert summary["cases"][0]["bundle_empty_prediction"] is True
 
 
 def test_vision_response_preserves_prompted_segmentation_empty_prediction(
@@ -1150,7 +1150,7 @@ def test_vision_response_preserves_prompted_segmentation_empty_prediction(
 ) -> None:
     response = validation_engine._vision_response(
         case=SimpleNamespace(name="prompt"),
-        source="trtfb",
+        source="bundle",
         output=SimpleNamespace(
             data={"masks": [], "num_masks": 0},
             metadata={
@@ -1176,7 +1176,7 @@ def test_vision_response_preserves_prompted_segmentation_empty_prediction(
             {
                 "mode": "image_classification_parity",
                 "hf_top1_accuracy": 1.0,
-                "trtfb_top1_accuracy": 1.0,
+                "bundle_top1_accuracy": 1.0,
                 "top1_agreement": 1.0,
             },
             "hf_top1=1.0000",
@@ -1185,7 +1185,7 @@ def test_vision_response_preserves_prompted_segmentation_empty_prediction(
             {
                 "mode": "semantic_segmentation_parity",
                 "hf_mean_iou": 0.5,
-                "trtfb_mean_iou": 0.5,
+                "bundle_mean_iou": 0.5,
                 "backend_mean_iou": 1.0,
             },
             "backend_miou=1.0000",
@@ -1195,7 +1195,7 @@ def test_vision_response_preserves_prompted_segmentation_empty_prediction(
                 "mode": "prompted_segmentation_parity",
                 "mean_backend_mask_iou": 1.0,
                 "hf_mean_ground_truth_iou": 0.8,
-                "trtfb_mean_ground_truth_iou": 0.8,
+                "bundle_mean_ground_truth_iou": 0.8,
             },
             "backend_mask_iou=1.0000",
         ),
@@ -1453,7 +1453,7 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
         {
             "name": "decoder-chat",
             "hf_id": "example-org/decoder-chat",
-            "bundle": "decoder-chat.trtfb",
+            "bundle": "decoder-chat.bundle",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
@@ -1467,7 +1467,7 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
         {
             "name": "decoder-continuation",
             "hf_id": "example-org/decoder-continuation",
-            "bundle": "decoder-continuation.trtfb",
+            "bundle": "decoder-continuation.bundle",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "causal_base_continuation",
@@ -1522,7 +1522,7 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
                 "name": "example-decoder",
                 "hf_id": "example-org/example-decoder",
                 "hf_revision": "0123456789abcdef",
-                "bundle": "example-decoder.trtfb",
+                "bundle": "example-decoder.bundle",
                 "family": "example_decoder",
                 "runtime_strategy": "example_decoder_decoder_kv_cache",
                 "task_strategy": "text_generation_causal",
@@ -1577,7 +1577,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
         {
             "name": "vl-primary",
             "hf_id": "example-org/vl-primary",
-            "bundle": "vl-primary.trtfb",
+            "bundle": "vl-primary.bundle",
             "runtime_strategy": "vision_family_vision_language",
             "task_strategy": "vision_language_generation",
             "reference_family": "vl_instruct_qa",
@@ -1591,7 +1591,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
         {
             "name": "vl-secondary",
             "hf_id": "example-org/vl-secondary",
-            "bundle": "vl-secondary.trtfb",
+            "bundle": "vl-secondary.bundle",
             "runtime_strategy": "vision_family_vision_language",
             "task_strategy": "vision_language_generation",
             "reference_family": "vl_instruct_qa",
@@ -1605,7 +1605,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
         {
             "name": "vl-excluded",
             "hf_id": "example-org/vl-excluded",
-            "bundle": "vl-excluded.trtfb",
+            "bundle": "vl-excluded.bundle",
             "runtime_strategy": "vision_family_vision_language",
             "task_strategy": "vision_language_generation",
             "reference_family": "vl_instruct_qa",
@@ -1619,7 +1619,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
         {
             "name": "text-decoder",
             "hf_id": "example-org/text-decoder",
-            "bundle": "text-decoder.trtfb",
+            "bundle": "text-decoder.bundle",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
@@ -1705,7 +1705,7 @@ def test_plan_selects_librispeech_streaming_asr_models() -> None:
     assert "canary-1b-v2" not in selected
 
 
-def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
+def test_prepare_mmlu_writes_answers_and_bundle_jsonl(tmp_path: Path) -> None:
     dataset = tmp_path / "mmlu.json"
     _write_mmlu(dataset)
     suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
@@ -1857,7 +1857,7 @@ def test_grounding_iou_scoring_and_reference_consistency() -> None:
             {"sample_id": "two", "output_text": "<ref>two</ref><box><500><500><900><900></box>"},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "one", "output_text": "<ref>one</ref><box><105><105><395><395></box>"},
             {"sample_id": "two", "output_text": "<ref>two</ref><box><0><0><100><100></box>"},
@@ -1866,17 +1866,17 @@ def test_grounding_iou_scoring_and_reference_consistency() -> None:
 
     summary = validation_engine.compare_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         scorer="grounding_iou",
         scorer_options={"iou_threshold": 0.5},
     )
 
     assert summary["hf"]["overall_accuracy"] == 1.0
-    assert summary["trtfb"]["overall_accuracy"] == 0.5
-    assert summary["trtfb"]["samples"][0]["iou"] > 0.9
+    assert summary["bundle"]["overall_accuracy"] == 0.5
+    assert summary["bundle"]["samples"][0]["iou"] > 0.9
     assert summary["prediction_agreement_rate"] == 0.5
-    assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+    assert summary["buckets"]["hf_correct_bundle_wrong"] == 1
 
 
 @pytest.mark.parametrize(
@@ -2963,20 +2963,20 @@ def test_continuation_parity_reports_divergence_severity() -> None:
             {"sample_id": "b", "output_text": "hello world"},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "a", "output_text": "the cat sat"},
             {"sample_id": "b", "output_text": "hello there"},
         ]
     }
 
-    summary = validation_engine.compare_continuation_sets(hf, trtfb, tokenize=lambda s: s.split())
+    summary = validation_engine.compare_continuation_sets(hf, bundle, tokenize=lambda s: s.split())
 
     assert summary["count"] == 2
     assert summary["divergence_metric_scope"] == "divergent_samples_only"
     assert (
         summary["normalization_denominator"]
-        == "max_hf_trtfb_generated_length"
+        == "max_hf_bundle_generated_length"
     )
     assert summary["exact_match_rate"] == 0.5  # "a" exact, "b" not
     assert summary["samples"][0]["first_divergence"] == 3  # all 3 tokens match
@@ -3005,14 +3005,14 @@ def test_continuation_parity_prefers_generated_token_ids() -> None:
             {"sample_id": "b", "output_text": "same text", "generated_token_ids": [1, 2, 3]},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "a", "output_text": "same text", "generated_token_ids": [10, 20]},
             {"sample_id": "b", "output_text": "same text", "generated_token_ids": [1, 2, 4]},
         ]
     }
 
-    summary = validation_engine.compare_continuation_sets(hf, trtfb, require_token_ids=True)
+    summary = validation_engine.compare_continuation_sets(hf, bundle, require_token_ids=True)
 
     assert summary["comparison_granularity"] == "generated_token_ids"
     assert summary["exact_match_rate"] == 0.5
@@ -3020,7 +3020,7 @@ def test_continuation_parity_prefers_generated_token_ids() -> None:
     assert summary["text_exact_match_rate"] == 1.0
     assert summary["samples"][1]["first_divergence"] == 2
     assert summary["samples"][1]["hf_token_at_divergence"] == 3
-    assert summary["samples"][1]["trtfb_token_at_divergence"] == 4
+    assert summary["samples"][1]["bundle_token_at_divergence"] == 4
     assert summary["samples"][1]["normalized_first_divergence"] == 2 / 3
     assert summary["samples"][1]["divergence_severity"] == 1 / 3
     assert summary["mean_divergent_prefix_ratio"] == 2 / 3
@@ -3038,7 +3038,7 @@ def test_continuation_parity_treats_reference_argmax_ties_as_gate_equivalent() -
             }
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {
                 "sample_id": "tie",
@@ -3049,7 +3049,7 @@ def test_continuation_parity_treats_reference_argmax_ties_as_gate_equivalent() -
     }
 
     summary = validation_engine.compare_continuation_sets(
-        hf, trtfb, require_token_ids=True
+        hf, bundle, require_token_ids=True
     )
 
     assert summary["exact_match_rate"] == 0.0
@@ -3061,7 +3061,7 @@ def test_continuation_parity_treats_reference_argmax_ties_as_gate_equivalent() -
             "sample_id": "tie",
             "first_divergence": 1,
             "hf_token_id": 20,
-            "trtfb_token_id": 21,
+            "bundle_token_id": 21,
             "max_score_token_ids": [20, 21],
         }
     ]
@@ -3094,10 +3094,10 @@ def test_continuation_parity_reports_no_divergence_without_empty_means() -> None
 
 def test_continuation_parity_requires_token_ids_when_requested() -> None:
     hf = {"responses": [{"sample_id": "a", "output_text": "x"}]}
-    trtfb = {"responses": [{"sample_id": "a", "output_text": "x"}]}
+    bundle = {"responses": [{"sample_id": "a", "output_text": "x"}]}
 
     try:
-        validation_engine.compare_continuation_sets(hf, trtfb, require_token_ids=True)
+        validation_engine.compare_continuation_sets(hf, bundle, require_token_ids=True)
     except ValueError as exc:
         assert "generated_token_ids" in str(exc)
     else:
@@ -3115,11 +3115,11 @@ def test_continuation_suite_accepts_one_divergent_sample_in_ten() -> None:
             for index in range(10)
         ]
     }
-    trtfb = json.loads(json.dumps(hf))
-    trtfb["responses"][-1]["output_text"] = "different"
-    trtfb["responses"][-1]["generated_token_ids"] = [9, 9]
+    bundle = json.loads(json.dumps(hf))
+    bundle["responses"][-1]["output_text"] = "different"
+    bundle["responses"][-1]["generated_token_ids"] = [9, 9]
     summary = validation_engine.compare_continuation_sets(
-        hf, trtfb, require_token_ids=True
+        hf, bundle, require_token_ids=True
     )
     result = {
         "exact_match_rate": summary["exact_match_rate"],
@@ -3168,7 +3168,7 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    (work_dir / "trtfb_predictions.json").write_text(
+    (work_dir / "bundle_predictions.json").write_text(
         json.dumps(
             {
                 "responses": [
@@ -3185,7 +3185,7 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
         argparse.Namespace(
             work_dir=str(work_dir),
             hf_predictions="",
-            trtfb_predictions="",
+            bundle_predictions="",
             model="",
             trust_remote_code=False,
             local_files_only=False,
@@ -3222,7 +3222,7 @@ def test_continuation_summary_markdown_prioritizes_divergence_severity(
             },
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {
                 "sample_id": "exact",
@@ -3236,7 +3236,7 @@ def test_continuation_summary_markdown_prioritizes_divergence_severity(
             },
         ]
     }
-    summary = validation_engine.compare_continuation_sets(hf, trtfb)
+    summary = validation_engine.compare_continuation_sets(hf, bundle)
     output = tmp_path / "summary.md"
 
     validation_engine.write_continuation_summary_markdown(summary, output)
@@ -3245,7 +3245,7 @@ def test_continuation_summary_markdown_prioritizes_divergence_severity(
     assert markdown.startswith("# Continuation Divergence Summary\n")
     assert "| divergence_metric_scope | divergent_samples_only |" in markdown
     assert (
-        "| normalization_denominator | max_hf_trtfb_generated_length |"
+        "| normalization_denominator | max_hf_bundle_generated_length |"
         in markdown
     )
     assert "| divergence_rate | 0.5000 |" in markdown
@@ -3302,8 +3302,8 @@ def test_dataset_benchmark_accepts_model_plugin_directory() -> None:
     assert "result.token_ids[token_idx]" in source
 
 
-def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
-    raw = tmp_path / "trtfb_raw.jsonl"
+def test_convert_bundle_uses_generated_text_field(tmp_path: Path) -> None:
+    raw = tmp_path / "bundle_raw.jsonl"
     raw.write_text(
         json.dumps(
             {
@@ -3321,25 +3321,25 @@ def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
     )
     predictions = tmp_path / "predictions.json"
 
-    validation_engine.convert_trtfb_jsonl_to_predictions(raw, predictions)
+    validation_engine.convert_bundle_jsonl_to_predictions(raw, predictions)
 
     payload = json.loads(predictions.read_text(encoding="utf-8"))
     assert payload["responses"][0]["output_text"] == "Answer: B"
     assert payload["responses"][0]["generated_token_ids"] == [42]
-    assert payload["responses"][0]["source"] == "trtfb"
+    assert payload["responses"][0]["source"] == "bundle"
 
 
-def test_convert_trtfb_replaces_invalid_utf8_in_generated_text(
+def test_convert_bundle_replaces_invalid_utf8_in_generated_text(
     tmp_path: Path,
 ) -> None:
-    raw = tmp_path / "trtfb_raw.jsonl"
+    raw = tmp_path / "bundle_raw.jsonl"
     raw.write_bytes(
         b'{"sample_id":"sample-0","text":"bad \x88 text",'
         b'"generated_token_ids":[7]}\n'
     )
     predictions = tmp_path / "predictions.json"
 
-    validation_engine.convert_trtfb_jsonl_to_predictions(raw, predictions)
+    validation_engine.convert_bundle_jsonl_to_predictions(raw, predictions)
 
     payload = json.loads(predictions.read_text(encoding="utf-8"))
     assert payload["responses"][0]["output_text"] == "bad \ufffd text"
@@ -3356,7 +3356,7 @@ def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
             {"sample_id": "mmlu_000001", "output_text": "Answer: A"},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "mmlu_000000", "output_text": "B<|im_end|>"},
             {"sample_id": "mmlu_000001", "output_text": "(B)"},
@@ -3364,14 +3364,14 @@ def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
     }
 
     hf_score = validation_engine.score_predictions(hf, answers)
-    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers)
+    summary = validation_engine.compare_prediction_sets(hf, bundle, answers)
 
     assert hf_score["overall_accuracy"] == 1.0
     assert summary["hf"]["overall_accuracy"] == 1.0
-    assert summary["trtfb"]["overall_accuracy"] == 0.5
-    assert summary["accuracy_delta_trtfb_minus_hf"] == -0.5
+    assert summary["bundle"]["overall_accuracy"] == 0.5
+    assert summary["accuracy_delta_bundle_minus_hf"] == -0.5
     assert summary["prediction_agreement_rate"] == 0.5
-    assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+    assert summary["buckets"]["hf_correct_bundle_wrong"] == 1
 
 
 def test_mcq_exact_reference_logit_ties_are_equivalent() -> None:
@@ -3386,7 +3386,7 @@ def test_mcq_exact_reference_logit_ties_are_equivalent() -> None:
             }
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {
                 "sample_id": "tie",
@@ -3397,7 +3397,7 @@ def test_mcq_exact_reference_logit_ties_are_equivalent() -> None:
     }
 
     summary = validation_engine.compare_prediction_sets(
-        hf, trtfb, answers, scorer="mcq"
+        hf, bundle, answers, scorer="mcq"
     )
     gate = validation_engine.prediction_agreement_gate_result(
         summary,
@@ -3408,10 +3408,10 @@ def test_mcq_exact_reference_logit_ties_are_equivalent() -> None:
     )
 
     assert summary["hf"]["overall_accuracy"] == 1.0
-    assert summary["trtfb"]["overall_accuracy"] == 0.0
+    assert summary["bundle"]["overall_accuracy"] == 0.0
     assert summary["prediction_agreement_rate"] == 1.0
     assert summary["reference_tie_equivalent_count"] == 1
-    assert summary["tie_adjusted_accuracy_delta_trtfb_minus_hf"] == 0.0
+    assert summary["tie_adjusted_accuracy_delta_bundle_minus_hf"] == 0.0
     assert gate["status"] == "passed"
     assert gate["accuracy_drop_from_hf"] == 0.0
 
@@ -3429,11 +3429,11 @@ def test_gpt_oss_harmony_parser_rejects_control_only_predictions() -> None:
 def test_required_valid_prediction_does_not_agree_on_empty_outputs() -> None:
     answers = {"requests": [{"answer": "A", "subject": "test"}]}
     hf = {"responses": [{"sample_id": "one", "output_text": "<|channel|>"}]}
-    trtfb = {"responses": [{"sample_id": "one", "output_text": "\n\n"}]}
+    bundle = {"responses": [{"sample_id": "one", "output_text": "\n\n"}]}
 
     summary = validation_engine.compare_prediction_sets(
         hf,
-        trtfb,
+        bundle,
         answers,
         answer_parser="gpt_oss_harmony_final_mcq",
         require_valid_prediction=True,
@@ -3441,9 +3441,9 @@ def test_required_valid_prediction_does_not_agree_on_empty_outputs() -> None:
 
     assert summary["prediction_agreement_rate"] == 0.0
     assert summary["hf"]["valid_prediction_count"] == 0
-    assert summary["trtfb"]["valid_prediction_count"] == 0
+    assert summary["bundle"]["valid_prediction_count"] == 0
     assert summary["disagreements"][0]["hf_prediction"] == ""
-    assert summary["disagreements"][0]["trtfb_prediction"] == ""
+    assert summary["disagreements"][0]["bundle_prediction"] == ""
 
 
 def test_score_predictions_parses_vlm_a_to_j_choices() -> None:
@@ -3540,8 +3540,8 @@ def test_tts_intelligibility_fails_wrong_or_missing_audio(tmp_path: Path) -> Non
 def test_tts_disagreement_reports_full_normalized_transcripts(tmp_path: Path) -> None:
     reference_wav = tmp_path / "reference.wav"
     hf_wav = tmp_path / "hf.wav"
-    trtfb_wav = tmp_path / "trtfb.wav"
-    for wav_path in (reference_wav, hf_wav, trtfb_wav):
+    bundle_wav = tmp_path / "bundle.wav"
+    for wav_path in (reference_wav, hf_wav, bundle_wav):
         _write_pcm_wav(wav_path)
     answers = {
         "requests": [
@@ -3560,22 +3560,22 @@ def test_tts_disagreement_reports_full_normalized_transcripts(tmp_path: Path) ->
             }
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {
                 "sample_id": "seedtts-1",
                 "output_text": "I am never more aware of other rooms.",
-                "wav_path": str(trtfb_wav),
+                "wav_path": str(bundle_wav),
             }
         ]
     }
 
-    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers, scorer="tts_intelligibility")
+    summary = validation_engine.compare_prediction_sets(hf, bundle, answers, scorer="tts_intelligibility")
 
     assert summary["disagreements"][0]["hf_prediction"] == (
         "i m never more aware of a room s acoustics"
     )
-    assert summary["disagreements"][0]["trtfb_prediction"] == (
+    assert summary["disagreements"][0]["bundle_prediction"] == (
         "i am never more aware of other rooms"
     )
 
@@ -3584,7 +3584,7 @@ def test_tts_intelligibility_gate_rejects_reference_pass_rate_drop() -> None:
     result = validation_engine.tts_intelligibility_gate_result(
         {
             "hf": {"overall_accuracy": 1.0},
-            "trtfb": {"overall_accuracy": 1.0 / 3.0},
+            "bundle": {"overall_accuracy": 1.0 / 3.0},
             "correctness_agreement_rate": 1.0 / 3.0,
         },
         {
@@ -3602,7 +3602,7 @@ def test_tts_intelligibility_gate_accepts_matching_correctness() -> None:
     result = validation_engine.tts_intelligibility_gate_result(
         {
             "hf": {"overall_accuracy": 1.0},
-            "trtfb": {"overall_accuracy": 1.0},
+            "bundle": {"overall_accuracy": 1.0},
             "correctness_agreement_rate": 1.0,
         },
         {
@@ -3614,7 +3614,7 @@ def test_tts_intelligibility_gate_accepts_matching_correctness() -> None:
     assert result["status"] == "passed"
 
 
-def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypatch) -> None:
+def test_run_tts_bundle_generates_audio_and_batches_asr(tmp_path: Path, monkeypatch) -> None:
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()
     _write_seedtts(dataset)
@@ -3656,7 +3656,7 @@ def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypat
         predictions="",
         log="",
         max_new_tokens=None,
-        bundle="model.trtfb",
+        bundle="model.bundle",
         trtmc_binary="build/trtmc",
         hf_python="",
         backend_dir="",
@@ -3665,13 +3665,13 @@ def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypat
         cuda_visible_devices="",
     )
 
-    validation_engine.run_tts_trtfb(args)
+    validation_engine.run_tts_bundle(args)
 
-    assert commands[0][:3] == ["build/trtmc", "generate-audio", "model.trtfb"]
+    assert commands[0][:3] == ["build/trtmc", "generate-audio", "model.bundle"]
     assert commands[0][commands[0].index("--max-new-tokens") + 1] == "12"
     assert "audio_magpie.seed=42" in commands[0]
     assert "audio_bark.seed=42" in commands[0]
-    predictions = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+    predictions = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
     assert predictions["responses"][0]["output_text"] == "The test sentence."
     assert Path(predictions["responses"][0]["wav_path"]).is_file()
 
@@ -3806,23 +3806,23 @@ def test_ocrbench_v2_agreement_uses_correctness_not_text_match() -> None:
             {"sample_id": "hf_correct", "output_text": "Facebook"},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "both_wrong", "output_text": "yyy"},
             {"sample_id": "hf_correct", "output_text": "Instagram"},
         ]
     }
 
-    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers, scorer="ocrbench_v2")
+    summary = validation_engine.compare_prediction_sets(hf, bundle, answers, scorer="ocrbench_v2")
 
     assert summary["prediction_agreement_rate"] == 0.5
     assert summary["agreement_count"] == 1
     assert summary["buckets"]["both_wrong"] == 1
-    assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+    assert summary["buckets"]["hf_correct_bundle_wrong"] == 1
     assert len(summary["disagreements"]) == 1
     assert summary["disagreements"][0]["sample_id"] == "hf_correct"
     assert summary["disagreements"][0]["hf_correct"] is True
-    assert summary["disagreements"][0]["trtfb_correct"] is False
+    assert summary["disagreements"][0]["bundle_correct"] is False
 
 
 def test_asr_transcript_scorer_reports_wer_cer_and_exact_rate() -> None:
@@ -3905,14 +3905,14 @@ def test_asr_transcript_agreement_uses_direct_transcript_similarity() -> None:
             {"sample_id": "hf_correct", "output_text": "gamma delta"},
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {"sample_id": "same_correctness", "output_text": "alpha, beta."},
             {"sample_id": "hf_correct", "output_text": "totally wrong"},
         ]
     }
 
-    summary = validation_engine.compare_prediction_sets(hf, trtfb, answers, scorer="asr_transcript")
+    summary = validation_engine.compare_prediction_sets(hf, bundle, answers, scorer="asr_transcript")
 
     expected_similarity = (
         1.0
@@ -3924,9 +3924,9 @@ def test_asr_transcript_agreement_uses_direct_transcript_similarity() -> None:
     assert summary["correctness_agreement_rate"] == 0.5
     assert summary["agreement_count"] == 1
     assert summary["buckets"]["both_correct"] == 1
-    assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+    assert summary["buckets"]["hf_correct_bundle_wrong"] == 1
     assert summary["disagreements"][0]["hf_prediction"] == "gamma delta"
-    assert summary["disagreements"][0]["trtfb_prediction"] == "totally wrong"
+    assert summary["disagreements"][0]["bundle_prediction"] == "totally wrong"
     assert summary["asr_parity_samples"][0]["transcript_similarity"] == 1.0
 
 
@@ -3936,7 +3936,7 @@ def test_selected_models_for_suite_accepts_manifest_name() -> None:
         {
             "name": "decoder-chat",
             "hf_id": "example-org/decoder-chat",
-            "bundle": "decoder-chat.trtfb",
+            "bundle": "decoder-chat.bundle",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
@@ -4001,7 +4001,7 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
         {
             "name": "decoder-waived",
             "hf_id": "example-org/decoder-waived",
-            "bundle": "decoder-waived.trtfb",
+            "bundle": "decoder-waived.bundle",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
@@ -4015,7 +4015,7 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
         {
             "name": "decoder-active",
             "hf_id": "example-org/decoder-active",
-            "bundle": "decoder-active.trtfb",
+            "bundle": "decoder-active.bundle",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
             "task_strategy": "text_generation_causal",
             "reference_family": "chat_instruct_template",
@@ -4068,7 +4068,7 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
     cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
-        bundle_path=tmp_path / "case.trtfb",
+        bundle_path=tmp_path / "case.bundle",
         extra_build_args=["--verbose"],
     )
 
@@ -4097,7 +4097,7 @@ def test_build_bundle_command_passes_manifest_hf_revision(tmp_path: Path) -> Non
     cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
-        bundle_path=tmp_path / "case.trtfb",
+        bundle_path=tmp_path / "case.bundle",
     )
 
     assert cmd[cmd.index("--model-revision") : cmd.index("--model-revision") + 2] == [
@@ -4119,7 +4119,7 @@ def test_build_bundle_command_passes_manifest_fp32_layers(tmp_path: Path) -> Non
     cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
-        bundle_path=tmp_path / "case.trtfb",
+        bundle_path=tmp_path / "case.bundle",
     )
 
     idx = cmd.index("--fp32-layers")
@@ -4137,7 +4137,7 @@ def test_build_bundle_command_omits_fp32_layers_when_absent(tmp_path: Path) -> N
     cmd = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
-        bundle_path=tmp_path / "case.trtfb",
+        bundle_path=tmp_path / "case.bundle",
     )
 
     assert "--fp32-layers" not in cmd
@@ -4147,7 +4147,7 @@ def test_ensure_bundle_replaces_existing_file_before_build(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     bundle.parent.mkdir()
     bundle.write_bytes(b"old")
 
@@ -4183,7 +4183,7 @@ def test_ensure_bundle_applies_selected_cuda_device_to_build(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     captured: dict[str, str] = {}
 
     class Result:
@@ -4216,7 +4216,7 @@ def test_ensure_bundle_reuses_matching_source_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     revision = "a" * 40
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     _write_bundle_config(bundle, {"source_revision": revision})
     monkeypatch.setattr(
         validation_engine,
@@ -4250,7 +4250,7 @@ def test_ensure_bundle_rebuilds_mismatched_source_revision_with_expected_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected_revision = "a" * 40
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     _write_bundle_config(bundle, {"source_revision": "b" * 40})
     monkeypatch.setattr(
         validation_engine,
@@ -4289,7 +4289,7 @@ def test_source_bound_bundle_preserves_existing_file_without_replace_authority(
 ) -> None:
     expected_revision = "a" * 40
     existing_revision = "b" * 40
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     _write_bundle_config(bundle, {"source_revision": existing_revision})
     monkeypatch.setattr(
         validation_engine,
@@ -4325,7 +4325,7 @@ def test_ensure_bundle_rejects_wrong_source_revision_after_build(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected_revision = "a" * 40
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
 
     def fake_run(command, **kwargs):
         assert kwargs["env"]["TRTMC_ENGINE_BUILD_REVISION"] == expected_revision
@@ -4357,7 +4357,7 @@ def test_ensure_bundle_removes_partial_replacement_after_failed_build(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     bundle.parent.mkdir()
     bundle.write_bytes(b"old")
 
@@ -4390,9 +4390,9 @@ def test_ensure_bundle_replaces_dangling_shared_bundle_symlink(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     bundle.parent.mkdir()
-    bundle.symlink_to(tmp_path / "missing.trtfb")
+    bundle.symlink_to(tmp_path / "missing.bundle")
 
     class Result:
         returncode = 0
@@ -4424,7 +4424,7 @@ def test_ensure_bundle_replaces_incompatible_tensorrt_abi(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     bundle.parent.mkdir()
     bundle.write_bytes(b"old")
     commands: list[list[str]] = []
@@ -4466,7 +4466,7 @@ def test_ensure_bundle_replaces_mismatched_precision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle = tmp_path / "shared" / "model.bundle"
     bundle.parent.mkdir()
     bundle.write_bytes(b"fp16")
     commands: list[list[str]] = []
@@ -4590,7 +4590,7 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
         "name": "decoder-small",
         "hf_id": "example-org/decoder-small",
         "hf_revision": "0123456789abcdef",
-        "bundle": "decoder-small.trtfb",
+        "bundle": "decoder-small.bundle",
         "max_cache_length": 256,
         "precision": "fp16",
         "trust_remote_code": False,
@@ -4622,9 +4622,9 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
         bundle.write_bytes(b"bundle")
         return bundle, True
 
-    def fake_run_trtfb(args):
+    def fake_run_bundle(args):
         validation_engine.write_predictions(
-            Path(args.work_dir) / "trtfb_predictions.json", responses
+            Path(args.work_dir) / "bundle_predictions.json", responses
         )
 
     def fake_max_prompt_token_length(**kwargs):
@@ -4640,7 +4640,7 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
         validation_engine, "run_hf_reference_subprocess", fake_run_hf
     )
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "run_bundle", fake_run_bundle)
     monkeypatch.setattr(
         validation_engine,
         "validate_text_input_token_contract",
@@ -5051,7 +5051,7 @@ def test_personaplex_behavior_suite_owns_precision_outside_ci_manifest() -> None
     command = validation_engine.build_bundle_command(
         resolved,
         trtmc_binary="/runtime/trtmc",
-        bundle_path=Path("/runs/engines/personaplex-7b.trtfb"),
+        bundle_path=Path("/runs/engines/personaplex-7b.bundle"),
         max_cache_length=1280,
     )
     assert command[command.index("--precision") + 1] == "bf16"
@@ -5338,7 +5338,7 @@ def test_text_input_contract_reports_first_token_mismatch(
         validation_engine.validate_text_input_token_contract(
             model={"name": "opt-125m", "hf_id": "facebook/opt-125m"},
             work_dir=work_dir,
-            bundle_path=tmp_path / "opt-125m.trtfb",
+            bundle_path=tmp_path / "opt-125m.bundle",
             local_files_only=True,
             trust_remote_code=False,
         )
@@ -5388,7 +5388,7 @@ def test_text_input_contract_records_aligned_token_digests(
     validation_engine.validate_text_input_token_contract(
         model={"name": "decoder", "hf_id": "org/decoder"},
         work_dir=work_dir,
-        bundle_path=tmp_path / "decoder.trtfb",
+        bundle_path=tmp_path / "decoder.bundle",
         local_files_only=True,
         trust_remote_code=False,
     )
@@ -5615,7 +5615,7 @@ def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
         runtime_strategy="diffusion_flux",
         task_strategy="diffusion_media_generation",
         reference_backend="hf_diffusers",
-        bundle="flux-schnell-l0.trtfb",
+        bundle="flux-schnell-l0.bundle",
         inputs={},
     )
     monkeypatch.setattr(
@@ -5658,7 +5658,7 @@ def test_captured_utf8_subprocess_replaces_invalid_native_output() -> None:
     assert result.stderr == "warning:\ufffd"
 
 
-def test_run_trtfb_dispatches_diffusion_prompt_workdir(
+def test_run_bundle_dispatches_diffusion_prompt_workdir(
     tmp_path: Path, monkeypatch
 ) -> None:
     work_dir = tmp_path / "work"
@@ -5673,10 +5673,10 @@ def test_run_trtfb_dispatches_diffusion_prompt_workdir(
         calls.append("diffusion")
 
     monkeypatch.setattr(
-        validation_engine, "run_diffusion_trtfb", fake_diffusion, raising=False
+        validation_engine, "run_diffusion_bundle", fake_diffusion, raising=False
     )
 
-    validation_engine.run_trtfb(argparse.Namespace(work_dir=str(work_dir)))
+    validation_engine.run_bundle(argparse.Namespace(work_dir=str(work_dir)))
 
     assert calls == ["diffusion"]
 
@@ -5686,9 +5686,9 @@ def test_dataset_benchmark_reproduction_is_direct_and_uses_single_input(
 ) -> None:
     command = [
         "/workspace/build/trtmc_dataset_benchmark",
-        "/runs/engines/model.trtfb",
+        "/runs/engines/model.bundle",
         "/runs/work/prompts.jsonl",
-        "/runs/work/trtfb_raw.jsonl",
+        "/runs/work/bundle_raw.jsonl",
         "--max-new-tokens",
         "8",
     ]
@@ -5696,7 +5696,7 @@ def test_dataset_benchmark_reproduction_is_direct_and_uses_single_input(
     validation_engine._write_dataset_benchmark_reproduction(tmp_path, command)
 
     payload = json.loads(
-        (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
+        (tmp_path / "bundle_repro.json").read_text(encoding="utf-8")
     )
     assert payload["backend"] == "trtmc_dataset_benchmark"
     assert payload["command"][0] == "/workspace/build/trtmc_dataset_benchmark"
@@ -5710,9 +5710,9 @@ def test_dataset_benchmark_reproduction_preserves_per_sample_seed(
 ) -> None:
     command = [
         "/workspace/build/trtmc_dataset_benchmark",
-        "/runs/engines/model.trtfb",
+        "/runs/engines/model.bundle",
         "/runs/work/prompts.jsonl",
-        "/runs/work/trtfb_raw.jsonl",
+        "/runs/work/bundle_raw.jsonl",
         "--seed",
         "42",
     ]
@@ -5720,7 +5720,7 @@ def test_dataset_benchmark_reproduction_preserves_per_sample_seed(
     validation_engine._write_dataset_benchmark_reproduction(tmp_path, command)
 
     payload = json.loads(
-        (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
+        (tmp_path / "bundle_repro.json").read_text(encoding="utf-8")
     )
     assert payload["base_seed"] == 42
     assert payload["command"][payload["command"].index("--seed") + 1] == (
@@ -5738,7 +5738,7 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
                 "command": [
                     "/workspace/build/trtmc",
                     "run",
-                    "/runs/engines/model.trtfb",
+                    "/runs/engines/model.bundle",
                     "--prompt",
                     "hello",
                 ]
@@ -5753,13 +5753,13 @@ def test_native_trtmc_command_recorder_extracts_nested_model_command(
     )
 
     row = json.loads(
-        (tmp_path / "trtfb_native_commands.jsonl").read_text(encoding="utf-8")
+        (tmp_path / "bundle_native_commands.jsonl").read_text(encoding="utf-8")
     )
     assert row["sample_id"] == "sample-7"
     assert row["command"][0:2] == ["/workspace/build/trtmc", "run"]
     assert "validation_engine.py" not in " ".join(row["command"])
 
-def test_run_diffusion_trtfb_writes_image_artifact_predictions(
+def test_run_diffusion_bundle_writes_image_artifact_predictions(
     tmp_path: Path, monkeypatch
 ) -> None:
     from tests.e2e_harness.contracts import E2ECase, StageOutput
@@ -5796,7 +5796,7 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
                     "command": [
                         "build/trtmc",
                         "generate-video",
-                        str(tmp_path / "bundles" / "flux-schnell-l0.trtfb"),
+                        str(tmp_path / "bundles" / "flux-schnell-l0.bundle"),
                         "--prompt",
                         case.inputs["prompt"],
                     ]
@@ -5811,7 +5811,7 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
         runtime_strategy="diffusion_flux",
         task_strategy="diffusion_media_generation",
         reference_backend="hf_diffusers",
-        bundle="flux-schnell-l0.trtfb",
+        bundle="flux-schnell-l0.bundle",
         inputs={},
     )
     monkeypatch.setattr(
@@ -5820,22 +5820,22 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
         lambda _work_dir: (template, object(), FakeRunner()),
     )
 
-    validation_engine.run_diffusion_trtfb(argparse.Namespace(
+    validation_engine.run_diffusion_bundle(argparse.Namespace(
         work_dir=str(work_dir),
-        bundle=str(tmp_path / "bundles" / "flux-schnell-l0.trtfb"),
+        bundle=str(tmp_path / "bundles" / "flux-schnell-l0.bundle"),
         trtmc_binary="build/trtmc",
         hf_python="/opt/venv/bin/python",
-        predictions="trtfb_predictions.json",
-        raw_output="trtfb_raw.jsonl",
+        predictions="bundle_predictions.json",
+        raw_output="bundle_raw.jsonl",
     ))
 
-    predictions = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
-    assert seen == [("a red cube", "build/trtmc", "flux-schnell-l0.trtfb")]
-    assert predictions["responses"][0]["source"] == "trtfb"
+    predictions = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
+    assert seen == [("a red cube", "build/trtmc", "flux-schnell-l0.bundle")]
+    assert predictions["responses"][0]["source"] == "bundle"
     assert predictions["responses"][0]["num_frames"] == 1
-    assert (work_dir / "trtfb_run.log").read_text(encoding="utf-8") == (
+    assert (work_dir / "bundle_run.log").read_text(encoding="utf-8") == (
         "$ build/trtmc generate-video "
-        f"{tmp_path / 'bundles' / 'flux-schnell-l0.trtfb'} "
+        f"{tmp_path / 'bundles' / 'flux-schnell-l0.bundle'} "
         "--prompt 'a red cube'\n"
     )
 
@@ -6409,7 +6409,7 @@ def test_eval_one_model_passes_model_manifest_to_diffusion_prepare(
         "name": "flux-schnell-l0",
         "manifest": "tests/e2e/models/flux/manifests/flux-schnell-l0.json",
         "hf_id": "black-forest-labs/FLUX.1-schnell",
-        "bundle": "flux-schnell-l0.trtfb",
+        "bundle": "flux-schnell-l0.bundle",
         "family": "flux",
         "task_eval": {},
     }
@@ -6458,7 +6458,7 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
         "name": "minimax-h3-768p",
         "manifest": "tests/e2e/models/minimax_h3/manifests/minimax-h3-768p.json",
         "hf_id": "MiniMaxAI/MiniMax-H3",
-        "bundle": "minimax-h3-768p.trtfb",
+        "bundle": "minimax-h3-768p.bundle",
         "family": "minimax_h3",
         "task_eval": {},
     }
@@ -6505,7 +6505,7 @@ def test_flux_validation_build_command_preserves_diffusion_shape(tmp_path: Path)
     command = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
-        bundle_path=tmp_path / "flux-schnell-l0.trtfb",
+        bundle_path=tmp_path / "flux-schnell-l0.bundle",
     )
 
     assert command[command.index("--image-height") + 1] == "384"
@@ -6524,7 +6524,7 @@ def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> N
     command = validation_engine.build_bundle_command(
         model,
         trtmc_binary="build/trtmc",
-        bundle_path=tmp_path / "flux-2-dev-fp8.trtfb",
+        bundle_path=tmp_path / "flux-2-dev-fp8.bundle",
     )
 
     scales = Path(command[command.index("--fp8-scales") + 1])
@@ -6563,7 +6563,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
         return kwargs["bundle_path"], True
 
     def fake_trt(args):
-        validation_engine.write_predictions(Path(args.work_dir) / "trtfb_predictions.json", [{
+        validation_engine.write_predictions(Path(args.work_dir) / "bundle_predictions.json", [{
             "sample_id": "dpg_bench_000000", "returncode": 0, "num_frames": 1
         }])
 
@@ -6586,7 +6586,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
 
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_bundle)
-    monkeypatch.setattr(validation_engine, "run_trtfb", fake_trt)
+    monkeypatch.setattr(validation_engine, "run_bundle", fake_trt)
     monkeypatch.setattr(validation_engine, "compare_diffusion_image_predictions", fake_compare)
     monkeypatch.setattr(
         validation_engine,
@@ -6639,7 +6639,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
     assert result["bundle_built"] is True
 
 
-def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch) -> None:
+def test_run_asr_bundle_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     (work_dir / "manifest.json").write_text(
@@ -6666,7 +6666,7 @@ def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
     args = argparse.Namespace(
         work_dir=str(work_dir),
-        bundle="bundle.trtfb",
+        bundle="bundle.bundle",
         trtmc_binary="build/trtmc",
         raw_output="",
         predictions="",
@@ -6676,20 +6676,20 @@ def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch)
         hf_python="",
     )
 
-    validation_engine.run_asr_trtfb(args)
+    validation_engine.run_asr_bundle(args)
 
     assert commands == [
         [
             "build/trtmc",
             "transcribe",
-            "bundle.trtfb",
+            "bundle.bundle",
             "--audio",
             str(audio_path),
             "--max-new-tokens",
             "32",
         ]
     ]
-    predictions = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+    predictions = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
     assert predictions["responses"][0]["output_text"] == "Hello world"
     assert predictions["responses"][0]["generated_token_ids"] == [1, 2, 3]
 
@@ -6788,7 +6788,7 @@ def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> Non
     assert payload["responses"][0]["generated_token_ids"] == [1, 2]
 
 
-def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
+def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
     tmp_path: Path, monkeypatch
 ) -> None:
     dataset = tmp_path / "mmlu.json"
@@ -6797,7 +6797,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
     model = {
         "name": "decoder-small",
         "hf_id": "example-org/decoder-small",
-        "bundle": "decoder-small.trtfb",
+        "bundle": "decoder-small.bundle",
         "max_cache_length": 256,
         "precision": "fp32",
         "trust_remote_code": False,
@@ -6841,9 +6841,9 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
         bundle.write_bytes(b"bundle")
         return bundle, True
 
-    def fake_run_trtfb(args):
-        calls.append(f"trtfb-seed={args.seed}")
-        Path(args.work_dir, "trtfb_predictions.json").write_text(
+    def fake_run_bundle(args):
+        calls.append(f"bundle-seed={args.seed}")
+        Path(args.work_dir, "bundle_predictions.json").write_text(
             json.dumps(
                 {
                     "responses": [
@@ -6857,7 +6857,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
 
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "run_bundle", fake_run_bundle)
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -6900,14 +6900,14 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
 
     result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
-    assert calls == ["hf-cache", "build", "trtfb-seed=123"]
+    assert calls == ["hf-cache", "build", "bundle-seed=123"]
     assert result["hf_reused"] is True
     assert result["hf_cache_key"] == "abc123"
     assert result["bundle_built"] is True
     assert result["max_prompt_tokens"] == 405
     assert result["generation_cache_headroom"] == 1
     assert result["build_max_cache_length"] == 406
-    assert result["trtfb_accuracy"] == 0.5
+    assert result["bundle_accuracy"] == 0.5
     assert result["prediction_agreement_rate"] == 0.5
     assert result["status"] == "failed"
     assert result["error_type"] == "BenchmarkGateError"
@@ -6937,7 +6937,7 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
     model = {
         "name": "vl-primary",
         "hf_id": "example-org/vl-primary",
-        "bundle": "vl-primary.trtfb",
+        "bundle": "vl-primary.bundle",
         "max_cache_length": 512,
         "precision": "fp32",
         "trust_remote_code": False,
@@ -6969,18 +6969,18 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
         bundle.write_bytes(b"bundle")
         return bundle, True
 
-    def fake_run_trtfb(args):
-        calls.append("trtfb")
+    def fake_run_bundle(args):
+        calls.append("bundle")
         prompts = validation_engine.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
         assert prompts[0]["images"] == [str(dataset_dir / "images" / "sample.jpg")]
-        Path(args.work_dir, "trtfb_predictions.json").write_text(
+        Path(args.work_dir, "bundle_predictions.json").write_text(
             json.dumps({"responses": [{"sample_id": "test_case_1", "output_text": "Answer: J"}]}),
             encoding="utf-8",
         )
 
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "run_bundle", fake_run_bundle)
     monkeypatch.setattr(validation_engine, "max_prompt_token_length", lambda **_kwargs: 128)
 
     args = argparse.Namespace(
@@ -7024,8 +7024,8 @@ def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, m
 
     result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
-    assert calls == ["hf", "build", "trtfb"]
-    assert result["trtfb_accuracy"] == 1.0
+    assert calls == ["hf", "build", "bundle"]
+    assert result["bundle_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
     assert result["status"] == "passed"
     assert result["gate_failures"] == []
@@ -7035,7 +7035,7 @@ def test_prediction_agreement_gate_reports_accuracy_drop() -> None:
     result = validation_engine.prediction_agreement_gate_result(
         {
             "hf": {"overall_accuracy": 0.8},
-            "trtfb": {"overall_accuracy": 0.6},
+            "bundle": {"overall_accuracy": 0.6},
             "prediction_agreement_rate": 1.0,
         },
         {
@@ -7067,7 +7067,7 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
     model = {
         "name": "whisper-tiny-fp16",
         "hf_id": "openai/whisper-tiny",
-        "bundle": "whisper-tiny-fp16.trtfb",
+        "bundle": "whisper-tiny-fp16.bundle",
         "max_cache_length": 64,
         "precision": "fp16",
         "trust_remote_code": False,
@@ -7098,11 +7098,11 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
         bundle.write_bytes(b"bundle")
         return bundle, True
 
-    def fake_run_trtfb(args):
-        calls.append("trtfb")
+    def fake_run_bundle(args):
+        calls.append("bundle")
         prompts = validation_engine.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
         assert prompts[0]["audio"].endswith("clean_000000.wav")
-        Path(args.work_dir, "trtfb_predictions.json").write_text(
+        Path(args.work_dir, "bundle_predictions.json").write_text(
             json.dumps(
                 {"responses": [{"sample_id": "clean_000000", "output_text": "the quick brown fox"}]}
             ),
@@ -7112,7 +7112,7 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
     monkeypatch.setattr(validation_engine, "max_prompt_token_length", fake_prompt_length)
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "run_bundle", fake_run_bundle)
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -7155,11 +7155,11 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
 
     result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
-    assert calls == ["hf", "build", "trtfb"]
+    assert calls == ["hf", "build", "bundle"]
     assert result["mode"] == "asr_transcript"
     assert result["max_prompt_tokens"] is None
     assert result["hf_accuracy"] == 1.0
-    assert result["trtfb_accuracy"] == 1.0
+    assert result["bundle_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
     assert result["status"] == "passed"
     assert result["gates"] == {
@@ -7177,7 +7177,7 @@ def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, mo
     model = {
         "name": "deepseek-ocr-l0",
         "hf_id": "deepseek-ai/DeepSeek-OCR-2",
-        "bundle": "deepseek-ocr-l0.trtfb",
+        "bundle": "deepseek-ocr-l0.bundle",
         "max_cache_length": 4096,
         "precision": "fp32",
         "trust_remote_code": True,
@@ -7201,18 +7201,18 @@ def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, mo
         bundle.write_bytes(b"bundle")
         return bundle, True
 
-    def fake_run_trtfb(args):
-        calls.append("trtfb")
+    def fake_run_bundle(args):
+        calls.append("bundle")
         prompts = validation_engine.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
         assert prompts[0]["images"] == [str(dataset_dir / "images" / "ocrbench_v2_000000.jpg")]
-        Path(args.work_dir, "trtfb_predictions.json").write_text(
+        Path(args.work_dir, "bundle_predictions.json").write_text(
             json.dumps({"responses": [{"sample_id": "ocrbench_v2_000000", "output_text": "on"}]}),
             encoding="utf-8",
         )
 
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
-    monkeypatch.setattr(validation_engine, "run_trtfb", fake_run_trtfb)
+    monkeypatch.setattr(validation_engine, "run_bundle", fake_run_bundle)
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -7255,20 +7255,20 @@ def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, mo
 
     result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
-    assert calls == ["hf", "build", "trtfb"]
+    assert calls == ["hf", "build", "bundle"]
     assert result["mode"] == "ocrbench_v2"
     assert result["hf_reference_status"] == "ran"
     assert result["hf_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
-    assert result["trtfb_accuracy"] == 1.0
+    assert result["bundle_accuracy"] == 1.0
     assert (tmp_path / "work" / suite["id"] / model["name"] / "hf_predictions.json").is_file()
 
 
 def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -> None:
     suite = {"id": "mmlu_five_shot_mcq", "dataset": {"kind": "mmlu_five_shot_json"}}
     models = [
-        {"name": "gated", "hf_id": "org/gated", "bundle": "gated.trtfb"},
-        {"name": "ok", "hf_id": "org/ok", "bundle": "ok.trtfb"},
+        {"name": "gated", "hf_id": "org/gated", "bundle": "gated.bundle"},
+        {"name": "ok", "hf_id": "org/ok", "bundle": "ok.bundle"},
     ]
 
     monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
@@ -7287,9 +7287,9 @@ def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -
             "model": "ok",
             "hf_id": "org/ok",
             "work_dir": str(tmp_path / "work" / suite["id"] / "ok"),
-            "bundle": str(tmp_path / "bundles" / "ok.trtfb"),
+            "bundle": str(tmp_path / "bundles" / "ok.bundle"),
             "hf_accuracy": 1.0,
-            "trtfb_accuracy": 1.0,
+            "bundle_accuracy": 1.0,
             "prediction_agreement_rate": 1.0,
             "hf_reused": False,
             "bundle_built": True,
@@ -7332,7 +7332,7 @@ def test_eval_preserves_failed_diffusion_gate_status(tmp_path: Path, monkeypatch
         "id": "dpg_bench_diffusion_image",
         "dataset": {"kind": "diffusion_prompt_tsv"},
     }
-    model = {"name": "pixart", "hf_id": "org/pixart", "bundle": "pixart.trtfb"}
+    model = {"name": "pixart", "hf_id": "org/pixart", "bundle": "pixart.bundle"}
     monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
     monkeypatch.setattr(validation_engine, "load_manifest_records", lambda *_args, **_kwargs: [model])
     monkeypatch.setattr(
@@ -7401,7 +7401,7 @@ def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> Non
     model = {
         "name": "reranker",
         "hf_id": "org/reranker",
-        "bundle": "reranker.trtfb",
+        "bundle": "reranker.bundle",
     }
     monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
     monkeypatch.setattr(validation_engine, "load_manifest_records", lambda *_args, **_kwargs: [model])
@@ -7451,7 +7451,7 @@ def test_eval_accepts_model_plugin_dataset_kind(tmp_path: Path, monkeypatch) -> 
     model = {
         "name": "lance",
         "hf_id": "org/lance",
-        "bundle": "lance.trtfb",
+        "bundle": "lance.bundle",
     }
     monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
     monkeypatch.setattr(validation_engine, "load_manifest_records", lambda *_args, **_kwargs: [model])
@@ -7498,8 +7498,8 @@ def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
 ) -> None:
     suite = {"id": "mmlu_five_shot_mcq", "dataset": {"kind": "mmlu_five_shot_json"}}
     models = [
-        {"name": "oom", "hf_id": "org/oom", "bundle": "oom.trtfb"},
-        {"name": "next", "hf_id": "org/next", "bundle": "next.trtfb"},
+        {"name": "oom", "hf_id": "org/oom", "bundle": "oom.bundle"},
+        {"name": "next", "hf_id": "org/next", "bundle": "next.bundle"},
     ]
 
     monkeypatch.setattr(validation_engine, "load_suites", lambda *_args, **_kwargs: [suite])
@@ -7687,7 +7687,7 @@ def test_diffusion_text_runner_replaces_e2e_replay_with_hf_shared_inputs(
     (shared_dir / "sampling_steps.f32").write_bytes(b"steps")
     template = SimpleNamespace(
         name="template",
-        bundle="template.trtfb",
+        bundle="template.bundle",
         inputs={
             "elf_replay_artifact": "fixed-replay.json",
             "condition_latents_raw": "fixed-condition.f32",
@@ -7712,12 +7712,12 @@ def test_diffusion_text_runner_replaces_e2e_replay_with_hf_shared_inputs(
         lambda _work_dir: (template, FakeRunner()),
     )
 
-    validation_engine.run_diffusion_text_trtfb(
+    validation_engine.run_diffusion_text_bundle(
         SimpleNamespace(
             work_dir=str(work_dir),
             raw_output="",
             predictions="",
-            bundle=str(tmp_path / "elf.trtfb"),
+            bundle=str(tmp_path / "elf.bundle"),
             trtmc_binary="trtmc",
             hf_python="python",
             model_plugin_dir="",
@@ -7808,7 +7808,7 @@ def test_continuation_translation_reports_bleu_without_gating_task_quality(
             }
         ]
     }
-    trtfb = {
+    bundle = {
         "responses": [
             {
                 "sample_id": "translation_0",
@@ -7834,13 +7834,13 @@ def test_continuation_translation_reports_bleu_without_gating_task_quality(
     )
 
     diagnostics = validation_engine.continuation_task_quality_diagnostics(
-        "sacrebleu", hf, trtfb, answers
+        "sacrebleu", hf, bundle, answers
     )
 
     assert diagnostics["hf_corpus_bleu"] == 42.0
-    assert diagnostics["trtfb_corpus_bleu"] == 37.5
+    assert diagnostics["bundle_corpus_bleu"] == 37.5
     assert diagnostics["corpus_bleu_abs_delta"] == 4.5
-    assert validation_engine.continuation_task_quality_diagnostics("", hf, trtfb, answers) == {}
+    assert validation_engine.continuation_task_quality_diagnostics("", hf, bundle, answers) == {}
 
 
 def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:
@@ -7943,18 +7943,18 @@ def test_diffusion_text_hf_parity_requires_token_ids() -> None:
     [
         (
             "sacrebleu",
-            {"hf_corpus_bleu": 26.4, "trtfb_corpus_bleu": 26.1},
+            {"hf_corpus_bleu": 26.4, "bundle_corpus_bleu": 26.1},
             {"corpus_bleu_abs_delta": pytest.approx(0.3)},
         ),
         (
             "rouge",
             {
                 "hf_rouge1": 0.36,
-                "trtfb_rouge1": 0.355,
+                "bundle_rouge1": 0.355,
                 "hf_rouge2": 0.122,
-                "trtfb_rouge2": 0.120,
+                "bundle_rouge2": 0.120,
                 "hf_rouge_l": 0.278,
-                "trtfb_rouge_l": 0.281,
+                "bundle_rouge_l": 0.281,
             },
             {
                 "rouge1_abs_delta": pytest.approx(0.005),
@@ -7966,9 +7966,9 @@ def test_diffusion_text_hf_parity_requires_token_ids() -> None:
             "unconditional_text_quality",
             {
                 "hf_generation_ppl": 24.2,
-                "trtfb_generation_ppl": 23.9,
+                "bundle_generation_ppl": 23.9,
                 "hf_unigram_entropy": 5.12,
-                "trtfb_unigram_entropy": 5.10,
+                "bundle_unigram_entropy": 5.10,
             },
             {
                 "generation_ppl_abs_delta": pytest.approx(0.3),
@@ -8145,7 +8145,7 @@ def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
             "status": "passed",
             "sample_agreement_rate": 1.0,
             "work_dir": "/private/runner/work",
-            "bundle": "/private/runner/engine.trtfb",
+            "bundle": "/private/runner/engine.bundle",
         },
         {"model": "timesfm", "status": "failed", "error": "/private/error"},
     ]

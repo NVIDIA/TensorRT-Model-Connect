@@ -56,7 +56,7 @@ def test_build_benchmark_command_expands_model_owned_template() -> None:
     mod = importlib.import_module("auto_perf_tune")
 
     cmd, metric, label = mod._build_bench_cmd(
-        "/tmp/model.trtfb",
+        "/tmp/model.bundle",
         prompt="unused for this command",
         max_tokens=32,
         gpu_argmax=True,
@@ -83,7 +83,7 @@ def test_build_benchmark_command_expands_model_owned_template() -> None:
     assert cmd == [
         "/tmp/build/trtmc",
         "custom-benchmark",
-        "/tmp/model.trtfb",
+        "/tmp/model.bundle",
         "--input",
         f"{mod.PROJECT_ROOT}/tests/fixtures/generic_input.bin",
         "--max-new-tokens",
@@ -102,7 +102,7 @@ def test_build_benchmark_command_rejects_unknown_placeholder() -> None:
 
     with pytest.raises(ValueError, match="Unknown benchmark command placeholder"):
         mod._build_bench_cmd(
-            "/tmp/model.trtfb",
+            "/tmp/model.bundle",
             prompt="hello",
             max_tokens=8,
             gpu_argmax=False,
@@ -186,7 +186,7 @@ def test_step_build_passes_untrusted_values_as_single_argv_tokens(
 
     assert mod.step_build(
         "org/model; touch /tmp/not-created",
-        "/tmp/output bundle.trtfb",
+        "/tmp/output bundle.bundle",
         precision="fp16",
         max_cache=512,
     )
@@ -195,7 +195,7 @@ def test_step_build_passes_untrusted_values_as_single_argv_tokens(
         "build",
         "org/model; touch /tmp/not-created",
         "-o",
-        "/tmp/output bundle.trtfb",
+        "/tmp/output bundle.bundle",
         "--max-cache-length",
         "512",
         "--precision",
@@ -216,7 +216,7 @@ def test_benchmark_passes_prompt_as_single_argv_token(
     monkeypatch.setattr(mod, "run_cmd", fake_run_cmd)
 
     value = mod.step_benchmark(
-        "/tmp/model.trtfb",
+        "/tmp/model.bundle",
         "hello; touch /tmp/not-created",
         max_tokens=10,
     )
@@ -240,7 +240,7 @@ def test_nsys_wraps_benchmark_argv_without_shell(
     monkeypatch.setattr(mod, "run_cmd", fake_run_cmd)
 
     result = mod.step_nsys_profile(
-        "/tmp/model.trtfb",
+        "/tmp/model.bundle",
         "hello; touch /tmp/not-created",
         "/tmp/profile output",
     )

@@ -99,7 +99,7 @@ Use tool tests when changing diff tools, report generation, performance comparis
 ## Runtime microbenchmark
 
 ```bash
-$TRTMC run Qwen3-0.6B.trtfb \
+$TRTMC run Qwen3-0.6B.bundle \
   --prompt "Benchmark prompt" \
   --max-new-tokens 64 \
   --benchmark 20 \
@@ -133,7 +133,7 @@ pipeline populates them, use the same benchmark command with a fixed prompt,
 warmup count, iteration count, and decoding flags:
 
 ```bash
-$TRTMC run Qwen3-0.6B.trtfb \
+$TRTMC run Qwen3-0.6B.bundle \
   --prompt "Benchmark prompt" \
   --max-new-tokens 64 \
   --greedy \

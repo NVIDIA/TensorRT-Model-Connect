@@ -1,11 +1,11 @@
 <!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
 <svg width="1168" height="617" role="img" aria-labelledby="architecture-bundle-layout-svg-title architecture-bundle-layout-svg-description" preserveAspectRatio="xMidYMid meet"
  viewBox="0.00 0.00 1168.00 617.00" xmlns="http://www.w3.org/2000/svg">
-<title id="architecture-bundle-layout-svg-title">Physical layout of a .trtfb bundle</title>
+<title id="architecture-bundle-layout-svg-title">Physical layout of a .bundle artifact</title>
 <desc id="architecture-bundle-layout-svg-description">A bundle begins with fixed magic and header-length fields, followed by a UTF-8 JSON header and contiguous binary payloads whose section table selects either native assets or optimized implementation artifacts.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 591.8)">
 <polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-591.8 1143.01,-591.8 1143.01,25.2 -25.2,25.2"/>
-<text xml:space="preserve" text-anchor="start" x="380.77" y="-538.4" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">model.trtfb physical layout</text>
+<text xml:space="preserve" text-anchor="start" x="362.87" y="-538.4" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">model.bundle physical layout</text>
 <text xml:space="preserve" text-anchor="start" x="287.63" y="-521.2" font-family="Arial" font-size="16.00" fill="#111827">The JSON section table indexes payload offsets relative to the payload area.</text>
 <g id="clust1" class="cluster">
 <title>cluster_file</title>
@@ -15,9 +15,9 @@
 <!-- magic -->
 <g id="node1" class="node">
 <title>magic</title>
-<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M378.86,-469C378.86,-469 275.39,-469 275.39,-469 269.39,-469 263.39,-463 263.39,-457 263.39,-457 263.39,-426.4 263.39,-426.4 263.39,-420.4 269.39,-414.4 275.39,-414.4 275.39,-414.4 378.86,-414.4 378.86,-414.4 384.86,-414.4 390.86,-420.4 390.86,-426.4 390.86,-426.4 390.86,-457 390.86,-457 390.86,-463 384.86,-469 378.86,-469"/>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M385.54,-469C385.54,-469 268.71,-469 268.71,-469 262.71,-469 256.71,-463 256.71,-457 256.71,-457 256.71,-426.4 256.71,-426.4 256.71,-420.4 262.71,-414.4 268.71,-414.4 268.71,-414.4 385.54,-414.4 385.54,-414.4 391.54,-414.4 397.54,-420.4 397.54,-426.4 397.54,-426.4 397.54,-457 397.54,-457 397.54,-463 391.54,-469 385.54,-469"/>
 <text xml:space="preserve" text-anchor="start" x="289.33" y="-443.9" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Bytes 0&#45;7</text>
-<text xml:space="preserve" text-anchor="start" x="277.79" y="-427.8" font-family="Arial" font-size="16.00" fill="#111827">TRTFB magic</text>
+<text xml:space="preserve" text-anchor="start" x="271.11" y="-427.8" font-family="Arial" font-size="16.00" fill="#111827">BUNDLE magic</text>
 </g>
 <!-- length -->
 <g id="node2" class="node">

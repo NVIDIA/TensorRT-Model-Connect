@@ -18,7 +18,7 @@ def test_qwen_package_smoke_config_matches_current_ci_default() -> None:
     assert data["default"] is True
     assert data["name"] == "qwen3-0.6b"
     assert data["model_id"] == "Qwen/Qwen3-0.6B"
-    assert data["bundle"] == "qwen3-0.6b.trtfb"
+    assert data["bundle"] == "qwen3-0.6b.bundle"
     assert data["timing_cache"] == "qwen3-0.6b.timing.cache"
     assert data["max_cache"] == 64
     assert data["max_new_tokens"] == 8

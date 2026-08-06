@@ -1,7 +1,7 @@
 {
   "name": "qwen3-4b-instruct-2507-tp4",
   "hf_id": "Qwen/Qwen3-4B-Instruct-2507",
-  "bundle": "qwen3-4b-instruct-2507-tp4.trtfb",
+  "bundle": "qwen3-4b-instruct-2507-tp4.bundle",
   "family": "qwen",
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

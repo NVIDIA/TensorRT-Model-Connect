@@ -221,7 +221,7 @@ def _make_case(
         runtime_strategy="unit_runtime",
         task_strategy="unit_task",
         reference_backend="unit_ref",
-        bundle=f"{name}.trtfb",
+        bundle=f"{name}.bundle",
         preflight=preflight or [],
         stages=[StageSpec(name="generate")],
         determinism=determinism or {},
@@ -594,7 +594,7 @@ def _patch_bundle_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    bundle_path = tmp_path / "engines" / "unit.trtfb"
+    bundle_path = tmp_path / "engines" / "unit.bundle"
     bundle_path.parent.mkdir(exist_ok=True)
     bundle_path.write_text("bundle", encoding="utf-8")
     monkeypatch.setattr(

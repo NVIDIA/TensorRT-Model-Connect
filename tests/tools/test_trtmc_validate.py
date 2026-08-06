@@ -1416,8 +1416,8 @@ def test_mcq_report_exposes_reference_tie_equivalence_metrics():
             "status": "passed",
             "mode": "mcq",
             "prediction_agreement_rate": 1.0,
-            "accuracy_delta_trtfb_minus_hf": -0.05,
-            "tie_adjusted_accuracy_delta_trtfb_minus_hf": 0.0,
+            "accuracy_delta_bundle_minus_hf": -0.05,
+            "tie_adjusted_accuracy_delta_bundle_minus_hf": 0.0,
             "raw_accuracy_drop_from_hf": 0.05,
             "accuracy_drop_from_hf": 0.0,
             "reference_tie_equivalent_count": 1,
@@ -1426,8 +1426,8 @@ def test_mcq_report_exposes_reference_tie_equivalence_metrics():
     )
 
     assert comparison["status"] == "agreement"
-    assert comparison["metrics"]["accuracy_delta_trtfb_minus_hf"] == -0.05
-    assert comparison["metrics"]["tie_adjusted_accuracy_delta_trtfb_minus_hf"] == 0.0
+    assert comparison["metrics"]["accuracy_delta_bundle_minus_hf"] == -0.05
+    assert comparison["metrics"]["tie_adjusted_accuracy_delta_bundle_minus_hf"] == 0.0
     assert comparison["metrics"]["raw_accuracy_drop_from_hf"] == 0.05
     assert comparison["metrics"]["accuracy_drop_from_hf"] == 0.0
     assert comparison["metrics"]["reference_tie_equivalent_count"] == 1
@@ -1609,11 +1609,11 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     work_dir = case_dir / "validation"
     work_dir.mkdir(parents=True)
-    (work_dir / "trtfb_run.log").write_text(
+    (work_dir / "bundle_run.log").write_text(
         json.dumps(
             {
                 "sample_id": "sample-1",
-                "command": ["trtmc", "solve", "model.trtfb", "--field-input", "1,2"],
+                "command": ["trtmc", "solve", "model.bundle", "--field-input", "1,2"],
             }
         )
         + "\n",
@@ -1636,9 +1636,9 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
 
     assert report["results"][0]["reproduce"]["trtmc"] == [
         "trtmc build",
-        "trtmc solve model.trtfb --field-input 1,2",
+        "trtmc solve model.bundle --field-input 1,2",
     ]
-    assert "$ trtmc solve model.trtfb --field-input 1,2" in html_path.read_text(
+    assert "$ trtmc solve model.bundle --field-input 1,2" in html_path.read_text(
         encoding="utf-8"
     )
 
@@ -1656,9 +1656,9 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
         ),
         encoding="utf-8",
     )
-    (work_dir / "trtfb_run.log").write_text(
+    (work_dir / "bundle_run.log").write_text(
         "".join(
-            f"$ trtmc run model.trtfb --prompt prompt-{index}\n"
+            f"$ trtmc run model.bundle --prompt prompt-{index}\n"
             for index in range(sample_count)
         ),
         encoding="utf-8",
@@ -1698,13 +1698,13 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     assert reproduction["command_count"]["trtmc"] == sample_count
     assert reproduction["commands_shown"]["trtmc"] == 1
     assert reproduction["trtmc"] == [
-        "trtmc run model.trtfb --prompt prompt-9999"
+        "trtmc run model.bundle --prompt prompt-9999"
     ]
     assert reproduction["representative"] == {
         "sample_id": "sample-9999",
         "reason": "first_disagreement",
     }
-    assert reproduction["command_logs"]["trtmc"] == ["trtfb_run.log"]
+    assert reproduction["command_logs"]["trtmc"] == ["bundle_run.log"]
     assert "prompt-5000" not in json.dumps(report)
     document = html_path.read_text(encoding="utf-8")
     assert "Showing 1 of 10000 commands" in document
@@ -1734,7 +1734,7 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
                     {
                         "sample_id": "sample-7",
                         "hf_prediction": "reference answer",
-                        "trtfb_prediction": "TRTMC answer",
+                        "bundle_prediction": "TRTMC answer",
                     }
                 ]
             }
@@ -1755,7 +1755,7 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         ),
         encoding="utf-8",
     )
-    (work_dir / "trtfb_predictions.json").write_text(
+    (work_dir / "bundle_predictions.json").write_text(
         json.dumps(
             {
                 "responses": [
@@ -1786,12 +1786,12 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         ),
         encoding="utf-8",
     )
-    (work_dir / "trtfb_repro.json").write_text(
+    (work_dir / "bundle_repro.json").write_text(
         json.dumps(
             {
                 "command": [
                     "/workspace/build/trtmc_dataset_benchmark",
-                    "model.trtfb",
+                    "model.bundle",
                     "{input_jsonl}",
                     "{trtmc_raw_jsonl}",
                     "--max-new-tokens",
@@ -1833,7 +1833,7 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         "/workspace/trtmc/tools/reference/transformers_text.py"
     )
     assert records[0]["reproduce"]["trtmc"].startswith(
-        "/workspace/build/trtmc_dataset_benchmark model.trtfb"
+        "/workspace/build/trtmc_dataset_benchmark model.bundle"
     )
     assert records[0]["reproduce"]["trtmc"].endswith("--seed 49")
     assert (case_dir / records[0]["artifacts"]["trtmc_input"]).read_text(
@@ -1893,8 +1893,8 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
-    (work_dir / "trtfb_run.log").write_text(
-        "$ python validation/engine.py run-trtfb\n",
+    (work_dir / "bundle_run.log").write_text(
+        "$ python validation/engine.py run-bundle\n",
         encoding="utf-8",
     )
     (work_dir / "full_duplex_bench_score.log").write_text(
@@ -1904,14 +1904,14 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
     commands = (
         {
             "sample_id": "sample-1",
-            "command": ["trtmc", "segment-prompted", "model.trtfb", "--prompt", "cat"],
+            "command": ["trtmc", "segment-prompted", "model.bundle", "--prompt", "cat"],
         },
         {
             "sample_id": "sample-2",
-            "command": ["trtmc", "segment-prompted", "model.trtfb", "--prompt", "dog"],
+            "command": ["trtmc", "segment-prompted", "model.bundle", "--prompt", "dog"],
         },
     )
-    (work_dir / "trtfb_native_commands.jsonl").write_text(
+    (work_dir / "bundle_native_commands.jsonl").write_text(
         "".join(json.dumps(command) + "\n" for command in commands),
         encoding="utf-8",
     )
@@ -1919,11 +1919,11 @@ def test_commands_from_logs_use_native_trtmc_jsonl(tmp_path: Path) -> None:
     reproduction = trtmc_validate._commands_from_logs(work_dir)
 
     assert reproduction["trtmc"] == [
-        "trtmc segment-prompted model.trtfb --prompt cat"
+        "trtmc segment-prompted model.bundle --prompt cat"
     ]
     assert reproduction["command_count"]["trtmc"] == 2
     assert reproduction["command_logs"]["trtmc"] == [
-        "trtfb_native_commands.jsonl"
+        "bundle_native_commands.jsonl"
     ]
     assert "full_duplex_bench_score.py" not in json.dumps(reproduction)
 
@@ -2021,7 +2021,7 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
         ),
         encoding="utf-8",
     )
-    (work_dir / "trtfb_predictions.json").write_text(
+    (work_dir / "bundle_predictions.json").write_text(
         json.dumps(
             {
                 "responses": [
@@ -2038,11 +2038,11 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
     native_command = [
         "/workspace/build/trtmc",
         "run",
-        "/runs/engines/model.trtfb",
+        "/runs/engines/model.bundle",
         "--prompt",
         "Describe",
     ]
-    (work_dir / "trtfb_native_commands.jsonl").write_text(
+    (work_dir / "bundle_native_commands.jsonl").write_text(
         json.dumps({"sample_id": "sample-9", "command": native_command}) + "\n",
         encoding="utf-8",
     )
@@ -2069,7 +2069,7 @@ def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
         (case_dir / metadata["path"]).read_text(encoding="utf-8")
     )
     assert record["reproduce"]["trtmc"] == (
-        "/workspace/build/trtmc run /runs/engines/model.trtfb "
+        "/workspace/build/trtmc run /runs/engines/model.bundle "
         "--prompt Describe"
     )
     assert record["reproduce"]["reference"].startswith(
@@ -2178,7 +2178,7 @@ def test_report_bounds_inline_failed_samples_but_keeps_full_artifact(tmp_path):
     )
     for name, prefix in (
         ("hf_predictions.json", "reference"),
-        ("trtfb_predictions.json", "trtmc"),
+        ("bundle_predictions.json", "trtmc"),
     ):
         (work_dir / name).write_text(
             json.dumps(
@@ -2229,8 +2229,8 @@ def test_report_does_not_treat_shared_task_failure_as_disagreement(tmp_path):
         json.dumps({"sample_id": "sample-0", "prompt": "hello"}) + "\n",
         encoding="utf-8",
     )
-    (work_dir / "trtfb_run.log").write_text(
-        "$ trtmc run model.trtfb --prompt hello\n",
+    (work_dir / "bundle_run.log").write_text(
+        "$ trtmc run model.bundle --prompt hello\n",
         encoding="utf-8",
     )
     (work_dir / "summary.json").write_text(
@@ -2238,7 +2238,7 @@ def test_report_does_not_treat_shared_task_failure_as_disagreement(tmp_path):
             {
                 "disagreements": [],
                 "hf": {"samples": [{"sample_id": "sample-0", "passed": False}]},
-                "trtfb": {
+                "bundle": {
                     "samples": [{"sample_id": "sample-0", "passed": False}]
                 },
             }

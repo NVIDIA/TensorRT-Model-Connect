@@ -1,7 +1,7 @@
 {
   "name": "all-mpnet-base-v2-tp4",
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
-  "bundle": "all-mpnet-base-v2-tp4.trtfb",
+  "bundle": "all-mpnet-base-v2-tp4.bundle",
   "family": "mpnet",
   "runtime_strategy": "mpnet_encoder_only",
   "task_strategy": "encoder_only_nlp",

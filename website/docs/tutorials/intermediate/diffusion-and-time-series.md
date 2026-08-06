@@ -32,13 +32,13 @@ or a populated local cache.
 
 ```bash
 $TRTMC build black-forest-labs/FLUX.2-dev \
-  -o /tmp/flux2.trtfb \
+  -o /tmp/flux2.bundle \
   --precision fp16 \
   --image-height 1024 \
   --image-width 1024 \
   --num-inference-steps 28
 
-$TRTMC generate-video /tmp/flux2.trtfb \
+$TRTMC generate-video /tmp/flux2.bundle \
   --prompt "A photo of a cat sitting on a windowsill at sunset" \
   --output /tmp/flux2-frames \
   --num-steps 28
@@ -84,7 +84,7 @@ same checkpoint, FP16 precision, FP32 text-encoder selector, 256-token cache,
 
 ```bash
 $TRTMC build PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
-  -o /tmp/pixart-sigma-512.trtfb \
+  -o /tmp/pixart-sigma-512.bundle \
   --precision fp16 \
   --fp32-layers 0 \
   --max-cache-length 256 \
@@ -92,7 +92,7 @@ $TRTMC build PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
   --image-width 512 \
   --num-inference-steps 20
 
-$TRTMC generate-video /tmp/pixart-sigma-512.trtfb \
+$TRTMC generate-video /tmp/pixart-sigma-512.bundle \
   --prompt "A photo of a cat sitting on a windowsill at sunset" \
   --output /tmp/pixart-sigma-512-frames \
   --num-steps 20
@@ -113,13 +113,13 @@ start from equivalent data.
 
 ```bash
 $TRTMC build Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
-  -o /tmp/wan21.trtfb \
+  -o /tmp/wan21.bundle \
   --precision fp16 \
   --video-height 480 \
   --video-width 832 \
   --video-num-frames 81
 
-$TRTMC generate-video /tmp/wan21.trtfb \
+$TRTMC generate-video /tmp/wan21.bundle \
   --prompt "A cinematic shot of clouds moving over mountains" \
   --output /tmp/wan21-frames
 ```
@@ -155,7 +155,7 @@ name, and input values.
 
 ```bash
 $TRTMC build amazon/chronos-bolt-tiny \
-  -o /tmp/chronos-bolt-tiny-official.trtfb \
+  -o /tmp/chronos-bolt-tiny-official.bundle \
   --precision fp32
 ```
 
@@ -170,12 +170,12 @@ from
 `python/tensorrt_model_connect/families/chronos_bolt/python_profile_requirements/chronos.lock.txt`,
 including `chronos-forecasting==2.2.2`. That step needs package access or a
 pre-populated profile/cache. A successful build exits with status 0 and creates
-`/tmp/chronos-bolt-tiny-official.trtfb`.
+`/tmp/chronos-bolt-tiny-official.bundle`.
 
 ### Forecast from the manifest input
 
 ```bash
-$TRTMC solve /tmp/chronos-bolt-tiny-official.trtfb \
+$TRTMC solve /tmp/chronos-bolt-tiny-official.bundle \
   --branch-input "100.1,100.15,100.18,100.22,100.21,100.27,100.31,100.35,100.37,100.4,100.44,100.5"
 ```
 

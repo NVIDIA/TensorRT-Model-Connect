@@ -46,7 +46,7 @@ Sam3TokenizerContractError = _tokenizer_contract.Sam3TokenizerContractError
 validate_sam3_tokenizer_json = _tokenizer_contract.validate_sam3_tokenizer_json
 
 
-_BUNDLE_MAGIC = b"TRTFB\x00\x01\x00"
+_BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 
 SAM3_PLAN_SECTIONS = frozenset(
     {
@@ -246,18 +246,18 @@ def _read_bundle_header(path: Path) -> tuple[dict, int, int]:
         file_size = path.stat().st_size
         with path.open("rb") as handle:
             if handle.read(len(_BUNDLE_MAGIC)) != _BUNDLE_MAGIC:
-                raise Sam3RuntimeContractError(f"Not a valid .trtfb bundle: {path}")
+                raise Sam3RuntimeContractError(f"Not a valid .bundle artifact: {path}")
             encoded_size = handle.read(struct.calcsize("<Q"))
             if len(encoded_size) != struct.calcsize("<Q"):
-                raise Sam3RuntimeContractError(f"Truncated .trtfb header length: {path}")
+                raise Sam3RuntimeContractError(f"Truncated .bundle header length: {path}")
             header_size = struct.unpack("<Q", encoded_size)[0]
             header_bytes = handle.read(header_size)
     except OSError as error:
         raise Sam3RuntimeContractError(f"Unable to read SAM3 bundle {path}: {error}") from error
 
     if len(header_bytes) != header_size:
-        raise Sam3RuntimeContractError(f"Truncated .trtfb JSON header: {path}")
-    header = _strict_json_loads(header_bytes, label=f".trtfb JSON header for {path}")
+        raise Sam3RuntimeContractError(f"Truncated .bundle JSON header: {path}")
+    header = _strict_json_loads(header_bytes, label=f".bundle JSON header for {path}")
     if not isinstance(header, dict):
         raise Sam3RuntimeContractError("SAM3 bundle header must be a JSON object")
     payload_start = len(_BUNDLE_MAGIC) + struct.calcsize("<Q") + header_size
@@ -748,7 +748,7 @@ def _native_live_load_probe(bundle: Path, dso_roles: dict[str, Path]) -> dict[st
 
     handle: int | None = None
     with tempfile.TemporaryDirectory(prefix="sam3-runtime-audit-") as temporary_directory:
-        probe_bundle = Path(temporary_directory) / "probe.trtfb"
+        probe_bundle = Path(temporary_directory) / "probe.bundle"
         probe_bundle.symlink_to(bundle)
         try:
             handle = library.trtmc_sam3_video_create(
@@ -1154,7 +1154,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Audit a production SAM3 bundle and native TensorRT runtime",
     )
-    parser.add_argument("--bundle", required=True, help="SAM3 .trtfb bundle")
+    parser.add_argument("--bundle", required=True, help="SAM3 .bundle artifact")
     parser.add_argument(
         "--dso",
         action="append",

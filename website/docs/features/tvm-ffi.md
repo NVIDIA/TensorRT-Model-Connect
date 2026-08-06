@@ -35,7 +35,7 @@ Build one exact Recipe instance:
 ```bash
 trtmc build MODEL [the same build options...] \
   --recipe RECIPE_ID INSTANCE_ID \
-  -o model-slot.trtfb
+  -o model-slot.bundle
 ```
 
 The command captures the graph, resolves the Recipe, validates its nodes, and
@@ -75,7 +75,7 @@ Build the selected replacement:
 ```bash
 trtmc build MODEL [the same build options...] \
   --graph-patch attention.selection.json \
-  -o model-slot.trtfb
+  -o model-slot.bundle
 ```
 
 Selections are tied to the captured graph fingerprint and engine role. Reuse
@@ -106,7 +106,7 @@ Create a strict JSON binding manifest beside the DSO:
 The library path must be relative to the manifest. Load and run:
 
 ```bash
-trtmc run model-slot.trtfb \
+trtmc run model-slot.bundle \
   --kernel-bindings kernel-bindings.json \
   --prompt "Hello" \
   --max-new-tokens 32

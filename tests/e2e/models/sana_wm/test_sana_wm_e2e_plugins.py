@@ -29,7 +29,7 @@ def _make_case() -> E2ECase:
         runtime_strategy="diffusion_sana_wm",
         task_strategy="diffusion_media_generation",
         reference_backend="hf_diffusers",
-        bundle="sana-wm-bidirectional.trtfb",
+        bundle="sana-wm-bidirectional.bundle",
         inputs={
             "prompt_file": "tests/e2e/models/sana_wm/assets/demo_0.txt",
             "image": "tests/e2e/models/sana_wm/assets/demo_0.png",
@@ -65,14 +65,14 @@ def test_sana_wm_trt_command_uses_model_card_inputs(monkeypatch, tmp_path: Path)
     cmd = build_sana_wm_trt_command(
         case,
         _make_ctx(case),
-        "/tmp/engines/sana-wm-bidirectional.trtfb",
+        "/tmp/engines/sana-wm-bidirectional.bundle",
         "/tmp/trtmc_frames",
     )
 
     assert cmd[:4] == [
         "./build/trtmc",
         "generate-video",
-        "/tmp/engines/sana-wm-bidirectional.trtfb",
+        "/tmp/engines/sana-wm-bidirectional.bundle",
         "--prompt",
     ]
     expected_image = Path(__file__).resolve().parent / "assets/demo_0.png"

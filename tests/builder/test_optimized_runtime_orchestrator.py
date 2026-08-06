@@ -236,7 +236,7 @@ def test_full_generic_build_writes_self_contained_delegated_bundle(
         "_probe_current_target_with_device",
         lambda: (_target(), 0),
     )
-    output = tmp_path / "model.trtfb"
+    output = tmp_path / "model.bundle"
 
     selection = try_build_optimized_runtime(
         str(model_source),
@@ -302,7 +302,7 @@ def test_current_target_preserves_active_device_ordinal_only_as_launch_context(
     import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
-    output = tmp_path / "model.trtfb"
+    output = tmp_path / "model.bundle"
 
     selection = try_build_optimized_runtime(
         str(model_source),
@@ -354,7 +354,7 @@ def test_malformed_sibling_in_the_same_family_is_isolated_before_selection(
 
     selection = try_build_optimized_runtime(
         str(model_source),
-        tmp_path / "model.trtfb",
+        tmp_path / "model.bundle",
         family_name="example",
         parameters={"precision": "fp16"},
     )
@@ -432,7 +432,7 @@ def test_selected_adapter_build_failure_remains_terminal(
     monkeypatch.setattr(orchestrator, "run_build", fail_build)
 
     with pytest.raises(BuildAdapterError, match="selected adapter build failed"):
-        build_selected_implementation(selection, tmp_path / "model.trtfb")
+        build_selected_implementation(selection, tmp_path / "model.bundle")
 
 
 def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
@@ -453,7 +453,7 @@ def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
     )
     selection = try_build_optimized_runtime(
         str(model_source),
-        tmp_path / "native.trtfb",
+        tmp_path / "native.bundle",
         family_name="example",
     )
 
@@ -481,7 +481,7 @@ def test_malformed_unselected_capsule_preserves_native_fallback(
 
     selection = try_build_optimized_runtime(
         str(model_source),
-        tmp_path / "model.trtfb",
+        tmp_path / "model.bundle",
         family_name="example",
         parameters={"precision": "fp16"},
     )
@@ -505,7 +505,7 @@ def test_unsupported_probe_returns_native_fallback_without_building(
         "_probe_current_target_with_device",
         lambda: (_target(), 0),
     )
-    output = tmp_path / "model.trtfb"
+    output = tmp_path / "model.bundle"
     selection = try_build_optimized_runtime(
         str(model_source),
         output,
@@ -517,7 +517,7 @@ def test_unsupported_probe_returns_native_fallback_without_building(
 
 
 def test_non_snapshot_model_source_retains_native_path(tmp_path: Path) -> None:
-    output = tmp_path / "native.trtfb"
+    output = tmp_path / "native.bundle"
 
     selection = try_build_optimized_runtime(
         "Example/Model",
@@ -558,7 +558,7 @@ def test_snapshot_selects_only_its_exact_revision_with_multiple_capsules(
         "_probe_current_target_with_device",
         lambda: (_target(), 0),
     )
-    output = tmp_path / "model.trtfb"
+    output = tmp_path / "model.bundle"
 
     selection = try_build_optimized_runtime(
         str(model_source),
@@ -581,7 +581,7 @@ def test_unavailable_active_target_returns_native_fallback(
     family_root = tmp_path / "family"
     _capsule(family_root)
     model_source = _snapshot(tmp_path / "cache")
-    output = tmp_path / "native.trtfb"
+    output = tmp_path / "native.bundle"
 
     def unavailable_target() -> tuple[dict[str, object], int]:
         raise TargetResolutionError("CUDA target probing is unavailable")

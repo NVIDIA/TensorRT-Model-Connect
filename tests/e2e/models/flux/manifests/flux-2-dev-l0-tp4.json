@@ -1,7 +1,7 @@
 {
   "name": "flux-2-dev-l0-tp4",
   "hf_id": "black-forest-labs/FLUX.2-dev",
-  "bundle": "flux-2-dev-l0-tp4.trtfb",
+  "bundle": "flux-2-dev-l0-tp4.bundle",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
   "task_strategy": "diffusion_media_generation",

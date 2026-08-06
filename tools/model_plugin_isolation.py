@@ -163,7 +163,7 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
                 family=family,
                 runtime_strategy=runtime_strategy,
                 path=path,
-                bundle=str(raw.get("bundle") or f"{name}.trtfb"),
+                bundle=str(raw.get("bundle") or f"{name}.bundle"),
                 result_case=result_case,
                 ci_tier=str(
                     result_testcase.get("ci_tier") or raw.get("ci_tier") or ""

@@ -19,7 +19,7 @@ def test_text_runner_maps_runtime_config_to_set_flags(monkeypatch, tmp_path):
         family="nemotron_h",
         runtime_strategy="nemotron_h_hybrid_mamba_attention",
         task_strategy="text_generation_causal",
-        bundle="nemotron-h-case.trtfb",
+        bundle="nemotron-h-case.bundle",
         inputs={},
         metadata={
             "runtime_config": {

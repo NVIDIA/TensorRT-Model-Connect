@@ -1,7 +1,7 @@
 {
   "name": "phi-moe-l0-tp4",
   "hf_id": "microsoft/Phi-tiny-MoE-instruct",
-  "bundle": "phi-moe-l0-tp4.trtfb",
+  "bundle": "phi-moe-l0-tp4.bundle",
   "family": "phi_moe",
   "runtime_strategy": "phi_moe_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

@@ -76,10 +76,10 @@ MODEL_ID = "Qwen/Qwen3-0.6B"
 MAX_CACHE = 256
 TMP_SIZE = 32 * 1024 * 1024  # 32MB FlashInfer workspace
 
-bundle_path = "/tmp/qwen3_flashinfer.trtfb"
+bundle_path = "/tmp/qwen3_flashinfer.bundle"
 baseline_bundle = os.environ.get(
     "TRTMC_QWEN3_BASELINE_BUNDLE",
-    str(REPO_ROOT / "engines" / "qwen3-0.6b.trtfb"),
+    str(REPO_ROOT / "engines" / "qwen3-0.6b.bundle"),
 )
 
 if os.path.exists(bundle_path) and "--rebuild" not in sys.argv:

@@ -66,7 +66,7 @@ def pytest_addoption(parser):
     addoption(
         "--engine-dir",
         default=None,
-        help="Directory containing .trtfb bundles (default: from engines.json)",
+        help="Directory containing .bundle artifacts (default: from engines.json)",
     )
     addoption(
         "--trtmc-binary", default=None, help="Path to the C++ trtmc binary (default: build/trtmc)"
@@ -194,7 +194,7 @@ def model_entry(request, engine_dir):
 
 
 def _build_bundle(trtmc_binary, hf_id, bundle_path, max_cache_length, precision="fp32"):
-    """Build a .trtfb bundle as a subprocess to isolate GPU memory.
+    """Build a .bundle artifact as a subprocess to isolate GPU memory.
 
     Returns build time in seconds.
     """
@@ -259,7 +259,7 @@ def built_bundle(request, engine_dir, trtmc_binary):
     """Parametrized fixture that ensures a bundle exists, building if needed.
 
     Returns a dict:
-        path: str          — absolute path to the .trtfb file
+        path: str          — absolute path to the .bundle file
         entry: dict        — the model manifest entry
         build_time_s: float | None  — build time if freshly built
         was_cached: bool   — True if the existing bundle was reused

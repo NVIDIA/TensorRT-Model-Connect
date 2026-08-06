@@ -1,7 +1,7 @@
 {
   "name": "tinyllama-1.1b",
   "hf_id": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-  "bundle": "tinyllama-1.1b.trtfb",
+  "bundle": "tinyllama-1.1b.bundle",
   "family": "llama",
   "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

@@ -151,7 +151,7 @@ def test_runner_registers_only_human_readable_segmentation_artifact(
         family="segformer",
         runtime_strategy="segformer_segmentation",
         task_strategy="segmentation",
-        bundle="segformer-report-test.trtfb",
+        bundle="segformer-report-test.bundle",
         inputs={"image": str(input_path)},
     )
     artifacts_dir = tmp_path / "artifacts"

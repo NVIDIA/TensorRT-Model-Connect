@@ -902,11 +902,11 @@ def build_bundle(
     tokenizer_source_model_id_or_path: str | None = None,
     tokenizer_source_revision: str | None = None,
 ) -> None:
-    """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
+    """Full pipeline: load HF model → build TRT engine → write .bundle artifact.
 
     Args:
         model_dir: Path to HF model directory with config.json + safetensors.
-        output_path: Where to write the .trtfb bundle.
+        output_path: Where to write the .bundle artifact.
         max_cache_length: KV cache length for the engine. ``None`` selects the
             model-owned default; decoder families may use the model's official
             context capacity.
@@ -1926,7 +1926,7 @@ def _build_native_impl(
     build_timing_path: str | None = None,
     max_batch_size: int = 1,
 ) -> None:
-    """Build a .trtfb bundle from a HuggingFace model ID or local path.
+    """Build a .bundle artifact from a HuggingFace model ID or local path.
 
     Like HF transformers, accepts either:
     - A HuggingFace repo ID such as ``"org/model-name"`` (auto-downloads)
@@ -1934,7 +1934,7 @@ def _build_native_impl(
 
     Args:
         model_id_or_path: HF repo ID or local directory with config.json + safetensors.
-        output_path: Where to write the .trtfb bundle.
+        output_path: Where to write the .bundle artifact.
         model_revision: Optional Hugging Face revision to resolve for remote model IDs.
         max_cache_length: Explicit KV cache length for the engine. ``None``
             lets the selected family resolve its model-owned default.

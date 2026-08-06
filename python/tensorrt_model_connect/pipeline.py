@@ -8,7 +8,7 @@ trtmc binary as a subprocess, providing a Pythonic API.
 
 Usage:
     import tensorrt_model_connect
-    pipe = tensorrt_model_connect.Pipeline("model.trtfb")
+    pipe = tensorrt_model_connect.Pipeline("model.bundle")
     print(pipe("Hello world", max_new_tokens=10))
     print(pipe("Describe this image", image="photo.jpg", max_new_tokens=50))
 """
@@ -48,7 +48,7 @@ class Pipeline:
     """Python wrapper that calls the C++ trtmc CLI as a subprocess.
 
     Args:
-        bundle_path: Path to a .trtfb bundle file.
+        bundle_path: Path to a .bundle artifact file.
         binary: Path to the trtmc binary. Auto-detected if not specified.
         hf_python: Path to Python interpreter for tokenizer. Auto-detected.
     """

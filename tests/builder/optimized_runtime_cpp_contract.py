@@ -99,7 +99,7 @@ abi = 1
             profile_sha256="a" * 64,
         )
         build = run_build(manifest, request, root / "build", probe=probe)
-        bundle = root / "writer-output.trtfb"
+        bundle = root / "writer-output.bundle"
         write_optimized_bundle(bundle, manifest, request, build)
 
         completed = subprocess.run(

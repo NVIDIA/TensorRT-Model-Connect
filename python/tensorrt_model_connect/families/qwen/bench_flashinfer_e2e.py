@@ -128,7 +128,7 @@ def _run_hf_baseline(model_id, prompt, max_new_tokens):
 def main():
     parser = argparse.ArgumentParser(description="TRT vs FlashInfer E2E benchmark")
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
-    parser.add_argument("--bundle", default=None, help="Pre-built .trtfb bundle path")
+    parser.add_argument("--bundle", default=None, help="Pre-built .bundle artifact path")
     parser.add_argument("--binary", default="./build/trtmc")
     parser.add_argument("--hf-python", default="/opt/venv/bin/python")
     parser.add_argument("--prompt", default="The capital of France is")
@@ -147,7 +147,7 @@ def main():
     bundle = args.bundle
     if bundle is None:
         model_slug = args.model.split("/")[-1].lower()
-        bundle = os.path.join(args.engine_dir, f"{model_slug}.trtfb")
+        bundle = os.path.join(args.engine_dir, f"{model_slug}.bundle")
         if not os.path.exists(bundle):
             print(f"Bundle not found at {bundle}, building...")
             subprocess.run([

@@ -22,7 +22,7 @@ def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
         family="qwen3_omni",
         runtime_strategy="qwen3_omni_multimodal",
         task_strategy="omni_multimodal",
-        bundle="qwen3-omni-case.trtfb",
+        bundle="qwen3-omni-case.bundle",
         inputs=inputs or {},
     )
     defaults.update(overrides)

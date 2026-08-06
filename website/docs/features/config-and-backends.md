@@ -146,7 +146,7 @@ The native runtime path loads TensorRT backends dynamically:
 Use `--backend-dir` to add explicit backend search directories:
 
 ```bash
-$TRTMC run /tmp/model.trtfb \
+$TRTMC run /tmp/model.bundle \
   --prompt "Hello" \
   --backend-dir /opt/trtmc/backends
 ```
@@ -177,7 +177,7 @@ For an optimized bundle, use a directory as the cache root rather than an RTX
 cache-file name:
 
 ```bash
-$TRTMC run /tmp/optimized.trtfb \
+$TRTMC run /tmp/optimized.bundle \
   --prompt "Hello" \
   --runtime-cache /tmp/trtmc-optimized-cache
 ```

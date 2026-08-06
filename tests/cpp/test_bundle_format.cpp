@@ -10,14 +10,14 @@
 // Architecture:   ARCH-BDL-001
 // Unit Design:    UD-BDL-01
 // Intent:         Bundle magic validation, section parsing, read/write round-trip
-// Preconditions:  Valid and invalid .trtfb test data available
+// Preconditions:  Valid and invalid .bundle test data available
 // Postconditions: BundleFile correctly populated or error returned
 // =============================================================================
 
-// Test suite: .trtfb bundle format reading, magic validation, and error handling.
+// Test suite: .bundle artifact format reading, magic validation, and error handling.
 //
 // Purpose:
-//   Validates the bundle reader for .trtfb files. Tests cover magic byte
+//   Validates the bundle reader for .bundle files. Tests cover magic byte
 //   validation, error handling for truncated/invalid files, and the
 //   IsBundle/InspectBundle utility functions. Write tests are omitted
 //   because bundle writing is now handled by the Python tensorrt_model_connect package.
@@ -62,7 +62,7 @@ static void check(bool condition, const char* test_name) {
 }
 
 static std::filesystem::path make_temp_dir() {
-    char pattern[] = "/tmp/trtfb_test_XXXXXX";
+    char pattern[] = "/tmp/bundle_test_XXXXXX";
     char* dir = mkdtemp(pattern);
     if (dir == nullptr) {
         throw std::runtime_error(std::string("mkdtemp failed: ") + std::strerror(errno));
@@ -70,7 +70,7 @@ static std::filesystem::path make_temp_dir() {
     return std::filesystem::path(dir);
 }
 
-// Helper: write a minimal valid .trtfb file manually (bypasses WriteBundleFile).
+// Helper: write a minimal valid .bundle file manually (bypasses WriteBundleFile).
 static void write_minimal_bundle(const std::string& path, const std::string& header_json) {
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
@@ -100,7 +100,7 @@ static void write_bundle_with_sections(const std::string& path, const std::strin
 
 static void test_read_valid_bundle() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "test.trtfb").string();
+    const auto path = (tmp / "test.bundle").string();
 
     const std::string json = R"({
   "model_id": "test-model",
@@ -151,7 +151,7 @@ static void test_read_valid_bundle() {
 
 static void test_magic_validation() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "bad.trtfb").string();
+    const auto path = (tmp / "bad.bundle").string();
 
     std::ofstream out(path, std::ios::binary);
     out.write("NOTMAGIC", 8);
@@ -173,7 +173,7 @@ static void test_magic_validation() {
 
 static void test_empty_sections() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "empty.trtfb").string();
+    const auto path = (tmp / "empty.bundle").string();
 
     const std::string json = R"({"model_id": "empty", "sections": {}})";
     write_minimal_bundle(path, json);
@@ -187,7 +187,7 @@ static void test_empty_sections() {
 
 static void test_is_bundle_valid() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "valid.trtfb").string();
+    const auto path = (tmp / "valid.bundle").string();
 
     write_minimal_bundle(path, R"({"model_id": "valid"})");
     check(trtmc::IsBundle(path), "IsBundle true for valid file");
@@ -209,7 +209,7 @@ static void test_is_bundle_invalid() {
 
 static void test_inspect_returns_metadata() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "inspect.trtfb").string();
+    const auto path = (tmp / "inspect.bundle").string();
 
     const std::string json = R"({
   "model_id": "inspectable",
@@ -231,7 +231,7 @@ static void test_inspect_returns_metadata() {
 
 static void test_tokenizer_add_special_tokens_header() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "tokenizer_flag.trtfb").string();
+    const auto path = (tmp / "tokenizer_flag.bundle").string();
 
     const std::string json = R"({
   "model_id": "tokenizer-flag",
@@ -249,7 +249,7 @@ static void test_tokenizer_add_special_tokens_header() {
 
 static void test_truncated_bundle_throws() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "truncated.trtfb").string();
+    const auto path = (tmp / "truncated.bundle").string();
 
     {
         std::ofstream out(path, std::ios::binary);
@@ -279,7 +279,7 @@ static void test_max_batch_size_parse_and_back_compat() {
     const auto tmp = make_temp_dir();
     std::vector<char> plan_data = {'P', 'L', 'A', 'N'};
 
-    const auto new_path = (tmp / "new.trtfb").string();
+    const auto new_path = (tmp / "new.bundle").string();
     write_bundle_with_sections(new_path, R"({
   "model_id": "diffusion-bs4", "family": "diffusion",
   "max_batch_size": {"dit": 4, "text_encoder": 8, "vae": 1},
@@ -292,7 +292,7 @@ static void test_max_batch_size_parse_and_back_compat() {
               loaded_new.info.max_batch_size.vae == 1,
           "max_batch_size parsed from header");
 
-    const auto legacy_path = (tmp / "legacy.trtfb").string();
+    const auto legacy_path = (tmp / "legacy.bundle").string();
     write_bundle_with_sections(legacy_path, R"({
   "model_id": "legacy", "family": "generic",
   "sections": {"engine_plan": {"offset": 0, "size": 4}}
@@ -322,7 +322,7 @@ class TrackingStreamBuffer final : public std::streambuf {
 
 static void test_copy_section_streams_in_bounded_chunks() {
     const auto tmp = make_temp_dir();
-    const auto path = (tmp / "streamed.trtfb").string();
+    const auto path = (tmp / "streamed.bundle").string();
     std::vector<char> payload(3 * 1024 * 1024 + 17, 'E');
     const std::string header =
         "{\"model_id\":\"streamed\",\"sections\":{\"edge/llm.engine\":{\"offset\":0,\"size\":" +
@@ -342,7 +342,7 @@ static void test_copy_section_streams_in_bounded_chunks() {
 
 #if defined(__linux__)
 static std::filesystem::path make_cache_test_temp_dir() {
-    const auto pattern_path = std::filesystem::current_path() / "trtfb_cache_test_XXXXXX";
+    const auto pattern_path = std::filesystem::current_path() / "bundle_cache_test_XXXXXX";
     const std::string pattern = pattern_path.string();
     std::vector<char> mutable_pattern(pattern.begin(), pattern.end());
     mutable_pattern.push_back('\0');
@@ -409,7 +409,7 @@ static void test_read_bundle_file_drops_payload_cache() {
     // overlayfs may accept POSIX_FADV_DONTNEED without exposing eviction through
     // mincore, while production bundles live on a regular mounted filesystem.
     const auto tmp = make_cache_test_temp_dir();
-    const auto path = (tmp / "cache-drop.trtfb").string();
+    const auto path = (tmp / "cache-drop.bundle").string();
     std::vector<char> payload(8 * 1024 * 1024, 'C');
     const std::string header =
         "{\"model_id\":\"cache-drop\",\"sections\":{\"engine_plan\":{\"offset\":0,\"size\":" +

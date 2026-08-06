@@ -240,7 +240,7 @@ std::optional<std::string> extract_answer_from_text(const std::string& text) {
 }
 
 void usage() {
-    std::cerr << "Usage: trtmc_dataset_benchmark <bundle.trtfb> <dataset.jsonl> <output.jsonl> "
+    std::cerr << "Usage: trtmc_dataset_benchmark <bundle.bundle> <dataset.jsonl> <output.jsonl> "
                  "[--max-new-tokens N] [--hf-python PATH] [--kv-cache-size SIZE] "
                  "[--backend-dir PATH] [--model-plugin-dir PATH] "
                  "[--temperature F] [--top-k N] [--top-p F] [--min-p F] [--seed N] "

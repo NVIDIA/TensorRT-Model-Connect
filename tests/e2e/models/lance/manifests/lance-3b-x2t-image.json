@@ -2,7 +2,7 @@
   "name": "lance-3b-x2t-image",
   "hf_id": "bytedance-research/Lance",
   "hf_revision": "7395315758865e6f56ab87ad06a88c7ac172f056",
-  "bundle": "lance-3b-x2t-image.trtfb",
+  "bundle": "lance-3b-x2t-image.bundle",
   "family": "lance",
   "runtime_strategy": "lance_vision_language",
   "task_strategy": "vision_language_generation",

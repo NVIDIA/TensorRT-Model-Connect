@@ -1,7 +1,7 @@
 {
   "name": "mistral-7b",
   "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
-  "bundle": "mistral-7b.trtfb",
+  "bundle": "mistral-7b.bundle",
   "family": "mistral",
   "runtime_strategy": "mistral_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

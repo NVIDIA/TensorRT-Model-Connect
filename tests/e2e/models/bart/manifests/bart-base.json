@@ -1,7 +1,7 @@
 {
   "name": "bart-base",
   "hf_id": "facebook/bart-base",
-  "bundle": "bart-base.trtfb",
+  "bundle": "bart-base.bundle",
   "family": "bart",
   "runtime_strategy": "bart_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",

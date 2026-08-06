@@ -4,13 +4,13 @@ title: CLI Reference
 
 ## `trtmc build`
 
-`trtmc build` builds `.trtfb` bundles through the Python builder package.
+`trtmc build` builds `.bundle` bundles through the Python builder package.
 In the usage signatures below, replace values inside `<...>` and omit the
 angle brackets; items inside `[...]` are optional syntax, not literal shell
 text.
 
 ```bash
-trtmc build <hf-repo-or-local-dir> [-o <output.trtfb>] [options]
+trtmc build <hf-repo-or-local-dir> [-o <output.bundle>] [options]
 ```
 
 The C++ bridge runs `python -m tensorrt_model_connect build ...`. When
@@ -24,18 +24,18 @@ Source builds use the same subcommands through `./build/trtmc`.
 Direct module execution is still available for debugging:
 
 ```bash
-python -m tensorrt_model_connect build <hf-repo-or-local-dir> [-o <output.trtfb>]
+python -m tensorrt_model_connect build <hf-repo-or-local-dir> [-o <output.bundle>]
 ```
 
 When `-o`/`--output` is omitted, the CLI derives
-`<model-name>.trtfb` from the Hugging Face ID or local-directory basename and
+`<model-name>.bundle` from the Hugging Face ID or local-directory basename and
 replaces unsafe filename characters with `-`.
 
 ### Build options
 
 | Option | Purpose |
 | --- | --- |
-| `-o`, `--output PATH` | Output bundle path. Defaults to the sanitized model basename plus `.trtfb`. |
+| `-o`, `--output PATH` | Output bundle path. Defaults to the sanitized model basename plus `.bundle`. |
 | `--recipe RECIPE_ID INSTANCE_ID` | Build a load-time TVM-FFI slot from one exact family-owned graph Recipe. Internally uses the ordinary graph capture, selection, and patch paths and writes `<output-basename>.selection.json`. |
 | `--graph-patch REGION.json` | Replace one explicitly selected TensorRT region with a load-time TVM-FFI slot. Requires the native TensorRT backend. |
 | `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
@@ -115,7 +115,7 @@ family while it constructed this graph. The recommended shortcut is:
 ```bash
 trtmc build MODEL [build options...] \
   --recipe RECIPE_ID INSTANCE_ID \
-  -o model-slot.trtfb
+  -o model-slot.bundle
 ```
 
 That one command orchestrates the existing graph capture, exact Recipe
@@ -144,26 +144,26 @@ contract and current limitations.
 `trtmc` also inspects and runs bundles from C++.
 
 ```bash
-trtmc run <bundle.trtfb> --prompt "text" [--image PATH] [--greedy] \
+trtmc run <bundle.bundle> --prompt "text" [--image PATH] [--greedy] \
   [--source-language-token-id N] [--forced-bos-token-id N] \
   [--kernel-bindings kernel-bindings.json]
-trtmc encode <bundle.trtfb> --prompt "text"
-trtmc segment <bundle.trtfb> --image PATH --output PATH
-trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR [--point-x F --point-y F]
-trtmc segment-prompted <bundle.trtfb> --image PATH --output DIR --prompt "object"
-trtmc classify <bundle.trtfb> --image PATH [--benchmark N --warmup N]
-trtmc detect <bundle.trtfb> --image PATH [--output-json PATH]
-trtmc generate-audio <bundle.trtfb> --prompt "text" --output PATH
-trtmc serve-audio <bundle.trtfb>
-trtmc generate-video <bundle.trtfb> --prompt "text" --output DIR
-trtmc embed <bundle.trtfb> --prompt "text"
-trtmc rerank <bundle.trtfb> --prompt "query" --document "text"
-trtmc solve <bundle.trtfb> --field-input CSV
-trtmc solve <bundle.trtfb> --branch-input CSV [--trunk-input CSV]
-trtmc transcribe <bundle.trtfb> --audio FILE.wav [--stream]
-trtmc speak <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
-trtmc inspect <bundle.trtfb>
-trtmc inspect <bundle.trtfb> --list-engines
+trtmc encode <bundle.bundle> --prompt "text"
+trtmc segment <bundle.bundle> --image PATH --output PATH
+trtmc segment-prompted <bundle.bundle> --image PATH --output DIR [--point-x F --point-y F]
+trtmc segment-prompted <bundle.bundle> --image PATH --output DIR --prompt "object"
+trtmc classify <bundle.bundle> --image PATH [--benchmark N --warmup N]
+trtmc detect <bundle.bundle> --image PATH [--output-json PATH]
+trtmc generate-audio <bundle.bundle> --prompt "text" --output PATH
+trtmc serve-audio <bundle.bundle>
+trtmc generate-video <bundle.bundle> --prompt "text" --output DIR
+trtmc embed <bundle.bundle> --prompt "text"
+trtmc rerank <bundle.bundle> --prompt "query" --document "text"
+trtmc solve <bundle.bundle> --field-input CSV
+trtmc solve <bundle.bundle> --branch-input CSV [--trunk-input CSV]
+trtmc transcribe <bundle.bundle> --audio FILE.wav [--stream]
+trtmc speak <bundle.bundle> --audio-in INPUT.wav --audio-out OUTPUT.wav
+trtmc inspect <bundle.bundle>
+trtmc inspect <bundle.bundle> --list-engines
 trtmc version
 ```
 
@@ -240,7 +240,7 @@ builds. `qwen_vl_lora.max_rank` must be between 1 and 256 when enabled:
 
 ```bash
 trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
-  -o /tmp/qwen-vl-lora.trtfb \
+  -o /tmp/qwen-vl-lora.bundle \
   --set qwen_vl_lora.enabled=true \
   --set qwen_vl_lora.max_rank=64 \
   --set qwen_vl_lora.target_modules=q_proj,k_proj,v_proj,o_proj
@@ -249,7 +249,7 @@ trtmc build Qwen/Qwen2.5-VL-3B-Instruct \
 Load one standard PEFT adapter directory and select it for the request:
 
 ```bash
-trtmc run /tmp/qwen-vl-lora.trtfb \
+trtmc run /tmp/qwen-vl-lora.bundle \
   --prompt "Describe the image." \
   --image /tmp/example.png \
   --lora-adapter /tmp/my-peft-adapter \

@@ -1,7 +1,7 @@
 {
   "name": "glm-4-9b-l0-tp2",
   "hf_id": "THUDM/glm-4-9b-hf",
-  "bundle": "glm-4-9b-l0-tp2.trtfb",
+  "bundle": "glm-4-9b-l0-tp2.bundle",
   "family": "glm",
   "runtime_strategy": "glm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

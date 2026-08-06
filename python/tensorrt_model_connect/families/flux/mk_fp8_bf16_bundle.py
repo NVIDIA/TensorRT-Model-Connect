@@ -6,8 +6,8 @@ import struct
 import os
 
 ENGINE = "/tmp/flux2_dit_fp8_bf16_clean.engine"
-DONOR = "/tmp/flux2_exp18.trtfb"
-OUTPUT = "/tmp/flux2_fp8_bf16.trtfb"
+DONOR = "/tmp/flux2_exp18.bundle"
+OUTPUT = "/tmp/flux2_fp8_bf16.bundle"
 
 with open(DONOR, "rb") as f:
     f.read(8)
@@ -53,7 +53,7 @@ for nm in order:
 
 hj = json.dumps(nh).encode()
 with open(OUTPUT, "wb") as f:
-    f.write(b"TRTFB\x00\x01\x00")
+    f.write(b"BUNDLE\x01\x00")
     f.write(struct.pack("<Q", len(hj)))
     f.write(hj)
     for nm in order:

@@ -1,7 +1,7 @@
 {
   "name": "bark-small-fp32-l0",
   "hf_id": "suno/bark-small",
-  "bundle": "bark-small-fp32-l0.trtfb",
+  "bundle": "bark-small-fp32-l0.bundle",
   "family": "bark",
   "runtime_strategy": "text_to_audio_bark",
   "task_strategy": "text_to_audio",

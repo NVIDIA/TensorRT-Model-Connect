@@ -1,7 +1,7 @@
 {
   "name": "deberta-base",
   "hf_id": "microsoft/deberta-base",
-  "bundle": "deberta-base.trtfb",
+  "bundle": "deberta-base.bundle",
   "family": "deberta",
   "runtime_strategy": "deberta_encoder_only",
   "task_strategy": "encoder_only_nlp",

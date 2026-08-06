@@ -72,7 +72,7 @@ def test_cmd_inspect_valid_bundle_without_sections(tmp_path, capsys):
     Preconditions: a syntactically valid bundle has required header fields but no "sections" key.
     Postconditions: _cmd_inspect succeeds and does not print a "Sections:" block.
     """
-    bundle_path = tmp_path / "minimal.trtfb"
+    bundle_path = tmp_path / "minimal.bundle"
     header = {
         "model_id": "minimal-model",
         "model_type": "example_decoder",
@@ -80,7 +80,7 @@ def test_cmd_inspect_valid_bundle_without_sections(tmp_path, capsys):
     }
     payload = json.dumps(header).encode("utf-8")
     with open(bundle_path, "wb") as f:
-        f.write(b"TRTFB\x00\x01\x00")
+        f.write(b"BUNDLE\x01\x00")
         f.write(struct.pack("<Q", len(payload)))
         f.write(payload)
 
@@ -97,10 +97,10 @@ def test_cmd_inspect_returns_error_for_malformed_header_json(tmp_path, capsys):
     Preconditions: bundle magic and header length are valid but header JSON is malformed.
     Postconditions: _cmd_inspect returns non-zero and emits an error to stderr.
     """
-    bundle_path = tmp_path / "malformed.trtfb"
+    bundle_path = tmp_path / "malformed.bundle"
     malformed = b'{"model_id": "bad-json"'
     with open(bundle_path, "wb") as f:
-        f.write(b"TRTFB\x00\x01\x00")
+        f.write(b"BUNDLE\x01\x00")
         f.write(struct.pack("<Q", len(malformed)))
         f.write(malformed)
 
@@ -143,7 +143,7 @@ def test_main_implicit_build_dispatches_to_build_handler(monkeypatch):
     parsed_build_args = argparse.Namespace(
         command="build",
         model="repo/model",
-        output="/tmp/out.trtfb",
+        output="/tmp/out.bundle",
         max_cache_length=1024,
         verbose=True,
     )
@@ -161,7 +161,7 @@ def test_main_implicit_build_dispatches_to_build_handler(monkeypatch):
             "trtmc",
             "repo/model",
             "-o",
-            "/tmp/out.trtfb",
+            "/tmp/out.bundle",
             "--max-cache-length",
             "1024",
             "--verbose",
@@ -176,14 +176,14 @@ def test_main_implicit_build_dispatches_to_build_handler(monkeypatch):
         "build",
         "repo/model",
         "-o",
-        "/tmp/out.trtfb",
+        "/tmp/out.bundle",
         "--max-cache-length",
         "1024",
         "--verbose",
     ]
     assert captured["args"].command == "build"
     assert captured["args"].model == "repo/model"
-    assert captured["args"].output == "/tmp/out.trtfb"
+    assert captured["args"].output == "/tmp/out.bundle"
     assert captured["args"].max_cache_length == 1024
     assert captured["args"].verbose is True
 

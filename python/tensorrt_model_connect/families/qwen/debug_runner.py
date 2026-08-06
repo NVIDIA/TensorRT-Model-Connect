@@ -65,11 +65,11 @@ def load_engine_from_bundle(
     bundle_path: str,
     section_name: str = "engine_plan",
 ) -> tuple[bytes, dict]:
-    """Load Qwen engine plan bytes and metadata from a .trtfb bundle."""
+    """Load Qwen engine plan bytes and metadata from a .bundle artifact."""
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -84,11 +84,11 @@ def load_engine_from_bundle(
 
 
 def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
-    """Load a named raw section from a Qwen .trtfb bundle."""
+    """Load a named raw section from a Qwen .bundle artifact."""
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -100,7 +100,7 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
 
 
 def load_config_from_bundle(bundle_path: str) -> dict:
-    """Load and parse Qwen config.json from a .trtfb bundle."""
+    """Load and parse Qwen config.json from a .bundle artifact."""
     data = load_section_from_bundle(bundle_path, "config.json")
     if data is None:
         return {}
@@ -812,7 +812,7 @@ def load_triattention_stats_from_bundle(
     bundle_path: str,
     section_name: str = "triattention_stats.json",
 ) -> dict[str, Any]:
-    """Load and parse embedded Qwen TriAttention stats from a .trtfb bundle."""
+    """Load and parse embedded Qwen TriAttention stats from a .bundle artifact."""
     import json
 
     data = load_section_from_bundle(bundle_path, section_name)

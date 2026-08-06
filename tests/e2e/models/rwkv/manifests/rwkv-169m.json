@@ -1,7 +1,7 @@
 {
   "name": "rwkv-169m",
   "hf_id": "RWKV/rwkv-4-169m-pile",
-  "bundle": "rwkv-169m.trtfb",
+  "bundle": "rwkv-169m.bundle",
   "family": "rwkv",
   "runtime_strategy": "rwkv_recurrent",
   "task_strategy": "text_generation_causal",

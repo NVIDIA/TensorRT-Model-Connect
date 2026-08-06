@@ -1,7 +1,7 @@
 {
   "name": "chronos-bolt-tiny-official-tp4",
   "hf_id": "amazon/chronos-bolt-tiny",
-  "bundle": "chronos-bolt-tiny-official-tp4.trtfb",
+  "bundle": "chronos-bolt-tiny-official-tp4.bundle",
   "family": "chronos_bolt",
   "runtime_strategy": "chronos_bolt_trt",
   "task_strategy": "neural_operator",

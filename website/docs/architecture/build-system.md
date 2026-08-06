@@ -140,8 +140,8 @@ for the full command.
 | `build/models/<owner>/libtrtmc_model_<owner>.so` | Model-owned native runtime |
 | `libtrtmc_tvm_ffi_plugin.so` | Optional TVM-FFI TensorRT plugin |
 | `dist/tensorrt_model_connect-*.whl` | Built Python/native wheel |
-| Native `.trtfb` | Plans/assets dispatched through an installed model/backend DSO |
-| Optimized `.trtfb` | Descriptor plus embedded implementation DSO/artifact tree |
+| Native `.bundle` | Plans/assets dispatched through an installed model/backend DSO |
+| Optimized `.bundle` | Descriptor plus embedded implementation DSO/artifact tree |
 | `website/build/` | Docusaurus production output |
 
 ## Build-time versus run-time availability

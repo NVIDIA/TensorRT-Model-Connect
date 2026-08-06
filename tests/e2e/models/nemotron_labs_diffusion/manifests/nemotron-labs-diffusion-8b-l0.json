@@ -1,7 +1,7 @@
 {
   "name": "nemotron-labs-diffusion-8b-l0",
   "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B",
-  "bundle": "nemotron-labs-diffusion-8b-l0.trtfb",
+  "bundle": "nemotron-labs-diffusion-8b-l0.bundle",
   "family": "nemotron_labs_diffusion",
   "runtime_strategy": "nemotron_labs_diffusion",
   "task_strategy": "text_generation_causal",

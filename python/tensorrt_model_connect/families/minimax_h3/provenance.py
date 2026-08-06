@@ -47,7 +47,7 @@ _REQUIRED_SNAPSHOT_FILES = (
     "transformer/diffusion_pytorch_model.safetensors.index.json",
     "vae/diffusion_pytorch_model.safetensors.index.json",
 )
-_BUNDLE_MAGIC = b"TRTFB\x00\x01\x00"
+_BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 _MAX_BUNDLE_HEADER_BYTES = 100 << 20
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")

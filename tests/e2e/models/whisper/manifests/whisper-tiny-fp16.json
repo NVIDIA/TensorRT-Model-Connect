@@ -1,7 +1,7 @@
 {
   "name": "whisper-tiny-fp16",
   "hf_id": "openai/whisper-tiny",
-  "bundle": "whisper-tiny-fp16.trtfb",
+  "bundle": "whisper-tiny-fp16.bundle",
   "family": "whisper",
   "runtime_strategy": "whisper_speech_to_text",
   "task_strategy": "speech_to_text",

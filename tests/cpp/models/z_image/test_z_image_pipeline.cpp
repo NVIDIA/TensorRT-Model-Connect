@@ -26,7 +26,7 @@ void test_zimage_construction() {
     trtmc::ZImagePreprocessorWeights z_weights;
 
     trtmc::ZImagePipeline pipeline(nullptr, nullptr, nullptr, cfg, weights, z_weights, nullptr,
-                                   "test-zimage", "/tmp/test.trtfb");
+                                   "test-zimage", "/tmp/test.bundle");
 
     check(std::string(pipeline.pipeline_type()) == "ZImagePipeline",
           "ZImagePipeline pipeline_type");

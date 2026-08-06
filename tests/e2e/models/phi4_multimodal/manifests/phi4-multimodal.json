@@ -1,7 +1,7 @@
 {
   "name": "phi4-multimodal",
   "hf_id": "microsoft/Phi-4-multimodal-instruct",
-  "bundle": "phi4-multimodal.trtfb",
+  "bundle": "phi4-multimodal.bundle",
   "family": "phi4_multimodal",
   "runtime_strategy": "phi4_multimodal_vision_language",
   "task_strategy": "vision_language_generation",

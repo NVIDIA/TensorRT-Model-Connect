@@ -22,7 +22,7 @@ def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
         family="sam3",
         runtime_strategy="sam3_prompted_segmentation",
         task_strategy="prompted_segmentation",
-        bundle="sam3-case.trtfb",
+        bundle="sam3-case.bundle",
         reference_family="prompted_segmentation_sam3",
         inputs=inputs or {},
     )

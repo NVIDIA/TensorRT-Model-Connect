@@ -2,7 +2,7 @@
   "name": "qwen3-omni-30b-a3b-instruct",
   "hf_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
   "hf_revision": "26291f793822fb6be9555850f06dfe95f2d7e695",
-  "bundle": "qwen3-omni-30b-a3b-instruct.trtfb",
+  "bundle": "qwen3-omni-30b-a3b-instruct.bundle",
   "family": "qwen3_omni",
   "runtime_strategy": "qwen3_omni_multimodal",
   "task_strategy": "omni_multimodal",

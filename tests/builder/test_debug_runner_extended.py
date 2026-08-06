@@ -35,7 +35,7 @@ class TestLoadConfigFromBundleExtended:
         header = {"num_layers": 2, "max_cache_length": 64}
         bundle = make_bundle_bytes(header, engine_plan=b"FAKE")
 
-        path = tmp_path / "no_config.trtfb"
+        path = tmp_path / "no_config.bundle"
         path.write_bytes(bundle)
 
         cfg = load_config_from_bundle(str(path))
@@ -59,7 +59,7 @@ class TestLoadConfigFromBundleExtended:
             extra_sections={"config.json": config_data},
         )
 
-        path = tmp_path / "nested_cfg.trtfb"
+        path = tmp_path / "nested_cfg.bundle"
         path.write_bytes(bundle)
 
         cfg = load_config_from_bundle(str(path))
@@ -98,7 +98,7 @@ class TestLoadPreprocessorConfigFromBundle:
             extra_sections={"preprocessor_config.json": preproc_data},
         )
 
-        path = tmp_path / "preproc.trtfb"
+        path = tmp_path / "preproc.bundle"
         path.write_bytes(bundle)
 
         cfg = load_preprocessor_config_from_bundle(str(path))
@@ -115,7 +115,7 @@ class TestLoadPreprocessorConfigFromBundle:
         header = {"num_layers": 1, "max_cache_length": 32}
         bundle = make_bundle_bytes(header, engine_plan=b"EP")
 
-        path = tmp_path / "no_preproc.trtfb"
+        path = tmp_path / "no_preproc.bundle"
         path.write_bytes(bundle)
 
         cfg = load_preprocessor_config_from_bundle(str(path))
@@ -147,7 +147,7 @@ class TestMultiSectionBundle:
                 "tokenizer.json": tokenizer_data,
             },
         )
-        path = tmp_path / "multi.trtfb"
+        path = tmp_path / "multi.bundle"
         path.write_bytes(bundle)
         return str(path), engine_plan, config_data, tokenizer_data
 
@@ -197,10 +197,10 @@ class TestLoadSectionInvalidBundle:
     def test_invalid_magic_raises(self, tmp_path):
         from tensorrt_model_connect.families.qwen.debug_runner import load_section_from_bundle
 
-        path = tmp_path / "bad.trtfb"
+        path = tmp_path / "bad.bundle"
         path.write_bytes(b"GARBAGE_DATA_NOT_A_BUNDLE")
 
-        with pytest.raises(ValueError, match="Not a valid .trtfb bundle"):
+        with pytest.raises(ValueError, match="Not a valid .bundle artifact"):
             load_section_from_bundle(str(path), "engine_plan")
 
 

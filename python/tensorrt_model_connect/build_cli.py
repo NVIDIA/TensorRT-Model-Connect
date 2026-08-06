@@ -131,7 +131,7 @@ def _default_bundle_path(model: str) -> str:
         ch if ch.isalnum() or ch in (".", "-", "_") else "-"
         for ch in model_name
     ).strip(".-_")
-    return f"{safe_name or 'model'}.trtfb"
+    return f"{safe_name or 'model'}.bundle"
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
@@ -592,11 +592,11 @@ def _parse_layer_indices(value: str) -> list[int]:
 
 
 def _read_bundle_header(bundle_path: str) -> dict:
-    """Read and return the JSON header from a .trtfb bundle."""
+    """Read and return the JSON header from a .bundle artifact."""
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header_json = f.read(header_len).decode("utf-8")
     return json.loads(header_json)
@@ -756,12 +756,12 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="trtmc",
-        description="Build .trtfb bundles from HuggingFace models",
+        description="Build .bundle artifacts from HuggingFace models",
     )
     subparsers = parser.add_subparsers(dest="command")
 
-    # trtmc build <model> [-o <out.trtfb>]
-    build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
+    # trtmc build <model> [-o <out.bundle>]
+    build_p = subparsers.add_parser("build", help="Build a .bundle artifact")
     build_p.add_argument("model",
                          help="HF repo ID (for example, org/model-name) or local directory")
     build_p.add_argument(
@@ -794,7 +794,7 @@ def main() -> None:
         "-o",
         "--output",
         default=None,
-        help="Output .trtfb path (default: <model-name>.trtfb)",
+        help="Output .bundle path (default: <model-name>.bundle)",
     )
     build_p.add_argument("--trust-remote-code", action="store_true",
                          help="Allow Hugging Face model code that requires trust_remote_code")
@@ -941,10 +941,10 @@ def main() -> None:
         help="Set one config field for this session (repeatable). Uses the "
              "schema's declared type; unknown namespaces/fields fail fast.")
 
-    # python -m tensorrt_model_connect inspect <bundle.trtfb>
+    # python -m tensorrt_model_connect inspect <bundle.bundle>
     inspect_p = subparsers.add_parser("inspect",
-                                      help="Inspect a .trtfb bundle")
-    inspect_p.add_argument("bundle_path", help=".trtfb file to inspect")
+                                      help="Inspect a .bundle artifact")
+    inspect_p.add_argument("bundle_path", help=".bundle file to inspect")
     inspect_p.add_argument("--list-engines", action="store_true",
                            help="List only TRT engine plan sections with roles")
 
@@ -959,7 +959,7 @@ def main() -> None:
     subparsers.add_parser("version", help="Show version info")
 
     # Keep direct module compatibility: `python -m tensorrt_model_connect
-    # <model-dir> -o out.trtfb` still means build. The public native CLI uses
+    # <model-dir> -o out.bundle` still means build. The public native CLI uses
     # explicit `trtmc build`.
     command_names = {"build", "graph", "inspect", "version"}
     cli_argv = sys.argv[1:]

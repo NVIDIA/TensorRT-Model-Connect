@@ -8,7 +8,7 @@ bundle section parsing through an owned E2E debug runner module.
 
 Trace: ARCH-DBG-001, UD-DBG-02
 Intent: Validate model-owned bundle section loading and vision engine extraction.
-Preconditions: No TRT or GPU required; uses in-memory .trtfb bundles and mocks for TRT engine deserialization.
+Preconditions: No TRT or GPU required; uses in-memory .bundle artifacts and mocks for TRT engine deserialization.
 Postconditions: Engine plan bytes are correctly extracted from bundle sections, vision plans are found when present.
 """
 
@@ -39,7 +39,7 @@ class TestLoadEngineFromBundle:
         engine_data = b"PLAN_BYTES_1234"
         bundle = make_bundle_bytes(header, engine_plan=engine_data)
 
-        path = tmp_path / "test.trtfb"
+        path = tmp_path / "test.bundle"
         path.write_bytes(bundle)
 
         plan, hdr = load_engine_from_bundle(str(path))
@@ -51,10 +51,10 @@ class TestLoadEngineFromBundle:
     def test_invalid_magic(self, tmp_path):
         from tensorrt_model_connect.families.qwen.debug_runner import load_engine_from_bundle
 
-        path = tmp_path / "bad.trtfb"
+        path = tmp_path / "bad.bundle"
         path.write_bytes(b"NOT_A_BUNDLE_xxxxxxxxxxxx")
 
-        with pytest.raises(ValueError, match="Not a valid .trtfb bundle"):
+        with pytest.raises(ValueError, match="Not a valid .bundle artifact"):
             load_engine_from_bundle(str(path))
 
     def test_named_engine_section(self, tmp_path):
@@ -71,7 +71,7 @@ class TestLoadEngineFromBundle:
             extra_sections={"engine_plan_tp_rank1": b"TP_RANK1_PLAN"},
         )
 
-        path = tmp_path / "tp.trtfb"
+        path = tmp_path / "tp.bundle"
         path.write_bytes(bundle)
 
         plan, hdr = load_engine_from_bundle(
@@ -98,7 +98,7 @@ class TestLoadVisionEngineFromBundle:
         bundle = make_bundle_bytes(
             header, engine_plan=engine_data, vision_plan=vision_data)
 
-        path = tmp_path / "vl.trtfb"
+        path = tmp_path / "vl.bundle"
         path.write_bytes(bundle)
 
         plan, hdr = load_vision_engine_from_bundle(str(path))
@@ -113,7 +113,7 @@ class TestLoadVisionEngineFromBundle:
         header = {"num_layers": 2, "max_cache_length": 64}
         bundle = make_bundle_bytes(header, engine_plan=b"TEXT_ONLY")
 
-        path = tmp_path / "text.trtfb"
+        path = tmp_path / "text.bundle"
         path.write_bytes(bundle)
 
         plan, hdr = load_vision_engine_from_bundle(str(path))
@@ -134,7 +134,7 @@ class TestBundleSectionUtils:
         header = {"num_layers": 1, "max_cache_length": 32}
         bundle = make_bundle_bytes(header, engine_plan=b"X")
 
-        path = tmp_path / "test.trtfb"
+        path = tmp_path / "test.bundle"
         path.write_bytes(bundle)
 
         result = load_section_from_bundle(str(path), "nonexistent_section")
@@ -145,7 +145,7 @@ class TestBundleSectionUtils:
 
         # Build a bundle with a config.json section
         config_data = json.dumps({"model_type": "example_decoder"}).encode("utf-8")
-        magic = b"TRTFB\x00\x01\x00"
+        magic = b"BUNDLE\x01\x00"
 
         engine_plan = b"FAKE_ENGINE"
         sections = {
@@ -159,7 +159,7 @@ class TestBundleSectionUtils:
         header_json = json.dumps(header).encode("utf-8")
         header_len = struct.pack("<Q", len(header_json))
 
-        path = tmp_path / "cfg.trtfb"
+        path = tmp_path / "cfg.bundle"
         path.write_bytes(magic + header_len + header_json + engine_plan + config_data)
 
         cfg = load_config_from_bundle(str(path))

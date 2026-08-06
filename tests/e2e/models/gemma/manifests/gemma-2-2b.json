@@ -1,7 +1,7 @@
 {
   "name": "gemma-2-2b",
   "hf_id": "google/gemma-2-2b-it",
-  "bundle": "gemma-2-2b.trtfb",
+  "bundle": "gemma-2-2b.bundle",
   "family": "gemma",
   "runtime_strategy": "gemma_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

@@ -144,7 +144,7 @@ def test_multi_testcase_exclusive_model_is_one_scheduler_entry(tmp_path: Path) -
         "shared-exclusive",
         runtime_strategy="diffusion_text_experiment",
         e2e_parallel_resource="exclusive_gpu",
-        bundle="shared-exclusive-bundle.trtfb",
+        bundle="shared-exclusive-bundle.bundle",
         testcases=[
             {"name": f"shared-exclusive-{mode}"}
             for mode in ("mode-a", "mode-b", "mode-c", "mode-d")
@@ -173,10 +173,10 @@ def test_model_entry_summarizes_child_testcases(tmp_path: Path) -> None:
     _write_manifest(
         tmp_path,
         "shared-model",
-        bundle="shared-bundle.trtfb",
+        bundle="shared-bundle.bundle",
         testcases=[{"name": f"shared-mode-{mode}"} for mode in ("a", "b", "c")],
     )
-    _write_manifest(tmp_path, "unique-mode", bundle="unique-bundle.trtfb")
+    _write_manifest(tmp_path, "unique-mode", bundle="unique-bundle.bundle")
 
     summary = schedule_e2e.model_selection_summary(
         [
@@ -201,7 +201,7 @@ def test_model_entry_weight_uses_model_timing(tmp_path: Path) -> None:
         tmp_path,
         "multi-model",
         hf_id="org/model-9B",
-        bundle="shared.trtfb",
+        bundle="shared.bundle",
         testcases=[{"name": "case-a"}, {"name": "case-b"}],
     )
     manifests = schedule_e2e._load_manifests(tmp_path)
@@ -622,7 +622,7 @@ def test_run_e2e_parallel_collects_model_entries_when_models_file_is_present(
         manifest_dir,
         "group",
         family="fake_family",
-        bundle="shared.trtfb",
+        bundle="shared.bundle",
         testcases=[{"name": "group-a"}, {"name": "group-b"}],
     )
     _write_manifest(manifest_dir, "solo", family="fake_family")

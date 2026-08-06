@@ -65,7 +65,7 @@ digraph BuildOwnership {
   bundle [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<FONT POINT-SIZE="20"><B>.trtfb deployment contract</B></FONT><BR/><FONT POINT-SIZE="16">metadata · plans or embedded implementation · assets</FONT>>
+    label=<<FONT POINT-SIZE="20"><B>.bundle deployment contract</B></FONT><BR/><FONT POINT-SIZE="16">metadata · plans or embedded implementation · assets</FONT>>
   ];
   evidence [
     fillcolor="#ecfeff",

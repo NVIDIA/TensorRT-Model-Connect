@@ -41,7 +41,7 @@ def test_hf_and_trtmc_share_exact_family_latents(
         case, RunContext(case=case, artifacts_dir=str(tmp_path / "hf_artifacts"))
     )
     trt = ensure_initial_latents(
-        case, RunContext(case=case, artifacts_dir=str(tmp_path / "trtfb_artifacts"))
+        case, RunContext(case=case, artifacts_dir=str(tmp_path / "bundle_artifacts"))
     )
 
     assert hf.path == trt.path

@@ -1,7 +1,7 @@
 {
   "name": "qwen35-9b",
   "hf_id": "Qwen/Qwen3.5-9B",
-  "bundle": "qwen35-9b.trtfb",
+  "bundle": "qwen35-9b.bundle",
   "family": "qwen3_5",
   "runtime_strategy": "qwen3_5_hybrid_mamba_attention",
   "task_strategy": "text_generation_causal",

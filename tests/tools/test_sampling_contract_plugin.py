@@ -37,7 +37,7 @@ def test_sampling_contract_accepts_forwarded_top_p_flags() -> None:
                 "command": [
                     "./build/trtmc",
                     "run",
-                    "example-decoder.trtfb",
+                    "example-decoder.bundle",
                     "--temperature",
                     "0.7",
                     "--top-p",
@@ -72,7 +72,7 @@ def test_sampling_contract_rejects_missing_top_p_flag() -> None:
                 "command": [
                     "./build/trtmc",
                     "run",
-                    "example-decoder.trtfb",
+                    "example-decoder.bundle",
                     "--temperature",
                     "0.7",
                     "--top-k",

@@ -59,7 +59,7 @@
 <g id="node5" class="node">
 <title>bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M328.53,-269.8C328.53,-269.8 85.39,-269.8 85.39,-269.8 79.39,-269.8 73.39,-263.8 73.39,-257.8 73.39,-257.8 73.39,-227.2 73.39,-227.2 73.39,-221.2 79.39,-215.2 85.39,-215.2 85.39,-215.2 328.53,-215.2 328.53,-215.2 334.53,-215.2 340.53,-221.2 340.53,-227.2 340.53,-227.2 340.53,-257.8 340.53,-257.8 340.53,-263.8 334.53,-269.8 328.53,-269.8"/>
-<text xml:space="preserve" text-anchor="start" x="143.68" y="-244.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Slot&#45;ready .trtfb</text>
+<text xml:space="preserve" text-anchor="start" x="132.82" y="-244.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Slot&#45;ready .bundle</text>
 <text xml:space="preserve" text-anchor="start" x="87.79" y="-228.6" font-family="Arial" font-size="16.00" fill="#111827">selection receipt · no kernel DSO</text>
 </g>
 <!-- patch&#45;&gt;bundle -->

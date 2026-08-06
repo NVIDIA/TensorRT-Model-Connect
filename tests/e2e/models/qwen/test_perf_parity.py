@@ -29,7 +29,7 @@ DEFAULT_ENGINE_DIR = Path("/mnt/storage/tensorrt-model-connect/engines")
 DEFAULT_BINARY = PROJECT_DIR / "build" / "trtmc"
 DEFAULT_HF_PYTHON = PROJECT_DIR / ".venv" / "bin" / "python"
 
-BUNDLE_NAME = "qwen3-0.6b.trtfb"
+BUNDLE_NAME = "qwen3-0.6b.bundle"
 PROMPT = "The capital of France is"
 MAX_NEW_TOKENS = 10
 
@@ -38,7 +38,7 @@ def pytest_addoption(parser):
     try:
         parser.addoption(
             "--engine-dir", default=None,
-            help="Directory containing .trtfb bundles")
+            help="Directory containing .bundle artifacts")
     except ValueError:
         pass  # already registered by another conftest
     try:

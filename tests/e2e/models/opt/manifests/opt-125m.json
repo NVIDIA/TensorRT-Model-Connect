@@ -1,7 +1,7 @@
 {
   "name": "opt-125m",
   "hf_id": "facebook/opt-125m",
-  "bundle": "opt-125m.trtfb",
+  "bundle": "opt-125m.bundle",
   "family": "opt",
   "runtime_strategy": "opt_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

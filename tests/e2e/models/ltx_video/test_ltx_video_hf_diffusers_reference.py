@@ -53,7 +53,7 @@ def _parity_case(seed: int = 42) -> E2ECase:
         hf_id="Lightricks/LTX-Video",
         family="ltx_video",
         runtime_strategy="diffusion_ltx",
-        bundle="ltx-video-l0.trtfb",
+        bundle="ltx-video-l0.bundle",
         inputs={
             "prompt": "A red robot walks through a garden",
             "video_num_frames": 9,
@@ -69,7 +69,7 @@ def _parity_case(seed: int = 42) -> E2ECase:
 def test_hf_and_trtmc_resolve_the_same_initial_latent(tmp_path) -> None:
     case = _parity_case(seed=43)
     hf_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "hf_artifacts"))
-    trt_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "trtfb_artifacts"))
+    trt_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "bundle_artifacts"))
 
     hf = ensure_initial_latents(case, hf_ctx)
     trt = ensure_initial_latents(case, trt_ctx)
@@ -88,7 +88,7 @@ def test_trtmc_runner_consumes_and_reports_shared_initial_latent(
     binary.write_text("", encoding="utf-8")
     ctx = RunContext(
         case=case,
-        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        artifacts_dir=str(tmp_path / "bundle_artifacts"),
         binary_path=str(binary),
         engine_dir=str(tmp_path),
     )

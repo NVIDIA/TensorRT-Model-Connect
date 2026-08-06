@@ -191,7 +191,7 @@ def test_manifest_loader_promotes_num_expected_masks_into_inputs(tmp_path) -> No
             {
                 "name": "sam-vit-base",
                 "hf_id": "facebook/sam-vit-base",
-                "bundle": "sam-vit-base.trtfb",
+                "bundle": "sam-vit-base.bundle",
                 "family": "sam",
                 "runtime_strategy": "sam_prompted_segmentation",
                 "testcases": [

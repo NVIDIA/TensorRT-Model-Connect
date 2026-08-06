@@ -293,12 +293,12 @@ deleted (hard removal with no shims), tests updated.
   TRTMC_HAS_TRT / TRTMC_SOURCE_DIR / TRTMC_VERSION_STRING which are
   compile-time machinery, not env vars.
 - [x] Qwen3-0.6B smoke (D6) — commit TBD
-  - `./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
+  - `./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.bundle
     --max-cache-length 256 --set triattention.kv_budget=2048
     --set triattention.recent_window=64` — build succeeded (86.8s),
     `/tmp/qwen3-0.6b-smoke.effective_config.json` was written alongside
     the bundle with all seven namespaces serialized.
-  - `./build/trtmc run /tmp/qwen3-0.6b-smoke.trtfb --prompt "The capital
+  - `./build/trtmc run /tmp/qwen3-0.6b-smoke.bundle --prompt "The capital
     of France is" --max-new-tokens 20 --hf-python /opt/venv/bin/python` —
     C++ runtime loaded the bundle, registry resolved, plugin read
     values from `ctx.runtime_config`, text generation produced
@@ -312,7 +312,7 @@ deleted (hard removal with no shims), tests updated.
     benchmark to confirm accuracy/throughput parity with iter2.
     Deferred to a user-driven kickoff. One-liner:
       python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py
-          --dense-bundle PATH.trtfb --tri-bundle PATH.trtfb
+          --dense-bundle PATH.bundle --tri-bundle PATH.bundle
           --output-dir artifacts/triattention/loop/iter3
           --set triattention.profile=true
           --tri-set triattention.kv_budget=6144
@@ -465,14 +465,14 @@ deleted (hard removal with no shims), tests updated.
 ### Tick 18 (2026-04-20) — loop terminates after this tick
 - Ran the Qwen3-0.6B end-to-end smoke under the new config path.
 - Build command:
-    `./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.trtfb
+    `./build/trtmc build Qwen/Qwen3-0.6B -o /tmp/qwen3-0.6b-smoke.bundle
      --max-cache-length 256 --set triattention.kv_budget=2048
      --set triattention.recent_window=64`
   completed in 86.8s. Output files:
-    /tmp/qwen3-0.6b-smoke.trtfb                      (3094.6 MB engine)
+    /tmp/qwen3-0.6b-smoke.bundle                      (3094.6 MB engine)
     /tmp/qwen3-0.6b-smoke.effective_config.json      (7 namespaces)
 - Runtime command:
-    `./build/trtmc run /tmp/qwen3-0.6b-smoke.trtfb
+    `./build/trtmc run /tmp/qwen3-0.6b-smoke.bundle
      --prompt "The capital of France is" --max-new-tokens 20
      --hf-python /opt/venv/bin/python`
   produced: "Paris. The capital of Italy is Rome. The capital of
@@ -1015,7 +1015,7 @@ Commit chain:
       dict path.
     * `test_bundle_defaults_feeds_bundle_default_layer` — session beats
       bundle default; bundle default fills gap.
-    * `test_bundle_writer_round_trip_with_defaults` — real `.trtfb`
+    * `test_bundle_writer_round_trip_with_defaults` — real `.bundle`
       write, re-read, dict-compare. The smoke test for this phase.
     * `test_bundle_writer_omits_defaults_when_empty` — no block when
       `defaults` is None.

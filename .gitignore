@@ -128,7 +128,7 @@ recovery-*-clone/
 engines
 *.png
 *.wav
-*.trtfb
+*.bundle
 *.ttrtb
 results.json
 !**/Recording.wav

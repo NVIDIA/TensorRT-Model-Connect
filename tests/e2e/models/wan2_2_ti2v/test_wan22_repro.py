@@ -31,8 +31,8 @@ def _case(manifest: str):
 @pytest.mark.parametrize(
     ("manifest", "bundle", "steps", "height", "width"),
     (
-        ("wan22-ti2v-5b.json", "wan22-ti2v-5b.trtfb", "50", "704", "1280"),
-        ("wan22-ti2v-5b-l0.json", "wan22-ti2v-5b-l0.trtfb", "15", "384", "672"),
+        ("wan22-ti2v-5b.json", "wan22-ti2v-5b.bundle", "50", "704", "1280"),
+        ("wan22-ti2v-5b-l0.json", "wan22-ti2v-5b-l0.bundle", "15", "384", "672"),
     ),
 )
 def test_repro_uses_the_fixed_profile_native_command(

@@ -24,7 +24,7 @@ Usage:
     # Use a pre-built bundle (skips engine build)
     python3 tools/perf_compare.py \
       --model example-org/example-decoder \
-      --bundle /path/to/model.trtfb \
+      --bundle /path/to/model.bundle \
       --prompt "The capital of France is" \
       --max-new-tokens 20
 
@@ -189,8 +189,8 @@ def load_trt_from_bundle(bundle_path: str):
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -882,7 +882,7 @@ def main():
     parser.add_argument("--model", required=True,
                         help="HF repo ID or local model directory")
     parser.add_argument("--bundle",
-                        help="Pre-built .trtfb bundle (skips engine build)")
+                        help="Pre-built .bundle artifact (skips engine build)")
     parser.add_argument("--prompt", default="The capital of France is",
                         help="Input prompt")
     parser.add_argument("--max-new-tokens", type=int, default=20)

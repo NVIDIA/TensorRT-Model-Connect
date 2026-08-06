@@ -1,8 +1,8 @@
 <!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
-<svg width="856" height="440" role="img" aria-labelledby="getting-started-trtfb-bundle-contents-svg-title getting-started-trtfb-bundle-contents-svg-description" preserveAspectRatio="xMidYMid meet"
+<svg width="856" height="440" role="img" aria-labelledby="getting-started-bundle-contents-svg-title getting-started-bundle-contents-svg-description" preserveAspectRatio="xMidYMid meet"
  viewBox="0.00 0.00 856.00 440.00" xmlns="http://www.w3.org/2000/svg">
-<title id="getting-started-trtfb-bundle-contents-svg-title">What a TRTFB bundle carries</title>
-<desc id="getting-started-trtfb-bundle-contents-svg-description">A TRTFB bundle records shared identity metadata plus either native configuration, engine plans, and assets or an optimized runtime descriptor and integrity-bound artifact tree.</desc>
+<title id="getting-started-bundle-contents-svg-title">What a BUNDLE bundle carries</title>
+<desc id="getting-started-bundle-contents-svg-description">A BUNDLE bundle records shared identity metadata plus either native configuration, engine plans, and assets or an optimized runtime descriptor and integrity-bound artifact tree.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(23.04 416.68)">
 <polygon fill="#fbfcfe" stroke="none" points="-23.04,23.04 -23.04,-416.68 832.78,-416.68 832.78,23.04 -23.04,23.04"/>
 <text xml:space="preserve" text-anchor="start" x="168.42" y="-365.44" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">Inspect the bundle before loading it</text>
@@ -11,7 +11,7 @@
 <g id="node1" class="node">
 <title>bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="1.6" d="M500.39,-341.64C500.39,-341.64 279.44,-341.64 279.44,-341.64 273.44,-341.64 267.44,-335.64 267.44,-329.64 267.44,-329.64 267.44,-297.48 267.44,-297.48 267.44,-291.48 273.44,-285.48 279.44,-285.48 279.44,-285.48 500.39,-285.48 500.39,-285.48 506.39,-285.48 512.39,-291.48 512.39,-297.48 512.39,-297.48 512.39,-329.64 512.39,-329.64 512.39,-335.64 506.39,-341.64 500.39,-341.64"/>
-<text xml:space="preserve" text-anchor="start" x="337.7" y="-314.56" font-family="Arial" font-weight="bold" font-size="20.00" fill="#101828">model.trtfb</text>
+<text xml:space="preserve" text-anchor="start" x="324.92" y="-314.56" font-family="Arial" font-weight="bold" font-size="20.00" fill="#101828">model.bundle</text>
 <text xml:space="preserve" text-anchor="start" x="281.84" y="-298.16" font-family="Arial" font-size="16.00" fill="#101828">portable deployment boundary</text>
 </g>
 <!-- header -->

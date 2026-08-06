@@ -1,7 +1,7 @@
 {
   "name": "xglm-564m-tp4",
   "hf_id": "facebook/xglm-564M",
-  "bundle": "xglm-564m-tp4.trtfb",
+  "bundle": "xglm-564m-tp4.bundle",
   "family": "xglm",
   "runtime_strategy": "xglm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

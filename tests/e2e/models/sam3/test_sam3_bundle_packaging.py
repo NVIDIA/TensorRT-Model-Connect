@@ -101,7 +101,7 @@ def _read_serialized_bundle(path: Path) -> tuple[dict, dict[str, bytes]]:
 def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
     """SAM3 prompted segmentation needs tokenizer provisioning and all TRT plans."""
     model_dir = _make_sam3_model_dir(tmp_path)
-    output_path = tmp_path / "sam3.trtfb"
+    output_path = tmp_path / "sam3.bundle"
 
     class _Sam3Plugin:
         name = "sam3"

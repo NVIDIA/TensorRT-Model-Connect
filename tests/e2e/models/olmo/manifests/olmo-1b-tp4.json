@@ -1,7 +1,7 @@
 {
   "name": "olmo-1b-tp4",
   "hf_id": "allenai/OLMo-1B-hf",
-  "bundle": "olmo-1b-tp4.trtfb",
+  "bundle": "olmo-1b-tp4.bundle",
   "family": "olmo",
   "runtime_strategy": "olmo_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

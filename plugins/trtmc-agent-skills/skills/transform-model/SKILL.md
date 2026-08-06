@@ -2,7 +2,7 @@
 name: transform-model
 description: >-
   Use when onboarding a Hugging Face model into TensorRT-Model-Connect or
-  extending an existing family to produce a `.trtfb` bundle. Drives
+  extending an existing family to produce a `.bundle` bundle. Drives
   ownership-first implementation across Python builder, native runtime, and
   model-owned E2E descriptors, then requires reference-consistency and runtime
   evidence before support is claimed.
@@ -123,7 +123,7 @@ Use the supported dev container when TensorRT/GPU dependencies are required:
 ```bash
 ./build/trtmc build <model-id-or-path> \
   --model-revision <immutable-revision> \
-  -o <artifact-dir>/<model>.trtfb
+  -o <artifact-dir>/<model>.bundle
 
 ./scripts/validate_family.sh <model-id-or-path> \
   --binary ./build/trtmc \
@@ -160,7 +160,7 @@ Then execute it on the exact bundle and retain the artifact tree:
 ```bash
 PYTHONPATH=python:. python3 tools/trtmc_validate.py \
   <model> <workload> \
-  --bundle <bundle.trtfb> \
+  --bundle <bundle.bundle> \
   --output <comparison-dir>
 ```
 

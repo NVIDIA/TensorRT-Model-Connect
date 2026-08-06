@@ -83,7 +83,7 @@ digraph QuantizationFlow {
   bundle [
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>.trtfb bundle</B><BR/><FONT POINT-SIZE="16">engine + required metadata/scales</FONT>>
+    label=<<B>.bundle artifact</B><BR/><FONT POINT-SIZE="16">engine + required metadata/scales</FONT>>
   ];
 
   { rank=same; weights; plan; }

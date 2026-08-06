@@ -1,7 +1,7 @@
 {
   "name": "albert-base",
   "hf_id": "albert/albert-base-v2",
-  "bundle": "albert-base.trtfb",
+  "bundle": "albert-base.bundle",
   "family": "albert",
   "runtime_strategy": "albert_encoder_only",
   "task_strategy": "encoder_only_nlp",

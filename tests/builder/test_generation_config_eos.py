@@ -70,7 +70,7 @@ def test_generation_config_eos_overrides_model_config_in_bundle(
                     with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                         build_bundle(
                             str(tmp_path),
-                            str(tmp_path / "output.trtfb"),
+                            str(tmp_path / "output.bundle"),
                         )
 
     sections = mock_write.call_args[0][2]

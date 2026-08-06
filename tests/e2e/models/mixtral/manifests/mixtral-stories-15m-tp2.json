@@ -1,7 +1,7 @@
 {
   "name": "mixtral-stories-15m-tp2",
   "hf_id": "ggml-org/stories15M_MOE",
-  "bundle": "mixtral-stories-15m-tp2.trtfb",
+  "bundle": "mixtral-stories-15m-tp2.bundle",
   "family": "mixtral",
   "runtime_strategy": "mixtral_decoder_moe",
   "task_strategy": "text_generation_causal",

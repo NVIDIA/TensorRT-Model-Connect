@@ -348,7 +348,7 @@ def test_write_effective_config_next_to_uses_suffix(tmp_path: Path):
     bundle = resolve_cli_config(
         set_tokens=["triattention.kv_budget=8192"],
     )
-    bundle_path = tmp_path / "some" / "bundle.trtfb"
+    bundle_path = tmp_path / "some" / "bundle.bundle"
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
 
     written = write_effective_config_next_to(bundle, bundle_path)
@@ -415,12 +415,12 @@ def test_bundle_defaults_feeds_bundle_default_layer(tmp_path: Path):
 
 
 def test_bundle_writer_round_trip_with_defaults(tmp_path: Path):
-    """End-to-end: Python builder writes a .trtfb, reader gets defaults back."""
+    """End-to-end: Python builder writes a .bundle, reader gets defaults back."""
     pytest.importorskip("struct")
     from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, BUNDLE_MAGIC, write_bundle
     import struct
 
-    path = tmp_path / "bundle.trtfb"
+    path = tmp_path / "bundle.bundle"
     info = BundleInfo(
         model_id="demo", vocab_size=100, hidden_size=16, num_layers=1,
         defaults={"triattention": {"kv_budget": 4096, "protect_prefill": True}},
@@ -450,7 +450,7 @@ def test_bundle_writer_omits_defaults_when_empty(tmp_path: Path):
     from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
     import struct
 
-    path = tmp_path / "bundle.trtfb"
+    path = tmp_path / "bundle.bundle"
     info = BundleInfo(model_id="demo", vocab_size=100, hidden_size=16, num_layers=1)
     write_bundle(path, info, [BundleSection(name="dummy", data=b"\x00\x00")])
 

@@ -106,7 +106,7 @@ static void test_null_input_returns_null() {
 }
 
 static void test_invalid_path_returns_null() {
-    auto* p = trtmc_create_pipeline("/nonexistent/path/to/bundle.trtfb", 0);
+    auto* p = trtmc_create_pipeline("/nonexistent/path/to/bundle.bundle", 0);
     check(p == nullptr, "invalid path returns nullptr");
     const char* err = trtmc_last_error();
     check(err != nullptr && std::strlen(err) > 0, "error set after invalid path");

@@ -219,7 +219,7 @@ def _public_time_series_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "sample_id",
         "output_numel",
         "hf_output_shape",
-        "trtfb_output_shape",
+        "bundle_output_shape",
         "relative_l2",
         "max_absolute_error",
         "passed",
@@ -2829,7 +2829,7 @@ def truncate_prompt_rows(
     token_limit: int,
     truncation_side: str = "left",
 ) -> dict[str, Any]:
-    """Truncate shared text prompts before either HF or TRTFB consumes them."""
+    """Truncate shared text prompts before either HF or BUNDLE consumes them."""
     if token_limit <= 0:
         raise ValueError(f"prompt token limit must be positive, got {token_limit}")
     if truncation_side not in {"left", "right"}:
@@ -3016,7 +3016,7 @@ def _parse_transcribe_stdout(text: str) -> str:
     return ""
 
 
-def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -> None:
+def convert_bundle_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -> None:
     rows = []
     for row in load_jsonl(raw_path, errors="replace"):
         rows.append(
@@ -3026,7 +3026,7 @@ def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -
                 "generated_tokens": row.get("generated_tokens"),
                 "generated_token_ids": _generated_token_ids(row),
                 "wall_ms": row.get("wall_ms"),
-                "source": "trtfb",
+                "source": "bundle",
             }
         )
     write_predictions(predictions_path, rows)
@@ -3055,13 +3055,13 @@ def _write_dataset_benchmark_reproduction(
     }
     if base_seed is not None:
         payload["base_seed"] = base_seed
-    (work_dir / "trtfb_repro.json").write_text(
+    (work_dir / "bundle_repro.json").write_text(
         json.dumps(payload, indent=2),
         encoding="utf-8",
     )
 
 
-_NATIVE_TRTMC_COMMANDS = "trtfb_native_commands.jsonl"
+_NATIVE_TRTMC_COMMANDS = "bundle_native_commands.jsonl"
 
 
 def _reset_native_trtmc_commands(work_dir: Path) -> None:
@@ -3123,12 +3123,12 @@ def _record_output_native_command(
         _append_native_trtmc_command(work_dir, sample_id, command)
 
 
-def run_vlm_trtfb(args: argparse.Namespace) -> None:
+def run_vlm_bundle(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     defaults = generation_defaults(work_dir)
-    raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    predictions = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (getattr(args, "log", "") or "trtfb_run.log")
+    raw_output = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    predictions = work_dir / (args.predictions or "bundle_predictions.json")
+    log_path = work_dir / (getattr(args, "log", "") or "bundle_run.log")
     max_new_tokens = (
         args.max_new_tokens
         if args.max_new_tokens is not None
@@ -3159,7 +3159,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
         for idx, prompt_row in enumerate(prompt_rows):
             images = prompt_row.get("images", [])
             if not isinstance(images, list) or len(images) != 1:
-                raise ValueError(f"VLM TRTFB run expects exactly one image for sample {idx}")
+                raise ValueError(f"VLM BUNDLE run expects exactly one image for sample {idx}")
             cmd = [
                 _trtmc_binary_from_args(args),
                 "run",
@@ -3218,7 +3218,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
                     if not proc.stdout.endswith("\n"):
                         log_f.write("\n")
                 raise RuntimeError(
-                    f"VLM TRTFB reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                    f"VLM BUNDLE reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
                 )
             output_text = _strip_generated_text_prefix(
                 proc.stdout,
@@ -3230,21 +3230,21 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
                 "generated_tokens": None,
                 "generated_token_ids": None,
                 "wall_ms": wall_ms,
-                "source": "trtfb",
+                "source": "bundle",
             }
             rows.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[validation.vlm_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.vlm_bundle] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(predictions, rows)
 
 
-def run_asr_trtfb(args: argparse.Namespace) -> None:
+def run_asr_bundle(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     defaults = generation_defaults(work_dir)
-    raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    predictions = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (args.log or "trtfb_run.log")
+    raw_output = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    predictions = work_dir / (args.predictions or "bundle_predictions.json")
+    log_path = work_dir / (args.log or "bundle_run.log")
     max_new_tokens = (
         args.max_new_tokens
         if args.max_new_tokens is not None
@@ -3265,7 +3265,7 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
         for idx, prompt_row in enumerate(prompt_rows):
             audio_path = str(prompt_row.get("audio", ""))
             if not audio_path:
-                raise ValueError(f"ASR TRTFB run expects an audio path for sample {idx}")
+                raise ValueError(f"ASR BUNDLE run expects an audio path for sample {idx}")
             cmd = [
                 _trtmc_binary_from_args(args),
                 "transcribe",
@@ -3301,7 +3301,7 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
                     log_f.write("\n")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"ASR TRTFB reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                    f"ASR BUNDLE reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
                 )
             generated_token_ids = _parse_generated_token_ids(proc.stderr)
             row = {
@@ -3312,12 +3312,12 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
                 else None,
                 "generated_token_ids": generated_token_ids,
                 "wall_ms": wall_ms,
-                "source": "trtfb",
+                "source": "bundle",
             }
             rows.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[validation.asr_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.asr_bundle] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(predictions, rows)
 
 
@@ -4791,38 +4791,38 @@ def _diffusion_text_shared_sampling_inputs(row: dict[str, Any]) -> dict[str, str
 
 def compare_diffusion_text_prediction_sets(
     hf_data: dict[str, Any],
-    trtfb_data: dict[str, Any],
+    bundle_data: dict[str, Any],
 ) -> dict[str, Any]:
     hf_rows = hf_data.get("responses", [])
-    trtfb_rows = trtfb_data.get("responses", [])
-    if len(hf_rows) != len(trtfb_rows):
+    bundle_rows = bundle_data.get("responses", [])
+    if len(hf_rows) != len(bundle_rows):
         raise ValueError(
-            f"ELF HF/TRTMC prediction count mismatch: hf={len(hf_rows)} trtfb={len(trtfb_rows)}"
+            f"ELF HF/TRTMC prediction count mismatch: hf={len(hf_rows)} bundle={len(bundle_rows)}"
         )
     token_matches = 0
     token_positions = 0
     shared_input_matches = 0
     samples: list[dict[str, Any]] = []
-    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+    for index, (hf_row, bundle_row) in enumerate(zip(hf_rows, bundle_rows, strict=True)):
         hf_id = str(hf_row.get("sample_id", hf_row.get("id", index)))
-        trtfb_id = str(trtfb_row.get("sample_id", trtfb_row.get("id", index)))
-        if hf_id != trtfb_id:
+        bundle_id = str(bundle_row.get("sample_id", bundle_row.get("id", index)))
+        if hf_id != bundle_id:
             raise ValueError(
-                f"ELF HF/TRTMC sample id mismatch at index {index}: hf={hf_id!r} trtfb={trtfb_id!r}"
+                f"ELF HF/TRTMC sample id mismatch at index {index}: hf={hf_id!r} bundle={bundle_id!r}"
             )
-        for backend, row in (("HF", hf_row), ("TRTMC", trtfb_row)):
+        for backend, row in (("HF", hf_row), ("TRTMC", bundle_row)):
             if not isinstance(row.get("token_ids", row.get("generated_token_ids")), list):
                 raise ValueError(
                     f"ELF {backend} prediction {hf_id!r} must contain token_ids or "
                     "generated_token_ids for token agreement"
                 )
         hf_tokens = _diffusion_text_sample_token_ids(hf_row)
-        trtfb_tokens = _diffusion_text_sample_token_ids(trtfb_row)
-        positions = max(len(hf_tokens), len(trtfb_tokens))
-        matches = sum(left == right for left, right in zip(hf_tokens, trtfb_tokens, strict=False))
+        bundle_tokens = _diffusion_text_sample_token_ids(bundle_row)
+        positions = max(len(hf_tokens), len(bundle_tokens))
+        matches = sum(left == right for left, right in zip(hf_tokens, bundle_tokens, strict=False))
         hf_shared_inputs = _diffusion_text_shared_sampling_inputs(hf_row)
-        trtfb_shared_inputs = _diffusion_text_shared_sampling_inputs(trtfb_row)
-        shared_inputs_match = bool(hf_shared_inputs) and hf_shared_inputs == trtfb_shared_inputs
+        bundle_shared_inputs = _diffusion_text_shared_sampling_inputs(bundle_row)
+        shared_inputs_match = bool(hf_shared_inputs) and hf_shared_inputs == bundle_shared_inputs
         token_matches += matches
         token_positions += positions
         shared_input_matches += int(shared_inputs_match)
@@ -4830,7 +4830,7 @@ def compare_diffusion_text_prediction_sets(
             {
                 "sample_id": hf_id,
                 "token_agreement_rate": matches / positions if positions else 0.0,
-                "first_token_divergence": _first_token_divergence(hf_tokens, trtfb_tokens),
+                "first_token_divergence": _first_token_divergence(hf_tokens, bundle_tokens),
                 "shared_sampling_inputs_match": shared_inputs_match,
             }
         )
@@ -4849,23 +4849,23 @@ def diffusion_text_task_metric_deltas(
 ) -> dict[str, float]:
     """Return absolute HF/TRTMC deltas for the task-level ELF metrics."""
     metric_pairs: dict[str, tuple[tuple[str, str, str], ...]] = {
-        "sacrebleu": (("hf_corpus_bleu", "trtfb_corpus_bleu", "corpus_bleu_abs_delta"),),
+        "sacrebleu": (("hf_corpus_bleu", "bundle_corpus_bleu", "corpus_bleu_abs_delta"),),
         "rouge": (
-            ("hf_rouge1", "trtfb_rouge1", "rouge1_abs_delta"),
-            ("hf_rouge2", "trtfb_rouge2", "rouge2_abs_delta"),
-            ("hf_rouge_l", "trtfb_rouge_l", "rouge_l_abs_delta"),
+            ("hf_rouge1", "bundle_rouge1", "rouge1_abs_delta"),
+            ("hf_rouge2", "bundle_rouge2", "rouge2_abs_delta"),
+            ("hf_rouge_l", "bundle_rouge_l", "rouge_l_abs_delta"),
         ),
         "unconditional_text_quality": (
-            ("hf_generation_ppl", "trtfb_generation_ppl", "generation_ppl_abs_delta"),
-            ("hf_unigram_entropy", "trtfb_unigram_entropy", "unigram_entropy_abs_delta"),
+            ("hf_generation_ppl", "bundle_generation_ppl", "generation_ppl_abs_delta"),
+            ("hf_unigram_entropy", "bundle_unigram_entropy", "unigram_entropy_abs_delta"),
         ),
     }
     pairs = metric_pairs.get(task_metric)
     if pairs is None:
         raise ValueError(f"Unsupported diffusion-text task metric {task_metric!r}")
     return {
-        output_key: abs(float(diagnostics[hf_key]) - float(diagnostics[trtfb_key]))
-        for hf_key, trtfb_key, output_key in pairs
+        output_key: abs(float(diagnostics[hf_key]) - float(diagnostics[bundle_key]))
+        for hf_key, bundle_key, output_key in pairs
     }
 
 
@@ -4985,20 +4985,20 @@ def apply_metric_gates(result: dict[str, Any], gates: dict[str, Any]) -> dict[st
 def continuation_task_quality_diagnostics(
     task_metric: str,
     hf_predictions: dict[str, Any],
-    trtfb_predictions: dict[str, Any],
+    bundle_predictions: dict[str, Any],
     answers: dict[str, Any],
 ) -> dict[str, Any]:
     if task_metric != "sacrebleu":
         return {}
     hf_quality = score_sacrebleu_predictions(hf_predictions, answers)
-    trtfb_quality = score_sacrebleu_predictions(trtfb_predictions, answers)
+    bundle_quality = score_sacrebleu_predictions(bundle_predictions, answers)
     return {
         "hf": hf_quality,
-        "trtfb": trtfb_quality,
+        "bundle": bundle_quality,
         "hf_corpus_bleu": hf_quality["corpus_bleu"],
-        "trtfb_corpus_bleu": trtfb_quality["corpus_bleu"],
+        "bundle_corpus_bleu": bundle_quality["corpus_bleu"],
         "corpus_bleu_abs_delta": abs(
-            hf_quality["corpus_bleu"] - trtfb_quality["corpus_bleu"]
+            hf_quality["corpus_bleu"] - bundle_quality["corpus_bleu"]
         ),
     }
 
@@ -5302,7 +5302,7 @@ def score_predictions(
 
 def compare_prediction_sets(
     hf_predictions: dict[str, Any],
-    trtfb_predictions: dict[str, Any],
+    bundle_predictions: dict[str, Any],
     answers: dict[str, Any],
     *,
     scorer: str = "exact_or_alias",
@@ -5318,8 +5318,8 @@ def compare_prediction_sets(
         require_valid_prediction=require_valid_prediction,
         scorer_options=scorer_options,
     )
-    trtfb_score = score_predictions(
-        trtfb_predictions,
+    bundle_score = score_predictions(
+        bundle_predictions,
         answers,
         scorer=scorer,
         answer_parser=answer_parser,
@@ -5327,10 +5327,10 @@ def compare_prediction_sets(
         scorer_options=scorer_options,
     )
     hf_responses = hf_predictions["responses"]
-    trt_responses = trtfb_predictions["responses"]
+    trt_responses = bundle_predictions["responses"]
     requests = answers["requests"]
     if len(hf_responses) != len(trt_responses):
-        raise ValueError("HF and TRTFB predictions must have the same length")
+        raise ValueError("HF and BUNDLE predictions must have the same length")
 
     agreement_score = 0.0
     correctness_agreement = 0
@@ -5345,7 +5345,7 @@ def compare_prediction_sets(
         answer = str(req["answer"])
         if scorer == "grounding_iou":
             hf_pred = hf_score["samples"][idx].get("parsed_prediction")
-            trt_pred = trtfb_score["samples"][idx].get("parsed_prediction")
+            trt_pred = bundle_score["samples"][idx].get("parsed_prediction")
         elif scorer == "asr_transcript":
             hf_pred = normalize_asr_transcript(str(hf_row.get("output_text", "")))
             trt_pred = normalize_asr_transcript(str(trt_row.get("output_text", "")))
@@ -5360,9 +5360,9 @@ def compare_prediction_sets(
                 str(trt_row.get("output_text", "")), answer_parser=answer_parser
             )
         hf_sample = hf_score["samples"][idx]
-        trtfb_sample = trtfb_score["samples"][idx]
+        bundle_sample = bundle_score["samples"][idx]
         hf_ok = bool(hf_sample.get("correct", False))
-        trt_ok = bool(trtfb_sample.get("correct", False))
+        trt_ok = bool(bundle_sample.get("correct", False))
         correctness_match = hf_ok == trt_ok
         agreement_match = (
             correctness_match
@@ -5392,7 +5392,7 @@ def compare_prediction_sets(
                         "index": idx,
                         "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
                         "hf_prediction": hf_pred,
-                        "trtfb_prediction": trt_pred,
+                        "bundle_prediction": trt_pred,
                         "max_score_token_ids": max_score_steps[0],
                     }
                 )
@@ -5407,7 +5407,7 @@ def compare_prediction_sets(
                     "index": idx,
                     "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
                     "hf_prediction": hf_pred,
-                    "trtfb_prediction": trt_pred,
+                    "bundle_prediction": trt_pred,
                     "transcript_exact": agreement_match,
                     "transcript_similarity": transcript_similarity,
                     "correctness_agreement": correctness_match,
@@ -5415,7 +5415,7 @@ def compare_prediction_sets(
             )
         if require_valid_prediction and (
             not bool(hf_sample.get("valid_prediction", False))
-            or not bool(trtfb_sample.get("valid_prediction", False))
+            or not bool(bundle_sample.get("valid_prediction", False))
         ):
             agreement_match = False
             prediction_score = 0.0
@@ -5424,9 +5424,9 @@ def compare_prediction_sets(
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
         elif hf_ok and not trt_ok:
-            buckets["hf_correct_trtfb_wrong"] += 1
+            buckets["hf_correct_bundle_wrong"] += 1
         elif not hf_ok and trt_ok:
-            buckets["hf_wrong_trtfb_correct"] += 1
+            buckets["hf_wrong_bundle_correct"] += 1
         else:
             buckets["both_wrong"] += 1
         if not agreement_match:
@@ -5437,17 +5437,17 @@ def compare_prediction_sets(
                     "subject": req.get("subject", ""),
                     "answer": answer,
                     "hf_prediction": hf_pred,
-                    "trtfb_prediction": trt_pred,
+                    "bundle_prediction": trt_pred,
                     "hf_correct": hf_ok,
-                    "trtfb_correct": trt_ok,
+                    "bundle_correct": trt_ok,
                     "hf_score": hf_sample.get("score", int(hf_ok)),
-                    "trtfb_score": trtfb_sample.get("score", int(trt_ok)),
+                    "bundle_score": bundle_sample.get("score", int(trt_ok)),
                 }
             )
 
     total = len(requests)
     raw_accuracy_delta = (
-        trtfb_score["overall_accuracy"] - hf_score["overall_accuracy"]
+        bundle_score["overall_accuracy"] - hf_score["overall_accuracy"]
     )
     tie_adjusted_accuracy_delta = raw_accuracy_delta + (
         tie_accuracy_adjustment / total if total else 0.0
@@ -5456,9 +5456,9 @@ def compare_prediction_sets(
         tie_adjusted_accuracy_delta = 0.0
     summary = {
         "hf": hf_score,
-        "trtfb": trtfb_score,
-        "accuracy_delta_trtfb_minus_hf": raw_accuracy_delta,
-        "tie_adjusted_accuracy_delta_trtfb_minus_hf": tie_adjusted_accuracy_delta,
+        "bundle": bundle_score,
+        "accuracy_delta_bundle_minus_hf": raw_accuracy_delta,
+        "tie_adjusted_accuracy_delta_bundle_minus_hf": tie_adjusted_accuracy_delta,
         "prediction_agreement_rate": (agreement_score / total) if total else 0.0,
         "agreement_count": correctness_agreement,
         "correctness_agreement_rate": (
@@ -5494,11 +5494,11 @@ def prediction_agreement_gate_result(
     )
     raw_accuracy_drop = (
         float(summary["hf"]["overall_accuracy"])
-        - float(summary["trtfb"]["overall_accuracy"])
+        - float(summary["bundle"]["overall_accuracy"])
     )
     accuracy_drop = -float(
         summary.get(
-            "tie_adjusted_accuracy_delta_trtfb_minus_hf",
+            "tie_adjusted_accuracy_delta_bundle_minus_hf",
             -raw_accuracy_drop,
         )
     )
@@ -5556,7 +5556,7 @@ def tts_intelligibility_gate_result(
     )
     pass_rate_drop = (
         float(summary["hf"]["overall_accuracy"])
-        - float(summary["trtfb"]["overall_accuracy"])
+        - float(summary["bundle"]["overall_accuracy"])
     )
     correctness_agreement = float(summary["correctness_agreement_rate"])
     return {
@@ -5676,7 +5676,7 @@ def write_diffusion_visual_review(
             f"<p class='prompt'>{html.escape(str(sample.get('prompt', '')))}</p>"
             "<div class='images'>"
             f"{image_tag(str(sample.get('hf_image', '')), 'HF')}"
-            f"{image_tag(str(sample.get('trtfb_image', '')), 'TRTMC')}"
+            f"{image_tag(str(sample.get('bundle_image', '')), 'TRTMC')}"
             "</div>"
             "<details open><summary>DPG proposition checklist</summary>"
             f"<ol>{question_items}</ol></details>"
@@ -5707,7 +5707,7 @@ def write_diffusion_visual_review(
 
 def compare_diffusion_image_predictions(
     hf_predictions: dict[str, Any],
-    trtfb_predictions: dict[str, Any],
+    bundle_predictions: dict[str, Any],
     answers_data: dict[str, Any],
     *,
     work_dir: Path,
@@ -5721,7 +5721,7 @@ def compare_diffusion_image_predictions(
     )
 
     hf_rows = hf_predictions.get("responses", [])
-    trt_rows = trtfb_predictions.get("responses", [])
+    trt_rows = bundle_predictions.get("responses", [])
     requests = answers_data.get("requests", [])
     if len(hf_rows) != len(trt_rows) or len(hf_rows) != len(requests):
         raise ValueError(
@@ -5752,7 +5752,7 @@ def compare_diffusion_image_predictions(
         if hf_id != expected_id or trt_id != expected_id:
             raise ValueError(
                 f"Diffusion sample id mismatch at index {index}: "
-                f"expected={expected_id!r} hf={hf_id!r} trtfb={trt_id!r}"
+                f"expected={expected_id!r} hf={hf_id!r} bundle={trt_id!r}"
             )
         expected_prompt = str(request.get("prompt", ""))
         hf_prompt = str(hf_row.get("prompt", ""))
@@ -5762,7 +5762,7 @@ def compare_diffusion_image_predictions(
         ):
             raise ValueError(
                 f"Diffusion prompt mismatch at index {index}: "
-                f"expected={expected_prompt!r} hf={hf_prompt!r} trtfb={trt_prompt!r}"
+                f"expected={expected_prompt!r} hf={hf_prompt!r} bundle={trt_prompt!r}"
             )
         shared_inputs: dict[str, Any] = {}
         for field in ("seed", "condition_image_sha256", "action"):
@@ -5773,7 +5773,7 @@ def compare_diffusion_image_predictions(
             if hf_value != trt_value:
                 raise ValueError(
                     f"Diffusion shared input mismatch at index {index} for {field}: "
-                    f"hf={hf_value!r} trtfb={trt_value!r}"
+                    f"hf={hf_value!r} bundle={trt_value!r}"
                 )
             expected_value = request.get(field)
             if field != "seed" and expected_value not in (None, "") and hf_value != expected_value:
@@ -5788,13 +5788,13 @@ def compare_diffusion_image_predictions(
         if require_matching_latents and (not hf_latent_hash or not trt_latent_hash):
             raise ValueError(
                 f"Diffusion parity requires matching initial latents at index {index}: "
-                f"hf={hf_latent_hash!r} trtfb={trt_latent_hash!r}"
+                f"hf={hf_latent_hash!r} bundle={trt_latent_hash!r}"
             )
         if hf_latent_hash or trt_latent_hash:
             if not hf_latent_hash or not trt_latent_hash or hf_latent_hash != trt_latent_hash:
                 raise ValueError(
                     f"Diffusion initial latent mismatch at index {index}: "
-                    f"hf={hf_latent_hash!r} trtfb={trt_latent_hash!r}"
+                    f"hf={hf_latent_hash!r} bundle={trt_latent_hash!r}"
                 )
         invalid = (
             int(hf_row.get("returncode", 1)) != 0
@@ -5812,7 +5812,7 @@ def compare_diffusion_image_predictions(
                 "prompt": request.get("prompt", ""),
                 "questions": request.get("questions", []),
                 "hf_image": str(_first_generated_image(str(hf_row.get("frames_dir", ""))) or ""),
-                "trtfb_image": str(_first_generated_image(str(trt_row.get("frames_dir", ""))) or ""),
+                "bundle_image": str(_first_generated_image(str(trt_row.get("frames_dir", ""))) or ""),
                 "status": StageStatus.ERROR.value,
                 "metrics": {},
                 "shared_inputs": shared_inputs,
@@ -5959,7 +5959,7 @@ def compare_diffusion_image_predictions(
             "prompt": request.get("prompt", ""),
             "questions": request.get("questions", []),
             "hf_image": str(_first_generated_image(str(hf_output.data["frames_dir"])) or ""),
-            "trtfb_image": str(_first_generated_image(str(trt_output.data["frames_dir"])) or ""),
+            "bundle_image": str(_first_generated_image(str(trt_output.data["frames_dir"])) or ""),
             "initial_latents_sha256": hf_latent_hash,
             "shared_inputs": shared_inputs,
             "status": result.status,
@@ -6004,12 +6004,12 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
             f"{summary['hf']['skipped_count']} |"
         ),
         (
-            f"| TRTFB | {summary['trtfb']['overall_accuracy']:.4f} | "
-            f"{summary['trtfb']['correct']} | {summary['trtfb']['valid_count']} | "
-            f"{summary['trtfb']['skipped_count']} |"
+            f"| BUNDLE | {summary['bundle']['overall_accuracy']:.4f} | "
+            f"{summary['bundle']['correct']} | {summary['bundle']['valid_count']} | "
+            f"{summary['bundle']['skipped_count']} |"
         ),
         "",
-        f"- accuracy_delta_trtfb_minus_hf: {summary['accuracy_delta_trtfb_minus_hf']:.4f}",
+        f"- accuracy_delta_bundle_minus_hf: {summary['accuracy_delta_bundle_minus_hf']:.4f}",
         f"- prediction_agreement_rate: {summary['prediction_agreement_rate']:.4f}",
     ]
     if "normalized_transcript_exact_agreement_rate" in summary:
@@ -6026,7 +6026,7 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
         "| Bucket | Count |",
         "|---|---:|",
     ])
-    for key in ("both_correct", "hf_correct_trtfb_wrong", "hf_wrong_trtfb_correct", "both_wrong"):
+    for key in ("both_correct", "hf_correct_bundle_wrong", "hf_wrong_bundle_correct", "both_wrong"):
         lines.append(f"| {key} | {summary['buckets'].get(key, 0)} |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -7127,17 +7127,17 @@ def run_time_series_hf_reference(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
-def run_time_series_trtfb(args: argparse.Namespace) -> None:
+def run_time_series_bundle(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
     template, _reference, runner = _load_time_series_validation_plugins(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir = work_dir / "bundle_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (args.log or "trtfb_run.log")
+    raw_path = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "bundle_predictions.json")
+    log_path = work_dir / (args.log or "bundle_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
     _reset_native_trtmc_commands(work_dir)
@@ -7170,7 +7170,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
                 + "\n"
             )
             log_file.flush()
-            response = _time_series_response(case=case, source="trtfb", output=output)
+            response = _time_series_response(case=case, source="bundle", output=output)
             if response["returncode"] != 0:
                 raise RuntimeError(
                     f"TRT time-series run failed for {case.name}: "
@@ -7180,7 +7180,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[validation.time_series_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.time_series_bundle] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -7353,7 +7353,7 @@ def run_vision_hf_reference(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
-def run_vision_trtfb(args: argparse.Namespace) -> None:
+def run_vision_bundle(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
@@ -7363,10 +7363,10 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
     validation_config = manifest.get("task_eval", {})
     validation_config = validation_config if isinstance(validation_config, dict) else {}
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir = work_dir / "bundle_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    raw_path = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "bundle_predictions.json")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
     _reset_native_trtmc_commands(work_dir)
@@ -7389,7 +7389,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
             _record_output_native_command(work_dir, case.name, output)
             response = _vision_response(
                 case=case,
-                source="trtfb",
+                source="bundle",
                 output=output,
                 dataset_kind=dataset_kind,
                 prompt_row=prompt_row,
@@ -7404,7 +7404,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[validation.vision_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.vision_bundle] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -7530,7 +7530,7 @@ def run_reranking_hf_reference(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
-def run_reranking_trtfb(args: argparse.Namespace) -> None:
+def run_reranking_bundle(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
@@ -7538,11 +7538,11 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
         work_dir
     )
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir = work_dir / "bundle_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
-    metadata_path = work_dir / (args.log or "trtfb_run.log")
+    raw_path = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "bundle_predictions.json")
+    metadata_path = work_dir / (args.log or "bundle_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
     _reset_native_trtmc_commands(work_dir)
@@ -7567,14 +7567,14 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
             )
             _record_output_native_command(work_dir, case.name, output)
             response = _reranking_response(
-                case=case, source="trtfb", output=output, prompt_row=prompt_row
+                case=case, source="bundle", output=output, prompt_row=prompt_row
             )
             responses.append(response)
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             _write_reranking_run_metadata(metadata_file, case.name, output)
             print(
-                f"[validation.reranking_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.reranking_bundle] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -8125,18 +8125,18 @@ def run_hf_reference(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
 
-def run_diffusion_trtfb(args: argparse.Namespace) -> None:
+def run_diffusion_bundle(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
     template, _reference, runner = _load_diffusion_validation_plugins(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     generation = generation_defaults(work_dir)
-    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir = work_dir / "bundle_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (getattr(args, "log", "") or "trtfb_run.log")
+    raw_path = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "bundle_predictions.json")
+    log_path = work_dir / (getattr(args, "log", "") or "bundle_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
     _reset_native_trtmc_commands(work_dir)
@@ -8172,7 +8172,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             elif isinstance(command, str) and command:
                 log_file.write(f"$ {command}\n")
             log_file.flush()
-            response = _diffusion_response(case.name, "trtfb", output, case=case)
+            response = _diffusion_response(case.name, "bundle", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
                 raise RuntimeError(
@@ -8183,7 +8183,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[validation.diffusion_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.diffusion_bundle] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -8227,17 +8227,17 @@ def _load_diffusion_text_validation_runner(work_dir: Path) -> tuple[Any, Any]:
     return case, runner
 
 
-def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
+def run_diffusion_text_bundle(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext, StageSpec
 
     work_dir = Path(args.work_dir)
     template, runner = _load_diffusion_text_validation_runner(work_dir)
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
     generation = generation_defaults(work_dir)
-    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir = work_dir / "bundle_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    raw_path = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "bundle_predictions.json")
     bundle_path = Path(args.bundle).resolve()
     base_seed = int(generation.get("seed", 42))
     responses: list[dict[str, Any]] = []
@@ -8310,7 +8310,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
                 "output_text": output_text,
                 "generated_token_ids": [int(token_id) for token_id in token_ids],
                 "wall_ms": float(output.timing_s) * 1000.0,
-                "source": "trtfb",
+                "source": "bundle",
                 "seed": case.inputs["seed"],
                 "shared_sampling_inputs": shared_sampling_inputs,
             }
@@ -8318,7 +8318,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
             raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[validation.diffusion_text_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.diffusion_text_bundle] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
@@ -8430,17 +8430,17 @@ def _runtime_config_tokens(config: dict[str, Any], prefix: str = "") -> list[str
     return tokens
 
 
-def run_tts_trtfb(args: argparse.Namespace) -> None:
+def run_tts_bundle(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     defaults = generation_defaults(work_dir)
     task_config = work_manifest(work_dir).get("task_eval", {})
     task_config = task_config if isinstance(task_config, dict) else {}
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    output_dir = work_dir / "trtfb_audio"
+    output_dir = work_dir / "bundle_audio"
     output_dir.mkdir(parents=True, exist_ok=True)
-    raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    predictions = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (args.log or "trtfb_run.log")
+    raw_output = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    predictions = work_dir / (args.predictions or "bundle_predictions.json")
+    log_path = work_dir / (args.log or "bundle_run.log")
     model_max_new_tokens = task_config.get("model_max_new_tokens")
     max_new_tokens = (
         args.max_new_tokens
@@ -8509,17 +8509,17 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
                     log_f.write("\n")
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"TRTFB TTS reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
+                    f"BUNDLE TTS reference-consistency validation failed for sample {idx} rc={proc.returncode}; see {log_path}"
                 )
             if not wav_path.is_file():
                 raise RuntimeError(
-                    f"TRTFB TTS reference-consistency validation produced no WAV for sample {idx}: {wav_path}"
+                    f"BUNDLE TTS reference-consistency validation produced no WAV for sample {idx}: {wav_path}"
                 )
-            row = _tts_response_row(sample_id, wav_path, wall_ms, "trtfb")
+            row = _tts_response_row(sample_id, wav_path, wall_ms, "bundle")
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[validation.tts_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(f"[validation.tts_bundle] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     scoring = work_scoring(work_dir)
     transcripts = _transcribe_audio_files(
         [Path(row["wav_path"]) for row in responses],
@@ -8546,7 +8546,7 @@ def _parse_encoder_vector_stdout(stdout: str, key: str) -> list[float]:
     return [float(value) for value in vector]
 
 
-def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
+def run_encoder_embedding_bundle(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     task_config = work_manifest(work_dir).get("task_eval", {})
     task_config = task_config if isinstance(task_config, dict) else {}
@@ -8554,9 +8554,9 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
     command_name = "embed" if vector_mode == "embedding" else "encode"
     output_key = "embedding" if vector_mode == "embedding" else "cls_embedding"
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (args.log or "trtfb_run.log")
+    raw_path = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "bundle_predictions.json")
+    log_path = work_dir / (args.log or "bundle_run.log")
     responses: list[dict[str, Any]] = []
     _reset_native_trtmc_commands(work_dir)
     env = os.environ.copy()
@@ -8607,19 +8607,19 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
                 "vector_mode": vector_mode,
                 "vector": _parse_encoder_vector_stdout(proc.stdout, output_key),
                 "wall_ms": wall_ms,
-                "source": "trtfb",
+                "source": "bundle",
             }
             responses.append(row)
             raw_file.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_file.flush()
             print(
-                f"[validation.encoder_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                f"[validation.encoder_bundle] sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
 
 
-def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
+def run_model_plugin_bundle(args: argparse.Namespace) -> None:
     from tests.e2e_harness.contracts import RunContext
 
     work_dir = Path(args.work_dir)
@@ -8629,11 +8629,11 @@ def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
         repo_root=REPO_ROOT,
     )
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir = work_dir / "bundle_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
-    metadata_path = work_dir / (args.log or "trtfb_run.log")
+    raw_path = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "bundle_predictions.json")
+    metadata_path = work_dir / (args.log or "bundle_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
     _reset_native_trtmc_commands(work_dir)
@@ -8681,7 +8681,7 @@ def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
             )
             response = response_from_output(
                 sample_id=sample_id,
-                source="trtfb",
+                source="bundle",
                 testcase=case.metadata["validation_manifest_case_name"],
                 output=output,
                 serialized_output=serialized,
@@ -8705,49 +8705,49 @@ def run_model_plugin_trtfb(args: argparse.Namespace) -> None:
             )
             metadata_file.flush()
             print(
-                f"[validation.model_plugin_trtfb] "
+                f"[validation.model_plugin_bundle] "
                 f"sample={index + 1}/{len(prompt_rows)}",
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
 
 
-def run_trtfb(args: argparse.Namespace) -> None:
+def run_bundle(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
     if _is_model_plugin_dataset_kind(dataset_kind):
-        run_model_plugin_trtfb(args)
+        run_model_plugin_bundle(args)
         return
     if _is_reranking_dataset_kind(dataset_kind):
-        run_reranking_trtfb(args)
+        run_reranking_bundle(args)
         return
     if _is_time_series_dataset_kind(dataset_kind):
-        run_time_series_trtfb(args)
+        run_time_series_bundle(args)
         return
     if _is_vision_task_dataset_kind(dataset_kind):
-        run_vision_trtfb(args)
+        run_vision_bundle(args)
         return
     if _is_encoder_embedding_dataset_kind(dataset_kind):
-        run_encoder_embedding_trtfb(args)
+        run_encoder_embedding_bundle(args)
         return
     if _is_tts_dataset_kind(dataset_kind):
-        run_tts_trtfb(args)
+        run_tts_bundle(args)
         return
     if _is_vlm_dataset_kind(dataset_kind):
-        run_vlm_trtfb(args)
+        run_vlm_bundle(args)
         return
     if _is_asr_dataset_kind(dataset_kind):
-        run_asr_trtfb(args)
+        run_asr_bundle(args)
         return
     if _is_diffusion_media_dataset_kind(dataset_kind):
-        run_diffusion_trtfb(args)
+        run_diffusion_bundle(args)
         return
     if _is_diffusion_text_dataset_kind(dataset_kind):
-        run_diffusion_text_trtfb(args)
+        run_diffusion_text_bundle(args)
         return
     defaults = generation_defaults(work_dir)
-    raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
-    predictions = work_dir / (args.predictions or "trtfb_predictions.json")
+    raw_output = work_dir / (args.raw_output or "bundle_raw.jsonl")
+    predictions = work_dir / (args.predictions or "bundle_predictions.json")
     max_new_tokens = (
         args.max_new_tokens
         if args.max_new_tokens is not None
@@ -8802,7 +8802,7 @@ def run_trtfb(args: argparse.Namespace) -> None:
     env = os.environ.copy()
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
-    log_path = work_dir / (args.log or "trtfb_run.log")
+    log_path = work_dir / (args.log or "bundle_run.log")
     with log_path.open("w", encoding="utf-8") as log_f:
         log_f.write(f"$ {shlex.join(cmd)}\n")
         log_f.flush()
@@ -8810,8 +8810,8 @@ def run_trtfb(args: argparse.Namespace) -> None:
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
         )
     if proc.returncode != 0:
-        raise RuntimeError(f"TRTFB reference-consistency validation failed with rc={proc.returncode}; see {log_path}")
-    convert_trtfb_jsonl_to_predictions(raw_output, predictions)
+        raise RuntimeError(f"BUNDLE reference-consistency validation failed with rc={proc.returncode}; see {log_path}")
+    convert_bundle_jsonl_to_predictions(raw_output, predictions)
 
 
 def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
@@ -9461,7 +9461,7 @@ def resolve_hf_reference_dtype(
     )["reference_dtype"]
 
 
-def _namespace_for_run_trtfb(
+def _namespace_for_run_bundle(
     args: argparse.Namespace, bundle_path: Path, work_dir: Path
 ) -> argparse.Namespace:
     return argparse.Namespace(
@@ -9477,9 +9477,9 @@ def _namespace_for_run_trtfb(
         set=args.set or [],
         cuda_visible_devices=args.cuda_visible_devices,
         chat_template=args.chat_template,
-        predictions="trtfb_predictions.json",
-        raw_output="trtfb_raw.jsonl",
-        log="trtfb_run.log",
+        predictions="bundle_predictions.json",
+        raw_output="bundle_raw.jsonl",
+        log="bundle_run.log",
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_k=args.top_k,
@@ -9502,7 +9502,7 @@ def model_reference_python(model: dict[str, Any], base_python: str) -> str:
 def _read_bundle_section(bundle_path: Path, section_name: str) -> bytes:
     max_header_size = 100 * 1024 * 1024
     with bundle_path.open("rb") as bundle:
-        if bundle.read(8) != b"TRTFB\x00\x01\x00":
+        if bundle.read(8) != b"BUNDLE\x01\x00":
             raise ValueError(f"{bundle_path} is not a TRTMC bundle")
         raw_header_size = bundle.read(8)
         if len(raw_header_size) != 8:
@@ -9681,7 +9681,7 @@ def run_hf_reference_subprocess(
 
     Keeping the torch/transformers reference model in its own process guarantees
     its GPU memory is fully reclaimed when the process exits, before the TRT
-    bundle build and TRTFB inference run for the same model. This prevents the
+    bundle build and BUNDLE inference run for the same model. This prevents the
     resident reference model from contending with the TRT engine + KV cache.
     """
     hf_args = _namespace_for_run_hf(args, model, work_dir)
@@ -9821,17 +9821,17 @@ def _spearman_correlation(left: list[float], right: list[float]) -> float | None
 
 def compare_encoder_embedding_prediction_sets(
     hf_data: dict[str, Any],
-    trtfb_data: dict[str, Any],
+    bundle_data: dict[str, Any],
     *,
     gates: dict[str, Any],
 ) -> dict[str, Any]:
     hf_rows = hf_data.get("responses", [])
-    trtfb_rows = trtfb_data.get("responses", [])
-    if not isinstance(hf_rows, list) or not isinstance(trtfb_rows, list):
+    bundle_rows = bundle_data.get("responses", [])
+    if not isinstance(hf_rows, list) or not isinstance(bundle_rows, list):
         raise ValueError("Encoder predictions must contain response lists")
-    if len(hf_rows) != len(trtfb_rows):
+    if len(hf_rows) != len(bundle_rows):
         raise ValueError(
-            f"Encoder HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(trtfb_rows)}"
+            f"Encoder HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(bundle_rows)}"
         )
     min_vector_cosine_gate = float(gates.get("min_vector_cosine", 0.99))
     min_vector_pass_rate_gate = float(gates.get("min_vector_pass_rate", 1.0))
@@ -9839,21 +9839,21 @@ def compare_encoder_embedding_prediction_sets(
     vector_cosines: list[float] = []
     samples: list[dict[str, Any]] = []
     hf_pairs: dict[str, dict[str, Any]] = defaultdict(dict)
-    trtfb_pairs: dict[str, dict[str, Any]] = defaultdict(dict)
-    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+    bundle_pairs: dict[str, dict[str, Any]] = defaultdict(dict)
+    for index, (hf_row, bundle_row) in enumerate(zip(hf_rows, bundle_rows, strict=True)):
         hf_id = str(hf_row.get("sample_id", index))
-        trtfb_id = str(trtfb_row.get("sample_id", index))
-        if hf_id != trtfb_id:
+        bundle_id = str(bundle_row.get("sample_id", index))
+        if hf_id != bundle_id:
             raise ValueError(
-                f"Encoder HF/TRTMC sample id mismatch at {index}: {hf_id!r} != {trtfb_id!r}"
+                f"Encoder HF/TRTMC sample id mismatch at {index}: {hf_id!r} != {bundle_id!r}"
             )
         hf_vector = hf_row.get("vector")
-        trtfb_vector = trtfb_row.get("vector")
-        if not isinstance(hf_vector, list) or not isinstance(trtfb_vector, list):
+        bundle_vector = bundle_row.get("vector")
+        if not isinstance(hf_vector, list) or not isinstance(bundle_vector, list):
             raise ValueError(f"Encoder prediction {hf_id!r} is missing vector data")
         cosine = _vector_cosine(
             [float(value) for value in hf_vector],
-            [float(value) for value in trtfb_vector],
+            [float(value) for value in bundle_vector],
         )
         vector_cosines.append(cosine)
         pair_id = str(hf_row.get("pair_id", ""))
@@ -9861,7 +9861,7 @@ def compare_encoder_embedding_prediction_sets(
         if not pair_id or pair_side not in {"sentence1", "sentence2"}:
             raise ValueError(f"Encoder prediction {hf_id!r} has invalid pair metadata")
         hf_pairs[pair_id][pair_side] = hf_row
-        trtfb_pairs[pair_id][pair_side] = trtfb_row
+        bundle_pairs[pair_id][pair_side] = bundle_row
         samples.append(
             {
                 "sample_id": hf_id,
@@ -9877,10 +9877,10 @@ def compare_encoder_embedding_prediction_sets(
     pair_deltas: list[float] = []
     gold_scores: list[float] = []
     hf_similarities: list[float] = []
-    trtfb_similarities: list[float] = []
+    bundle_similarities: list[float] = []
     for pair_id, hf_pair in hf_pairs.items():
-        trtfb_pair = trtfb_pairs.get(pair_id, {})
-        if set(hf_pair) != {"sentence1", "sentence2"} or set(trtfb_pair) != {
+        bundle_pair = bundle_pairs.get(pair_id, {})
+        if set(hf_pair) != {"sentence1", "sentence2"} or set(bundle_pair) != {
             "sentence1",
             "sentence2",
         }:
@@ -9889,22 +9889,22 @@ def compare_encoder_embedding_prediction_sets(
             [float(value) for value in hf_pair["sentence1"]["vector"]],
             [float(value) for value in hf_pair["sentence2"]["vector"]],
         )
-        trtfb_similarity = _vector_cosine(
-            [float(value) for value in trtfb_pair["sentence1"]["vector"]],
-            [float(value) for value in trtfb_pair["sentence2"]["vector"]],
+        bundle_similarity = _vector_cosine(
+            [float(value) for value in bundle_pair["sentence1"]["vector"]],
+            [float(value) for value in bundle_pair["sentence2"]["vector"]],
         )
-        delta = abs(trtfb_similarity - hf_similarity)
+        delta = abs(bundle_similarity - hf_similarity)
         score = float(hf_pair["sentence1"].get("score", 0.0))
         pair_deltas.append(delta)
         gold_scores.append(score)
         hf_similarities.append(hf_similarity)
-        trtfb_similarities.append(trtfb_similarity)
+        bundle_similarities.append(bundle_similarity)
         pair_rows.append(
             {
                 "pair_id": pair_id,
                 "score": score,
                 "hf_cosine": hf_similarity,
-                "trtfb_cosine": trtfb_similarity,
+                "bundle_cosine": bundle_similarity,
                 "cosine_abs_delta": delta,
                 "passed": delta <= max_pair_delta_gate,
             }
@@ -9936,7 +9936,7 @@ def compare_encoder_embedding_prediction_sets(
         else float("inf"),
         "max_pair_cosine_abs_delta": max_pair_delta,
         "hf_sts_spearman": _spearman_correlation(gold_scores, hf_similarities),
-        "trtfb_sts_spearman": _spearman_correlation(gold_scores, trtfb_similarities),
+        "bundle_sts_spearman": _spearman_correlation(gold_scores, bundle_similarities),
         "gates": {
             "min_vector_cosine": min_vector_cosine_gate,
             "min_vector_pass_rate": min_vector_pass_rate_gate,
@@ -9956,47 +9956,47 @@ def _validation_response_rows(data: dict[str, Any], label: str) -> list[dict[str
 
 def compare_time_series_prediction_sets(
     hf_data: dict[str, Any],
-    trtfb_data: dict[str, Any],
+    bundle_data: dict[str, Any],
     *,
     gates: dict[str, Any],
 ) -> dict[str, Any]:
     """Gate every numeric sample with the model-owned E2E parity metrics."""
     hf_rows = _validation_response_rows(hf_data, "HF")
-    trtfb_rows = _validation_response_rows(trtfb_data, "TRTMC")
-    if len(hf_rows) != len(trtfb_rows):
+    bundle_rows = _validation_response_rows(bundle_data, "TRTMC")
+    if len(hf_rows) != len(bundle_rows):
         raise ValueError(
-            f"Time-series HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(trtfb_rows)}"
+            f"Time-series HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(bundle_rows)}"
         )
     max_relative_l2 = float(gates.get("max_relative_l2", 0.01))
     max_absolute_error = float(gates.get("max_absolute_error", 0.1))
     min_sample_agreement_rate = float(gates.get("min_sample_agreement_rate", 1.0))
     cases: list[dict[str, Any]] = []
-    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+    for index, (hf_row, bundle_row) in enumerate(zip(hf_rows, bundle_rows, strict=True)):
         hf_id = str(hf_row.get("sample_id", index))
-        trtfb_id = str(trtfb_row.get("sample_id", index))
-        if hf_id != trtfb_id:
+        bundle_id = str(bundle_row.get("sample_id", index))
+        if hf_id != bundle_id:
             raise ValueError(
-                f"Time-series sample id mismatch at {index}: {hf_id!r} != {trtfb_id!r}"
+                f"Time-series sample id mismatch at {index}: {hf_id!r} != {bundle_id!r}"
             )
         hf_values = hf_row.get("output_values")
-        trtfb_values = trtfb_row.get("output_values")
-        if not isinstance(hf_values, list) or not isinstance(trtfb_values, list):
+        bundle_values = bundle_row.get("output_values")
+        if not isinstance(hf_values, list) or not isinstance(bundle_values, list):
             raise ValueError(f"Time-series prediction {hf_id!r} is missing output_values")
-        if len(hf_values) != len(trtfb_values) or not hf_values:
+        if len(hf_values) != len(bundle_values) or not hf_values:
             cases.append(
                 {
                     "sample_id": hf_id,
                     "passed": False,
                     "error": (
                         "output element count mismatch: "
-                        f"HF={len(hf_values)} TRTMC={len(trtfb_values)}"
+                        f"HF={len(hf_values)} TRTMC={len(bundle_values)}"
                     ),
                 }
             )
             continue
         hf_vector = [float(value) for value in hf_values]
-        trtfb_vector = [float(value) for value in trtfb_values]
-        if not all(math.isfinite(value) for value in hf_vector + trtfb_vector):
+        bundle_vector = [float(value) for value in bundle_values]
+        if not all(math.isfinite(value) for value in hf_vector + bundle_vector):
             cases.append(
                 {
                     "sample_id": hf_id,
@@ -10006,7 +10006,7 @@ def compare_time_series_prediction_sets(
             )
             continue
         squared_error = sum(
-            (trtfb - hf) ** 2 for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+            (bundle - hf) ** 2 for hf, bundle in zip(hf_vector, bundle_vector, strict=True)
         )
         reference_squared_norm = sum(value * value for value in hf_vector)
         relative_l2 = (
@@ -10015,14 +10015,14 @@ def compare_time_series_prediction_sets(
             else math.sqrt(squared_error)
         )
         absolute_error = max(
-            abs(trtfb - hf) for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+            abs(bundle - hf) for hf, bundle in zip(hf_vector, bundle_vector, strict=True)
         )
         cases.append(
             {
                 "sample_id": hf_id,
                 "output_numel": len(hf_vector),
                 "hf_output_shape": hf_row.get("output_shape", []),
-                "trtfb_output_shape": trtfb_row.get("output_shape", []),
+                "bundle_output_shape": bundle_row.get("output_shape", []),
                 "relative_l2": relative_l2,
                 "max_absolute_error": absolute_error,
                 "passed": (relative_l2 <= max_relative_l2 and absolute_error <= max_absolute_error),
@@ -10079,48 +10079,48 @@ def write_time_series_summary_markdown(summary: dict[str, Any], path: Path) -> N
 
 def compare_image_classification_prediction_sets(
     hf_data: dict[str, Any],
-    trtfb_data: dict[str, Any],
+    bundle_data: dict[str, Any],
     answers: dict[str, Any],
     *,
     gates: dict[str, Any],
 ) -> dict[str, Any]:
     hf_rows = _validation_response_rows(hf_data, "HF")
-    trtfb_rows = _validation_response_rows(trtfb_data, "TRTMC")
+    bundle_rows = _validation_response_rows(bundle_data, "TRTMC")
     requests = answers.get("requests", [])
     if not isinstance(requests, list):
         raise ValueError("Classification answers must contain requests")
     hf_by_id = {str(row["sample_id"]): row for row in hf_rows}
-    trtfb_by_id = {str(row["sample_id"]): row for row in trtfb_rows}
+    bundle_by_id = {str(row["sample_id"]): row for row in bundle_rows}
     cases: list[dict[str, Any]] = []
     for request in requests:
         sample_id = str(request.get("sample_id") or request.get("id") or "")
         hf_row = hf_by_id.get(sample_id)
-        trtfb_row = trtfb_by_id.get(sample_id)
-        if hf_row is None or trtfb_row is None:
+        bundle_row = bundle_by_id.get(sample_id)
+        if hf_row is None or bundle_row is None:
             cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
             continue
         label = int(request["label"])
         hf_top = int(hf_row["top_class"])
-        trtfb_top = int(trtfb_row["top_class"])
+        bundle_top = int(bundle_row["top_class"])
         cases.append(
             {
                 "sample_id": sample_id,
                 "label": label,
                 "label_name": str(request.get("label_name", "")),
                 "hf_top_class": hf_top,
-                "trtfb_top_class": trtfb_top,
+                "bundle_top_class": bundle_top,
                 "hf_correct": hf_top == label,
-                "trtfb_correct": trtfb_top == label,
-                "top1_agreement": hf_top == trtfb_top,
+                "bundle_correct": bundle_top == label,
+                "top1_agreement": hf_top == bundle_top,
             }
         )
     valid = [case for case in cases if "error" not in case]
     hf_accuracy = _mean([float(case["hf_correct"]) for case in valid])
-    trtfb_accuracy = _mean([float(case["trtfb_correct"]) for case in valid])
+    bundle_accuracy = _mean([float(case["bundle_correct"]) for case in valid])
     agreement = _mean([float(case["top1_agreement"]) for case in valid])
     max_drop = float(gates.get("max_top1_accuracy_drop_from_hf", 0.01))
     min_agreement = float(gates.get("min_top1_agreement", 0.98))
-    accuracy_drop = hf_accuracy - trtfb_accuracy
+    accuracy_drop = hf_accuracy - bundle_accuracy
     status = (
         "passed"
         if valid
@@ -10134,7 +10134,7 @@ def compare_image_classification_prediction_sets(
         "valid_count": len(valid),
         "sample_count": len(cases),
         "hf_top1_accuracy": hf_accuracy,
-        "trtfb_top1_accuracy": trtfb_accuracy,
+        "bundle_top1_accuracy": bundle_accuracy,
         "top1_accuracy_drop_from_hf": accuracy_drop,
         "top1_agreement": agreement,
         "gates": {
@@ -10207,7 +10207,7 @@ def _segmentation_metrics(confusion: Any) -> dict[str, float]:
 
 def compare_semantic_segmentation_prediction_sets(
     hf_data: dict[str, Any],
-    trtfb_data: dict[str, Any],
+    bundle_data: dict[str, Any],
     answers: dict[str, Any],
     *,
     gates: dict[str, Any],
@@ -10220,18 +10220,18 @@ def compare_semantic_segmentation_prediction_sets(
         str(row["sample_id"]): row
         for row in _validation_response_rows(hf_data, "HF")
     }
-    trtfb_by_id = {
+    bundle_by_id = {
         str(row["sample_id"]): row
-        for row in _validation_response_rows(trtfb_data, "TRTMC")
+        for row in _validation_response_rows(bundle_data, "TRTMC")
     }
     requests = answers.get("requests", [])
     hf_ground = np.zeros((num_classes, num_classes), dtype=np.int64)
-    trtfb_ground = np.zeros_like(hf_ground)
+    bundle_ground = np.zeros_like(hf_ground)
     backend = np.zeros_like(hf_ground)
     cases: list[dict[str, Any]] = []
     for request in requests:
         sample_id = str(request.get("sample_id") or request.get("id") or "")
-        if sample_id not in hf_by_id or sample_id not in trtfb_by_id:
+        if sample_id not in hf_by_id or sample_id not in bundle_by_id:
             cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
             continue
         ground_truth = _load_segmentation_array(str(request["mask"]))
@@ -10242,8 +10242,8 @@ def compare_semantic_segmentation_prediction_sets(
                 or hf_by_id[sample_id]["class_map_path"]
             )
         )
-        trtfb_map = _load_segmentation_array(
-            str(trtfb_by_id[sample_id]["class_map_path"])
+        bundle_map = _load_segmentation_array(
+            str(bundle_by_id[sample_id]["class_map_path"])
         )
         hf_conf = _segmentation_confusion(
             ground_truth,
@@ -10251,20 +10251,20 @@ def compare_semantic_segmentation_prediction_sets(
             num_classes=num_classes,
             ignore_index=ignore_index,
         )
-        trtfb_conf = _segmentation_confusion(
+        bundle_conf = _segmentation_confusion(
             ground_truth,
-            trtfb_map,
+            bundle_map,
             num_classes=num_classes,
             ignore_index=ignore_index,
         )
-        resized_hf = _resize_label_array(hf_backend_map, trtfb_map.shape)
+        resized_hf = _resize_label_array(hf_backend_map, bundle_map.shape)
         backend_conf = _segmentation_confusion(
             resized_hf,
-            trtfb_map,
+            bundle_map,
             num_classes=num_classes,
         )
         hf_ground += hf_conf
-        trtfb_ground += trtfb_conf
+        bundle_ground += bundle_conf
         backend += backend_conf
         case_backend = _segmentation_metrics(backend_conf)
         cases.append(
@@ -10273,16 +10273,16 @@ def compare_semantic_segmentation_prediction_sets(
                 "backend_pixel_agreement": case_backend["pixel_accuracy"],
                 "backend_mean_iou": case_backend["mean_iou"],
                 "hf_ground_truth_mean_iou": _segmentation_metrics(hf_conf)["mean_iou"],
-                "trtfb_ground_truth_mean_iou": _segmentation_metrics(trtfb_conf)["mean_iou"],
+                "bundle_ground_truth_mean_iou": _segmentation_metrics(bundle_conf)["mean_iou"],
             }
         )
     hf_metrics = _segmentation_metrics(hf_ground)
-    trtfb_metrics = _segmentation_metrics(trtfb_ground)
+    bundle_metrics = _segmentation_metrics(bundle_ground)
     backend_metrics = _segmentation_metrics(backend)
     min_pixel = float(gates.get("min_backend_pixel_agreement", 0.98))
     min_backend_iou = float(gates.get("min_backend_mean_iou", 0.95))
     max_drop = float(gates.get("max_mean_iou_drop_from_hf", 0.01))
-    mean_iou_drop = hf_metrics["mean_iou"] - trtfb_metrics["mean_iou"]
+    mean_iou_drop = hf_metrics["mean_iou"] - bundle_metrics["mean_iou"]
     valid_count = sum("error" not in case for case in cases)
     status = (
         "passed"
@@ -10298,10 +10298,10 @@ def compare_semantic_segmentation_prediction_sets(
         "sample_count": len(cases),
         "valid_count": valid_count,
         "hf_mean_iou": hf_metrics["mean_iou"],
-        "trtfb_mean_iou": trtfb_metrics["mean_iou"],
+        "bundle_mean_iou": bundle_metrics["mean_iou"],
         "mean_iou_drop_from_hf": mean_iou_drop,
         "hf_pixel_accuracy": hf_metrics["pixel_accuracy"],
-        "trtfb_pixel_accuracy": trtfb_metrics["pixel_accuracy"],
+        "bundle_pixel_accuracy": bundle_metrics["pixel_accuracy"],
         "backend_mean_iou": backend_metrics["mean_iou"],
         "backend_pixel_agreement": backend_metrics["pixel_accuracy"],
         "gates": {
@@ -10361,7 +10361,7 @@ def _binary_mask_iou(left: Any, right: Any) -> float:
 
 def compare_prompted_segmentation_prediction_sets(
     hf_data: dict[str, Any],
-    trtfb_data: dict[str, Any],
+    bundle_data: dict[str, Any],
     answers: dict[str, Any],
     *,
     gates: dict[str, Any],
@@ -10372,16 +10372,16 @@ def compare_prompted_segmentation_prediction_sets(
         str(row["sample_id"]): row
         for row in _validation_response_rows(hf_data, "HF")
     }
-    trtfb_by_id = {
+    bundle_by_id = {
         str(row["sample_id"]): row
-        for row in _validation_response_rows(trtfb_data, "TRTMC")
+        for row in _validation_response_rows(bundle_data, "TRTMC")
     }
     cases: list[dict[str, Any]] = []
     for request in answers.get("requests", []):
         sample_id = str(request.get("sample_id") or request.get("id") or "")
         hf_row = hf_by_id.get(sample_id)
-        trtfb_row = trtfb_by_id.get(sample_id)
-        if hf_row is None or trtfb_row is None:
+        bundle_row = bundle_by_id.get(sample_id)
+        if hf_row is None or bundle_row is None:
             cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
             continue
         ground_truth = _load_segmentation_array(str(request[ground_truth_mask_field])) > 0
@@ -10390,14 +10390,14 @@ def compare_prompted_segmentation_prediction_sets(
             prompt_mode,
             ground_truth.shape,
         )
-        trtfb_mask = _selected_prompt_prediction_mask(
-            trtfb_row,
+        bundle_mask = _selected_prompt_prediction_mask(
+            bundle_row,
             prompt_mode,
             ground_truth.shape,
         )
-        backend_iou = _binary_mask_iou(hf_mask, trtfb_mask)
+        backend_iou = _binary_mask_iou(hf_mask, bundle_mask)
         hf_gt_iou = _binary_mask_iou(ground_truth, hf_mask)
-        trtfb_gt_iou = _binary_mask_iou(ground_truth, trtfb_mask)
+        bundle_gt_iou = _binary_mask_iou(ground_truth, bundle_mask)
         cases.append(
             {
                 "sample_id": sample_id,
@@ -10405,23 +10405,23 @@ def compare_prompted_segmentation_prediction_sets(
                 "text_prompt": str(request.get("text_prompt", "")),
                 "backend_mask_iou": backend_iou,
                 "hf_ground_truth_iou": hf_gt_iou,
-                "trtfb_ground_truth_iou": trtfb_gt_iou,
-                "ground_truth_iou_drop_from_hf": hf_gt_iou - trtfb_gt_iou,
+                "bundle_ground_truth_iou": bundle_gt_iou,
+                "ground_truth_iou_drop_from_hf": hf_gt_iou - bundle_gt_iou,
                 "hf_empty_prediction": bool(hf_row.get("empty_prediction")),
-                "trtfb_empty_prediction": bool(trtfb_row.get("empty_prediction")),
+                "bundle_empty_prediction": bool(bundle_row.get("empty_prediction")),
                 "hf_segmented_image_path": str(hf_row.get("segmented_image_path", "")),
-                "trtfb_segmented_image_path": str(
-                    trtfb_row.get("segmented_image_path", "")
+                "bundle_segmented_image_path": str(
+                    bundle_row.get("segmented_image_path", "")
                 ),
             }
         )
     valid = [case for case in cases if "error" not in case]
     mean_backend_iou = _mean([float(case["backend_mask_iou"]) for case in valid])
     hf_gt_iou = _mean([float(case["hf_ground_truth_iou"]) for case in valid])
-    trtfb_gt_iou = _mean([float(case["trtfb_ground_truth_iou"]) for case in valid])
+    bundle_gt_iou = _mean([float(case["bundle_ground_truth_iou"]) for case in valid])
     min_backend_iou = float(gates.get("min_backend_mask_iou", 0.90))
     max_gt_drop = float(gates.get("max_ground_truth_iou_drop_from_hf", 0.05))
-    gt_drop = hf_gt_iou - trtfb_gt_iou
+    gt_drop = hf_gt_iou - bundle_gt_iou
     status = (
         "passed"
         if valid
@@ -10437,7 +10437,7 @@ def compare_prompted_segmentation_prediction_sets(
         "prompt_mode": prompt_mode,
         "mean_backend_mask_iou": mean_backend_iou,
         "hf_mean_ground_truth_iou": hf_gt_iou,
-        "trtfb_mean_ground_truth_iou": trtfb_gt_iou,
+        "bundle_mean_ground_truth_iou": bundle_gt_iou,
         "ground_truth_iou_drop_from_hf": gt_drop,
         "gates": {
             "min_backend_mask_iou": min_backend_iou,
@@ -10449,7 +10449,7 @@ def compare_prompted_segmentation_prediction_sets(
 
 def compare_reranking_prediction_sets(
     hf_data: dict[str, Any],
-    trtfb_data: dict[str, Any],
+    bundle_data: dict[str, Any],
     answers: dict[str, Any],
     *,
     gates: dict[str, Any],
@@ -10466,9 +10466,9 @@ def compare_reranking_prediction_sets(
         str(row["sample_id"]): row
         for row in _validation_response_rows(hf_data, "HF")
     }
-    trtfb_by_id = {
+    bundle_by_id = {
         str(row["sample_id"]): row
-        for row in _validation_response_rows(trtfb_data, "TRTMC")
+        for row in _validation_response_rows(bundle_data, "TRTMC")
     }
     metric_thresholds = {
         "pairwise_ordering_agreement": float(
@@ -10486,33 +10486,33 @@ def compare_reranking_prediction_sets(
     for request in answers.get("requests", []):
         sample_id = str(request.get("sample_id") or request.get("id") or "")
         hf_row = hf_by_id.get(sample_id)
-        trtfb_row = trtfb_by_id.get(sample_id)
-        if hf_row is None or trtfb_row is None:
+        bundle_row = bundle_by_id.get(sample_id)
+        if hf_row is None or bundle_row is None:
             cases.append(
                 {"sample_id": sample_id, "passed": False, "error": "missing prediction"}
             )
             continue
         hf_scores = hf_row.get("scores")
-        trtfb_scores = trtfb_row.get("scores")
-        if not isinstance(hf_scores, list) or not isinstance(trtfb_scores, list):
+        bundle_scores = bundle_row.get("scores")
+        if not isinstance(hf_scores, list) or not isinstance(bundle_scores, list):
             cases.append(
                 {"sample_id": sample_id, "passed": False, "error": "missing scores"}
             )
             continue
-        if not hf_scores or len(hf_scores) != len(trtfb_scores):
+        if not hf_scores or len(hf_scores) != len(bundle_scores):
             cases.append(
                 {
                     "sample_id": sample_id,
                     "passed": False,
                     "error": (
                         f"score count mismatch: HF={len(hf_scores)}, "
-                        f"TRTMC={len(trtfb_scores)}"
+                        f"TRTMC={len(bundle_scores)}"
                     ),
                 }
             )
             continue
         comparison = comparator.compare(
-            StageOutput(stage_name=stage.name, data={"scores": trtfb_scores}),
+            StageOutput(stage_name=stage.name, data={"scores": bundle_scores}),
             StageOutput(stage_name=stage.name, data={"scores": hf_scores}),
             threshold,
             stage,
@@ -10531,8 +10531,8 @@ def compare_reranking_prediction_sets(
             int(index) for index in request.get("relevant_document_indices", [])
         }
         hf_top_index = max(range(len(hf_scores)), key=lambda index: hf_scores[index])
-        trtfb_top_index = max(
-            range(len(trtfb_scores)), key=lambda index: trtfb_scores[index]
+        bundle_top_index = max(
+            range(len(bundle_scores)), key=lambda index: bundle_scores[index]
         )
         cases.append(
             {
@@ -10542,12 +10542,12 @@ def compare_reranking_prediction_sets(
                 "message": comparison.message,
                 "metrics": metrics,
                 "hf_scores": [float(score) for score in hf_scores],
-                "trtfb_scores": [float(score) for score in trtfb_scores],
+                "bundle_scores": [float(score) for score in bundle_scores],
                 "hf_top_document_index": hf_top_index,
-                "trtfb_top_document_index": trtfb_top_index,
+                "bundle_top_document_index": bundle_top_index,
                 "relevant_document_indices": sorted(relevant_indices),
                 "hf_top1_correct": hf_top_index in relevant_indices,
-                "trtfb_top1_correct": trtfb_top_index in relevant_indices,
+                "bundle_top1_correct": bundle_top_index in relevant_indices,
             }
         )
     valid = [case for case in cases if "error" not in case]
@@ -10565,8 +10565,8 @@ def compare_reranking_prediction_sets(
     hf_top1_accuracy = _mean(
         [1.0 if case["hf_top1_correct"] else 0.0 for case in gold_cases]
     )
-    trtfb_top1_accuracy = _mean(
-        [1.0 if case["trtfb_top1_correct"] else 0.0 for case in gold_cases]
+    bundle_top1_accuracy = _mean(
+        [1.0 if case["bundle_top1_correct"] else 0.0 for case in gold_cases]
     )
     status = (
         "passed"
@@ -10582,7 +10582,7 @@ def compare_reranking_prediction_sets(
         "passed_count": passed_count,
         "sample_pass_rate": sample_pass_rate,
         "hf_top1_accuracy": hf_top1_accuracy,
-        "trtfb_top1_accuracy": trtfb_top1_accuracy,
+        "bundle_top1_accuracy": bundle_top1_accuracy,
         "metrics": metric_summaries,
         "gates": {**metric_thresholds, "min_sample_pass_rate": min_sample_pass_rate},
         "cases": cases,
@@ -10599,14 +10599,14 @@ def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path
         f"- min_vector_cosine: {summary['min_vector_cosine']:.6f}",
         f"- max_pair_cosine_abs_delta: {summary['max_pair_cosine_abs_delta']:.6f}",
         f"- hf_sts_spearman: {_format_optional_float(summary.get('hf_sts_spearman'))}",
-        f"- trtfb_sts_spearman: {_format_optional_float(summary.get('trtfb_sts_spearman'))}",
+        f"- bundle_sts_spearman: {_format_optional_float(summary.get('bundle_sts_spearman'))}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def compare_model_plugin_prediction_sets(
     hf_predictions: dict[str, Any],
-    trtfb_predictions: dict[str, Any],
+    bundle_predictions: dict[str, Any],
     answers_data: dict[str, Any],
     *,
     work_dir: Path,
@@ -10615,7 +10615,7 @@ def compare_model_plugin_prediction_sets(
     from tests.e2e_harness.contracts import StageStatus, ThresholdProfile
 
     hf_rows = hf_predictions.get("responses", [])
-    trt_rows = trtfb_predictions.get("responses", [])
+    trt_rows = bundle_predictions.get("responses", [])
     requests = answers_data.get("requests", [])
     if not all(isinstance(rows, list) for rows in (hf_rows, trt_rows, requests)):
         raise ValueError(
@@ -10665,7 +10665,7 @@ def compare_model_plugin_prediction_sets(
             raise ValueError(
                 f"model-plugin sample id mismatch at index {index}: "
                 f"expected={sample_id!r} hf={hf_row.get('sample_id')!r} "
-                f"trtfb={trt_row.get('sample_id')!r}"
+                f"bundle={trt_row.get('sample_id')!r}"
             )
         case, stage = select_case(
             manifest_path,
@@ -10830,7 +10830,7 @@ def run_full_duplex_bench_comparison(
     *,
     python: str,
     hf_predictions: Path,
-    trtfb_predictions: Path,
+    bundle_predictions: Path,
     answers: Path,
     work_dir: Path,
     gates: Mapping[str, Any],
@@ -10854,7 +10854,7 @@ def run_full_duplex_bench_comparison(
         "--hf-predictions",
         str(hf_predictions),
         "--trtmc-predictions",
-        str(trtfb_predictions),
+        str(bundle_predictions),
         "--requests",
         str(answers),
         "--cache-root",
@@ -10972,7 +10972,7 @@ def eval_one_model(
     if prompt_token_limit:
         if bool(suite.get("generation", {}).get("apply_chat_template", False)):
             raise ValueError(
-                "prompt_token_limit requires apply_chat_template=false so HF and TRTFB "
+                "prompt_token_limit requires apply_chat_template=false so HF and BUNDLE "
                 "consume the same normalized prompt"
             )
         prompt_normalization = apply_work_prompt_token_limit(
@@ -10990,7 +10990,7 @@ def eval_one_model(
     hf_reused = False
     if not no_hf_reference:
         # Run HF in its own process so its GPU memory is fully reclaimed before
-        # the TRT bundle build and TRTFB inference for this model.
+        # the TRT bundle build and BUNDLE inference for this model.
         run_hf_reference_subprocess(args, model, work_dir)
     hf_cache = reference_cache_metadata(work_dir)
     if hf_cache.get("status") in {"reused", "adopted"}:
@@ -11087,7 +11087,7 @@ def eval_one_model(
 
     # TRT inference intentionally runs every eval invocation so runtime changes
     # are never hidden behind stale predictions.
-    run_trtfb(_namespace_for_run_trtfb(args, bundle_path, work_dir))
+    run_bundle(_namespace_for_run_bundle(args, bundle_path, work_dir))
 
     base_result = {
         "suite": suite["id"],
@@ -11128,7 +11128,7 @@ def eval_one_model(
         summary = run_full_duplex_bench_comparison(
             python=scorer_python,
             hf_predictions=work_dir / "hf_predictions.json",
-            trtfb_predictions=work_dir / "trtfb_predictions.json",
+            bundle_predictions=work_dir / "bundle_predictions.json",
             answers=answers_path,
             work_dir=work_dir,
             gates=suite.get("gates", {}),
@@ -11195,12 +11195,12 @@ def eval_one_model(
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        bundle_data = json.loads(
+            (work_dir / "bundle_predictions.json").read_text(encoding="utf-8")
         )
         summary = compare_model_plugin_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             work_dir=work_dir,
             gates=suite.get("gates", {}),
@@ -11228,10 +11228,10 @@ def eval_one_model(
             result["execution_errors"] = summary["execution_errors"]
     elif scorer == "time_series_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
-        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        bundle_data = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
         summary = compare_time_series_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             gates=suite.get("gates", {}),
         )
         (work_dir / "summary.json").write_text(
@@ -11254,12 +11254,12 @@ def eval_one_model(
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        bundle_data = json.loads(
+            (work_dir / "bundle_predictions.json").read_text(encoding="utf-8")
         )
         summary = compare_image_classification_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             gates=suite.get("gates", {}),
         )
@@ -11272,7 +11272,7 @@ def eval_one_model(
             "status": summary["status"],
             "valid_count": summary["valid_count"],
             "hf_top1_accuracy": summary["hf_top1_accuracy"],
-            "trtfb_top1_accuracy": summary["trtfb_top1_accuracy"],
+            "bundle_top1_accuracy": summary["bundle_top1_accuracy"],
             "top1_accuracy_drop_from_hf": summary["top1_accuracy_drop_from_hf"],
             "top1_agreement": summary["top1_agreement"],
         }
@@ -11280,13 +11280,13 @@ def eval_one_model(
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        bundle_data = json.loads(
+            (work_dir / "bundle_predictions.json").read_text(encoding="utf-8")
         )
         dataset_config = suite.get("dataset", {})
         summary = compare_semantic_segmentation_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             gates=suite.get("gates", {}),
             num_classes=int(dataset_config.get("num_classes", 150)),
@@ -11301,7 +11301,7 @@ def eval_one_model(
             "status": summary["status"],
             "valid_count": summary["valid_count"],
             "hf_mean_iou": summary["hf_mean_iou"],
-            "trtfb_mean_iou": summary["trtfb_mean_iou"],
+            "bundle_mean_iou": summary["bundle_mean_iou"],
             "mean_iou_drop_from_hf": summary["mean_iou_drop_from_hf"],
             "backend_mean_iou": summary["backend_mean_iou"],
             "backend_pixel_agreement": summary["backend_pixel_agreement"],
@@ -11310,12 +11310,12 @@ def eval_one_model(
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        bundle_data = json.loads(
+            (work_dir / "bundle_predictions.json").read_text(encoding="utf-8")
         )
         summary = compare_prompted_segmentation_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             gates=suite.get("gates", {}),
             prompt_mode=str(validation_config.get("prompt_mode", "")),
@@ -11334,7 +11334,7 @@ def eval_one_model(
             "prompt_mode": summary["prompt_mode"],
             "mean_backend_mask_iou": summary["mean_backend_mask_iou"],
             "hf_mean_ground_truth_iou": summary["hf_mean_ground_truth_iou"],
-            "trtfb_mean_ground_truth_iou": summary["trtfb_mean_ground_truth_iou"],
+            "bundle_mean_ground_truth_iou": summary["bundle_mean_ground_truth_iou"],
             "ground_truth_iou_drop_from_hf": summary[
                 "ground_truth_iou_drop_from_hf"
             ],
@@ -11343,15 +11343,15 @@ def eval_one_model(
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        bundle_data = json.loads(
+            (work_dir / "bundle_predictions.json").read_text(encoding="utf-8")
         )
         _template, _reference, _runner, comparator = (
             _load_reranking_validation_plugins(work_dir)
         )
         summary = compare_reranking_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             gates=suite.get("gates", {}),
             comparator=comparator,
@@ -11367,7 +11367,7 @@ def eval_one_model(
             "passed_count": summary["passed_count"],
             "sample_pass_rate": summary["sample_pass_rate"],
             "hf_top1_accuracy": summary["hf_top1_accuracy"],
-            "trtfb_top1_accuracy": summary["trtfb_top1_accuracy"],
+            "bundle_top1_accuracy": summary["bundle_top1_accuracy"],
             "mean_pairwise_ordering_agreement": summary["metrics"][
                 "pairwise_ordering_agreement"
             ]["mean"],
@@ -11377,12 +11377,12 @@ def eval_one_model(
         }
     elif scorer == "encoder_embedding_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
-        trtfb_data = json.loads(
-            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        bundle_data = json.loads(
+            (work_dir / "bundle_predictions.json").read_text(encoding="utf-8")
         )
         summary = compare_encoder_embedding_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             gates=suite.get("gates", {}),
         )
         (work_dir / "summary.json").write_text(
@@ -11401,21 +11401,21 @@ def eval_one_model(
             "mean_pair_cosine_abs_delta": summary["mean_pair_cosine_abs_delta"],
             "max_pair_cosine_abs_delta": summary["max_pair_cosine_abs_delta"],
             "hf_sts_spearman": summary["hf_sts_spearman"],
-            "trtfb_sts_spearman": summary["trtfb_sts_spearman"],
+            "bundle_sts_spearman": summary["bundle_sts_spearman"],
         }
     elif scorer == "diffusion_text_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
-        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
-        summary = compare_diffusion_text_prediction_sets(hf_data, trtfb_data)
+        bundle_data = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
+        summary = compare_diffusion_text_prediction_sets(hf_data, bundle_data)
         task_metric = str(suite.get("scoring", {}).get("task_metric", "") or "")
         answers_data = json.loads(answers_path.read_text(encoding="utf-8"))
         diagnostics: dict[str, Any] = {}
         if task_metric == "sacrebleu":
-            for label, data in (("hf", hf_data), ("trtfb", trtfb_data)):
+            for label, data in (("hf", hf_data), ("bundle", bundle_data)):
                 score = score_sacrebleu_predictions(data, answers_data)
                 diagnostics[f"{label}_corpus_bleu"] = score["corpus_bleu"]
         elif task_metric == "rouge":
-            for label, data in (("hf", hf_data), ("trtfb", trtfb_data)):
+            for label, data in (("hf", hf_data), ("bundle", bundle_data)):
                 score = score_rouge_predictions(data, answers_data)
                 diagnostics[f"{label}_rouge1"] = score["rouge1"]
                 diagnostics[f"{label}_rouge2"] = score["rouge2"]
@@ -11423,7 +11423,7 @@ def eval_one_model(
         elif task_metric == "unconditional_text_quality":
             scoring = suite.get("scoring", {})
             perplexity_model = str(scoring.get("perplexity_model", "") or "")
-            for label, data in (("hf", hf_data), ("trtfb", trtfb_data)):
+            for label, data in (("hf", hf_data), ("bundle", bundle_data)):
                 texts = [str(row.get("output_text", "")) for row in data.get("responses", [])]
                 metrics = compute_gpt2_generation_metrics(
                     texts,
@@ -11448,13 +11448,13 @@ def eval_one_model(
         }
         apply_metric_gates(result, suite.get("gates", {}))
     elif scorer in {"sacrebleu", "rouge", "unconditional_text_quality"} and no_hf_reference:
-        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        bundle_data = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
         answers_data = json.loads(answers_path.read_text(encoding="utf-8"))
         if scorer == "sacrebleu":
-            summary = score_sacrebleu_predictions(trtfb_data, answers_data)
+            summary = score_sacrebleu_predictions(bundle_data, answers_data)
             metric_names = ("corpus_bleu", "non_empty_rate", "valid_count", "skipped_count")
         elif scorer == "rouge":
-            summary = score_rouge_predictions(trtfb_data, answers_data)
+            summary = score_rouge_predictions(bundle_data, answers_data)
             metric_names = (
                 "rouge1",
                 "rouge2",
@@ -11469,13 +11469,13 @@ def eval_one_model(
             generation_metrics: dict[str, float] = {}
             if perplexity_model:
                 generation_metrics = compute_gpt2_generation_metrics(
-                    [str(row.get("output_text", "")) for row in trtfb_data.get("responses", [])],
+                    [str(row.get("output_text", "")) for row in bundle_data.get("responses", [])],
                     model_id=perplexity_model,
                     device=str(scoring.get("perplexity_device", "cuda") or "cuda"),
                     local_files_only=args.local_files_only,
                 )
             summary = score_unconditional_text_predictions(
-                trtfb_data,
+                bundle_data,
                 answers_data,
                 generation_ppl=generation_metrics.get("generation_ppl"),
                 unigram_entropy=generation_metrics.get("unigram_entropy"),
@@ -11503,10 +11503,10 @@ def eval_one_model(
         apply_metric_gates(result, suite.get("gates", {}))
     elif scorer == "continuation":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
-        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        bundle_data = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
         summary = compare_continuation_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             require_token_ids=True,
         )
         (work_dir / "summary.json").write_text(
@@ -11545,20 +11545,20 @@ def eval_one_model(
         diagnostics = continuation_task_quality_diagnostics(
             str(suite.get("scoring", {}).get("task_metric", "")),
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
         )
         if diagnostics:
             result.update(
                 {
                     "hf_corpus_bleu": diagnostics["hf_corpus_bleu"],
-                    "trtfb_corpus_bleu": diagnostics["trtfb_corpus_bleu"],
+                    "bundle_corpus_bleu": diagnostics["bundle_corpus_bleu"],
                     "corpus_bleu_abs_delta": diagnostics["corpus_bleu_abs_delta"],
                 }
             )
             summary["task_quality_diagnostics"] = {
                 "hf": diagnostics["hf"],
-                "trtfb": diagnostics["trtfb"],
+                "bundle": diagnostics["bundle"],
                 "corpus_bleu_abs_delta": diagnostics["corpus_bleu_abs_delta"],
             }
             (work_dir / "summary.json").write_text(
@@ -11567,10 +11567,10 @@ def eval_one_model(
         apply_metric_gates(result, suite.get("gates", {}))
     elif scorer == "diffusion_image_clip_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
-        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        bundle_data = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
         summary = compare_diffusion_image_predictions(
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             work_dir=work_dir,
             gates=suite.get("gates", {}),
@@ -11597,10 +11597,10 @@ def eval_one_model(
         }
     else:
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
-        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        bundle_data = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
         summary = compare_prediction_sets(
             hf_data,
-            trtfb_data,
+            bundle_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             scorer=scorer,
             answer_parser=str(validation_config.get("answer_parser", "") or ""),
@@ -11617,17 +11617,17 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "hf_accuracy": summary["hf"]["overall_accuracy"],
-            "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
-            "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
-            "tie_adjusted_accuracy_delta_trtfb_minus_hf": summary[
-                "tie_adjusted_accuracy_delta_trtfb_minus_hf"
+            "bundle_accuracy": summary["bundle"]["overall_accuracy"],
+            "accuracy_delta_bundle_minus_hf": summary["accuracy_delta_bundle_minus_hf"],
+            "tie_adjusted_accuracy_delta_bundle_minus_hf": summary[
+                "tie_adjusted_accuracy_delta_bundle_minus_hf"
             ],
             "reference_tie_equivalent_count": summary[
                 "reference_tie_equivalent_count"
             ],
             "prediction_agreement_rate": summary["prediction_agreement_rate"],
             "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
-            "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
+            "bundle_valid_prediction_rate": summary["bundle"].get("valid_prediction_rate"),
         }
         if scorer in {"grounding_iou", "mcq", "asr_transcript"}:
             result.update(
@@ -11664,7 +11664,7 @@ def eval_one_model(
 # ---------------------------------------------------------------------------
 # Continuation divergence diagnostics for base / completion models
 # (generation-only, no logits).
-# HF reference and TRTFB both greedily generate from the same plain-text prompt;
+# HF reference and BUNDLE both greedily generate from the same plain-text prompt;
 # we compare the two continuations. No gold answer or logprobs are needed. The
 # primary metrics describe how often they diverge and how much of each divergent
 # continuation remains after its first differing token. Legacy agreement fields
@@ -11683,32 +11683,32 @@ def _first_divergence(a: list[Any], b: list[Any]) -> int:
 
 def compare_continuation_sets(
     hf_predictions: dict[str, Any],
-    trtfb_predictions: dict[str, Any],
+    bundle_predictions: dict[str, Any],
     tokenize: Any = None,
     require_token_ids: bool = False,
 ) -> dict[str, Any]:
-    """Compare HF vs TRTFB greedy continuations.
+    """Compare HF vs BUNDLE greedy continuations.
 
     Prefer generated token ids emitted by the runners. ``tokenize`` is only a
     compatibility fallback for older prediction files that do not contain ids.
     """
     hf_rows = hf_predictions.get("responses", [])
-    trt_rows = trtfb_predictions.get("responses", [])
+    trt_rows = bundle_predictions.get("responses", [])
     if not isinstance(hf_rows, list) or not isinstance(trt_rows, list):
-        raise ValueError("HF and TRTFB predictions must contain response lists")
+        raise ValueError("HF and BUNDLE predictions must contain response lists")
     if len(hf_rows) != len(trt_rows):
         raise ValueError(
-            f"HF and TRTFB predictions must have the same length: {len(hf_rows)} != {len(trt_rows)}"
+            f"HF and BUNDLE predictions must have the same length: {len(hf_rows)} != {len(trt_rows)}"
         )
     if not all(isinstance(row, dict) for row in hf_rows + trt_rows):
-        raise ValueError("HF and TRTFB predictions must contain object rows")
+        raise ValueError("HF and BUNDLE predictions must contain object rows")
 
     hf_id_rows = [_generated_token_ids(row) for row in hf_rows]
     trt_id_rows = [_generated_token_ids(row) for row in trt_rows]
     has_all_token_ids = all(ids is not None for ids in hf_id_rows + trt_id_rows)
     if require_token_ids and not has_all_token_ids:
         missing = []
-        for label, rows in (("hf", hf_id_rows), ("trtfb", trt_id_rows)):
+        for label, rows in (("hf", hf_id_rows), ("bundle", trt_id_rows)):
             missing.extend(f"{label}[{idx}]" for idx, ids in enumerate(rows) if ids is None)
         raise ValueError(
             "Continuation token-id metric requires generated_token_ids in every prediction row; "
@@ -11779,7 +11779,7 @@ def compare_continuation_sets(
                     "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
                     "first_divergence": divergence,
                     "hf_token_id": int(hf_tokens[divergence]),
-                    "trtfb_token_id": int(trt_tokens[divergence]),
+                    "bundle_token_id": int(trt_tokens[divergence]),
                     "max_score_token_ids": max_score_token_ids,
                 }
             )
@@ -11808,9 +11808,9 @@ def compare_continuation_sets(
                 "normalized_first_divergence": normalized_divergence,
                 "divergence_severity": divergence_severity,
                 "hf_len": len(hf_tokens),
-                "trtfb_len": len(trt_tokens),
+                "bundle_len": len(trt_tokens),
                 "hf_token_at_divergence": hf_token_at_divergence,
-                "trtfb_token_at_divergence": trt_token_at_divergence,
+                "bundle_token_at_divergence": trt_token_at_divergence,
                 "reference_tie_equivalent": reference_tie_equivalent,
             }
         )
@@ -11824,7 +11824,7 @@ def compare_continuation_sets(
     return {
         "comparison_granularity": comparison_granularity,
         "divergence_metric_scope": "divergent_samples_only",
-        "normalization_denominator": "max_hf_trtfb_generated_length",
+        "normalization_denominator": "max_hf_bundle_generated_length",
         "exact_match_rate": exact_rate,
         "tie_adjusted_exact_match_rate": tie_adjusted_exact_rate,
         "token_id_exact_match_rate": exact_rate if has_all_token_ids else None,
@@ -11863,10 +11863,10 @@ def compare_continuation_sets(
 def cmd_compare_continuation(args: argparse.Namespace) -> int:
     work_dir = Path(args.work_dir)
     hf_path = Path(args.hf_predictions) if args.hf_predictions else work_dir / "hf_predictions.json"
-    trtfb_path = (
-        Path(args.trtfb_predictions)
-        if args.trtfb_predictions
-        else work_dir / "trtfb_predictions.json"
+    bundle_path = (
+        Path(args.bundle_predictions)
+        if args.bundle_predictions
+        else work_dir / "bundle_predictions.json"
     )
     tokenize = None
     if args.model:
@@ -11880,7 +11880,7 @@ def cmd_compare_continuation(args: argparse.Namespace) -> int:
         tokenize = lambda s: tok(s, add_special_tokens=False).input_ids  # noqa: E731
     summary = compare_continuation_sets(
         json.loads(hf_path.read_text(encoding="utf-8")),
-        json.loads(trtfb_path.read_text(encoding="utf-8")),
+        json.loads(bundle_path.read_text(encoding="utf-8")),
         tokenize=tokenize,
     )
     output_path = Path(args.output) if args.output else work_dir / "continuation_parity.json"
@@ -11969,18 +11969,18 @@ def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> 
     else:
         lines.extend(
             [
-                "| Sample | First divergence | HF length | TRTFB length | Prefix ratio | Severity | HF token | TRTFB token |",
+                "| Sample | First divergence | HF length | BUNDLE length | Prefix ratio | Severity | HF token | BUNDLE token |",
                 "|---|---:|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for sample in divergent_samples:
             lines.append(
                 f"| {sample['sample_id']} | {sample['first_divergence']} | "
-                f"{sample['hf_len']} | {sample['trtfb_len']} | "
+                f"{sample['hf_len']} | {sample['bundle_len']} | "
                 f"{sample['normalized_first_divergence']:.4f} | "
                 f"{sample['divergence_severity']:.4f} | "
                 f"{sample['hf_token_at_divergence']} | "
-                f"{sample['trtfb_token_at_divergence']} |"
+                f"{sample['bundle_token_at_divergence']} |"
             )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -12125,14 +12125,14 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     if result.get("mode") == "image_classification_parity":
         return (
             f"model={model['name']} hf_top1={result['hf_top1_accuracy']:.4f} "
-            f"trtfb_top1={result['trtfb_top1_accuracy']:.4f} "
+            f"bundle_top1={result['bundle_top1_accuracy']:.4f} "
             f"top1_agreement={result['top1_agreement']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
     if result.get("mode") == "semantic_segmentation_parity":
         return (
             f"model={model['name']} hf_miou={result['hf_mean_iou']:.4f} "
-            f"trtfb_miou={result['trtfb_mean_iou']:.4f} "
+            f"bundle_miou={result['bundle_mean_iou']:.4f} "
             f"backend_miou={result['backend_mean_iou']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
@@ -12141,12 +12141,12 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
             f"model={model['name']} backend_mask_iou="
             f"{result['mean_backend_mask_iou']:.4f} "
             f"hf_gt_iou={result['hf_mean_ground_truth_iou']:.4f} "
-            f"trtfb_gt_iou={result['trtfb_mean_ground_truth_iou']:.4f} "
+            f"bundle_gt_iou={result['bundle_mean_ground_truth_iou']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
     return (
         f"model={model['name']} hf={result['hf_accuracy']:.4f} "
-        f"trtfb={result['trtfb_accuracy']:.4f} "
+        f"bundle={result['bundle_accuracy']:.4f} "
         f"agreement={result['prediction_agreement_rate']:.4f} {common}"
     )
 
@@ -12202,7 +12202,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--subject", default="")
     p.add_argument("--sample-seed", type=int)
 
-    p = sub.add_parser("run-trtfb")
+    p = sub.add_parser("run-bundle")
     p.add_argument("--bundle", required=True)
     p.add_argument("--work-dir", required=True)
     p.add_argument("--trtmc-binary", default="build/trtmc")
@@ -12220,17 +12220,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--log")
     add_generation_args(p)
 
-    p = sub.add_parser("convert-trtfb")
+    p = sub.add_parser("convert-bundle")
     p.add_argument("--raw", required=True)
     p.add_argument("--predictions", required=True)
 
     p = sub.add_parser(
         "compare-continuation",
-        help="Measure HF/TRTFB continuation divergence frequency and severity.",
+        help="Measure HF/BUNDLE continuation divergence frequency and severity.",
     )
     p.add_argument("--work-dir", required=True)
     p.add_argument("--hf-predictions")
-    p.add_argument("--trtfb-predictions")
+    p.add_argument("--bundle-predictions")
     p.add_argument("--model", default="", help="Optional model id; enables token-level parity.")
     p.add_argument("--trust-remote-code", action="store_true")
     p.add_argument("--local-files-only", action="store_true")
@@ -12262,7 +12262,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--work-dir", required=True)
     p.add_argument("--answers")
     p.add_argument("--hf-predictions")
-    p.add_argument("--trtfb-predictions")
+    p.add_argument("--bundle-predictions")
     p.add_argument("--output", default="")
     p.add_argument("--markdown", default="")
     p.add_argument("--scorer", default="exact_or_alias")
@@ -12327,7 +12327,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "contract and may reuse the same cached reference result."
         ),
     )
-    p.add_argument("--force-build", action="store_true", help="Rebuild the .trtfb bundle.")
+    p.add_argument("--force-build", action="store_true", help="Rebuild the .bundle artifact.")
     p.add_argument(
         "--replace-bundle-on-build",
         action="store_true",
@@ -12351,7 +12351,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--skip-prompt-length-check",
         action="store_true",
-        help="Skip tokenizer-based prompt length validation before TRTFB build/run.",
+        help="Skip tokenizer-based prompt length validation before BUNDLE build/run.",
     )
     p.add_argument("--trtmc-binary", default="build/trtmc")
     p.add_argument("--benchmark-binary", default="build/trtmc_dataset_benchmark")
@@ -12434,8 +12434,8 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_convert_trtfb(args: argparse.Namespace) -> int:
-    convert_trtfb_jsonl_to_predictions(Path(args.raw), Path(args.predictions))
+def cmd_convert_bundle(args: argparse.Namespace) -> int:
+    convert_bundle_jsonl_to_predictions(Path(args.raw), Path(args.predictions))
     return 0
 
 
@@ -12448,7 +12448,7 @@ def cmd_score(args: argparse.Namespace) -> int:
             if args.predictions
             else work_dir / f"{args.label}_predictions.json"
             if args.label
-            else work_dir / "trtfb_predictions.json"
+            else work_dir / "bundle_predictions.json"
         )
         label = args.label or predictions_path.stem.removesuffix("_predictions")
         output_path = Path(args.output) if args.output else work_dir / f"{label}_score.json"
@@ -12478,14 +12478,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
     work_dir = Path(args.work_dir)
     answers_path = Path(args.answers) if args.answers else work_dir / "answers.json"
     hf_path = Path(args.hf_predictions) if args.hf_predictions else work_dir / "hf_predictions.json"
-    trtfb_path = (
-        Path(args.trtfb_predictions)
-        if args.trtfb_predictions
-        else work_dir / "trtfb_predictions.json"
+    bundle_path = (
+        Path(args.bundle_predictions)
+        if args.bundle_predictions
+        else work_dir / "bundle_predictions.json"
     )
     summary = compare_prediction_sets(
         json.loads(hf_path.read_text(encoding="utf-8")),
-        json.loads(trtfb_path.read_text(encoding="utf-8")),
+        json.loads(bundle_path.read_text(encoding="utf-8")),
         json.loads(answers_path.read_text(encoding="utf-8")),
         scorer=args.scorer,
     )
@@ -12495,7 +12495,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     write_summary_markdown(summary, markdown)
     print(
         f"hf_accuracy={summary['hf']['overall_accuracy']:.4f} "
-        f"trtfb_accuracy={summary['trtfb']['overall_accuracy']:.4f} "
+        f"bundle_accuracy={summary['bundle']['overall_accuracy']:.4f} "
         f"agreement={summary['prediction_agreement_rate']:.4f} "
         f"output={output}"
     )
@@ -12893,11 +12893,11 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_prepare_media(args)
     if args.cmd == "prepare-ci-dataset":
         return cmd_prepare_ci_dataset(args)
-    if args.cmd == "run-trtfb":
-        run_trtfb(args)
+    if args.cmd == "run-bundle":
+        run_bundle(args)
         return 0
-    if args.cmd == "convert-trtfb":
-        return cmd_convert_trtfb(args)
+    if args.cmd == "convert-bundle":
+        return cmd_convert_bundle(args)
     if args.cmd == "compare-continuation":
         return cmd_compare_continuation(args)
     if args.cmd == "score":

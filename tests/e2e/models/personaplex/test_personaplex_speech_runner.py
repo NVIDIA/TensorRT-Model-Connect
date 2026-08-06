@@ -37,7 +37,7 @@ def test_runner_uses_total_frame_budget_without_adding_tail_frames(
         family="personaplex",
         runtime_strategy="personaplex_speech_to_speech",
         task_strategy="speech_to_speech",
-        bundle="personaplex.trtfb",
+        bundle="personaplex.bundle",
         inputs={
             "audio": str(audio_path),
             "speech_test_max_frames": 100,

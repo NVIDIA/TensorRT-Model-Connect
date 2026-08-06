@@ -34,15 +34,15 @@ except (ImportError, ModuleNotFoundError):
 class TestPipelineInit:
     def test_explicit_binary(self):
         """Explicit binary path is stored directly, no auto-detection."""
-        pipe = Pipeline("/tmp/model.trtfb", binary="/usr/bin/trtmc")
+        pipe = Pipeline("/tmp/model.bundle", binary="/usr/bin/trtmc")
         assert pipe.binary == "/usr/bin/trtmc"
-        assert pipe.bundle_path == "/tmp/model.trtfb"
+        assert pipe.bundle_path == "/tmp/model.bundle"
         assert pipe.hf_python is None
 
     def test_explicit_binary_and_hf_python(self):
         """Both binary and hf_python are stored when provided."""
         pipe = Pipeline(
-            "/tmp/model.trtfb",
+            "/tmp/model.bundle",
             binary="/usr/bin/trtmc",
             hf_python="/opt/venv/bin/python",
         )
@@ -52,7 +52,7 @@ class TestPipelineInit:
     def test_auto_detect_calls_find_binary(self):
         """When binary is None, _find_binary is called."""
         with patch.object(Pipeline, "_find_binary", return_value="/auto/trtmc"):
-            pipe = Pipeline("/tmp/model.trtfb")
+            pipe = Pipeline("/tmp/model.bundle")
             assert pipe.binary == "/auto/trtmc"
 
     def test_binary_not_found_raises(self):
@@ -62,18 +62,18 @@ class TestPipelineInit:
             side_effect=FileNotFoundError("trtmc binary not found"),
         ):
             with pytest.raises(FileNotFoundError, match="trtmc binary not found"):
-                Pipeline("/tmp/model.trtfb")
+                Pipeline("/tmp/model.bundle")
 
     def test_bundle_path_converted_to_str(self):
         """Path objects are converted to str."""
-        pipe = Pipeline(Path("/tmp/model.trtfb"), binary="/usr/bin/trtmc")
+        pipe = Pipeline(Path("/tmp/model.bundle"), binary="/usr/bin/trtmc")
         assert isinstance(pipe.bundle_path, str)
-        assert pipe.bundle_path == "/tmp/model.trtfb"
+        assert pipe.bundle_path == "/tmp/model.bundle"
 
     def test_repr(self):
         """__repr__ includes the bundle path."""
-        pipe = Pipeline("/tmp/model.trtfb", binary="/usr/bin/trtmc")
-        assert repr(pipe) == "Pipeline('/tmp/model.trtfb')"
+        pipe = Pipeline("/tmp/model.bundle", binary="/usr/bin/trtmc")
+        assert repr(pipe) == "Pipeline('/tmp/model.bundle')"
 
 
 # ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@ class TestPipelineInit:
 class TestPipelineCall:
     def _make_pipeline(self, hf_python=None):
         return Pipeline(
-            "/tmp/model.trtfb", binary="/usr/bin/trtmc", hf_python=hf_python)
+            "/tmp/model.bundle", binary="/usr/bin/trtmc", hf_python=hf_python)
 
     def test_basic_prompt(self):
         """Basic text prompt constructs correct command."""
@@ -99,7 +99,7 @@ class TestPipelineCall:
 
             mock_run.assert_called_once_with(
                 [
-                    "/usr/bin/trtmc", "run", "/tmp/model.trtfb",
+                    "/usr/bin/trtmc", "run", "/tmp/model.bundle",
                     "--prompt", "Say hello",
                     "--max-new-tokens", "5",
                 ],
@@ -275,7 +275,7 @@ class TestPipelineCall:
 class TestPipelineInspect:
     def test_inspect_success(self):
         """inspect() returns stripped stdout."""
-        pipe = Pipeline("/tmp/model.trtfb", binary="/usr/bin/trtmc")
+        pipe = Pipeline("/tmp/model.bundle", binary="/usr/bin/trtmc")
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "Model ID:  example-model\nLayers: 28\n"
@@ -284,7 +284,7 @@ class TestPipelineInspect:
                     return_value=mock_result) as mock_run:
             out = pipe.inspect()
             mock_run.assert_called_once_with(
-                ["/usr/bin/trtmc", "inspect", "/tmp/model.trtfb"],
+                ["/usr/bin/trtmc", "inspect", "/tmp/model.bundle"],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -293,10 +293,10 @@ class TestPipelineInspect:
 
     def test_inspect_failure_raises(self):
         """Non-zero exit code in inspect raises RuntimeError."""
-        pipe = Pipeline("/tmp/model.trtfb", binary="/usr/bin/trtmc")
+        pipe = Pipeline("/tmp/model.bundle", binary="/usr/bin/trtmc")
         mock_result = MagicMock()
         mock_result.returncode = 1
-        mock_result.stderr = "not a valid .trtfb bundle"
+        mock_result.stderr = "not a valid .bundle artifact"
 
         with patch("tensorrt_model_connect.pipeline.subprocess.run",
                     return_value=mock_result):

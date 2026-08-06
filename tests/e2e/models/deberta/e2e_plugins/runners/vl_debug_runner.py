@@ -704,7 +704,7 @@ def load_engine_from_bundle(
     bundle_path: str,
     section_name: str = "engine_plan",
 ) -> tuple[bytes, dict]:
-    """Load engine plan bytes and metadata from a .trtfb bundle.
+    """Load engine plan bytes and metadata from a .bundle artifact.
 
     Returns:
         (engine_plan_bytes, header_dict)
@@ -714,8 +714,8 @@ def load_engine_from_bundle(
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -729,7 +729,7 @@ def load_engine_from_bundle(
     return engine_plan, header
 
 def load_vision_engine_from_bundle(bundle_path: str) -> tuple[bytes | None, dict]:
-    """Load vision engine plan bytes from a .trtfb bundle.
+    """Load vision engine plan bytes from a .bundle artifact.
 
     Returns:
         (vision_engine_plan_bytes_or_None, header_dict)
@@ -739,8 +739,8 @@ def load_vision_engine_from_bundle(bundle_path: str) -> tuple[bytes | None, dict
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -855,7 +855,7 @@ class VisionTrtRunner:
             cudart.cudaStreamDestroy(self.stream)
 
 def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
-    """Load a named section's raw bytes from a .trtfb bundle.
+    """Load a named section's raw bytes from a .bundle artifact.
 
     Returns None if the section doesn't exist.
     """
@@ -864,8 +864,8 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
 
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        if magic != b"TRTFB\x00\x01\x00":
-            raise ValueError(f"Not a valid .trtfb bundle: {bundle_path}")
+        if magic != b"BUNDLE\x01\x00":
+            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
         header_len = struct.unpack("<Q", f.read(8))[0]
         header = json.loads(f.read(header_len).decode("utf-8"))
         sections = header.get("sections", {})
@@ -877,7 +877,7 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
 
 
 def load_config_from_bundle(bundle_path: str) -> dict:
-    """Load and parse config.json from a .trtfb bundle."""
+    """Load and parse config.json from a .bundle artifact."""
     import json
     data = load_section_from_bundle(bundle_path, "config.json")
     if data is None:
@@ -886,7 +886,7 @@ def load_config_from_bundle(bundle_path: str) -> dict:
 
 
 def load_preprocessor_config_from_bundle(bundle_path: str) -> dict:
-    """Load and parse preprocessor_config.json from a .trtfb bundle."""
+    """Load and parse preprocessor_config.json from a .bundle artifact."""
     import json
     data = load_section_from_bundle(bundle_path, "preprocessor_config.json")
     if data is None:

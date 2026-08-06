@@ -33,7 +33,7 @@
 <g id="node2" class="node">
 <title>bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M716.35,-437.8C716.35,-437.8 522.56,-437.8 522.56,-437.8 516.56,-437.8 510.56,-431.8 510.56,-425.8 510.56,-425.8 510.56,-395.2 510.56,-395.2 510.56,-389.2 516.56,-383.2 522.56,-383.2 522.56,-383.2 716.35,-383.2 716.35,-383.2 722.35,-383.2 728.35,-389.2 728.35,-395.2 728.35,-395.2 728.35,-425.8 728.35,-425.8 728.35,-431.8 722.35,-437.8 716.35,-437.8"/>
-<text xml:space="preserve" text-anchor="start" x="569.88" y="-412.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="558.53" y="-412.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.bundle artifact</text>
 <text xml:space="preserve" text-anchor="start" x="524.96" y="-396.6" font-family="Arial" font-size="16.00" fill="#111827">dispatch identity + artifacts</text>
 </g>
 <!-- bundle&#45;&gt;shared -->

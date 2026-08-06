@@ -84,13 +84,13 @@ def _mock_model_strategy_detection(
 
 
 def _write_synthetic_bundle(path: Path, config: dict):
-    """Create a tiny .trtfb with a config.json section."""
+    """Create a tiny .bundle with a config.json section."""
     config_blob = json.dumps(config).encode("utf-8")
     sections = {"config.json": {"offset": 0, "size": len(config_blob)}}
     header_blob = json.dumps({"sections": sections}).encode("utf-8")
 
     with open(path, "wb") as f:
-        f.write(b"TRTFB\x00\x01\x00")
+        f.write(b"BUNDLE\x01\x00")
         f.write(struct.pack("<Q", len(header_blob)))
         f.write(header_blob)
         f.write(config_blob)
@@ -294,7 +294,7 @@ class TestRunner:
 
     def test_detect_bundle_unknown_strategy_reports_skip(self, tmp_path):
         runner = _import_runner()
-        bundle = tmp_path / "unknown_strategy.trtfb"
+        bundle = tmp_path / "unknown_strategy.bundle"
         _write_synthetic_bundle(
             bundle, {"runtime_strategy": "future_runtime_strategy"})
 
@@ -312,7 +312,7 @@ class TestRunner:
         self, tmp_path
     ):
         runner = _import_runner()
-        bundle = tmp_path / "missing_runtime_strategy.trtfb"
+        bundle = tmp_path / "missing_runtime_strategy.bundle"
         _write_synthetic_bundle(bundle, {"model_type": "fake"})
 
         result = runner.detect_runtime_strategy_from_bundle(
@@ -326,7 +326,7 @@ class TestRunner:
 
     def test_detect_bundle_read_failure_reports_error(self, tmp_path):
         runner = _import_runner()
-        missing_bundle = tmp_path / "missing.trtfb"
+        missing_bundle = tmp_path / "missing.bundle"
 
         result = runner.detect_runtime_strategy_from_bundle(
             str(missing_bundle), with_status=True)

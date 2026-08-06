@@ -149,7 +149,7 @@
 <g id="node11" class="node">
 <title>bundle</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M644.59,-54.6C644.59,-54.6 393.86,-54.6 393.86,-54.6 387.86,-54.6 381.86,-48.6 381.86,-42.6 381.86,-42.6 381.86,-12 381.86,-12 381.86,-6 387.86,0 393.86,0 393.86,0 644.59,0 644.59,0 650.59,0 656.59,-6 656.59,-12 656.59,-12 656.59,-42.6 656.59,-42.6 656.59,-48.6 650.59,-54.6 644.59,-54.6"/>
-<text xml:space="preserve" text-anchor="start" x="469.65" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.trtfb bundle</text>
+<text xml:space="preserve" text-anchor="start" x="458.3" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">.bundle artifact</text>
 <text xml:space="preserve" text-anchor="start" x="396.26" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">engine + required metadata/scales</text>
 </g>
 <!-- engine&#45;&gt;bundle -->

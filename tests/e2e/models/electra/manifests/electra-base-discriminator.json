@@ -1,7 +1,7 @@
 {
   "name": "electra-base-discriminator",
   "hf_id": "google/electra-base-discriminator",
-  "bundle": "electra-base-discriminator.trtfb",
+  "bundle": "electra-base-discriminator.bundle",
   "family": "electra",
   "runtime_strategy": "electra_encoder_only",
   "task_strategy": "encoder_only_nlp",

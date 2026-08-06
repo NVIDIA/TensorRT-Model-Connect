@@ -31,11 +31,11 @@ The difference between text, vision, and speech is mostly the preprocessing, com
 
 ```bash
 $TRTMC build Qwen/Qwen2.5-VL-3B-Instruct \
-  -o /tmp/qwen25vl.trtfb \
+  -o /tmp/qwen25vl.bundle \
   --precision fp16 \
   --max-cache-length 384
 
-$TRTMC run /tmp/qwen25vl.trtfb \
+$TRTMC run /tmp/qwen25vl.bundle \
   --prompt "Describe this image in one sentence." \
   --image tests/assets/test_image.jpg \
   --max-new-tokens 48
@@ -69,7 +69,7 @@ KV cache use BF16 while the separate vision tower stays FP32:
 
 ```bash
 $TRTMC build Qwen/Qwen3-VL-2B-Instruct \
-  -o /tmp/qwen3vl-bf16.trtfb \
+  -o /tmp/qwen3vl-bf16.bundle \
   --precision bf16 \
   --max-cache-length 384
 ```
@@ -83,7 +83,7 @@ smart-resize at runtime:
 
 ```bash
 $TRTMC build Qwen/Qwen2.5-VL-3B-Instruct \
-  -o /tmp/qwen25vl-dynamic.trtfb \
+  -o /tmp/qwen25vl-dynamic.bundle \
   --precision fp16 \
   --max-cache-length 384 \
   --set qwen_vl_vision.dynamic_resolution=true
@@ -113,10 +113,10 @@ Key ideas:
 
 ```bash
 $TRTMC build openai/whisper-large-v3-turbo \
-  -o /tmp/whisper.trtfb \
+  -o /tmp/whisper.bundle \
   --precision fp16
 
-$TRTMC transcribe /tmp/whisper.trtfb \
+$TRTMC transcribe /tmp/whisper.bundle \
   --audio tests/e2e/models/whisper/data/Recording.wav \
   --max-new-tokens 224
 ```
@@ -141,11 +141,11 @@ The important beginner mistake is to treat audio as if it were text. Speech mode
 
 ```bash
 $TRTMC build nvidia/nemotron-speech-streaming-en-0.6b \
-  -o /tmp/nemotron-rnnt.trtfb \
+  -o /tmp/nemotron-rnnt.bundle \
   --precision fp16 \
   --max-cache-length 128
 
-$TRTMC transcribe /tmp/nemotron-rnnt.trtfb \
+$TRTMC transcribe /tmp/nemotron-rnnt.bundle \
   --audio tests/e2e/models/whisper/data/Recording.wav \
   --stream \
   --chunk-ms 160 \
@@ -174,10 +174,10 @@ Streaming adds two concerns that offline transcription does not have:
 
 ```bash
 $TRTMC build nvidia/magpie_tts_multilingual_357m \
-  -o /tmp/magpie.trtfb \
+  -o /tmp/magpie.bundle \
   --precision fp16
 
-$TRTMC generate-audio /tmp/magpie.trtfb \
+$TRTMC generate-audio /tmp/magpie.bundle \
   --prompt "A calm narration for a product demo." \
   --output /tmp/out.wav
 ```

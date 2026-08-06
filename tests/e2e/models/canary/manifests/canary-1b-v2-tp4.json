@@ -1,7 +1,7 @@
 {
   "name": "canary-1b-v2-tp4",
   "hf_id": "nvidia/canary-1b-v2",
-  "bundle": "canary-1b-v2-tp4.trtfb",
+  "bundle": "canary-1b-v2-tp4.bundle",
   "family": "canary",
   "runtime_strategy": "canary_speech_to_text",
   "task_strategy": "speech_to_text",

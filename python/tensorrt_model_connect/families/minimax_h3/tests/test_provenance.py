@@ -358,7 +358,7 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
             filename: receipt["components"][filename]["sha256"] for filename in PLAN_FILENAMES
         },
     }
-    bundle = tmp_path / "model.trtfb"
+    bundle = tmp_path / "model.bundle"
     write_bundle(
         bundle,
         BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),

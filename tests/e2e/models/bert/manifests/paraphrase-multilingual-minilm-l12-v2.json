@@ -1,7 +1,7 @@
 {
   "name": "paraphrase-multilingual-minilm-l12-v2",
   "hf_id": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-  "bundle": "paraphrase-multilingual-minilm-l12-v2.trtfb",
+  "bundle": "paraphrase-multilingual-minilm-l12-v2.bundle",
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",

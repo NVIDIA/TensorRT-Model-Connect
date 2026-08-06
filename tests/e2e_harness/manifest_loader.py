@@ -1076,7 +1076,7 @@ def _load_case(raw: dict[str, Any], path: Path, model_name: str) -> E2ECase:
         reference_family=reference_family,
         user_contract=user_contract,
         ci_lane=ci_lane,
-        bundle=raw.get("bundle", f"{raw['name']}.trtfb"),
+        bundle=raw.get("bundle", f"{raw['name']}.bundle"),
         inputs=_build_inputs(raw, e2e_defaults),
         preflight=_build_preflight(raw, e2e_defaults),
         stages=_build_stages(raw, e2e_defaults),

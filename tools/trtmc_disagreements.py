@@ -359,7 +359,7 @@ def _media_candidates(
         "image_path",
         "output_video",
         "segmented_image_path",
-        "trtfb_image",
+        "bundle_image",
         "video",
         "video_path",
         "visualization_path",
@@ -572,14 +572,14 @@ def build_disagreement_artifact(
     )
     answers = _answer_rows(work_dir / "answers.json")
     reference_rows = _prediction_rows(work_dir / "hf_predictions.json")
-    trtmc_rows = _prediction_rows(work_dir / "trtfb_predictions.json")
+    trtmc_rows = _prediction_rows(work_dir / "bundle_predictions.json")
     reference_metadata = _load_json(work_dir / "hf_native_repro.json")
     native_reference_commands = _native_trtmc_commands(
         work_dir / "hf_native_commands.jsonl"
     )
-    trtmc_metadata = _load_json(work_dir / "trtfb_repro.json")
+    trtmc_metadata = _load_json(work_dir / "bundle_repro.json")
     native_trtmc_commands = _native_trtmc_commands(
-        work_dir / "trtfb_native_commands.jsonl"
+        work_dir / "bundle_native_commands.jsonl"
     )
     records = []
     for index, comparison in enumerate(comparison_rows):

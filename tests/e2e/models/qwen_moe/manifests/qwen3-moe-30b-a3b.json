@@ -1,7 +1,7 @@
 {
   "name": "qwen3-moe-30b-a3b",
   "hf_id": "Qwen/Qwen3-30B-A3B",
-  "bundle": "qwen3-moe-30b-a3b.trtfb",
+  "bundle": "qwen3-moe-30b-a3b.bundle",
   "family": "qwen_moe",
   "runtime_strategy": "qwen_moe_decoder_moe",
   "task_strategy": "text_generation_causal",

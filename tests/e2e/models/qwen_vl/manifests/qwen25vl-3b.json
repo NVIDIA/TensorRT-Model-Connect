@@ -1,7 +1,7 @@
 {
   "name": "qwen25vl-3b",
   "hf_id": "Qwen/Qwen2.5-VL-3B-Instruct",
-  "bundle": "qwen25vl-3b-vl.trtfb",
+  "bundle": "qwen25vl-3b-vl.bundle",
   "family": "qwen_vl",
   "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation",

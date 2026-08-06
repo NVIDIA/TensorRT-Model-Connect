@@ -155,7 +155,7 @@ NON_SOURCE_SUFFIXES = frozenset(
         ".rst",
         ".safetensors",
         ".svg",
-        ".trtfb",
+        ".bundle",
         ".tsv",
         ".txt",
         ".wav",

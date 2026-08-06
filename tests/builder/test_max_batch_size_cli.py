@@ -5,7 +5,7 @@
 
 Trace: ARCH-DIFF-BATCH-001, UD-DIFF-BATCH-CLI
 Intent: Verify that ``trtmc build --max-batch-size N`` reaches the family
-plugin's ``build_components`` and that the resulting ``.trtfb`` bundle
+plugin's ``build_components`` and that the resulting ``.bundle`` bundle
 records the expected per-component batch envelope on disk.
 Preconditions: tensorrt_model_connect is importable; tests monkeypatch the
 actual TRT engine builds so no GPU or TRT runtime is required.
@@ -32,10 +32,10 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover - dependency-only
 
 
 def _read_bundle_header(bundle_path: Path) -> dict:
-    """Decode the JSON header from a .trtfb file written by ``write_bundle``."""
+    """Decode the JSON header from a .bundle file written by ``write_bundle``."""
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
-        assert magic == b"TRTFB\x00\x01\x00", f"bad magic: {magic!r}"
+        assert magic == b"BUNDLE\x01\x00", f"bad magic: {magic!r}"
         header_len = struct.unpack("<Q", f.read(8))[0]
         return json.loads(f.read(header_len).decode("utf-8"))
 
@@ -205,7 +205,7 @@ def test_default_max_batch_size_omits_envelope(monkeypatch, tmp_path):
     with PR 1 readers: no ``max_batch_size`` block in the JSON header."""
     plugin = _install_stub_plugin(monkeypatch)
     model_dir = _make_fake_diffusion_model_dir(tmp_path)
-    output = tmp_path / "out.trtfb"
+    output = tmp_path / "out.bundle"
 
     rc = cli._cmd_build(_build_args(model_dir, output, max_batch_size=1))
     assert rc == 0, "CLI should succeed for the default batch size"
@@ -227,7 +227,7 @@ def test_max_batch_size_four_records_envelope(monkeypatch, tmp_path):
     ``{"dit": 4, "text_encoder": 8, "vae": 1}`` (Decision C / E)."""
     plugin = _install_stub_plugin(monkeypatch)
     model_dir = _make_fake_diffusion_model_dir(tmp_path)
-    output = tmp_path / "out.trtfb"
+    output = tmp_path / "out.bundle"
 
     rc = cli._cmd_build(_build_args(model_dir, output, max_batch_size=4))
     assert rc == 0

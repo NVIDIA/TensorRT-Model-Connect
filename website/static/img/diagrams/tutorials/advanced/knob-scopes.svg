@@ -31,7 +31,7 @@
 <g id="node3" class="node">
 <title>native</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M192.45,-368.8C192.45,-368.8 12,-368.8 12,-368.8 6,-368.8 0,-362.8 0,-356.8 0,-356.8 0,-326.2 0,-326.2 0,-320.2 6,-314.2 12,-314.2 12,-314.2 192.45,-314.2 192.45,-314.2 198.45,-314.2 204.45,-320.2 204.45,-326.2 204.45,-326.2 204.45,-356.8 204.45,-356.8 204.45,-362.8 198.45,-368.8 192.45,-368.8"/>
-<text xml:space="preserve" text-anchor="start" x="55" y="-343.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native .trtfb</text>
+<text xml:space="preserve" text-anchor="start" x="44.13" y="-343.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native .bundle</text>
 <text xml:space="preserve" text-anchor="start" x="14.4" y="-327.6" font-family="Arial" font-size="16.00" fill="#111827">runtime_strategy + plans</text>
 </g>
 <!-- build&#45;&gt;native -->
@@ -44,7 +44,7 @@
 <g id="node4" class="node">
 <title>optimized</title>
 <path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M533.15,-368.8C533.15,-368.8 251.3,-368.8 251.3,-368.8 245.3,-368.8 239.3,-362.8 239.3,-356.8 239.3,-356.8 239.3,-326.2 239.3,-326.2 239.3,-320.2 245.3,-314.2 251.3,-314.2 251.3,-314.2 533.15,-314.2 533.15,-314.2 539.15,-314.2 545.15,-320.2 545.15,-326.2 545.15,-326.2 545.15,-356.8 545.15,-356.8 545.15,-362.8 539.15,-368.8 533.15,-368.8"/>
-<text xml:space="preserve" text-anchor="start" x="329.42" y="-343.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Optimized .trtfb</text>
+<text xml:space="preserve" text-anchor="start" x="318.56" y="-343.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Optimized .bundle</text>
 <text xml:space="preserve" text-anchor="start" x="253.7" y="-327.6" font-family="Arial" font-size="16.00" fill="#111827">descriptor + embedded implementation</text>
 </g>
 <!-- build&#45;&gt;optimized -->

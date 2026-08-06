@@ -29,7 +29,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | CUDA | NVIDIA GPU programming/runtime stack. | Needed by the C++ runtime and TensorRT execution. |
 | TensorRT | NVIDIA inference compiler/runtime. | Build-time code creates engine plans; runtime code deserializes and executes them. |
 | Engine plan | Serialized TensorRT execution artifact. | Stored in bundle sections such as `engine_plan`, `vision_engine_plan`, or `denoiser_plan`. |
-| `.trtfb` bundle | TensorRT-Model-Connect deployable artifact. | A container with metadata plus either native config/plans/assets or an optimized-runtime descriptor and integrity-bound embedded implementation tree. |
+| `.bundle` bundle | TensorRT-Model-Connect deployable artifact. | A container with metadata plus either native config/plans/assets or an optimized-runtime descriptor and integrity-bound embedded implementation tree. |
 | Hugging Face model ID | A repo name such as `Qwen/Qwen3-0.6B`. | `trtmc build` resolves it to a local model directory, downloading files if needed. |
 | Precision | Numeric format used by engine weights/activations. | `fp16` is common for fast GPU smoke tests; `fp32` is larger and usually slower. |
 | Quantization | Lower-precision representation such as FP8 or INT4. | Reduces footprint or latency when supported by the family and backend. |
@@ -42,7 +42,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 
 | Term | Plain meaning | In this project |
 | --- | --- | --- |
-| Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, honors a family-owned native default route when declared, otherwise tries one exact-qualified optimized provider before the native fallback, and writes `.trtfb` bundles. |
+| Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, honors a family-owned native default route when declared, otherwise tries one exact-qualified optimized provider before the native fallback, and writes `.bundle` bundles. |
 | C++ runtime | Request-time execution library and CLI. | `trtmc`, source-built `./build/trtmc`, and `trtmc::load()` load bundles and run task APIs. |
 | Family plugin | Python adapter for a model family. | Examples: `qwen`, `llama`, `whisper`, `flux`, `pixart`. It handles config and weights. |
 | Runtime strategy | Model-owned native C++ dispatch key in bundle metadata. | Examples: `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux`, `diffusion_pixart`. Optimized-runtime bundles use `optimized_runtime.json` instead. |

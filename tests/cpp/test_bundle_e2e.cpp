@@ -20,7 +20,7 @@
 // Purpose:
 //   Validates that the C ABI and bundle infrastructure gracefully reject
 //   invalid inputs. Since the C++ runtime is now bundle-only (requires
-//   pre-built .trtfb files), and unit tests cannot create bundles (that
+//   pre-built .bundle files), and unit tests cannot create bundles (that
 //   requires TRT + GPU + model weights), these tests focus on the error
 //   paths: non-bundle files, nonexistent paths, and bundle API utilities.
 //
@@ -66,7 +66,7 @@ static void check(bool condition, const char* test_name)
 // Setup: None (uses the always-available /dev/null as input).
 // Mechanism: Calls trtmc_create_pipeline("/dev/null", 0), asserts nullptr
 //   return and a non-empty error message. This ensures the bundle loader
-//   gracefully rejects files that lack the .trtfb magic bytes.
+//   gracefully rejects files that lack the .bundle magic bytes.
 // -----------------------------------------------------------------------------
 static void test_non_bundle_file_rejected()
 {
@@ -85,7 +85,7 @@ static void test_non_bundle_file_rejected()
 // -----------------------------------------------------------------------------
 static void test_nonexistent_bundle_rejected()
 {
-    auto* p = trtmc_create_pipeline("/nonexistent/path/to/model.trtfb", 0);
+    auto* p = trtmc_create_pipeline("/nonexistent/path/to/model.bundle", 0);
     check(p == nullptr, "nonexistent bundle path returns nullptr");
     const char* err = trtmc_last_error();
     check(err != nullptr && std::strlen(err) > 0, "error message set for nonexistent bundle");
@@ -108,7 +108,7 @@ static void test_is_bundle_rejects_non_bundle()
 // -----------------------------------------------------------------------------
 static void test_is_bundle_rejects_nonexistent()
 {
-    check(!trtmc::IsBundle("/nonexistent/path/to/model.trtfb"), "IsBundle rejects nonexistent path");
+    check(!trtmc::IsBundle("/nonexistent/path/to/model.bundle"), "IsBundle rejects nonexistent path");
 }
 
 // -----------------------------------------------------------------------------
@@ -123,7 +123,7 @@ static void test_inspect_nonexistent_does_not_crash()
     bool threw = false;
     try
     {
-        trtmc::InspectBundle("/nonexistent/path/to/model.trtfb");
+        trtmc::InspectBundle("/nonexistent/path/to/model.bundle");
     }
     catch (const std::exception&)
     {

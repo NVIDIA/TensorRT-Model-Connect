@@ -47,7 +47,7 @@ SHORT_PROMPT = "The capital of France is"
 
 
 def _build_bundle(trtmc_binary, hf_id, output_path, max_cache_length, timeout=600):
-    """Build a .trtfb bundle with a specific cache size."""
+    """Build a .bundle artifact with a specific cache size."""
     cmd = [
         str(trtmc_binary), "build",
         hf_id, "-o", str(output_path),
@@ -103,7 +103,7 @@ class TestCacheOverflow:
     def test_cache_overflow_produces_output(self, trtmc_binary, hf_python,
                                             ld_library_path, engine_dir):
         """Generate with prompt exceeding max_cache_length=32 -> non-empty output."""
-        bundle_path = engine_dir / "cache_test_32.trtfb"
+        bundle_path = engine_dir / "cache_test_32.bundle"
 
         # Build with tiny cache (32 tokens, LONG_PROMPT is ~80 tokens)
         _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_path, max_cache_length=32)
@@ -120,7 +120,7 @@ class TestCacheOverflow:
     def test_cache_overflow_no_segfault(self, trtmc_binary, hf_python,
                                         ld_library_path, engine_dir):
         """Specifically verify no segfault (signal -11) on cache overflow."""
-        bundle_path = engine_dir / "cache_test_32.trtfb"
+        bundle_path = engine_dir / "cache_test_32.bundle"
 
         # Reuse if already built by previous test, otherwise build fresh
         if not bundle_path.is_file():
@@ -144,8 +144,8 @@ class TestCacheConsistency:
         When the prompt fits in both caches, the first generated tokens
         should be identical because greedy decoding is deterministic.
         """
-        bundle_64 = engine_dir / "cache_test_64.trtfb"
-        bundle_256 = engine_dir / "cache_test_256.trtfb"
+        bundle_64 = engine_dir / "cache_test_64.bundle"
+        bundle_256 = engine_dir / "cache_test_256.bundle"
 
         # Build both bundles (skip if build fails -- probably no GPU)
         _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_64, max_cache_length=64)
@@ -187,7 +187,7 @@ class TestCacheBoundary:
         runtime should either succeed (generating from the last token)
         or fail cleanly.
         """
-        bundle_path = engine_dir / "cache_test_64.trtfb"
+        bundle_path = engine_dir / "cache_test_64.bundle"
         if not bundle_path.is_file():
             _build_bundle(trtmc_binary, CACHE_TEST_MODEL, bundle_path, max_cache_length=64)
 

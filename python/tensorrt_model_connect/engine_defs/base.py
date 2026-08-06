@@ -12,7 +12,7 @@ from typing import Protocol, runtime_checkable
 class BuildBackend(Protocol):
     """Protocol for engine build backends.
 
-    Each backend takes a resolved model directory and produces a .trtfb bundle.
+    Each backend takes a resolved model directory and produces a .bundle artifact.
     The backend is a build-time concern -- the resulting bundle uses standard
     runtime_strategy values and is indistinguishable at runtime.
     """
@@ -33,5 +33,5 @@ class BuildBackend(Protocol):
         verbose: bool = False,
         parallel_config=None,
     ) -> None:
-        """Build a .trtfb bundle from a model directory."""
+        """Build a .bundle artifact from a model directory."""
         ...

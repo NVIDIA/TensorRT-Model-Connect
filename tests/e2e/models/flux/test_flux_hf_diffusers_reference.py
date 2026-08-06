@@ -20,7 +20,7 @@ def test_flux_reference_uses_sequential_cpu_offload(monkeypatch, tmp_path, model
         hf_id="black-forest-labs/example",
         family="flux",
         runtime_strategy="diffusion_flux",
-        bundle="example.trtfb",
+        bundle="example.bundle",
         inputs={"image_height": 384, "image_width": 384},
         metadata={"model_type": model_type},
     )
@@ -49,7 +49,7 @@ def test_flux_reference_honors_nested_validation_precision(monkeypatch, tmp_path
         hf_id="black-forest-labs/FLUX.1-schnell",
         family="flux",
         runtime_strategy="diffusion_flux",
-        bundle="flux-schnell.trtfb",
+        bundle="flux-schnell.bundle",
         inputs={"image_height": 384, "image_width": 384},
         metadata={
             "model_type": "flux",
@@ -83,7 +83,7 @@ def test_flux2_reference_honors_declared_text_sequence_length(monkeypatch, tmp_p
         hf_id="black-forest-labs/FLUX.2-dev",
         family="flux",
         runtime_strategy="diffusion_flux",
-        bundle="flux-2-dev.trtfb",
+        bundle="flux-2-dev.bundle",
         inputs={
             "image_height": 384,
             "image_width": 384,

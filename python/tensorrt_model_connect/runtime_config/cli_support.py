@@ -301,7 +301,7 @@ def write_effective_config_next_to(
 ) -> Path:
     """Write ``effective_config.json`` alongside an output artifact.
 
-    For an output at ``foo/bar.trtfb`` and default suffix, the artifact
+    For an output at ``foo/bar.bundle`` and default suffix, the artifact
     is ``foo/bar.effective_config.json``. Returns the written path.
     """
     resolved = Path(artifact_path)

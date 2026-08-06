@@ -35,7 +35,7 @@ pytestmark = pytest.mark.unit
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _bundle(tmp_path: Path, name: str = "model.trtfb") -> Path:
+def _bundle(tmp_path: Path, name: str = "model.bundle") -> Path:
     path = tmp_path / name
     path.write_bytes(b"bundle")
     return path
@@ -249,7 +249,7 @@ def test_default_catalog_falls_back_to_installed_package_data(
             {
                 "name": "installed-model",
                 "hf_id": "example/installed-model",
-                "bundle": "installed-model.trtfb",
+                "bundle": "installed-model.bundle",
                 "family": "installed",
                 "task_strategy": "text_generation_causal",
                 "runtime_strategy": "installed_runtime",
@@ -362,7 +362,7 @@ def test_future_family_reuses_existing_task_adapter_without_benchmark_changes(
             {
                 "name": "wan2.2-ti2v-5b",
                 "hf_id": "Wan-AI/Wan2.2-TI2V-5B",
-                "bundle": "wan2.2-ti2v-5b.trtfb",
+                "bundle": "wan2.2-ti2v-5b.bundle",
                 "family": "wan2_2_ti2v",
                 "task_strategy": "diffusion_media_generation",
                 "runtime_strategy": "diffusion_wan2_2_ti2v",
@@ -387,7 +387,7 @@ def test_future_family_reuses_existing_task_adapter_without_benchmark_changes(
     )
 
     catalog = ManifestCatalog(tmp_path / "catalog")
-    case = resolve_case(catalog.resolve("wan2.2-ti2v-5b"), tmp_path / "pending.trtfb")
+    case = resolve_case(catalog.resolve("wan2.2-ti2v-5b"), tmp_path / "pending.bundle")
 
     assert case.operation == "generate_image"
     assert case.request["media_type"] == "video"
@@ -412,7 +412,7 @@ def test_future_object_detection_family_uses_existing_public_capability(tmp_path
             {
                 "name": "yolox-tiny",
                 "hf_id": "example/yolox-tiny",
-                "bundle": "yolox-tiny.trtfb",
+                "bundle": "yolox-tiny.bundle",
                 "family": "yolox",
                 "task_strategy": "object_detection",
                 "runtime_strategy": "yolox_object_detection",
@@ -429,7 +429,7 @@ def test_future_object_detection_family_uses_existing_public_capability(tmp_path
         encoding="utf-8",
     )
 
-    case = resolve_case(ManifestCatalog().resolve(str(manifest)), tmp_path / "pending.trtfb")
+    case = resolve_case(ManifestCatalog().resolve(str(manifest)), tmp_path / "pending.bundle")
 
     assert case.operation == "detect"
     assert case.request["score_threshold"] == 0.3
@@ -464,7 +464,7 @@ def test_model_identity_does_not_depend_on_catalog_install_path(tmp_path: Path) 
 
 def test_named_cases_are_literal_while_sweep_is_cartesian(tmp_path: Path, capsys) -> None:
     config = tmp_path / "bench.yaml"
-    bundle = _bundle(tmp_path, "flux-schnell-l0.trtfb")
+    bundle = _bundle(tmp_path, "flux-schnell-l0.bundle")
     config.write_text(
         f"""
 models:
@@ -519,7 +519,7 @@ def test_batch_size_fails_closed_instead_of_being_clamped(tmp_path: Path) -> Non
 def test_auto_build_reuses_model_defaults_and_largest_diffusion_shape(tmp_path: Path) -> None:
     catalog = ManifestCatalog()
     model = catalog.resolve("flux-schnell-l0")
-    base = resolve_case(model, tmp_path / "pending.trtfb")
+    base = resolve_case(model, tmp_path / "pending.bundle")
     cases = expand_sweeps(base, {"request.batch_size": [1, 2]})
     plan = BundleBuilder(tmp_path / "cache")._plan(model, cases)
 
@@ -550,7 +550,7 @@ def test_batch_two_profile_preserves_manifest_batch_inputs_and_build_shape(
     tmp_path: Path,
 ) -> None:
     model = ManifestCatalog().resolve("flux-schnell-l0-batch2")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     plan = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
 
     assert case.request["batch_size"] == 2
@@ -565,7 +565,7 @@ def test_batch_two_profile_preserves_manifest_batch_inputs_and_build_shape(
 
 def test_image_edit_profile_resolves_built_in_condition_image(tmp_path: Path) -> None:
     model = ManifestCatalog().resolve("qwen-image-edit-2511")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
 
     assert case.request["image_path"] == "data/test_img.jpeg"
     assert len(case.request["image_sha256"]) == 64
@@ -602,7 +602,7 @@ def test_auto_build_requires_and_passes_manifest_fp8_scales(
 
     catalog = ManifestCatalog()
     model = catalog.resolve("flux-2-dev-fp8")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     plan = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
 
     assert model.build_settings["fp8_scales"] == "data/flux2-fp8-scales.json"
@@ -640,12 +640,12 @@ def test_fp8_scale_contents_participate_in_bundle_cache_identity(tmp_path: Path)
 
     catalog = ManifestCatalog(tmp_path / "catalog")
     model = catalog.resolve("flux-2-dev-fp8")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     first = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
 
     scales.write_text('{"version": 2}\n', encoding="utf-8")
     updated_model = catalog.resolve("flux-2-dev-fp8")
-    updated_case = resolve_case(updated_model, tmp_path / "pending.trtfb")
+    updated_case = resolve_case(updated_model, tmp_path / "pending.bundle")
     second = BundleBuilder(tmp_path / "cache")._plan(updated_model, (updated_case,))
 
     assert first.cache_key != second.cache_key
@@ -665,12 +665,12 @@ def test_build_environment_asset_contents_participate_in_bundle_cache_identity(
 
     catalog = ManifestCatalog(tmp_path / "catalog")
     model = catalog.resolve("qwen-image-edit-2511")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     first = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
 
     image.write_bytes(b"second-image")
     updated_model = catalog.resolve("qwen-image-edit-2511")
-    updated_case = resolve_case(updated_model, tmp_path / "pending.trtfb")
+    updated_case = resolve_case(updated_model, tmp_path / "pending.bundle")
     second = BundleBuilder(tmp_path / "cache")._plan(updated_model, (updated_case,))
 
     assert first.environment["TRTMC_QWEN_IMAGE_EDIT_CONDITION_IMAGE"] == str(image)
@@ -705,7 +705,7 @@ def test_required_build_environment_asset_participates_in_bundle_cache_identity(
 
     catalog = ManifestCatalog(tmp_path / "catalog")
     model = catalog.resolve("qwen-image-edit-2511")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     first = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
 
     image.write_bytes(b"second-image")
@@ -732,7 +732,7 @@ def test_builder_source_digest_participates_in_bundle_cache_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = ManifestCatalog().resolve("distilgpt2")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     builder = BundleBuilder(tmp_path / "cache")
 
     monkeypatch.setattr(benchmark_builder, "_builder_source_digest", lambda _family: "first")
@@ -795,7 +795,7 @@ def test_metric_contract_rejects_missing_native_observations() -> None:
 def test_sana_runtime_config_resolves_manifest_assets_for_native_worker(tmp_path: Path) -> None:
     case = resolve_case(
         ManifestCatalog().resolve("sana-wm-bidirectional"),
-        tmp_path / "pending.trtfb",
+        tmp_path / "pending.bundle",
     )
 
     assert case.operation == "generate_image"
@@ -808,13 +808,13 @@ def test_sana_runtime_config_resolves_manifest_assets_for_native_worker(tmp_path
 def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: Path) -> None:
     vlm = resolve_case(
         ManifestCatalog().resolve("deepseek-ocr-l0"),
-        tmp_path / "deepseek-ocr.trtfb",
+        tmp_path / "deepseek-ocr.bundle",
     )
     assert Path(vlm.worker_request()["request"]["image_path"]).is_file()
 
     speech = resolve_case(
         ManifestCatalog().resolve("personaplex-7b-l0"),
-        tmp_path / "personaplex.trtfb",
+        tmp_path / "personaplex.bundle",
     )
     assert speech.operation == "speak"
     assert speech.request["max_new_tokens"] == 100
@@ -823,7 +823,7 @@ def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: 
 
     magpie = resolve_case(
         ManifestCatalog().resolve("magpie-tts-357m"),
-        tmp_path / "magpie.trtfb",
+        tmp_path / "magpie.bundle",
     )
     assert magpie.request["seed"] == 42
     assert magpie.runtime["config"] == {
@@ -834,14 +834,14 @@ def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: 
 
     bark = resolve_case(
         ManifestCatalog().resolve("bark-small"),
-        tmp_path / "bark.trtfb",
+        tmp_path / "bark.bundle",
     )
     assert bark.request["seed"] == 0
     assert bark.sources["request.seed"] == "model testcase"
 
     qwen3_omni = resolve_case(
         ManifestCatalog().resolve("qwen3-omni-30b-a3b-instruct"),
-        tmp_path / "qwen3-omni.trtfb",
+        tmp_path / "qwen3-omni.bundle",
     )
     assert qwen3_omni.request["seed"] == 42
     assert qwen3_omni.sources["request.seed"] == "model testcase"
@@ -868,7 +868,7 @@ def test_seeded_ready_profiles_preserve_seed_in_public_request(tmp_path: Path) -
         }
         if not declares_seed(seed_contract):
             continue
-        case = resolve_case(entry.model, tmp_path / f"{entry.name}.trtfb")
+        case = resolve_case(entry.model, tmp_path / f"{entry.name}.bundle")
         if not {"seed", "seeds"} & set(case.request):
             missing.append(entry.name)
 
@@ -878,7 +878,7 @@ def test_seeded_ready_profiles_preserve_seed_in_public_request(tmp_path: Path) -
 def test_text_generation_preserves_sampling_contract(tmp_path: Path) -> None:
     case = resolve_case(
         ManifestCatalog().resolve("qwen3-0.6b-topp"),
-        tmp_path / "pending.trtfb",
+        tmp_path / "pending.bundle",
     )
 
     assert case.request["temperature"] == 0.7
@@ -895,7 +895,7 @@ def test_text_generation_distinguishes_testcase_and_operation_defaults(
 ) -> None:
     case = resolve_case(
         ManifestCatalog().resolve("glm-4-9b"),
-        tmp_path / "pending.trtfb",
+        tmp_path / "pending.bundle",
     )
 
     assert case.sources["request.prompt"] == "model testcase"
@@ -929,7 +929,7 @@ def test_text_generation_distinguishes_testcase_and_operation_defaults(
 
 def test_all_advertised_defaults_explain_every_request_field(tmp_path: Path) -> None:
     for model in ManifestCatalog().models():
-        case = resolve_case(model, tmp_path / f"{model.name}.trtfb")
+        case = resolve_case(model, tmp_path / f"{model.name}.bundle")
         request_sources = {
             name.removeprefix("request."): source
             for name, source in case.sources.items()
@@ -941,7 +941,7 @@ def test_all_advertised_defaults_explain_every_request_field(tmp_path: Path) -> 
 def test_text_generation_preserves_mode_and_chat_contract(tmp_path: Path) -> None:
     case = resolve_case(
         ManifestCatalog().resolve("nemotron-labs-diffusion-8b-l0"),
-        tmp_path / "pending.trtfb",
+        tmp_path / "pending.bundle",
     )
 
     assert case.request["generation_mode"] == "ar"
@@ -953,7 +953,7 @@ def test_text_generation_preserves_mode_and_chat_contract(tmp_path: Path) -> Non
 
 def test_video_profile_preserves_video_build_shape_and_frame_rate(tmp_path: Path) -> None:
     model = ManifestCatalog().resolve("ltx-video-l0")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     plan = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
 
     assert case.request["media_type"] == "video"
@@ -990,7 +990,7 @@ def test_transcription_resolves_audio_artifact_and_reports_realtime_factor(
 ) -> None:
     case = resolve_case(
         ManifestCatalog().resolve("whisper-tiny-fp16"),
-        _bundle(tmp_path, "whisper.trtfb"),
+        _bundle(tmp_path, "whisper.bundle"),
     )
 
     assert case.request["audio_path"] == "data/Recording.wav"
@@ -1361,7 +1361,7 @@ def test_cli_rebuilds_stale_managed_bundle_found_by_bundle_root(
 ) -> None:
     worker = _worker(tmp_path)
     cache = tmp_path / "cache"
-    stale_bundle = cache / "distilgpt2" / "stale-cache-key" / "distilgpt2.trtfb"
+    stale_bundle = cache / "distilgpt2" / "stale-cache-key" / "distilgpt2.bundle"
     stale_bundle.parent.mkdir(parents=True)
     stale_bundle.write_bytes(b"stale bundle")
     commands: list[list[str]] = []
@@ -1480,7 +1480,7 @@ def test_auto_build_selects_python_tensorrt_matching_runtime_backend(
 
     catalog = ManifestCatalog()
     model = catalog.resolve("distilgpt2")
-    case = resolve_case(model, tmp_path / "pending.trtfb")
+    case = resolve_case(model, tmp_path / "pending.bundle")
     plan = BundleBuilder(tmp_path / "cache", backend_abi="10.15")._plan(model, (case,))
 
     assert plan.runtime.version == "10.15.2.7"

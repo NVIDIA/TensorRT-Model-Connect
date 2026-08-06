@@ -69,7 +69,7 @@ def _diffusion_model_by_name(name):
 # ---------------------------------------------------------------------------
 
 def _build_diffusion_bundle(trtmc_binary, hf_id, bundle_path, build_args, precision="fp32"):
-    """Build a diffusion .trtfb bundle as a subprocess."""
+    """Build a diffusion .bundle artifact as a subprocess."""
     cmd = [
         str(trtmc_binary), "build",
         hf_id, "-o", str(bundle_path),

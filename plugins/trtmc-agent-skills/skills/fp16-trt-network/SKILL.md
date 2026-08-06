@@ -144,7 +144,7 @@ evidence for a dtype-only change.
 Inspect the artifact and selected path:
 
 ```bash
-./build/trtmc inspect <bundle.trtfb>
+./build/trtmc inspect <bundle.bundle>
 ```
 
 Bundle size is only a signal. Confirm section metadata and weight dtypes; do
@@ -155,7 +155,7 @@ revision, workload, sampling, and runtime strategy:
 
 ```bash
 PYTHONPATH=python:. python3 tools/trtmc_validate.py <model> <workload> \
-  --bundle <bundle.trtfb> \
+  --bundle <bundle.bundle> \
   --output <artifact-dir>
 ```
 

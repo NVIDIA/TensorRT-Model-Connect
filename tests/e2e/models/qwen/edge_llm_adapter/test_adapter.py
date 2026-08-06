@@ -1074,7 +1074,7 @@ def test_public_python_model_id_default_dispatches_without_native_fallback(
 ) -> None:
     import tensorrt_model_connect.engine_builder as engine_builder
 
-    bundle = tmp_path / "qwen-default.trtfb"
+    bundle = tmp_path / "qwen-default.bundle"
     captured: dict[str, object] = {}
 
     def select_optimized(model_id: str, output_path: str, public_options: dict):
@@ -1169,7 +1169,7 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["trtmc", "build", MODEL_ID, "-o", "/tmp/qwen-edge-test.trtfb"],
+        ["trtmc", "build", MODEL_ID, "-o", "/tmp/qwen-edge-test.bundle"],
     )
     with pytest.raises(SystemExit) as exit_info:
         build_cli.main()
@@ -1187,7 +1187,7 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
             "build",
             MODEL_ID,
             "-o",
-            "/tmp/qwen-edge-test.trtfb",
+            "/tmp/qwen-edge-test.bundle",
             "--precision",
             "fp16",
             "--max-cache-length",
@@ -1214,7 +1214,7 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
             "build",
             MODEL_ID,
             "-o",
-            "/tmp/qwen-edge-test.trtfb",
+            "/tmp/qwen-edge-test.bundle",
             "--precision",
             "fp16",
         ],
@@ -1664,7 +1664,7 @@ def test_build_stages_one_common_runtime_and_profile_bound_engine(
     assert build.descriptor["bundle_config"]["runtime_provider"] == IMPLEMENTATION_ID
     assert "metadata" not in build.descriptor
 
-    bundle = write_optimized_bundle(tmp_path / f"{profile_id}.trtfb", manifest, request, build)
+    bundle = write_optimized_bundle(tmp_path / f"{profile_id}.bundle", manifest, request, build)
     assert bundle.is_file()
     assert bundle.stat().st_size > sum(
         path.stat().st_size for path in build.artifacts_path.rglob("*") if path.is_file()

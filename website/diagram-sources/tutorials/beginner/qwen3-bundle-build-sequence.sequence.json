@@ -1,6 +1,6 @@
 {
   "title": "Build the Qwen3 bundle",
-  "description": "The build CLI normalizes the model configuration, resolves Qwen family ownership, loads weights, builds the default split prefill and decode TensorRT plans, and writes both plans with metadata into Qwen3-0.6B.trtfb.",
+  "description": "The build CLI normalizes the model configuration, resolves Qwen family ownership, loads weights, builds the default split prefill and decode TensorRT plans, and writes both plans with metadata into Qwen3-0.6B.bundle.",
   "subtitle": "Configuration and model ownership stay in Python; the output is a deployable bundle.",
   "participants": [
     {"id": "cli", "label": "trtmc build", "color": "api"},
@@ -21,6 +21,6 @@
     {"from": "family", "to": "builder", "label": "Build decode engine"},
     {"from": "builder", "to": "family", "label": "Return decode plan", "style": "return"},
     {"from": "family", "to": "bundle", "label": "Write both plan sections"},
-    {"from": "bundle", "to": "cli", "label": "Return .trtfb", "style": "return"}
+    {"from": "bundle", "to": "cli", "label": "Return .bundle", "style": "return"}
   ]
 }

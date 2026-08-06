@@ -206,7 +206,7 @@ def test_effective_config_dumps_new_feature(tmp_path: Path):
         config_path=None,
         set_tokens=["demo_feature.max_candidates=99", "demo_feature.mode=fast"],
     )
-    bundle_path = tmp_path / "nothing.trtfb"
+    bundle_path = tmp_path / "nothing.bundle"
     written = write_effective_config_next_to(bundle, bundle_path)
     data = json.loads(written.read_text())
     assert data["demo_feature"]["max_candidates"] == {

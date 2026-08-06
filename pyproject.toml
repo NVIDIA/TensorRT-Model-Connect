@@ -9,7 +9,7 @@ backend-path = ["."]
 [project]
 name = "tensorrt-model-connect"
 version = "0.1.0"
-description = "TensorRT-Model-Connect builder for HuggingFace models and .trtfb bundles"
+description = "TensorRT-Model-Connect builder for HuggingFace models and .bundle artifacts"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

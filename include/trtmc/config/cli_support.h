@@ -92,7 +92,7 @@ ConfigBundle resolve_cli_config(const std::string& config_path,             // e
                                 const SchemaRegistry& registry = SchemaRegistry::instance());
 
 // Write the effective-config JSON alongside an artifact. For artifact
-// ``foo/bar.trtfb`` and default suffix the output is
+// ``foo/bar.bundle`` and default suffix the output is
 // ``foo/bar.effective_config.json``. Returns the written path.
 std::string write_effective_config_next_to(const ConfigBundle& bundle,
                                            const std::string& artifact_path,

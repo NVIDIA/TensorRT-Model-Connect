@@ -134,7 +134,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "manifest": str(path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path),
         "hf_id": raw.get("hf_id") or raw.get("model_id", ""),
         "hf_revision": str(raw.get("hf_revision", "") or ""),
-        "bundle": raw.get("bundle", f"{path.stem}.trtfb"),
+        "bundle": raw.get("bundle", f"{path.stem}.bundle"),
         "family": raw.get("family", ""),
         "runtime_strategy": runtime_strategy,
         "task_strategy": task_strategy,

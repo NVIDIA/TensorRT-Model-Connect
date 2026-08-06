@@ -1,7 +1,7 @@
 {
   "name": "gpt-neo-125m",
   "hf_id": "EleutherAI/gpt-neo-125m",
-  "bundle": "gpt-neo-125m.trtfb",
+  "bundle": "gpt-neo-125m.bundle",
   "family": "gpt_neo",
   "runtime_strategy": "gpt_neo_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

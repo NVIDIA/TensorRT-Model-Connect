@@ -77,7 +77,7 @@ def _case() -> E2ECase:
         task_strategy="fake_task",
         reference_backend="fake_reference",
         reference_family="fake_family",
-        bundle="plugin-runtime-context.trtfb",
+        bundle="plugin-runtime-context.bundle",
         metadata={"runtime_cli_requires_hf_python": True},
         stages=[StageSpec(name="generate")],
     )

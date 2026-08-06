@@ -2,7 +2,7 @@
   "name": "magpie-tts-357m",
   "hf_id": "nvidia/magpie_tts_multilingual_357m",
   "hf_revision": "34d7e40da85cabc97f92198889b65cea27bc7fd1",
-  "bundle": "magpie-tts-357m.trtfb",
+  "bundle": "magpie-tts-357m.bundle",
   "family": "magpie_tts",
   "runtime_strategy": "text_to_audio_magpie",
   "task_strategy": "text_to_audio",

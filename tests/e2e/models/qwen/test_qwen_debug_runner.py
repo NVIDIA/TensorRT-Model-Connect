@@ -26,7 +26,7 @@ def test_qwen_debug_runner_forwards_engine_section_and_communicator(tmp_path) ->
         },
     )
 
-    path = tmp_path / "qwen_tp_dispatch.trtfb"
+    path = tmp_path / "qwen_tp_dispatch.bundle"
     path.write_bytes(bundle)
 
     communicator = object()
@@ -58,7 +58,7 @@ def test_qwen_loads_triattention_stats_from_bundle(tmp_path) -> None:
         extra_sections={"triattention_stats.json": stats_data},
     )
 
-    path = tmp_path / "qwen_tri.trtfb"
+    path = tmp_path / "qwen_tri.bundle"
     path.write_bytes(bundle)
 
     payload = adapter.load_triattention_stats_from_bundle(str(path))
@@ -100,7 +100,7 @@ def test_qwen_triattention_bundle_uses_qwen_runner(tmp_path) -> None:
         },
     )
 
-    path = tmp_path / "qwen_tri_dispatch.trtfb"
+    path = tmp_path / "qwen_tri_dispatch.bundle"
     path.write_bytes(bundle)
 
     adapter = import_module("tensorrt_model_connect.families.qwen.debug_runner")

@@ -2,7 +2,7 @@
   "name": "wan22-ti2v-5b",
   "hf_id": "Wan-AI/Wan2.2-TI2V-5B",
   "hf_revision": "921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
-  "bundle": "wan22-ti2v-5b.trtfb",
+  "bundle": "wan22-ti2v-5b.bundle",
   "family": "wan2_2_ti2v",
   "runtime_strategy": "diffusion_wan2_2_ti2v",
   "task_strategy": "diffusion_media_generation",

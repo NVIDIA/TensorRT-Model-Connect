@@ -1,7 +1,7 @@
 {
   "name": "fnet-base",
   "hf_id": "google/fnet-base",
-  "bundle": "fnet-base.trtfb",
+  "bundle": "fnet-base.bundle",
   "family": "fnet",
   "runtime_strategy": "fnet_encoder_only",
   "task_strategy": "encoder_only_nlp",

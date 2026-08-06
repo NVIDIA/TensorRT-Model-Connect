@@ -14,7 +14,7 @@ auto-detected from bundle metadata.
 
 Usage (inside container):
     python3 tools/test_runner_parity.py \
-      --bundle /tmp/model.trtfb \
+      --bundle /tmp/model.bundle \
       --binary ./build/trtmc \
       --hf-python .venv/bin/python \
       --prompt "The capital of France is" \
@@ -174,7 +174,7 @@ def run_python(bundle: str, prompt: str,
 def main():
     parser = argparse.ArgumentParser(
         description="Cross-validate Python TrtRunner vs C++ trtmc binary")
-    parser.add_argument("--bundle", required=True, help=".trtfb bundle path")
+    parser.add_argument("--bundle", required=True, help=".bundle artifact path")
     parser.add_argument("--binary", default="./build/trtmc",
                         help="Path to trtmc C++ binary")
     parser.add_argument("--hf-python", default="",

@@ -32,7 +32,7 @@ def test_hf_and_trtmc_resolve_the_same_initial_latent(tmp_path) -> None:
 
     case = _case(seed=43)
     hf_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "hf_artifacts"))
-    trt_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "trtfb_artifacts"))
+    trt_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "bundle_artifacts"))
 
     hf = ensure_initial_latents(case, hf_ctx)
     trt = ensure_initial_latents(case, trt_ctx)
@@ -47,12 +47,12 @@ def test_trtmc_runner_consumes_and_reports_shared_initial_latent(
     tmp_path, monkeypatch
 ) -> None:
     case = _case(seed=44)
-    case.bundle = "pixart.trtfb"
+    case.bundle = "pixart.bundle"
     binary = tmp_path / "trtmc"
     binary.write_text("", encoding="utf-8")
     ctx = RunContext(
         case=case,
-        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        artifacts_dir=str(tmp_path / "bundle_artifacts"),
         binary_path=str(binary),
         engine_dir=str(tmp_path),
         model_plugin_dir="/runtime/models/pixart",
@@ -117,12 +117,12 @@ def test_standard_trtmc_runner_keeps_seeded_generation_path(
     tmp_path, monkeypatch
 ) -> None:
     case = _case(seed=45, shared_initial_latents=False)
-    case.bundle = "pixart.trtfb"
+    case.bundle = "pixart.bundle"
     binary = tmp_path / "trtmc"
     binary.write_text("", encoding="utf-8")
     ctx = RunContext(
         case=case,
-        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        artifacts_dir=str(tmp_path / "bundle_artifacts"),
         binary_path=str(binary),
         engine_dir=str(tmp_path),
     )

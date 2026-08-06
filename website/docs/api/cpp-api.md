@@ -20,7 +20,7 @@ complete stable pure-C ownership API.
 #include <iostream>
 
 int main() {
-    auto pipe = trtmc::load("/tmp/qwen3.trtfb", "/opt/venv/bin/python");
+    auto pipe = trtmc::load("/tmp/qwen3.bundle", "/opt/venv/bin/python");
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens = 20;
     auto out = pipe->generate("The capital of France is", cfg);
@@ -40,7 +40,7 @@ options.backend_search_paths = {"/opt/trtmc/backends"};
 options.model_plugin_search_paths = {"/opt/trtmc/models"};
 options.set_tokens = {"runtime.prefer_gpu_greedy=true"};
 
-auto pipe = trtmc::load("/tmp/model.trtfb", options);
+auto pipe = trtmc::load("/tmp/model.bundle", options);
 ```
 
 `load()` supports both bundle shapes. A native bundle uses
@@ -77,7 +77,7 @@ surfaces instead of silently ignoring them.
 #include <iostream>
 
 int main() {
-    const std::string path = "/tmp/model.trtfb";
+    const std::string path = "/tmp/model.bundle";
     if (!trtmc::IsBundle(path)) {
         return 1;
     }
@@ -94,7 +94,7 @@ int main() {
 }
 ```
 
-`IsBundle()` checks the `.trtfb` magic bytes; it is not a full compatibility
+`IsBundle()` checks the `.bundle` magic bytes; it is not a full compatibility
 or engine-load proof. `InspectBundle()` returns `BundleInfo`, including model,
 precision, TensorRT/ABI, shape, tokenizer, runtime-strategy, and section
 metadata. Each `BundleSectionInfo` contains the section name, byte offset, and
@@ -163,7 +163,7 @@ For native bundles, use independent instances or `PipelinePool`:
 #include <trtmc/runtime/pipeline_pool.h>
 
 auto pool = trtmc::PipelineFactory::from_bundle_pool(
-    "/tmp/native-model.trtfb", 4);
+    "/tmp/native-model.bundle", 4);
 
 // Each worker acquires one exclusive, move-only lane for one in-flight request.
 auto lease = pool->acquire();
@@ -391,7 +391,7 @@ experiments:
 TrtmcPipelineOptions opts{};
 opts.hf_python = "/opt/venv/bin/python";
 
-trtmc::IPipeline* pipe = trtmc_create_pipeline_ex("/tmp/model.trtfb", &opts);
+trtmc::IPipeline* pipe = trtmc_create_pipeline_ex("/tmp/model.bundle", &opts);
 if (pipe == nullptr) {
     const char* err = trtmc_last_error();
     // Report err and stop.

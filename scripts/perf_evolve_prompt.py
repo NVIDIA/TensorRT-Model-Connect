@@ -88,14 +88,14 @@ def build_evolve_prompt(
     ### L1: CPU Phase Breakdown
     ```bash
     docker exec {container} python3 tools/cpu_profile.py \\
-        --bundle /tmp/baseline.trtfb --iterations 20 --json /tmp/profile_l1.json
+        --bundle /tmp/baseline.bundle --iterations 20 --json /tmp/profile_l1.json
     ```
     Read the JSON. Record: mask_build_ms, h2d_ms, tensor_bind_ms, execute_ms,
     d2d_cache_ms, d2h_ms, argmax_ms.
 
     ### L2: Per-Layer TRT Profiling
     ```bash
-    docker exec {container} ./build/trtmc profile /tmp/baseline.trtfb --json --warmup 5 --runs 20
+    docker exec {container} ./build/trtmc profile /tmp/baseline.bundle --json --warmup 5 --runs 20
     ```
     Record: attention_pct, mlp_pct, norm_pct, other_pct, total_ms.
 
@@ -130,7 +130,7 @@ def build_evolve_prompt(
     ### Step 1: Build
     ```bash
     docker exec {container} bash -c \\
-        './build/trtmc build {model} -o /tmp/evolve_test.trtfb \\
+        './build/trtmc build {model} -o /tmp/evolve_test.bundle \\
          --max-cache-length {max_cache_length} --verbose 2>&1; echo EXIT=$?'
     ```
     If the build fails, read the error, fix the code, and retry the build.
@@ -148,7 +148,7 @@ def build_evolve_prompt(
     Use the C++ binary for decode throughput (captures CUDA Graph benefits):
     ```bash
     docker exec {container} bash -c \\
-        './build/trtmc run /tmp/evolve_test.trtfb \\
+        './build/trtmc run /tmp/evolve_test.bundle \\
          --prompt "The capital of France is" --max-new-tokens 100 \\
          --hf-python /opt/venv/bin/python \\
          --set platform.trt_log_stderr=true 2>&1 | grep "Decode:"'
@@ -158,7 +158,7 @@ def build_evolve_prompt(
     For full comparison (TRT vs compile), also run:
     ```bash
     docker exec {container} python3 tools/perf_compare.py \\
-        --model {model} --bundle /tmp/evolve_test.trtfb \\
+        --model {model} --bundle /tmp/evolve_test.bundle \\
         --trt-only --iterations 5 --warmup 2 \\
         --json /tmp/evolve_bench.json
     ```
@@ -388,7 +388,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         **Benchmark with both enabled:**
         ```bash
-        ./build/trtmc run /tmp/test.trtfb \\
+        ./build/trtmc run /tmp/test.bundle \\
             --prompt "The capital of France is" --max-new-tokens 100 \\
             --hf-python /opt/venv/bin/python \\
             --set platform.trt_log_stderr=true \\
@@ -405,14 +405,14 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
         Already implemented in the quantization framework. Just pass `--precision fp16`:
         ```bash
-        ./build/trtmc build <model> -o /tmp/test_fp16.trtfb --max-cache-length 256 --precision fp16
+        ./build/trtmc build <model> -o /tmp/test_fp16.bundle --max-cache-length 256 --precision fp16
         ```
         Correctness: use `--atol 0.1` (relaxed for FP16).
         Bundle size halves (~2.5GB → ~1.3GB for 0.6B model).
 
         **BF16 — similar to FP16, better numerical stability**
         ```bash
-        ./build/trtmc build <model> -o /tmp/test_bf16.trtfb --max-cache-length 256 --precision bf16
+        ./build/trtmc build <model> -o /tmp/test_bf16.bundle --max-cache-length 256 --precision bf16
         ```
         Only on B100/B200/H100 (native BF16 support).
 

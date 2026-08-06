@@ -37,7 +37,7 @@ def test_segmentation_reference_aligns_floating_inputs_with_model_dtype(
         family="segformer",
         runtime_strategy="segformer_segmentation",
         task_strategy="segmentation",
-        bundle="segformer-unit.trtfb",
+        bundle="segformer-unit.bundle",
         inputs={"image": str(image)},
         metadata={"reference_precision": "fp16"},
     )

@@ -1,7 +1,7 @@
 {
   "name": "camembert-base",
   "hf_id": "almanach/camembert-base",
-  "bundle": "camembert-base.trtfb",
+  "bundle": "camembert-base.bundle",
   "family": "roberta",
   "runtime_strategy": "roberta_encoder_only",
   "task_strategy": "encoder_only_nlp",

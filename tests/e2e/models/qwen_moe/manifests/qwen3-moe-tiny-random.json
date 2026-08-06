@@ -1,7 +1,7 @@
 {
   "name": "qwen3-moe-tiny-random",
   "hf_id": "amd-quark/tiny-random-qwen3_moe",
-  "bundle": "qwen3-moe-tiny-random.trtfb",
+  "bundle": "qwen3-moe-tiny-random.bundle",
   "family": "qwen_moe",
   "runtime_strategy": "qwen_moe_decoder_moe",
   "task_strategy": "text_generation_causal",

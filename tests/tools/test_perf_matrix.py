@@ -88,7 +88,7 @@ asset_loading=overrides.get('measurement.asset_loading_included',False)
 resolved={{
  'schema_version':'trtmc.benchmark-case/v1',
  'name':a.case, 'testcase':a.case, 'operation':'generate',
- 'bundle_name':'distilgpt2.trtfb', 'bundle_path':'/tmp/distilgpt2.trtfb',
+ 'bundle_name':'distilgpt2.bundle', 'bundle_path':'/tmp/distilgpt2.bundle',
  'resolved_case_digest':'candidate-digest', 'sources':{{}},
  'request':{{'batch_size':1,'prompt':\"Hello, I'm a language model\",'max_new_tokens':2,
             'temperature':0.0,'top_k':1,'top_p':1.0,'min_p':0.0,'seed':-1,
@@ -99,7 +99,7 @@ resolved={{
  'model':{{'name':'distilgpt2','hf_id':'distilbert/distilgpt2','family':'gpt2',
           'task_strategy':'text_generation_causal','runtime_strategy':'gpt2_decoder_kv_cache',
           'precision':'fp16','manifest':'gpt2/manifests/distilgpt2.json',
-          'manifest_path':{str(manifest)!r},'manifest_sha256':'fake','bundle_name':'distilgpt2.trtfb',
+          'manifest_path':{str(manifest)!r},'manifest_sha256':'fake','bundle_name':'distilgpt2.bundle',
           'build':{{'max_cache_length':256,'trust_remote_code':False}}}}
 }}
 if a.dry_run:
@@ -998,7 +998,7 @@ def test_report_displays_campaign_and_model_profile_wall_times() -> None:
 
 
 def test_report_prefers_test_task_bundle_preparation_receipt() -> None:
-    bundle = "/shared/engines/example/cache-key/example.trtfb"
+    bundle = "/shared/engines/example/cache-key/example.bundle"
     results = {
         "git_commit": "tested-commit",
         "cases": [
@@ -1069,7 +1069,7 @@ def test_report_includes_client_side_row_filters() -> None:
                         "bundles": [
                             {
                                 "model": "example-model",
-                                "bundle": "/shared/example.trtfb",
+                                "bundle": "/shared/example.bundle",
                                 "status": "built",
                                 "build_time_s": 1.0,
                             }
@@ -1091,7 +1091,7 @@ def test_report_includes_client_side_row_filters() -> None:
                         "bundles": [
                             {
                                 "model": "other-model",
-                                "bundle": "/shared/other.trtfb",
+                                "bundle": "/shared/other.bundle",
                                 "status": "reused",
                             }
                         ]
@@ -1159,7 +1159,7 @@ def test_apply_bundle_preparation_receipt_rejects_unmatched_bundle() -> None:
                         "bundles": [
                             {
                                 "model": "example-model",
-                                "bundle": "/shared/engines/example.trtfb",
+                                "bundle": "/shared/engines/example.bundle",
                             }
                         ]
                     }
@@ -1175,7 +1175,7 @@ def test_apply_bundle_preparation_receipt_rejects_unmatched_bundle() -> None:
         "bundles": [
             {
                 "model": "example-model",
-                "bundle": "/different/example.trtfb",
+                "bundle": "/different/example.bundle",
                 "status": "built",
                 "build_time_s": 1.0,
                 "included_in_performance_metrics": False,

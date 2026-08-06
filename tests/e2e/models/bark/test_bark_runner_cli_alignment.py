@@ -18,7 +18,7 @@ def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
         family="bark",
         runtime_strategy="text_to_audio_bark",
         task_strategy="text_to_audio",
-        bundle="bark-case.trtfb",
+        bundle="bark-case.bundle",
         inputs=inputs or {},
     )
     defaults.update(overrides)

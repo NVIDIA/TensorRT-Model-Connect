@@ -26,9 +26,9 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 BASELINE_BUNDLE = os.environ.get(
     "TRTMC_QWEN3_BASELINE_BUNDLE",
-    str(REPO_ROOT / "engines" / "qwen3-4b-instruct-2507.trtfb"),
+    str(REPO_ROOT / "engines" / "qwen3-4b-instruct-2507.bundle"),
 )
-FI_BUNDLE = "/tmp/qwen3_4b_fi.trtfb"
+FI_BUNDLE = "/tmp/qwen3_4b_fi.bundle"
 HEAD_DIM = 128
 MAX_CACHE = 256
 MAX_NEW = 30

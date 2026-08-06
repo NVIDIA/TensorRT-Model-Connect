@@ -51,10 +51,10 @@ class DiffusionRunner:
     """
 
     def __init__(self, bundle_path: str):
-        """Load engines and config from a .trtfb bundle.
+        """Load engines and config from a .bundle artifact.
 
         Args:
-            bundle_path: Path to the diffusion .trtfb bundle.
+            bundle_path: Path to the diffusion .bundle artifact.
         """
         if not HAS_CUDA:
             raise RuntimeError("CUDA/TensorRT not available for DiffusionRunner")
@@ -84,7 +84,7 @@ class DiffusionRunner:
         """Parse bundle file and deserialize TRT engines."""
         with open(path, "rb") as f:
             magic = f.read(8)
-            assert magic == b"TRTFB\x00\x01\x00", f"Bad magic: {magic}"
+            assert magic == b"BUNDLE\x01\x00", f"Bad magic: {magic}"
             json_len = struct.unpack("<Q", f.read(8))[0]
             header = json.loads(f.read(json_len).decode("utf-8"))
             data_start = 16 + json_len

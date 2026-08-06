@@ -30,7 +30,7 @@ import tensorrt_model_connect
 
 tensorrt_model_connect.build(
     "Qwen/Qwen3-0.6B",
-    "/tmp/qwen3.trtfb",
+    "/tmp/qwen3.bundle",
     verbose=True,
 )
 ```
@@ -51,7 +51,7 @@ contract without linking the C++ API:
 ```python
 from tensorrt_model_connect import Pipeline
 
-pipe = Pipeline("/tmp/qwen3.trtfb")
+pipe = Pipeline("/tmp/qwen3.bundle")
 text = pipe("The capital of France is", max_new_tokens=20, timeout=120)
 metadata = pipe.inspect()
 ```
@@ -84,7 +84,7 @@ API or CLI directly for other task-specific operations.
 | Parameter | Purpose |
 | --- | --- |
 | `model_id_or_path` | Hugging Face repository ID or resolved local model directory. |
-| `output_path` | Destination `.trtfb` bundle path. |
+| `output_path` | Destination `.bundle` bundle path. |
 | `max_cache_length` | Explicit KV cache length. Omitted/`None` lets the family choose: eligible dense Qwen3/Llama use `max_position_embeddings`, while other native or legacy paths normally use 256. A non-full-context value makes those Qwen3/Llama checkpoints ineligible for native KV. |
 | `model_revision` | Hugging Face commit, tag, or branch to resolve. |
 | `decoder_engine_layout` | `split` or `dual_profile` for supported decoders. |

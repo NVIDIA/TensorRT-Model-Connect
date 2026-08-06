@@ -1,7 +1,7 @@
 {
   "name": "wan21-t2v-1.3b-l0-cp4",
   "hf_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
-  "bundle": "wan21-t2v-1.3b-l0-cp4.trtfb",
+  "bundle": "wan21-t2v-1.3b-l0-cp4.bundle",
   "family": "wan_t2v",
   "runtime_strategy": "diffusion_wan",
   "task_strategy": "diffusion_media_generation",

@@ -1,7 +1,7 @@
 {
   "name": "riva-translate-4b",
   "hf_id": "nvidia/Riva-Translate-4B-Instruct-v1.1",
-  "bundle": "riva-translate-4b.trtfb",
+  "bundle": "riva-translate-4b.bundle",
   "family": "mistral",
   "runtime_strategy": "mistral_decoder_kv_cache",
   "task_strategy": "text_generation_causal",

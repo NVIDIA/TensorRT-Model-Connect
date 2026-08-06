@@ -35,7 +35,7 @@ def test_nllb_runner_passes_language_token_contract(monkeypatch, tmp_path) -> No
         family="m2m_100",
         runtime_strategy="m2m_100_seq2seq_encoder_decoder",
         task_strategy="text_generation_causal",
-        bundle="nllb-case.trtfb",
+        bundle="nllb-case.bundle",
         inputs={},
         metadata={
             "contract_config": {
