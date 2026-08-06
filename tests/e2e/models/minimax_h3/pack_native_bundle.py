@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,14 @@ PLAN_SECTIONS = {
     "denoiser_plan": "denoiser.plan",
     "vae_tile_decoder_plan": "vae_tile_decoder.plan",
 }
+FIRST_BLOCK_CACHE_PLAN_SECTIONS = {
+    "text_encoder_plan": "text_encoder.plan",
+    "adaln_precompute_plan": "adaln_precompute.plan",
+    "denoiser_head_plan": "denoiser_head.plan",
+    "denoiser_tail_plan": "denoiser_tail.plan",
+    "denoiser_finish_plan": "denoiser_finish.plan",
+    "vae_tile_decoder_plan": "vae_tile_decoder.plan",
+}
 EAGER_BUNDLE_SECTIONS = ("tokenizer.json", "config.json")
 LAZY_BUNDLE_SECTIONS = tuple(PLAN_SECTIONS)
 
@@ -47,13 +56,13 @@ def _target_metadata() -> tuple[str, str, str]:
     return trt_version, trt_abi, gpu_name
 
 
-def _bundle_loading_policy() -> dict[str, object]:
+def _bundle_loading_policy(plan_sections=PLAN_SECTIONS) -> dict[str, object]:
     """Keep only metadata resident; H3 loads one large plan at a time."""
 
     return {
         "mode": "staged",
         "eager_sections": list(EAGER_BUNDLE_SECTIONS),
-        "lazy_sections": list(LAZY_BUNDLE_SECTIONS),
+        "lazy_sections": list(plan_sections),
     }
 
 
@@ -63,11 +72,18 @@ def main() -> int:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--source-revision", required=True)
+    parser.add_argument(
+        "--first-block-cache",
+        action="store_true",
+        help="Package split head/tail/finish plans instead of denoiser.plan.",
+    )
     args = parser.parse_args()
     plans = Path(args.plans_dir)
     model = Path(args.model_path)
     output = Path(args.output)
     source_revision = validate_source_revision(args.source_revision)
+    profile = replace(SOL_ENGINE_1344X768_124F, first_block_cache=args.first_block_cache)
+    plan_sections = FIRST_BLOCK_CACHE_PLAN_SECTIONS if profile.first_block_cache else PLAN_SECTIONS
     trt_version, trt_abi, gpu_name = _target_metadata()
     receipt_path = plans / "build_receipt.json"
     if not receipt_path.is_file():
@@ -81,12 +97,12 @@ def main() -> int:
         tokenizer=tokenizer,
         build_helper=Path(__file__).with_name("build_native_components.py"),
         source_revision=source_revision,
-        profile=SOL_ENGINE_1344X768_124F,
+        profile=profile,
         hash_files=False,
     )
 
     sections: list[BundleSection] = []
-    for section_name, filename in PLAN_SECTIONS.items():
+    for section_name, filename in plan_sections.items():
         path = plans / filename
         sections.append(
             _bundle_section_from_file(
@@ -107,7 +123,7 @@ def main() -> int:
         "engine_backend": "trt",
         "trt_version": trt_version,
         "trt_abi": trt_abi,
-        "bundle_loading": _bundle_loading_policy(),
+        "bundle_loading": _bundle_loading_policy(plan_sections),
         "tokenizer_add_special_tokens": 0,
         "checkpoint_revision": CHECKPOINT_REVISION,
         "source_revision": source_revision,
@@ -116,8 +132,11 @@ def main() -> int:
         "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
         "workspace_limit_bytes": dict(receipt["workspace_limit_bytes"]),
         "plan_sha256": {
-            filename: recorded[filename]["sha256"] for filename in PLAN_SECTIONS.values()
+            filename: recorded[filename]["sha256"] for filename in plan_sections.values()
         },
+        "first_block_cache": profile.first_block_cache,
+        "denoiser_cache_mode": "first_block" if profile.first_block_cache else "monolithic",
+        "first_block_cache_threshold": 0.08,
         "height": 768,
         "width": 1344,
         "num_frames": 124,

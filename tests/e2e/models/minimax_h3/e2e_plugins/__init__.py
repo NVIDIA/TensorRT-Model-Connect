@@ -24,6 +24,14 @@ _PLAN_FILENAMES = {
     "denoiser.plan",
     "vae_tile_decoder.plan",
 }
+_FIRST_BLOCK_CACHE_PLAN_FILENAMES = {
+    "text_encoder.plan",
+    "adaln_precompute.plan",
+    "denoiser_head.plan",
+    "denoiser_tail.plan",
+    "denoiser_finish.plan",
+    "vae_tile_decoder.plan",
+}
 
 
 def artifact_dir(ctx: RunContext, case: E2ECase, name: str) -> Path:
@@ -97,9 +105,18 @@ def source_revision(case: E2ECase, ctx: RunContext) -> str:
         raise ValueError("MiniMax-H3 E2E bundle does not use the unpadded sequence")
     if config.get("vae_tile_batch") != 28:
         raise ValueError("MiniMax-H3 E2E bundle does not decode all spatial tiles in one batch")
+    cache_mode = config.get("denoiser_cache_mode", "monolithic")
+    if cache_mode not in ("monolithic", "first_block"):
+        raise ValueError("MiniMax-H3 E2E bundle has an invalid denoiser cache mode")
+    first_block_cache = config.get("first_block_cache", False)
+    if not isinstance(first_block_cache, bool) or first_block_cache != (
+        cache_mode == "first_block"
+    ):
+        raise ValueError("MiniMax-H3 E2E bundle cache profile is inconsistent")
+    expected_plans = _FIRST_BLOCK_CACHE_PLAN_FILENAMES if first_block_cache else _PLAN_FILENAMES
     plan_sha = config.get("plan_sha256")
-    if not isinstance(plan_sha, dict) or set(plan_sha) != _PLAN_FILENAMES:
-        raise ValueError("MiniMax-H3 bundle does not identify exactly all four native plans")
+    if not isinstance(plan_sha, dict) or set(plan_sha) != expected_plans:
+        raise ValueError("MiniMax-H3 bundle does not identify the selected native plans")
     if any(_SHA256.fullmatch(str(value)) is None for value in plan_sha.values()):
         raise ValueError("MiniMax-H3 bundle contains an invalid native plan SHA256")
 

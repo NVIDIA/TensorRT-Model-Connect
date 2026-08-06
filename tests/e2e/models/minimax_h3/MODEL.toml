@@ -25,6 +25,7 @@ input_fields = [
   { input = "fps", manifest = "fps" },
 ]
 build_cli_args = [
+  { flag = "--set", value = "minimax_h3.first_block_cache=true" },
   { flag = "--video-height", input = "video_height" },
   { flag = "--video-width", input = "video_width" },
   { flag = "--video-num-frames", input = "video_num_frames" },

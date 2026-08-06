@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import tomllib
@@ -12,12 +13,15 @@ import pytest
 
 from tensorrt_model_connect.families.minimax_h3.config import (
     DEFAULT_WORKSPACE_LIMIT_BYTES,
+    FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES,
     MiniMaxH3Config,
     SOL_ENGINE_1344X768_124F,
+    default_workspace_limit_bytes,
 )
 from tensorrt_model_connect.families.minimax_h3.plugin import (
     MiniMaxH3Plugin,
     _build_source_revision,
+    _effective_build_config,
     _fixed_profile,
 )
 
@@ -34,6 +38,7 @@ def test_sol_engine_profile_matches_public_packed_shape() -> None:
     assert profile.padded_sequence_length // profile.context_parallel_size == 38247
     assert profile.attention_size == 7168
     assert profile.video_patch_dim == 96
+    assert profile.first_block_cache is False
 
 
 def test_invalid_single_device_contract_fails_closed() -> None:
@@ -42,6 +47,8 @@ def test_invalid_single_device_contract_fails_closed() -> None:
             MiniMaxH3Config(padded_sequence_length=padded_rows).validate()
     with pytest.raises(ValueError, match="context_parallel_size=1"):
         MiniMaxH3Config(context_parallel_size=4).validate()
+    with pytest.raises(ValueError, match="must be a boolean"):
+        MiniMaxH3Config(first_block_cache=1).validate()
 
 
 def test_manifest_discovers_both_public_pipeline_names() -> None:
@@ -88,8 +95,28 @@ def test_plugin_fails_closed_on_unqualified_profile_or_source(monkeypatch) -> No
     monkeypatch.setenv("TRTMC_MINIMAX_H3_SOURCE_REVISION", "A" * 40)
     assert _build_source_revision() == "a" * 40
     assert _fixed_profile({}) is SOL_ENGINE_1344X768_124F
+    assert _fixed_profile({"first_block_cache": True}).first_block_cache is True
+    assert _fixed_profile({"denoiser_cache_mode": "first_block"}).first_block_cache is True
+    with pytest.raises(ValueError, match="disagree"):
+        _fixed_profile({"denoiser_cache_mode": "first_block", "first_block_cache": False})
     with pytest.raises(ValueError, match="packed-row profile"):
         _fixed_profile({"video_rows": 1})
+
+
+def test_namespaced_build_options_select_first_block_cache() -> None:
+    raw = _effective_build_config(
+        {
+            "_family_build_options": {
+                "minimax_h3": {
+                    "first_block_cache": True,
+                    "first_block_cache_threshold": 0.05,
+                }
+            }
+        }
+    )
+
+    assert _fixed_profile(raw).first_block_cache is True
+    assert raw["first_block_cache_threshold"] == 0.05
 
 
 def test_plugin_bundle_config_preserves_exact_provenance() -> None:
@@ -114,6 +141,9 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     assert result["seed"] == 7
     assert result["context_parallel_size"] == 1
     assert result["workspace_limit_bytes"] == DEFAULT_WORKSPACE_LIMIT_BYTES
+    assert result["first_block_cache"] is False
+    assert result["denoiser_cache_mode"] == "monolithic"
+    assert result["first_block_cache_threshold"] == 0.08
     assert result["bundle_loading"] == {
         "mode": "staged",
         "eager_sections": ["tokenizer.json", "config.json"],
@@ -128,6 +158,72 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         MiniMaxH3Plugin().diffusion_bundle_config(
             SimpleNamespace(raw={"video_width": 1}),
             components={"profile": SOL_ENGINE_1344X768_124F, "provenance": provenance},
+        )
+
+
+def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
+    profile = replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
+    workspaces = default_workspace_limit_bytes(first_block_cache=True)
+    provenance = {
+        "source_revision": "a" * 40,
+        "builder_source_sha256": "b" * 64,
+        "checkpoint_inventory_sha256": "c" * 64,
+        "workspace_limit_bytes": workspaces,
+        "plan_sha256": {filename: "d" * 64 for filename in workspaces},
+    }
+    components = {
+        "profile": profile,
+        "provenance": provenance,
+        "text_encoder": b"text",
+        "adaln_precompute": b"adaln",
+        "denoiser_head": b"head",
+        "denoiser_tail": b"tail",
+        "denoiser_finish": b"finish",
+        "vae_decoder": b"vae",
+        "tokenizer_json": b"{}",
+    }
+    sections = dict(MiniMaxH3Plugin().diffusion_bundle_sections(components))
+    assert tuple(sections) == (
+        "text_encoder_plan",
+        "adaln_precompute_plan",
+        "denoiser_head_plan",
+        "denoiser_tail_plan",
+        "denoiser_finish_plan",
+        "vae_tile_decoder_plan",
+        "tokenizer.json",
+    )
+    config = MiniMaxH3Plugin().diffusion_bundle_config(
+        SimpleNamespace(
+            raw={
+                "first_block_cache": True,
+                "first_block_cache_threshold": 0.08,
+            }
+        ),
+        components=components,
+    )
+    assert config["first_block_cache"] is True
+    assert config["denoiser_cache_mode"] == "first_block"
+    assert config["first_block_cache_threshold"] == 0.08
+    assert config["bundle_loading"]["lazy_sections"][2:5] == [
+        "denoiser_head_plan",
+        "denoiser_tail_plan",
+        "denoiser_finish_plan",
+    ]
+    assert set(config["workspace_limit_bytes"]) == {
+        "text_encoder.plan",
+        "adaln_precompute.plan",
+        *FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES,
+        "vae_tile_decoder.plan",
+    }
+    with pytest.raises(ValueError, match="finite and positive"):
+        MiniMaxH3Plugin().diffusion_bundle_config(
+            SimpleNamespace(
+                raw={
+                    "first_block_cache": True,
+                    "first_block_cache_threshold": float("nan"),
+                }
+            ),
+            components=components,
         )
 
     malformed_provenance = dict(provenance)
@@ -172,4 +268,8 @@ def test_sol_lossless_optimizations_are_structural() -> None:
     assert 'network.add_input("rank"' not in dit
     assert "layer.mask" not in ops
     assert "SolAttn" not in "\n".join((adaln, dit, ops))
-    assert "FirstBlockCache" not in "\n".join((adaln, dit, ops))
+    assert "build_dit_head_engine" in dit
+    assert "build_dit_tail_engine" in dit
+    assert "build_dit_finish_engine" in dit
+    assert "cache_metric" in dit
+    assert "FirstBlockCacheConfig" not in "\n".join((adaln, dit, ops))

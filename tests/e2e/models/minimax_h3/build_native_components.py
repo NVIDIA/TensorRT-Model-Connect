@@ -10,6 +10,7 @@ import gc
 import hashlib
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from tensorrt_model_connect.families.minimax_h3.checkpoint import (
@@ -18,8 +19,8 @@ from tensorrt_model_connect.families.minimax_h3.checkpoint import (
     validate_component_key_partition,
 )
 from tensorrt_model_connect.families.minimax_h3.config import (
-    DEFAULT_WORKSPACE_LIMIT_BYTES,
     SOL_ENGINE_1344X768_124F,
+    default_workspace_limit_bytes,
 )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
     CHECKPOINT_REVISION,
@@ -57,13 +58,16 @@ def _positive_workspace_gib(raw: str) -> int:
     return value
 
 
-def _workspace_limits(workspace_gib: int | None) -> dict[str, int]:
+def _workspace_limits(
+    workspace_gib: int | None, *, first_block_cache: bool = False
+) -> dict[str, int]:
+    defaults = default_workspace_limit_bytes(first_block_cache=first_block_cache)
     if workspace_gib is None:
-        return dict(DEFAULT_WORKSPACE_LIMIT_BYTES)
+        return defaults
     if not isinstance(workspace_gib, int) or isinstance(workspace_gib, bool) or workspace_gib <= 0:
         raise ValueError("workspace_gib must be a positive integer")
     workspace_bytes = workspace_gib << 30
-    return {filename: workspace_bytes for filename in DEFAULT_WORKSPACE_LIMIT_BYTES}
+    return {filename: workspace_bytes for filename in defaults}
 
 
 def _validate_resume_identity(previous: object, current: dict) -> None:
@@ -92,6 +96,11 @@ def main() -> int:
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--cp-size", type=int, default=1, choices=(1,))
     parser.add_argument(
+        "--first-block-cache",
+        action="store_true",
+        help="Build native head/tail/finish denoiser plans for FirstBlockCache.",
+    )
+    parser.add_argument(
         "--workspace-gib",
         type=_positive_workspace_gib,
         help="Override the TensorRT tactic workspace for every component (GiB).",
@@ -112,14 +121,16 @@ def main() -> int:
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     source_revision = validate_source_revision(args.source_revision)
-    profile_values = {
-        **SOL_ENGINE_1344X768_124F.__dict__,
-        "context_parallel_size": args.cp_size,
-    }
-    profile = SOL_ENGINE_1344X768_124F.__class__(**profile_values)
+    profile = replace(
+        SOL_ENGINE_1344X768_124F,
+        context_parallel_size=args.cp_size,
+        first_block_cache=args.first_block_cache,
+    )
     receipt_path = output / "build_receipt.json"
     tokenizer = model / "tokenizer" / "tokenizer.json"
-    workspace_limit_bytes = _workspace_limits(args.workspace_gib)
+    workspace_limit_bytes = _workspace_limits(
+        args.workspace_gib, first_block_cache=profile.first_block_cache
+    )
     receipt = {
         "checkpoint_revision": CHECKPOINT_REVISION,
         "checkpoint_snapshot": checkpoint_snapshot_record(model),
@@ -192,15 +203,34 @@ def main() -> int:
     )
     from tensorrt_model_connect.families.minimax_h3.dit_builder import (
         build_dit_engine,
+        build_dit_finish_engine,
+        build_dit_head_engine,
+        build_dit_tail_engine,
         checkpoint_keys as dit_keys,
+        finish_checkpoint_keys,
+        head_checkpoint_keys,
+        tail_checkpoint_keys,
     )
 
     build_adaln = should_build("adaln_precompute", "adaln_precompute.plan")
-    build_denoiser = should_build("denoiser", "denoiser.plan")
-    if build_adaln or build_denoiser:
-        validate_component_key_partition(
-            model / "transformer", (adaln_keys(profile), dit_keys(profile))
+    if profile.first_block_cache:
+        denoiser_specs = (
+            ("denoiser_head.plan", build_dit_head_engine, head_checkpoint_keys(profile)),
+            ("denoiser_tail.plan", build_dit_tail_engine, tail_checkpoint_keys(profile)),
+            ("denoiser_finish.plan", build_dit_finish_engine, finish_checkpoint_keys(profile)),
         )
+    else:
+        denoiser_specs = (("denoiser.plan", build_dit_engine, dit_keys(profile)),)
+    build_denoiser = any(
+        should_build("denoiser", filename) for filename, _builder, _keys in denoiser_specs
+    )
+    if build_adaln or build_denoiser:
+        checkpoint_groups = (
+            (adaln_keys(profile), *(keys for _filename, _builder, keys in denoiser_specs))
+            if profile.first_block_cache
+            else (adaln_keys(profile), dit_keys(profile))
+        )
+        validate_component_key_partition(model / "transformer", checkpoint_groups)
     if build_adaln:
         state = load_selected_component_state_dict(model / "transformer", adaln_keys(profile))
         weights = numpy_state(state)
@@ -217,20 +247,23 @@ def main() -> int:
         del weights, plan
         gc.collect()
     if build_denoiser:
-        state = load_selected_component_state_dict(model / "transformer", dit_keys(profile))
-        weights = numpy_state(state)
-        del state
-        started = time.perf_counter()
-        plan = build_dit_engine(
-            weights,
-            profile,
-            consume_weights=True,
-            workspace_bytes=workspace_limit_bytes["denoiser.plan"],
-        )
-        _write(output, "denoiser.plan", plan, time.perf_counter() - started, receipt)
-        checkpoint_receipt()
-        del weights, plan
-        gc.collect()
+        for filename, denoiser_builder, selected_keys in denoiser_specs:
+            if not should_build("denoiser", filename):
+                continue
+            state = load_selected_component_state_dict(model / "transformer", selected_keys)
+            weights = numpy_state(state)
+            del state
+            started = time.perf_counter()
+            plan = denoiser_builder(
+                weights,
+                profile,
+                consume_weights=True,
+                workspace_bytes=workspace_limit_bytes[filename],
+            )
+            _write(output, filename, plan, time.perf_counter() - started, receipt)
+            checkpoint_receipt()
+            del weights, plan
+            gc.collect()
 
     from tensorrt_model_connect.families.minimax_h3.vae_builder import (
         build_vae_tile_decoder_engine,

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,8 @@ from tensorrt_model_connect.families.minimax_h3 import provenance
 from tensorrt_model_connect.families.minimax_h3.config import (
     DEFAULT_WORKSPACE_LIMIT_BYTES,
     SOL_ENGINE_1344X768_124F,
+    default_workspace_limit_bytes,
+    native_plan_filenames,
 )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
     CHECKPOINT_REVISION,
@@ -207,6 +210,44 @@ def test_complete_native_build_receipt_is_accepted(tmp_path: Path) -> None:
     _validate(receipt, plans, snapshot, tokenizer)
 
 
+def test_first_block_cache_build_receipt_selects_exact_split_plans(tmp_path: Path) -> None:
+    receipt, plans, snapshot, tokenizer = _receipt(tmp_path)
+    profile = replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
+    selected = native_plan_filenames(first_block_cache=True)
+    components = {}
+    for index, filename in enumerate(selected, start=1):
+        path = plans / filename
+        if not path.exists():
+            path.write_bytes(bytes([index]) * index)
+        components[filename] = file_record(path)
+    receipt["profile"] = serialized_profile(profile)
+    receipt["workspace_limit_bytes"] = default_workspace_limit_bytes(first_block_cache=True)
+    receipt["components"] = components
+    validate_build_receipt(
+        receipt,
+        plans_dir=plans,
+        snapshot=snapshot,
+        tokenizer=tokenizer,
+        build_helper=BUILD_HELPER,
+        source_revision=SOURCE_REVISION,
+        profile=profile,
+        hash_files=True,
+    )
+
+    receipt["components"]["denoiser.plan"] = {"bytes": 1, "sha256": "0" * 64}
+    with pytest.raises(ValueError, match="selected native plans"):
+        validate_build_receipt(
+            receipt,
+            plans_dir=plans,
+            snapshot=snapshot,
+            tokenizer=tokenizer,
+            build_helper=BUILD_HELPER,
+            source_revision=SOURCE_REVISION,
+            profile=profile,
+            hash_files=False,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -230,7 +271,7 @@ def test_native_build_receipt_rejects_incomplete_or_invalid_artifacts(tmp_path: 
     receipt, plans, snapshot, tokenizer = _receipt(tmp_path)
     incomplete = copy.deepcopy(receipt)
     incomplete["components"].pop(PLAN_FILENAMES[0])
-    with pytest.raises(ValueError, match="all four"):
+    with pytest.raises(ValueError, match="selected native plans"):
         _validate(incomplete, plans, snapshot, tokenizer)
 
     malformed = copy.deepcopy(receipt)

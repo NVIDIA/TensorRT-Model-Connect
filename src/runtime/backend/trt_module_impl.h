@@ -112,7 +112,7 @@ class TrtModuleImpl final : public ITrtModule {
     bool should_allocate_input(const std::string& name, std::size_t nbytes) const;
     void validate_alias_outputs_exist(const std::vector<std::string>& output_names) const;
     void bind_alias_outputs_or_invalidate(const std::vector<std::string>& output_names, void* ptr);
-    void reset_alias_cuda_graph_if_rebound(void* previous_ptr, void* ptr);
+    void reset_cuda_graph_if_rebound(void* previous_ptr, void* ptr);
     void validate_alias_groups_bound() const;
     void free_buffers();
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);

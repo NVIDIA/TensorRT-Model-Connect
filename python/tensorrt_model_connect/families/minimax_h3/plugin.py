@@ -8,7 +8,9 @@ from __future__ import annotations
 import gc
 import hashlib
 import json
+import math
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from .checkpoint import (
@@ -16,7 +18,10 @@ from .checkpoint import (
     numpy_state,
     validate_component_key_partition,
 )
-from .config import DEFAULT_WORKSPACE_LIMIT_BYTES, SOL_ENGINE_1344X768_124F
+from .config import (
+    SOL_ENGINE_1344X768_124F,
+    default_workspace_limit_bytes,
+)
 from .provenance import (
     builder_source_sha256,
     checkpoint_snapshot_record,
@@ -40,6 +45,16 @@ def _build_source_revision() -> str:
     )
 
 
+def _effective_build_config(raw: dict) -> dict:
+    family_options = raw.get("_family_build_options", {})
+    minimax_options = (
+        family_options.get("minimax_h3", {}) if isinstance(family_options, dict) else {}
+    )
+    if not isinstance(minimax_options, dict):
+        raise ValueError("minimax_h3 build options must be an object")
+    return {**raw, **minimax_options}
+
+
 def _fixed_profile(raw: dict):
     expected = {
         "text_rows": SOL_ENGINE_1344X768_124F.text_rows,
@@ -54,7 +69,36 @@ def _fixed_profile(raw: dict):
     }
     if mismatches:
         raise ValueError(f"Unsupported MiniMax-H3 packed-row profile: {mismatches}")
-    return SOL_ENGINE_1344X768_124F
+    explicit_flag = raw.get("first_block_cache")
+    mode = raw.get(
+        "denoiser_cache_mode",
+        "first_block" if explicit_flag is True else "monolithic",
+    )
+    if mode not in ("monolithic", "first_block"):
+        raise ValueError(f"Unsupported MiniMax-H3 denoiser_cache_mode: {mode!r}")
+    if explicit_flag is not None and not isinstance(explicit_flag, bool):
+        raise ValueError("MiniMax-H3 first_block_cache must be a boolean")
+    mode_flag = mode == "first_block"
+    if explicit_flag is not None and explicit_flag != mode_flag:
+        raise ValueError("MiniMax-H3 cache mode and first_block_cache flag disagree")
+    if not mode_flag:
+        return SOL_ENGINE_1344X768_124F
+    return replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
+
+
+def _first_block_cache_threshold(raw: dict) -> float:
+    value = raw.get("first_block_cache_threshold", 0.08)
+    if isinstance(value, bool):
+        raise ValueError("MiniMax-H3 first_block_cache_threshold must be finite and positive")
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "MiniMax-H3 first_block_cache_threshold must be finite and positive"
+        ) from error
+    if not math.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError("MiniMax-H3 first_block_cache_threshold must be finite and positive")
+    return threshold
 
 
 class MiniMaxH3Plugin:
@@ -126,23 +170,70 @@ class MiniMaxH3Plugin:
         if mode != "single" or cp_size != 1:
             raise ValueError("MiniMax-H3 requires parallel.mode=single and cp_size=1")
 
-        raw = getattr(config, "raw", {})
+        raw = _effective_build_config(getattr(config, "raw", {}))
         profile = _fixed_profile(raw)
         profile.validate()
+        workspace_limits = default_workspace_limit_bytes(
+            first_block_cache=profile.first_block_cache
+        )
         source_revision = _build_source_revision()
         snapshot = checkpoint_snapshot_record(Path(weights["_model_dir"]))
         from .adaln_builder import build_adaln_precompute_engine
         from .adaln_builder import checkpoint_keys as adaln_checkpoint_keys
-        from .dit_builder import build_dit_engine, checkpoint_keys as dit_checkpoint_keys
+        from .dit_builder import (
+            build_dit_engine,
+            build_dit_finish_engine,
+            build_dit_head_engine,
+            build_dit_tail_engine,
+            checkpoint_keys as dit_checkpoint_keys,
+            finish_checkpoint_keys,
+            head_checkpoint_keys,
+            tail_checkpoint_keys,
+        )
         from .text_encoder_builder import (
             build_text_encoder_engine,
             checkpoint_keys as text_encoder_checkpoint_keys,
         )
 
-        validate_component_key_partition(
-            weights["_transformer_dir"],
-            (adaln_checkpoint_keys(profile), dit_checkpoint_keys(profile)),
-        )
+        if profile.first_block_cache:
+            denoiser_specs = (
+                (
+                    "denoiser_head",
+                    "denoiser_head.plan",
+                    build_dit_head_engine,
+                    head_checkpoint_keys(profile),
+                ),
+                (
+                    "denoiser_tail",
+                    "denoiser_tail.plan",
+                    build_dit_tail_engine,
+                    tail_checkpoint_keys(profile),
+                ),
+                (
+                    "denoiser_finish",
+                    "denoiser_finish.plan",
+                    build_dit_finish_engine,
+                    finish_checkpoint_keys(profile),
+                ),
+            )
+            checkpoint_groups = (
+                adaln_checkpoint_keys(profile),
+                *(spec[3] for spec in denoiser_specs),
+            )
+        else:
+            denoiser_specs = (
+                (
+                    "denoiser",
+                    "denoiser.plan",
+                    build_dit_engine,
+                    dit_checkpoint_keys(profile),
+                ),
+            )
+            checkpoint_groups = (
+                adaln_checkpoint_keys(profile),
+                dit_checkpoint_keys(profile),
+            )
+        validate_component_key_partition(weights["_transformer_dir"], checkpoint_groups)
 
         text_state = load_selected_component_state_dict(
             weights["_text_encoder_dir"], text_encoder_checkpoint_keys()
@@ -154,7 +245,7 @@ class MiniMaxH3Plugin:
             sequence_length=profile.text_rows,
             verbose=verbose,
             consume_weights=True,
-            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["text_encoder.plan"],
+            workspace_bytes=workspace_limits["text_encoder.plan"],
         )
         del text_weights
         gc.collect()
@@ -169,25 +260,33 @@ class MiniMaxH3Plugin:
             profile,
             verbose=verbose,
             consume_weights=True,
-            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["adaln_precompute.plan"],
+            workspace_bytes=workspace_limits["adaln_precompute.plan"],
         )
         del adaln_weights
         gc.collect()
 
-        dit_state = load_selected_component_state_dict(
-            weights["_transformer_dir"], dit_checkpoint_keys(profile)
-        )
-        dit_weights = numpy_state(dit_state)
-        del dit_state
-        denoiser_plan = build_dit_engine(
-            dit_weights,
-            profile,
-            verbose=verbose,
-            consume_weights=True,
-            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["denoiser.plan"],
-        )
-        del dit_weights
-        gc.collect()
+        denoiser_components = {}
+        plan_sha256 = {
+            "text_encoder.plan": hashlib.sha256(text_encoder_plan).hexdigest(),
+            "adaln_precompute.plan": hashlib.sha256(adaln_plan).hexdigest(),
+        }
+        for component_name, filename, denoiser_builder, selected_keys in denoiser_specs:
+            dit_state = load_selected_component_state_dict(
+                weights["_transformer_dir"], selected_keys
+            )
+            dit_weights = numpy_state(dit_state)
+            del dit_state
+            denoiser_plan = denoiser_builder(
+                dit_weights,
+                profile,
+                verbose=verbose,
+                consume_weights=True,
+                workspace_bytes=workspace_limits[filename],
+            )
+            del dit_weights
+            gc.collect()
+            denoiser_components[component_name] = denoiser_plan
+            plan_sha256[filename] = hashlib.sha256(denoiser_plan).hexdigest()
 
         from .vae_builder import (
             build_vae_tile_decoder_engine,
@@ -201,21 +300,16 @@ class MiniMaxH3Plugin:
             vae_weights,
             verbose=verbose,
             consume_weights=True,
-            workspace_bytes=DEFAULT_WORKSPACE_LIMIT_BYTES["vae_tile_decoder.plan"],
+            workspace_bytes=workspace_limits["vae_tile_decoder.plan"],
         )
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
-        plan_sha256 = {
-            "text_encoder.plan": hashlib.sha256(text_encoder_plan).hexdigest(),
-            "adaln_precompute.plan": hashlib.sha256(adaln_plan).hexdigest(),
-            "denoiser.plan": hashlib.sha256(denoiser_plan).hexdigest(),
-            "vae_tile_decoder.plan": hashlib.sha256(vae_decoder_plan).hexdigest(),
-        }
+        plan_sha256["vae_tile_decoder.plan"] = hashlib.sha256(vae_decoder_plan).hexdigest()
 
         return {
             "text_encoder": text_encoder_plan,
             "adaln_precompute": adaln_plan,
-            "denoiser": denoiser_plan,
+            **denoiser_components,
             "vae_decoder": vae_decoder_plan,
             "profile": profile,
             # Text/VAE paths remain explicit so follow-on native component
@@ -228,7 +322,7 @@ class MiniMaxH3Plugin:
                 "source_revision": source_revision,
                 "builder_source_sha256": builder_source_sha256(),
                 "checkpoint_inventory_sha256": snapshot["inventory_sha256"],
-                "workspace_limit_bytes": dict(DEFAULT_WORKSPACE_LIMIT_BYTES),
+                "workspace_limit_bytes": workspace_limits,
                 "plan_sha256": plan_sha256,
             },
         }
@@ -237,16 +331,27 @@ class MiniMaxH3Plugin:
         self, components: dict, *, parallel_config=None
     ) -> list[tuple[str, bytes]]:
         del parallel_config
-        return [
+        shared = [
             ("text_encoder_plan", components["text_encoder"]),
             ("adaln_precompute_plan", components["adaln_precompute"]),
-            ("denoiser_plan", components["denoiser"]),
+        ]
+        if components["profile"].first_block_cache:
+            denoiser = [
+                ("denoiser_head_plan", components["denoiser_head"]),
+                ("denoiser_tail_plan", components["denoiser_tail"]),
+                ("denoiser_finish_plan", components["denoiser_finish"]),
+            ]
+        else:
+            denoiser = [("denoiser_plan", components["denoiser"])]
+        return [
+            *shared,
+            *denoiser,
             ("vae_tile_decoder_plan", components["vae_decoder"]),
             ("tokenizer.json", components["tokenizer_json"]),
         ]
 
     def diffusion_bundle_config(self, config, *, components: dict) -> dict:
-        raw = getattr(config, "raw", {})
+        raw = _effective_build_config(getattr(config, "raw", {}))
         profile = components["profile"]
         fixed_request = {
             "video_height": 768,
@@ -264,7 +369,15 @@ class MiniMaxH3Plugin:
         provenance = components.get("provenance")
         if not isinstance(provenance, dict):
             raise ValueError("MiniMax-H3 components are missing exact build provenance")
-        validate_workspace_limit_bytes(provenance.get("workspace_limit_bytes"))
+        validate_workspace_limit_bytes(provenance.get("workspace_limit_bytes"), profile=profile)
+        if profile.first_block_cache:
+            denoiser_sections = [
+                "denoiser_head_plan",
+                "denoiser_tail_plan",
+                "denoiser_finish_plan",
+            ]
+        else:
+            denoiser_sections = ["denoiser_plan"]
         return {
             "checkpoint_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
             **provenance,
@@ -280,10 +393,13 @@ class MiniMaxH3Plugin:
                 "lazy_sections": [
                     "text_encoder_plan",
                     "adaln_precompute_plan",
-                    "denoiser_plan",
+                    *denoiser_sections,
                     "vae_tile_decoder_plan",
                 ],
             },
+            "first_block_cache": profile.first_block_cache,
+            "denoiser_cache_mode": ("first_block" if profile.first_block_cache else "monolithic"),
+            "first_block_cache_threshold": _first_block_cache_threshold(raw),
             "text_rows": profile.text_rows,
             "audio_rows": profile.audio_rows,
             "video_rows": profile.video_rows,

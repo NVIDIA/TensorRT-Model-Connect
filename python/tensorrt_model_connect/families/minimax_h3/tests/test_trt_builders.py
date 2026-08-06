@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import ml_dtypes
 import numpy as np
 import pytest
@@ -22,7 +24,16 @@ from tensorrt_model_connect.families.minimax_h3.config import (  # noqa: E402
     VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     resolve_workspace_bytes,
 )
-from tensorrt_model_connect.families.minimax_h3.dit_builder import build_dit_engine  # noqa: E402
+from tensorrt_model_connect.families.minimax_h3.dit_builder import (  # noqa: E402
+    build_dit_engine,
+    build_dit_finish_engine,
+    build_dit_head_engine,
+    build_dit_tail_engine,
+    checkpoint_keys as dit_checkpoint_keys,
+    finish_checkpoint_keys,
+    head_checkpoint_keys,
+    tail_checkpoint_keys,
+)
 from tensorrt_model_connect.families.minimax_h3 import graph_ops as op  # noqa: E402
 from tensorrt_model_connect.families.minimax_h3.text_encoder_builder import (  # noqa: E402
     build_text_encoder_engine,
@@ -162,6 +173,29 @@ def test_workspace_limit_uses_default_or_exact_override() -> None:
         op.configure_workspace(RejectingConfig(), 8 << 30, default_bytes=64 << 30)
 
 
+def test_first_block_cache_checkpoint_partitions_are_exact() -> None:
+    profile = replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
+    head = set(head_checkpoint_keys(profile))
+    tail = set(tail_checkpoint_keys(profile))
+    finish = set(finish_checkpoint_keys(profile))
+    assert head
+    assert tail
+    assert finish
+    assert not (head & tail or head & finish or tail & finish)
+    assert head | tail | finish == set(dit_checkpoint_keys(profile))
+    assert "transformer_blocks.0.norm1.weight" in head
+    assert "transformer_blocks.1.norm1.weight" in tail
+    assert "norm_out.norm.weight" in finish
+
+
+def test_split_builders_require_explicit_first_block_cache_profile() -> None:
+    for builder in (build_dit_head_engine, build_dit_tail_engine, build_dit_finish_engine):
+        with pytest.raises(ValueError, match="first_block_cache=True"):
+            builder({}, SOL_ENGINE_1344X768_124F)
+    with pytest.raises(ValueError, match="requires the split DiT builders"):
+        build_dit_engine({}, replace(SOL_ENGINE_1344X768_124F, first_block_cache=True))
+
+
 @pytest.mark.gpu
 def test_tiny_native_h3_graphs_serialize() -> None:
     profile = MiniMaxH3Config(
@@ -188,6 +222,30 @@ def test_tiny_native_h3_graphs_serialize() -> None:
     weights = _weights(profile)
     assert build_adaln_precompute_engine(weights, profile, workspace_bytes=1 << 30)
     assert build_dit_engine(weights, profile, workspace_bytes=1 << 30)
+
+    split_profile = replace(profile, num_layers=2, first_block_cache=True)
+    split_weights = _weights(split_profile)
+    head_plan = build_dit_head_engine(split_weights, split_profile, workspace_bytes=1 << 30)
+    tail_plan = build_dit_tail_engine(split_weights, split_profile, workspace_bytes=1 << 30)
+    finish_plan = build_dit_finish_engine(split_weights, split_profile, workspace_bytes=1 << 30)
+    assert head_plan and tail_plan and finish_plan
+
+    runtime_logger = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(runtime_logger)
+    expected = (
+        (head_plan, {"head_hidden", "head_residual", "cache_metric"}),
+        (tail_plan, {"tail_residual"}),
+        (finish_plan, {"video_velocity", "audio_velocity"}),
+    )
+    for plan, expected_outputs in expected:
+        engine = runtime.deserialize_cuda_engine(plan)
+        assert engine is not None
+        outputs = {
+            engine.get_tensor_name(index)
+            for index in range(engine.num_io_tensors)
+            if engine.get_tensor_mode(engine.get_tensor_name(index)) == trt.TensorIOMode.OUTPUT
+        }
+        assert outputs == expected_outputs
 
 
 @pytest.mark.gpu

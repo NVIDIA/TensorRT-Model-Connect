@@ -9,7 +9,12 @@ import json
 from pathlib import Path
 import sys
 
-from tensorrt_model_connect.families.minimax_h3.provenance import PLAN_FILENAMES
+import pytest
+
+from tensorrt_model_connect.families.minimax_h3.provenance import (
+    FIRST_BLOCK_CACHE_PLAN_FILENAMES,
+    PLAN_FILENAMES,
+)
 from tests.e2e.models.minimax_h3 import pack_native_bundle
 
 
@@ -71,16 +76,29 @@ def test_staged_loading_partitions_every_bundle_section() -> None:
         "config.json",
     }
     assert not set(policy["eager_sections"]) & set(policy["lazy_sections"])
+    split = pack_native_bundle._bundle_loading_policy(
+        pack_native_bundle.FIRST_BLOCK_CACHE_PLAN_SECTIONS
+    )
+    assert split["lazy_sections"][2:5] == [
+        "denoiser_head_plan",
+        "denoiser_tail_plan",
+        "denoiser_finish_plan",
+    ]
+    assert set(split["lazy_sections"]) == set(pack_native_bundle.FIRST_BLOCK_CACHE_PLAN_SECTIONS)
 
 
-def test_packer_preserves_validated_workspace_mapping(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("first_block_cache", [False, True])
+def test_packer_preserves_validated_workspace_mapping(
+    tmp_path: Path, monkeypatch, capsys, first_block_cache: bool
+) -> None:
     plans = tmp_path / "plans"
     plans.mkdir()
     recorded = {}
-    for filename in PLAN_FILENAMES:
+    selected_plans = FIRST_BLOCK_CACHE_PLAN_FILENAMES if first_block_cache else PLAN_FILENAMES
+    for filename in selected_plans:
         (plans / filename).write_bytes(filename.encode())
         recorded[filename] = {"bytes": len(filename), "sha256": "a" * 64}
-    workspace_limits = {filename: 8 << 30 for filename in PLAN_FILENAMES}
+    workspace_limits = {filename: 8 << 30 for filename in selected_plans}
     (plans / "build_receipt.json").write_text(
         json.dumps(
             {
@@ -112,22 +130,24 @@ def test_packer_preserves_validated_workspace_mapping(tmp_path: Path, monkeypatc
         captured.update(json.loads(config_section.data))
 
     monkeypatch.setattr(pack_native_bundle, "write_bundle", capture_bundle)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "pack_native_bundle.py",
-            "--plans-dir",
-            str(plans),
-            "--model-path",
-            str(model),
-            "--output",
-            str(tmp_path / "model.bundle"),
-            "--source-revision",
-            "1" * 40,
-        ],
-    )
+    argv = [
+        "pack_native_bundle.py",
+        "--plans-dir",
+        str(plans),
+        "--model-path",
+        str(model),
+        "--output",
+        str(tmp_path / "model.bundle"),
+        "--source-revision",
+        "1" * 40,
+    ]
+    if first_block_cache:
+        argv.append("--first-block-cache")
+    monkeypatch.setattr(sys, "argv", argv)
 
     assert pack_native_bundle.main() == 0
     assert captured["workspace_limit_bytes"] == workspace_limits
+    assert captured["first_block_cache"] is first_block_cache
+    assert captured["denoiser_cache_mode"] == ("first_block" if first_block_cache else "monolithic")
+    assert captured["first_block_cache_threshold"] == 0.08
     capsys.readouterr()

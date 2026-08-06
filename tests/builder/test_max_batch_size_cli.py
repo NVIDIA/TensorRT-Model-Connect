@@ -88,6 +88,7 @@ class _FakeDiffusionPlugin:
             "dit_mbs": dit_mbs,
             "te_mbs": te_mbs,
             "vae_mbs": vae_mbs,
+            "family_build_options": config.raw.get("_family_build_options", {}),
         })
         out = {
             "text_encoders": [("fake_te", b"te-plan")],
@@ -244,3 +245,19 @@ def test_max_batch_size_four_records_envelope(monkeypatch, tmp_path):
     assert plugin.calls[0]["vae_mbs"] == 1  # VAE always slices
     assert plugin.tokenizer_add_special_calls == 1
     assert plugin.tokenizer_section_calls == 1
+
+
+def test_diffusion_family_build_options_reach_plugin(monkeypatch, tmp_path):
+    """Schema-resolved ``--set`` values must survive diffusion dispatch."""
+    plugin = _install_stub_plugin(monkeypatch)
+    model_dir = _make_fake_diffusion_model_dir(tmp_path)
+    output = tmp_path / "out.trtfb"
+    args = _build_args(model_dir, output, max_batch_size=1)
+    args.set_flags = ["minimax_h3.first_block_cache=true"]
+
+    assert cli._cmd_build(args) == 0
+
+    assert plugin.calls[0]["family_build_options"]["minimax_h3"] == {
+        "first_block_cache": True,
+        "first_block_cache_threshold": 0.08,
+    }

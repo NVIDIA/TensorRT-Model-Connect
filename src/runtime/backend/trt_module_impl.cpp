@@ -484,7 +484,7 @@ void TrtModuleImpl::bind_alias_outputs_or_invalidate(const std::vector<std::stri
     }
 }
 
-void TrtModuleImpl::reset_alias_cuda_graph_if_rebound(void* previous_ptr, void* ptr) {
+void TrtModuleImpl::reset_cuda_graph_if_rebound(void* previous_ptr, void* ptr) {
     if (previous_ptr != ptr && use_cuda_graph_ && cuda_graph_)
         cuda_graph_->reset();
 }
@@ -510,7 +510,7 @@ void TrtModuleImpl::bind_alias_group(const std::string& input_name, void* ptr) {
 
     bind_alias_outputs_or_invalidate(outputs->second, ptr);
 
-    reset_alias_cuda_graph_if_rebound(input->second.d_ptr, ptr);
+    reset_cuda_graph_if_rebound(input->second.d_ptr, ptr);
     input->second.d_ptr = ptr;
     input->second.is_external = true;
     for (const auto& output_name : outputs->second) {
@@ -883,18 +883,27 @@ void TrtModuleImpl::bind_external(const std::string& name, void* external_device
     }
 
     auto& entry = it->second;
+    if (external_device_ptr == nullptr)
+        throw std::invalid_argument("External buffer for '" + name + "' is null");
+    if (external_device_ptr == entry.d_ptr)
+        return;
 
-    // Free our own buffer if we allocated it
-    if (entry.d_ptr && !entry.is_external) {
-        cudaFree(entry.d_ptr);
-    }
+    // Bind the candidate before changing ownership. If TensorRT rejects the
+    // address, the module must retain both its previous context binding and its
+    // still-live owned buffer.
+    BufferEntry candidate = entry;
+    candidate.d_ptr = external_device_ptr;
+    candidate.is_external = true;
+    if (!bind_tensor_address(name, candidate))
+        throw std::runtime_error("TensorRT rejected external buffer for '" + name + "'");
 
-    entry.d_ptr = external_device_ptr;
-    entry.is_external = true;
-
-    // Update execution context binding
-    if (ctx_ && external_device_ptr)
-        bind_tensor_address(name, entry);
+    void* const previous_ptr = entry.d_ptr;
+    const bool free_previous =
+        previous_ptr != nullptr && !entry.is_external && previous_ptr != external_device_ptr;
+    reset_cuda_graph_if_rebound(previous_ptr, external_device_ptr);
+    entry = std::move(candidate);
+    if (free_previous)
+        cudaFree(previous_ptr);
 }
 
 } // namespace trtmc

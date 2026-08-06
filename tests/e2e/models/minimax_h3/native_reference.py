@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import re
@@ -33,10 +34,69 @@ PERF_PATTERN = re.compile(
     r"vae_decoder_ms=(?P<vae>[0-9.]+) total_ms=(?P<total>[0-9.]+)"
 )
 ENGINE_PATTERN = re.compile(
-    r'\[trtmc\.engine_timing\] label="engine" execute_ms=(?P<execute>[0-9.]+) '
+    r'\[trtmc\.engine_timing\] label="(?P<label>[^"]+)" execute_ms=(?P<execute>[0-9.]+) '
     r"launches=(?P<launches>[0-9]+)"
 )
-ENGINE_STAGES = ("text_encoder", "adaln", "denoiser", "vae_decoder")
+BACKEND_PATTERN = re.compile(
+    r"\[trtmc\] Backend loaded: [^\n]* \((?P<dso>libtrtmc_backend_[^)]+\.so)\)"
+)
+CACHE_THRESHOLD_PATTERN = re.compile(
+    r"\[minimax-h3\.perf\][^\n]* cache_threshold=(?P<threshold>[0-9.]+)"
+)
+CACHE_THRESHOLD_CONFIG_KEY = "minimax_h3.first_block_cache_threshold"
+
+
+def evict_file_pages(path: Path) -> dict[str, bool | str]:
+    """Best-effort eviction of clean cache pages for one file only."""
+
+    posix_fadvise = getattr(os, "posix_fadvise", None)
+    dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if posix_fadvise is None or dontneed is None:
+        return {"supported": False, "attempted": False, "succeeded": False}
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            posix_fadvise(descriptor, 0, 0, dontneed)
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        return {
+            "supported": True,
+            "attempted": True,
+            "succeeded": False,
+            "error": f"{type(error).__name__}: {error}",
+        }
+    return {"supported": True, "attempted": True, "succeeded": True}
+
+
+def cache_threshold_cli_args(value: float | None) -> list[str]:
+    if value is None:
+        return []
+    return ["--set", f"{CACHE_THRESHOLD_CONFIG_KEY}={value:.9g}"]
+
+
+def resolve_trt_backend_dso(executable: Path, bundle_config: dict) -> Path:
+    """Resolve the exact adjacent backend DSO selected by the runtime loader."""
+
+    if bundle_config.get("engine_backend") != "trt":
+        raise ValueError("MiniMax-H3 native evidence requires engine_backend=trt")
+    abi = bundle_config.get("trt_abi")
+    match = re.fullmatch(r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)", str(abi))
+    if match is None:
+        raise ValueError("MiniMax-H3 bundle config has an invalid TensorRT ABI")
+    names = (
+        f"libtrtmc_backend_trt_{match.group('major')}_{match.group('minor')}.so",
+        "libtrtmc_backend_trt.so",
+    )
+    for name in names:
+        candidate = executable.parent / name
+        if candidate.is_file():
+            return candidate.resolve(strict=True)
+    raise FileNotFoundError(
+        "MiniMax-H3 could not bind the adjacent TensorRT backend DSO: "
+        + ", ".join(str(executable.parent / name) for name in names)
+    )
 
 
 def main() -> int:
@@ -47,7 +107,21 @@ def main() -> int:
     parser.add_argument("--plugin-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-revision", required=True)
+    parser.add_argument(
+        "--cuda-graphs",
+        action="store_true",
+        help="forward CUDA graph enablement to the native TRTMC runtime",
+    )
+    parser.add_argument(
+        "--cache-threshold",
+        type=float,
+        help=f"override {CACHE_THRESHOLD_CONFIG_KEY} for this visual run",
+    )
     args = parser.parse_args()
+    if args.cache_threshold is not None and (
+        not math.isfinite(args.cache_threshold) or args.cache_threshold <= 0.0
+    ):
+        raise ValueError("cache threshold must be finite and positive")
     source_revision = validate_source_revision(args.source_revision)
     bundle = Path(args.bundle).resolve(strict=True)
     bundle_identity = file_identity(bundle)
@@ -65,10 +139,12 @@ def main() -> int:
     if not isinstance(prompt_spec.get("seed"), int) or isinstance(prompt_spec["seed"], bool):
         raise ValueError("MiniMax-H3 prompt file must contain an integer seed")
     bundle_config = validate_native_bundle_config(bundle, source_revision=source_revision)
+    backend = resolve_trt_backend_dso(trtf, bundle_config)
     script_path = Path(__file__).resolve()
     bound_paths = {
         "bundle": bundle,
         "trtf": trtf,
+        "trt_backend": backend,
         "plugin": plugin,
         "prompt_file": prompt_path,
         "native_reference": script_path,
@@ -115,11 +191,15 @@ def main() -> int:
         "--width",
         "1344",
     ]
+    if args.cuda_graphs:
+        command.append("--cuda-graphs")
+    command.extend(cache_threshold_cli_args(args.cache_threshold))
     environment = os.environ.copy()
     environment["TRTMC_MODEL_PLUGIN_DIR"] = str(plugin_dir)
     environment["TRTMC_PNG_WRITE_WORKERS"] = "8"
     environment["WORLD_SIZE"] = "1"
     environment["RANK"] = "0"
+    bundle_page_cache_eviction = evict_file_pages(bundle)
     started = time.perf_counter()
     stdout_path = output / "native_stdout.txt"
     stderr_path = output / "native_stderr.txt"
@@ -145,16 +225,30 @@ def main() -> int:
     np.save(frames_path, frames)
     frames_record, _ = stable_file_record(frames_path, "native decoded frames")
     native_stderr = stderr_path.read_text()
+    loaded_backends = [match.group("dso") for match in BACKEND_PATTERN.finditer(native_stderr)]
+    if loaded_backends != [backend.name]:
+        raise RuntimeError(
+            "Native H3 runtime did not load the provenance-bound TensorRT backend DSO"
+        )
     matches = [match.groupdict() for match in PERF_PATTERN.finditer(native_stderr)]
     perf = {name + "_ms": float(value) for name, value in matches[-1].items()} if matches else {}
+    threshold_matches = [
+        float(match.group("threshold")) for match in CACHE_THRESHOLD_PATTERN.finditer(native_stderr)
+    ]
+    effective_cache_threshold = threshold_matches[-1] if threshold_matches else None
+    if args.cache_threshold is not None and (
+        effective_cache_threshold is None
+        or not math.isclose(
+            effective_cache_threshold, args.cache_threshold, rel_tol=0.0, abs_tol=1e-6
+        )
+    ):
+        raise RuntimeError("Native H3 runtime did not apply the requested cache threshold")
     engine_matches = [match.groupdict() for match in ENGINE_PATTERN.finditer(native_stderr)]
-    engine_execute = {}
-    if len(engine_matches) >= len(ENGINE_STAGES):
-        selected = engine_matches[-len(ENGINE_STAGES) :]
-        engine_execute = {
-            f"{stage}_ms": float(match["execute"])
-            for stage, match in zip(ENGINE_STAGES, selected, strict=True)
-        }
+    engine_execute: dict[str, float] = {}
+    if engine_matches:
+        for match in engine_matches:
+            name = f"{match['label']}_ms"
+            engine_execute[name] = engine_execute.get(name, 0.0) + float(match["execute"])
         engine_execute["total_ms"] = sum(engine_execute.values())
     receipt = {
         "backend": "tensorrt_native_single_device",
@@ -168,13 +262,18 @@ def main() -> int:
         "inputs": inputs,
         "workload": workload,
         "world_size": 1,
+        "cuda_graphs_requested": args.cuda_graphs,
+        "cache_threshold_override": args.cache_threshold,
+        "effective_cache_threshold": effective_cache_threshold,
         "wall_s": elapsed,
         "runtime": perf,
         "engine_execute": engine_execute,
+        "loaded_backend_dso": loaded_backends[0],
         "runtime_includes_plan_deserialization": True,
         "collective_transport": "none",
         "shape": list(frames.shape),
         "frames": frames_record,
+        "bundle_page_cache_eviction": bundle_page_cache_eviction,
         "host": platform.node(),
         "command": command,
     }

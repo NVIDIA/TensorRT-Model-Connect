@@ -42,6 +42,8 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <stdexcept>
+#include <utility>
 #include <vector>
 
 static int failures = 0;
@@ -55,6 +57,21 @@ static void check(bool condition, const char* test_name) {
 
 // Process-wide logger (TRT requires a single logger for all objects).
 static trtmc::TrtLogger g_logger;
+
+namespace trtmc {
+
+class TrtModuleImplTestPeer {
+  public:
+    static nvinfer1::IExecutionContext* release_execution_context(TrtModuleImpl& module) {
+        return std::exchange(module.ctx_, nullptr);
+    }
+
+    static bool binding_is_external(const TrtModuleImpl& module, const std::string& name) {
+        return module.buffers_.at(name).is_external;
+    }
+};
+
+} // namespace trtmc
 
 // Build a tiny TRT engine: identity mapping input[4] → output[4] (float32)
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
@@ -315,6 +332,68 @@ static void test_bind_external() {
     cudaStreamDestroy(stream);
 }
 
+static void test_bind_external_failure_preserves_owned_buffer() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto* ctx = engine->createExecutionContext();
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+    auto* const old_ptr = module.device_ptr("x");
+    check(old_ptr != nullptr, "failed external bind: original buffer exists");
+
+    void* ext_ptr = nullptr;
+    cudaMalloc(&ext_ptr, 16);
+    check(ext_ptr != nullptr, "failed external bind: external alloc ok");
+
+    // A missing execution context makes the TensorRT address update fail.
+    // The binding operation must not publish ext_ptr or free old_ptr.
+    auto* detached_ctx = trtmc::TrtModuleImplTestPeer::release_execution_context(module);
+    bool rejected = false;
+    try {
+        module.bind_external("x", ext_ptr);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "failed external bind: rejection is surfaced");
+    check(module.device_ptr("x") == old_ptr,
+          "failed external bind: original buffer remains published");
+    check(cudaMemset(old_ptr, 0, 16) == cudaSuccess,
+          "failed external bind: original owned buffer remains live");
+
+    delete detached_ctx;
+    cudaFree(ext_ptr);
+    cudaStreamDestroy(stream);
+}
+
+static void test_bind_external_same_owned_pointer_preserves_ownership() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    {
+        auto* ctx = engine->createExecutionContext();
+        trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+        auto* const owned_ptr = module.device_ptr("x");
+        check(owned_ptr != nullptr, "same-pointer external bind: original buffer exists");
+        check(!trtmc::TrtModuleImplTestPeer::binding_is_external(module, "x"),
+              "same-pointer external bind: original buffer is owned");
+
+        module.bind_external("x", owned_ptr);
+
+        check(module.device_ptr("x") == owned_ptr,
+              "same-pointer external bind: device pointer is unchanged");
+        check(!trtmc::TrtModuleImplTestPeer::binding_is_external(module, "x"),
+              "same-pointer external bind: ownership is preserved");
+    }
+    cudaStreamDestroy(stream);
+}
+
 static void test_unique_ptr_ownership() {
     // Modules now live behind unique_ptr<ITrtModule> — verify ownership transfer
     auto engine = build_identity_engine();
@@ -488,6 +567,8 @@ int main() {
     test_introspection();
     test_device_ptr();
     test_bind_external();
+    test_bind_external_failure_preserves_owned_buffer();
+    test_bind_external_same_owned_pointer_preserves_ownership();
     test_unique_ptr_ownership();
     test_keep_alive();
     test_forward_device();

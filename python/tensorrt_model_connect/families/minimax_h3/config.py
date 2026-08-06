@@ -25,6 +25,41 @@ DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "vae_tile_decoder.plan": VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
 }
 
+FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES = (
+    "denoiser_head.plan",
+    "denoiser_tail.plan",
+    "denoiser_finish.plan",
+)
+
+
+def native_plan_filenames(*, first_block_cache: bool) -> tuple[str, ...]:
+    """Return the exact plan set selected by the native denoiser profile."""
+
+    if not isinstance(first_block_cache, bool):
+        raise ValueError("MiniMax-H3 first_block_cache must be a boolean")
+    denoiser_plans = (
+        FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES if first_block_cache else ("denoiser.plan",)
+    )
+    return (
+        "text_encoder.plan",
+        "adaln_precompute.plan",
+        *denoiser_plans,
+        "vae_tile_decoder.plan",
+    )
+
+
+def default_workspace_limit_bytes(*, first_block_cache: bool) -> dict[str, int]:
+    """Return per-plan tactic workspace limits for one denoiser layout."""
+
+    return {
+        filename: (
+            DENOISER_DEFAULT_WORKSPACE_BYTES
+            if filename.startswith("denoiser_") or filename == "denoiser.plan"
+            else DEFAULT_WORKSPACE_LIMIT_BYTES[filename]
+        )
+        for filename in native_plan_filenames(first_block_cache=first_block_cache)
+    }
+
 
 def resolve_workspace_bytes(workspace_bytes: int | None, *, default_bytes: int) -> int:
     """Resolve a positive tactic-workspace limit without silently coercing values."""
@@ -58,6 +93,7 @@ class MiniMaxH3Config:
     padded_sequence_length: int = 38247
     max_timestep_count: int = 4
     context_parallel_size: int = 1
+    first_block_cache: bool = False
 
     @property
     def sequence_length(self) -> int:
@@ -91,6 +127,8 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 single-device profile requires no packed-sequence padding")
         if self.rope_freq_dim * 6 > self.head_dim:
             raise ValueError("MiniMax-H3 rotary channels exceed head_dim")
+        if not isinstance(self.first_block_cache, bool):
+            raise ValueError("MiniMax-H3 first_block_cache must be a boolean")
 
 
 SOL_ENGINE_1344X768_124F = MiniMaxH3Config()

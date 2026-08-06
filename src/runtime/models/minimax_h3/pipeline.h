@@ -33,7 +33,8 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
 class MiniMaxH3Pipeline final : public IPipeline {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
-                      std::string model_id);
+                      std::string model_id, bool first_block_cache = false,
+                      float cache_threshold = 0.08F);
     ~MiniMaxH3Pipeline() override;
 
     bool supports_image_generation() const override { return true; }
@@ -42,11 +43,16 @@ class MiniMaxH3Pipeline final : public IPipeline {
     const char* pipeline_type() const override { return "MiniMaxH3Pipeline"; }
 
   private:
+    struct ResidentState;
+
     MiniMaxH3ModuleLoader loader_;
     std::unique_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
     cudaStream_t stream_{nullptr};
     std::mutex generation_mutex_;
+    std::unique_ptr<ResidentState> resident_;
+    bool first_block_cache_{false};
+    float cache_threshold_{0.08F};
 };
 
 } // namespace trtmc

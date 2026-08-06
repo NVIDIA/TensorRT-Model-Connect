@@ -6,6 +6,7 @@
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
 #include "runtime/models/minimax_h3/pipeline.h"
+#include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/tokenizer.h"
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -24,17 +26,27 @@ namespace {
 
 using SectionMap = std::unordered_map<std::string, BundleSectionInfo>;
 
-SectionMap index_sections(const BundleInfo& info) {
-    constexpr std::array<const char*, 4> names = {"text_encoder_plan", "adaln_precompute_plan",
-                                                  "denoiser_plan", "vae_tile_decoder_plan"};
+SectionMap index_sections(const BundleInfo& info, bool first_block_cache) {
+    constexpr std::array<const char*, 4> monolithic_names = {
+        "text_encoder_plan", "adaln_precompute_plan", "denoiser_plan", "vae_tile_decoder_plan"};
+    constexpr std::array<const char*, 6> first_block_cache_names = {
+        "text_encoder_plan",  "adaln_precompute_plan", "denoiser_head_plan",
+        "denoiser_tail_plan", "denoiser_finish_plan",  "vae_tile_decoder_plan"};
     SectionMap sections;
-    for (const char* name : names) {
+    const auto add_section = [&](const char* name) {
         const auto it =
             std::find_if(info.sections.begin(), info.sections.end(),
                          [name](const BundleSectionInfo& item) { return item.name == name; });
         if (it == info.sections.end() || it->size == 0)
             throw std::runtime_error(std::string("MiniMax-H3 bundle is missing ") + name);
         sections.emplace(name, *it);
+    };
+    if (first_block_cache) {
+        for (const char* name : first_block_cache_names)
+            add_section(name);
+    } else {
+        for (const char* name : monolithic_names)
+            add_section(name);
     }
     return sections;
 }
@@ -66,7 +78,26 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
         const int32_t vae_tile_batch = extract_json_int(ctx.config_json, "vae_tile_batch", 28);
         if (vae_tile_batch != 28)
             throw std::runtime_error("MiniMax-H3 requires vae_tile_batch=28");
-        auto sections = index_sections(ctx.bundle.info);
+        const std::string cache_mode =
+            extract_json_string(ctx.config_json, "denoiser_cache_mode", "monolithic");
+        if (cache_mode != "monolithic" && cache_mode != "first_block")
+            throw std::runtime_error("MiniMax-H3 bundle has an invalid denoiser_cache_mode");
+        const bool first_block_cache =
+            extract_json_bool(ctx.config_json, "first_block_cache", false);
+        if (first_block_cache != (cache_mode == "first_block"))
+            throw std::runtime_error("MiniMax-H3 bundle cache mode and profile flag disagree");
+        float cache_threshold =
+            extract_json_float(ctx.config_json, "first_block_cache_threshold", 0.08F);
+        if (ctx.runtime_config != nullptr &&
+            ctx.runtime_config->source_of("minimax_h3", "first_block_cache_threshold") !=
+                config::Layer::SchemaDefault) {
+            cache_threshold = static_cast<float>(
+                ctx.runtime_config->get<double>("minimax_h3", "first_block_cache_threshold"));
+        }
+        if (!std::isfinite(cache_threshold) || cache_threshold <= 0.0F)
+            throw std::runtime_error(
+                "MiniMax-H3 first_block_cache_threshold must be finite and positive");
+        auto sections = index_sections(ctx.bundle.info, first_block_cache);
         const std::string bundle_path = ctx.bundle_path;
         const std::string runtime_cache = ctx.runtime_cache_path;
         IBackend* const backend = ctx.backend;
@@ -85,7 +116,8 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
             return backend->create_module(plan.data(), plan.size(), options);
         };
         return std::make_unique<MiniMaxH3Pipeline>(std::move(loader), load_tokenizer(ctx.bundle),
-                                                   ctx.bundle.info.model_id);
+                                                   ctx.bundle.info.model_id, first_block_cache,
+                                                   cache_threshold);
     }
 };
 

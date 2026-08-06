@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from .config import native_plan_filenames
+
 CHECKPOINT_REVISION = "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
 CHECKPOINT_REPOSITORY = "MiniMaxAI/MiniMax-H3"
 HF_CACHE_REPOSITORY = "models--MiniMaxAI--MiniMax-H3"
@@ -33,12 +35,8 @@ DIFFUSERS_REFERENCE_ARCHIVE_SHA256 = (
     "372c820aece801258bd4cea2458a2b85ad536e9262d7b0bbcdd450eda2d664a9"
 )
 DIFFUSERS_REFERENCE_CONTAINER_ROOT = "/work/reference-private"
-PLAN_FILENAMES = (
-    "text_encoder.plan",
-    "adaln_precompute.plan",
-    "denoiser.plan",
-    "vae_tile_decoder.plan",
-)
+PLAN_FILENAMES = native_plan_filenames(first_block_cache=False)
+FIRST_BLOCK_CACHE_PLAN_FILENAMES = native_plan_filenames(first_block_cache=True)
 _REQUIRED_SNAPSHOT_FILES = (
     "modular_model_index.json",
     "scheduler/scheduler_config.json",
@@ -107,12 +105,26 @@ def _validate_record_object(record: object, label: str) -> tuple[int, str]:
     return expected_size, expected_sha
 
 
-def validate_workspace_limit_bytes(record: object) -> dict[str, int]:
+def plan_filenames_for_profile(profile) -> tuple[str, ...]:
+    return native_plan_filenames(first_block_cache=profile.first_block_cache)
+
+
+def validate_workspace_limit_bytes(
+    record: object, *, profile=None, first_block_cache: bool | None = None
+) -> dict[str, int]:
     """Validate the exact per-plan TensorRT tactic-workspace provenance."""
 
-    if not isinstance(record, dict) or set(record) != set(PLAN_FILENAMES):
+    if profile is not None and first_block_cache is not None:
+        raise ValueError("MiniMax-H3 workspace validation received two profile selectors")
+    if profile is not None:
+        first_block_cache = profile.first_block_cache
+    selected = False if first_block_cache is None else first_block_cache
+    if not isinstance(selected, bool):
+        raise ValueError("MiniMax-H3 first_block_cache selector must be a boolean")
+    expected = native_plan_filenames(first_block_cache=selected)
+    if not isinstance(record, dict) or set(record) != set(expected):
         raise ValueError(
-            "MiniMax-H3 workspace_limit_bytes must cover exactly all four native plans"
+            "MiniMax-H3 workspace_limit_bytes must cover exactly the selected native plans"
         )
     for filename, value in record.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -624,12 +636,13 @@ def _validate_build_receipt_metadata(
     for key, value in expected.items():
         if receipt.get(key) != value:
             raise ValueError(f"MiniMax-H3 build receipt does not match current {key}")
-    validate_workspace_limit_bytes(receipt.get("workspace_limit_bytes"))
+    selected_plans = plan_filenames_for_profile(profile)
+    validate_workspace_limit_bytes(receipt.get("workspace_limit_bytes"), profile=profile)
     snapshot_record = validate_checkpoint_snapshot_record(receipt.get("checkpoint_snapshot"))
     components = receipt.get("components")
-    if not isinstance(components, dict) or set(components) != set(PLAN_FILENAMES):
-        raise ValueError("MiniMax-H3 build receipt must cover exactly all four native plans")
-    for filename in PLAN_FILENAMES:
+    if not isinstance(components, dict) or set(components) != set(selected_plans):
+        raise ValueError("MiniMax-H3 build receipt must cover exactly the selected native plans")
+    for filename in selected_plans:
         _validate_record_object(components.get(filename), filename)
     assets = receipt.get("assets")
     tokenizer_record = assets.get("tokenizer.json") if isinstance(assets, dict) else None
@@ -657,7 +670,7 @@ def validate_build_receipt(
     current_snapshot = checkpoint_snapshot_record(snapshot)
     if recorded_snapshot != current_snapshot:
         raise ValueError("MiniMax-H3 build receipt does not match current checkpoint_snapshot")
-    for filename in PLAN_FILENAMES:
+    for filename in plan_filenames_for_profile(profile):
         validate_record(
             plans_dir / filename,
             components.get(filename),
@@ -679,7 +692,7 @@ def validate_component_build_receipt(
     profile,
     hash_file: bool,
 ) -> tuple[str, dict, dict]:
-    if component not in PLAN_FILENAMES:
+    if component not in plan_filenames_for_profile(profile):
         raise ValueError(f"Unknown MiniMax-H3 native component: {component}")
     source_sha, components, snapshot_record = _validate_build_receipt_metadata(
         receipt,
@@ -753,13 +766,24 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
     inventory_sha = config.get("checkpoint_inventory_sha256")
     if not isinstance(inventory_sha, str) or _SHA256.fullmatch(inventory_sha) is None:
         raise ValueError("MiniMax-H3 bundle config has an invalid checkpoint inventory SHA256")
+    cache_mode = config.get("denoiser_cache_mode", "monolithic")
+    if cache_mode not in ("monolithic", "first_block"):
+        raise ValueError("MiniMax-H3 bundle config has an invalid denoiser cache mode")
+    first_block_cache = cache_mode == "first_block"
+    selected_plans = native_plan_filenames(first_block_cache=first_block_cache)
     plan_sha = config.get("plan_sha256")
-    if not isinstance(plan_sha, dict) or set(plan_sha) != set(PLAN_FILENAMES):
-        raise ValueError("MiniMax-H3 bundle config must identify exactly all four native plans")
+    if not isinstance(plan_sha, dict) or set(plan_sha) != set(selected_plans):
+        raise ValueError("MiniMax-H3 bundle config must identify exactly the selected native plans")
     if any(
         not isinstance(value, str) or _SHA256.fullmatch(value) is None
         for value in plan_sha.values()
     ):
         raise ValueError("MiniMax-H3 bundle config has an invalid native plan SHA256")
-    validate_workspace_limit_bytes(config.get("workspace_limit_bytes"))
+    if not isinstance(config.get("first_block_cache", False), bool):
+        raise ValueError("MiniMax-H3 bundle config has an invalid first_block_cache flag")
+    if config.get("first_block_cache", False) != first_block_cache:
+        raise ValueError("MiniMax-H3 bundle cache mode and profile flag disagree")
+    validate_workspace_limit_bytes(
+        config.get("workspace_limit_bytes"), first_block_cache=first_block_cache
+    )
     return config
