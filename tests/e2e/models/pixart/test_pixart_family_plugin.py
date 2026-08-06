@@ -12,6 +12,7 @@ Postconditions: Plugin matches PixArt aliases, serializes preprocessor weights c
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import struct
 import sys
 import types
@@ -134,6 +135,16 @@ def test_pixart_pipeline_classes_resolve_to_pixart_plugin() -> None:
 
     for pipeline_class in ("PixArtSigmaPipeline", "PixArtAlphaPipeline"):
         assert find_diffusion_plugin(pipeline_class) is pixart_mod.plugin
+
+
+def test_pixart_sigma_l0_reserves_an_exclusive_gpu() -> None:
+    """The 300-token FP32 T5-XXL build must not share a GPU with other proofs."""
+    manifest_path = (
+        Path(__file__).parent / "manifests" / "pixart-sigma-1024-l0.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
 
 
 def test_load_weights_success_and_missing_model_index(tmp_path) -> None:
