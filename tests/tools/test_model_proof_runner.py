@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tools.ci import gpu_lease as gpu_lease_module
 from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
 from tools.ci.model_reference_cache import ModelReferenceCacheWarmer
@@ -2653,7 +2654,20 @@ Node 3, zone  Movable
 
 def test_capacity_gated_lease_waits_for_memory_reclaim_without_requeueing(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Drive the short capacity settle window explicitly so host scheduling
+    # cannot turn the second memory sample into an unrelated GPU requeue.
+    clock = SimpleNamespace(now=0.0)
+
+    def advance_clock(seconds: float) -> None:
+        clock.now += seconds
+
+    monkeypatch.setattr(
+        gpu_lease_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock.now, sleep=advance_clock),
+    )
     context = _fake_gpu_lease_context(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 174208, 110000",
