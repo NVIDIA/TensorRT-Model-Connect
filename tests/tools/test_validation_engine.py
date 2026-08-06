@@ -4576,19 +4576,19 @@ def test_non_continuation_reserves_generation_headroom_by_default() -> None:
 
 
 def test_nemotron_nano_mcq_reserves_generation_cache_headroom() -> None:
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "mmlu_five_shot_mcq"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "mmlu_five_shot_mcq"
     )
     model = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "nemotron-nano-4b"
     )
 
     assert (
-        task_eval.generation_cache_headroom(
+        validation_engine.generation_cache_headroom(
             scorer="mcq",
-            task_eval_config=task_eval.effective_task_eval_config(
+            validation_config=validation_engine.effective_validation_config(
                 suite, model
             ),
             generation=suite["generation"],
