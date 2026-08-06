@@ -664,6 +664,34 @@ def test_release_performance_config_runs_source_contracts_without_model_fallback
     } == {"unit_tests"}
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        "benchmarks/performance/baselines/task_reference.py",
+        "tools/perf_matrix.py",
+    ),
+)
+def test_release_performance_runtime_changes_keep_model_fallback(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "# changed release performance runtime\n")
+    head = _commit(repo, "update release performance runtime")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a"]
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == ["model_a"]
+    assert result["matrix"] == {
+        "include": [{"model": "model_a", "selection_kind": "fallback"}]
+    }
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+
+
 def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, "src/runtime/core/core.cpp", "// changed platform core\n")
