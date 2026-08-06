@@ -162,17 +162,28 @@ class MiniMaxH3HfReference:
         receipt_path = output_dir / "hf_receipt.json"
         receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
         frames_path = output_dir / "hf_frames.npy"
+        frames_dir = output_dir / "frames"
+        frame_paths = sorted(frames_dir.glob("frame_*.png"))
+        data = {
+            "returncode": result.returncode,
+            "frames_path": str(frames_path) if frames_path.is_file() else "",
+            "receipt_path": str(receipt_path) if receipt_path.is_file() else "",
+            "receipt": receipt,
+            "source_revision": revision,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+        if frame_paths:
+            data.update(
+                {
+                    "num_frames": len(frame_paths),
+                    "frames_dir": str(frames_dir),
+                    "frame_paths": [str(path) for path in frame_paths],
+                }
+            )
         return StageOutput(
             stage_name=stage.name,
-            data={
-                "returncode": result.returncode,
-                "frames_path": str(frames_path) if frames_path.is_file() else "",
-                "receipt_path": str(receipt_path) if receipt_path.is_file() else "",
-                "receipt": receipt,
-                "source_revision": revision,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            },
+            data=data,
             text=result.stdout,
             timing_s=elapsed,
             metadata={

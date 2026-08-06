@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import platform
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from types import MethodType
 
 import numpy as np
 import torch
+from PIL import Image
 from tensorrt_model_connect.families.minimax_h3.provenance import (
     CHECKPOINT_REVISION,
     atomic_write_json,
@@ -38,6 +40,55 @@ BASE_TRANSFORMERS_ENTRYPOINT_RECORD = {
     "bytes": 38424,
     "sha256": "91b2c544c6848f4ce8213c770aaa705ce682ee656c995f4ce58352c4b7368ee7",
 }
+EXPECTED_NUM_FRAMES = 124
+
+
+def _write_report_frames(frames: np.ndarray, frames_dir: Path) -> list[Path]:
+    """Materialize the full decoded video as canonical PNG report evidence."""
+    array = np.asarray(frames)
+    if array.ndim != 4 or array.shape[-1] != 3:
+        raise ValueError("MiniMax-H3 HF report frames must have shape [frames, height, width, 3]")
+    if array.shape[0] != EXPECTED_NUM_FRAMES:
+        raise ValueError(
+            f"MiniMax-H3 HF returned {array.shape[0]} frames instead of {EXPECTED_NUM_FRAMES}"
+        )
+    if not np.isfinite(array).all():
+        raise ValueError("MiniMax-H3 HF report frames contain non-finite pixels")
+
+    shutil.rmtree(frames_dir, ignore_errors=True)
+    frames_dir.mkdir(parents=True)
+    for index, frame in enumerate(array):
+        pixels = np.rint(np.clip(frame, 0.0, 1.0) * 255.0).astype(np.uint8)
+        Image.fromarray(pixels).save(frames_dir / f"frame_{index:04d}.png")
+
+    paths = sorted(frames_dir.glob("frame_*.png"))
+    if len(paths) != EXPECTED_NUM_FRAMES:
+        raise RuntimeError(
+            f"MiniMax-H3 HF wrote {len(paths)} report frames instead of {EXPECTED_NUM_FRAMES}"
+        )
+    return paths
+
+
+def _materialize_report_frames(
+    frames: np.ndarray,
+    frames_dir: Path,
+    *,
+    output_type: str,
+) -> dict | None:
+    """Write human-review media only when the pipeline returned decoded RGB."""
+    if output_type == "latent":
+        return None
+    if output_type != "np":
+        raise ValueError(f"Unsupported MiniMax-H3 HF output type: {output_type}")
+
+    started = time.perf_counter()
+    paths = _write_report_frames(frames, frames_dir)
+    return {
+        "count": len(paths),
+        "directory": frames_dir.name,
+        "write_s": time.perf_counter() - started,
+        "included_in_median_request_s": False,
+    }
 
 
 def _has_git_checkout(entrypoint: Path) -> bool:
@@ -206,6 +257,10 @@ def main() -> int:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    frames_dir = output_dir / "frames"
+    for stale in (output_dir / "hf_receipt.json", output_dir / "hf_frames.npy"):
+        stale.unlink(missing_ok=True)
+    shutil.rmtree(frames_dir, ignore_errors=True)
     # Keep the lexical evidence path intact. The provenance validator owns
     # existence, stability, and no-symlink enforcement.
     diffusers_evidence = (
@@ -301,6 +356,11 @@ def main() -> int:
     frames_path = output_dir / "hf_frames.npy"
     np.save(frames_path, frames)
     frames_record, _ = stable_file_record(frames_path, "HF decoded frames")
+    report_frames = _materialize_report_frames(
+        frames,
+        frames_dir,
+        output_type=args.output_type,
+    )
     validate_file_identity(prompt_path, prompt_hashed_identity, "prompt file")
     validate_file_identity(script_path, script_identity, "HF reference helper")
     if diffusers_evidence is not None:
@@ -346,6 +406,8 @@ def main() -> int:
         "shape": list(frames.shape),
         "frames": frames_record,
     }
+    if report_frames is not None:
+        receipt["report_frames"] = report_frames
     atomic_write_json(output_dir / "hf_receipt.json", receipt)
     print(json.dumps(receipt, indent=2))
     return 0

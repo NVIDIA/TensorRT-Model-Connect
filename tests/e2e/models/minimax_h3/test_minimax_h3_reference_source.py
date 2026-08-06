@@ -5,11 +5,15 @@
 
 from __future__ import annotations
 
+import importlib
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+from PIL import Image
 
 try:
     import tomllib
@@ -19,11 +23,15 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 from tensorrt_model_connect.families.minimax_h3.provenance import file_record
 from tests.e2e.models.minimax_h3 import hf_reference
 from tests.e2e.models.minimax_h3.e2e_plugins import reference
-from tests.e2e_harness.contracts import RunContext
+from tests.e2e_harness import orchestrator
+from tests.e2e_harness.artifact_sink import FileArtifactSink
+from tests.e2e_harness.contracts import E2EResult, RunContext, StageOutput
+from tests.e2e_harness.manifest_loader import load_model_manifest
 from tools.ci.model_reference_cache import parse_model_reference_contract
 
 
 MODEL_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = MODEL_DIR.parents[3]
 
 
 def _git_checkout(tmp_path: Path) -> tuple[Path, str]:
@@ -102,10 +110,16 @@ def test_reference_evidence_is_resolved_from_context_and_passed_explicitly(
     prompt = tmp_path / "prompt.json"
     prompt.write_text("{}\n", encoding="utf-8")
     captured: dict[str, object] = {}
+    emit_frames = True
 
     def fake_run(command, **kwargs):
         captured["command"] = command
         captured["environment"] = kwargs["env"]
+        if emit_frames:
+            frames_dir = output_dir / "frames"
+            frames_dir.mkdir()
+            for index in range(2):
+                (frames_dir / f"frame_{index:04d}.png").touch()
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     case = SimpleNamespace(
@@ -123,7 +137,7 @@ def test_reference_evidence_is_resolved_from_context_and_passed_explicitly(
     monkeypatch.setattr(reference, "_reference_environment", lambda _ctx: {"PINNED": "1"})
     monkeypatch.setattr(reference.subprocess, "run", fake_run)
 
-    reference.reference.run_stage(
+    output = reference.reference.run_stage(
         case,
         SimpleNamespace(name="end_to_end"),
         ctx,
@@ -132,6 +146,112 @@ def test_reference_evidence_is_resolved_from_context_and_passed_explicitly(
     command = captured["command"]
     assert command[command.index("--diffusers-evidence") + 1] == str(evidence.resolve())
     assert captured["environment"] == {"PINNED": "1"}
+    assert output.data["num_frames"] == 2
+    assert output.data["frames_dir"] == str(output_dir / "frames")
+    assert output.data["frame_paths"] == [
+        str(output_dir / "frames" / f"frame_{index:04d}.png") for index in range(2)
+    ]
+
+    for path in (output_dir / "frames").iterdir():
+        path.unlink()
+    (output_dir / "frames").rmdir()
+    emit_frames = False
+    output = reference.reference.run_stage(
+        case,
+        SimpleNamespace(name="end_to_end"),
+        ctx,
+    )
+    assert "num_frames" not in output.data
+    assert "frames_dir" not in output.data
+    assert "frame_paths" not in output.data
+
+
+def test_hf_report_frames_are_complete_clipped_png_evidence(tmp_path: Path) -> None:
+    frames = np.linspace(
+        -0.25,
+        1.25,
+        num=hf_reference.EXPECTED_NUM_FRAMES * 2 * 3 * 3,
+        dtype=np.float32,
+    ).reshape(hf_reference.EXPECTED_NUM_FRAMES, 2, 3, 3)
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    (frames_dir / "stale.png").write_bytes(b"stale")
+
+    report_frames = hf_reference._materialize_report_frames(
+        frames,
+        frames_dir,
+        output_type="np",
+    )
+    paths = sorted(frames_dir.glob("frame_*.png"))
+
+    assert report_frames is not None
+    assert report_frames["count"] == hf_reference.EXPECTED_NUM_FRAMES
+    assert report_frames["directory"] == "frames"
+    assert report_frames["write_s"] >= 0.0
+    assert report_frames["included_in_median_request_s"] is False
+    assert len(paths) == hf_reference.EXPECTED_NUM_FRAMES
+    assert paths[0].name == "frame_0000.png"
+    assert paths[-1].name == "frame_0123.png"
+    assert not (frames_dir / "stale.png").exists()
+    first = np.asarray(Image.open(paths[0]))
+    last = np.asarray(Image.open(paths[-1]))
+    assert first.min() == 0
+    assert last.max() == 255
+
+    with pytest.raises(ValueError, match="123 frames instead of 124"):
+        hf_reference._write_report_frames(frames[:-1], frames_dir)
+    non_finite = frames.copy()
+    non_finite[0, 0, 0, 0] = np.nan
+    with pytest.raises(ValueError, match="non-finite pixels"):
+        hf_reference._write_report_frames(non_finite, frames_dir)
+
+
+def test_hf_latent_output_does_not_claim_or_write_report_media(tmp_path: Path) -> None:
+    frames_dir = tmp_path / "frames"
+    latents = np.zeros((1, 16, 31, 96, 168), dtype=np.float32)
+
+    report_frames = hf_reference._materialize_report_frames(
+        latents,
+        frames_dir,
+        output_type="latent",
+    )
+
+    assert report_frames is None
+    assert not frames_dir.exists()
+
+
+def test_hf_report_frames_register_and_satisfy_html_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.syspath_prepend(str(PROJECT_DIR / "scripts"))
+    report = importlib.import_module("generate_e2e_report")
+    case = load_model_manifest(MODEL_DIR / "manifests" / "minimax-h3-768p.json").testcases[0]
+    sink = FileArtifactSink(tmp_path / "e2e", case)
+    trt_frames = sink.base_dir / "trt_native" / "frames"
+    ref_frames = sink.base_dir / "hf_reference" / "frames"
+    for frames_dir, color in ((trt_frames, (8, 16, 24)), (ref_frames, (24, 16, 8))):
+        frames_dir.mkdir(parents=True)
+        Image.new("RGB", (4, 4), color).save(frames_dir / "frame_0000.png")
+
+    orchestrator._auto_register_artifacts(
+        sink,
+        StageOutput(stage_name="end_to_end", data={"frames_dir": str(trt_frames)}),
+        "trt",
+    )
+    orchestrator._auto_register_artifacts(
+        sink,
+        StageOutput(stage_name="end_to_end", data={"frames_dir": str(ref_frames)}),
+        "ref",
+    )
+    result_path = sink.finalize(E2EResult(case_name=case.name))
+    result = json.loads(Path(result_path).read_text(encoding="utf-8"))
+    result["_artifact_dir"] = str(sink.base_dir)
+
+    assert result["artifacts"] == {
+        "trt_frames": "trt_native/frames",
+        "ref_frames": "hf_reference/frames",
+    }
+    assert report.validate_evidence([result], project_dir=PROJECT_DIR) == []
 
 
 def test_reference_evidence_preserves_symlink_for_provenance_rejection(tmp_path: Path) -> None:
