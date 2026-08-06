@@ -19,6 +19,7 @@ from tensorrt_model_connect.families import (
     family_hf_warm_file_specs,
     family_hf_warm_files,
 )
+from tensorrt_model_connect.families.internlm.plugin import InternLMPlugin
 
 tokenizer_json = importlib.import_module(
     "tensorrt_model_connect.families.internlm.tokenizer_json"
@@ -97,6 +98,53 @@ def test_ensure_tokenizer_json_installs_verified_local_artifact(
             "local_files_only": True,
         }
     ]
+
+
+def test_internlm_uses_pinned_tokenizer_before_generic_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_payload = b"source tokenizer model"
+    official_payload = b'{"official": true}'
+    artifact = tmp_path / "cached-official-tokenizer.json"
+    artifact.write_bytes(official_payload)
+    (tmp_path / "tokenizer.model").write_bytes(source_payload)
+    generic_calls: list[Path] = []
+
+    class FakeBackendTokenizer:
+        @staticmethod
+        def save(path):
+            generic_calls.append(Path(path))
+            Path(path).write_bytes(b'{"generic": true}')
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(path, use_fast=False):
+            assert Path(path) == tmp_path
+            assert use_fast is False
+            return types.SimpleNamespace(backend_tokenizer=FakeBackendTokenizer())
+
+    monkeypatch.setattr(
+        tokenizer_json,
+        "SOURCE_TOKENIZER_MODEL_SHA256",
+        _sha256(source_payload),
+    )
+    monkeypatch.setattr(
+        tokenizer_json,
+        "PINNED_TOKENIZER_SHA256",
+        _sha256(official_payload),
+    )
+    _install_fake_hub(monkeypatch, lambda **_kwargs: str(artifact))
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
+    )
+
+    _ensure_tokenizer_json(tmp_path, plugin=InternLMPlugin())
+
+    assert generic_calls == []
+    assert (tmp_path / "tokenizer.json").read_bytes() == official_payload
 
 
 def test_non_target_source_without_json_preserves_generic_fallback(

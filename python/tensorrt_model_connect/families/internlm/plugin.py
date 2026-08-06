@@ -43,6 +43,7 @@ class InternLMPlugin:
     name = "internlm"
     runtime_strategy = "internlm_decoder_kv_cache"
     runtime_capabilities = {"decoder_kv"}
+    tokenizer_json_conversion_policy = "family_first"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower().startswith("internlm")

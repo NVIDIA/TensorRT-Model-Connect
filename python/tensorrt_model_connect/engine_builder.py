@@ -793,6 +793,16 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
                     "family tokenizer validation rejected existing tokenizer.json"
                 )
         return
+    family_first = (
+        getattr(plugin, "tokenizer_json_conversion_policy", "")
+        == "family_first"
+    )
+    if family_first and callable(family_ensure):
+        kwargs = {}
+        if _call_supports_kwarg(family_ensure, "previous_error"):
+            kwargs["previous_error"] = None
+        if bool(family_ensure(model_dir, **kwargs)):
+            return
     if rebuild_wordpiece:
         print(
             "[trtmc build] Rebuilding undersized WordPiece tokenizer.json "
