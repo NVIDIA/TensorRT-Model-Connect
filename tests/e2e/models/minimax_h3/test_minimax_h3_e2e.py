@@ -52,6 +52,10 @@ def pytest_generate_tests(metafunc):
 
 
 def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
+    manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
+    assert manifest["e2e_min_free_gpu_memory_mib"] == 240000
+
     model = load_model_manifest(_MANIFEST_PATH)
     assert model.name == "minimax-h3-768p"
     assert model.family == "minimax_h3"
