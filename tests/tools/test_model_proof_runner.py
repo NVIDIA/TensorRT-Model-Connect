@@ -826,8 +826,8 @@ def test_minimax_h3_selection_requires_native_runtime_capacity(tmp_path: Path) -
     selection = _run_test_selection(tmp_path, "minimax_h3", "premerge")
 
     assert selection["resource_class"] == "exclusive_gpu"
-    assert selection["min_free_gpu_memory_mib"] == 280000
-    assert {case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]} == {280000}
+    assert selection["min_free_gpu_memory_mib"] == 184320
+    assert {case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]} == {184320}
 
 
 def test_selection_without_a_capacity_requirement_normalizes_to_zero(
