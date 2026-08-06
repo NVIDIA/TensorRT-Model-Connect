@@ -7924,7 +7924,7 @@ def test_gpt2_generation_metrics_pin_the_offline_scorer_revision(
         ),
     )
 
-    result = task_eval.compute_gpt2_generation_metrics(
+    result = validation_engine.compute_gpt2_generation_metrics(
         [],
         model_id="openai-community/gpt2-large",
         model_revision="32b71b12589c2f8d625668d2335a01cac3249519",
