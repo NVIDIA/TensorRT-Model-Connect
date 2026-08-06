@@ -637,6 +637,33 @@ def test_impact_runs_units_for_test_consumed_docs(
     } == {expected_kind}
 
 
+def test_release_performance_config_runs_source_contracts_without_model_fallback(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "benchmarks/performance/release.yaml",
+        "entries:\n  - id: model-a.generate\n",
+    )
+    head = _commit(repo, "update release performance contract")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+    assert {
+        classification["kind"]
+        for change in result["changes"]
+        for classification in change["classifications"]
+    } == {"unit_tests"}
+
+
 def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, "src/runtime/core/core.cpp", "// changed platform core\n")

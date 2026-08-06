@@ -142,9 +142,13 @@ BUILDER_UNIT_TEST_INPUT_EXACT = frozenset(
         "website/docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md",
     }
 )
-# Inputs consumed by the complete source-only tools/CI contract suite.
+# Inputs consumed by the complete source-only tools/CI contract suite. The
+# release performance matrix is declarative: representative premerge model
+# proofs do not execute it, while the source contracts validate its schema,
+# ready-model coverage, exclusions, and report accounting.
 FULL_UNIT_TEST_INPUT_EXACT = frozenset(
     {
+        "benchmarks/performance/release.yaml",
         "tools/ci/README.md",
     }
 )
