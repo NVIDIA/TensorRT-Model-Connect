@@ -2873,7 +2873,7 @@ def _run_binding_with_comparison_results(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache: trtmc_validate.ReferenceSourceSelection(
+        lambda _family, _cache, _contract=None: trtmc_validate.ReferenceSourceSelection(
             environment={},
         ),
     )
@@ -2962,7 +2962,7 @@ def _run_multiple_bindings_with_comparison_results(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache: trtmc_validate.ReferenceSourceSelection(
+        lambda _family, _cache, _contract=None: trtmc_validate.ReferenceSourceSelection(
             environment={},
         ),
     )
