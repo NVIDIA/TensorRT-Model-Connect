@@ -108,7 +108,8 @@ static void test_is_bundle_rejects_non_bundle()
 // -----------------------------------------------------------------------------
 static void test_is_bundle_rejects_nonexistent()
 {
-    check(!trtmc::IsBundle("/nonexistent/path/to/model.bundle"), "IsBundle rejects nonexistent path");
+    check(!trtmc::IsBundle("/nonexistent/path/to/model.bundle"),
+          "IsBundle rejects nonexistent path");
 }
 
 // -----------------------------------------------------------------------------

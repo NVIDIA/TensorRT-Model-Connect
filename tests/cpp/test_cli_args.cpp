@@ -67,8 +67,8 @@ void test_version_aliases() {
 }
 
 void test_build_forwards_args_verbatim() {
-    auto args =
-        parse({"trtmc", "build", "Example/Decoder-0.6B", "-o", "out.bundle", "--precision", "fp16"});
+    auto args = parse(
+        {"trtmc", "build", "Example/Decoder-0.6B", "-o", "out.bundle", "--precision", "fp16"});
     check(args.command == "build", "build command");
     check(args.build_args.size() == 5, "build forwards arg count");
     check(args.build_args[0] == "Example/Decoder-0.6B", "build forwards model");
@@ -381,8 +381,8 @@ void test_invalid_generation_sampling_values_fail() {
 }
 
 void test_generation_sampling_boundaries_parse() {
-    auto args = parse({"trtmc", "run", "bundle.bundle", "--prompt", "hello", "--max-new-tokens", "1",
-                       "--temperature", "0", "--top-p", "0", "--min-p", "1", "--top-k", "0"});
+    auto args = parse({"trtmc", "run", "bundle.bundle", "--prompt", "hello", "--max-new-tokens",
+                       "1", "--temperature", "0", "--top-p", "0", "--min-p", "1", "--top-k", "0"});
     check(!args.parse_error, "generation sampling boundary values parse");
     check(args.max_new_tokens == 1, "boundary max tokens");
     check(args.temperature == 0.0F, "boundary temperature");
