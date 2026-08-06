@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1512,13 +1513,122 @@ def _campaign_started_at(output: Path, fallback: str) -> str:
     return started_at
 
 
-def write_run_metadata(output: Path) -> Path:
+def _query_nvidia_smi_gpus() -> list[dict[str, Any]]:
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,name,pci.bus_id",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValidationError(f"could not query GPU identity: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit code {result.returncode}"
+        raise ValidationError(f"could not query GPU identity: {detail}")
+
+    inventory: list[dict[str, Any]] = []
+    for row in csv.reader(result.stdout.splitlines()):
+        values = [value.strip() for value in row]
+        if len(values) != 4:
+            raise ValidationError("nvidia-smi returned malformed GPU identity data")
+        try:
+            index = int(values[0])
+        except ValueError as exc:
+            raise ValidationError(
+                "nvidia-smi returned a non-numeric GPU index"
+            ) from exc
+        uuid, name, pci_bus_id = values[1:]
+        if not uuid or not name or not pci_bus_id:
+            raise ValidationError("nvidia-smi returned incomplete GPU identity data")
+        inventory.append(
+            {
+                "nvidia_smi_index": index,
+                "uuid": uuid,
+                "name": name,
+                "pci_bus_id": pci_bus_id,
+            }
+        )
+    return inventory
+
+
+def _resolve_cuda_devices(
+    cuda_visible_devices: str,
+    inventory: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    visible = cuda_visible_devices.strip()
+    if visible.lower() in {"-1", "none", "void"}:
+        return []
+    selectors = (
+        [str(device["nvidia_smi_index"]) for device in inventory]
+        if not visible or visible.lower() == "all"
+        else [selector.strip() for selector in visible.split(",")]
+    )
+    if not selectors or any(not selector for selector in selectors):
+        raise ValidationError("CUDA_VISIBLE_DEVICES contains an empty selector")
+
+    resolved: list[dict[str, Any]] = []
+    for logical_index, selector in enumerate(selectors):
+        if selector.isdigit():
+            matches = [
+                device
+                for device in inventory
+                if int(device["nvidia_smi_index"]) == int(selector)
+            ]
+        else:
+            matches = [
+                device
+                for device in inventory
+                if str(device["uuid"]) == selector
+                or str(device["uuid"]).startswith(selector)
+            ]
+        if len(matches) != 1:
+            raise ValidationError(
+                "CUDA_VISIBLE_DEVICES selector does not resolve to exactly one "
+                f"GPU identity: {selector}"
+            )
+        device = dict(matches[0])
+        device["cuda_logical_index"] = logical_index
+        resolved.append(device)
+    return resolved
+
+
+def _runtime_gpu_devices(cuda_visible_devices: str) -> list[dict[str, Any]]:
+    return _resolve_cuda_devices(
+        cuda_visible_devices,
+        _query_nvidia_smi_gpus(),
+    )
+
+
+def write_run_metadata(
+    output: Path,
+    *,
+    cuda_visible_devices: str | None = None,
+) -> Path:
     started_at = _campaign_started_at(output, _utc_now().isoformat())
+    effective_cuda_visible_devices = (
+        cuda_visible_devices.strip()
+        if cuda_visible_devices is not None and cuda_visible_devices.strip()
+        else os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    )
+    gpu_devices = _runtime_gpu_devices(effective_cuda_visible_devices)
+    if not gpu_devices:
+        raise ValidationError(
+            "GPU identity is unavailable; refusing to write ambiguous run metadata"
+        )
     metadata = {
         "schema_version": "trtmc.validation-run/v1",
         "source_revision": _source_revision(),
         "hostname": platform.node(),
-        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+        "cuda_visible_devices": effective_cuda_visible_devices,
+        "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES", ""),
+        "gpu_identity_source": "nvidia-smi",
+        "gpu_devices": gpu_devices,
         "command": shlex.join(sys.argv),
         "started_at": started_at,
         "finished_at": None,
@@ -1543,10 +1653,44 @@ def finalize_run_metadata(output: Path) -> Path:
 
 
 def _report_provenance(run: Mapping[str, Any]) -> str:
-    fields = (
+    fields = [
         ("source", run.get("source_revision")),
         ("host", run.get("hostname")),
-        ("CUDA_VISIBLE_DEVICES", run.get("cuda_visible_devices")),
+    ]
+    gpu_devices = run.get("gpu_devices", [])
+    if isinstance(gpu_devices, Sequence) and not isinstance(
+        gpu_devices, (str, bytes)
+    ):
+        for device in gpu_devices:
+            if not isinstance(device, Mapping):
+                continue
+            logical_index = device.get("cuda_logical_index")
+            identity = [str(device.get("name", "") or "unknown GPU")]
+            for label, key in (
+                ("uuid", "uuid"),
+                ("pci", "pci_bus_id"),
+                ("runtime-nvidia-smi-index", "nvidia_smi_index"),
+            ):
+                value = device.get(key)
+                if value not in (None, ""):
+                    identity.append(f"{label}={value}")
+            details = "; ".join(identity[1:])
+            display = identity[0] + (f" ({details})" if details else "")
+            fields.append(
+                (
+                    f"GPU logical {logical_index}",
+                    display,
+                )
+            )
+    if run.get("cuda_visible_devices") and not any(
+        name.startswith("GPU logical ") for name, _ in fields
+    ):
+        fields.append(("GPU identity", "not recorded"))
+    fields.append(
+        (
+            "CUDA_VISIBLE_DEVICES(process-local)",
+            run.get("cuda_visible_devices"),
+        )
     )
     return " · ".join(f"{name}={value}" for name, value in fields if value)
 
@@ -2824,7 +2968,10 @@ def _run_all_bindings(
     catalog: Mapping[str, Any],
 ) -> int:
     _prepare_run_directories(arguments)
-    write_run_metadata(arguments.output)
+    write_run_metadata(
+        arguments.output,
+        cuda_visible_devices=arguments.cuda_visible_devices,
+    )
     failed = False
     not_compared = False
     for binding in bindings:
@@ -2885,7 +3032,10 @@ def _run_bindings(
 ) -> int:
     _prepare_run_directories(arguments)
     if not arguments.model_worker:
-        write_run_metadata(arguments.output)
+        write_run_metadata(
+            arguments.output,
+            cuda_visible_devices=arguments.cuda_visible_devices,
+        )
     failed = False
     not_compared = False
     for binding in bindings:

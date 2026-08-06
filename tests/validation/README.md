@@ -55,6 +55,12 @@ setup validation failed before the case could run. Requesting a model that is
 explicitly marked not compared also writes
 `<output>/<model>/not-compared/comparison.json` and returns `2`.
 
+`run.json` records each runtime-visible GPU's model, UUID, and PCI bus address.
+The report labels `CUDA_VISIBLE_DEVICES` as a process-local selector because a
+container may renumber a host GPU to logical device `0`. Validation refuses to
+start when it cannot resolve that selector to stable GPU identity, preventing
+an ambiguous report from being published.
+
 Dataset-backed workloads use the task-specific sample limits declared in
 `model_workloads.yaml`. Fast encoder and classification workloads use larger
 slices, while generation-heavy image, video, and audio workloads use smaller

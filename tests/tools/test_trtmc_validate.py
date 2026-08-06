@@ -457,7 +457,11 @@ def test_all_supervisor_applies_model_failure_policy(
         "_run_supervised_binding_with_retries",
         run_worker,
     )
-    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_run_metadata",
+        lambda output, **_kwargs: output,
+    )
     monkeypatch.setattr(
         trtmc_validate,
         "finalize_run_metadata",
@@ -595,7 +599,11 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
         "_run_supervised_binding_with_retries",
         unexpected_worker,
     )
-    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda output: output)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_run_metadata",
+        lambda output, **_kwargs: output,
+    )
     monkeypatch.setattr(
         trtmc_validate,
         "finalize_run_metadata",
@@ -809,6 +817,19 @@ def test_single_ci_case_writes_stable_result_and_exit_code(
     )
     binding = trtmc_validate.Binding("model-a", "workload-a")
     catalog = {"sample_limits": {"workload-a": 5}}
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_runtime_gpu_devices",
+        lambda _visible: [
+            {
+                "cuda_logical_index": 0,
+                "nvidia_smi_index": 0,
+                "uuid": "GPU-test",
+                "name": "NVIDIA test GPU",
+                "pci_bus_id": "00000000:01:00.0",
+            }
+        ],
+    )
 
     def run_binding(binding, *, arguments, task_models, suites):
         result = {
@@ -2267,21 +2288,200 @@ def test_report_does_not_treat_shared_task_failure_as_disagreement(tmp_path):
 
 def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):
     monkeypatch.setenv("TRTMC_VALIDATION_SOURCE_REVISION", "abc123")
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     monkeypatch.setattr(
         trtmc_validate.sys,
         "argv",
         ["tools/trtmc_validate.py", "model-a"],
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_runtime_gpu_devices",
+        lambda visible: [
+            {
+                "cuda_logical_index": 0,
+                "nvidia_smi_index": 0,
+                "uuid": "GPU-7980c63d",
+                "name": "NVIDIA GB300",
+                "pci_bus_id": "00000009:06:00.0",
+            }
+        ],
     )
 
     path = trtmc_validate.write_run_metadata(tmp_path)
     metadata = json.loads(path.read_text(encoding="utf-8"))
 
     assert metadata["source_revision"] == "abc123"
-    assert metadata["cuda_visible_devices"] == "1"
+    assert metadata["cuda_visible_devices"] == "0"
+    assert metadata["gpu_devices"] == [
+        {
+            "cuda_logical_index": 0,
+            "nvidia_smi_index": 0,
+            "uuid": "GPU-7980c63d",
+            "name": "NVIDIA GB300",
+            "pci_bus_id": "00000009:06:00.0",
+        }
+    ]
     assert metadata["command"] == "tools/trtmc_validate.py model-a"
     assert metadata["finished_at"] is None
     assert metadata["duration_seconds"] is None
+
+
+def test_run_metadata_prefers_cli_gpu_selector_over_parent_environment(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    received = []
+
+    def resolve(visible):
+        received.append(visible)
+        return [
+            {
+                "cuda_logical_index": 0,
+                "nvidia_smi_index": 1,
+                "uuid": "GPU-gb300",
+                "name": "NVIDIA GB300",
+                "pci_bus_id": "00000009:06:00.0",
+            }
+        ]
+
+    monkeypatch.setattr(trtmc_validate, "_runtime_gpu_devices", resolve)
+
+    path = trtmc_validate.write_run_metadata(
+        tmp_path,
+        cuda_visible_devices="1",
+    )
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+
+    assert received == ["1"]
+    assert metadata["cuda_visible_devices"] == "1"
+    assert metadata["gpu_devices"][0]["uuid"] == "GPU-gb300"
+
+
+def test_cuda_visible_device_ordinal_resolves_to_stable_gpu_identity():
+    inventory = [
+        {
+            "nvidia_smi_index": 0,
+            "uuid": "GPU-rtx",
+            "name": "NVIDIA RTX PRO 6000",
+            "pci_bus_id": "00000004:01:00.0",
+        },
+        {
+            "nvidia_smi_index": 1,
+            "uuid": "GPU-gb300",
+            "name": "NVIDIA GB300",
+            "pci_bus_id": "00000009:06:00.0",
+        },
+    ]
+
+    assert trtmc_validate._resolve_cuda_devices("1", inventory) == [
+        {
+            "cuda_logical_index": 0,
+            "nvidia_smi_index": 1,
+            "uuid": "GPU-gb300",
+            "name": "NVIDIA GB300",
+            "pci_bus_id": "00000009:06:00.0",
+        }
+    ]
+
+
+def test_nvidia_smi_inventory_records_stable_gpu_identity(monkeypatch):
+    command = []
+
+    def fake_run(args, **kwargs):
+        command.extend(args)
+        assert kwargs == {
+            "check": False,
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+        }
+        return trtmc_validate.subprocess.CompletedProcess(
+            args,
+            0,
+            stdout=(
+                "0, GPU-ae3e92b4, NVIDIA RTX PRO 6000, 00000004:01:00.0\n"
+                "1, GPU-7980c63d, NVIDIA GB300, 00000009:06:00.0\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(trtmc_validate.subprocess, "run", fake_run)
+
+    assert trtmc_validate._query_nvidia_smi_gpus() == [
+        {
+            "nvidia_smi_index": 0,
+            "uuid": "GPU-ae3e92b4",
+            "name": "NVIDIA RTX PRO 6000",
+            "pci_bus_id": "00000004:01:00.0",
+        },
+        {
+            "nvidia_smi_index": 1,
+            "uuid": "GPU-7980c63d",
+            "name": "NVIDIA GB300",
+            "pci_bus_id": "00000009:06:00.0",
+        },
+    ]
+    assert command == [
+        "nvidia-smi",
+        "--query-gpu=index,uuid,name,pci.bus_id",
+        "--format=csv,noheader,nounits",
+    ]
+
+
+def test_run_metadata_rejects_missing_gpu_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_runtime_gpu_devices",
+        lambda _visible: [],
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="GPU identity",
+    ):
+        trtmc_validate.write_run_metadata(tmp_path)
+
+    assert not (tmp_path / "run.json").exists()
+
+
+def test_report_provenance_disambiguates_process_local_cuda_ordinal():
+    provenance = trtmc_validate._report_provenance(
+        {
+            "source_revision": "abc123",
+            "hostname": "container-id",
+            "cuda_visible_devices": "0",
+            "gpu_devices": [
+                {
+                    "cuda_logical_index": 0,
+                    "nvidia_smi_index": 0,
+                    "uuid": "GPU-7980c63d",
+                    "name": "NVIDIA GB300",
+                    "pci_bus_id": "00000009:06:00.0",
+                }
+            ],
+        }
+    )
+
+    assert "GPU logical 0=NVIDIA GB300" in provenance
+    assert "uuid=GPU-7980c63d" in provenance
+    assert "pci=00000009:06:00.0" in provenance
+    assert "runtime-nvidia-smi-index=0" in provenance
+    assert "CUDA_VISIBLE_DEVICES(process-local)=0" in provenance
+
+
+def test_report_provenance_marks_legacy_gpu_identity_as_missing():
+    provenance = trtmc_validate._report_provenance(
+        {
+            "hostname": "legacy-container-id",
+            "cuda_visible_devices": "0",
+        }
+    )
+
+    assert "GPU identity=not recorded" in provenance
+    assert "CUDA_VISIBLE_DEVICES(process-local)=0" in provenance
 
 
 def test_run_metadata_preserves_campaign_start_when_results_exist(
@@ -2306,6 +2506,19 @@ def test_run_metadata_preserves_campaign_start_when_results_exist(
         trtmc_validate,
         "_utc_now",
         lambda: datetime(2026, 7, 25, 2, 0, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_runtime_gpu_devices",
+        lambda _visible: [
+            {
+                "cuda_logical_index": 0,
+                "nvidia_smi_index": 0,
+                "uuid": "GPU-test",
+                "name": "NVIDIA test GPU",
+                "pci_bus_id": "00000000:01:00.0",
+            }
+        ],
     )
 
     path = trtmc_validate.write_run_metadata(tmp_path)
