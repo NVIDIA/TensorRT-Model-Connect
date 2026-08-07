@@ -3116,13 +3116,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-work-dir",
         type=Path,
-        help="isolate engines and optional Hugging Face cache per model",
+        help=(
+            "isolate engines per model/workload binding and optionally isolate "
+            "the Hugging Face cache per model"
+        ),
     )
     parser.add_argument(
         "--engine-retention",
         choices=RETENTION_POLICIES,
         default="retain",
-        help="retain model engines, delete them on pass, or always delete them",
+        help="retain binding engines, delete them on pass, or always delete them",
     )
     parser.add_argument(
         "--hf-cache-mode",
@@ -3370,23 +3373,29 @@ def _prepare_run_directories(arguments: argparse.Namespace) -> None:
     arguments.reference_cache_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _model_binding_arguments(
+def _binding_resource_arguments(
     arguments: argparse.Namespace,
     binding: Binding,
-) -> tuple[argparse.Namespace, Path | None]:
+) -> tuple[argparse.Namespace, Path | None, Path | None]:
     selected = copy.copy(arguments)
     if arguments.model_work_dir is None:
-        return selected, None
+        return selected, None, None
     if Path(binding.model).name != binding.model:
         raise ValidationError(f"unsafe model name for model work: {binding.model!r}")
+    workload = _required_workload(binding)
+    if Path(workload).name != workload:
+        raise ValidationError(f"unsafe workload name for binding work: {workload!r}")
     model_work = arguments.model_work_dir / binding.model
-    selected.engine_dir = model_work / "engines"
+    # Dataset preparation can change the resolved build shape/profile. Keep the
+    # engine below the exact Accuracy binding; only the HF cache is model-scoped.
+    binding_work = model_work / "bindings" / workload
+    selected.engine_dir = binding_work / "engines"
     selected.engine_dir.mkdir(parents=True, exist_ok=True)
     selected.hf_cache_dir = None
     if arguments.hf_cache_mode == "per_model":
         selected.hf_cache_dir = model_work / "hf-cache"
         selected.hf_cache_dir.mkdir(parents=True, exist_ok=True)
-    return selected, model_work
+    return selected, binding_work, model_work
 
 
 def _delete_for_retention(policy: str, *, passed: bool) -> bool:
@@ -3408,42 +3417,60 @@ def _cleanup_resource(path: Path, policy: str, *, passed: bool) -> dict[str, str
     return evidence
 
 
-def _cleanup_model_resources(
+def _cleanup_binding_engine(
+    arguments: argparse.Namespace,
+    binding_work: Path | None,
+    *,
+    passed: bool,
+) -> dict[str, str]:
+    if binding_work is None:
+        return {"policy": "retain", "status": "shared_retained"}
+    engine = _cleanup_resource(
+        binding_work / "engines",
+        arguments.engine_retention,
+        passed=passed,
+    )
+    try:
+        binding_work.rmdir()
+    except OSError:
+        pass
+    return engine
+
+
+def _cleanup_model_hf_cache(
     arguments: argparse.Namespace,
     model_work: Path | None,
     *,
     passed: bool,
-) -> dict[str, Any]:
+    model_complete: bool,
+) -> dict[str, str]:
     if model_work is None:
+        return {"policy": "retain", "status": "shared_retained"}
+    if arguments.hf_cache_mode == "shared":
+        if model_complete:
+            for directory in (model_work / "bindings", model_work):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+        return {"policy": "retain", "status": "shared_retained"}
+    if not model_complete:
         return {
-            "scope": "shared",
-            "engine": {"policy": "retain", "status": "retained"},
-            "hf_cache": {"policy": "retain", "status": "shared_retained"},
+            "path": str(model_work / "hf-cache"),
+            "policy": arguments.hf_cache_retention,
+            "status": "retained_until_model_complete",
         }
-    engine = _cleanup_resource(
-        model_work / "engines",
-        arguments.engine_retention,
+    hf_cache = _cleanup_resource(
+        model_work / "hf-cache",
+        arguments.hf_cache_retention,
         passed=passed,
     )
-    hf_cache = (
-        _cleanup_resource(
-            model_work / "hf-cache",
-            arguments.hf_cache_retention,
-            passed=passed,
-        )
-        if arguments.hf_cache_mode == "per_model"
-        else {"policy": "retain", "status": "shared_retained"}
-    )
-    try:
-        model_work.rmdir()
-    except OSError:
-        pass
-    return {
-        "scope": "model",
-        "passed": passed,
-        "engine": engine,
-        "hf_cache": hf_cache,
-    }
+    for directory in (model_work / "bindings", model_work):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+    return hf_cache
 
 
 def _worker_environment(arguments: argparse.Namespace) -> dict[str, str]:
@@ -3784,7 +3811,10 @@ def _run_all_bindings(
             f"/ {free_gib:.1f} GiB free",
             flush=True,
         )
-        binding_arguments, model_work = _model_binding_arguments(arguments, binding)
+        binding_arguments, binding_work, model_work = _binding_resource_arguments(
+            arguments,
+            binding,
+        )
         result = _run_supervised_binding_with_retries(
             binding,
             arguments=binding_arguments,
@@ -3794,24 +3824,37 @@ def _run_all_bindings(
         model_passed[binding.model] = model_passed[binding.model] and not model_failed
         remaining[binding.model] -= 1
         stop_model = model_failed and arguments.on_model_failure == "stop"
-        if remaining[binding.model] == 0 or stop_model:
-            cleanup = _cleanup_model_resources(
+        model_complete = remaining[binding.model] == 0 or stop_model
+        cleanup = {
+            "scope": "binding",
+            "passed": not model_failed,
+            "engine": _cleanup_binding_engine(
+                arguments,
+                binding_work,
+                passed=not model_failed,
+            ),
+            "hf_cache": _cleanup_model_hf_cache(
                 arguments,
                 model_work,
-                passed=model_passed[binding.model] and remaining[binding.model] == 0,
-            )
-            result["resource_cleanup"] = cleanup
-            cleanup_failed = any(
-                resource.get("status") == "failed"
-                for resource in (cleanup["engine"], cleanup["hf_cache"])
-            )
-            failed = failed or cleanup_failed
-            comparison = _case_directory(arguments.output, binding) / "comparison.json"
-            comparison.parent.mkdir(parents=True, exist_ok=True)
-            comparison.write_text(
-                json.dumps(result, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+                passed=(
+                    model_passed[binding.model]
+                    and remaining[binding.model] == 0
+                ),
+                model_complete=model_complete,
+            ),
+        }
+        result["resource_cleanup"] = cleanup
+        cleanup_failed = any(
+            resource.get("status") == "failed"
+            for resource in (cleanup["engine"], cleanup["hf_cache"])
+        )
+        failed = failed or cleanup_failed
+        comparison = _case_directory(arguments.output, binding) / "comparison.json"
+        comparison.parent.mkdir(parents=True, exist_ok=True)
+        comparison.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         _, report_path, _ = write_report(arguments.output)
         comparison = _case_directory(arguments.output, binding) / "comparison.json"
         _print_result(result, comparison, report_path)

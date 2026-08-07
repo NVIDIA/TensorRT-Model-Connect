@@ -72,18 +72,19 @@ order. Accuracy receives exact `MODEL=SUITE` bindings and Perf receives exact
 entry IDs, so the two task configurations cannot silently broaden selection.
 
 The checked-in platform environments keep Accuracy and Perf artifacts
-separate. Accuracy uses model-scoped work, so all selected suites for one model
-reuse that model's engine. Perf keeps entry-scoped work and its own bundle
-cache. The default GB300 and L4T Accuracy policy deletes engines only after all
-selected suites for the model pass and retains the shared HF cache. The L4T
-Perf policy does the same for a managed bundle; the GB300 Perf default remains
-`retain` for compatibility with existing jobs.
+separate. Accuracy isolates engines by exact `MODEL=SUITE` binding because a
+suite's dataset can change static shapes, optimization profiles, or the
+dataset-derived cache length. It may still share the HF cache per model. Perf
+keeps entry-scoped work and its own bundle cache. The default GB300 and L4T
+Accuracy policy deletes each passing binding's engine and retains the shared HF
+cache. The L4T Perf policy does the same for a managed bundle; the GB300 Perf
+default remains `retain` for compatibility with existing jobs.
 
 Native runner policies are independent:
 
 | Resource | Isolation | Retention values |
 | --- | --- | --- |
-| Accuracy engine | per model | `retain`, `delete_on_pass`, `delete_always` |
+| Accuracy engine | per model/suite binding | `retain`, `delete_on_pass`, `delete_always` |
 | Accuracy HF cache | shared or per model | same; shared requires `retain` |
 | Perf bundle | per entry/cache fingerprint | same |
 | Perf HF cache | shared or per entry | same; shared requires `retain` |
@@ -98,7 +99,8 @@ On L4T Thor, `TRTMC_CHECK_STORAGE_ROOT` must resolve below
 ## Adding coverage
 
 - Add or update the Accuracy suite and dataset recipe in
-  `tests/validation/workloads.yaml`.
+  `tests/validation/workloads.yaml`. Give dataset variants separate suite IDs;
+  the suite ID is part of the Accuracy engine-isolation boundary.
 - Add that suite to the model profile's `workloads` in
   `tests/validation/model_workloads.yaml`; set `default` only when the default
   should change.

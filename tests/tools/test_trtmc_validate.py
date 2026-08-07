@@ -424,7 +424,7 @@ def test_select_bindings_rejects_malformed_exact_binding():
         )
 
 
-def test_model_scoped_resources_are_shared_across_suites_then_deleted_on_pass(
+def test_binding_scoped_engines_are_isolated_across_suites_and_deleted_on_pass(
     tmp_path,
     monkeypatch,
 ):
@@ -436,6 +436,10 @@ def test_model_scoped_resources_are_shared_across_suites_then_deleted_on_pass(
             "--model-work-dir",
             str(tmp_path / "work"),
             "--engine-retention",
+            "delete_on_pass",
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-retention",
             "delete_on_pass",
             "--reference-cache-dir",
             str(tmp_path / "references"),
@@ -450,9 +454,12 @@ def test_model_scoped_resources_are_shared_across_suites_then_deleted_on_pass(
     def run_worker(binding, *, arguments, catalog):
         engine_directories.append(arguments.engine_dir)
         artifact = arguments.engine_dir / "model-a.bundle"
-        if binding.workload == "suite-b":
-            assert artifact.is_file()
+        assert not artifact.exists()
         artifact.write_text("engine", encoding="utf-8")
+        cache_blob = arguments.hf_cache_dir / "blob"
+        if binding.workload == "suite-b":
+            assert cache_blob.is_file()
+        cache_blob.write_text("cache", encoding="utf-8")
         case_dir = trtmc_validate._case_directory(arguments.output, binding)
         case_dir.mkdir(parents=True, exist_ok=True)
         result = {
@@ -489,19 +496,38 @@ def test_model_scoped_resources_are_shared_across_suites_then_deleted_on_pass(
 
     assert returncode == 0
     assert engine_directories == [
-        tmp_path / "work" / "model-a" / "engines",
-        tmp_path / "work" / "model-a" / "engines",
+        tmp_path / "work" / "model-a" / "bindings" / "suite-a" / "engines",
+        tmp_path / "work" / "model-a" / "bindings" / "suite-b" / "engines",
     ]
-    assert not (tmp_path / "work" / "model-a" / "engines").exists()
+    for suite in ("suite-a", "suite-b"):
+        assert not (
+            tmp_path / "work" / "model-a" / "bindings" / suite / "engines"
+        ).exists()
+        result = json.loads(
+            (tmp_path / f"results/model-a/{suite}/comparison.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert result["resource_cleanup"]["engine"]["status"] == "deleted"
+    first_result = json.loads(
+        (tmp_path / "results/model-a/suite-a/comparison.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        first_result["resource_cleanup"]["hf_cache"]["status"]
+        == "retained_until_model_complete"
+    )
     final_result = json.loads(
         (tmp_path / "results/model-a/suite-b/comparison.json").read_text(
             encoding="utf-8"
         )
     )
-    assert final_result["resource_cleanup"]["engine"]["status"] == "deleted"
+    assert final_result["resource_cleanup"]["hf_cache"]["status"] == "deleted"
+    assert not (tmp_path / "work" / "model-a").exists()
 
 
-def test_model_scoped_failure_retains_engine_and_per_model_hf_cache(tmp_path):
+def test_binding_failure_retains_engine_and_per_model_hf_cache(tmp_path):
     arguments = trtmc_validate.build_parser().parse_args(
         [
             "--all",
@@ -516,20 +542,30 @@ def test_model_scoped_failure_retains_engine_and_per_model_hf_cache(tmp_path):
         ]
     )
     binding = trtmc_validate.Binding("model-a", "suite-a")
-    selected, model_work = trtmc_validate._model_binding_arguments(arguments, binding)
+    selected, binding_work, model_work = trtmc_validate._binding_resource_arguments(
+        arguments,
+        binding,
+    )
+    assert binding_work is not None
     assert model_work is not None
     (selected.engine_dir / "model.bundle").write_text("engine", encoding="utf-8")
     (selected.hf_cache_dir / "blob").write_text("cache", encoding="utf-8")
 
-    cleanup = trtmc_validate._cleanup_model_resources(
+    engine_cleanup = trtmc_validate._cleanup_binding_engine(
+        arguments,
+        binding_work,
+        passed=False,
+    )
+    hf_cleanup = trtmc_validate._cleanup_model_hf_cache(
         arguments,
         model_work,
         passed=False,
+        model_complete=True,
     )
 
-    assert cleanup["engine"]["status"] == "retained"
-    assert cleanup["hf_cache"]["status"] == "retained"
-    assert (model_work / "engines/model.bundle").is_file()
+    assert engine_cleanup["status"] == "retained"
+    assert hf_cleanup["status"] == "retained"
+    assert (binding_work / "engines/model.bundle").is_file()
     assert (model_work / "hf-cache/blob").is_file()
 
 

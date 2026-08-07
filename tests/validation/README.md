@@ -81,13 +81,15 @@ Both policies return a nonzero exit status when any attempted model fails.
 Process isolation also covers failures that happen before backend execution,
 such as reference-environment setup or uncaught model-specific Python errors.
 
-For disk-bounded runs, `--model-work-dir` isolates the engine and optional HF
-cache once per model, not once per suite. Multiple suites selected for one model
-therefore reuse the same engine before cleanup. `--engine-retention` and
-`--hf-cache-retention` accept `retain`, `delete_on_pass`, or `delete_always`;
-the latter applies only with `--hf-cache-mode per_model`. A shared HF cache can
-only be retained. `--storage-root` rejects mutable paths outside the managed
-filesystem, and `--minimum-free-space-gib` is checked before every binding.
+For disk-bounded runs, `--model-work-dir` isolates engines by exact
+model/workload binding. Suites for the same model do not share engines because
+their datasets may resolve to different static shapes, optimization profiles,
+or cache lengths. A per-model HF cache can still be shared across those suites.
+`--engine-retention` and `--hf-cache-retention` accept `retain`,
+`delete_on_pass`, or `delete_always`; the latter applies only with
+`--hf-cache-mode per_model`. A shared HF cache can only be retained.
+`--storage-root` rejects mutable paths outside the managed filesystem, and
+`--minimum-free-space-gib` is checked before every binding.
 
 ```bash
 python tools/trtmc_validate.py \
@@ -359,7 +361,8 @@ variants with the same reference computation can reuse an entry.
 ## Add or extend a model
 
 1. Reuse or add a dataset workload in
-   `tests/validation/workloads.yaml`.
+   `tests/validation/workloads.yaml`. Dataset variants that can change build
+   shapes or profiles require distinct workload IDs.
 2. Add that workload under the model in `model_workloads.yaml`.
 3. Add a workload sample limit if the workload is new.
 4. Select one workload as the model default.
