@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.model-check-platform/v1
+id: l4t-thor
+
+execution:
+  task_order: [accuracy, perf]
+  serial_tasks: true
+
+# The initial qualification run supplies evidence for this sparse list. A
+# disagreement is not a hardware exclusion; only an evidence-backed hardware
+# limitation belongs here.
+unsupported: []
