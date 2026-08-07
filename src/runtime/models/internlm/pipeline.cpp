@@ -468,34 +468,11 @@ bool InternlmTextGenerationPipeline::run_prefill_batched(const std::vector<int32
     return true;
 }
 
-void InternlmTextGenerationPipeline::prime_decoder_after_batched_prefill(
-    const std::vector<int32_t>& input_ids) {
-    if (input_ids.empty())
-        return;
-
-    TrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
-        return;
-
-    int32_t token_id = input_ids.back();
-    TensorMap inputs;
-    Tensor token_tensor;
-    token_tensor.data = &token_id;
-    token_tensor.shape = {1};
-    token_tensor.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = token_tensor;
-
-    state_->prepare_step(inputs);
-    decoder.forward_async(inputs);
-    decoder.sync();
-}
-
 void InternlmTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                                  std::vector<float>& logits, bool gpu_sampling) {
     // Fast path: batched prefill engine writes K/V for the whole prompt in
     // one forward and returns last-token logits on host.
     if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
-        prime_decoder_after_batched_prefill(input_ids);
         state_->mark_prefill_complete();
         return;
     }
@@ -959,6 +936,11 @@ int32_t InternlmTextGenerationPipeline::run_decode_loop(
                                   result.is_eos))
             break;
         if (result.is_eos)
+            break;
+        // The sampled token is already the final requested output. Running
+        // another decoder step would compute logits that no caller consumes;
+        // at full QA context it also exceeds the valid MHA cache read window.
+        if (step + 1 >= max_new_tokens)
             break;
         if (gpu_sampling)
             run_step_device(result.token_id);

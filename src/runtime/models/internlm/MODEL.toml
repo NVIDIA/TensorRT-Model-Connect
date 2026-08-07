@@ -10,4 +10,5 @@ decoder_debug = ["internlm_decoder_kv_cache"]
 
 runtime_tests = [
   "test_internlm_chat_template|test_internlm_chat_template.cpp|trtmc_model_internlm|_|_",
+  "test_internlm_pipeline|test_internlm_pipeline.cpp|trtmc_model_internlm|_|REQUIRES_GPU",
 ]
