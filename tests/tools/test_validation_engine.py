@@ -5129,7 +5129,7 @@ def test_fnet_keeps_fp16_candidate_with_declared_fp32_reference(
     command = validation_engine.build_bundle_command(
         model,
         trtmc_binary="/runtime/trtmc",
-        bundle_path=Path("/runs/engines/fnet-base.trtfb"),
+        bundle_path=Path("/runs/engines/fnet-base.bundle"),
         max_cache_length=256,
     )
     assert command[command.index("--precision") + 1] == "fp16"
