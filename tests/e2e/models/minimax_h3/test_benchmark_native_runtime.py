@@ -52,7 +52,7 @@ def test_file_page_eviction_is_portable_when_advice_constant_is_unavailable(
 
     monkeypatch.setattr(MODULE.os, "open", fail_open)
 
-    assert MODULE.evict_file_pages(Path("bundle.trtfb")) == {
+    assert MODULE.evict_file_pages(Path("model.bundle")) == {
         "supported": False,
         "attempted": False,
         "succeeded": False,
@@ -67,7 +67,7 @@ def test_file_page_eviction_reports_open_failure(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(MODULE.os, "POSIX_FADV_DONTNEED", 4, raising=False)
     monkeypatch.setattr(MODULE.os, "open", fail_open)
 
-    assert MODULE.evict_file_pages(Path("bundle.trtfb")) == {
+    assert MODULE.evict_file_pages(Path("model.bundle")) == {
         "supported": True,
         "attempted": True,
         "succeeded": False,
@@ -129,7 +129,7 @@ def _worker_result(*, warmup: int, iterations: int) -> dict:
 
 def test_worker_request_forwards_cuda_graphs_and_fixed_workload(tmp_path: Path) -> None:
     request = MODULE.build_worker_request(
-        bundle=tmp_path / "h3.trtfb",
+        bundle=tmp_path / "h3.bundle",
         plugin_dir=tmp_path / "plugins",
         prompt="prompt",
         seed=0,
@@ -152,7 +152,7 @@ def test_worker_request_forwards_cuda_graphs_and_fixed_workload(tmp_path: Path) 
 
 def test_worker_request_forwards_optional_cache_threshold(tmp_path: Path) -> None:
     request = MODULE.build_worker_request(
-        bundle=tmp_path / "h3.trtfb",
+        bundle=tmp_path / "h3.bundle",
         plugin_dir=tmp_path / "plugins",
         prompt="prompt",
         seed=0,
@@ -166,7 +166,7 @@ def test_worker_request_forwards_optional_cache_threshold(tmp_path: Path) -> Non
     assert request["runtime"]["config"] == {"minimax_h3.first_block_cache_threshold": 0.05}
 
     default_request = MODULE.build_worker_request(
-        bundle=tmp_path / "h3.trtfb",
+        bundle=tmp_path / "h3.bundle",
         plugin_dir=tmp_path / "plugins",
         prompt="prompt",
         seed=0,

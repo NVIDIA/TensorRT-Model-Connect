@@ -70,7 +70,7 @@ def test_file_page_eviction_is_portable_when_posix_fadvise_is_unavailable(
 
     monkeypatch.setattr(MODULE.os, "open", fail_open)
 
-    assert MODULE.evict_file_pages(Path("bundle.trtfb")) == {
+    assert MODULE.evict_file_pages(Path("model.bundle")) == {
         "supported": False,
         "attempted": False,
         "succeeded": False,
@@ -80,7 +80,7 @@ def test_file_page_eviction_is_portable_when_posix_fadvise_is_unavailable(
 def test_file_page_eviction_advises_exact_file_and_closes_descriptor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    bundle = tmp_path / "bundle.trtfb"
+    bundle = tmp_path / "model.bundle"
     bundle.write_bytes(b"bundle")
     calls: list[tuple[int, int, int, int]] = []
 
@@ -103,7 +103,7 @@ def test_file_page_eviction_advises_exact_file_and_closes_descriptor(
 def test_file_page_eviction_reports_failure_and_closes_descriptor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    bundle = tmp_path / "bundle.trtfb"
+    bundle = tmp_path / "model.bundle"
     bundle.write_bytes(b"bundle")
     descriptors: list[int] = []
     real_open = MODULE.os.open

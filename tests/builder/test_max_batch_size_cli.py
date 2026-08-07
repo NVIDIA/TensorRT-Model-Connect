@@ -251,7 +251,7 @@ def test_diffusion_family_build_options_reach_plugin(monkeypatch, tmp_path):
     """Schema-resolved ``--set`` values must survive diffusion dispatch."""
     plugin = _install_stub_plugin(monkeypatch)
     model_dir = _make_fake_diffusion_model_dir(tmp_path)
-    output = tmp_path / "out.trtfb"
+    output = tmp_path / "out.bundle"
     args = _build_args(model_dir, output, max_batch_size=1)
     args.set_flags = ["minimax_h3.first_block_cache=true"]
 
