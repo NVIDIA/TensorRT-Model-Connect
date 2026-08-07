@@ -6,6 +6,10 @@
   "runtime_strategy": "fnet_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "precision": "fp16",
+  "task_eval": {
+    "reference_precision": "fp32",
+    "allow_reference_precision_mismatch": true
+  },
   "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
@@ -17,7 +21,7 @@
       "reference_precision": "fp32",
       "prompt": "The capital of France is Paris.",
       "max_new_tokens": 1,
-      "notes": "FNet with 2D DFT via matrix multiplication. The runtime pads static inputs with the checkpoint pad token so TRT and the FP32 reference transform identical 256-token inputs.",
+      "notes": "FNet with 2D DFT via matrix multiplication. TRTMC remains FP16 while the official PyTorch reference uses FP32 because cuFFT cannot execute this non-power-of-two transform in FP16. The runtime pads static inputs with the checkpoint pad token so both sides transform identical 256-token inputs.",
       "core": false,
       "metadata": {
         "contract_config": {

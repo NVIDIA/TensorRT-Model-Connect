@@ -5058,10 +5058,7 @@ def test_personaplex_behavior_suite_owns_precision_outside_ci_manifest() -> None
     assert command[command.index("--fp32-layers") + 1] == "2,3"
 
 
-@pytest.mark.parametrize("model_name", ["fnet-base", "xlnet-base"])
-def test_encoder_validation_compares_candidate_and_reference_in_fp32(
-    model_name: str,
-) -> None:
+def test_xlnet_validation_compares_candidate_and_reference_in_fp32() -> None:
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(),
         "stsbenchmark_encoder_embedding_parity",
@@ -5069,7 +5066,7 @@ def test_encoder_validation_compares_candidate_and_reference_in_fp32(
     model = next(
         model
         for model in validation_engine.load_manifest_records()
-        if model["name"] == model_name
+        if model["name"] == "xlnet-base"
     )
 
     validation_config = validation_engine.effective_validation_config(
@@ -5084,6 +5081,58 @@ def test_encoder_validation_compares_candidate_and_reference_in_fp32(
     assert validation_config["comparison_precision"] == "fp32"
     assert model["precision"] == "fp16"
     assert resolved_model["precision"] == "fp32"
+
+
+def test_fnet_keeps_fp16_candidate_with_declared_fp32_reference(
+    tmp_path: Path,
+) -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(),
+        "stsbenchmark_encoder_embedding_parity",
+    )
+    model = next(
+        record
+        for record in validation_engine.load_manifest_records()
+        if record["name"] == "fnet-base"
+    )
+    config = validation_engine.effective_validation_config(suite, model)
+
+    assert model["precision"] == "fp16"
+    assert "comparison_precision" not in config
+    assert config["reference_precision"] == "fp32"
+    assert config["allow_reference_precision_mismatch"] is True
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "sts_pair_jsonl",
+                "task_eval": config,
+            }
+        ),
+        encoding="utf-8",
+    )
+    contract = validation_engine.resolve_reference_precision_contract(
+        argparse.Namespace(hf_dtype="auto"),
+        model,
+        work_dir,
+    )
+
+    assert contract == {
+        "trtmc_base_precision": "fp16",
+        "trtmc_quantization": "none",
+        "reference_precision": "fp32",
+        "reference_dtype": "float32",
+        "comparison": "reference_defined",
+    }
+    command = validation_engine.build_bundle_command(
+        model,
+        trtmc_binary="/runtime/trtmc",
+        bundle_path=Path("/runs/engines/fnet-base.trtfb"),
+        max_cache_length=256,
+    )
+    assert command[command.index("--precision") + 1] == "fp16"
 
 
 def test_segformer_validation_compares_candidate_and_reference_in_fp16() -> None:

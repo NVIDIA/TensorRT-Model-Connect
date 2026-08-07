@@ -275,6 +275,22 @@ executed FP8 kernels. The same contract applies to FP4, NVFP4, MXFP, or future
 quantization formats when those candidates are added. A quantized manifest
 without `task_eval.reference_precision` fails before reference inference.
 
+An unquantized model whose official reference cannot execute at the TRTMC base
+precision must declare the reviewed mismatch explicitly. For example, FNet
+keeps its shipping candidate in FP16 while its non-power-of-two PyTorch cuFFT
+reference runs in FP32:
+
+```json
+"precision": "fp16",
+"task_eval": {
+  "reference_precision": "fp32",
+  "allow_reference_precision_mismatch": true
+}
+```
+
+Without that explicit declaration, native unquantized precision mismatches
+fail before reference inference.
+
 The resolved TRTMC base precision, quantization format, reference precision,
 and comparison kind are stored in `comparison.json` and shown in the HTML
 report. Reference cache keys include the effective reference dtype, so only
