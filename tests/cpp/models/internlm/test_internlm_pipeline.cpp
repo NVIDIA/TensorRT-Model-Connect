@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Regression coverage for the one-token task-eval path used by MMLU. The
+// Regression coverage for the one-token MMLU validation path. The
 // batched prefill logits already supply that token, so touching the CUDA-graph
 // decoder is both unnecessary and unsafe at the longest prompt shape.
 
@@ -141,12 +141,14 @@ void test_one_token_batched_prefill_does_not_touch_decoder() {
     request.max_new_tokens = 1;
     request.temperature = 0.0F;
     request.top_k = 1;
-    request.eos_token_id = 2;
+    // Keep the prefill argmax (token 2) non-EOS so this exercises the explicit
+    // final-token stop instead of passing through the earlier EOS branch.
+    request.eos_token_id = 3;
 
     std::vector<int32_t> prompt(700, 1);
     const auto result = pipeline.generate_ids(prompt, request);
     check(result.token_ids.size() == 701 && result.token_ids.back() == 2,
-          "one-token result comes from prefill logits");
+          "one non-EOS token comes from prefill logits");
     check(prefill_stats->calls == 1, "long batched prefill launches once");
     check(decode_stats->calls == 0, "one-token request does not prime decoder");
     check(prefill_stats->shapes["token_id"] == std::vector<int64_t>({700}),
