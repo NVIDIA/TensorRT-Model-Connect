@@ -209,7 +209,7 @@ Text-to-audio is a good example of why `IPipeline` has task-specific methods. Th
 
 ## Self-check
 
-1. Why can two tasks use the same `.trtfb` container without sharing a runtime
+1. Why can two tasks use the same `.bundle` container without sharing a runtime
    strategy?
 2. Which state makes streaming ASR different from offline transcription?
 3. Why should a text-to-audio result not be handled like generated token IDs?

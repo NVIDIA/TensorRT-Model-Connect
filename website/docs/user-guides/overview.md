@@ -15,7 +15,7 @@ know the concept and need every option or API field.
 
 | Goal | Guide | Result |
 | --- | --- | --- |
-| Create an artifact | [Build a Bundle](build-a-bundle.md) | A named `.trtfb` with recorded model/config inputs. |
+| Create an artifact | [Build a Bundle](build-a-bundle.md) | A named `.bundle` with recorded model/config inputs. |
 | Diagnose an artifact | [Inspect a Bundle](inspect-a-bundle.md) | Bundle kind, family, runtime identity, and section inventory. |
 | Execute a task | [Run Inference](run-inference.md) | The correct CLI command and typed result for the bundle. |
 | Change runtime behavior | [Configure Runtime Behavior](configure-runtime.md) | A validated config file or `--set` override at the right lifecycle layer. |

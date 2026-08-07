@@ -15,7 +15,7 @@ First identify when the setting takes effect:
 Registered configuration uses a JSON file or repeatable overrides:
 
 ```bash
-trtmc run model.trtfb \
+trtmc run model.bundle \
   --config runtime.json \
   --set runtime.disable_cuda_graph=true \
   --prompt "Hello"

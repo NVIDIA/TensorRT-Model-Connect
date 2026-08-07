@@ -4,8 +4,8 @@ description: Identify bundle ownership and execution path before loading or debu
 ---
 
 ```bash
-trtmc inspect model.trtfb
-trtmc inspect model.trtfb --list-engines
+trtmc inspect model.bundle
+trtmc inspect model.bundle --list-engines
 ```
 
 Use regular inspection first. It reports header metadata and section names.

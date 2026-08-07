@@ -6,7 +6,7 @@ description: Quick task and configuration lookup for vision-language, transcript
 ## Vision-language generation
 
 ```bash
-trtmc run vision-language.trtfb \
+trtmc run vision-language.bundle \
   --image input.jpg \
   --prompt "Describe this image in one sentence." \
   --max-new-tokens 48
@@ -19,7 +19,7 @@ only with a Qwen-VL build that declares them.
 ## Speech recognition
 
 ```bash
-trtmc transcribe speech-to-text.trtfb \
+trtmc transcribe speech-to-text.bundle \
   --audio input.wav \
   --beam-size 1 \
   --source-language en \
@@ -34,11 +34,11 @@ duration remain model-owned constraints.
 ## Audio generation and speech-to-speech
 
 ```bash
-trtmc generate-audio text-to-audio.trtfb \
+trtmc generate-audio text-to-audio.bundle \
   --prompt "A clear short test sentence." \
   --output output.wav
 
-trtmc speak speech-to-speech.trtfb \
+trtmc speak speech-to-speech.bundle \
   --audio-in input.wav \
   --audio-out response.wav
 ```

@@ -9,7 +9,7 @@ or a compatible local checkpoint directory:
 ```bash
 trtmc build Qwen/Qwen3-0.6B \
   --model-revision MODEL_COMMIT \
-  -o qwen3-0.6b.trtfb
+  -o qwen3-0.6b.bundle
 ```
 
 Omit `--model-revision` for exploration only. A reproducible result pins an
@@ -30,7 +30,7 @@ trtmc build MODEL_ID \
   --precision fp16 \
   --config build-profile.json \
   --set qwen_vl_vision.dynamic_resolution=true \
-  -o model.trtfb
+  -o model.bundle
 ```
 
 Do not copy that combination to an arbitrary family. The selected family owns

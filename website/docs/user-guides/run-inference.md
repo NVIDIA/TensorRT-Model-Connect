@@ -20,7 +20,7 @@ The CLI is task-oriented; it is not one generic tensor runner.
 Example deterministic text request:
 
 ```bash
-trtmc run qwen3-0.6b.trtfb \
+trtmc run qwen3-0.6b.bundle \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy

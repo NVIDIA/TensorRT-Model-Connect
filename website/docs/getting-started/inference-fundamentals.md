@@ -9,7 +9,7 @@ This page explains the vocabulary behind TensorRT-Model-Connect. It assumes no p
 ## Learning objectives
 
 By the end of this module, you should be able to distinguish checkpoints,
-TensorRT engines, and `.trtfb` bundles; explain prefill/decode/KV cache; and
+TensorRT engines, and `.bundle` bundles; explain prefill/decode/KV cache; and
 separate family, native runtime strategy, optimized profile, and task strategy.
 
 ## Training versus inference
@@ -186,7 +186,7 @@ not generic task strategies.
 ## Self-check
 
 1. Why is a Hugging Face checkpoint not directly interchangeable with a
-   TensorRT engine or `.trtfb` bundle?
+   TensorRT engine or `.bundle` bundle?
 2. Which identity selects a native C++ implementation, and which identity
    groups different models under the same user-visible task?
 3. What does KV cache avoid recomputing during decoder generation?

@@ -7,7 +7,7 @@ Build and inspect an exact text-generation checkpoint, then choose deterministic
 or sampled decoding.
 
 ```bash
-trtmc run model.trtfb \
+trtmc run model.bundle \
   --prompt "Summarize TensorRT in one sentence." \
   --max-new-tokens 48 \
   --greedy
@@ -17,7 +17,7 @@ For sampling, omit `--greedy` and set only the controls required by the
 experiment:
 
 ```bash
-trtmc run model.trtfb \
+trtmc run model.bundle \
   --prompt "Write a two-line GPU poem." \
   --max-new-tokens 64 \
   --temperature 0.8 \

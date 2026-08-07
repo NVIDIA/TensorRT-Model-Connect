@@ -7,17 +7,17 @@ Time-series bundles expose `solve()` rather than text or media generation. The
 exact model contract determines which numeric input form is valid.
 
 ```bash
-trtmc solve forecast.trtfb \
+trtmc solve forecast.bundle \
   --branch-input "100.1,100.15,100.18,100.22,100.21,100.27"
 ```
 
 Other model contracts can use:
 
 ```bash
-trtmc solve operator.trtfb \
+trtmc solve operator.bundle \
   --field-input "..."
 
-trtmc solve operator.trtfb \
+trtmc solve operator.bundle \
   --branch-input "..." \
   --trunk-input "..."
 ```

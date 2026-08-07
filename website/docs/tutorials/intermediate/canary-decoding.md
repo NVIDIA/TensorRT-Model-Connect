@@ -194,7 +194,7 @@ sizes, excessive output lengths, and invalid duration values throw
 <details>
 <summary>Check your answers</summary>
 
-1. The generated `.trtfb` packages the checkpoint-derived decoder prompt and
+1. The generated `.bundle` packages the checkpoint-derived decoder prompt and
    control-token metadata.
 2. Canary groups requests by beam size and validates per-request language,
    task, timestamps, and output constraints while preserving result order.

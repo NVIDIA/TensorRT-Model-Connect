@@ -13,9 +13,9 @@ trtmc build MODEL_ID \
   --image-height 1024 \
   --image-width 1024 \
   --num-inference-steps 28 \
-  -o diffusion.trtfb
+  -o diffusion.bundle
 
-trtmc generate-video diffusion.trtfb \
+trtmc generate-video diffusion.bundle \
   --prompt "A sunrise over a mountain lake" \
   --output frames \
   --num-steps 28
@@ -28,9 +28,9 @@ must remain within the profiles packaged by the exact family build.
 ## Classification and segmentation
 
 ```bash
-trtmc classify classifier.trtfb --image input.jpg
-trtmc segment segmenter.trtfb --image input.jpg --output mask.png
-trtmc segment-prompted prompted.trtfb \
+trtmc classify classifier.bundle --image input.jpg
+trtmc segment segmenter.bundle --image input.jpg --output mask.png
+trtmc segment-prompted prompted.bundle \
   --image input.jpg --output masks --point-x 0.5 --point-y 0.5
 ```
 

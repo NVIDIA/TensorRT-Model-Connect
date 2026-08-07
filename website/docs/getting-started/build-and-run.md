@@ -44,6 +44,17 @@ $TRTMC run /tmp/qwen25vl.bundle \
   --max-new-tokens 48
 ```
 
+These length controls have different scopes. `--max-cache-length 384` fixes
+the bundle's KV-cache capacity. The Qwen-VL build field
+`qwen_vl_decoder.max_prefill_length` defaults to `0`, which uses that cache
+length as the prefill-profile maximum; an explicit value is clamped to the
+cache length, and `opt_prefill_length` is clamped to the resulting prefill
+maximum. `--max-new-tokens 48` is only the request-time decode-loop limit: it
+does not resize either build-time profile. After the Qwen-VL cache fills, its
+runtime advances with a sliding cache, so earlier context rows are evicted.
+See [Configuration and Backends](../features/config-and-backends.md) for the
+exact family fields and defaults.
+
 This Qwen-VL bundle routes through the model-owned
 `runtime_strategy="qwen_vl_vision_language"`. Other vision-language families
 use their own strategy keys and DSOs even when they implement the same public

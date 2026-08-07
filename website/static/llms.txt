@@ -9,7 +9,7 @@ Repository: https://github.com/NVIDIA/TensorRT-Model-Connect
 
 - [Overview](https://nvidia.github.io/TensorRT-Model-Connect/)
 - [Get Started](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/overview)
-- [Supported Models](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/model-support)
+- [Supported Models](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)
 - [User Guides](https://nvidia.github.io/TensorRT-Model-Connect/user-guides/overview)
 - [Tutorials](https://nvidia.github.io/TensorRT-Model-Connect/learning-path)
 - [Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)

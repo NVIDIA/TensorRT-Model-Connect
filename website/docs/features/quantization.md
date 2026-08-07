@@ -44,6 +44,18 @@ with:
 --quant-calibration-samples 512
 ```
 
+### Why ModelOpt is a build dependency
+
+TRTMC uses NVIDIA ModelOpt only when automatic PTQ calibration is selected
+and no precomputed scale artifact is supplied. A family adapter loads the
+reference model and representative batches, ModelOpt runs the format-specific
+calibration algorithm, and TRTMC extracts the resulting scale state into its
+own `QuantScaleMap`. TRTMC then builds the TensorRT graph and packages the
+native bundle; ModelOpt is not a runtime backend and is not required merely to
+load a bundle whose scales and engines are already present. This reuses the
+calibration algorithms without transferring family selection, graph
+construction, or runtime ownership out of TensorRT-Model-Connect.
+
 Inspect the live parser rather than copying an old option list:
 
 ```bash

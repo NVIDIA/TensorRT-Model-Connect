@@ -128,8 +128,6 @@ const HF_TASKS = [
   },
 ];
 
-const TASK_BY_SLUG = new Map(HF_TASKS.map((task) => [task.slug, task]));
-
 const CLI_COMMANDS_BY_TASK_STRATEGY = {
   diffusion_text_generation: ['run'],
   embedding: ['embed'],
@@ -407,15 +405,17 @@ function parsePythonConfigSchemas(repoRoot, sourcePath) {
     if (!name || !type || !defaultValue || !allowedLayers) {
       throw new Error(`Unable to parse ConfigField in ${sourcePath}: ${fieldSource}`);
     }
+    const fieldLayers = layerSets.get(allowedLayers[1]) || [allowedLayers[1]];
     currentSchema.fields.push({
       name: name[1],
       key: `${currentSchema.namespace}.${name[1]}`,
       type: type[1],
       defaultValue: parsePythonDefault(defaultValue[1]),
-      allowedLayers: layerSets.get(allowedLayers[1]) || [allowedLayers[1]],
+      allowedLayers: fieldLayers,
+      surfaces: fieldLayers.includes('Build Time') ? ['build'] : [],
     });
   }
-  return schemas.map((schema) => ({...schema, sourcePath}));
+  return schemas.map((schema) => ({...schema, sourcePaths: [sourcePath]}));
 }
 
 function parseCppDefault(expression) {
@@ -456,11 +456,34 @@ function parseCppConfigSchemas(repoRoot, sourcePath) {
         type: fieldMatch[2],
         defaultValue: parseCppDefault(fieldMatch[3].trim()),
         allowedLayers: layerSets.get(fieldMatch[4]) || [fieldMatch[4]],
+        surfaces: ['runtime'],
       });
     }
-    if (fields.length > 0) schemas.push({namespace, fields, sourcePath});
+    if (fields.length > 0) schemas.push({namespace, fields, sourcePaths: [sourcePath]});
   }
   return schemas;
+}
+
+function mergeConfigSchema(existing, incoming) {
+  existing.sourcePaths = [...new Set([...existing.sourcePaths, ...incoming.sourcePaths])].sort();
+  for (const field of incoming.fields) {
+    const current = existing.fields.find((candidate) => candidate.key === field.key);
+    if (!current) {
+      existing.fields.push(field);
+      continue;
+    }
+    if (current.type !== field.type || current.defaultValue !== field.defaultValue) {
+      throw new Error(
+        `Config schema mismatch for ${field.key}: ` +
+        `${current.type}/${current.defaultValue} versus ${field.type}/${field.defaultValue}`
+      );
+    }
+    current.allowedLayers = [
+      ...new Set([...current.allowedLayers, ...field.allowedLayers]),
+    ].sort();
+    current.surfaces = [...new Set([...current.surfaces, ...field.surfaces])].sort();
+  }
+  existing.fields.sort((left, right) => left.key.localeCompare(right.key));
 }
 
 function collectFamilyConfigSchemas(repoRoot, family, runtimeOwners) {
@@ -478,7 +501,12 @@ function collectFamilyConfigSchemas(repoRoot, family, runtimeOwners) {
     for (const entry of schemaArray[1].matchAll(/"([^"|]+)(?:\|[^"]+)?"/g)) {
       const sourcePath = `src/runtime/models/${owner}/${entry[1]}`;
       for (const schema of parseCppConfigSchemas(repoRoot, sourcePath)) {
-        if (!namespaces.has(schema.namespace)) {
+        if (namespaces.has(schema.namespace)) {
+          mergeConfigSchema(
+            schemas.find((candidate) => candidate.namespace === schema.namespace),
+            schema
+          );
+        } else {
           schemas.push(schema);
           namespaces.add(schema.namespace);
         }
@@ -899,7 +927,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'run',
         purpose: 'Generate text from a text prompt.',
-        syntax: 'trtmc run <bundle.trtfb> --prompt "<text>" [generation options]',
+        syntax: 'trtmc run <bundle.bundle> --prompt "<text>" [generation options]',
         options: [
           option('--prompt <TEXT>', 'Required', 'Text input for this causal language-model recipe.'),
           ...generateOptions(capability, CAUSAL_GENERATION_FIELDS),
@@ -923,7 +951,7 @@ function commandContractForProfile(profile, capability) {
         purpose: capability.textImageInput
           ? 'Generate text from an image and text prompt.'
           : 'Generate text from the inputs implemented by this runtime.',
-        syntax: `trtmc run <bundle.trtfb> --prompt "<text>"${imageSyntax} [generation options]`,
+        syntax: `trtmc run <bundle.bundle> --prompt "<text>"${imageSyntax} [generation options]`,
         options: [
           option('--prompt <TEXT>', 'Required', 'Text prompt for the vision-language recipe.'),
           ...imageOptions,
@@ -939,7 +967,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'run',
         purpose: 'Generate text with the family\'s diffusion-style text runtime.',
-        syntax: 'trtmc run <bundle.trtfb> --prompt "<text>" [text-diffusion options]',
+        syntax: 'trtmc run <bundle.bundle> --prompt "<text>" [text-diffusion options]',
         options: [
           option('--prompt <TEXT>', 'Required unless initial latents are supplied', 'Text conditioning input.'),
           ...generateOptions(capability, TEXT_DIFFUSION_FIELDS),
@@ -957,7 +985,7 @@ function commandContractForProfile(profile, capability) {
         return {
           command: 'generate-video',
           purpose: 'Generate video frames from a text prompt.',
-          syntax: 'trtmc generate-video <bundle.trtfb> --prompt "<text>" --output <output-dir> [generation options]',
+          syntax: 'trtmc generate-video <bundle.bundle> --prompt "<text>" --output <output-dir> [generation options]',
           options: [
             option('--prompt <TEXT>', 'Required', 'Text conditioning input.'),
             option('--output <DIR>', 'Optional', 'Directory for generated PNG frames.'),
@@ -971,7 +999,7 @@ function commandContractForProfile(profile, capability) {
         purpose: imageInput
           ? 'Generate or edit an image from an input image and text prompt.'
           : 'Generate an image from a text prompt.',
-        syntax: `trtmc run <bundle.trtfb> --prompt "<text>"${imageInput ? (hasTextOnlyRecipe ? ' [--image <input.png>]' : ' --image <input.png>') : ''} --output <output.png> [generation options]`,
+        syntax: `trtmc run <bundle.bundle> --prompt "<text>"${imageInput ? (hasTextOnlyRecipe ? ' [--image <input.png>]' : ' --image <input.png>') : ''} --output <output.png> [generation options]`,
         options: [
           option('--prompt <TEXT>', 'Required', 'Text conditioning input.'),
           ...(imageInput ? [option('--image <PATH>', hasTextOnlyRecipe ? 'Required for image-to-image; omit for text-to-image' : 'Required', 'Image conditioning input implemented by the runtime overload.')] : []),
@@ -989,7 +1017,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'encode',
         purpose: 'Return the encoder hidden-state representation for text.',
-        syntax: 'trtmc encode <bundle.trtfb> --prompt "<text>"',
+        syntax: 'trtmc encode <bundle.bundle> --prompt "<text>"',
         options: [option('--prompt <TEXT>', 'Required', 'Text input passed to the encoder.')],
         evidence,
       };
@@ -997,7 +1025,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'embed',
         purpose: 'Return an embedding for text.',
-        syntax: 'trtmc embed <bundle.trtfb> --prompt "<text>"',
+        syntax: 'trtmc embed <bundle.bundle> --prompt "<text>"',
         options: [option('--prompt <TEXT>', 'Required', 'Text input passed to the embedding runtime.')],
         evidence,
       };
@@ -1005,7 +1033,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'rerank',
         purpose: 'Score one document against a query.',
-        syntax: 'trtmc rerank <bundle.trtfb> --prompt "<query>" --document "<document>"',
+        syntax: 'trtmc rerank <bundle.bundle> --prompt "<query>" --document "<document>"',
         options: [
           option('--prompt <TEXT>', 'Required', 'Query text.'),
           option('--document <TEXT>', 'Required', 'Candidate document text.'),
@@ -1016,7 +1044,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'classify',
         purpose: 'Classify an input image.',
-        syntax: 'trtmc classify <bundle.trtfb> --image <input.png>',
+        syntax: 'trtmc classify <bundle.bundle> --image <input.png>',
         options: [
           option('--image <PATH>', 'Required', 'Image input consumed by classify().'),
           option('--benchmark <N>', 'Optional', 'Run N timed classification iterations.'),
@@ -1028,7 +1056,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'segment',
         purpose: 'Create a semantic segmentation mask for an image.',
-        syntax: 'trtmc segment <bundle.trtfb> --image <input.png> --output <mask.png>',
+        syntax: 'trtmc segment <bundle.bundle> --image <input.png> --output <mask.png>',
         options: [
           option('--image <PATH>', 'Required', 'Image input consumed by segment().'),
           option('--output <PATH>', 'Optional', 'Output grayscale mask path.'),
@@ -1049,7 +1077,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'segment-prompted',
         purpose: 'Create masks from an image and a runtime-supported prompt type.',
-        syntax: `trtmc segment-prompted <bundle.trtfb> --image <input.png> --output <output-dir>${capability.promptedText ? ' --prompt "<object>"' : ' --point-x <F> --point-y <F>'}`,
+        syntax: `trtmc segment-prompted <bundle.bundle> --image <input.png> --output <output-dir>${capability.promptedText ? ' --prompt "<object>"' : ' --point-x <F> --point-y <F>'}`,
         options: [
           option('--image <PATH>', 'Required', 'Image input.'),
           option('--output <DIR>', 'Optional', 'Directory for masks, scores, boxes, and overlay.'),
@@ -1063,7 +1091,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'generate-audio',
         purpose: 'Generate audio from a text prompt.',
-        syntax: 'trtmc generate-audio <bundle.trtfb> --prompt "<text>" --output <output.wav>',
+        syntax: 'trtmc generate-audio <bundle.bundle> --prompt "<text>" --output <output.wav>',
         options: [
           option('--prompt <TEXT>', 'Required', 'Text input for audio generation.'),
           option('--output <PATH>', 'Optional', 'Output WAV path.'),
@@ -1079,7 +1107,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'speak',
         purpose: 'Generate speech from input speech.',
-        syntax: 'trtmc speak <bundle.trtfb> --audio-in <input.wav> --audio-out <output.wav>',
+        syntax: 'trtmc speak <bundle.bundle> --audio-in <input.wav> --audio-out <output.wav>',
         options: [
           option('--audio-in <PATH>', 'Required', 'Input WAV file.'),
           option('--audio-out <PATH>', 'Optional', 'Output WAV file.'),
@@ -1105,7 +1133,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'transcribe',
         purpose: 'Transcribe an audio file.',
-        syntax: `trtmc transcribe <bundle.trtfb> --audio <input.wav>${capability.transcriptionStreaming ? ' [--stream]' : ''}`,
+        syntax: `trtmc transcribe <bundle.bundle> --audio <input.wav>${capability.transcriptionStreaming ? ' [--stream]' : ''}`,
         options: [
           option('--audio <PATH>', 'Required', 'Input WAV file; repeat for supported offline batches.'),
           ...(!hasMaxTokens ? [
@@ -1125,7 +1153,7 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'solve',
         purpose: 'Run the family\'s numerical forecasting or neural-operator contract.',
-        syntax: 'trtmc solve <bundle.trtfb> --field-input <CSV>',
+        syntax: 'trtmc solve <bundle.bundle> --field-input <CSV>',
         options: [
           option('--field-input <CSV>', 'One input mode', 'Single numerical field input.'),
           option('--branch-input <CSV>', 'One input mode', 'Branch input for operator-style recipes.'),
@@ -1356,7 +1384,7 @@ function collectModelSupportInventory(repoRoot) {
         profile: manifest.name,
         hfId: manifest.hf_id,
         revision: manifest.hf_revision || 'not pinned',
-        bundle: manifest.bundle || `${manifest.name}.trtfb`,
+        bundle: manifest.bundle || `${manifest.name}.bundle`,
         family: manifest.family,
         runtimeStrategy: manifest.runtime_strategy || 'not declared',
         taskStrategy: manifest.task_strategy,

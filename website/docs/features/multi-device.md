@@ -27,10 +27,10 @@ Select exactly one mode:
 
 ```bash
 # Tensor parallelism
-trtmc build MODEL --tensor-parallel-size 4 -o model-tp4.trtfb
+trtmc build MODEL --tensor-parallel-size 4 -o model-tp4.bundle
 
 # Context parallelism
-trtmc build MODEL --context-parallel-size 4 -o model-cp4.trtfb
+trtmc build MODEL --context-parallel-size 4 -o model-cp4.bundle
 ```
 
 `--tp-size` and `--cp-size` are short aliases. Both options accept `1`, `2`,
@@ -119,7 +119,7 @@ mpirun --tag-output -np 4 \
   -x LD_LIBRARY_PATH \
   -x CUDA_VISIBLE_DEVICES \
   -x TRTMC_NCCL_RENDEZVOUS \
-  trtmc run model-tp4.trtfb [task options...]
+  trtmc run model-tp4.bundle [task options...]
 ```
 
 `libnccl.so.2` or `libnccl.so` must be discoverable at runtime. Model Connect

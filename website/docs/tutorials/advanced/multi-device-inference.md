@@ -4,7 +4,7 @@ description: Build, launch, validate, and benchmark model-owned tensor- and cont
 ---
 
 This tutorial starts with Qwen3-0.6B tensor parallelism, then applies context
-parallelism to the denoiser in FLUX.1-schnell. Both paths build one `.trtfb`
+parallelism to the denoiser in FLUX.1-schnell. Both paths build one `.bundle`
 bundle and launch one process per visible GPU, but they partition different
 model dimensions and store different engine sections.
 
@@ -89,7 +89,7 @@ Use the same model and reduced cache capacity as the repository's
   --precision fp16 \
   --max-cache-length 256 \
   --tensor-parallel-size 4 \
-  -o "$WORK/qwen3-0.6b-fp16-tp4.trtfb"
+  -o "$WORK/qwen3-0.6b-fp16-tp4.bundle"
 ```
 
 The build itself is one process. It compiles all four rank plans in order and
@@ -100,8 +100,8 @@ one rank plan is loaded by each runtime process.
 Inspect the result and list its engine sections:
 
 ```bash
-"$TRTMC" inspect "$WORK/qwen3-0.6b-fp16-tp4.trtfb"
-"$TRTMC" inspect "$WORK/qwen3-0.6b-fp16-tp4.trtfb" --list-engines
+"$TRTMC" inspect "$WORK/qwen3-0.6b-fp16-tp4.bundle"
+"$TRTMC" inspect "$WORK/qwen3-0.6b-fp16-tp4.bundle" --list-engines
 ```
 
 Confirm that all four rank engine sections are present. The bundle metadata
@@ -123,7 +123,7 @@ mpirun --tag-output -np 4 \
   -x LD_LIBRARY_PATH \
   -x CUDA_VISIBLE_DEVICES \
   -x TRTMC_NCCL_RENDEZVOUS \
-  "$TRTMC" run "$WORK/qwen3-0.6b-fp16-tp4.trtfb" \
+  "$TRTMC" run "$WORK/qwen3-0.6b-fp16-tp4.bundle" \
     --prompt "What is the capital of France? Answer in one word." \
     --max-new-tokens 10 \
     --greedy \
@@ -151,9 +151,9 @@ capacity. Change only the topology:
   "${REVISION_ARGS[@]}" \
   --precision fp16 \
   --max-cache-length 256 \
-  -o "$WORK/qwen3-0.6b-single.trtfb"
+  -o "$WORK/qwen3-0.6b-single.bundle"
 
-"$TRTMC" run "$WORK/qwen3-0.6b-single.trtfb" \
+"$TRTMC" run "$WORK/qwen3-0.6b-single.bundle" \
   --prompt "What is the capital of France? Answer in one word." \
   --max-new-tokens 10 \
   --greedy \
@@ -174,7 +174,7 @@ mpirun --tag-output -np 4 \
   -x LD_LIBRARY_PATH \
   -x CUDA_VISIBLE_DEVICES \
   -x TRTMC_NCCL_RENDEZVOUS \
-  "$TRTMC" run "$WORK/qwen3-0.6b-fp16-tp4.trtfb" \
+  "$TRTMC" run "$WORK/qwen3-0.6b-fp16-tp4.bundle" \
     --prompt "Explain tensor parallelism in one sentence." \
     --max-new-tokens 64 --greedy \
     --warmup 3 --benchmark 10 \
@@ -205,10 +205,10 @@ The following dimensions and step count mirror the reduced
   --image-width 384 \
   --num-inference-steps 20 \
   --context-parallel-size 4 \
-  -o "$WORK/flux-schnell-cp4.trtfb"
+  -o "$WORK/flux-schnell-cp4.bundle"
 
-"$TRTMC" inspect "$WORK/flux-schnell-cp4.trtfb"
-"$TRTMC" inspect "$WORK/flux-schnell-cp4.trtfb" --list-engines
+"$TRTMC" inspect "$WORK/flux-schnell-cp4.bundle"
+"$TRTMC" inspect "$WORK/flux-schnell-cp4.bundle" --list-engines
 ```
 
 Confirm that `denoiser_plan_cp` is present. The bundle metadata also records
@@ -237,7 +237,7 @@ mpirun --tag-output -np 4 \
     rank="${OMPI_COMM_WORLD_RANK:-${PMI_RANK:-${RANK:-0}}}"
     output="$WORK/flux-cp4-output/rank_$rank"
     mkdir -p "$output"
-    exec "$TRTMC" generate-video "$WORK/flux-schnell-cp4.trtfb" \
+    exec "$TRTMC" generate-video "$WORK/flux-schnell-cp4.bundle" \
       --prompt "A photo of a cat sitting on a windowsill at sunset" \
       --output "$output" \
       --num-steps 20 \

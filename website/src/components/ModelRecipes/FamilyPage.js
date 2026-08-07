@@ -12,11 +12,11 @@ import RecipePageLayout from './RecipePageLayout';
 const BUNDLE_CLI_REFERENCE = {
   build: {
     purpose: 'Build one exact checkpoint into a TensorRT-Model-Connect bundle.',
-    syntax: 'trtmc build <hf-id> --output <bundle.trtfb>',
+    syntax: 'trtmc build <hf-id> --output <bundle.bundle>',
   },
   inspect: {
     purpose: 'Inspect bundle metadata, runtime identity, and packaged sections.',
-    syntax: 'trtmc inspect <bundle.trtfb>',
+    syntax: 'trtmc inspect <bundle.bundle>',
   },
 };
 
@@ -98,18 +98,30 @@ function FamilyConfigReference({family, commands}) {
         keys belong on the family&apos;s inference command.
       </p>
       {family.configSchemas.map((schema) => {
-        const buildField = schema.fields.find((field) => field.allowedLayers.includes('Build Time'));
-        const sessionField = schema.fields.find((field) => field.allowedLayers.includes('Session Request'));
+        const buildField = schema.fields.find((field) => field.surfaces.includes('build'));
+        const sessionField = schema.fields.find(
+          (field) => field.surfaces.includes('runtime') &&
+            field.allowedLayers.includes('Session Request')
+        );
         return (
           <section key={schema.namespace}>
             <h3><code>{schema.namespace}</code></h3>
-            <p>Schema source: <code>{schema.sourcePath}</code></p>
+            <p>
+              Schema {schema.sourcePaths.length === 1 ? 'source' : 'sources'}:{' '}
+              {schema.sourcePaths.map((sourcePath, index) => (
+                <React.Fragment key={sourcePath}>
+                  {index > 0 && <br />}
+                  <code>{sourcePath}</code>
+                </React.Fragment>
+              ))}
+            </p>
             <table>
               <thead>
                 <tr>
                   <th><code>--set</code> key</th>
                   <th>Type</th>
                   <th>Default</th>
+                  <th>CLI surface</th>
                   <th>Allowed configuration layers</th>
                 </tr>
               </thead>
@@ -119,16 +131,17 @@ function FamilyConfigReference({family, commands}) {
                     <td><code>{field.key}</code></td>
                     <td><code>{field.type}</code></td>
                     <td><code>{field.defaultValue}</code></td>
+                    <td>{field.surfaces.length > 0 ? field.surfaces.join(', ') : 'Schema metadata only'}</td>
                     <td>{field.allowedLayers.join(', ')}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
             {buildField && (
-              <pre><code>{`trtmc build <hf-id> --output <bundle.trtfb> --set ${buildField.key}=<value>`}</code></pre>
+              <pre><code>{`trtmc build <hf-id> --output <bundle.bundle> --set ${buildField.key}=<value>`}</code></pre>
             )}
             {sessionField && (
-              <pre><code>{`trtmc ${runtimeCommand} <bundle.trtfb> <task-inputs> --set ${sessionField.key}=<value>`}</code></pre>
+              <pre><code>{`trtmc ${runtimeCommand} <bundle.bundle> <task-inputs> --set ${sessionField.key}=<value>`}</code></pre>
             )}
           </section>
         );

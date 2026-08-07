@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "snapshot_date": "2026-08-06",
+  "snapshot_date": "2026-08-07",
   "purpose": "Documentation metadata only; checkpoint qualification remains defined by the README release row and E2E manifest.",
   "checkpoints": [
     {
@@ -99,6 +99,17 @@
       "model_type": null,
       "architectures": [
         "LTXPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
+      "hf_id": "MiniMaxAI/MiniMax-H3",
+      "revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "MiniMaxH3ModularPipeline"
       ],
       "architecture_source": "model_index._class_name"
     },

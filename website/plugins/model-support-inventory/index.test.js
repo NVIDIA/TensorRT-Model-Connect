@@ -129,7 +129,27 @@ test('collects support inventory from repository metadata', (context) => {
   writeFixture(
     repoRoot,
     'src/runtime/models/alpha/MODEL.toml',
-    'runtime_strategies = ["decoder", "shared"]\n'
+    [
+      'runtime_strategies = ["decoder", "shared"]',
+      'runtime_config_schemas = ["config_schema.cpp|register_alpha_schema"]',
+      '',
+    ].join('\n')
+  );
+  writeFixture(
+    repoRoot,
+    'src/runtime/models/alpha/config_schema.cpp',
+    [
+      'Schema make_alpha_schema() {',
+      '  const std::set<Layer> session = {Layer::SessionRequest, Layer::PlatformProfile};',
+      '  return Schema{',
+      '    "alpha_runtime",',
+      '    {',
+      '      ConfigField{"temperature", "float", std::any{0.5F}, session, nullptr},',
+      '    },',
+      '  };',
+      '}',
+      '',
+    ].join('\n')
   );
   writeFixture(
     repoRoot,
@@ -186,7 +206,7 @@ test('collects support inventory from repository metadata', (context) => {
       profile: 'beta-base-tp2',
       hfId: 'example/beta-base',
       revision: 'not pinned',
-      bundle: 'beta-base-tp2.trtfb',
+      bundle: 'beta-base-tp2.bundle',
       family: 'beta',
       runtimeStrategy: 'encoder',
       taskStrategy: 'encoder_only_nlp',
@@ -210,7 +230,7 @@ test('collects support inventory from repository metadata', (context) => {
       profile: 'alpha-small',
       hfId: 'example/alpha-small',
       revision: alphaRevision,
-      bundle: 'alpha-small.trtfb',
+      bundle: 'alpha-small.bundle',
       family: 'alpha',
       runtimeStrategy: 'decoder',
       taskStrategy: 'text_generation_causal',
@@ -271,10 +291,14 @@ test('collects support inventory from repository metadata', (context) => {
             key: 'alpha_runtime.temperature',
             type: 'float',
             defaultValue: '0.5',
-            allowedLayers: ['Session Request', 'Platform Profile'],
+            allowedLayers: ['Platform Profile', 'Session Request'],
+            surfaces: ['runtime'],
           },
         ],
-        sourcePath: 'python/tensorrt_model_connect/families/alpha/runtime_config_schema.py',
+        sourcePaths: [
+          'python/tensorrt_model_connect/families/alpha/runtime_config_schema.py',
+          'src/runtime/models/alpha/config_schema.cpp',
+        ],
       },
     ]
   );
@@ -284,7 +308,7 @@ test('collects support inventory from repository metadata', (context) => {
   assert.equal(alphaContract.command, 'run');
   assert.equal(
     alphaContract.syntax,
-    'trtmc run <bundle.trtfb> --prompt "<text>" [generation options]'
+    'trtmc run <bundle.bundle> --prompt "<text>" [generation options]'
   );
   assert.ok(!alphaContract.syntax.includes('--image'));
   assert.deepEqual(
