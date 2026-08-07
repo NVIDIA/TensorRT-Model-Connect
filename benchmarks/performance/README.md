@@ -174,6 +174,15 @@ The environment file owns machine-specific execution settings:
 - command timeout and local-files-only mode;
 - minimum free disk space.
 
+`storage.bundle_retention` accepts `retain`, `delete_on_pass`, or
+`delete_always`. Deletion is limited to the resolved cache entry below the
+configured managed `bundle_cache`; bundles found in external roots are
+preserved. `execution.hf_cache_mode` is `shared` or `per_entry`, and
+`execution.hf_cache_retention` uses the same retention values. A shared HF
+cache can only be retained. With `per_entry`, failed entry work is preserved by
+`delete_on_pass` for diagnosis. Optional `storage.storage_root` rejects results,
+scratch, and managed bundle paths outside that filesystem before execution.
+
 An individual baseline can set `local_files_only: true` when that reference must
 use an already-provisioned model snapshot even if the rest of the matrix may
 access its configured model source.

@@ -376,6 +376,182 @@ def test_select_bindings_requires_one_binding_for_explicit_dataset(tmp_path):
         trtmc_validate._select_bindings(arguments, catalog, ("model-a",))
 
 
+def test_select_bindings_accepts_multiple_exact_model_workload_pairs():
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--binding",
+            "model-a=workload-b",
+            "--binding",
+            "model-b=workload-c",
+            "--binding",
+            "model-a=workload-b",
+            "--dry-run",
+        ]
+    )
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a", "workload-b"],
+            },
+            "model-b": {
+                "default": "workload-c",
+                "workloads": ["workload-c"],
+            },
+        }
+    }
+
+    assert trtmc_validate._select_bindings(
+        arguments,
+        catalog,
+        ("model-a", "model-b"),
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-b"),
+        trtmc_validate.Binding("model-b", "workload-c"),
+    ]
+
+
+def test_select_bindings_rejects_malformed_exact_binding():
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["--binding", "model-a", "--dry-run"]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="MODEL=WORKLOAD"):
+        trtmc_validate._select_bindings(
+            arguments,
+            {"models": {}},
+            (),
+        )
+
+
+def test_model_scoped_resources_are_shared_across_suites_then_deleted_on_pass(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    bindings = [
+        trtmc_validate.Binding("model-a", "suite-a"),
+        trtmc_validate.Binding("model-a", "suite-b"),
+    ]
+    engine_directories = []
+
+    def run_worker(binding, *, arguments, catalog):
+        engine_directories.append(arguments.engine_dir)
+        artifact = arguments.engine_dir / "model-a.bundle"
+        if binding.workload == "suite-b":
+            assert artifact.is_file()
+        artifact.write_text("engine", encoding="utf-8")
+        case_dir = trtmc_validate._case_directory(arguments.output, binding)
+        case_dir.mkdir(parents=True, exist_ok=True)
+        result = {
+            "model": binding.model,
+            "workload": binding.workload,
+            "execution": {"status": "completed"},
+            "validation": {"status": "passed"},
+        }
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result),
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        run_worker,
+    )
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trtmc_validate, "finalize_run_metadata", lambda *args: None)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_report",
+        lambda output: (output / "report.json", output / "report.html", {}),
+    )
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+
+    returncode = trtmc_validate._run_all_bindings(
+        bindings,
+        arguments=arguments,
+        catalog={"sample_limits": {"suite-a": 1, "suite-b": 1}},
+    )
+
+    assert returncode == 0
+    assert engine_directories == [
+        tmp_path / "work" / "model-a" / "engines",
+        tmp_path / "work" / "model-a" / "engines",
+    ]
+    assert not (tmp_path / "work" / "model-a" / "engines").exists()
+    final_result = json.loads(
+        (tmp_path / "results/model-a/suite-b/comparison.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert final_result["resource_cleanup"]["engine"]["status"] == "deleted"
+
+
+def test_model_scoped_failure_retains_engine_and_per_model_hf_cache(tmp_path):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-retention",
+            "delete_on_pass",
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "suite-a")
+    selected, model_work = trtmc_validate._model_binding_arguments(arguments, binding)
+    assert model_work is not None
+    (selected.engine_dir / "model.bundle").write_text("engine", encoding="utf-8")
+    (selected.hf_cache_dir / "blob").write_text("cache", encoding="utf-8")
+
+    cleanup = trtmc_validate._cleanup_model_resources(
+        arguments,
+        model_work,
+        passed=False,
+    )
+
+    assert cleanup["engine"]["status"] == "retained"
+    assert cleanup["hf_cache"]["status"] == "retained"
+    assert (model_work / "engines/model.bundle").is_file()
+    assert (model_work / "hf-cache/blob").is_file()
+
+
+def test_shared_hf_cache_cannot_be_deleted_by_accuracy_runner(tmp_path):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--hf-cache-retention",
+            "delete_always",
+        ]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="shared Hugging Face"):
+        trtmc_validate._prepare_run_directories(arguments)
+
+
 def test_resolve_binding_keeps_unimplemented_model_visible_but_not_runnable():
     catalog = {
         "models": {
