@@ -14,6 +14,9 @@
       "reference_family": "encoder_base_features",
       "user_contract": "representation_parity",
       "reference_precision": "fp32",
+      "task_eval": {
+        "comparison_precision": "fp32"
+      },
       "prompt": "The capital of France is Paris.",
       "max_new_tokens": 1,
       "notes": "Encoder-only model with disentangled attention. Outputs hidden states, not logits.",
