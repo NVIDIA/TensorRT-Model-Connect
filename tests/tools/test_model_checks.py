@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -311,6 +312,9 @@ def test_execution_environment_preserves_command_name_and_resolves_paths(
 
     assert environment["storage"]["root"] == str(storage)
     assert environment["storage"]["results_root"] == str(storage / "results")
+    assert environment["storage"]["python_profiles_root"] == str(
+        storage / "python-profiles"
+    )
     assert environment["tasks"]["accuracy"]["runner_python"] == "python3"
     assert Path(environment["tasks"]["perf"]["suite"]).is_absolute()
 
@@ -321,6 +325,24 @@ def test_runner_executable_preserves_virtual_environment_symlink(tmp_path):
     runner.symlink_to(sys.executable)
 
     assert model_checks._runner_executable(str(runner), "runner") == str(runner)
+
+
+def test_task_environment_uses_shared_profiles_and_allows_missing_profiles(
+    tmp_path,
+    monkeypatch,
+):
+    profiles = tmp_path / "storage/python-profiles"
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", "/opt/trtmc-python-profiles")
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_PREBUILT_ONLY", "1")
+
+    environment = model_checks._task_environment(
+        {"storage": {"python_profiles_root": str(profiles)}}
+    )
+
+    assert environment["TRTMC_PYTHON_PROFILE_ROOT"] == str(profiles)
+    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY" not in environment
+    assert os.environ["TRTMC_PYTHON_PROFILE_ROOT"] == "/opt/trtmc-python-profiles"
+    assert os.environ["TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"] == "1"
 
 
 @pytest.mark.parametrize("platform", ["gb300", "l4t-thor", "auto-thor"])
@@ -409,11 +431,14 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     monkeypatch.setenv("TRTMC_PERF_BUNDLE_CACHE", str(storage / "bundles"))
     monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
     monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_PREBUILT_ONLY", "1")
     returncodes = iter((1, 0))
     commands = []
+    child_environments = []
 
-    def run(command, **_kwargs):
+    def run(command, **kwargs):
         commands.append(command)
+        child_environments.append(kwargs["env"])
         return SimpleNamespace(returncode=next(returncodes))
 
     monkeypatch.setattr(model_checks.subprocess, "run", run)
@@ -432,6 +457,15 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
 
     assert result == 1
     assert len(commands) == 2
+    assert all(
+        environment["TRTMC_PYTHON_PROFILE_ROOT"]
+        == str(storage / "python-profiles")
+        for environment in child_environments
+    )
+    assert all(
+        "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY" not in environment
+        for environment in child_environments
+    )
     output = capsys.readouterr().out
     assert "Run: concise-unit" in output
     assert "Order: Accuracy -> Perf" in output
