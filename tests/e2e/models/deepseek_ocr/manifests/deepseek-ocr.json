@@ -31,6 +31,10 @@
       "reference_backend": "hf_transformers",
       "reference_family": "ocr_markdown",
       "user_contract": "ocr_text",
+      "task_eval": {
+        "reference_precision": "bf16",
+        "allow_reference_precision_mismatch": true
+      },
       "metadata": {
         "contract_config": {
           "use_processor": true,

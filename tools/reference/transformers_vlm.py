@@ -586,8 +586,25 @@ def _load_runtime(
     return processor, model, device
 
 
+def _is_deepseek_ocr_model_id(model_id: str) -> bool:
+    return "deepseek-ocr" in model_id.lower()
+
+
+def _validate_checkpoint_native_dtype(model_id: str, dtype: str) -> None:
+    if _is_deepseek_ocr_model_id(model_id) and dtype not in {
+        "auto",
+        "bfloat16",
+    }:
+        raise ValueError(
+            "DeepSeek-OCR official remote-code reference requires "
+            "checkpoint-native BF16 (`--dtype bfloat16` or `--dtype auto`); "
+            "its checkpoint, image preprocessing, and CUDA autocast path are "
+            "BF16-native"
+        )
+
+
 def _is_deepseek_ocr(model_id: str, model: Any) -> bool:
-    return "deepseek-ocr" in model_id.lower() and hasattr(model, "infer")
+    return _is_deepseek_ocr_model_id(model_id) and hasattr(model, "infer")
 
 
 def _deepseek_prompt(prompt: str) -> str:
@@ -808,6 +825,7 @@ def _vlm_response(
 
 
 def run(arguments: argparse.Namespace) -> None:
+    _validate_checkpoint_native_dtype(arguments.model, arguments.dtype)
     torch, transformers, processor_class = _runtime_dependencies()
     manifest = _load_json(arguments.manifest)
     answers = _load_json(arguments.answers)

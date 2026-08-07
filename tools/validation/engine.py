@@ -11629,7 +11629,7 @@ def eval_one_model(
             "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
             "bundle_valid_prediction_rate": summary["bundle"].get("valid_prediction_rate"),
         }
-        if scorer in {"grounding_iou", "mcq", "asr_transcript"}:
+        if scorer in {"grounding_iou", "mcq", "ocrbench_v2", "asr_transcript"}:
             result.update(
                 prediction_agreement_gate_result(
                     summary,

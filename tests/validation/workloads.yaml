@@ -661,13 +661,18 @@ suites:
       scorer: ocrbench_v2
     build:
       min_max_cache_length: 1024
+    gates:
+      max_accuracy_drop_from_hf: 0.02
+      min_prediction_agreement: 0.95
     ci:
       eligible: false
       lane: local_only
       notes: >
         Intended for manual local validation first. Pass --dataset for
         machine-specific data roots such as
-        /path/to/OCRBench_v2_repaired.
+        /path/to/OCRBench_v2_repaired. The parity gates compare
+        TRTMC with the same-run HF reference; they intentionally avoid an
+        absolute accuracy floor derived from a small validation slice.
 
   - id: librispeech_clean_asr
     description: >
