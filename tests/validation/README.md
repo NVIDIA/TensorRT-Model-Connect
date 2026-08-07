@@ -20,11 +20,45 @@ Run a different workload declared for that model:
 python tools/trtmc_validate.py internvl3-2b vlm_mmmu_pro_vision_mcq
 ```
 
+Select multiple models with the same model-first interface:
+
+```bash
+python tools/trtmc_validate.py \
+  --model gpt2-125m \
+  --model qwen25vl-3b
+```
+
+The default remains one workload per model. Expand every workload declared for
+the selected model only when requested explicitly:
+
+```bash
+python tools/trtmc_validate.py \
+  --model qwen25vl-3b \
+  --all-workloads
+```
+
+Select one or more exact workloads for the selected model set:
+
+```bash
+python tools/trtmc_validate.py \
+  --model qwen25vl-3b \
+  --workload vlm_mmmu_pro_vision_mcq \
+  --workload vlm_mmmu_pro_vision_fixed_mcq
+```
+
+`--model-selection FILE` accepts the owner/family JSON emitted by
+`tools/model_ci.py` and expands it to matching ready model profiles. Every
+resolved `(model profile, workload)` pair is an independent result binding.
+
 Run every single-device model whose catalog status is `ready`:
 
 ```bash
 python tools/trtmc_validate.py --all
 ```
+
+`--all` still selects only each model's default workload. Use
+`--all --all-workloads` only when the intended scope is the complete
+model/workload expansion.
 
 The all-model command supervises one isolated worker process per model. By
 default it records a failed worker and continues with the remaining models.

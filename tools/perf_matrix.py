@@ -61,6 +61,7 @@ from tools.reporting_html import (  # noqa: E402
     sorted_filter_values,
     task_type_label,
 )
+from tools import model_selection  # noqa: E402
 
 
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
@@ -143,6 +144,20 @@ def build_parser() -> argparse.ArgumentParser:
             action="append",
             default=[],
             help="exact matrix entry id; repeatable",
+        )
+        command.add_argument(
+            "--model",
+            action="append",
+            default=[],
+            help="canonical model name; selects every matching entry; repeatable",
+        )
+        command.add_argument(
+            "--model-selection",
+            type=Path,
+            help=(
+                "JSON owner/family selection emitted by tools/model_ci.py; "
+                "selects matching model profiles"
+            ),
         )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
@@ -794,10 +809,51 @@ def _coverage_details(
 def _selected_cases(
     cases: Sequence[dict[str, Any]],
     requested: Sequence[str],
+    *,
+    requested_models: Sequence[str] = (),
+    requested_families: Sequence[str] = (),
+    excluded_profiles: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     requested = [value for value in requested if value]
+    requested_models = list(model_selection.normalize_models(requested_models))
+    requested_families = list(model_selection.normalize_models(requested_families))
+    if sum(bool(value) for value in (requested, requested_models, requested_families)) > 1:
+        raise PerfMatrixError("entry, model, and family selections are mutually exclusive")
     _validate_requested_cases(cases, requested)
-    selected = [case for case in cases if not requested or case["id"] in requested]
+    _validate_requested_models(
+        cases,
+        requested_models,
+        excluded_profiles=excluded_profiles or {},
+    )
+    _validate_requested_families(cases, requested_families)
+    if requested:
+        selected = [case for case in cases if case["id"] in requested]
+        selected.sort(key=lambda case: str(case["id"]))
+        return selected
+    if requested_models:
+        model_order = {model: index for index, model in enumerate(requested_models)}
+        selected = [case for case in cases if str(case["model"]) in model_order]
+        selected.sort(
+            key=lambda case: (
+                model_order[str(case["model"])],
+                str(case["id"]),
+            )
+        )
+        return selected
+    if requested_families:
+        family_order = {
+            family: index for index, family in enumerate(requested_families)
+        }
+        selected = [case for case in cases if str(case["family"]) in family_order]
+        selected.sort(
+            key=lambda case: (
+                family_order[str(case["family"])],
+                str(case["model"]),
+                str(case["id"]),
+            )
+        )
+        return selected
+    selected = list(cases)
     selected.sort(key=lambda case: str(case["id"]))
     return selected
 
@@ -807,6 +863,37 @@ def _validate_requested_cases(cases: Sequence[Mapping[str, Any]], requested: Seq
     unknown = sorted(set(requested) - known)
     if unknown:
         raise PerfMatrixError(f"unknown entry ids: {', '.join(unknown)}")
+
+
+def _validate_requested_models(
+    cases: Sequence[Mapping[str, Any]],
+    requested: Sequence[str],
+    *,
+    excluded_profiles: Mapping[str, str],
+) -> None:
+    known = {str(case["model"]) for case in cases}
+    excluded = sorted(set(requested).intersection(excluded_profiles))
+    if excluded:
+        details = "; ".join(
+            f"{model}: {excluded_profiles[model]}" for model in excluded
+        )
+        raise PerfMatrixError(f"excluded performance models: {details}")
+    unknown = sorted(set(requested) - known)
+    if unknown:
+        raise PerfMatrixError(
+            "models have no performance entries: " + ", ".join(unknown)
+        )
+
+
+def _validate_requested_families(
+    cases: Sequence[Mapping[str, Any]], requested: Sequence[str]
+) -> None:
+    known = {str(case["family"]) for case in cases}
+    unknown = sorted(set(requested) - known)
+    if unknown:
+        raise PerfMatrixError(
+            "model owners have no performance entries: " + ", ".join(unknown)
+        )
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -3045,8 +3132,32 @@ def _load_suite_request(
     suite_path = arguments.suite.resolve()
     suite = _read_yaml(suite_path)
     cases = _cases(suite)
-    _validate_coverage(cases, _excluded_profiles(suite))
-    selected = _selected_cases(cases, arguments.entry)
+    exclusions = _excluded_profiles(suite)
+    _validate_coverage(cases, exclusions)
+    selection_modes = sum(
+        bool(value)
+        for value in (
+            arguments.entry,
+            arguments.model,
+            arguments.model_selection,
+        )
+    )
+    if selection_modes > 1:
+        raise PerfMatrixError(
+            "choose exactly one selection: --entry, --model, or --model-selection"
+        )
+    requested_families = (
+        model_selection.load_model_selection(arguments.model_selection)
+        if arguments.model_selection
+        else ()
+    )
+    selected = _selected_cases(
+        cases,
+        arguments.entry,
+        requested_models=tuple(arguments.model),
+        requested_families=requested_families,
+        excluded_profiles=exclusions,
+    )
     if not selected:
         raise PerfMatrixError("selection contains no entries")
     environment = _read_environment(arguments.environment)

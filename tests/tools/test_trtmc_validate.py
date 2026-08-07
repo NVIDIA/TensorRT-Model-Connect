@@ -234,6 +234,148 @@ def test_resolve_binding_defaults_and_rejects_undeclared_workload():
         trtmc_validate.resolve_binding(catalog, "model-a", "workload-c")
 
 
+def test_resolve_bindings_defaults_to_one_workload_per_model():
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a", "workload-b"],
+            },
+            "model-b": {
+                "default": "workload-c",
+                "workloads": ["workload-c"],
+            },
+        }
+    }
+
+    assert trtmc_validate.resolve_bindings(
+        catalog,
+        ["model-a", "model-b"],
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-a"),
+        trtmc_validate.Binding("model-b", "workload-c"),
+    ]
+
+
+def test_resolve_bindings_expands_every_declared_workload():
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a", "workload-b"],
+            }
+        }
+    }
+
+    assert trtmc_validate.resolve_bindings(
+        catalog,
+        ["model-a"],
+        all_workloads=True,
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-a"),
+        trtmc_validate.Binding("model-a", "workload-b"),
+    ]
+
+
+def test_resolve_bindings_selects_multiple_explicit_workloads():
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a", "workload-b"],
+            }
+        }
+    }
+
+    assert trtmc_validate.resolve_bindings(
+        catalog,
+        ["model-a"],
+        workloads=["workload-b", "workload-a", "workload-b"],
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-b"),
+        trtmc_validate.Binding("model-a", "workload-a"),
+    ]
+
+
+def test_select_bindings_reads_model_ci_selection_and_expands_workloads(tmp_path):
+    selection = tmp_path / "selection.json"
+    selection.write_text(
+        json.dumps({"matrix": {"include": [{"model": "model-a"}]}}),
+        encoding="utf-8",
+    )
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["--model-selection", str(selection), "--all-workloads", "--dry-run"]
+    )
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a", "workload-b"],
+            }
+        }
+    }
+
+    assert trtmc_validate._select_bindings(
+        arguments,
+        catalog,
+        ("model-a",),
+        {"model-a": {"family": "model-a"}},
+    ) == [
+        trtmc_validate.Binding("model-a", "workload-a"),
+        trtmc_validate.Binding("model-a", "workload-b"),
+    ]
+
+
+def test_model_ci_family_selection_expands_ready_accuracy_profiles():
+    assert trtmc_validate.model_profiles_for_families(
+        {
+            "model-a-small": {"family": "family-a"},
+            "model-a-large": {"family": "family-a"},
+            "model-b": {"family": "family-b"},
+        },
+        ("model-a-small", "model-a-large", "model-b"),
+        ("family-a",),
+    ) == ("model-a-large", "model-a-small")
+
+
+def test_select_bindings_rejects_ambiguous_selection_modes():
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["model-a", "--model", "model-b", "--dry-run"]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="choose exactly one"):
+        trtmc_validate._select_bindings(
+            arguments,
+            {"models": {}},
+            (),
+        )
+
+
+def test_select_bindings_requires_one_binding_for_explicit_dataset(tmp_path):
+    dataset = tmp_path / "dataset.json"
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--model",
+            "model-a",
+            "--all-workloads",
+            "--dataset",
+            str(dataset),
+            "--dry-run",
+        ]
+    )
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a", "workload-b"],
+            }
+        }
+    }
+
+    with pytest.raises(trtmc_validate.ValidationError, match="exactly one"):
+        trtmc_validate._select_bindings(arguments, catalog, ("model-a",))
+
+
 def test_resolve_binding_keeps_unimplemented_model_visible_but_not_runnable():
     catalog = {
         "models": {

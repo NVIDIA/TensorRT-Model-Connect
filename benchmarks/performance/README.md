@@ -52,6 +52,21 @@ python3 tools/perf_matrix.py run \
   --entry gpt2.generate
 ```
 
+Run every release entry bound to one or more canonical model names:
+
+```bash
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --model distilgpt2 \
+  --model qwen3-0.6b-fp8
+```
+
+`--model-selection FILE` accepts the owner/family JSON emitted by
+`tools/model_ci.py` and expands every selected owner to its task-owned model
+profiles and release entries. `--entry`, `--model`, and `--model-selection`
+are mutually exclusive.
+
 An additional profile under the same family-operation contract has a
 profile-qualified entry ID:
 
