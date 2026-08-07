@@ -88,5 +88,7 @@ class TestCodeGenBuildEngine:
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.MLP))
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
-        engine = plugin.build_engine(cfg, weights, max_cache_length=32, verbose=False)
+        engine = plugin.build_engine(
+            cfg, weights, max_cache_length=32, precision="fp16", verbose=False
+        )
         assert isinstance(engine, bytes) and len(engine) > 0

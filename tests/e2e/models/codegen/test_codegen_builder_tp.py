@@ -32,6 +32,9 @@ MODEL_TYPE = 'codegen'
 TP_SIZE = 4
 RAW = {'rotary_dim': 2}
 EXPECTED_KWARGS = {'activation': 'gelu_new',
+ 'fp32_lm_head': True,
+ 'fp32_qk_attention': True,
+ 'fp32_rope': True,
  'interleaved_rope': True,
  'mlp_type': 'gelu_fc',
  'norm_type': 'layernorm',
@@ -98,6 +101,35 @@ def test_codegen_plugin_routes_tp_build(monkeypatch) -> None:
     assert kwargs["parallel_config"] == parallel
     for key, expected in EXPECTED_KWARGS.items():
         assert kwargs[key] == expected
+
+
+def test_codegen_plugin_routes_accuracy_precision_boundaries(monkeypatch) -> None:
+    plugin_mod = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+    captured: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        captured["kwargs"] = kwargs
+        return b"single-device-plan"
+
+    monkeypatch.setattr(
+        plugin_mod,
+        "build_standard_decoder_engine",
+        fake_build,
+    )
+
+    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+        _config(MODEL_TYPE, 1, RAW),
+        WeightDict(),
+        max_cache_length=17,
+        precision="fp16",
+    )
+
+    assert plan == b"single-device-plan"
+    kwargs = captured["kwargs"]
+    assert kwargs["fp32_rope"] is True
+    assert kwargs["fp32_qk_attention"] is True
+    assert kwargs["fp32_lm_head"] is True
 
 
 def test_codegen_plugin_rejects_quantized_tp(monkeypatch) -> None:

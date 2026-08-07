@@ -631,6 +631,17 @@ def test_default_suites_include_text_generation_gap_models() -> None:
         assert suite["default_model_names"] == model_names
         assert suite["gates"] == {}
 
+    codegen = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "codegen-350m"
+    )
+    humaneval = task_eval.suite_by_id(
+        suites, "humaneval_code_continuation_parity"
+    )
+    resolved_codegen = task_eval.resolve_suite_for_model(humaneval, codegen)
+    assert resolved_codegen["gates"] == {"min_exact_match_rate": 1.0}
+
     for suite_id in (
         "newstest2019_en_ru_marian_translation_parity",
         "wmt14_en_de_t5_translation_parity",
@@ -3136,6 +3147,99 @@ def test_continuation_suite_accepts_one_divergent_sample_in_ten() -> None:
 
     assert result["exact_match_rate"] == 0.9
     assert result["token_prefix_agreement"] == 0.9
+    assert result["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("divergences", "exact_match_rate", "token_prefix_agreement"),
+    [
+        ({6: 7, 7: 9}, 0.8, 0.825),
+        ({7: 9}, 0.9, 0.9140625),
+    ],
+)
+def test_codegen_humaneval_gate_rejects_qa_accuracy_replays(
+    divergences: dict[int, int],
+    exact_match_rate: float,
+    token_prefix_agreement: float,
+) -> None:
+    hf = {
+        "responses": [
+            {
+                "sample_id": f"HumanEval/{index}",
+                "output_text": "reference",
+                "generated_token_ids": list(range(64)),
+            }
+            for index in range(10)
+        ]
+    }
+    trtfb = json.loads(json.dumps(hf))
+    for sample_index, divergence_index in divergences.items():
+        response = trtfb["responses"][sample_index]
+        response["output_text"] = "divergent"
+        response["generated_token_ids"][divergence_index:] = [
+            1000 + sample_index
+        ] * (64 - divergence_index)
+
+    summary = task_eval.compare_continuation_sets(
+        hf, trtfb, require_token_ids=True
+    )
+    result = {
+        "exact_match_rate": summary["exact_match_rate"],
+        "token_prefix_agreement": summary["token_prefix_agreement"],
+    }
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "humaneval_code_continuation_parity"
+    )
+    codegen = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "codegen-350m"
+    )
+    suite = task_eval.resolve_suite_for_model(suite, codegen)
+
+    task_eval.apply_metric_gates(result, suite["gates"])
+
+    assert result["exact_match_rate"] == exact_match_rate
+    assert result["token_prefix_agreement"] == token_prefix_agreement
+    assert result["status"] == "failed"
+    assert result["gate_failures"] == [
+        {
+            "gate": "min_exact_match_rate",
+            "metric": "exact_match_rate",
+            "actual": exact_match_rate,
+            "required": 1.0,
+        }
+    ]
+
+
+def test_codegen_humaneval_gate_accepts_exact_replay() -> None:
+    predictions = {
+        "responses": [
+            {
+                "sample_id": f"HumanEval/{index}",
+                "output_text": "reference",
+                "generated_token_ids": list(range(64)),
+            }
+            for index in range(10)
+        ]
+    }
+    summary = task_eval.compare_continuation_sets(
+        predictions, predictions, require_token_ids=True
+    )
+    result = {"exact_match_rate": summary["exact_match_rate"]}
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "humaneval_code_continuation_parity"
+    )
+    codegen = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "codegen-350m"
+    )
+    suite = task_eval.resolve_suite_for_model(suite, codegen)
+
+    task_eval.apply_metric_gates(result, suite["gates"])
+
+    assert result["exact_match_rate"] == 1.0
     assert result["status"] == "passed"
 
 

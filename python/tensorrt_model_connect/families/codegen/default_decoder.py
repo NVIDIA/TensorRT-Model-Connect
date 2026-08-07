@@ -65,6 +65,9 @@ def build_standard_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    fp32_rope: bool = False,
+    fp32_qk_attention: bool = False,
+    fp32_lm_head: bool = False,
     embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
@@ -89,6 +92,10 @@ def build_standard_decoder_engine(
             rotated-half (LLaMA/Qwen) where (d, d+half) share frequencies.
         scale_attn_weights: Whether to scale attention scores by 1/sqrt(head_dim).
             Most models use this (True, default). GPT-Neo does NOT scale (False).
+        fp32_rope: Evaluate RoPE in FP32 and keep its query output in FP32.
+        fp32_qk_attention: Evaluate Q/K scores and softmax in FP32 while
+            retaining the value/probability output dtype.
+        fp32_lm_head: Evaluate the final vocabulary projection in FP32.
         embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
             engine inputs. When use_input_embed==1, the decoder uses input_embed
             directly instead of the embedding lookup. Used for VL models where
@@ -147,6 +154,9 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
+            fp32_rope=fp32_rope,
+            fp32_qk_attention=fp32_qk_attention,
+            fp32_lm_head=fp32_lm_head,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
@@ -303,12 +313,14 @@ def build_standard_decoder_engine(
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False,
             partial_rotary_factor, interleaved=interleaved_rope)
+        rope_np_dtype = np.float32 if fp32_rope else work_np_dtype
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
-        cos_half_tensor = _cast_work_dtype(cos_half_tensor)
+            network, cos_half_np.shape, cos_half_np, dtype=rope_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
-        sin_half_tensor = _cast_work_dtype(sin_half_tensor)
+            network, sin_half_np.shape, sin_half_np, dtype=rope_np_dtype)
+        if not fp32_rope:
+            cos_half_tensor = _cast_work_dtype(cos_half_tensor)
+            sin_half_tensor = _cast_work_dtype(sin_half_tensor)
     elif position_type == "learned":
         pos_embed_np = weights["position_embedding"]
         position_embed_table = graph_ops.add_constant(
@@ -444,6 +456,8 @@ def build_standard_decoder_engine(
             sin_half_tensor=sin_half_tensor,
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
+            fp32_rope=fp32_rope,
+            fp32_qk_attention=fp32_qk_attention,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
         )
@@ -478,21 +492,24 @@ def build_standard_decoder_engine(
     # Output vocab may differ from input vocab (e.g. Bark semantic: 129600 in, 10048 out).
     # Derive from w_out shape if available.
     out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
+    lm_head_dtype = np.float32 if fp32_lm_head else work_np_dtype
+    if fp32_lm_head and hidden_state.dtype != trt.float32:
+        hidden_state = network.add_cast(hidden_state, trt.float32).get_output(0)
     logits = graph_ops.add_matmul_rhs_constant(
         network, hidden_state, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+        dtype=lm_head_dtype)
     # LM head bias (if present, e.g. CodeGen) or zero bias for C++ parity
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias,
-                                        dtype=work_np_dtype)
+                                        dtype=lm_head_dtype)
     else:
-        b_out = np.zeros(out_vocab, dtype=work_np_dtype)
+        b_out = np.zeros(out_vocab, dtype=lm_head_dtype)
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out,
-                                        dtype=work_np_dtype)
+                                        dtype=lm_head_dtype)
 
     # Logits output: always FP32 for accurate argmax/sampling
-    if work_trt_dtype != trt.float32:
+    if logits.dtype != trt.float32:
         logits_cast = network.add_cast(logits, trt.float32)
         logits = logits_cast.get_output(0)
     logits.name = "logits"
@@ -576,6 +593,8 @@ def _add_decoder_layer(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    fp32_rope: bool = False,
+    fp32_qk_attention: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
     eps: float | None = None,
@@ -602,6 +621,8 @@ def _add_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        fp32_rope=fp32_rope,
+        fp32_qk_accumulation=fp32_qk_attention,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
     )

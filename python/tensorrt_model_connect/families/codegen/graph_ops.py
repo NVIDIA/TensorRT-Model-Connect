@@ -820,6 +820,58 @@ def _repeat_kv_heads_4d(
     return concat.get_output(0)
 
 
+def _add_attention_core_fp32_qk(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    mask: trt.ITensor | None,
+    scale: float,
+) -> trt.ITensor:
+    """Match CodeGen's FP32 Q/K and FP16/BF16 probability-value boundary."""
+    output_dtype = v_4d.dtype
+    k_4d = _repeat_kv_heads_4d(
+        network, k_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
+    v_4d = _repeat_kv_heads_4d(
+        network, v_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
+
+    if q_4d.dtype != trt.float32:
+        q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
+    if k_4d.dtype != trt.float32:
+        k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
+    if mask is not None and mask.dtype != trt.float32:
+        mask = network.add_cast(mask, trt.float32).get_output(0)
+
+    scores = network.add_matrix_multiply(
+        q_4d, trt.MatrixOperation.NONE,
+        k_4d, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    if mask is not None:
+        scores = network.add_elementwise(
+            scores, mask, trt.ElementWiseOperation.SUM).get_output(0)
+
+    scale_t = _scalar_constant_for_trt_dtype(
+        network, (1, 1, 1, 1), scale, trt.float32)
+    scores = network.add_elementwise(
+        scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << 3
+    probs_t = probs.get_output(0)
+    if probs_t.dtype != output_dtype:
+        probs_t = network.add_cast(probs_t, output_dtype).get_output(0)
+
+    context = network.add_matrix_multiply(
+        probs_t, trt.MatrixOperation.NONE,
+        v_4d, trt.MatrixOperation.NONE).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
 def _add_attention_core_with_logit_softcap(
     network: trt.INetworkDefinition,
     q_4d: trt.ITensor,
@@ -893,6 +945,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    fp32_qk_accumulation: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -922,6 +975,14 @@ def add_attention_from_rows(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
             mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+    elif fp32_qk_accumulation:
+        if causal:
+            raise NotImplementedError(
+                "FP32 Q/K attention requires an explicit additive mask")
+        ctx_4d = _add_attention_core_fp32_qk(
+            network, q_4d, k_4d, v_4d,
+            num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
+            mask=mask, scale=scale)
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,

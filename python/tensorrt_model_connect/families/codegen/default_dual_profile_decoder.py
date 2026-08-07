@@ -161,6 +161,9 @@ def build_dual_profile_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    fp32_rope: bool = False,
+    fp32_qk_attention: bool = False,
+    fp32_lm_head: bool = False,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     profile_mode: str = "dual_profile",
@@ -356,12 +359,18 @@ def build_dual_profile_decoder_engine(
         sin_half_np = graph_ops.make_rope_table_half_dim(
             kmax, head_dim, config.rope_theta, False,
             partial_rotary_factor, interleaved=interleaved_rope)
-        cos_half_table = _const_in_work_dtype(
-            network, cos_half_np.shape, cos_half_np,
-            work_np_dtype, work_trt_dtype)
-        sin_half_table = _const_in_work_dtype(
-            network, sin_half_np.shape, sin_half_np,
-            work_np_dtype, work_trt_dtype)
+        if fp32_rope:
+            cos_half_table = graph_ops.add_constant(
+                network, cos_half_np.shape, cos_half_np, dtype=np.float32)
+            sin_half_table = graph_ops.add_constant(
+                network, sin_half_np.shape, sin_half_np, dtype=np.float32)
+        else:
+            cos_half_table = _const_in_work_dtype(
+                network, cos_half_np.shape, cos_half_np,
+                work_np_dtype, work_trt_dtype)
+            sin_half_table = _const_in_work_dtype(
+                network, sin_half_np.shape, sin_half_np,
+                work_np_dtype, work_trt_dtype)
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
     position_embed_table: trt.ITensor | None = None
@@ -492,6 +501,12 @@ def build_dual_profile_decoder_engine(
         # Position embedding (RoPE only; learned was applied above and ALiBi
         # is added into the attention mask).
         if position_type == "rope":
+            key_output_dtype = k.dtype
+            if fp32_rope:
+                if q.dtype != trt.float32:
+                    q = network.add_cast(q, trt.float32).get_output(0)
+                if k.dtype != trt.float32:
+                    k = network.add_cast(k, trt.float32).get_output(0)
             q = graph_ops.add_apply_rope_native(
                 network, q, num_heads, head_dim,
                 cos_half_table, sin_half_table, position_id,
@@ -502,6 +517,8 @@ def build_dual_profile_decoder_engine(
                 cos_half_table, sin_half_table, position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
+            if fp32_rope and k.dtype != key_output_dtype:
+                k = network.add_cast(k, key_output_dtype).get_output(0)
 
         # Present K / V (this step's raw K / V), shape (Sq, attn_size).
         present_k_outs.append(k)
@@ -518,7 +535,9 @@ def build_dual_profile_decoder_engine(
             num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
             q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
-            scale=attn_scale, tag=f"{prefix}.attn")
+            scale=attn_scale,
+            fp32_qk_accumulation=fp32_qk_attention,
+            tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")
@@ -600,19 +619,22 @@ def build_dual_profile_decoder_engine(
 
     out_vocab = (weights["w_out"].shape[1]
                  if isinstance(weights["w_out"], np.ndarray) else vocab)
+    lm_head_dtype = np.float32 if fp32_lm_head else work_np_dtype
+    if fp32_lm_head and last_hidden.dtype != trt.float32:
+        last_hidden = network.add_cast(last_hidden, trt.float32).get_output(0)
     logits = graph_ops.add_matmul_rhs_constant(
         network, last_hidden, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+        dtype=lm_head_dtype)
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, lm_bias, dtype=work_np_dtype)
+            network, logits, out_vocab, lm_bias, dtype=lm_head_dtype)
     else:
-        zero_bias = np.zeros(out_vocab, dtype=work_np_dtype)
+        zero_bias = np.zeros(out_vocab, dtype=lm_head_dtype)
         logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, zero_bias, dtype=work_np_dtype)
+            network, logits, out_vocab, zero_bias, dtype=lm_head_dtype)
 
-    if work_trt_dtype != trt.float32:
+    if logits.dtype != trt.float32:
         logits = network.add_cast(logits, trt.float32).get_output(0)
     logits.name = "logits"
     network.mark_output(logits)

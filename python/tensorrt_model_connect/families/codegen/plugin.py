@@ -177,6 +177,9 @@ class CodeGenPlugin:
                 partial_rotary_factor=partial_rotary_factor,
                 interleaved_rope=True,
                 parallel_residual=True,
+                fp32_rope=True,
+                fp32_qk_attention=True,
+                fp32_lm_head=True,
                 verbose=verbose,
                 parallel_config=parallel)
 
@@ -190,6 +193,12 @@ class CodeGenPlugin:
             partial_rotary_factor=partial_rotary_factor,
             interleaved_rope=True,
             parallel_residual=True,
+            # Transformers keeps CodeGen's RoPE query and Q/K score path in
+            # FP32. Keep the LM head in FP32 as well so close logits do not
+            # collapse into an FP16 tie before greedy selection.
+            fp32_rope=True,
+            fp32_qk_attention=True,
+            fp32_lm_head=True,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
 

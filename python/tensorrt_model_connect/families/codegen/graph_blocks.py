@@ -146,6 +146,8 @@ def add_attention_block(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    fp32_rope: bool = False,
+    fp32_qk_accumulation: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
 ) -> dict[str, trt.ITensor]:
@@ -219,6 +221,12 @@ def add_attention_block(
                 "TRT native IRotaryEmbeddingLayer")
         rope_dim = rotary_embedding_dim or head_dim
         rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
+        key_output_dtype = k.dtype
+        if fp32_rope:
+            if q.dtype != trt.float32:
+                q = network.add_cast(q, trt.float32).get_output(0)
+            if k.dtype != trt.float32:
+                k = network.add_cast(k, trt.float32).get_output(0)
         q = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
@@ -227,6 +235,8 @@ def add_attention_block(
             network, k, num_kv_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
             rope_dim, interleaved_rope)
+        if fp32_rope and k.dtype != key_output_dtype:
+            k = network.add_cast(k, key_output_dtype).get_output(0)
 
     # Save present K/V (before concatenation, this is the raw projection output)
     present_k = k
@@ -280,6 +290,7 @@ def add_attention_block(
             causal=False,
             mask=mask_4d,
             scale=attention_scale,
+            fp32_qk_accumulation=fp32_qk_accumulation,
         )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:

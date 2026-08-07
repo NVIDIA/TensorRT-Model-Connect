@@ -229,6 +229,13 @@ suites:
       do_sample: false
     scoring:
       scorer: continuation
+    model_profiles:
+      codegen-350m:
+        gates:
+          # CodeGen greedy continuations are deterministic. Any token
+          # divergence is an accuracy regression, including the 1/10 failure
+          # that the original diagnostic-only suite silently accepted.
+          min_exact_match_rate: 1.0
     model_overrides:
       by_model:
         codegen-350m:
