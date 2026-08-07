@@ -31,7 +31,7 @@ def test_qwen_vl_rejects_observed_point_eight_prediction_agreement() -> None:
 
     observed_summary = {
         "hf": {"overall_accuracy": 0.0},
-        "trtfb": {"overall_accuracy": 0.0},
+        "bundle": {"overall_accuracy": 0.0},
         "prediction_agreement_rate": 0.8,
         "correctness_agreement_rate": 1.0,
     }
