@@ -77,7 +77,9 @@ def test_olmo2_reference_resolves_the_pinned_checkpoint(monkeypatch, tmp_path):
     fake_huggingface_hub.snapshot_download = fake_snapshot_download
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_huggingface_hub)
 
-    resolved = hf_transformers._resolve_cached_model_ref("allenai/OLMo-2-0425-1B", _HF_REVISION)
+    resolved = hf_transformers._resolve_olmo2_cached_model_ref(
+        "allenai/OLMo-2-0425-1B", _HF_REVISION
+    )
 
     assert resolved == str(tmp_path)
     assert captured == {

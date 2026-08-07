@@ -116,8 +116,8 @@ def _decode_vl_generated_text(
     return ""
 
 
-def _resolve_cached_model_ref(hf_id: str, revision: str = "") -> str:
-    """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
+def _resolve_olmo2_cached_model_ref(hf_id: str, revision: str = "") -> str:
+    """Resolve the pinned OLMo2 snapshot without a network fallback."""
     if not hf_id:
         return hf_id
     p = Path(hf_id)
@@ -331,7 +331,7 @@ class HfTransformersReference:
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
+        model_ref = _resolve_olmo2_cached_model_ref(hf_id, case.hf_revision)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
@@ -506,7 +506,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "Hello world")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_olmo2_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -588,7 +588,7 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "What is machine learning?")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_olmo2_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -740,7 +740,7 @@ class HfTransformersReference:
             documents = [document] if document else []
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_olmo2_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -895,7 +895,7 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_olmo2_cached_model_ref(hf_id)
         fallback_text = prompt
         torch_dtype_expr = _torch_dtype_for_case(case)
 
