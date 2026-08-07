@@ -103,6 +103,7 @@ class GpuLease:
         self.gpu_id: int | None = None
         self.slot_ids: list[int] = []
         self.gpu_memory_admission: dict[str, object] | None = None
+        self.hold_ticket_while_capacity_drains = False
         self.last_observed_free_mib: dict[int, int] = {}
         self.last_observed_total_mib: dict[int, int] = {}
         self.gpu_numa_nodes: dict[str, int] = {}
@@ -147,10 +148,12 @@ class GpuLease:
                         return self
                 elif self.min_free_gpu_memory_mib:
                     if self._reserve_capacity_candidate(deadline, exclude=capacity_rejected):
+                        if not self.hold_ticket_while_capacity_drains:
+                            self._release_ticket()
+                        self._drain_reserved_gpu(deadline, exclude=capacity_rejected)
+                        self._release_ticket()
                         candidate_gpu = self.gpu_id
                         assert candidate_gpu is not None
-                        self._release_ticket()
-                        self._drain_reserved_gpu(deadline)
                         if prepare_candidate:
                             prepare_candidate()
                         candidates_remaining = len(self.gpu_ids) - len(capacity_rejected)
@@ -223,6 +226,7 @@ class GpuLease:
             self.reservation = None
         self.gpu_id = None
         self.gpu_memory_admission = None
+        self.hold_ticket_while_capacity_drains = False
 
     def evidence(self, revision: str) -> dict[str, object]:
         if self.gpu_id is None or not self.slot_ids:
@@ -424,15 +428,20 @@ class GpuLease:
         """Reserve the least-busy eligible GPU before waiting for it to drain."""
         allocator = self._allocator(deadline)
         try:
+            self.hold_ticket_while_capacity_drains = False
             best_gpu: int | None = None
             best_available_slots = -1
+            eligible_gpus = 0
+            reservable_gpus = 0
             for gpu in self.gpu_ids:
                 if gpu in exclude:
                     continue
+                eligible_gpus += 1
                 reservation = FileLock(self.lock_dir / f"gpu-{gpu}-reservation.lock")
                 if not reservation.try_lock():
                     reservation.handle.close()
                     continue
+                reservable_gpus += 1
                 available_slots = 0
                 for slot in range(self.slots_per_gpu):
                     candidate = FileLock(self.lock_dir / f"gpu-{gpu}-slot-{slot}.lock")
@@ -454,26 +463,102 @@ class GpuLease:
                 reservation.handle.close()
                 return False
             self.gpu_id, self.reservation = best_gpu, reservation
+            self.hold_ticket_while_capacity_drains = (
+                eligible_gpus > 1 and reservable_gpus == 1
+            )
             print(
                 f"Reserved GPU {best_gpu} for capacity-gated exclusive admission "
                 f"with {best_available_slots}/{self.slots_per_gpu} slots already idle"
             )
+            if self.hold_ticket_while_capacity_drains:
+                print(
+                    "Retaining GPU admission queue priority while reserved alternate GPUs "
+                    "drain"
+                )
             return True
         finally:
             allocator.close()
 
-    def _drain_reserved_gpu(self, deadline: float) -> None:
+    def _drain_reserved_gpu(
+        self,
+        deadline: float,
+        *,
+        exclude: set[int] | None = None,
+    ) -> None:
         assert self.gpu_id is not None
-        for slot in range(self.slots_per_gpu):
-            candidate = FileLock(self.lock_dir / f"gpu-{self.gpu_id}-slot-{slot}.lock")
-            if not self._wait_lock(candidate, deadline):
+        rejected = exclude or set()
+        while time.monotonic() < deadline:
+            allocator = self._allocator(deadline)
+            try:
+                held_slots = set(self.slot_ids)
+                for slot in range(self.slots_per_gpu):
+                    if slot in held_slots:
+                        continue
+                    candidate = FileLock(self.lock_dir / f"gpu-{self.gpu_id}-slot-{slot}.lock")
+                    if candidate.try_lock():
+                        self.slots.append(candidate)
+                        self.slot_ids.append(slot)
+                    else:
+                        candidate.handle.close()
+                if len(self.slots) == self.slots_per_gpu:
+                    self._order_slots()
+                    return
+                if self.min_free_gpu_memory_mib and self._switch_to_idle_candidate(
+                    exclude=rejected
+                ):
+                    return
+            finally:
+                allocator.close()
+            time.sleep(min(self.poll_interval, max(0.0, deadline - time.monotonic())))
+        raise CiError(
+            f"timed out after {self.timeout}s waiting for an exclusive_gpu "
+            f"model-proof GPU lease from: {self.gpu_id}"
+        )
+
+    def _switch_to_idle_candidate(self, *, exclude: set[int]) -> bool:
+        """Atomically move a draining capacity lease to an idle configured GPU."""
+        assert self.gpu_id is not None and self.reservation is not None
+        current_gpu = self.gpu_id
+        for gpu in self.gpu_ids:
+            if gpu == current_gpu or gpu in exclude:
+                continue
+            reservation = FileLock(self.lock_dir / f"gpu-{gpu}-reservation.lock")
+            if not reservation.try_lock():
+                reservation.handle.close()
+                continue
+            slots: list[FileLock] = []
+            for slot in range(self.slots_per_gpu):
+                candidate = FileLock(self.lock_dir / f"gpu-{gpu}-slot-{slot}.lock")
+                if not candidate.try_lock():
+                    candidate.handle.close()
+                    break
+                slots.append(candidate)
+            if len(slots) != self.slots_per_gpu:
+                for candidate in slots:
+                    candidate.close()
+                reservation.close()
+                continue
+
+            previous_slots = self.slots
+            previous_reservation = self.reservation
+            self.gpu_id = gpu
+            self.reservation = reservation
+            self.slots = slots
+            self.slot_ids = list(range(self.slots_per_gpu))
+            for candidate in previous_slots:
                 candidate.close()
-                raise CiError(
-                    f"timed out after {self.timeout}s waiting for an exclusive_gpu "
-                    f"model-proof GPU lease from: {self.gpu_id}"
-                )
-            self.slots.append(candidate)
-            self.slot_ids.append(slot)
+            previous_reservation.close()
+            print(
+                f"Switched capacity-gated exclusive admission from draining GPU "
+                f"{current_gpu} to idle GPU {gpu}"
+            )
+            return True
+        return False
+
+    def _order_slots(self) -> None:
+        ordered = sorted(zip(self.slot_ids, self.slots, strict=True))
+        self.slot_ids = [slot for slot, _ in ordered]
+        self.slots = [lock for _, lock in ordered]
 
     def _candidate_has_capacity(
         self,
