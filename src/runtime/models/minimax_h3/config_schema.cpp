@@ -26,7 +26,7 @@ Schema make_minimax_h3_schema() {
     return Schema{
         "minimax_h3",
         {
-            ConfigField{"first_block_cache_threshold", "double", std::any{0.08}, session,
+            ConfigField{"first_block_cache_threshold", "double", std::any{0.025}, session,
                         is_positive_finite_double},
         },
     };

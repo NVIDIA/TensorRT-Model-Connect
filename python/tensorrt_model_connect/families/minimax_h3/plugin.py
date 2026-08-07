@@ -87,7 +87,7 @@ def _fixed_profile(raw: dict):
 
 
 def _first_block_cache_threshold(raw: dict) -> float:
-    value = raw.get("first_block_cache_threshold", 0.08)
+    value = raw.get("first_block_cache_threshold", 0.025)
     if isinstance(value, bool):
         raise ValueError("MiniMax-H3 first_block_cache_threshold must be finite and positive")
     try:

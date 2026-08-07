@@ -28,7 +28,7 @@ using SectionMap = std::unordered_map<std::string, BundleSectionInfo>;
 
 struct CacheConfig {
     bool enabled{false};
-    float threshold{0.08F};
+    float threshold{0.025F};
 };
 
 SectionMap index_sections(const BundleInfo& info, bool first_block_cache) {

@@ -136,7 +136,7 @@ def main() -> int:
         },
         "first_block_cache": profile.first_block_cache,
         "denoiser_cache_mode": "first_block" if profile.first_block_cache else "monolithic",
-        "first_block_cache_threshold": 0.08,
+        "first_block_cache_threshold": 0.025,
         "height": 768,
         "width": 1344,
         "num_frames": 124,

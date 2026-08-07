@@ -52,7 +52,7 @@ int main() {
     const ConfigBundle defaults = ConfigBundle::build({}, schemas);
     check(defaults.source_of("minimax_h3", "first_block_cache_threshold") == Layer::SchemaDefault,
           "cache threshold default retains SchemaDefault provenance");
-    check(std::abs(defaults.get<double>("minimax_h3", "first_block_cache_threshold") - 0.08) <
+    check(std::abs(defaults.get<double>("minimax_h3", "first_block_cache_threshold") - 0.025) <
               1.0e-12,
           "cache threshold schema default");
 

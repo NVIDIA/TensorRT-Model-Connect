@@ -34,7 +34,7 @@ class MiniMaxH3Pipeline final : public IPipeline {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
                       std::string model_id, bool first_block_cache = false,
-                      float cache_threshold = 0.08F);
+                      float cache_threshold = 0.025F);
     ~MiniMaxH3Pipeline() override;
 
     bool supports_image_generation() const override { return true; }
@@ -52,7 +52,7 @@ class MiniMaxH3Pipeline final : public IPipeline {
     std::mutex generation_mutex_;
     std::unique_ptr<ResidentState> resident_;
     bool first_block_cache_{false};
-    float cache_threshold_{0.08F};
+    float cache_threshold_{0.025F};
 };
 
 } // namespace trtmc

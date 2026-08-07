@@ -259,5 +259,5 @@ def test_diffusion_family_build_options_reach_plugin(monkeypatch, tmp_path):
 
     assert plugin.calls[0]["family_build_options"]["minimax_h3"] == {
         "first_block_cache": True,
-        "first_block_cache_threshold": 0.08,
+        "first_block_cache_threshold": 0.025,
     }

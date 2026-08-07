@@ -149,5 +149,5 @@ def test_packer_preserves_validated_workspace_mapping(
     assert captured["workspace_limit_bytes"] == workspace_limits
     assert captured["first_block_cache"] is first_block_cache
     assert captured["denoiser_cache_mode"] == ("first_block" if first_block_cache else "monolithic")
-    assert captured["first_block_cache_threshold"] == 0.08
+    assert captured["first_block_cache_threshold"] == 0.025
     capsys.readouterr()

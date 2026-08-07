@@ -143,7 +143,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
     assert result["workspace_limit_bytes"] == DEFAULT_WORKSPACE_LIMIT_BYTES
     assert result["first_block_cache"] is False
     assert result["denoiser_cache_mode"] == "monolithic"
-    assert result["first_block_cache_threshold"] == 0.08
+    assert result["first_block_cache_threshold"] == 0.025
     assert result["bundle_loading"] == {
         "mode": "staged",
         "eager_sections": ["tokenizer.json", "config.json"],
