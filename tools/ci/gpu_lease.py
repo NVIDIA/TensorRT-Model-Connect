@@ -509,7 +509,13 @@ class GpuLease:
                     return
             finally:
                 allocator.close()
-            time.sleep(min(self.poll_interval, max(0.0, deadline - time.monotonic())))
+            time.sleep(
+                min(
+                    0.05,
+                    self.poll_interval,
+                    max(0.0, deadline - time.monotonic()),
+                )
+            )
         raise CiError(
             f"timed out after {self.timeout}s waiting for an exclusive_gpu "
             f"model-proof GPU lease from: {self.gpu_id}"
