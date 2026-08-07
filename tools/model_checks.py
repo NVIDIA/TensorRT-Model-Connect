@@ -201,7 +201,7 @@ def audit_platform_unsupported(
                 raise ModelCheckError(
                     f"platform unsupported[{index}] names unknown Accuracy model {model}"
                 )
-            if binding and binding not in spec.get("workloads", []):
+            if binding and binding not in trtmc_validate.declared_workloads(spec):
                 raise ModelCheckError(
                     f"platform unsupported[{index}] names unknown Accuracy binding "
                     f"{model}={binding}"

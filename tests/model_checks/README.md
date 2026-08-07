@@ -17,7 +17,7 @@ python tools/model_checks.py check \
   --model qwen25vl-3b
 ```
 
-Run every Accuracy suite configured for one model:
+Run every full-matrix Accuracy suite configured for one model:
 
 ```bash
 python tools/model_checks.py check \
@@ -48,7 +48,8 @@ python tools/model_checks.py check \
 ```
 
 `--accuracy-suite` is repeatable when the same selected suite set is valid for
-every selected model. `--accuracy-binding` is the exact per-model form.
+every selected model. `--accuracy-binding` is the exact per-model form and can
+select an explicit-only `diagnostic_workloads` binding.
 
 ## Run
 
@@ -126,7 +127,8 @@ runner launch when the storage root is on another filesystem.
   the suite ID is part of the Accuracy engine-isolation boundary.
 - Add that suite to the model profile's `workloads` in
   `tests/validation/model_workloads.yaml`; set `default` only when the default
-  should change.
+  should change. Put a suite in `diagnostic_workloads` instead when it must
+  remain explicitly runnable but stay out of full-matrix expansion.
 - Add the model's task metadata under `tests/e2e/models/` when it is a new
   ready model profile.
 - Add its independent Perf entry to

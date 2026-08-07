@@ -168,7 +168,8 @@ models:
     workloads: [mmlu_five_shot_mcq]
   internvl3-8b:
     default: vlm_mmmu_pro_vision_fixed_mcq
-    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
+    workloads: [vlm_mmmu_pro_vision_fixed_mcq]
+    diagnostic_workloads: [vlm_mmmu_pro_vision_mcq]
   lance-3b-x2t-image:
     default: mmmu_pro_vision_square_plugin_parity
     workloads: [mmmu_pro_vision_square_plugin_parity]
@@ -281,7 +282,8 @@ models:
     workloads: [gedit_bench_image_edit]
   qwen25vl-3b:
     default: vlm_mmmu_pro_vision_fixed_mcq
-    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
+    workloads: [vlm_mmmu_pro_vision_fixed_mcq]
+    diagnostic_workloads: [vlm_mmmu_pro_vision_mcq]
   qwen3-0.6b-fp16:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
@@ -305,7 +307,8 @@ models:
     workloads: [seedtts_en_omni_audio_parity]
   qwen3-vl-2b:
     default: vlm_mmmu_pro_vision_fixed_mcq
-    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
+    workloads: [vlm_mmmu_pro_vision_fixed_mcq]
+    diagnostic_workloads: [vlm_mmmu_pro_vision_mcq]
   qwen35-9b:
     default: mmlu_five_shot_mcq
     workloads: [mmlu_five_shot_mcq]
