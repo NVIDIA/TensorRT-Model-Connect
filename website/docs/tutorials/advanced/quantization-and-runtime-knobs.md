@@ -6,6 +6,13 @@ import Diagram from '@site/src/components/Diagram';
 
 This tutorial covers build-time precision, post-training quantization, runtime cache sizing, and backend selection.
 
+## Learning objectives
+
+By the end of this lab, you should be able to place a knob at build, load, or
+request time; distinguish precision from quantization; and verify whether two
+bundles use the same native or platform-specialized execution path before
+comparing them.
+
 Select the CLI before running an example:
 
 ```bash
@@ -215,5 +222,26 @@ When reporting a result, always include:
 | Load | Native backend DSO/search path or optimized implementation path, runtime cache path, CUDA graph policy, and config overrides. |
 | Request | Prompt/input shape, max tokens or steps, sampling settings, image/video dimensions, audio sample rate, forecast horizon. |
 | Hardware | GPU model, driver, CUDA, TensorRT runtime, container or host environment. |
+
+## Self-check
+
+1. Why does parser acceptance of `--quantize fp8` not prove model support?
+2. When is `--runtime-cache` a file, and when can it be a materialization root?
+3. What must you inspect before treating an A/B timing result as a backend or
+   quantization comparison?
+
+<details>
+<summary>Check your answers</summary>
+
+1. The selected family must apply the format to the intended graph regions and
+   pass task parity/quality and performance gates; a generic parser cannot
+   prove that.
+2. Native TensorRT-RTX uses it as a JIT cache file. An optimized runtime can use
+   it as the root for integrity-bound provider artifacts.
+3. Confirm model/revision/config, bundle kind, native strategy or optimized
+   provider/profile, section layout, runtime dependencies, input, timing
+   boundary, and quality gate are comparable.
+
+</details>
 
 {/* Collaborative review anchor. */}

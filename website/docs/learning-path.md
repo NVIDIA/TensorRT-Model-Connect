@@ -1,14 +1,33 @@
 ---
-title: Learning Path
-description: A course-style path for learning TensorRT-Model-Connect from inference fundamentals to extension work.
+title: Tutorial Curriculum
+description: A course-style path with progressive modules, hands-on checkpoints, and self-assessment.
 ---
 
 import Diagram from '@site/src/components/Diagram';
 
-This page is the tutorial index and the recommended order for learning the
-project. Start only after completing [Getting Started](getting-started/overview.md);
-the first stages reuse the Qwen bundle from the Quick Start instead of asking
+Tutorials teach; they are not a lookup reference. Each module introduces one
+mental model, asks you to change or inspect something concrete, and ends with a
+self-check. Start after completing [Getting Started](getting-started/overview.md);
+the first modules reuse the Qwen bundle from the Quick Start instead of asking
 you to rebuild it.
+
+Use [User Guides](user-guides/overview.md) when you already know the concept
+and need a command for speech, diffusion, text, or another task. Use
+[Reference](api/overview.md) for exact option and API details.
+
+## Course contract
+
+Each module has four parts, adapted from strong public technical courses and
+hands-on learning sites:
+
+1. **Learning objectives** state what you should be able to explain or do.
+2. **Lab** applies one concept to a real bundle, task, or source boundary.
+3. **Evidence checkpoint** gives an observable success condition.
+4. **Self-check** asks you to predict or explain the behavior before opening
+   the answer key.
+
+Do not measure progress by page completion. Move on when you can satisfy the
+module milestone and answer its self-check without copying the prose.
 
 <Diagram
   src="/img/diagrams/learning/course-map.svg"
@@ -16,8 +35,8 @@ you to rebuild it.
   caption="Complete the shared text path first, then choose the modality branches that match your workload."
 />
 
-You do not have to complete every modality. Follow the common path through text
-generation, then choose the branches that match your workload.
+You do not have to complete every modality. Follow the common foundations
+through text generation, then choose the task labs that match your workload.
 
 Keep one CLI selector in the same shell for the Learning path:
 
@@ -27,11 +46,11 @@ export TRTMC=trtmc
 # export TRTMC=./build/trtmc
 ```
 
-## Stage 0: Complete the first inference
+## Module 0: Complete the first inference
 
 Read and run these pages in order:
 
-1. [Prerequisites and Environment](getting-started/environment-and-repro.md)
+1. [System Requirements](getting-started/environment-and-repro.md)
 2. [Installation](getting-started/installation.md)
 3. [Quick Start](getting-started/quick-start.md)
 
@@ -43,7 +62,7 @@ If that milestone does not pass, stay in Getting Started. Architecture,
 quantization, and other model recipes will add variables without fixing the
 environment boundary.
 
-## Stage 1: Learn the bundle workflow
+## Module 1: Learn the bundle workflow
 
 Read:
 
@@ -60,7 +79,7 @@ bundle, and which was produced only when the C++ runtime loaded it.
 **Milestone:** you can explain why a Hugging Face checkpoint, a TensorRT engine,
 and a `.bundle` bundle are different artifacts.
 
-## Stage 2: Control text generation
+## Module 2: Control text generation
 
 Continue with [Text Generation](tutorials/beginner/text-generation.md). Reuse
 `Qwen3-0.6B.bundle` to compare deterministic greedy decoding with sampling
@@ -72,7 +91,7 @@ surface. The tutorial teaches the behavior; the API menu is the lookup source.
 **Milestone:** you can choose deterministic or sampled decoding intentionally
 and can reproduce a seeded request.
 
-## Stage 3: Choose another modality
+## Module 3: Choose another modality
 
 Choose one or more branches:
 
@@ -93,7 +112,7 @@ it is not another Getting Started path.
 **Milestone:** for the modality you chose, you can name the input
 preprocessing, engine components, public task method, and returned result type.
 
-## Stage 4: Tune advanced behavior
+## Module 4: Tune advanced behavior
 
 Read:
 
@@ -114,7 +133,7 @@ conversion, bundle metadata, runtime configuration, or request-time decoding,
 and can distinguish build-time topology metadata from launcher/runtime process
 count.
 
-## Stage 5: Validate and benchmark
+## Module 5: Validate and benchmark
 
 Follow [Validation and Benchmarking](tutorials/advanced/validation-and-benchmarking.md),
 then use [Testing](reference/testing.md) and
@@ -127,17 +146,18 @@ single plausible output is not model-parity evidence.
 **Milestone:** another developer can reproduce what you measured and can tell
 which claims your evidence does and does not support.
 
-## Stage 6: Optional architecture and contributor branch
+## Module 6: Optional architecture and contributor branch
 
 Stop here if you only need to use the product. To understand or change the
 implementation, continue with:
 
-1. [Architecture Overview](architecture/overview.md)
-2. [Units and Ownership](architecture/units-and-ownership.md)
-3. [Build Pipeline](architecture/build-pipeline.md)
-4. [Runtime Lifecycle](architecture/runtime-lifecycle.md)
-5. [Validation Design](architecture/validation-design.md)
-6. [Extension Overview](extend/overview.md)
+1. [Developer Guide](developer-guide/overview.md)
+2. [Architecture Overview](architecture/overview.md)
+3. [Units and Ownership](architecture/units-and-ownership.md)
+4. [Build Pipeline](architecture/build-pipeline.md)
+5. [Runtime Lifecycle](architecture/runtime-lifecycle.md)
+6. [Validation Design](architecture/validation-design.md)
+7. [Extension Overview](extend/overview.md)
 
 Then choose the extension guide owned by your change:
 

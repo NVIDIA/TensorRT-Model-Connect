@@ -1,5 +1,5 @@
 ---
-title: Prerequisites and Environment
+title: System Requirements
 description: Select and verify the environment before installing TensorRT-Model-Connect.
 ---
 

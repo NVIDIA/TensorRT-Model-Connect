@@ -6,6 +6,12 @@ import Diagram from '@site/src/components/Diagram';
 
 A `.bundle` bundle is the portable handoff between the Python builder and C++ runtime. Inspecting it is the first debugging step.
 
+## Learning objectives
+
+By the end of this lab, you should be able to classify a bundle as native or
+platform-specialized, identify its family/runtime ownership, and route a load
+failure to the artifact, model DSO, backend, or provider boundary.
+
 Select the CLI before using this page directly:
 
 ```bash
@@ -216,5 +222,22 @@ Before leaving the tutorial, write short answers to these prompts:
 3. Which metadata would you inspect for TensorRT compatibility?
 4. Which optimized descriptor values are not exposed by the current inspector?
 5. If inspection passes but runtime loading fails, where is the likely boundary?
+
+<details>
+<summary>Check your answers</summary>
+
+1. Native dispatch uses `runtime_strategy`; `optimized_runtime.json` claims the
+   platform-specialized path.
+2. The section inventory should contain the tokenizer/processor assets required
+   by that model runtime.
+3. Check the recorded TensorRT compatibility/ABI metadata and the section
+   layout expected by the selected runtime.
+4. The current inspector does not decode the optimized implementation ID,
+   profile ID, or full provider qualification tuple.
+5. For native bundles, start with the model DSO/plugin and backend search path.
+   For optimized bundles, start with the embedded implementation descriptor,
+   artifact integrity, and provider dependencies.
+
+</details>
 
 {/* Collaborative review anchor. */}

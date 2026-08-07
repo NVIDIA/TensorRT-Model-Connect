@@ -6,6 +6,12 @@ import Diagram from '@site/src/components/Diagram';
 
 Validation should prove that the runtime under test matches an appropriate oracle. Benchmarking should state exactly what is measured.
 
+## Learning objectives
+
+By the end of this lab, you should be able to choose evidence that matches a
+claim, run a focused model-owned contract, define a benchmark timing boundary,
+and produce a receipt another developer can reproduce.
+
 Select the CLI before running a standalone bundle command:
 
 ```bash
@@ -197,5 +203,24 @@ Notes:
 ```
 
 The input is part of the benchmark. A one-token prompt, a 2K-token prompt, a single image, an 81-frame video, and a dataset run are different workloads.
+
+## Self-check
+
+1. Which evidence proves a documentation-only change, and which proves exact
+   model parity on a GPU?
+2. Why must a benchmark report its input and timing boundary?
+3. Is a skipped hardware preflight a passing E2E result?
+
+<details>
+<summary>Check your answers</summary>
+
+1. Site/link/build checks prove documentation integrity; exact model parity
+   requires the named revision/configuration, target execution, reference
+   oracle, comparator, and thresholds.
+2. Different prompts, shapes, output lengths, and included setup/build/runtime
+   work measure different workloads and cannot be compared honestly otherwise.
+3. No. It proves only that the required environment was unavailable.
+
+</details>
 
 {/* Collaborative review anchor. */}

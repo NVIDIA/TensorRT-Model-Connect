@@ -51,7 +51,7 @@ After this tutorial, you should be able to explain:
 
 :::info Required reading
 Before running commands, read [Glossary](/getting-started/glossary),
-[Prerequisites and Environment](/getting-started/environment-and-repro),
+[System Requirements](/getting-started/environment-and-repro),
 [Inference Fundamentals](/getting-started/inference-fundamentals), and
 [Inspect Bundles](inspect-bundles.md). Keep the glossary and bundle-inspection
 page open while working through this tutorial.
@@ -255,6 +255,21 @@ Before leaving the tutorial, write short answers to these prompts:
 3. Which source-level abstraction selected the runtime plugin?
 4. What state is reused between decode steps?
 5. What would you inspect first if runtime creation failed?
+
+<details>
+<summary>Check your answers</summary>
+
+1. The builder resolves the Qwen family, creates TensorRT plans, packages model
+   assets/config, and writes the bundle metadata and sections.
+2. The runtime reads the bundle header/config/sections before selecting the
+   native runtime strategy and loading its engines.
+3. The bundle's `runtime_strategy` maps through model-owned plugin registration
+   to the concrete pipeline.
+4. The KV cache reuses attention keys/values between decode steps.
+5. Inspect the bundle kind and strategy first, then verify the owning model DSO
+   and backend/provider path.
+
+</details>
 
 ## Optional Exercises
 

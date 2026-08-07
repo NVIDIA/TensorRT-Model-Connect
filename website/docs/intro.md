@@ -28,45 +28,47 @@ entry path for that goal.
 
 <div className="trtmc-card-grid">
   <div className="trtmc-card">
-    <strong>Run your first inference</strong>
+    <strong>Get started</strong>
     Check prerequisites, prepare the environment, install the project, and
     complete one build-inspect-run loop.
   </div>
   <div className="trtmc-card">
-    <strong>Learn the project</strong>
-    Follow one ordered curriculum from inference fundamentals through
-    multimodal models, optimization, and validation.
+    <strong>Find a model</strong>
+    Search exact checkpoint IDs, tasks, family ownership, precision, and
+    topology configurations generated from manifests.
   </div>
   <div className="trtmc-card">
-    <strong>Integrate an API</strong>
-    Look up the CLI, Python builder/wrapper, C++ runtime, or experimental
-    C-linkage subset.
+    <strong>Use a feature</strong>
+    Look up task commands, build behavior, runtime configuration,
+    quantization, parallelism, validation, and benchmarking.
   </div>
   <div className="trtmc-card">
-    <strong>Understand the design</strong>
-    Follow block and sequence diagrams from checkpoint resolution to build,
-    bundle loading, GPU execution, and typed results.
+    <strong>Follow a course</strong>
+    Learn progressively through short modules, hands-on labs, milestones,
+    self-check questions, and answer keys.
   </div>
   <div className="trtmc-card">
-    <strong>Contribute or extend</strong>
-    Choose the owning family, runtime, config, validation, or external-kernel
-    boundary before editing.
+    <strong>Look up a contract</strong>
+    Open the CLI, Python, C++, bundle, configuration, testing, or performance
+    reference without reading a tutorial first.
   </div>
   <div className="trtmc-card">
-    <strong>Research a feature</strong>
-    Read current feature contracts and the historical context that explains
-    why they exist.
+    <strong>Develop or contribute</strong>
+    Understand architecture and choose the owning model, runtime, config,
+    validation, or optimized-provider boundary before editing.
   </div>
 </div>
 
 | Goal | Start here |
 | --- | --- |
 | First successful NLP/text inference | [Getting Started](getting-started/overview.md) |
-| Beginner-to-advanced curriculum | [Learn & Tutorials](learning-path.md) |
-| Exact public interfaces | [API Reference](api/overview.md) |
-| Software architecture and component ownership | [Architecture & Design](architecture/overview.md) |
-| Contribution and extension recipes | [Contribute & Extend](extend/overview.md) |
-| Feature behavior and design history | [Feature Reference & Context](features/overview.md) |
+| Exact model/checkpoint lookup | [Models & Recipes](models-recipes/overview.md) |
+| Task and feature lookup | [User Guides](user-guides/overview.md) |
+| Beginner-to-advanced curriculum | [Tutorials](learning-path.md) |
+| Exact public interfaces and configuration | [Reference](api/overview.md) |
+| Architecture, extension, and contribution | [Developer Guide](developer-guide/overview.md) |
+| Compatibility and lifecycle policy | [Release & Support](release-support/overview.md) |
+| Machine-readable and agent safety guidance | [AI & Agent Guide](agent-guide.md) |
 
 ## The minimum mental model
 
@@ -89,7 +91,7 @@ checkout:
 <ModelSupportInventory variant="facts" />
 
 These are discovery counts, not proof that every declared model passed on your
-hardware. Use [Model Support](getting-started/model-support.md) for evidence
+hardware. Use [Model Support](models-recipes/overview.md) for evidence
 levels and exact ownership.
 
 ## What comes after the first run
@@ -98,10 +100,10 @@ After Getting Started:
 
 1. use [Inference Fundamentals](getting-started/inference-fundamentals.md) to
    explain what happened;
-2. follow the [Learning Path](learning-path.md) from beginner to advanced;
-3. use [Architecture & Design](architecture/overview.md) only when you need
-   source-level responsibilities; and
-4. treat [Feature Reference & Context](features/overview.md) as an archive and
-   deep-reference section, not as the default reading path.
+2. use [User Guides](user-guides/overview.md) for the next task you need to do;
+3. follow the [Tutorial Curriculum](learning-path.md) when you want progressive
+   learning and self-checks; and
+4. use [Developer Guide](developer-guide/overview.md) only when you need
+   source-level ownership or contribution instructions.
 
 {/* Collaborative review anchor. */}

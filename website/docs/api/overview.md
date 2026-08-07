@@ -1,10 +1,14 @@
 ---
-title: API Reference
+title: Reference
+description: Exact CLI, Python, C++, bundle, configuration, testing, and performance contracts.
 ---
 
-TensorRT-Model-Connect exposes four public entry layers. This section is a
-reference: begin with [your first NLP inference](../getting-started/quick-start.md)
-if you have not yet built and run a bundle.
+Reference pages are for exact lookup, not progressive learning or task
+instruction. Begin with [your first NLP inference](../getting-started/quick-start.md)
+if you have not built a bundle, or use [User Guides](../user-guides/overview.md)
+when you need a goal-oriented procedure.
+
+TensorRT-Model-Connect exposes four public entry layers:
 
 | API | Entry point | Best for |
 | --- | --- | --- |

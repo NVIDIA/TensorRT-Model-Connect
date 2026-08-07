@@ -21,7 +21,7 @@ internal architecture page.
 
 | Step | Page | You are done when |
 | --- | --- | --- |
-| 1 | [Prerequisites and Environment](environment-and-repro.md) | You have selected a supported wheel or source-build path, the GPU is visible, and you understand the first model's resource boundary. |
+| 1 | [System Requirements](environment-and-repro.md) | You have selected a supported wheel or source-build path, the GPU is visible, and you understand the first model's resource boundary. |
 | 2 | [Installation](installation.md) | Either `trtmc version` or `./build/trtmc version` succeeds in the environment where you will build and run the model. |
 | 3 | [Quick Start](quick-start.md) | You have built and inspected `Qwen3-0.6B.bundle`, then received generated text from the native C++ runtime. |
 | 4 | [Learning Path](../learning-path.md) | You can choose the next tutorial without repeating the setup or first build. |
@@ -60,7 +60,7 @@ disk. Use the supported development environment and do not treat 4.375 GiB as
 a total GPU-memory requirement.
 
 If your machine does not match one of the installation paths, stop at
-[Prerequisites and Environment](environment-and-repro.md). A profile described
+[System Requirements](environment-and-repro.md). A profile described
 as qualified for another machine is not a general compatibility promise.
 
 {/* Collaborative review anchor. */}

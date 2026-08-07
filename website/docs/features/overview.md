@@ -1,6 +1,6 @@
 ---
-title: Feature Reference & Context
-description: Current feature contracts and the design history that explains why they exist.
+title: Feature Context Archive
+description: Archived feature contracts, design records, and implementation history retained for deep research.
 ---
 
 This section is the project's long-term feature record. It combines two kinds
@@ -11,9 +11,10 @@ of material that used to appear in separate menus:
   workflow that explains how the current design was reached.
 
 Most newcomers do not need this section to complete their first inference.
-Start with [Getting Started](../getting-started/overview.md), then use the
-[Learning Path](../learning-path.md). Return here when you need the exact
-boundary or history of one feature.
+Start with [Getting Started](../getting-started/overview.md), then use
+[User Guides](../user-guides/overview.md), [Tutorials](../learning-path.md), or
+the [Developer Guide](../developer-guide/overview.md). Return here only when
+you need the historical boundary or record behind one feature.
 
 ## How to read a page
 
@@ -35,7 +36,7 @@ Use these pages to understand family ownership, native runtime strategies,
 delegated optimized implementations, and the migrations that created those
 boundaries.
 
-- [Model Support](../getting-started/model-support.md)
+- [Model Support](../models-recipes/overview.md)
 - [Model Families](model-families.md)
 - [Runtime Strategies](runtime-strategies.md)
 - [Optimized-runtime family adapter record](../context/optimized-runtime-family-adapter-plan.md)
@@ -90,7 +91,7 @@ declared. A support claim needs the evidence appropriate to its level:
 4. target-hardware execution; and
 5. performance or release qualification when those properties are claimed.
 
-See [Model Support](../getting-started/model-support.md) for the live inventory
+See [Model Support](../models-recipes/overview.md) for the live inventory
 and [Testing Reference](../reference/testing.md) for the validation boundary.
 
 {/* Collaborative review anchor. */}

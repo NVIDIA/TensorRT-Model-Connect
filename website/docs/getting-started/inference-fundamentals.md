@@ -6,6 +6,12 @@ import Diagram from '@site/src/components/Diagram';
 
 This page explains the vocabulary behind TensorRT-Model-Connect. It assumes no prior deep learning inference background.
 
+## Learning objectives
+
+By the end of this module, you should be able to distinguish checkpoints,
+TensorRT engines, and `.trtfb` bundles; explain prefill/decode/KV cache; and
+separate family, native runtime strategy, optimized profile, and task strategy.
+
 ## Training versus inference
 
 Training is the process that creates model weights. Inference is the process that uses those weights to answer a new request.
@@ -176,6 +182,27 @@ Both paths preserve the same ownership rule: implementation details stay with
 the family, while shared tools reason about capability labels and task
 strategies. Optimized profiles are exact model/revision/target qualifications,
 not generic task strategies.
+
+## Self-check
+
+1. Why is a Hugging Face checkpoint not directly interchangeable with a
+   TensorRT engine or `.trtfb` bundle?
+2. Which identity selects a native C++ implementation, and which identity
+   groups different models under the same user-visible task?
+3. What does KV cache avoid recomputing during decoder generation?
+
+<details>
+<summary>Check your answers</summary>
+
+1. The checkpoint stores portable model/config/weights/assets; TensorRT engines
+   are compiled plans; the bundle packages plans, metadata, assets, and runtime
+   dispatch information for deployment.
+2. `runtime_strategy` selects the native model DSO/plugin. `task_strategy`
+   groups models for a shared task runner/comparator contract.
+3. It reuses attention keys and values for prior tokens so each decode step
+   does not recompute the whole prefix.
+
+</details>
 
 ## What to learn next
 

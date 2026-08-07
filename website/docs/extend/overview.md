@@ -62,9 +62,9 @@ driver, CUDA runtime, TensorRT, dynamic loader, and system libraries.
    or model behavior changes.
 4. Record exact-revision evidence in the pull request.
 
-The [Architecture & Design](../architecture/overview.md) section explains the
-units behind these extension points. Historical migration plans belong in
-[Feature Reference & Context](../features/overview.md), not in the current
-contributor runbook.
+The [Developer Guide](../developer-guide/overview.md) and
+[Architecture Overview](../architecture/overview.md) explain the units behind
+these extension points. Historical migration plans and worklogs are project
+records, not current contributor runbooks.
 
 {/* Collaborative review anchor. */}

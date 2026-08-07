@@ -8,7 +8,7 @@ This is the single first-inference path for the site. It builds one
 text-generation bundle, inspects it, and runs it through the native C++
 runtime.
 
-Complete [Prerequisites and Environment](environment-and-repro.md), then
+Complete [System Requirements](environment-and-repro.md), then
 [Installation](installation.md), before starting. If you installed a release
 wheel, the command is `trtmc`. If you built from source in the dev container,
 the command is `./build/trtmc`.
@@ -187,7 +187,7 @@ to use the portable BF16 path.
   the tutorials from beginner concepts through advanced validation and
   extension work.
 - [Model Recipes](build-and-run.md) is an optional index for other modalities.
-- [Model Support](model-support.md) explains the current supported model surface from the manifest set.
+- [Model Support](../models-recipes/overview.md) explains the current supported model surface and release snapshot.
 - [Inspect Bundles](../tutorials/beginner/inspect-bundles.md) teaches the artifact-debugging workflow.
 - [CLI Reference](../api/cli-reference.md) lists the build and runtime command surfaces.
 

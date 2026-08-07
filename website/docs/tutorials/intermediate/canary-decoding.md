@@ -5,6 +5,12 @@ title: Configurable Canary Decoding
 This tutorial builds a Canary bundle from a local NeMo checkpoint and uses the
 offline decoding controls exposed by the CLI and C++ API.
 
+## Learning objectives
+
+By the end of this lab, you should be able to build from a local Canary
+archive, choose greedy or beam decoding, configure transcription versus
+translation, and explain how per-request settings affect batch grouping.
+
 Select the CLI before running an example:
 
 ```bash
@@ -178,5 +184,23 @@ available and maps to the default greedy configuration.
 Unsupported languages, mismatched task/language combinations, invalid beam
 sizes, excessive output lengths, and invalid duration values throw
 `std::invalid_argument` with the failing option named in the message.
+
+## Self-check
+
+1. Which build artifact preserves the checkpoint's prompt/control-token IDs?
+2. Why can two requests in one API call execute in separate decoder groups?
+3. What is the evidence that a language/task pair is supported?
+
+<details>
+<summary>Check your answers</summary>
+
+1. The generated `.trtfb` packages the checkpoint-derived decoder prompt and
+   control-token metadata.
+2. Canary groups requests by beam size and validates per-request language,
+   task, timestamps, and output constraints while preserving result order.
+3. The exact checkpoint contract and successful model-owned E2E comparison,
+   not merely the presence of CLI language flags.
+
+</details>
 
 {/* Collaborative review anchor. */}

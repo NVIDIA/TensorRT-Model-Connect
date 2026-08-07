@@ -3,34 +3,91 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+const path = require('path');
+const {
+  collectModelSupportInventory,
+} = require('./plugins/model-support-inventory');
+
+const modelInventory = collectModelSupportInventory(path.resolve(__dirname, '..'));
+const modelRecipeTaskItems = modelInventory.taskRecipes.map((task) => ({
+  type: 'category',
+  label: task.label,
+  collapsed: true,
+  items: [
+    {
+      type: 'link',
+      label: 'Task overview',
+      href: `/models-recipes/model-recipes/tasks/${task.slug}`,
+      autoAddBaseUrl: true,
+    },
+    ...task.families.map((family) => ({
+      type: 'link',
+      label: family.family,
+      href: `/models-recipes/model-recipes/families/${family.slug}`,
+      autoAddBaseUrl: true,
+    })),
+  ],
+}));
+
 const sidebars = {
   docs: [
     'intro',
     {
       type: 'category',
-      label: 'Getting Started',
-      link: {
-        type: 'doc',
-        id: 'getting-started/overview'
-      },
+      label: 'Get Started',
+      link: {type: 'doc', id: 'getting-started/overview'},
       items: [
         'getting-started/environment-and-repro',
         'getting-started/installation',
-        'getting-started/glossary',
-        'getting-started/quick-start'
+        'getting-started/quick-start',
+        'getting-started/troubleshooting'
       ]
     },
     {
       type: 'category',
-      label: 'Learn & Tutorials',
-      link: {
-        type: 'doc',
-        id: 'learning-path'
-      },
+      label: 'Models & Recipes',
+      link: {type: 'doc', id: 'models-recipes/overview'},
       items: [
         {
           type: 'category',
-          label: 'Beginner: Understand One Inference',
+          label: 'Model Recipes',
+          link: {type: 'doc', id: 'models-recipes/model-recipes'},
+          items: modelRecipeTaskItems,
+        },
+      ]
+    },
+    {
+      type: 'category',
+      label: 'User Guides',
+      link: {type: 'doc', id: 'user-guides/overview'},
+      items: [
+        'user-guides/build-a-bundle',
+        'user-guides/inspect-a-bundle',
+        'user-guides/run-inference',
+        {
+          type: 'category',
+          label: 'Task Guides',
+          items: [
+            'user-guides/text-generation',
+            'user-guides/multimodal-speech',
+            'user-guides/image-video-generation',
+            'user-guides/time-series'
+          ]
+        },
+        'user-guides/configure-runtime',
+        'features/quantization',
+        'features/multi-device',
+        'user-guides/validate-benchmark'
+      ]
+    },
+    {
+      type: 'category',
+      label: 'Tutorials',
+      link: {type: 'doc', id: 'learning-path'},
+      items: [
+        {
+          type: 'category',
+          label: 'Foundations',
           items: [
             'getting-started/inference-fundamentals',
             'tutorials/beginner/inspect-bundles',
@@ -39,9 +96,8 @@ const sidebars = {
         },
         {
           type: 'category',
-          label: 'Intermediate: Model Recipes',
+          label: 'Task Labs',
           items: [
-            'getting-started/build-and-run',
             'tutorials/intermediate/multimodal-and-speech',
             'tutorials/intermediate/canary-decoding',
             'tutorials/intermediate/diffusion-and-time-series'
@@ -49,9 +105,10 @@ const sidebars = {
         },
         {
           type: 'category',
-          label: 'Advanced: Optimize, Extend, and Validate',
+          label: 'Advanced Labs',
           items: [
             'tutorials/advanced/quantization-and-runtime-knobs',
+            'tutorials/advanced/multi-device-inference',
             'tutorials/advanced/bring-your-own-kernel',
             'tutorials/advanced/validation-and-benchmarking'
           ]
@@ -60,121 +117,78 @@ const sidebars = {
     },
     {
       type: 'category',
-      label: 'API Reference',
-      link: {
-        type: 'doc',
-        id: 'api/overview'
-      },
+      label: 'Reference',
+      link: {type: 'doc', id: 'api/overview'},
       items: [
-        'api/python-builder',
         'api/cli-reference',
-        'api/cpp-api'
+        'api/python-builder',
+        'api/cpp-api',
+        'architecture/bundle-format',
+        'features/config-and-backends',
+        'features/sampling',
+        'reference/testing',
+        'reference/benchmarking',
+        'reference/profiling',
+        'getting-started/glossary'
       ]
     },
     {
       type: 'category',
-      label: 'Architecture & Design',
-      link: {
-        type: 'doc',
-        id: 'architecture/overview'
-      },
+      label: 'Developer Guide',
+      link: {type: 'doc', id: 'developer-guide/overview'},
       items: [
         {
           type: 'category',
-          label: 'System Architecture',
+          label: 'Architecture',
           items: [
-            'architecture/bundle-format',
+            'architecture/overview',
+            'architecture/units-and-ownership',
+            'architecture/build-pipeline',
             'architecture/runtime-lifecycle',
-            'architecture/build-system'
+            'architecture/build-system',
+            'architecture/validation-design',
+            'features/model-families',
+            'features/runtime-strategies'
           ]
         },
         {
           type: 'category',
-          label: 'Component Design',
+          label: 'Contribute & Extend',
           items: [
-            'architecture/units-and-ownership',
-            'architecture/build-pipeline',
-            'architecture/validation-design'
+            'extend/overview',
+            'extend/contributing',
+            'extend/add-model-family',
+            'extend/add-runtime-strategy',
+            'extend/add-optimized-runtime',
+            'extend/add-config-schema',
+            'extend/model-validation'
           ]
         },
+        'features/tvm-ffi',
+        'features/triattention',
         'reference/source-layout'
       ]
     },
     {
       type: 'category',
-      label: 'Contribute & Extend',
-      link: {
-        type: 'doc',
-        id: 'extend/overview'
-      },
+      label: 'Release & Support',
+      link: {type: 'doc', id: 'release-support/overview'},
+      collapsed: true,
       items: [
-        'extend/contributing',
-        'extend/add-model-family',
-        'extend/add-optimized-runtime',
-        'extend/add-runtime-strategy',
-        'extend/add-config-schema',
-        'extend/model-validation'
+        'release-support/compatibility',
+        'release-support/known-issues',
+        'release-support/troubleshooting',
+        'release-support/release-notes',
+        'release-support/migration-guide',
+        'release-support/deprecation-policy'
       ]
     },
     {
       type: 'category',
-      label: 'Feature Reference & Context',
+      label: 'AI & Agent Guide',
+      link: {type: 'doc', id: 'agent-guide'},
       collapsed: true,
-      link: {
-        type: 'doc',
-        id: 'features/overview'
-      },
-      items: [
-        {
-          type: 'category',
-          label: 'Model & Runtime Integration',
-          items: [
-            'getting-started/model-support',
-            'features/model-families',
-            'features/runtime-strategies',
-            'context/optimized-runtime-family-adapter-plan',
-            'context/model-plugin-encapsulation-plan'
-          ]
-        },
-        {
-          type: 'category',
-          label: 'Inference Behavior & Optimizations',
-          items: [
-            'features/tvm-ffi',
-            'features/sampling',
-            'features/triattention',
-            'context/triattention-native-cpp-worklog'
-          ]
-        },
-        {
-          type: 'category',
-          label: 'Build, Quantization & Configuration',
-          items: [
-            'features/quantization',
-            'features/config-and-backends',
-            'context/config-registry-status'
-          ]
-        },
-        {
-          type: 'category',
-          label: 'Validation, CI & Performance',
-          items: [
-            'reference/testing',
-            'reference/benchmarking',
-            'reference/profiling',
-            'reference/e2e-l0-replacements',
-            'context/traceability-and-safety'
-          ]
-        },
-        {
-          type: 'category',
-          label: 'Design & Project History',
-          items: [
-            'context/adr/README',
-            'reference/documentation-research'
-          ]
-        }
-      ]
+      items: []
     }
   ]
 };

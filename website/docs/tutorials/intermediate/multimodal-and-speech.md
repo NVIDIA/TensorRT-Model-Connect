@@ -6,6 +6,12 @@ import Diagram from '@site/src/components/Diagram';
 
 This tutorial exercises non-text modalities that still use the same bundle/runtime contract.
 
+## Learning objectives
+
+By the end of this lab, you should be able to compare vision-language, offline
+ASR, streaming ASR, and text-to-audio pipelines by preprocessing, engine
+sections, iterative state, public task method, and result type.
+
 Select the CLI before running an example:
 
 ```bash
@@ -200,5 +206,24 @@ Text-to-audio is a good example of why `IPipeline` has task-specific methods. Th
 | Speech-to-text | Audio feature metadata, tokenizer assets, encoder/decoder sections, and `whisper_speech_to_text` or `canary_speech_to_text` for those families. |
 | Streaming ASR | RNNT/streaming config, supported context schedule, and `nemotron_speech_streaming_speech_to_text_rnnt`. |
 | Text-to-audio | Acoustic and codec sections, tokenizer/phoneme assets, audio sample-rate metadata, and `text_to_audio_magpie` for Magpie. |
+
+## Self-check
+
+1. Why can two tasks use the same `.trtfb` container without sharing a runtime
+   strategy?
+2. Which state makes streaming ASR different from offline transcription?
+3. Why should a text-to-audio result not be handled like generated token IDs?
+
+<details>
+<summary>Check your answers</summary>
+
+1. The bundle is a common artifact boundary, while each model owns its
+   preprocessing, engine topology, task loop, strategy, and typed result.
+2. Streaming retains chunk schedule, feature/encoder cache, right-context, and
+   partial-hypothesis state across calls.
+3. The public contract returns audio samples or chunks with sample-rate/output
+   metadata, not a text-decoder token sequence.
+
+</details>
 
 {/* Collaborative review anchor. */}

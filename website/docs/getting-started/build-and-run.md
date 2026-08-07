@@ -18,7 +18,7 @@ TRTMC=trtmc
 ```
 
 If the command itself is unavailable, return to
-[Prerequisites and Environment](environment-and-repro.md) and
+[System Requirements](environment-and-repro.md) and
 [Installation](installation.md). If you have not yet built and run the Qwen
 first-inference bundle, complete the Quick Start before choosing a recipe here.
 

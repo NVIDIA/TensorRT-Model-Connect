@@ -28,7 +28,7 @@ If your established clone names the canonical remote `github`, substitute
 work.
 
 For source changes, use the development environment described in
-[Prerequisites and Environment](../getting-started/environment-and-repro.md).
+[System Requirements](../getting-started/environment-and-repro.md).
 
 ## 2. Find the owner before editing
 
@@ -42,7 +42,7 @@ Choose the narrowest current owner:
 | User-facing configuration | [Add a Config Schema](add-config-schema.md) |
 | Model validation | [Validate a Model Contribution](model-validation.md) |
 | External family-owned kernel | [Bring Your Own Kernel](../tutorials/advanced/bring-your-own-kernel.md) |
-| Public API or shared infrastructure | [Architecture & Design](../architecture/overview.md), then the owning API reference |
+| Public API or shared infrastructure | [Developer Guide](../developer-guide/overview.md), then the owning architecture or API reference |
 
 Similar model behavior is not automatically shared infrastructure. Family
 semantics stay with the owning family unless at least two real owners require

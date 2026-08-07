@@ -43,12 +43,12 @@ const config = {
         src: 'img/trtmc-mark.svg'
       },
       items: [
-        { to: '/getting-started/overview', label: 'Getting Started', position: 'left' },
-        { to: '/learning-path', label: 'Learn & Tutorials', position: 'left' },
-        { to: '/api/overview', label: 'API', position: 'left' },
-        { to: '/architecture/overview', label: 'Architecture & Design', position: 'left' },
-        { to: '/extend/overview', label: 'Contribute', position: 'left' },
-        { to: '/features/overview', label: 'Feature Reference', position: 'left' },
+        { to: '/getting-started/overview', label: 'Get Started', position: 'left' },
+        { to: '/models-recipes/overview', label: 'Models', position: 'left' },
+        { to: '/user-guides/overview', label: 'User Guides', position: 'left' },
+        { to: '/learning-path', label: 'Tutorials', position: 'left' },
+        { to: '/developer-guide/overview', label: 'Developer', position: 'left' },
+        { to: '/api/overview', label: 'Reference', position: 'left' },
         { href: `https://github.com/${repository}`, label: 'GitHub', position: 'right' }
       ]
     },
@@ -59,23 +59,23 @@ const config = {
           title: 'Use',
           items: [
             { label: 'Getting Started', to: '/getting-started/overview' },
-            { label: 'First NLP Inference', to: '/getting-started/quick-start' },
-            { label: 'CLI Reference', to: '/api/cli-reference' }
+            { label: 'Supported Models', to: '/models-recipes/overview' },
+            { label: 'User Guides', to: '/user-guides/overview' }
           ]
         },
         {
           title: 'Learn',
           items: [
-            { label: 'Learning Path', to: '/learning-path' },
-            { label: 'Architecture & Design', to: '/architecture/overview' },
-            { label: 'Feature Reference & Context', to: '/features/overview' }
+            { label: 'Tutorial Curriculum', to: '/learning-path' },
+            { label: 'Reference', to: '/api/overview' },
+            { label: 'Developer Guide', to: '/developer-guide/overview' }
           ]
         },
         {
-          title: 'Contribute',
+          title: 'Project',
           items: [
-            { label: 'Contributor Quickstart', to: '/extend/contributing' },
-            { label: 'Extension Guides', to: '/extend/overview' },
+            { label: 'AI and Agent Guide', to: '/agent-guide' },
+            { label: 'Release & Support', to: '/release-support/overview' },
             { label: 'GitHub', href: `https://github.com/${repository}` }
           ]
         }

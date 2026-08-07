@@ -8,6 +8,12 @@ parallelism to the denoiser in FLUX.1-schnell. Both paths build one `.trtfb`
 bundle and launch one process per visible GPU, but they partition different
 model dimensions and store different engine sections.
 
+## Learning objectives
+
+By the end of this lab, you should be able to distinguish tensor from context
+parallelism, build topology into a bundle, launch the matching world size, and
+validate all-rank completion with the model-owned task oracle.
+
 For the topology contract, supported limits, and model-discovery workflow, see
 the [Multi-Device Execution feature reference](../../features/multi-device.md).
 
@@ -303,3 +309,21 @@ assets. A skipped preflight is not a passing model result.
 | Build rejects the mode | Confirm the exact family manifest supports TP or CP and its dimensions divide by the requested size. |
 | Only rank 0 writes media | Expected for current distributed diffusion pipelines; inspect all ranks for successful completion. |
 | Output differs from single-device | Apply the model-owned numerical or task-quality oracle before treating non-bit-identical output as a regression. |
+
+## Self-check
+
+1. Why can a TP4 bundle not be run correctly with two processes?
+2. What is partitioned by TP, and what is partitioned by current Ulysses CP?
+3. Why is a rank-0 output artifact insufficient evidence by itself?
+
+<details>
+<summary>Check your answers</summary>
+
+1. The bundle contains topology-specific plans and requires a runtime world
+   size matching the build metadata.
+2. TP shards model weights/heads/projections; current CP shards the denoiser's
+   sequence or media-token dimension and exchanges shards through collectives.
+3. Every rank must load, rendezvous, participate in collectives, and finish
+   without error before the model-owned output oracle can establish success.
+
+</details>

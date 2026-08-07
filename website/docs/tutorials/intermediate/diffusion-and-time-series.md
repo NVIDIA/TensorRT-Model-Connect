@@ -6,6 +6,12 @@ import Diagram from '@site/src/components/Diagram';
 
 This tutorial covers pipelines that do not return generated text.
 
+## Learning objectives
+
+By the end of this lab, you should be able to distinguish token decoding from
+denoising and forecasting loops, select the correct typed task method, and use
+an exact E2E manifest to identify canonical non-text inputs and outputs.
+
 These pipelines still use `IPipeline`, but their task methods and internal loops differ.
 
 Select the CLI before running an example:
@@ -222,5 +228,23 @@ evidence.
 - Iterative inference can mean token decode, diffusion denoising, streaming audio chunks, or another task-specific loop.
 - Time-series models can use `solve()` to map a numeric history to a forecast vector without a text or image interface.
 - E2E manifests are the safest way to find canonical inputs for non-text models.
+
+## Self-check
+
+1. What replaces token-by-token decode in a diffusion pipeline?
+2. Why is the number printed by `Output [N]:` not another input parameter?
+3. Does the presence of `detect()` prove a detector model is supported?
+
+<details>
+<summary>Check your answers</summary>
+
+1. A scheduler-controlled denoising loop repeatedly updates latent tensors and
+   then decodes them into pixels or frames.
+2. `N` is the returned forecast vector dimension packaged by the model
+   contract; the following values are outputs.
+3. No. Support requires a model-owned detection runtime strategy, descriptor,
+   exact manifest, and appropriate passing evidence.
+
+</details>
 
 {/* Collaborative review anchor. */}

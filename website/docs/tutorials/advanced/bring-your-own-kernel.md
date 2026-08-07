@@ -9,6 +9,13 @@ This tutorial starts by replacing part of a Qwen3-8B TensorRT graph with a
 TVM-FFI kernel, then manually replaces a DistilBERT region with a CuTe DSL
 kernel. You do not write TensorRT C++.
 
+## Learning objectives
+
+By the end of this lab, you should be able to select a family recipe or explicit
+graph region, explain its ABI receipt and load-time binding, and require both
+numerical correctness and a measured no-regression gate before promoting a
+kernel.
+
 For the API contract, lifecycle, and supported limits, see the
 [TVM FFI feature reference](../../features/tvm-ffi.md).
 
@@ -748,5 +755,23 @@ no-regression gates. The success criterion is not “the DSO loaded”; it is
   inference instead of completing during pipeline load.
 - Slot-ready bundles load through the CLI or C++ binding overload. The current
   C-linkage API has no kernel-binding argument.
+
+## Self-check
+
+1. What does a family recipe change compared with manual graph selection?
+2. Why is “the DSO loaded” not a sufficient success criterion?
+3. Can a running pipeline be rebound to a different kernel DSO in place?
+
+<details>
+<summary>Check your answers</summary>
+
+1. It selects a versioned known region and parameters; both paths use the same
+   graph capture, region validation, patching, ABI, and load-time binding.
+2. The replacement must preserve task/numerical correctness and satisfy a
+   task-appropriate performance gate. Load success proves neither.
+3. No. Binding happens while a new pipeline is constructed; another compatible
+   DSO requires constructing another pipeline.
+
+</details>
 
 {/* Collaborative review anchor. */}
