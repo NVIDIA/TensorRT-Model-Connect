@@ -12,15 +12,15 @@
     "scale_source": "modelopt",
     "calibration_samples": 64
   },
-  "max_cache_length": 405,
+  "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
     {
       "name": "qwen3-0.6b-fp8",
       "trace_id": "IT-E2E-QWN3-FP8-01",
-      "prompt": "The following are multiple choice questions (with answers) about abstract algebra.\n\nFind all c in Z_3 such that Z_3[x]/(x^2 + c) is a field.\nA. 0\nB. 1\nC. 2\nD. 3\nAnswer: B\n\nStatement 1 | If aH is an element of a factor group, then |aH| divides |a|. Statement 2 | If H and K are subgroups of G then HK is a subgroup of G.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: B\n\nStatement 1 | Every element of a group generates a cyclic subgroup of the group. Statement 2 | The symmetric group S_10 has 10 elements.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: C\n\nStatement 1| Every function from a finite set onto itself must be one to one. Statement 2 | Every subgroup of an abelian group is abelian.\nA. True, True\nB. False, False\nC. True, False\nD. False, True\nAnswer: A\n\nFind the characteristic of the ring 2Z.\nA. 0\nB. 3\nC. 12\nD. 30\nAnswer: A\n\nFind the degree for the given field extension Q(sqrt(2), sqrt(3), sqrt(18)) over Q.\nA. 0\nB. 4\nC. 2\nD. 6\nAnswer:",
+      "prompt": "The following are multiple choice questions (with answers) about miscellaneous.\n\nHow many axles does a standard automobile have?\nA. one\nB. two\nC. four\nD. eight\nAnswer: B\n\nWhat place is named in the title of the 1979 live album by rock legends Cheap Trick?\nA. Budapest\nB. Budokan\nC. Bhutan\nD. Britain\nAnswer: B\n\nWho led the 1831 slave insurrection in SouthamptonVirginia?\nA. John Brown\nB. Dred Scott\nC. Nat Turner\nD. Harriet Tubman\nAnswer:",
       "expected_answers": [
-        "B"
+        "C"
       ],
       "task_eval": {
         "reference_backend": "hf_transformers",
@@ -33,7 +33,7 @@
         "enable_thinking": false
       },
       "max_new_tokens": 1,
-      "notes": "The canonical E2E prompt is QA MMLU sample 0, which distinguishes the supported FP16-based FP8 contract from the inaccurate BF16-based route without adding another engine build."
+      "notes": "The canonical E2E prompt is a fixed two-shot MMLU miscellaneous sample from the pinned cais/mmlu test split. It distinguishes the supported FP16-based FP8 contract from the inaccurate BF16-based route while preserving the existing logit and token agreement gates."
     }
   ]
 }

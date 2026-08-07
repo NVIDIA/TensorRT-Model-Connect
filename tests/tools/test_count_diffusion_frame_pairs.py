@@ -71,6 +71,87 @@ def test_counts_frames_plus_ref_frames(tmp_path) -> None:
     assert pairs[0]["hf_image"].endswith("ref_frames/frame_0000.png")
 
 
+@pytest.mark.parametrize("duplicate_registration", [False, True])
+def test_registered_nested_frame_directories_are_preferred(
+    tmp_path, duplicate_registration
+) -> None:
+    model_dir = tmp_path / "artifacts" / "minimax-h3-768p"
+    _write_result(model_dir, case_name="minimax-h3-768p")
+    result_path = model_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    trt_ref = "trt_native/frames"
+    hf_ref = "hf_reference/frames"
+    result["artifacts"] = {
+        "trt_frames": [trt_ref, trt_ref] if duplicate_registration else trt_ref,
+        "ref_frames": [hf_ref, hf_ref] if duplicate_registration else hf_ref,
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    for dirname, payload in (
+        ("trt_native/frames", b"registered-trt"),
+        ("hf_reference/frames", b"registered-ref"),
+        ("frames", b"legacy-trt"),
+        ("hf_frames", b"legacy-ref"),
+    ):
+        frame_dir = model_dir / dirname
+        frame_dir.mkdir(parents=True)
+        (frame_dir / "frame_0000.png").write_bytes(payload)
+
+    pairs = discover_diffusion_frame_pairs(tmp_path / "artifacts")
+
+    assert len(pairs) == 1
+    assert pairs[0]["trt_image"].endswith(
+        "minimax-h3-768p/trt_native/frames/frame_0000.png"
+    )
+    assert pairs[0]["hf_image"].endswith(
+        "minimax-h3-768p/hf_reference/frames/frame_0000.png"
+    )
+
+
+def test_unsafe_registered_frame_paths_do_not_use_legacy_fallback(tmp_path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    model_dir = artifacts_dir / "safe-case"
+    _write_result(model_dir, case_name="safe-case")
+    result_path = model_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["artifacts"] = {
+        "trt_frames": "../outside-trt",
+        "ref_frames": "../outside-ref",
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    _write_frame_pair(model_dir, "hf_frames")
+    for dirname in ("outside-trt", "outside-ref"):
+        outside = artifacts_dir / dirname
+        outside.mkdir()
+        (outside / "frame_0000.png").write_bytes(b"outside")
+
+    assert discover_diffusion_frame_pairs(artifacts_dir) == []
+    with pytest.raises(ValueError, match=r"missing=\['safe-case'\]"):
+        validate_complete_diffusion_frame_pairs(artifacts_dir)
+
+
+def test_registered_frame_symlink_escape_is_rejected(tmp_path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    model_dir = artifacts_dir / "symlink-case"
+    _write_result(model_dir, case_name="symlink-case")
+    result_path = model_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["artifacts"] = {
+        "trt_frames": "nested/trt",
+        "ref_frames": "nested/ref",
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    outside = artifacts_dir / "outside.png"
+    outside.write_bytes(b"outside")
+    for dirname in ("nested/trt", "nested/ref"):
+        frame_dir = model_dir / dirname
+        frame_dir.mkdir(parents=True)
+        (frame_dir / "frame_0000.png").symlink_to(outside)
+
+    assert discover_diffusion_frame_pairs(artifacts_dir) == []
+    with pytest.raises(ValueError, match=r"missing=\['symlink-case'\]"):
+        validate_complete_diffusion_frame_pairs(artifacts_dir)
+
+
 def test_malformed_result_json_is_ignored(tmp_path) -> None:
     model_dir = tmp_path / "artifacts" / "broken"
     model_dir.mkdir(parents=True)

@@ -80,12 +80,12 @@ def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
     assert fp8["precision"] == "fp16"
     assert fp8["bundle"] == "qwen3-0.6b-fp8-fp16base.bundle"
     assert fp8["task_eval"]["reference_precision"] == "fp16"
-    assert fp8["max_cache_length"] == 405
+    assert fp8["max_cache_length"] == 256
     assert fp8_e2e.inputs["prompt"].startswith(
         "The following are multiple choice questions (with answers) "
-        "about abstract algebra."
+        "about miscellaneous."
     )
-    assert fp8_e2e.metadata["expected_answers"] == ["B"]
+    assert fp8_e2e.metadata["expected_answers"] == ["C"]
     assert fp8_e2e.inputs["max_new_tokens"] == 1
     assert fp8_e2e.metadata["contract_config"] == {
         "use_chat_template": False,

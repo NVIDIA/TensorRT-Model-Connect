@@ -12,13 +12,59 @@ from pathlib import Path
 from typing import Any
 
 
-def _frames_in(path: Path) -> list[Path]:
-    if not path.is_dir():
+def _safe_path(path: Path, root: Path, *, directory: bool) -> Path | None:
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if directory and not resolved.is_dir():
+        return None
+    if not directory and not resolved.is_file():
+        return None
+    return resolved
+
+
+def _frames_in(path: Path, root: Path) -> list[Path]:
+    safe_dir = _safe_path(path, root, directory=True)
+    if safe_dir is None:
         return []
-    frames = sorted(path.glob("frame_*.png"))
-    if frames:
-        return frames
-    return sorted(path.glob("*.png"))
+    candidates = sorted(safe_dir.glob("frame_*.png"))
+    if not candidates:
+        candidates = sorted(safe_dir.glob("*.png"))
+    return [
+        safe_frame
+        for frame in candidates
+        if (safe_frame := _safe_path(frame, root, directory=False)) is not None
+    ]
+
+
+def _registered_frame_dir(
+    result: dict[str, Any], model_dir: Path, key: str
+) -> tuple[bool, Path | None]:
+    artifacts = result.get("artifacts")
+    if not isinstance(artifacts, dict) or key not in artifacts:
+        return False, None
+    value = artifacts[key]
+    references = [value] if isinstance(value, str) else value
+    if not isinstance(references, list) or not references:
+        return True, None
+
+    directories: list[Path] = []
+    for reference in references:
+        if (
+            not isinstance(reference, str)
+            or not reference
+            or Path(reference).is_absolute()
+        ):
+            return True, None
+        safe_dir = _safe_path(model_dir / reference, model_dir, directory=True)
+        if safe_dir is None:
+            return True, None
+        if safe_dir not in directories:
+            directories.append(safe_dir)
+    return True, directories[0] if len(directories) == 1 else None
 
 
 def _select_frame(frames: list[Path]) -> Path | None:
@@ -86,10 +132,20 @@ def discover_diffusion_frame_pairs(artifacts_dir: Path) -> list[dict[str, Any]]:
             continue
 
         model_dir = result_path.parent
-        trt_frames = _frames_in(model_dir / "frames")
-        hf_frames = _frames_in(model_dir / "hf_frames")
-        if not hf_frames:
-            hf_frames = _frames_in(model_dir / "ref_frames")
+        trt_registered, trt_dir = _registered_frame_dir(
+            result, model_dir, "trt_frames"
+        )
+        trt_frames = _frames_in(trt_dir, model_dir) if trt_dir is not None else []
+        if not trt_registered:
+            trt_frames = _frames_in(model_dir / "frames", model_dir)
+        ref_registered, ref_dir = _registered_frame_dir(
+            result, model_dir, "ref_frames"
+        )
+        hf_frames = _frames_in(ref_dir, model_dir) if ref_dir is not None else []
+        if not ref_registered:
+            hf_frames = _frames_in(model_dir / "hf_frames", model_dir)
+        if not ref_registered and not hf_frames:
+            hf_frames = _frames_in(model_dir / "ref_frames", model_dir)
         if not trt_frames or len(trt_frames) != len(hf_frames):
             continue
         sample_count, expected_frame_count = _vlm_frame_contract(result)

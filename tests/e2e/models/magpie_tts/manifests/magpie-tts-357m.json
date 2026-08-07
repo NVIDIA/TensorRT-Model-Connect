@@ -92,7 +92,7 @@
       "ci_tier": "nightly_only",
       "l0_replacement": "magpie-tts-357m",
       "l0_replacement_reason": "TTS probe matrix runs in nightly; PR L0 uses the base magpie-tts-357m case for the same text_to_audio_magpie runtime path.",
-      "prompt": "Say hello, then say goodbye.",
+      "prompt": "Hello, welcome to this audio test.",
       "max_new_tokens": 220,
       "runtime_config": {
         "audio_magpie": {
