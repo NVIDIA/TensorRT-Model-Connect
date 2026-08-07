@@ -20,6 +20,10 @@
 !.github/
 !.github/scripts/
 !.github/scripts/build-python-profiles.py
+!tools/
+!tools/__init__.py
+!tools/report_hub/
+!tools/report_hub/**
 
 **/__pycache__/
 **/*.py[cod]
