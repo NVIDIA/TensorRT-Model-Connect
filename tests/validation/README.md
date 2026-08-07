@@ -8,16 +8,16 @@ SPDX-License-Identifier: Apache-2.0
 `trtmc-validate` is an internal Dev/QA workflow for checking that a TRTMC model
 still agrees with its original reference implementation.
 
-Run a model's default workload:
+Run every Accuracy benchmark configured for a model:
 
 ```bash
 python tools/trtmc_validate.py gpt2-125m
 ```
 
-Run a different workload declared for that model:
+Run one benchmark explicitly:
 
 ```bash
-python tools/trtmc_validate.py internvl3-2b vlm_mmmu_pro_vision_mcq
+python tools/trtmc_validate.py qwen25vl-3b vlm_mmmu_pro_vision_mcq
 ```
 
 Select multiple models with the same model-first interface:
@@ -26,15 +26,6 @@ Select multiple models with the same model-first interface:
 python tools/trtmc_validate.py \
   --model gpt2-125m \
   --model qwen25vl-3b
-```
-
-The default remains one workload per model. Expand every full-matrix workload
-for the selected model only when requested explicitly:
-
-```bash
-python tools/trtmc_validate.py \
-  --model qwen25vl-3b \
-  --all-workloads
 ```
 
 Select one or more exact workloads for the selected model set:
@@ -65,18 +56,33 @@ Run every single-device model whose catalog status is `ready`:
 python tools/trtmc_validate.py --all
 ```
 
-`--all` still selects only each model's default workload. Use
-`--all --all-workloads` only when the intended scope is the complete
-full-matrix model/workload expansion. Workloads under `diagnostic_workloads`
-remain available by positional workload, `--workload`, or `--binding`, but are
-never selected by either full-matrix mode.
+`--all` expands every workload listed under every model. There is no separate
+default, additional, or diagnostic workload category. A suite that exists in
+`workloads.yaml` and `sample_limits` but is not listed under a model is omitted
+from model and all-model runs; it can still be selected explicitly for a
+one-off experiment when its selectors match that model.
 
-Default sample counts are keyed by workload at the top of
+The complete selection schema is intentionally just:
+
+```yaml
+sample_limits:
+  benchmark_a: 20
+  benchmark_b: -1  # all available samples
+
+models:
+  model-a:
+    workloads: [benchmark_a, benchmark_b]
+```
+
+Selecting `model-a` runs both benchmarks as independent bindings.
+
+Configured sample counts are keyed by workload at the top of
 `model_workloads.yaml`. A heterogeneous full run resolves each binding's own
 sample count independently. Do not pass `--limit` for that path: it is a
 one-off override applied uniformly to every selected binding, with `--limit 0`
-meaning the complete datasets. Audit the resolved full/diagnostic scope and
-sample counts with:
+retained as a compatibility spelling and `--limit -1` meaning the complete
+datasets. A positive limit larger than a dataset uses every available sample.
+Audit the resolved scope and configured sample counts with:
 
 ```bash
 python tools/trtmc_validate.py --list
@@ -116,7 +122,7 @@ or cache lengths. A per-model HF cache can still be shared across those suites.
 
 ```bash
 python tools/trtmc_validate.py \
-  --model qwen25vl-3b --all-workloads \
+  --model qwen25vl-3b \
   --storage-root /runs \
   --model-work-dir /runs/work/accuracy \
   --engine-retention delete_on_pass \
@@ -149,15 +155,17 @@ an ambiguous report from being published.
 Dataset-backed workloads use the task-specific sample limits declared in
 `model_workloads.yaml`. Fast encoder and classification workloads use larger
 slices, while generation-heavy image, video, and audio workloads use smaller
-slices. The selected limit is printed before execution and shown in the
-`Samples` column of `report.html`.
+slices. Set a workload to `-1` for its complete dataset. The runner never pads
+or repeats samples: when the configured limit exceeds the available count, it
+runs the available samples. `report.json` and the `Samples` column of
+`report.html` record the actual prepared sample count.
 
 Override the configured limit for one run, or request the complete dataset
 explicitly:
 
 ```bash
 python tools/trtmc_validate.py gpt2-125m --limit 100
-python tools/trtmc_validate.py gpt2-125m --limit 0
+python tools/trtmc_validate.py gpt2-125m --limit -1
 ```
 
 The command creates a reference environment only when one does not already
@@ -213,7 +221,7 @@ read the existing root-level public `VBench` asset directly. Dev/QA machines
 and NAS mirrors should copy the six directories without changing their
 relative layouts and verify the manifest after transfer.
 
-PersonaPlex's default `full_duplex_bench_behavior_parity` workload uses a
+PersonaPlex's `full_duplex_bench_behavior_parity` workload uses a
 separate, deterministic behavioral slice of the public Full-Duplex-Bench v1.0
 asset. Prepare it from the complete 727-sample benchmark:
 
@@ -251,11 +259,12 @@ Because those aggregate gates are sized for 30 samples per category, the
 validation engine rejects a reduced `--limit` before launching HF or TRTMC
 instead of reporting a statistically unsupported pass.
 
-PersonaPlex also retains `full_duplex_bench_speech_parity` as a five-sample
-diagnostic regression. It contains the original `000000` and `000002`
-synthetic-interruption failures from issue #767 and provides per-sample token,
-waveform, and vanilla reproduction evidence. It complements the aggregate
-behavior suite; it does not replace the 150-sample behavioral gate.
+PersonaPlex also runs `full_duplex_bench_speech_parity` as a separate
+five-sample regression benchmark. It contains the original `000000` and
+`000002` synthetic-interruption failures from issue #767 and provides
+per-sample token, waveform, and vanilla reproduction evidence. It complements
+the aggregate behavior suite; it does not replace the 150-sample behavioral
+gate.
 
 LocateAnything grounding accuracy uses the public `lscpku/RefCOCO_rec`
 dataset pinned at revision
@@ -386,15 +395,16 @@ variants with the same reference computation can reuse an entry.
 1. Reuse or add a dataset workload in
    `tests/validation/workloads.yaml`. Dataset variants that can change build
    shapes or profiles require distinct workload IDs.
-2. Add that workload under the model's `workloads` in `model_workloads.yaml`,
-   or under `diagnostic_workloads` when it must stay out of full-matrix runs.
-3. Add its workload-owned default to the top-level `sample_limits`; one value
+2. Add that workload under the model's `workloads` in `model_workloads.yaml`
+   when model and all-model runs should include it. Leave it unmapped for an
+   explicit-only experiment.
+3. Add its workload-owned limit to the top-level `sample_limits`; one value
    is shared by every model using that dataset/workload contract.
-4. Select one workload as the model default.
 
-A model may list multiple workloads; callers select one by passing it after the
-model name. If the aligned reference/TRTMC comparison is not implemented yet,
-declare only:
+A model may list multiple workloads; selecting that model runs all of them as
+independent bindings. Callers can narrow a one-off run by passing one workload
+after the model name. If the aligned reference/TRTMC comparison is not
+implemented yet, declare only:
 
 ```yaml
 model-name:

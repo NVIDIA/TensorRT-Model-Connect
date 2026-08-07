@@ -9,21 +9,13 @@ No NAS publishing or CI job is enabled by this tool.
 
 ## Selection
 
-Use each model's default Accuracy suite and every matching Perf entry:
+Use every Accuracy benchmark configured for the model and every matching Perf
+entry:
 
 ```bash
 python tools/model_checks.py check \
   --platform gb300 \
   --model qwen25vl-3b
-```
-
-Run every full-matrix Accuracy suite configured for one model:
-
-```bash
-python tools/model_checks.py check \
-  --platform l4t-thor \
-  --model qwen25vl-3b \
-  --all-accuracy-suites
 ```
 
 Auto Thor uses the same model-first interface with its own platform and
@@ -49,7 +41,8 @@ python tools/model_checks.py check \
 
 `--accuracy-suite` is repeatable when the same selected suite set is valid for
 every selected model. `--accuracy-binding` is the exact per-model form and can
-select an explicit-only `diagnostic_workloads` binding.
+select a suite that is globally configured but intentionally omitted from the
+model's normal `workloads` list.
 
 ## Run
 
@@ -72,7 +65,6 @@ export TRTMC_PERF_RUNTIME_DIRS=/runs/tmp/build-trt112
 python tools/model_checks.py run \
   --platform gb300 \
   --model qwen25vl-3b \
-  --all-accuracy-suites \
   --run-id qwen25vl-smoke \
   --dry-run
 ```
@@ -126,9 +118,9 @@ runner launch when the storage root is on another filesystem.
   `tests/validation/workloads.yaml`. Give dataset variants separate suite IDs;
   the suite ID is part of the Accuracy engine-isolation boundary.
 - Add that suite to the model profile's `workloads` in
-  `tests/validation/model_workloads.yaml`; set `default` only when the default
-  should change. Put a suite in `diagnostic_workloads` instead when it must
-  remain explicitly runnable but stay out of full-matrix expansion.
+  `tests/validation/model_workloads.yaml` when normal model and all-model runs
+  should include it. Leave it out of the model list when it should remain an
+  explicit-only experiment.
 - Add the model's task metadata under `tests/e2e/models/` when it is a new
   ready model profile.
 - Add its independent Perf entry to
@@ -140,7 +132,8 @@ There is no additional model roster to synchronize. A model may have any
 number of Accuracy suites, while Perf remains a separate list of concrete
 entries.
 
-`--all` means the complete matrix for each selected task. A profile that exists
-only in Accuracy or only in Perf does not become a missing-configuration blocker
-for the other task. Explicit `--model` selection remains strict and reports a
-missing selected-task configuration as a blocker.
+`--all` means every model's configured Accuracy workloads and every configured
+Perf entry. A profile that exists only in Accuracy or only in Perf does not
+become a missing-configuration blocker for the other task. Explicit `--model`
+selection remains strict and reports a missing selected-task configuration as
+a blocker.

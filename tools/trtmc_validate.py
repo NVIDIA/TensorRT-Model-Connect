@@ -103,15 +103,15 @@ class Binding:
 
 def _required_workload(binding: Binding) -> str:
     if binding.workload is None:
-        raise ValidationError(
-            f"model {binding.model} has no reference-consistency workload"
-        )
+        raise ValidationError(f"model {binding.model} has no reference-consistency workload")
     return binding.workload
 
 
 def _case_directory(output: Path, binding: Binding) -> Path:
-    return output / binding.model / (
-        binding.workload if binding.workload is not None else NOT_COMPARED_DIRECTORY
+    return (
+        output
+        / binding.model
+        / (binding.workload if binding.workload is not None else NOT_COMPARED_DIRECTORY)
     )
 
 
@@ -156,23 +156,24 @@ SANA_WM_SOURCE = ReferenceSource(
 def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
     if not isinstance(name, str) or not isinstance(spec, dict):
         raise ValidationError(f"{path}: invalid model binding {name!r}")
+    obsolete_fields = sorted(
+        {"default", "additional_workloads", "diagnostic_workloads"}.intersection(spec)
+    )
+    if obsolete_fields:
+        raise ValidationError(
+            f"{path}: {name} uses obsolete fields: {', '.join(obsolete_fields)}; "
+            "list every normally selected benchmark under workloads"
+        )
     not_compared_reason = spec.get("not_compared_reason")
     if not_compared_reason is not None:
         if not isinstance(not_compared_reason, str) or not not_compared_reason.strip():
-            raise ValidationError(
-                f"{path}: {name}.not_compared_reason must be a non-empty string"
-            )
-        if any(
-            field in spec
-            for field in ("default", "workloads", "diagnostic_workloads")
-        ):
+            raise ValidationError(f"{path}: {name}.not_compared_reason must be a non-empty string")
+        if "workloads" in spec:
             raise ValidationError(
                 f"{path}: {name} cannot declare workloads while marked not compared"
             )
         return
     workloads = spec.get("workloads")
-    diagnostic_workloads = spec.get("diagnostic_workloads", [])
-    default = spec.get("default")
     valid_workloads = (
         isinstance(workloads, list)
         and bool(workloads)
@@ -180,47 +181,22 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
     )
     if not valid_workloads:
         raise ValidationError(f"{path}: {name}.workloads must contain names")
-    valid_diagnostic_workloads = isinstance(diagnostic_workloads, list) and all(
-        isinstance(item, str) and item for item in diagnostic_workloads
-    )
-    if not valid_diagnostic_workloads:
-        raise ValidationError(
-            f"{path}: {name}.diagnostic_workloads must contain names"
-        )
-    overlap = sorted(set(workloads).intersection(diagnostic_workloads))
-    if overlap:
-        raise ValidationError(
-            f"{path}: {name} workloads cannot also be diagnostic: "
-            f"{', '.join(overlap)}"
-        )
-    if "e2e" in [*workloads, *diagnostic_workloads]:
+    if "e2e" in workloads:
         raise ValidationError(
             f"{path}: {name} workloads cannot use e2e; reference consistency "
             "requires aligned reference and TRTMC outputs"
         )
-    if default not in workloads:
-        raise ValidationError(f"{path}: {name}.default must be one of {name}.workloads")
     reference_cache_identity = spec.get("reference_cache_identity")
     if reference_cache_identity is not None and (
-        not isinstance(reference_cache_identity, str)
-        or not reference_cache_identity.strip()
+        not isinstance(reference_cache_identity, str) or not reference_cache_identity.strip()
     ):
-        raise ValidationError(
-            f"{path}: {name}.reference_cache_identity must be a non-empty string"
-        )
+        raise ValidationError(f"{path}: {name}.reference_cache_identity must be a non-empty string")
 
 
 def declared_workloads(spec: Mapping[str, Any]) -> tuple[str, ...]:
-    """Return full-matrix and explicit-only diagnostic workload names."""
+    """Return the benchmarks selected for a model's Accuracy matrix."""
 
-    return tuple(
-        dict.fromkeys(
-            [
-                *spec.get("workloads", []),
-                *spec.get("diagnostic_workloads", []),
-            ]
-        )
-    )
+    return tuple(dict.fromkeys(spec.get("workloads", [])))
 
 
 def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
@@ -230,9 +206,9 @@ def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
     for workload, limit in sample_limits.items():
         if not isinstance(workload, str) or not workload:
             raise ValidationError(f"{path}: invalid sample-limit workload {workload!r}")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        if isinstance(limit, bool) or not isinstance(limit, int) or (limit != -1 and limit <= 0):
             raise ValidationError(
-                f"{path}: sample_limits.{workload} must be a positive integer"
+                f"{path}: sample_limits.{workload} must be -1 or a positive integer"
             )
 
 
@@ -358,20 +334,15 @@ def audit_catalog(
         raise ValidationError(f"unknown workloads: {', '.join(unknown)}")
 
     declared_sampled = {
-        workload
-        for spec in models.values()
-        for workload in declared_workloads(spec)
+        workload for spec in models.values() for workload in declared_workloads(spec)
     }
     configured_sampled = set(catalog["sample_limits"])
     missing_limits = sorted(declared_sampled - configured_sampled)
-    stale_limits = sorted(configured_sampled - declared_sampled)
-    if missing_limits or stale_limits:
-        details = []
-        if missing_limits:
-            details.append(f"missing sample limits: {', '.join(missing_limits)}")
-        if stale_limits:
-            details.append(f"unused sample limits: {', '.join(stale_limits)}")
-        raise ValidationError("; ".join(details))
+    unknown_limits = sorted(configured_sampled - known_workloads)
+    if missing_limits:
+        raise ValidationError(f"missing sample limits: {', '.join(missing_limits)}")
+    if unknown_limits:
+        raise ValidationError(f"unknown sample-limit workloads: {', '.join(unknown_limits)}")
 
 
 def audit_workload_compatibility(
@@ -390,9 +361,7 @@ def audit_workload_compatibility(
             )
             if not matched:
                 incompatible.append(f"{model_name}/{workload}: {reason}")
-            reference_cache_identity = str(
-                spec.get("reference_cache_identity", "") or ""
-            )
+            reference_cache_identity = str(spec.get("reference_cache_identity", "") or "")
             if reference_cache_identity:
                 model = task_models[model_name]
                 contract = (
@@ -410,11 +379,39 @@ def audit_workload_compatibility(
     for identity, contracts in sorted(reference_cache_contracts.items()):
         if len(contracts) > 1:
             incompatible.append(
-                f"reference cache identity {identity!r} spans "
-                "different reference contracts"
+                f"reference cache identity {identity!r} spans different reference contracts"
             )
     if incompatible:
         raise ValidationError("incompatible model/workload bindings: " + "; ".join(incompatible))
+
+
+def audit_binding_compatibility(
+    bindings: Iterable[Binding],
+    *,
+    suites: Mapping[str, dict[str, Any]],
+    task_models: Mapping[str, dict[str, Any]],
+) -> None:
+    """Validate explicitly selected bindings against suite selectors."""
+
+    incompatible = []
+    for binding in bindings:
+        if not binding.runnable:
+            continue
+        assert binding.workload is not None
+        suite = suites.get(binding.workload)
+        model = task_models.get(binding.model)
+        if suite is None or model is None:
+            incompatible.append(
+                f"{binding.model}/{binding.workload}: missing suite or model metadata"
+            )
+            continue
+        matched, reason = validation_catalog.suite_match_reason(suite, model)
+        if not matched:
+            incompatible.append(f"{binding.model}/{binding.workload}: {reason}")
+    if incompatible:
+        raise ValidationError(
+            "incompatible selected model/workload bindings: " + "; ".join(incompatible)
+        )
 
 
 def resolve_binding(
@@ -430,27 +427,30 @@ def resolve_binding(
     if not_compared_reason:
         if workload:
             raise ValidationError(
-                f"model {model} has no reference-consistency workloads: "
-                f"{not_compared_reason}"
+                f"model {model} has no reference-consistency workloads: {not_compared_reason}"
             )
         return Binding(
             model=model,
             workload=None,
             not_compared_reason=not_compared_reason,
         )
-    selected = workload or spec["default"]
     available_workloads = declared_workloads(spec)
-    if selected not in available_workloads:
-        available = ", ".join(available_workloads)
-        raise ValidationError(
-            f"model {model} does not declare workload {selected}; available: {available}"
-        )
+    if workload is None:
+        if len(available_workloads) != 1:
+            raise ValidationError(
+                f"model {model} selects {len(available_workloads)} workloads; "
+                "resolve the model matrix or name one workload explicitly"
+            )
+        selected = available_workloads[0]
+    else:
+        selected = workload
+    if selected not in catalog["sample_limits"]:
+        available = ", ".join(sorted(catalog["sample_limits"]))
+        raise ValidationError(f"unknown workload {selected}; available: {available}")
     return Binding(
         model=model,
         workload=selected,
-        reference_cache_identity=str(
-            spec.get("reference_cache_identity", "") or ""
-        ),
+        reference_cache_identity=str(spec.get("reference_cache_identity", "") or ""),
     )
 
 
@@ -459,14 +459,11 @@ def resolve_bindings(
     models: Iterable[str],
     *,
     workloads: Iterable[str] = (),
-    all_workloads: bool = False,
 ) -> list[Binding]:
     """Resolve model selection into independent model/workload bindings."""
 
     selected_models = model_selection.normalize_models(models)
     selected_workloads = model_selection.normalize_models(workloads)
-    if all_workloads and selected_workloads:
-        raise ValidationError("--all-workloads cannot be combined with --workload")
 
     bindings: list[Binding] = []
     for model in selected_models:
@@ -477,21 +474,17 @@ def resolve_bindings(
         if not_compared_reason:
             if selected_workloads:
                 raise ValidationError(
-                    f"model {model} has no reference-consistency workloads: "
-                    f"{not_compared_reason}"
+                    f"model {model} has no reference-consistency workloads: {not_compared_reason}"
                 )
             bindings.append(resolve_binding(catalog, model))
             continue
 
-        if selected_workloads:
-            model_workloads = selected_workloads
-        elif all_workloads:
-            model_workloads = model_selection.normalize_models(spec["workloads"])
-        else:
-            model_workloads = (str(spec["default"]),)
-        bindings.extend(
-            resolve_binding(catalog, model, workload) for workload in model_workloads
+        model_workloads = (
+            selected_workloads
+            if selected_workloads
+            else model_selection.normalize_models(spec["workloads"])
         )
+        bindings.extend(resolve_binding(catalog, model, workload) for workload in model_workloads)
     return bindings
 
 
@@ -516,9 +509,7 @@ def model_profiles_for_families(
             missing.append(family)
         profiles.extend(matched)
     if missing:
-        raise ValidationError(
-            "model owners have no ready Accuracy profiles: " + ", ".join(missing)
-        )
+        raise ValidationError("model owners have no ready Accuracy profiles: " + ", ".join(missing))
     return tuple(profiles)
 
 
@@ -527,20 +518,20 @@ def resolve_sample_limit(
     binding: Binding,
     explicit_limit: int | None,
 ) -> int:
-    if explicit_limit is not None and explicit_limit < 0:
-        raise ValidationError("--limit must be zero or greater")
+    if explicit_limit is not None and explicit_limit < -1:
+        raise ValidationError("--limit must be -1 or greater")
     if not binding.runnable:
         return 0
     if explicit_limit is not None:
-        return explicit_limit
+        return 0 if explicit_limit == -1 else explicit_limit
     assert binding.workload is not None
-    return int(catalog["sample_limits"][binding.workload])
+    configured = int(catalog["sample_limits"][binding.workload])
+    return 0 if configured == -1 else configured
 
 
 def _validation_models(models_root: Path) -> dict[str, dict[str, Any]]:
     return {
-        str(model["name"]): model
-        for model in validation_catalog.load_manifest_records(models_root)
+        str(model["name"]): model for model in validation_catalog.load_manifest_records(models_root)
     }
 
 
@@ -570,9 +561,7 @@ def _binding_profiles(
     suites: Mapping[str, dict[str, Any]] | None = None,
 ) -> tuple[str, ...]:
     if not binding.runnable:
-        raise ValidationError(
-            f"model {binding.model} has no reference-consistency workload"
-        )
+        raise ValidationError(f"model {binding.model} has no reference-consistency workload")
     model = task_models[binding.model]
     profile = _declared_profile(
         family=str(model.get("family", "") or ""),
@@ -586,9 +575,7 @@ def _binding_profiles(
     suite = (suites or {}).get(binding.workload, {})
     scoring = suite.get("scoring", {}) if isinstance(suite, Mapping) else {}
     scoring_profile = (
-        str(scoring.get("python_profile", "") or "")
-        if isinstance(scoring, Mapping)
-        else ""
+        str(scoring.get("python_profile", "") or "") if isinstance(scoring, Mapping) else ""
     )
     if scoring_profile and scoring_profile not in profiles:
         profiles.append(scoring_profile)
@@ -666,8 +653,7 @@ def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
             )
             if not (staged / source.entrypoint).exists():
                 raise ValidationError(
-                    f"Pinned {source.name} checkout is missing "
-                    f"{source.entrypoint}"
+                    f"Pinned {source.name} checkout is missing {source.entrypoint}"
                 )
             staged.rename(checkout)
     except subprocess.CalledProcessError as exc:
@@ -688,13 +674,10 @@ def ensure_reference_sources(
     declared_source = None
     if model_reference_cache:
         required = ("repository", "revision", "relative_path", "entrypoint")
-        missing = [
-            field for field in required if not model_reference_cache.get(field)
-        ]
+        missing = [field for field in required if not model_reference_cache.get(field)]
         if missing:
             raise ValidationError(
-                f"{family} model reference source is missing: "
-                + ", ".join(missing)
+                f"{family} model reference source is missing: " + ", ".join(missing)
             )
         declared_source = ReferenceSource(
             name=family,
@@ -725,9 +708,7 @@ def ensure_reference_sources(
         if declared_source is None:
             declared_source = SANA_WM_SOURCE
             checkout = _ensure_reference_source(declared_source, cache_root)
-        environment["SANA_WM_SCRIPT"] = str(
-            checkout / declared_source.entrypoint
-        )
+        environment["SANA_WM_SCRIPT"] = str(checkout / declared_source.entrypoint)
     return ReferenceSourceSelection(environment=environment)
 
 
@@ -1046,15 +1027,12 @@ def _collect_command_logs(
     counts = {"hf": 0, "trtmc": 0}
     logs: dict[str, list[str]] = {"hf": [], "trtmc": []}
     has_native_reference = any(
-        path.name in {"hf_native_run.log", "hf_native_commands.jsonl"}
-        for path in log_paths
+        path.name in {"hf_native_run.log", "hf_native_commands.jsonl"} for path in log_paths
     )
     has_native_reference_commands = any(
         path.name == "hf_native_commands.jsonl" for path in log_paths
     )
-    has_native_trtmc = any(
-        path.name == "bundle_native_commands.jsonl" for path in log_paths
-    )
+    has_native_trtmc = any(path.name == "bundle_native_commands.jsonl" for path in log_paths)
     for path in log_paths:
         kind = _command_log_kind(
             path,
@@ -1090,10 +1068,7 @@ def _commands_from_logs(root: Path) -> dict[str, Any]:
         path
         for path in root.rglob("*")
         if path.is_file()
-        and (
-            path.name in _REPRO_COMMAND_LOG_NAMES
-            or path.name.endswith("_native_commands.jsonl")
-        )
+        and (path.name in _REPRO_COMMAND_LOG_NAMES or path.name.endswith("_native_commands.jsonl"))
     )
     commands, counts, logs = _collect_command_logs(
         root,
@@ -1221,9 +1196,7 @@ def _execution_details(
 
 def _comparison_metrics(raw_result: Mapping[str, Any]) -> dict[str, Any]:
     metrics = {
-        name: raw_result[name]
-        for name in _COMPARISON_METRICS
-        if raw_result.get(name) is not None
+        name: raw_result[name] for name in _COMPARISON_METRICS if raw_result.get(name) is not None
     }
     nested = raw_result.get("metrics", {})
     if isinstance(nested, Mapping):
@@ -1319,13 +1292,9 @@ def _normalized_command_logs(reproduce: Mapping[str, Any], kind: str) -> list[st
 
 def _normalize_reproduction(value: Any) -> dict[str, Any]:
     reproduce = value if isinstance(value, dict) else {}
-    all_commands = {
-        kind: _string_list(reproduce.get(kind, []))
-        for kind in ("hf", "trtmc")
-    }
+    all_commands = {kind: _string_list(reproduce.get(kind, [])) for kind in ("hf", "trtmc")}
     commands = {
-        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND]
-        for kind, values in all_commands.items()
+        kind: values[:MAX_REPRO_COMMANDS_PER_BACKEND] for kind, values in all_commands.items()
     }
     dataset = reproduce.get("dataset", {})
     if not isinstance(dataset, dict):
@@ -1341,9 +1310,7 @@ def _normalize_reproduction(value: Any) -> dict[str, Any]:
             for kind in commands
         },
         "commands_shown": {kind: len(values) for kind, values in commands.items()},
-        "command_logs": {
-            kind: _normalized_command_logs(reproduce, kind) for kind in commands
-        },
+        "command_logs": {kind: _normalized_command_logs(reproduce, kind) for kind in commands},
         "representative": representative,
     }
 
@@ -1501,32 +1468,35 @@ def _comparison_result(
         work_dir=work_dir,
         case_dir=case_dir,
     )
-    return _normalize_result({
-        "schema_version": "trtmc.validation-result/v2",
-        "model": binding.model,
-        "workload": binding.workload,
-        "family": family,
-        "operation": operation,
-        "task_strategy": task_strategy,
-        "task_type": task_type,
-        "user_contract": user_contract,
-        "executor": "trtmc_compare",
-        "status": status,
-        "returncode": returncode,
-        "reference_environment": [
-            {"name": name, "python": path} for name, path in reference_environment.names_and_paths
-        ],
-        "reproduce": _add_dataset_reproduction(
-            _commands_from_logs(work_dir),
-            dataset_command,
-            sample_limit,
-        ),
-        "raw_result": raw_result,
-        "raw_result_path": str(summary_path),
-        "disagreements": disagreements,
-        "execution_log": str(case_dir / "execution.log"),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    return _normalize_result(
+        {
+            "schema_version": "trtmc.validation-result/v2",
+            "model": binding.model,
+            "workload": binding.workload,
+            "family": family,
+            "operation": operation,
+            "task_strategy": task_strategy,
+            "task_type": task_type,
+            "user_contract": user_contract,
+            "executor": "trtmc_compare",
+            "status": status,
+            "returncode": returncode,
+            "reference_environment": [
+                {"name": name, "python": path}
+                for name, path in reference_environment.names_and_paths
+            ],
+            "reproduce": _add_dataset_reproduction(
+                _commands_from_logs(work_dir),
+                dataset_command,
+                sample_limit,
+            ),
+            "raw_result": raw_result,
+            "raw_result_path": str(summary_path),
+            "disagreements": disagreements,
+            "execution_log": str(case_dir / "execution.log"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 def _should_revalidate_reused_bundle(
@@ -1983,9 +1953,7 @@ def _campaign_started_at(output: Path, fallback: str) -> str:
     if not path.is_file() or next(output.glob("*/*/comparison.json"), None) is None:
         return fallback
     try:
-        started_at = json.loads(path.read_text(encoding="utf-8")).get(
-            "started_at"
-        )
+        started_at = json.loads(path.read_text(encoding="utf-8")).get("started_at")
         if not isinstance(started_at, str) or not started_at:
             return fallback
         datetime.fromisoformat(started_at)
@@ -2021,9 +1989,7 @@ def _query_nvidia_smi_gpus() -> list[dict[str, Any]]:
         try:
             index = int(values[0])
         except ValueError as exc:
-            raise ValidationError(
-                "nvidia-smi returned a non-numeric GPU index"
-            ) from exc
+            raise ValidationError("nvidia-smi returned a non-numeric GPU index") from exc
         uuid, name, pci_bus_id = values[1:]
         if not uuid or not name or not pci_bus_id:
             raise ValidationError("nvidia-smi returned incomplete GPU identity data")
@@ -2057,16 +2023,13 @@ def _resolve_cuda_devices(
     for logical_index, selector in enumerate(selectors):
         if selector.isdigit():
             matches = [
-                device
-                for device in inventory
-                if int(device["nvidia_smi_index"]) == int(selector)
+                device for device in inventory if int(device["nvidia_smi_index"]) == int(selector)
             ]
         else:
             matches = [
                 device
                 for device in inventory
-                if str(device["uuid"]) == selector
-                or str(device["uuid"]).startswith(selector)
+                if str(device["uuid"]) == selector or str(device["uuid"]).startswith(selector)
             ]
         if len(matches) != 1:
             raise ValidationError(
@@ -2139,9 +2102,7 @@ def _report_provenance(run: Mapping[str, Any]) -> str:
         ("host", run.get("hostname")),
     ]
     gpu_devices = run.get("gpu_devices", [])
-    if isinstance(gpu_devices, Sequence) and not isinstance(
-        gpu_devices, (str, bytes)
-    ):
+    if isinstance(gpu_devices, Sequence) and not isinstance(gpu_devices, (str, bytes)):
         for device in gpu_devices:
             if not isinstance(device, Mapping):
                 continue
@@ -2272,7 +2233,9 @@ def _reproduction_count(result: Mapping[str, Any], kind: str) -> int:
     counts = reproduce.get("command_count", {}) if isinstance(reproduce, dict) else {}
     commands = _result_commands(result, kind)
     try:
-        return max(int(counts.get(kind)), len(commands)) if isinstance(counts, dict) else len(commands)
+        return (
+            max(int(counts.get(kind)), len(commands)) if isinstance(counts, dict) else len(commands)
+        )
     except (TypeError, ValueError):
         return len(commands)
 
@@ -2298,11 +2261,20 @@ def _dataset_reproduction(result: Mapping[str, Any]) -> tuple[str, int, int]:
     return command, sample_limit, prepared
 
 
+def _selected_sample_count(result: Mapping[str, Any]) -> int | None:
+    reproduce = result.get("reproduce", {})
+    dataset = reproduce.get("dataset", {}) if isinstance(reproduce, dict) else {}
+    if not isinstance(dataset, dict):
+        return None
+    _command, sample_limit, prepared = _dataset_reproduction(result)
+    if "prepared_input_count" in dataset:
+        return min(sample_limit, prepared) if sample_limit > 0 else prepared
+    return sample_limit if sample_limit > 0 else None
+
+
 def _representative_note(result: Mapping[str, Any]) -> str:
     reproduce = result.get("reproduce", {})
-    representative = (
-        reproduce.get("representative", {}) if isinstance(reproduce, dict) else {}
-    )
+    representative = reproduce.get("representative", {}) if isinstance(reproduce, dict) else {}
     if not isinstance(representative, dict):
         return ""
     sample_id = str(representative.get("sample_id", "") or "")
@@ -2355,9 +2327,7 @@ def _render_failure_media(
         body = _failure_media_tag(str(item.get("kind", "")), href, label)
         if not body:
             continue
-        rendered.append(
-            f'<figure><figcaption>{label}</figcaption>{body}</figure>'
-        )
+        rendered.append(f"<figure><figcaption>{label}</figcaption>{body}</figure>")
     if not rendered:
         return ""
     return '<h5>Failure media</h5><div class="failure-media">' + "".join(rendered) + "</div>"
@@ -2425,15 +2395,11 @@ def _render_disagreements(
         limit=limit,
     )
     comparison = result.get("comparison", {})
-    failed = (
-        isinstance(comparison, dict)
-        and comparison.get("status") == "disagreement"
-    )
+    failed = isinstance(comparison, dict) and comparison.get("status") == "disagreement"
     noun = "failed samples" if failed else "sample differences"
     asset_base = Path(artifact_href).parent
     records = "".join(
-        _render_disagreement_record(record, asset_base=asset_base)
-        for record in preview
+        _render_disagreement_record(record, asset_base=asset_base) for record in preview
     )
     more = ""
     if count > len(preview):
@@ -2456,19 +2422,16 @@ def _render_reproduction(
 ) -> str:
     not_compared_reason = str(result.get("not_compared_reason", "") or "")
     if not_compared_reason:
-        return (
-            '<span class="unavailable">'
-            f"{html.escape(not_compared_reason)}"
-            "</span>"
-        )
+        return f'<span class="unavailable">{html.escape(not_compared_reason)}</span>'
     reference_commands = _result_commands(result, "hf")
     trtmc_commands = _result_commands(result, "trtmc")
-    dataset_command, sample_limit, _ = _dataset_reproduction(result)
+    dataset_command, _sample_limit, _prepared = _dataset_reproduction(result)
     reference_total = _reproduction_count(result, "hf")
     trtmc_total = _reproduction_count(result, "trtmc")
-    if sample_limit:
-        sample_label = "sample" if sample_limit == 1 else "samples"
-        dataset_label = f"Dataset slice ({sample_limit} {sample_label})"
+    selected_samples = _selected_sample_count(result)
+    if selected_samples is not None:
+        sample_label = "sample" if selected_samples == 1 else "samples"
+        dataset_label = f"Dataset slice ({selected_samples} {sample_label})"
     else:
         dataset_label = "Full dataset"
     summary = (
@@ -2491,11 +2454,7 @@ def _reference_result_status(result: Mapping[str, Any]) -> str:
     raw_result = result.get("raw_result", {})
     if not isinstance(raw_result, dict):
         return ""
-    return str(
-        raw_result.get("hf_cache_status")
-        or raw_result.get("hf_reference_status")
-        or ""
-    )
+    return str(raw_result.get("hf_cache_status") or raw_result.get("hf_reference_status") or "")
 
 
 def _signal(status: str, labels: Mapping[str, str]) -> str:
@@ -2566,16 +2525,10 @@ def _render_comparison(result: Mapping[str, Any]) -> str:
     contract = result.get("precision_contract", {})
     if isinstance(contract, Mapping) and contract:
         base = str(contract.get("trtmc_base_precision", "") or "").upper()
-        quantization = str(
-            contract.get("trtmc_quantization", "") or ""
-        ).upper()
-        reference = str(
-            contract.get("reference_precision", "") or ""
-        ).upper()
+        quantization = str(contract.get("trtmc_quantization", "") or "").upper()
+        reference = str(contract.get("reference_precision", "") or "").upper()
         candidate = (
-            f"{quantization} ({base} base)"
-            if quantization and quantization != "NONE"
-            else base
+            f"{quantization} ({base} base)" if quantization and quantization != "NONE" else base
         )
         if candidate and reference:
             details.append(f"TRTMC {candidate} vs HF {reference}")
@@ -2587,8 +2540,7 @@ def _render_comparison(result: Mapping[str, Any]) -> str:
         elif comparison_kind == "reference_defined":
             details.append("Reference-defined precision")
     return signal + "".join(
-        f'<div class="detail">{html.escape(detail)}</div>'
-        for detail in details
+        f'<div class="detail">{html.escape(detail)}</div>' for detail in details
     )
 
 
@@ -2640,11 +2592,7 @@ def _render_metrics(result: Mapping[str, Any]) -> str:
 
 def _render_validation(result: Mapping[str, Any]) -> str:
     validation = result.get("validation", {})
-    status = (
-        str(validation.get("status", "failed"))
-        if isinstance(validation, dict)
-        else "failed"
-    )
+    status = str(validation.get("status", "failed")) if isinstance(validation, dict) else "failed"
     return _signal(
         status,
         {
@@ -2659,10 +2607,8 @@ def _render_validation(result: Mapping[str, Any]) -> str:
 def _render_samples(result: Mapping[str, Any]) -> str:
     if result.get("not_compared_reason"):
         return "—"
-    _command, sample_limit, _ = _dataset_reproduction(result)
-    if sample_limit:
-        return str(sample_limit)
-    return "Full"
+    selected_samples = _selected_sample_count(result)
+    return str(selected_samples) if selected_samples is not None else "Full"
 
 
 def _normalize_result_files(
@@ -2712,9 +2658,7 @@ def _report_counts(
         name: sum(result["comparison"]["status"] == name for result in results)
         for name in ("agreement", "disagreement", "not_run")
     }
-    execution_errors = sum(
-        result["execution"]["status"] == "error" for result in results
-    )
+    execution_errors = sum(result["execution"]["status"] == "error" for result in results)
     return validation_counts, comparison_counts, execution_errors
 
 
@@ -2796,11 +2740,7 @@ def _render_task_type(result: Mapping[str, Any]) -> str:
     task_type, user_contract = _result_task_metadata(result)
     if not task_type:
         return "—"
-    contract = (
-        f'<div class="detail">{html.escape(user_contract)}</div>'
-        if user_contract
-        else ""
-    )
+    contract = f'<div class="detail">{html.escape(user_contract)}</div>' if user_contract else ""
     return f"<strong>{html.escape(task_type)}</strong>{contract}"
 
 
@@ -2837,9 +2777,7 @@ def _report_document(
             ReportFilter(
                 "task-type",
                 "Task type",
-                sorted_filter_values(
-                    _result_task_metadata(result)[0] for result in results
-                ),
+                sorted_filter_values(_result_task_metadata(result)[0] for result in results),
             ),
             ReportFilter(
                 "status",
@@ -2852,9 +2790,7 @@ def _report_document(
                         ("red", "Red"),
                         ("white", "White"),
                     )
-                    if any(
-                        _traffic_light_status(result) == status for result in results
-                    )
+                    if any(_traffic_light_status(result) == status for result in results)
                 ),
             ),
         ),
@@ -2935,7 +2871,9 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths, results = _deduplicate_results(result_paths, results)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
     traffic_light_counts = _traffic_light_counts(results)
-    sample_limits = [_dataset_reproduction(result)[1] for result in results]
+    sample_counts = [
+        count for result in results if (count := _selected_sample_count(result)) is not None
+    ]
     generated_at = _utc_now()
     report = {
         "schema_version": "trtmc.validation-report/v2",
@@ -2950,8 +2888,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
         "summary": {
             "cases": len(results),
             "execution_completed": sum(
-                result["execution"]["status"] == "completed"
-                for result in results
+                result["execution"]["status"] == "completed" for result in results
             ),
             "execution_errors": execution_errors,
             "agreements": comparison_counts["agreement"],
@@ -2960,7 +2897,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             "validation_passed": validation_counts["passed"],
             "validation_failed": validation_counts["failed"],
             "validation_skipped": validation_counts["skipped"],
-            "selected_samples": sum(sample_limits),
+            "selected_samples": sum(sample_counts),
         },
         "results": results,
     }
@@ -3084,11 +3021,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Accuracy workload to run for every selected model; repeatable",
     )
     parser.add_argument(
-        "--all-workloads",
-        action="store_true",
-        help="run every declared Accuracy workload for each selected model",
-    )
-    parser.add_argument(
         "--on-model-failure",
         choices=("continue", "stop"),
         default="continue",
@@ -3199,7 +3131,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "override the workload sample limit; use 0 for the complete dataset"
+            "override the workload sample limit; use -1 for the complete dataset; "
+            "0 remains accepted for compatibility"
         ),
     )
     parser.add_argument("--force-hf", action="store_true")
@@ -3255,26 +3188,14 @@ def _select_bindings(
         )
     if not selection_modes:
         raise ValidationError(
-            "provide MODEL [WORKLOAD], --model, --model-selection, --binding, "
-            "--all, or --list"
+            "provide MODEL [WORKLOAD], --model, --model-selection, --binding, --all, or --list"
         )
-    if arguments.selected_bindings and (
-        arguments.workload
-        or arguments.selected_workloads
-        or arguments.all_workloads
-    ):
+    if arguments.selected_bindings and (arguments.workload or arguments.selected_workloads):
         raise ValidationError(
-            "--binding cannot be combined with positional WORKLOAD, "
-            "--workload, or --all-workloads"
+            "--binding cannot be combined with positional WORKLOAD, or --workload"
         )
-    if arguments.workload and (
-        arguments.selected_workloads or arguments.all_workloads
-    ):
-        raise ValidationError(
-            "positional WORKLOAD cannot be combined with --workload or --all-workloads"
-        )
-    if arguments.selected_workloads and arguments.all_workloads:
-        raise ValidationError("--workload cannot be combined with --all-workloads")
+    if arguments.workload and arguments.selected_workloads:
+        raise ValidationError("positional WORKLOAD cannot be combined with --workload")
 
     if arguments.selected_bindings:
         bindings: list[Binding] = []
@@ -3284,9 +3205,7 @@ def _select_bindings(
             model = model.strip()
             workload = workload.strip()
             if not separator or not model or not workload:
-                raise ValidationError(
-                    f"invalid --binding {raw_binding!r}; expected MODEL=WORKLOAD"
-                )
+                raise ValidationError(f"invalid --binding {raw_binding!r}; expected MODEL=WORKLOAD")
             identity = (model, workload)
             if identity not in seen:
                 bindings.append(resolve_binding(catalog, model, workload))
@@ -3300,9 +3219,7 @@ def _select_bindings(
         models = (arguments.model,)
     elif arguments.model_selection:
         if task_models is None:
-            raise ValidationError(
-                "task model metadata is required for --model-selection"
-            )
+            raise ValidationError("task model metadata is required for --model-selection")
         models = model_profiles_for_families(
             task_models,
             ready_models,
@@ -3311,16 +3228,11 @@ def _select_bindings(
     else:
         models = model_selection.normalize_models(arguments.selected_models)
 
-    workloads = (
-        (arguments.workload,)
-        if arguments.workload
-        else tuple(arguments.selected_workloads)
-    )
+    workloads = (arguments.workload,) if arguments.workload else tuple(arguments.selected_workloads)
     bindings = resolve_bindings(
         catalog,
         models,
         workloads=workloads,
-        all_workloads=arguments.all_workloads,
     )
     if arguments.dataset and len(bindings) != 1:
         raise ValidationError("--dataset requires exactly one model/workload binding")
@@ -3364,9 +3276,7 @@ def _print_bindings(
 
 def _prepare_run_directories(arguments: argparse.Namespace) -> None:
     if arguments.engine_retention != "retain" and arguments.model_work_dir is None:
-        raise ValidationError(
-            "non-retained engines require --model-work-dir isolation"
-        )
+        raise ValidationError("non-retained engines require --model-work-dir isolation")
     if arguments.hf_cache_mode == "per_model" and arguments.model_work_dir is None:
         raise ValidationError("--hf-cache-mode per_model requires --model-work-dir")
     if arguments.hf_cache_mode == "shared" and arguments.hf_cache_retention != "retain":
@@ -3648,9 +3558,7 @@ def _run_supervised_binding(
     case_dir.mkdir(parents=True, exist_ok=True)
     comparison_path = case_dir / "comparison.json"
     comparison_path.unlink(missing_ok=True)
-    worker_log = case_dir / (
-        "worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log"
-    )
+    worker_log = case_dir / ("worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log")
     command = _worker_command(binding, arguments)
     launch_error = ""
     try:
@@ -3728,15 +3636,9 @@ def _attempt_record(
         "execution_log": execution_log,
         "comparison_result": archived.get("comparison.json", ""),
         "error_type": (
-            str(raw_result.get("error_type", ""))
-            if isinstance(raw_result, Mapping)
-            else ""
+            str(raw_result.get("error_type", "")) if isinstance(raw_result, Mapping) else ""
         ),
-        "error": (
-            str(raw_result.get("error", ""))
-            if isinstance(raw_result, Mapping)
-            else ""
-        ),
+        "error": (str(raw_result.get("error", "")) if isinstance(raw_result, Mapping) else ""),
     }
 
 
@@ -3763,10 +3665,7 @@ def _run_supervised_binding_with_retries(
         )
         revalidation_budget.record_worker_result(result)
         execution = result.get("execution", {})
-        execution_error = (
-            isinstance(execution, Mapping)
-            and execution.get("status") == "error"
-        )
+        execution_error = isinstance(execution, Mapping) and execution.get("status") == "error"
         archived = (
             _archive_failed_attempt(case_dir, attempt)
             if execution_error and attempt < arguments.model_attempts
@@ -3864,9 +3763,7 @@ def _validate_resume_request(output: Path) -> None:
     if not recorded_command or _resume_command(recorded_command) != _resume_command(
         current_command
     ):
-        raise ValidationError(
-            "cannot resume Accuracy results with a different resolved command"
-        )
+        raise ValidationError("cannot resume Accuracy results with a different resolved command")
 
 
 def _run_all_bindings(
@@ -3891,8 +3788,7 @@ def _run_all_bindings(
     for binding in bindings:
         if not binding.runnable:
             print(
-                f"\nNot compared: {binding.model} / "
-                f"{binding.not_compared_reason}",
+                f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
                 flush=True,
             )
             result, comparison = _write_not_compared_case(
@@ -3904,11 +3800,7 @@ def _run_all_bindings(
             _print_result(result, comparison, report_path)
             continue
         sample_limit = resolve_sample_limit(catalog, binding, arguments.limit)
-        sample_note = (
-            "full dataset"
-            if sample_limit == 0
-            else f"{sample_limit} samples"
-        )
+        sample_note = "full dataset" if sample_limit == 0 else f"{sample_limit} samples"
         binding_arguments, binding_work, model_work = _binding_resource_arguments(
             arguments,
             binding,
@@ -3932,8 +3824,7 @@ def _run_all_bindings(
             )
         else:
             print(
-                f"\nResume: keeping terminal result for "
-                f"{binding.model} / {binding.workload}",
+                f"\nResume: keeping terminal result for {binding.model} / {binding.workload}",
                 flush=True,
             )
         model_failed = result["validation"]["status"] == "failed"
@@ -3952,10 +3843,7 @@ def _run_all_bindings(
             "hf_cache": _cleanup_model_hf_cache(
                 arguments,
                 model_work,
-                passed=(
-                    model_passed[binding.model]
-                    and remaining[binding.model] == 0
-                ),
+                passed=(model_passed[binding.model] and remaining[binding.model] == 0),
                 model_complete=model_complete,
             ),
         }
@@ -4008,8 +3896,7 @@ def _run_bindings(
     for binding in bindings:
         if not binding.runnable:
             print(
-                f"\nNot compared: {binding.model} / "
-                f"{binding.not_compared_reason}",
+                f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
                 flush=True,
             )
             result, comparison = _write_not_compared_case(
@@ -4031,9 +3918,7 @@ def _run_bindings(
             arguments.limit,
         )
         sample_note = (
-            "full dataset"
-            if binding_arguments.limit == 0
-            else f"{binding_arguments.limit} samples"
+            "full dataset" if binding_arguments.limit == 0 else f"{binding_arguments.limit} samples"
         )
         print(
             f"\n{binding.model} / {binding.workload} / {sample_note}",
@@ -4066,13 +3951,16 @@ def _main(arguments: argparse.Namespace) -> int:
             workloads = []
             for workload in spec["workloads"]:
                 limit = catalog["sample_limits"][workload]
-                workloads.append(f"{workload} ({limit} samples, full matrix)")
-            for workload in spec.get("diagnostic_workloads", []):
-                limit = catalog["sample_limits"][workload]
-                workloads.append(f"{workload} ({limit} samples, diagnostic)")
+                limit_label = "all samples" if limit == -1 else f"{limit} samples"
+                workloads.append(f"{workload} ({limit_label})")
             print(f"{name}: {', '.join(workloads)}")
         return 0
     bindings = _select_bindings(arguments, catalog, ready, task_models)
+    audit_binding_compatibility(
+        bindings,
+        suites=suites,
+        task_models=task_models,
+    )
     if arguments.dry_run:
         _print_bindings(
             bindings,
