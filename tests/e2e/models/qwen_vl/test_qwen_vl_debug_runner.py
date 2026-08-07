@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import pytest
 
@@ -60,3 +61,16 @@ def test_profile_min_shape_rejects_unresolved_profile(module_name) -> None:
 
     with pytest.raises(RuntimeError, match="Invalid optimization profile shape"):
         module._profile_min_shape(engine, "input_embed", 0)
+
+
+@pytest.mark.parametrize("module_name", RUNNER_MODULES)
+def test_debug_runner_binds_mrope_and_fails_closed(module_name) -> None:
+    module = importlib.import_module(module_name)
+    init_source = inspect.getsource(module.TrtRunner.__init__)
+    step_source = inspect.getsource(module.TrtRunner.step)
+
+    assert '"mrope_position_ids"' in init_source
+    assert "self._h_mrope_position_ids.fill(position_id)" in step_source
+    assert '"mrope_position_ids", self._d_mrope_position_ids' in step_source
+    assert "if not self.context.execute_async_v3(stream):" in step_source
+    assert "TensorRT Qwen-VL debug decoder execution failed" in step_source

@@ -41,6 +41,30 @@ def test_owner_reference_falls_back_to_tokenizer_chat_template() -> None:
     assert "tokenizer chat template produced no image placeholder" in source
 
 
+def test_owner_reference_uses_qa_cuda_device_contract() -> None:
+    source = inspect.getsource(
+        qwen_vl_hf_transformers.HfTransformersReference._run_vl_full_generation
+    )
+    assert "if not torch.cuda.is_available():" in source
+    assert "Qwen-VL HF reference requires CUDA to match QA validation" in source
+    assert 'device = torch.device("cuda")' in source
+    assert "model.to(device)" in source
+    assert 'value.to(device) if hasattr(value, "to") else value' in source
+    assert '"reference_device": "cuda"' in source
+
+
+def test_qwen3_manifest_pins_qa_reference_precision() -> None:
+    manifest = json.loads(
+        (
+            qwen_vl_hf_transformers.PROJECT_DIR
+            / "tests/e2e/models/qwen_vl/manifests/qwen3-vl-2b.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert manifest["precision"] == "bf16"
+    assert manifest["reference_precision"] == "bf16"
+
+
 def test_vl_decode_uses_generated_suffix_for_full_sequences() -> None:
     processor = _FakeProcessor({
         (101, 102): "prompt",

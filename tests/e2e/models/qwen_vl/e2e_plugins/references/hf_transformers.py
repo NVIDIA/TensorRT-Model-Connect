@@ -877,6 +877,8 @@ class HfTransformersReference:
         model_ref = _resolve_cached_model_ref(hf_id)
         fallback_text = f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"
         torch_dtype_expr = _torch_dtype_for_case(case)
+        reference_precision = case.metadata.get(
+            "reference_precision", case.metadata.get("precision", "fp32"))
 
         script = textwrap.dedent(f"""\
             import sys, torch
@@ -918,6 +920,11 @@ class HfTransformersReference:
                 model = transformers.AutoModelForCausalLM.from_pretrained(
                     model_ref, trust_remote_code=True,
                     torch_dtype={torch_dtype_expr})
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "Qwen-VL HF reference requires CUDA to match QA validation")
+            device = torch.device("cuda")
+            model.to(device)
             model.eval()
 
             image = Image.open(image_path).convert("RGB")
@@ -961,6 +968,11 @@ class HfTransformersReference:
                     inputs = processor(
                         text=fallback_text, images=image, return_tensors="pt")
 
+            inputs = {{
+                key: value.to(device) if hasattr(value, "to") else value
+                for key, value in inputs.items()
+            }}
+
             with torch.no_grad():
                 generated_ids = model.generate(
                     **inputs, max_new_tokens=max_new_tokens)
@@ -993,7 +1005,11 @@ class HfTransformersReference:
             env=_reference_env(ctx),
             output_readers=(lambda: {"text": _read_text_artifact(text_path)},),
             text_reader=lambda: _read_text_artifact(text_path),
-            metadata={"trust_remote_code": trust_remote_code},
+            metadata={
+                "trust_remote_code": trust_remote_code,
+                "reference_device": "cuda",
+                "reference_precision": reference_precision,
+            },
             failure_label="HF VL generation",
         )
 

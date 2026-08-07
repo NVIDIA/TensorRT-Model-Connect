@@ -207,6 +207,23 @@ class TrtRunner:
         err, self._d_position_id = cudart.cudaMalloc(4)
         _check_cuda(err)
 
+        # Qwen3-VL decoders require rank-2 multimodal rotary positions even
+        # for a single text/decode token. Keep all three axes equal for this
+        # text-only debug step, matching the production decode path.
+        self._h_mrope_position_ids: np.ndarray | None = None
+        self._d_mrope_position_ids = 0
+        if any(
+            self.engine.get_tensor_name(index) == "mrope_position_ids"
+            for index in range(self.engine.num_io_tensors)
+        ):
+            mrope_shape = _profile_min_shape(
+                self.engine, "mrope_position_ids", self._profile_index)
+            self._h_mrope_position_ids = np.zeros(
+                mrope_shape, dtype=np.int32)
+            err, self._d_mrope_position_ids = cudart.cudaMalloc(
+                self._h_mrope_position_ids.nbytes)
+            _check_cuda(err)
+
         # attention_mask
         self._h_mask = np.zeros((1, attention_window), dtype=np.float32)
         err, self._d_mask = cudart.cudaMalloc(attention_window * 4)
@@ -338,6 +355,12 @@ class TrtRunner:
         cudart.cudaMemcpyAsync(
             self._d_position_id, self._h_position_id.ctypes.data,
             4, H2D, stream)
+        if self._h_mrope_position_ids is not None:
+            self._h_mrope_position_ids.fill(position_id)
+            cudart.cudaMemcpyAsync(
+                self._d_mrope_position_ids,
+                self._h_mrope_position_ids.ctypes.data,
+                self._h_mrope_position_ids.nbytes, H2D, stream)
         cudart.cudaMemcpyAsync(
             self._d_mask, self._h_mask.ctypes.data,
             attention_window * 4, H2D, stream)
@@ -379,6 +402,9 @@ class TrtRunner:
         # Set tensor addresses
         self.context.set_tensor_address("token_id", self._d_token_id)
         self.context.set_tensor_address("position_id", self._d_position_id)
+        if self._d_mrope_position_ids:
+            self.context.set_tensor_address(
+                "mrope_position_ids", self._d_mrope_position_ids)
         self.context.set_tensor_address("attention_mask", self._d_mask)
         self.context.set_tensor_address("logits", self._d_logits)
 
@@ -410,7 +436,8 @@ class TrtRunner:
             self.context.set_input_shape(name, shape)
 
         # Execute
-        self.context.execute_async_v3(stream)
+        if not self.context.execute_async_v3(stream):
+            raise RuntimeError("TensorRT Qwen-VL debug decoder execution failed")
 
         # D2D cache update
         row_bytes = self.attention_size * self._cache_elem_bytes
@@ -502,8 +529,9 @@ class TrtRunner:
         if cudart is None:
             return
         bufs = []
-        for name in ("_d_token_id", "_d_position_id", "_d_mask", "_d_logits",
-                     "_d_input_embed", "_d_use_input_embed", "_d_deepstack_active"):
+        for name in ("_d_token_id", "_d_position_id", "_d_mrope_position_ids",
+                     "_d_mask", "_d_logits", "_d_input_embed",
+                     "_d_use_input_embed", "_d_deepstack_active"):
             d_ptr = getattr(self, name, 0)
             if d_ptr:
                 bufs.append(d_ptr)

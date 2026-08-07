@@ -6,6 +6,7 @@
   "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation",
   "precision": "bf16",
+  "reference_precision": "bf16",
   "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
