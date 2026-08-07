@@ -55,7 +55,8 @@ export TRTMC_CHECK_PYTHON=/opt/venv/bin/python
 
 export TRTMC_PERF_WORKER=/runs/tmp/build-trt112/trtmc_benchmark_worker
 export TRTMC_PERF_BUNDLE_CACHE=/runs/engines/perf
-export TRTMC_PERF_BUNDLE_ROOTS=/runs/engines/perf
+# ':' expands to no external roots; never recursively expose the managed cache.
+export TRTMC_PERF_BUNDLE_ROOTS=:
 export TRTMC_PERF_RUNTIME_DIRS=/runs/tmp/build-trt112
 
 python tools/model_checks.py run \
