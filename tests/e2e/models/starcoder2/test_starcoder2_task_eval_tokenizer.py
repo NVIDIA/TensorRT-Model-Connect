@@ -104,7 +104,7 @@ def _write_bundle(path: Path, sections: dict[str, bytes]) -> None:
         offset += len(payload)
     header = json.dumps({"sections": metadata}).encode("utf-8")
     path.write_bytes(
-        b"TRTFB\x00\x01\x00"
+        b"BUNDLE\x01\x00"
         + struct.pack("<Q", len(header))
         + header
         + b"".join(sections.values())
@@ -115,7 +115,7 @@ def test_input_contract_loads_effective_bundled_wrapper(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    bundle = tmp_path / "starcoder2.trtfb"
+    bundle = tmp_path / "starcoder2.bundle"
     _write_bundle(
         bundle,
         {
