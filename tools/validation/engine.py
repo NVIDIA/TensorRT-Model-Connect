@@ -2759,6 +2759,24 @@ def load_jsonl(path: Path, *, errors: str = "strict") -> list[dict[str, Any]]:
     return rows
 
 
+class _RawTokenizerWrapper:
+    """Expose the small callable tokenizer surface used by validation."""
+
+    def __init__(self, tokenizer: Any) -> None:
+        self._tokenizer = tokenizer
+
+    def __call__(self, text: str, *, add_special_tokens: bool = True) -> Any:
+        encoding = self._tokenizer.encode(
+            text, add_special_tokens=add_special_tokens
+        )
+        return argparse.Namespace(input_ids=encoding.ids)
+
+    def decode(self, token_ids: Sequence[int], **_: Any) -> str:
+        return self._tokenizer.decode(
+            list(token_ids), skip_special_tokens=False
+        )
+
+
 def _load_prompt_tokenizer(
     *,
     model_id: str,
@@ -2800,26 +2818,12 @@ def _load_prompt_tokenizer(
                 "or tokenizer.json"
             ) from fallback_error
 
-        class RawTokenizerWrapper:
-            def __call__(self, text: str, *, add_special_tokens: bool = True) -> Any:
-                encoding = raw_tokenizer.encode(
-                    text, add_special_tokens=add_special_tokens
-                )
-
-                class Encoded:
-                    input_ids = encoding.ids
-
-                return Encoded()
-
-            def decode(self, token_ids: Sequence[int], **_: Any) -> str:
-                return raw_tokenizer.decode(list(token_ids), skip_special_tokens=False)
-
         print(
             f"warning: AutoTokenizer failed for {model_id!r} ({auto_error}); "
             "using tokenizer.json for prompt accounting",
             file=sys.stderr,
         )
-        return RawTokenizerWrapper()
+        return _RawTokenizerWrapper(raw_tokenizer)
 
 
 def truncate_prompt_rows(
