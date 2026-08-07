@@ -3174,16 +3174,16 @@ def test_codegen_humaneval_gate_rejects_qa_accuracy_replays(
             for index in range(10)
         ]
     }
-    trtfb = json.loads(json.dumps(hf))
+    bundle = json.loads(json.dumps(hf))
     for sample_index, divergence_index in divergences.items():
-        response = trtfb["responses"][sample_index]
+        response = bundle["responses"][sample_index]
         response["output_text"] = "divergent"
         response["generated_token_ids"][divergence_index:] = [
             1000 + sample_index
         ] * (64 - divergence_index)
 
     summary = validation_engine.compare_continuation_sets(
-        hf, trtfb, require_token_ids=True
+        hf, bundle, require_token_ids=True
     )
     result = {
         "exact_match_rate": summary["exact_match_rate"],
