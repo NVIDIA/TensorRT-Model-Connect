@@ -2346,7 +2346,7 @@ def _cleanup_entry_work(
     hf_policy = (
         options.hf_cache_retention
         if options.hf_cache_mode == "per_entry"
-        else "delete_always"
+        else "delete_on_pass"
     )
     evidence: dict[str, Any] = {
         "path": str(case_work),

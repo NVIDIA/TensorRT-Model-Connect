@@ -9,9 +9,20 @@ execution:
   serial_tasks: true
 
 storage:
-  root_prefix: /dev/nvme0n1p1
+  device: /dev/nvme0n1p1
 
-# The initial qualification run supplies evidence for this sparse list. A
-# disagreement is not a hardware exclusion; only an evidence-backed hardware
-# limitation belongs here.
-unsupported: []
+# A disagreement is not a hardware exclusion. Keep only reproduced hardware
+# limits here, scoped to the exact task binding that requires the engine.
+unsupported:
+  - model: qwen-image-2512
+    task: accuracy
+    binding: dpg_bench_diffusion_image
+    reason: >-
+      TensorRT 11.0 MMDiT engine construction exhausts the platform's 128 GiB
+      unified memory and can leave the build blocked in a dma-fence wait.
+  - model: qwen-image-edit-2511
+    task: accuracy
+    binding: gedit_bench_image_edit
+    reason: >-
+      Equivalent Qwen Image engine profiles exhaust 128 GiB unified memory;
+      the edit profile uses the same engine topology with added conditioning.

@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 from typing import Any, Iterable, Mapping, Sequence
@@ -83,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--run-id", help="stable output directory name")
     run.add_argument("--dry-run", action="store_true", help="write and print commands only")
+    run.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume the existing --run-id after verifying its request",
+    )
     return parser
 
 
@@ -136,6 +142,14 @@ def load_platform(value: str) -> dict[str, Any]:
         raise ModelCheckError(
             f"platform storage.root_prefix must be an absolute path: {path}"
         )
+    required_device = storage.get("device")
+    if required_device is not None and (
+        not isinstance(required_device, str)
+        or not Path(required_device).is_absolute()
+    ):
+        raise ModelCheckError(
+            f"platform storage.device must be an absolute path: {path}"
+        )
     unsupported = profile.get("unsupported", [])
     if not isinstance(unsupported, list):
         raise ModelCheckError(f"platform unsupported must be a list: {path}")
@@ -150,7 +164,59 @@ def load_platform(value: str) -> dict[str, Any]:
             raise ModelCheckError(
                 f"platform unsupported[{index}] has unknown task {item['task']!r}"
             )
+        binding = item.get("binding")
+        if binding is not None and (
+            not isinstance(binding, str) or not binding.strip()
+        ):
+            raise ModelCheckError(
+                f"platform unsupported[{index}].binding must be a non-empty string"
+            )
     return {**profile, "source": str(path)}
+
+
+def audit_platform_unsupported(
+    platform: Mapping[str, Any],
+    *,
+    accuracy_catalog: Mapping[str, Any],
+    perf_cases: Sequence[Mapping[str, Any]],
+) -> None:
+    accuracy_models = accuracy_catalog["models"]
+    perf_bindings: dict[str, set[str]] = {}
+    for case in perf_cases:
+        perf_bindings.setdefault(str(case["model"]), set()).add(str(case["id"]))
+    seen: set[tuple[str, str, str]] = set()
+    for index, item in enumerate(platform.get("unsupported", [])):
+        model = str(item["model"])
+        task = str(item["task"])
+        binding = str(item.get("binding", "") or "")
+        key = (model, task, binding)
+        if key in seen:
+            raise ModelCheckError(
+                f"platform unsupported[{index}] duplicates {model}/{task}/{binding or '*'}"
+            )
+        seen.add(key)
+        if task == "accuracy":
+            spec = accuracy_models.get(model)
+            if not isinstance(spec, Mapping):
+                raise ModelCheckError(
+                    f"platform unsupported[{index}] names unknown Accuracy model {model}"
+                )
+            if binding and binding not in spec.get("workloads", []):
+                raise ModelCheckError(
+                    f"platform unsupported[{index}] names unknown Accuracy binding "
+                    f"{model}={binding}"
+                )
+        else:
+            entries = perf_bindings.get(model, set())
+            if not entries:
+                raise ModelCheckError(
+                    f"platform unsupported[{index}] names unknown Perf model {model}"
+                )
+            if binding and binding not in entries:
+                raise ModelCheckError(
+                    f"platform unsupported[{index}] names unknown Perf binding "
+                    f"{model}={binding}"
+                )
 
 
 def _environment_path(value: str) -> Path:
@@ -347,12 +413,19 @@ def _accuracy_projection(
     catalog: Mapping[str, Any],
     workloads: Sequence[str],
     all_workloads: bool,
+    missing_is_not_applicable: bool,
     platform: Mapping[str, Any],
 ) -> dict[str, Any]:
     if model not in catalog["models"]:
         return {
-            "status": "unconfigured",
-            "reason": "model has no Accuracy catalog binding",
+            "status": (
+                "not_applicable" if missing_is_not_applicable else "unconfigured"
+            ),
+            "reason": (
+                "model belongs only to another selected task's complete matrix"
+                if missing_is_not_applicable
+                else "model has no Accuracy catalog binding"
+            ),
             "bindings": [],
         }
     try:
@@ -456,6 +529,7 @@ def resolve_plan(
     all_accuracy_workloads: bool,
     perf_cases: Sequence[Mapping[str, Any]],
     perf_exclusions: Mapping[str, str],
+    complete_task_matrices: bool = False,
 ) -> dict[str, Any]:
     results = []
     blocker_count = 0
@@ -469,6 +543,7 @@ def resolve_plan(
                 all_workloads=(
                     all_accuracy_workloads if not accuracy_bindings else False
                 ),
+                missing_is_not_applicable=complete_task_matrices,
                 platform=platform,
             )
         if "perf" in tasks:
@@ -482,6 +557,12 @@ def resolve_plan(
             task["status"] == "unconfigured" for task in record["tasks"].values()
         )
         results.append(record)
+    bindings = [
+        binding
+        for record in results
+        for task in record["tasks"].values()
+        for binding in task["bindings"]
+    ]
     return {
         "schema_version": "trtmc.model-check-selection/v1",
         "platform": platform["id"],
@@ -493,10 +574,12 @@ def resolve_plan(
         "models": results,
         "summary": {
             "model_count": len(results),
-            "binding_count": sum(
-                len(task["bindings"])
-                for record in results
-                for task in record["tasks"].values()
+            "binding_count": len(bindings),
+            "configured_binding_count": sum(
+                binding["status"] == "configured" for binding in bindings
+            ),
+            "unsupported_binding_count": sum(
+                binding["status"] == "unsupported" for binding in bindings
             ),
             "blocker_count": blocker_count,
         },
@@ -528,6 +611,7 @@ def _render(plan: Mapping[str, Any]) -> str:
             "",
             f"Summary: {summary['model_count']} models, "
             f"{summary['binding_count']} bindings, "
+            f"{summary['unsupported_binding_count']} unsupported, "
             f"{summary['blocker_count']} blockers",
         ]
     )
@@ -558,12 +642,22 @@ def _resolve_request(
     perf_cases = perf_matrix._cases(perf_suite)
     perf_exclusions = perf_matrix._excluded_profiles(perf_suite)
     perf_matrix._validate_coverage(perf_cases, perf_exclusions)
+    audit_platform_unsupported(
+        platform,
+        accuracy_catalog=accuracy_catalog,
+        perf_cases=perf_cases,
+    )
 
-    available_profiles = set(accuracy_catalog["models"]).union(
+    known_profiles = set(accuracy_catalog["models"]).union(
         str(case["model"]) for case in perf_cases
     )
     if arguments.all:
-        models = tuple(sorted(available_profiles))
+        complete_profiles: set[str] = set()
+        if "accuracy" in tasks:
+            complete_profiles.update(accuracy_catalog["models"])
+        if "perf" in tasks:
+            complete_profiles.update(str(case["model"]) for case in perf_cases)
+        models = tuple(sorted(complete_profiles))
     elif arguments.model_selection:
         owners = model_selection.load_model_selection(arguments.model_selection)
         known_owners = set(
@@ -583,7 +677,7 @@ def _resolve_request(
         )
     else:
         models = model_selection.normalize_models(arguments.model)
-        unknown = sorted(set(models) - available_profiles)
+        unknown = sorted(set(models) - known_profiles)
         if unknown:
             raise ModelCheckError("unknown model profiles: " + ", ".join(unknown))
 
@@ -622,6 +716,7 @@ def _resolve_request(
         all_accuracy_workloads=arguments.all_accuracy_suites,
         perf_cases=perf_cases,
         perf_exclusions=perf_exclusions,
+        complete_task_matrices=arguments.all,
     )
     return plan, platform
 
@@ -663,15 +758,34 @@ def _require_platform_storage_root(
     platform: Mapping[str, Any],
 ) -> None:
     configured = platform.get("storage", {}).get("root_prefix")
-    if not configured:
+    if configured:
+        required = Path(str(configured)).resolve()
+        try:
+            root.relative_to(required)
+        except ValueError as exc:
+            raise ModelCheckError(
+                f"storage root must be below platform root {required}: {root}"
+            ) from exc
+    required_device = platform.get("storage", {}).get("device")
+    if not required_device:
         return
-    required = Path(str(configured)).resolve()
+    device_path = Path(str(required_device)).resolve()
     try:
-        root.relative_to(required)
-    except ValueError as exc:
+        root_device = root.stat().st_dev
+        device_stat = device_path.stat()
+    except OSError as exc:
         raise ModelCheckError(
-            f"storage root must be below platform root {required}: {root}"
+            f"cannot verify storage device {device_path} for {root}: {exc}"
         ) from exc
+    expected_device = (
+        device_stat.st_rdev
+        if stat.S_ISBLK(device_stat.st_mode)
+        else device_stat.st_dev
+    )
+    if root_device != expected_device:
+        raise ModelCheckError(
+            f"storage root must be on device {device_path}: {root}"
+        )
 
 
 def _option_arguments(options: Mapping[str, Any]) -> list[str]:
@@ -749,7 +863,10 @@ def _resolved_perf_environment(
     results_root: Path,
     scratch_root: Path,
 ) -> Path:
-    raw = _read_yaml(source, "performance environment")
+    raw = _expand_environment(
+        _read_yaml(source, "performance environment"),
+        "performance environment",
+    )
     storage = raw.get("storage")
     if not isinstance(storage, dict):
         raise ModelCheckError("performance environment storage must be an object")
@@ -782,6 +899,58 @@ def _perf_command(
     return command
 
 
+def _perf_resume_command(
+    environment: Mapping[str, Any],
+    results_root: Path,
+) -> list[str] | None:
+    if not results_root.is_dir():
+        return None
+    candidates = sorted(
+        path for path in results_root.iterdir() if (path / "results.json").is_file()
+    )
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ModelCheckError(
+            "cannot identify one Perf run to resume below "
+            f"{results_root}: found {len(candidates)}"
+        )
+    config = environment["tasks"]["perf"]
+    return [
+        str(config["runner_python"]),
+        str(REPOSITORY / "tools" / "perf_matrix.py"),
+        "resume",
+        str(candidates[0]),
+    ]
+
+
+def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
+    try:
+        previous = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ModelCheckError(f"cannot resume without request metadata: {path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ModelCheckError(f"cannot read resume request {path}: {exc}") from exc
+    if not isinstance(previous, Mapping):
+        raise ModelCheckError(f"resume request must contain a JSON object: {path}")
+    for field in (
+        "schema_version",
+        "run_id",
+        "platform",
+        "platform_source",
+        "platform_config",
+        "environment_source",
+        "environment_config",
+        "perf_environment_config",
+        "selection",
+        "commands",
+    ):
+        if previous.get(field) != request.get(field):
+            raise ModelCheckError(
+                f"cannot resume because the resolved {field} changed"
+            )
+
+
 def _run(arguments: argparse.Namespace) -> int:
     platform = load_platform(arguments.platform)
     environment = load_execution_environment(
@@ -808,9 +977,13 @@ def _run(arguments: argparse.Namespace) -> int:
         "results root",
     )
     run_root = _require_managed_path(results_root / run_id, storage_root, "run root")
-    if run_root.exists():
-        raise ModelCheckError(f"run root already exists: {run_root}")
-    run_root.mkdir(parents=True)
+    if arguments.resume:
+        if not run_root.is_dir():
+            raise ModelCheckError(f"cannot resume missing run root: {run_root}")
+    else:
+        if run_root.exists():
+            raise ModelCheckError(f"run root already exists: {run_root}")
+        run_root.mkdir(parents=True)
 
     perf_environment = None
     if _task_bindings(plan, "perf"):
@@ -831,8 +1004,11 @@ def _run(arguments: argparse.Namespace) -> int:
                 run_root / "accuracy",
             )
         else:
-            assert perf_environment is not None
-            command = _perf_command(plan, environment, perf_environment)
+            command = (
+                _perf_command(plan, environment, perf_environment)
+                if perf_environment is not None
+                else None
+            )
         commands.append((task, command))
 
     request = {
@@ -840,7 +1016,14 @@ def _run(arguments: argparse.Namespace) -> int:
         "run_id": run_id,
         "platform": platform["id"],
         "platform_source": platform["source"],
+        "platform_config": platform,
         "environment_source": environment["source"],
+        "environment_config": environment,
+        "perf_environment_config": (
+            _read_yaml(perf_environment, "resolved performance environment")
+            if perf_environment is not None
+            else None
+        ),
         "selection": plan,
         "commands": {
             task: command for task, command in commands if command is not None
@@ -848,10 +1031,31 @@ def _run(arguments: argparse.Namespace) -> int:
         "dry_run": bool(arguments.dry_run),
     }
     request_path = run_root / "request.json"
-    request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    if arguments.resume:
+        _verify_resume_request(request_path, request)
+    else:
+        request_path.write_text(
+            json.dumps(request, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    execution_commands = list(commands)
+    if arguments.resume:
+        execution_commands = []
+        for task, command in commands:
+            if command is None:
+                execution_commands.append((task, None))
+            elif task == "accuracy":
+                execution_commands.append((task, [*command, "--resume-existing"]))
+            else:
+                resume_command = _perf_resume_command(
+                    environment,
+                    run_root / "perf" / "results",
+                )
+                execution_commands.append((task, resume_command or command))
     print(_render(plan))
     print(f"\nRun root: {run_root}")
-    for task, command in commands:
+    for task, command in execution_commands:
         if command is None:
             print(f"{task}: no configured bindings")
             continue
@@ -861,7 +1065,7 @@ def _run(arguments: argparse.Namespace) -> int:
         return 0
 
     task_results: dict[str, int] = {}
-    for task, command in commands:
+    for task, command in execution_commands:
         if command is None:
             continue
         completed = subprocess.run(command, cwd=REPOSITORY, check=False)
@@ -869,6 +1073,7 @@ def _run(arguments: argparse.Namespace) -> int:
     result = {
         "schema_version": "trtmc.model-check-run-result/v1",
         "run_id": run_id,
+        "resumed": bool(arguments.resume),
         "task_exit_codes": task_results,
         "status": "passed" if all(code == 0 for code in task_results.values()) else "failed",
     }
