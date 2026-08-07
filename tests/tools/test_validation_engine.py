@@ -4698,9 +4698,9 @@ def test_max_prompt_token_length_uses_pinned_model_revision(
     captured: dict[str, Any] = {}
 
     class Tokenizer:
-        def __call__(self, text, *, add_special_tokens=False):
-            assert add_special_tokens is False
-            return argparse.Namespace(input_ids=text.split())
+        def __call__(self, text, *, add_special_tokens=True):
+            assert add_special_tokens is True
+            return argparse.Namespace(input_ids=["<bos>", *text.split()])
 
     class AutoTokenizer:
         @staticmethod
@@ -4722,7 +4722,7 @@ def test_max_prompt_token_length_uses_pinned_model_revision(
         local_files_only=True,
     )
 
-    assert length == 2
+    assert length == 3
     assert captured == {
         "model_id": "org/model",
         "revision": "0123456789abcdef",
@@ -4745,9 +4745,9 @@ def test_max_prompt_token_length_falls_back_to_raw_tokenizer(
             raise TypeError("invalid added tokens")
 
     class RawTokenizer:
-        def encode(self, text, *, add_special_tokens=False):
-            assert add_special_tokens is False
-            return argparse.Namespace(ids=text.split())
+        def encode(self, text, *, add_special_tokens=True):
+            assert add_special_tokens is True
+            return argparse.Namespace(ids=["<bos>", *text.split()])
 
         def decode(self, token_ids, *, skip_special_tokens=False):
             assert skip_special_tokens is False
@@ -4787,7 +4787,7 @@ def test_max_prompt_token_length_falls_back_to_raw_tokenizer(
         local_files_only=True,
     )
 
-    assert length == 3
+    assert length == 4
     assert captured == {
         "model_id": "org/model",
         "revision": "0123456789abcdef",
@@ -4795,6 +4795,59 @@ def test_max_prompt_token_length_falls_back_to_raw_tokenizer(
         "allow_patterns": ["tokenizer.json"],
         "tokenizer_file": str(tmp_path / "snapshot" / "tokenizer.json"),
     }
+
+
+def test_max_prompt_token_length_bounds_reranking_templates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text(
+        json.dumps(
+            {
+                "query": "query text",
+                "documents": ["short", "the longer document"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    captured: list[str] = []
+
+    class Tokenizer:
+        def __call__(self, text, *, add_special_tokens=True):
+            assert add_special_tokens is True
+            captured.append(text)
+            extra_tokens = 2 if "\n" in text else 0
+            return argparse.Namespace(
+                input_ids=["<bos>", *text.split(), *(["<newline>"] * extra_tokens)]
+            )
+
+    class AutoTokenizer:
+        @staticmethod
+        def from_pretrained(_model_id, **_kwargs):
+            return Tokenizer()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=AutoTokenizer),
+    )
+
+    length = validation_engine.max_prompt_token_length(
+        model_id="org/reranker",
+        model_revision="0123456789abcdef",
+        prompts_path=prompts,
+        local_files_only=True,
+    )
+
+    assert captured == [
+        "question:query text   passage:short",
+        "question:query text \n \n passage:short",
+        "question:query text   passage:the longer document",
+        "question:query text \n \n passage:the longer document",
+    ]
+    assert length == 8
 
 
 def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch) -> None:

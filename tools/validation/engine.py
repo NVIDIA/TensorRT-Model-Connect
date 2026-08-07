@@ -2801,7 +2801,7 @@ def _load_prompt_tokenizer(
             ) from fallback_error
 
         class RawTokenizerWrapper:
-            def __call__(self, text: str, *, add_special_tokens: bool = False) -> Any:
+            def __call__(self, text: str, *, add_special_tokens: bool = True) -> Any:
                 encoding = raw_tokenizer.encode(
                     text, add_special_tokens=add_special_tokens
                 )
@@ -2931,13 +2931,22 @@ def max_prompt_token_length(
         documents = row.get("documents")
         if isinstance(documents, list) and documents:
             query = str(row.get("query", row.get("prompt", "")))
-            prompts = [
-                f"question:{query}   passage:{document}" for document in documents
-            ]
+            prompts = []
+            for document in documents:
+                # Bound both the current C++ runtime text and the pinned Eagle
+                # processor contract. Whitespace changes tokenization, and
+                # either representation can be the longer fixed-shape input.
+                prompts.extend(
+                    [
+                        f"question:{query}   passage:{document}",
+                        f"question:{query} \n \n passage:{document}",
+                    ]
+                )
         else:
             prompts = [str(row.get("prompt", ""))]
         for prompt in prompts:
-            length = len(tokenizer(prompt, add_special_tokens=False).input_ids)
+            # Match the default special-token framing embedded in the bundle.
+            length = len(tokenizer(prompt).input_ids)
             max_len = max(max_len, length)
     return max_len
 
