@@ -2929,12 +2929,47 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     return json_path, html_path, report
 
 
-def _print_result(result: Mapping[str, Any], comparison: Path, report: Path) -> None:
+def _print_result(
+    result: Mapping[str, Any],
+    comparison: Path,
+    report: Path,
+    verbose: bool = False,
+) -> None:
     not_compared_reason = str(result.get("not_compared_reason", "") or "")
     if not_compared_reason:
         print()
+        print("Status: NOT COMPARED")
+        print(f"Reason: {not_compared_reason}")
         print(f"Compare result: {comparison}")
         print(f"Report:         {report}")
+        return
+    execution = result.get("execution", {})
+    validation = result.get("validation", {})
+    raw_result = result.get("raw_result", {})
+    validation_status = (
+        str(validation.get("status", "")) if isinstance(validation, Mapping) else ""
+    )
+    status = {
+        "passed": "PASSED",
+        "failed": "FAILED",
+        "skipped": "SKIPPED",
+    }.get(validation_status, validation_status.upper() or "UNKNOWN")
+    print()
+    print(f"Status: {status}")
+    if isinstance(execution, Mapping) and execution.get("status") == "error":
+        error = (
+            str(raw_result.get("error", ""))
+            if isinstance(raw_result, Mapping)
+            else ""
+        )
+        if error:
+            print(f"Error: {error}")
+        worker_log = str(result.get("worker_log", "") or "")
+        if worker_log:
+            print(f"Worker log: {worker_log}")
+    if not verbose:
+        print(f"Compare result: {comparison}")
+        print(f"Report: {report}")
         return
     reproduce = result.get("reproduce", {})
     hf_commands = reproduce.get("hf", []) if isinstance(reproduce, dict) else []
@@ -3140,6 +3175,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print full reproduction commands and detailed worker progress",
+    )
     return parser
 
 
@@ -3547,6 +3587,23 @@ def _worker_error_result(
     )
 
 
+_WORKER_EXCEPTION_LINE = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)|[^:]+: error):\s+.+$"
+)
+
+
+def _worker_log_error(worker_log: Path) -> str:
+    try:
+        lines = worker_log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines[-200:]):
+        rendered = line.strip()
+        if _WORKER_EXCEPTION_LINE.fullmatch(rendered):
+            return rendered
+    return ""
+
+
 def _run_supervised_binding(
     binding: Binding,
     *,
@@ -3578,13 +3635,14 @@ def _run_supervised_binding(
         if result.get("model") != binding.model or result.get("workload") != binding.workload:
             raise ValidationError("worker wrote comparison.json for a different binding")
     except (OSError, ValueError, ValidationError) as exc:
+        worker_error = _worker_log_error(worker_log)
         result = _worker_error_result(
             binding,
             command=command,
             returncode=returncode,
             worker_log=worker_log,
             sample_limit=resolve_sample_limit(catalog, binding, arguments.limit),
-            error=str(exc),
+            error=worker_error or str(exc),
         )
         (case_dir / "disagreements.jsonl").write_text("", encoding="utf-8")
     else:
@@ -3671,17 +3729,24 @@ def _run_supervised_binding_with_retries(
             if execution_error and attempt < arguments.model_attempts
             else {}
         )
-        attempts.append(
-            _attempt_record(
-                result,
-                attempt=attempt,
-                archived=archived,
-            )
+        attempt_result = _attempt_record(
+            result,
+            attempt=attempt,
+            archived=archived,
         )
+        attempts.append(attempt_result)
         if not execution_error or attempt == arguments.model_attempts:
             break
         print(
-            f"Retrying worker after execution error: {binding.model} "
+            f"  Attempt {attempt}/{arguments.model_attempts}: FAILED",
+            flush=True,
+        )
+        if attempt_result["error"]:
+            print(f"  Error: {attempt_result['error']}", flush=True)
+        if attempt_result["worker_log"]:
+            print(f"  Worker log: {attempt_result['worker_log']}", flush=True)
+        print(
+            f"  Retrying {binding.model} "
             f"(attempt {attempt + 1}/{arguments.model_attempts})",
             flush=True,
         )
@@ -3738,7 +3803,8 @@ def _resume_command(command: str) -> list[str]:
         arguments = shlex.split(command)
     except ValueError as exc:
         raise ValidationError(f"cannot parse recorded Accuracy command: {exc}") from exc
-    return [argument for argument in arguments if argument != "--resume-existing"]
+    presentation_only = {"--resume-existing", "--verbose"}
+    return [argument for argument in arguments if argument not in presentation_only]
 
 
 def _validate_resume_request(output: Path) -> None:
@@ -3797,7 +3863,7 @@ def _run_all_bindings(
             )
             not_compared = True
             _, report_path, _ = write_report(arguments.output)
-            _print_result(result, comparison, report_path)
+            _print_result(result, comparison, report_path, arguments.verbose)
             continue
         sample_limit = resolve_sample_limit(catalog, binding, arguments.limit)
         sample_note = "full dataset" if sample_limit == 0 else f"{sample_limit} samples"
@@ -3861,7 +3927,7 @@ def _run_all_bindings(
         )
         _, report_path, _ = write_report(arguments.output)
         comparison = _case_directory(arguments.output, binding) / "comparison.json"
-        _print_result(result, comparison, report_path)
+        _print_result(result, comparison, report_path, arguments.verbose)
         failed = failed or model_failed
         if stop_model:
             print(
@@ -3906,7 +3972,7 @@ def _run_bindings(
             not_compared = True
             if not arguments.model_worker:
                 _, report_path, _ = write_report(arguments.output)
-                _print_result(result, comparison, report_path)
+                _print_result(result, comparison, report_path, arguments.verbose)
             continue
         binding_arguments = copy.copy(arguments)
         binding_arguments._reused_bundle_revalidation_budget = (
@@ -3933,7 +3999,7 @@ def _run_bindings(
         if not arguments.model_worker:
             _, report_path, _ = write_report(arguments.output)
             comparison = _case_directory(arguments.output, binding) / "comparison.json"
-            _print_result(result, comparison, report_path)
+            _print_result(result, comparison, report_path, arguments.verbose)
         failed = failed or result["validation"]["status"] == "failed"
     if failed:
         return 1

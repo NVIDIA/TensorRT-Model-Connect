@@ -84,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--run-id", help="stable output directory name")
     run.add_argument("--dry-run", action="store_true", help="write and print commands only")
     run.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print full child commands and enable detailed child-runner output",
+    )
+    run.add_argument(
         "--resume",
         action="store_true",
         help="resume the existing --run-id after verifying its request",
@@ -582,6 +587,35 @@ def _render(plan: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _task_label(task: str) -> str:
+    return "Accuracy" if task == "accuracy" else "Perf"
+
+
+def _render_run_header(
+    plan: Mapping[str, Any],
+    *,
+    run_id: str,
+    run_root: Path,
+) -> str:
+    models = [str(record["model"]) for record in plan["models"]]
+    model_summary = ", ".join(models) if len(models) <= 5 else f"{len(models)} selected"
+    order = " -> ".join(_task_label(task) for task in plan["execution"]["task_order"])
+    return "\n".join(
+        (
+            f"Run: {run_id}",
+            f"Platform: {plan['platform']}",
+            f"Models: {model_summary}",
+            f"Order: {order}",
+            f"Bindings: {plan['summary']['configured_binding_count']}",
+            f"Run root: {run_root}",
+        )
+    )
+
+
+def _detailed_command(command: Sequence[str], *, verbose: bool) -> list[str]:
+    return [*command, "--verbose"] if verbose else list(command)
+
+
 def _resolve_request(
     arguments: argparse.Namespace,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1008,23 +1042,34 @@ def _run(arguments: argparse.Namespace) -> int:
                     run_root / "perf" / "results",
                 )
                 execution_commands.append((task, resume_command or command))
-    print(_render(plan))
-    print(f"\nRun root: {run_root}")
-    for task, command in execution_commands:
-        if command is None:
-            print(f"{task}: no configured bindings")
-            continue
-        print(f"{task}: {shlex.join(command)}")
+    print(_render_run_header(plan, run_id=run_id, run_root=run_root))
+    if arguments.verbose or arguments.dry_run:
+        print("\nCommands:")
+        for task, command in execution_commands:
+            if command is None:
+                print(f"  {_task_label(task)}: no configured bindings")
+                continue
+            rendered = _detailed_command(command, verbose=arguments.verbose)
+            print(f"  {_task_label(task)}: {shlex.join(rendered)}")
 
     if arguments.dry_run:
         return 0
 
     task_results: dict[str, int] = {}
-    for task, command in execution_commands:
+    runnable = [(task, command) for task, command in execution_commands if command is not None]
+    for index, (task, command) in enumerate(runnable, start=1):
+        label = _task_label(task)
+        print(f"\n[{index}/{len(runnable)}] {label}", flush=True)
         if command is None:
             continue
-        completed = subprocess.run(command, cwd=REPOSITORY, check=False)
+        completed = subprocess.run(
+            _detailed_command(command, verbose=arguments.verbose),
+            cwd=REPOSITORY,
+            check=False,
+        )
         task_results[task] = completed.returncode
+        status = "PASSED" if completed.returncode == 0 else "FAILED"
+        print(f"[{index}/{len(runnable)}] {label}: {status}", flush=True)
     result = {
         "schema_version": "trtmc.model-check-run-result/v1",
         "run_id": run_id,
@@ -1036,6 +1081,11 @@ def _run(arguments: argparse.Namespace) -> int:
         json.dumps(result, indent=2) + "\n",
         encoding="utf-8",
     )
+    print(f"\nOverall: {result['status'].upper()}")
+    for task, returncode in task_results.items():
+        status = "PASSED" if returncode == 0 else "FAILED"
+        print(f"  {_task_label(task)}: {status}")
+    print(f"Run root: {run_root}")
     return 0 if result["status"] == "passed" else 1
 
 

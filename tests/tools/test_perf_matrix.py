@@ -708,6 +708,7 @@ def test_gpu_memory_headroom_waits_for_reclaimable_capacity(monkeypatch) -> None
 def test_backend_waits_for_gpu_headroom_before_each_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys,
 ) -> None:
     events = []
     monkeypatch.setattr(perf_matrix, "_command_environment", lambda: {})
@@ -755,7 +756,7 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     perf_matrix._run_supported_case(
         {"id": "example"},
         {"model": {"precision": "fp16"}, "request": {}},
-        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25),
+        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25, verbose=False),
         tmp_path,
         row,
     )
@@ -767,6 +768,21 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
         ("run", "baseline"),
     ]
     assert row["status"] == "green"
+    assert "TRTMC:" not in capsys.readouterr().out
+
+    events.clear()
+    row = {"resolved_settings": {}}
+    perf_matrix._run_supported_case(
+        {"id": "example"},
+        {"model": {"precision": "fp16"}, "request": {}},
+        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0.25, verbose=True),
+        tmp_path,
+        row,
+    )
+
+    output = capsys.readouterr().out
+    assert "[example] TRTMC: candidate" in output
+    assert "[example] baseline: baseline --precision fp16" in output
 
 
 @pytest.mark.parametrize(
