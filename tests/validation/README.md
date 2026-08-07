@@ -46,6 +46,15 @@ python tools/trtmc_validate.py \
   --workload vlm_mmmu_pro_vision_fixed_mcq
 ```
 
+Automation that already resolved a heterogeneous set of model/workload pairs
+can pass exact bindings without constructing a shared workload intersection:
+
+```bash
+python tools/trtmc_validate.py \
+  --binding qwen25vl-3b=vlm_mmmu_pro_vision_mcq \
+  --binding gpt2-125m=mmlu_continuation_parity
+```
+
 `--model-selection FILE` accepts the owner/family JSON emitted by
 `tools/model_ci.py` and expands it to matching ready model profiles. Every
 resolved `(model profile, workload)` pair is an independent result binding.
@@ -71,6 +80,23 @@ python tools/trtmc_validate.py --all --on-model-failure stop
 Both policies return a nonzero exit status when any attempted model fails.
 Process isolation also covers failures that happen before backend execution,
 such as reference-environment setup or uncaught model-specific Python errors.
+
+For disk-bounded runs, `--model-work-dir` isolates the engine and optional HF
+cache once per model, not once per suite. Multiple suites selected for one model
+therefore reuse the same engine before cleanup. `--engine-retention` and
+`--hf-cache-retention` accept `retain`, `delete_on_pass`, or `delete_always`;
+the latter applies only with `--hf-cache-mode per_model`. A shared HF cache can
+only be retained. `--storage-root` rejects mutable paths outside the managed
+filesystem, and `--minimum-free-space-gib` is checked before every binding.
+
+```bash
+python tools/trtmc_validate.py \
+  --model qwen25vl-3b --all-workloads \
+  --storage-root /runs \
+  --model-work-dir /runs/work/accuracy \
+  --engine-retention delete_on_pass \
+  --hf-cache-mode shared --hf-cache-retention retain
+```
 
 The same CLI is the CI case entry point. Generate a machine-readable matrix,
 then run one exact model/workload binding in each CI node:

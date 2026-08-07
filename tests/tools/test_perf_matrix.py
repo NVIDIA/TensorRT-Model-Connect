@@ -23,6 +23,9 @@ from tools import perf_matrix
 REPOSITORY = Path(__file__).resolve().parents[2]
 SUITE = REPOSITORY / "benchmarks/performance/release.yaml"
 GB300_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/gb300.yaml"
+L4T_THOR_ENVIRONMENT = (
+    REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
+)
 MINIMAX_H3_EXCLUSION_REASON = (
     "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
     "into the release performance runner."
@@ -397,8 +400,112 @@ def test_checked_in_gb300_environment_is_ci_runnable() -> None:
     assert raw["storage"]["bundle_cache"] == "${TRTMC_PERF_BUNDLE_CACHE}"
     assert raw["storage"]["bundle_roots"] == "${TRTMC_PERF_BUNDLE_ROOTS}"
     assert raw["storage"]["runtime_dirs"] == "${TRTMC_PERF_RUNTIME_DIRS}"
+    assert raw["storage"]["bundle_retention"] == "retain"
+    assert raw["execution"]["hf_cache_mode"] == "shared"
+    assert raw["execution"]["hf_cache_retention"] == "retain"
     assert raw["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert raw["execution"]["timeout_seconds"] == 7200
+
+
+def test_checked_in_l4t_environment_bounds_storage_and_cleanup() -> None:
+    raw = yaml.safe_load(L4T_THOR_ENVIRONMENT.read_text(encoding="utf-8"))
+
+    assert raw["storage"]["storage_root"] == "${TRTMC_CHECK_STORAGE_ROOT}"
+    assert raw["storage"]["bundle_retention"] == "delete_on_pass"
+    assert raw["execution"]["hf_cache_mode"] == "shared"
+    assert raw["execution"]["hf_cache_retention"] == "retain"
+
+
+def test_environment_rejects_deleting_a_shared_hf_cache(tmp_path: Path) -> None:
+    environment_path = tmp_path / "environment.yaml"
+    _write_environment(
+        environment_path,
+        results_root=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench=tmp_path / "trtmc-bench",
+        trtmc_worker=tmp_path / "worker",
+        hf_transformers_runner=tmp_path / "hf.py",
+    )
+    raw = yaml.safe_load(environment_path.read_text(encoding="utf-8"))
+    raw["execution"]["hf_cache_mode"] = "shared"
+    raw["execution"]["hf_cache_retention"] = "delete_always"
+    environment_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="shared Hugging Face"):
+        perf_matrix._read_environment(environment_path)
+
+
+def test_perf_bundle_delete_on_pass_retains_failure_then_deletes_success(
+    tmp_path: Path,
+) -> None:
+    cache = tmp_path / "bundles"
+    bundle = cache / "model-a" / "fingerprint" / "model-a.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text("engine", encoding="utf-8")
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=cache,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        bundle_retention="delete_on_pass",
+    )
+
+    retained = perf_matrix._cleanup_managed_bundle(
+        {"bundle_path": str(bundle)},
+        options,
+        passed=False,
+    )
+    assert retained["status"] == "retained"
+    assert bundle.is_file()
+
+    deleted = perf_matrix._cleanup_managed_bundle(
+        {"bundle_path": str(bundle)},
+        options,
+        passed=True,
+    )
+    assert deleted["status"] == "deleted"
+    assert not bundle.parent.exists()
+
+
+def test_perf_per_entry_hf_cache_can_retain_failure_and_delete_success(
+    tmp_path: Path,
+) -> None:
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        hf_cache_mode="per_entry",
+        hf_cache_retention="delete_on_pass",
+    )
+    case_work = tmp_path / "scratch/case"
+    (case_work / "hf-cache").mkdir(parents=True)
+
+    retained = perf_matrix._cleanup_entry_work(case_work, options, passed=False)
+    assert retained["status"] == "retained"
+    assert case_work.is_dir()
+
+    deleted = perf_matrix._cleanup_entry_work(case_work, options, passed=True)
+    assert deleted["status"] == "deleted"
+    assert not case_work.exists()
 
 
 

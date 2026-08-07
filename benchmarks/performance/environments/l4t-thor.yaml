@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version: trtmc.perf-environment/v1
-name: gb300-ci
+name: l4t-thor
 
 tools:
   trtmc_bench: scripts/trtmc-bench
@@ -11,17 +11,18 @@ tools:
   task_reference_runner: benchmarks/performance/baselines/task_reference.py
 
 storage:
+  storage_root: ${TRTMC_CHECK_STORAGE_ROOT}
   results_root: artifacts/perf
   scratch_root: artifacts/perf-scratch
   bundle_cache: ${TRTMC_PERF_BUNDLE_CACHE}
   bundle_roots: ${TRTMC_PERF_BUNDLE_ROOTS}
   runtime_dirs: ${TRTMC_PERF_RUNTIME_DIRS}
-  minimum_free_space_gib: 20
-  bundle_retention: retain
+  minimum_free_space_gib: 64
+  bundle_retention: delete_on_pass
 
 execution:
   local_files_only: false
   hf_cache_mode: shared
   hf_cache_retention: retain
   minimum_gpu_free_fraction: 0.0
-  timeout_seconds: 7200
+  timeout_seconds: 14400

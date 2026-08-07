@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import copy
 from dataclasses import dataclass
@@ -72,6 +73,18 @@ DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT = 1
 LEGACY_E2E_REASON = (
     "E2E execution does not compare aligned reference and TRTMC outputs."
 )
+HF_CACHE_ENVIRONMENT_NAMES = (
+    "HF_HOME",
+    "HF_HUB_CACHE",
+    "HUGGINGFACE_HUB_CACHE",
+    "HF_DATASETS_CACHE",
+    "TRANSFORMERS_CACHE",
+    "HF_ASSETS_CACHE",
+    "HF_XET_CACHE",
+)
+RETENTION_POLICIES = ("retain", "delete_on_pass", "delete_always")
+
+
 class ValidationError(RuntimeError):
     """The requested validation cannot be resolved or executed."""
 
@@ -3025,6 +3038,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--binding",
+        dest="selected_bindings",
+        action="append",
+        default=[],
+        metavar="MODEL=WORKLOAD",
+        help="exact Accuracy binding; repeatable",
+    )
+    parser.add_argument(
         "--workload",
         dest="selected_workloads",
         action="append",
@@ -3087,6 +3108,40 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_REFERENCE_CACHE,
     )
+    parser.add_argument(
+        "--storage-root",
+        type=Path,
+        help="require mutable validation paths to stay below this root",
+    )
+    parser.add_argument(
+        "--model-work-dir",
+        type=Path,
+        help="isolate engines and optional Hugging Face cache per model",
+    )
+    parser.add_argument(
+        "--engine-retention",
+        choices=RETENTION_POLICIES,
+        default="retain",
+        help="retain model engines, delete them on pass, or always delete them",
+    )
+    parser.add_argument(
+        "--hf-cache-mode",
+        choices=("shared", "per_model"),
+        default="shared",
+        help="use the inherited Hugging Face cache or isolate it per model",
+    )
+    parser.add_argument(
+        "--hf-cache-retention",
+        choices=RETENTION_POLICIES,
+        default="retain",
+        help="retention for a per-model Hugging Face cache",
+    )
+    parser.add_argument(
+        "--minimum-free-space-gib",
+        type=_nonnegative_float,
+        default=0.0,
+        help="refuse to start the next Accuracy binding below this free space",
+    )
     parser.add_argument("--trtmc-binary", type=Path, default=REPO_ROOT / "build" / "trtmc")
     parser.add_argument(
         "--benchmark-binary",
@@ -3148,16 +3203,27 @@ def _select_bindings(
             arguments.model,
             arguments.selected_models,
             arguments.model_selection,
+            arguments.selected_bindings,
         )
     )
     if selection_modes > 1:
         raise ValidationError(
             "choose exactly one model selection: MODEL, --model, "
-            "--model-selection, or --all"
+            "--model-selection, --binding, or --all"
         )
     if not selection_modes:
         raise ValidationError(
-            "provide MODEL [WORKLOAD], --model, --model-selection, --all, or --list"
+            "provide MODEL [WORKLOAD], --model, --model-selection, --binding, "
+            "--all, or --list"
+        )
+    if arguments.selected_bindings and (
+        arguments.workload
+        or arguments.selected_workloads
+        or arguments.all_workloads
+    ):
+        raise ValidationError(
+            "--binding cannot be combined with positional WORKLOAD, "
+            "--workload, or --all-workloads"
         )
     if arguments.workload and (
         arguments.selected_workloads or arguments.all_workloads
@@ -3168,6 +3234,24 @@ def _select_bindings(
     if arguments.selected_workloads and arguments.all_workloads:
         raise ValidationError("--workload cannot be combined with --all-workloads")
 
+    if arguments.selected_bindings:
+        bindings: list[Binding] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_binding in arguments.selected_bindings:
+            model, separator, workload = raw_binding.partition("=")
+            model = model.strip()
+            workload = workload.strip()
+            if not separator or not model or not workload:
+                raise ValidationError(
+                    f"invalid --binding {raw_binding!r}; expected MODEL=WORKLOAD"
+                )
+            identity = (model, workload)
+            if identity not in seen:
+                bindings.append(resolve_binding(catalog, model, workload))
+                seen.add(identity)
+        if arguments.dataset and len(bindings) != 1:
+            raise ValidationError("--dataset requires exactly one model/workload binding")
+        return bindings
     if arguments.all:
         models = tuple(ready_models)
     elif arguments.model:
@@ -3237,9 +3321,152 @@ def _print_bindings(
 
 
 def _prepare_run_directories(arguments: argparse.Namespace) -> None:
+    if arguments.engine_retention != "retain" and arguments.model_work_dir is None:
+        raise ValidationError(
+            "non-retained engines require --model-work-dir isolation"
+        )
+    if arguments.hf_cache_mode == "per_model" and arguments.model_work_dir is None:
+        raise ValidationError("--hf-cache-mode per_model requires --model-work-dir")
+    if arguments.hf_cache_mode == "shared" and arguments.hf_cache_retention != "retain":
+        raise ValidationError(
+            "a shared Hugging Face cache only supports --hf-cache-retention retain"
+        )
+    if arguments.storage_root is not None:
+        storage_root = arguments.storage_root.expanduser().resolve()
+        if not storage_root.is_dir():
+            raise ValidationError(f"storage root does not exist: {storage_root}")
+        arguments.storage_root = storage_root
+        for label, path in (
+            ("output", arguments.output),
+            ("engine directory", arguments.engine_dir),
+            ("reference cache directory", arguments.reference_cache_dir),
+            ("model work directory", arguments.model_work_dir),
+        ):
+            if path is None:
+                continue
+            resolved = path.expanduser().resolve()
+            try:
+                resolved.relative_to(storage_root)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"{label} must stay below storage root {storage_root}: {resolved}"
+                ) from exc
+    if arguments.model_work_dir is not None:
+        output = arguments.output.expanduser().resolve()
+        model_work = arguments.model_work_dir.expanduser().resolve()
+        if (
+            output == model_work
+            or output.is_relative_to(model_work)
+            or model_work.is_relative_to(output)
+        ):
+            raise ValidationError("output and model work directory must be disjoint")
+        arguments.output = output
+        arguments.model_work_dir = model_work
     arguments.output.mkdir(parents=True, exist_ok=True)
-    arguments.engine_dir.mkdir(parents=True, exist_ok=True)
+    if arguments.model_work_dir is None:
+        arguments.engine_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        arguments.model_work_dir.mkdir(parents=True, exist_ok=True)
     arguments.reference_cache_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _model_binding_arguments(
+    arguments: argparse.Namespace,
+    binding: Binding,
+) -> tuple[argparse.Namespace, Path | None]:
+    selected = copy.copy(arguments)
+    if arguments.model_work_dir is None:
+        return selected, None
+    if Path(binding.model).name != binding.model:
+        raise ValidationError(f"unsafe model name for model work: {binding.model!r}")
+    model_work = arguments.model_work_dir / binding.model
+    selected.engine_dir = model_work / "engines"
+    selected.engine_dir.mkdir(parents=True, exist_ok=True)
+    selected.hf_cache_dir = None
+    if arguments.hf_cache_mode == "per_model":
+        selected.hf_cache_dir = model_work / "hf-cache"
+        selected.hf_cache_dir.mkdir(parents=True, exist_ok=True)
+    return selected, model_work
+
+
+def _delete_for_retention(policy: str, *, passed: bool) -> bool:
+    return policy == "delete_always" or (policy == "delete_on_pass" and passed)
+
+
+def _cleanup_resource(path: Path, policy: str, *, passed: bool) -> dict[str, str]:
+    evidence = {"path": str(path), "policy": policy, "status": "retained"}
+    if not _delete_for_retention(policy, passed=passed):
+        return evidence
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        evidence["status"] = "already_absent"
+    except OSError as exc:
+        evidence.update({"status": "failed", "error": str(exc)})
+    else:
+        evidence["status"] = "deleted"
+    return evidence
+
+
+def _cleanup_model_resources(
+    arguments: argparse.Namespace,
+    model_work: Path | None,
+    *,
+    passed: bool,
+) -> dict[str, Any]:
+    if model_work is None:
+        return {
+            "scope": "shared",
+            "engine": {"policy": "retain", "status": "retained"},
+            "hf_cache": {"policy": "retain", "status": "shared_retained"},
+        }
+    engine = _cleanup_resource(
+        model_work / "engines",
+        arguments.engine_retention,
+        passed=passed,
+    )
+    hf_cache = (
+        _cleanup_resource(
+            model_work / "hf-cache",
+            arguments.hf_cache_retention,
+            passed=passed,
+        )
+        if arguments.hf_cache_mode == "per_model"
+        else {"policy": "retain", "status": "shared_retained"}
+    )
+    try:
+        model_work.rmdir()
+    except OSError:
+        pass
+    return {
+        "scope": "model",
+        "passed": passed,
+        "engine": engine,
+        "hf_cache": hf_cache,
+    }
+
+
+def _worker_environment(arguments: argparse.Namespace) -> dict[str, str]:
+    environment = _source_environment()
+    hf_cache_dir = getattr(arguments, "hf_cache_dir", None)
+    if hf_cache_dir is None:
+        return environment
+    environment["HF_HOME"] = str(Path(hf_cache_dir).resolve())
+    for name in HF_CACHE_ENVIRONMENT_NAMES[1:]:
+        environment.pop(name, None)
+    return environment
+
+
+def _check_free_space(arguments: argparse.Namespace, binding: Binding) -> float:
+    root = arguments.storage_root or arguments.model_work_dir or arguments.output
+    free_gib = shutil.disk_usage(root).free / 1024**3
+    if free_gib < arguments.minimum_free_space_gib:
+        raise ValidationError(
+            f"refusing to start {binding.model}/{binding.workload}: "
+            f"only {free_gib:.1f} GiB free; "
+            f"minimum is {arguments.minimum_free_space_gib:.1f} GiB"
+        )
+    return free_gib
 
 
 def _worker_command(
@@ -3361,7 +3588,7 @@ def _run_supervised_binding(
     command = _worker_command(binding, arguments)
     launch_error = ""
     try:
-        returncode = _run_subprocess(command, worker_log, _source_environment())
+        returncode = _run_subprocess(command, worker_log, _worker_environment(arguments))
     except OSError as exc:
         returncode = 127
         launch_error = f"could not start model worker: {exc}"
@@ -3519,6 +3746,7 @@ def _run_all_bindings(
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
 ) -> int:
+    bindings = tuple(bindings)
     _prepare_run_directories(arguments)
     _reused_bundle_revalidation_budget(arguments)
     write_run_metadata(
@@ -3527,6 +3755,8 @@ def _run_all_bindings(
     )
     failed = False
     not_compared = False
+    remaining = Counter(binding.model for binding in bindings if binding.runnable)
+    model_passed = {model: True for model in remaining}
     for binding in bindings:
         if not binding.runnable:
             print(
@@ -3548,21 +3778,45 @@ def _run_all_bindings(
             if sample_limit == 0
             else f"{sample_limit} samples"
         )
+        free_gib = _check_free_space(arguments, binding)
         print(
-            f"\nStarting worker: {binding.model} / {binding.workload} / {sample_note}",
+            f"\nStarting worker: {binding.model} / {binding.workload} / {sample_note} "
+            f"/ {free_gib:.1f} GiB free",
             flush=True,
         )
+        binding_arguments, model_work = _model_binding_arguments(arguments, binding)
         result = _run_supervised_binding_with_retries(
             binding,
-            arguments=arguments,
+            arguments=binding_arguments,
             catalog=catalog,
         )
+        model_failed = result["validation"]["status"] == "failed"
+        model_passed[binding.model] = model_passed[binding.model] and not model_failed
+        remaining[binding.model] -= 1
+        stop_model = model_failed and arguments.on_model_failure == "stop"
+        if remaining[binding.model] == 0 or stop_model:
+            cleanup = _cleanup_model_resources(
+                arguments,
+                model_work,
+                passed=model_passed[binding.model] and remaining[binding.model] == 0,
+            )
+            result["resource_cleanup"] = cleanup
+            cleanup_failed = any(
+                resource.get("status") == "failed"
+                for resource in (cleanup["engine"], cleanup["hf_cache"])
+            )
+            failed = failed or cleanup_failed
+            comparison = _case_directory(arguments.output, binding) / "comparison.json"
+            comparison.parent.mkdir(parents=True, exist_ok=True)
+            comparison.write_text(
+                json.dumps(result, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
         _, report_path, _ = write_report(arguments.output)
         comparison = _case_directory(arguments.output, binding) / "comparison.json"
         _print_result(result, comparison, report_path)
-        model_failed = result["validation"]["status"] == "failed"
         failed = failed or model_failed
-        if model_failed and arguments.on_model_failure == "stop":
+        if stop_model:
             print(
                 f"Stopping after failed model: {binding.model}",
                 flush=True,
