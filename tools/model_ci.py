@@ -127,7 +127,6 @@ LEGAL_OR_DOC_EXACT = frozenset(
         "LICENSE",
         "NOTICE",
         "README.md",
-        ".github/workflows/legal.yml",
         "tools/legal_header_exceptions.toml",
         "tools/legal_headers.py",
     }

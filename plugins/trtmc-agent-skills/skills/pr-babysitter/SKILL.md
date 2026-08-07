@@ -37,8 +37,8 @@ branch, and push updated commits. Work sequentially and report every PR state.
 ## Current CI Contract
 
 Read `.github/workflows/internal-ci-bridge.yml` from current `github/main`.
-Source keeps only Internal CI Bridge, Legal Compliance, and Pages workflows.
-Premerge and nightly execution stay in private Internal CI.
+Source keeps only Internal CI Bridge and Pages workflows. Premerge, including
+legal compliance, and nightly execution stay in private Internal CI.
 
 Before triggering premerge, compare the PR metadata head with the independently
 resolved source branch head. This catches a GitHub PR tracking ref that stopped
@@ -259,7 +259,7 @@ and restart CI evaluation.
 ## Diagnose Failed Checks
 
 Use Source Actions logs only for the retained Source workflows: Internal CI
-Bridge, Legal Compliance, and Pages. List recent Source bridge runs:
+Bridge and Pages. List recent Source bridge runs:
 
 ```bash
 gh run list \

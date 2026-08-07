@@ -4,9 +4,9 @@ title: Testing Reference
 
 ## CI and evidence boundary
 
-Source contains the test implementation and three GitHub workflows: the
-Internal CI Bridge, reusable/manual Legal Compliance, and the path-scoped Pages
-deployment. Premerge and nightly orchestration run in private Internal CI.
+Source contains the test implementation and two GitHub workflows: the Internal
+CI Bridge and the path-scoped Pages deployment. Premerge, including legal
+compliance, and nightly orchestration run in private Internal CI.
 
 An authorized collaborator with maintain or admin access applies
 `run-internal-ci` to dispatch the exact current PR head. Source receives only
@@ -70,12 +70,11 @@ change must not claim that this checker passes.
 
 ## Active workflow inventory
 
-Source contains exactly these three workflow files:
+Source contains exactly these two workflow files:
 
 | Workflow | Trigger and evidence boundary |
 | --- | --- |
 | `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, captures the exact PR head, posts a pending sanitized status, and dispatches private premerge. |
-| `.github/workflows/legal.yml` | Reusable or manual exact-revision legal-document and source-header certification; it does not run on `main` pushes. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
 
 Internal scheduled nightly and model proof are not Source workflows. Their raw

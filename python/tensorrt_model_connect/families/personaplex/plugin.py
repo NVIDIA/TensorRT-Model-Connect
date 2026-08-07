@@ -11,19 +11,6 @@ PersonaPlex (nvidia/personaplex-7b-v1) is based on the Moshi architecture:
 Pipeline:
   audio_in -> Mimi_encode -> Temporal_process -> Depth_generate -> Mimi_decode -> audio_out
 
-Bring-up CLI reference (used for PersonaPlex TRT/C++ iteration):
-  # Rebuild C++ runtime after speech backend / CLI changes
-  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && cmake --build build -j'
-
-  # Build a PersonaPlex bundle from HF (base engine bundle)
-  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && ./build/trtmc build nvidia/personaplex-7b-v1 -o /tmp/trtmc-ci/engines/personaplex-7b.bundle --max-cache-length 256 --verbose'
-
-  # Rebuild only Mimi decoder capacity (example: 320 frames) and repack bundle
-  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && .venv/bin/python <inline script calling _build_mimi_decoder_engine(..., num_input_codebooks=8, num_frames=320) and replacing mimi_decoder_plan in an existing .bundle>'
-
-  # Run speech inference (long-form test using tail frame extension)
-  docker exec trtmc-dev-gb300 bash -lc 'cd /workspace/tensorrt-model-connect && ./build/trtmc speak /tmp/trtmc-ci/engines/personaplex-7b-ropefix2-dec320.bundle --audio-in tests/e2e/models/personaplex/data/Recording.wav --audio-out /workspace/tensorrt-model-connect/personaplex_recording_ropefix2_dec320_tail300_max1000.wav --max-new-tokens 1000 --tail-frames 300'
-
 Real weight key structure (nvidia/personaplex-7b-v1):
   Temporal Transformer (32 layers, hidden=4096):
     transformer.layers.{i}.self_attn.in_proj_weight: [12288, 4096]  # fused QKV

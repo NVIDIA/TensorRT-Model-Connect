@@ -342,12 +342,10 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
     }
     assert sorted(path.name for path in workflow_files) == [
         "internal-ci-bridge.yml",
-        "legal.yml",
         "pages.yml",
     ]
 
     bridge = (workflows / "internal-ci-bridge.yml").read_text(encoding="utf-8")
-    legal = (workflows / "legal.yml").read_text(encoding="utf-8")
     pages = (workflows / "pages.yml").read_text(encoding="utf-8")
 
     for forbidden_trigger in (
@@ -357,14 +355,11 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         "repository_dispatch",
     ):
         assert f"\n  {forbidden_trigger}:" not in bridge
-    assert "\n  push:" not in legal
-    assert "workflow_call:" in legal
-    assert "workflow_dispatch:" in legal
 
     assert "\n  push:" in pages
     assert '      - "website/**"' in pages
-    assert "python3 -m tools.ci" not in legal + pages
-    assert "actions/workflows/premerge.yml/dispatches" not in legal + pages
+    assert "python3 -m tools.ci" not in pages
+    assert "actions/workflows/premerge.yml/dispatches" not in pages
 
 
 def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
@@ -731,7 +726,7 @@ def test_internal_ci_guard_failure_is_visible_on_the_pull_request(
     assert f"Source branch: `{branch_head}`" in serialized
     assert "Refresh the PR base" in serialized
     assert "/issues/715/comments" in serialized
-    assert "NVIDIA-dev" not in serialized
+    assert re.search(r"NVIDIA-[A-Za-z0-9-]+", serialized) is None
 
 
 def test_internal_ci_guard_updates_its_existing_diagnostic_comment(
@@ -1250,22 +1245,6 @@ def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
         assert "pytest.skip(" in text
         assert "allow_module_level=True" in text
         assert text.index("pytest.skip(") < text.index("import tvm_ffi")
-
-
-
-
-def test_reusable_legal_outputs_the_immutable_checked_out_sha() -> None:
-    text = (REPO_ROOT / ".github" / "workflows" / "legal.yml").read_text()
-    assert "tested_sha:" in text
-    assert "value: ${{ jobs.legal-compliance.outputs.tested_sha }}" in text
-    assert "tested_sha: ${{ steps.resolve.outputs.tested_sha }}" in text
-    assert "id: resolve" in text
-    assert "persist-credentials: false" in text
-    assert "git rev-parse 'HEAD^{commit}'" in text
-    assert 'git cat-file -e "${tested_sha}^{commit}"' in text
-    assert 'echo "tested_sha=$tested_sha" >> "$GITHUB_OUTPUT"' in text
-
-
 
 
 def test_source_quality_lint_uses_resolved_ci_base_ref() -> None:

@@ -82,7 +82,7 @@ report that result instead of inventing documentation churn.
 | Source of truth | Documentation consumers |
 | --- | --- |
 | `.github/workflows/internal-ci-bridge.yml`, `tools/ci/README.md` | premerge trigger and public/private evidence boundary |
-| `.github/workflows/legal.yml`, `.github/workflows/pages.yml` | retained Source workflows |
+| `.github/workflows/pages.yml` | retained Source documentation deployment workflow |
 | Python family `MODEL.toml` and family code | build selection and family behavior |
 | C++ model `MODEL.toml`, registry, and runtime code | native strategies and dispatch |
 | E2E `MODEL.toml`, manifests, and sidecars | model support and validation |
@@ -102,8 +102,8 @@ root graph helpers, or paths copied from another branch.
 
 ## CI Documentation Contract
 
-Source contains only the Internal CI Bridge, Legal Compliance, and Pages
-workflows. Premerge and nightly orchestration are private Internal CI.
+Source contains only the Internal CI Bridge and Pages workflows. Premerge,
+including legal compliance, and nightly orchestration are private Internal CI.
 
 - `run-internal-ci` is the one-shot trusted trigger; `run-ci` is retired.
 - The bridge verifies event, PR metadata, and source branch heads before

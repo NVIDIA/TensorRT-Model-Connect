@@ -12,12 +12,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FORBIDDEN_PATTERNS = (
     r"/(workspace/users|home|localhome)/[^/[:space:]]+/",
-    r"gitlab-master[.]nvidia[.]com",
-    r"NVIDIA-dev/",
-    r"trtmc-[^[:space:]\"']*a100[^[:space:]\"']*-proof",
-    r"p2021",
-    r"11[.]2[.]0[.]113",
-    r"trt11[.]2",
+    r"(gitlab|jenkins|artifactory)[-a-z0-9]*[.]nvidia[.]com",
+    r"NVIDIA-[a-z0-9-]+/",
+    r"trtmc[-_a-z0-9]*(actions[-_a-z0-9]*runners?|a100[-_a-z0-9]*proof)",
+    r"(^|[^a-z0-9])p[0-9]{4}([^a-z0-9]|$)",
     r"[a-z0-9-]+[.]pages[.]github[.]io",
 )
 INTERNAL_ONLY_FILES = (

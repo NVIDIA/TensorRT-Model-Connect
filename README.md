@@ -10,6 +10,10 @@
 [Model Support](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/model-support) |
 [API Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
 
+TensorRT-Model-Connect is a reference implementation. Users are responsible
+for trusting the checkpoints, bundles, native libraries, and local environment
+they provide when building or running models.
+
 ## What is TensorRT-Model-Connect?
 
 TensorRT-Model-Connect (TRTMC) turns a supported Hugging Face or local
