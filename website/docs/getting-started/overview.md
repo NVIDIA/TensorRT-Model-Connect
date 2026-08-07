@@ -21,10 +21,12 @@ internal architecture page.
 
 | Step | Page | You are done when |
 | --- | --- | --- |
-| 1 | [System Requirements](environment-and-repro.md) | You have selected a supported wheel or source-build path, the GPU is visible, and you understand the first model's resource boundary. |
-| 2 | [Installation](installation.md) | Either `trtmc version` or `./build/trtmc version` succeeds in the environment where you will build and run the model. |
-| 3 | [Quick Start](quick-start.md) | You have built and inspected `Qwen3-0.6B.bundle`, then received generated text from the native C++ runtime. |
-| 4 | [Learning Path](../learning-path.md) | You can choose the next tutorial without repeating the setup or first build. |
+| 1 | [Project Overview](project-overview.md) | You understand the checkpoint-to-bundle boundary and whether TRTMC is the right integration path. |
+| 2 | [System Requirements](environment-and-repro.md) | You have selected a supported wheel or source-build path, the GPU is visible, and you understand the first model's resource boundary. |
+| 3 | [Installation](installation.md) | Either `trtmc version` or the source-built CLI version command succeeds in the environment where you will build and run the model. |
+| 4 | [Build from Source](source-build.md) | Optional: you have compiled the CLI, selected backend, and required model DSOs for one target SM. |
+| 5 | [Quick Start](quick-start.md) | You have built and inspected `Qwen3-0.6B.bundle`, then received generated text from the native C++ runtime. |
+| 6 | [Learning Path](../learning-path.md) | You can choose the next tutorial without repeating the setup or first build. |
 
 Keep the [Glossary](glossary.md) open when a term is unfamiliar. You do not
 need to memorize it before starting.

@@ -8,6 +8,11 @@ TensorRT-Model-Connect has three install paths:
 2. Build the wheel from source, then install it.
 3. Advanced Python-only editable install for developers.
 
+Developers who need the native CLI, backend DSOs, or model runtime DSOs should
+follow [Build from Source](source-build.md). That guide covers model-agnostic
+development images, target-SM selection, standard and TensorRT-RTX backends,
+and both aggregate and focused model-DSO builds.
+
 ## Requirements
 
 - Linux x86_64 or aarch64 with a compatible NVIDIA GPU for the selected build
@@ -148,19 +153,10 @@ to avoid dependency resolution:
 pip install --no-deps -e . -C py-only=true
 ```
 
-This editable install points Python at `python/tensorrt_model_connect/`. Use it
-with a separate source build when you need the native CLI:
-
-```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-  -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libnvinfer.so" \
-  -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
-  -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
-cmake --build build -j
-
-./build/trtmc version
-```
+This editable install points Python at `python/tensorrt_model_connect/`. Pair it
+with [Build from Source](source-build.md) when you need the native CLI,
+backend, and model DSOs. That page keeps the target-SM and build-configuration
+commands in one canonical location.
 
 CI and release validation use the wheel path, not the Python-only editable
 install.

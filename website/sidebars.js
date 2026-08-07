@@ -37,8 +37,10 @@ const sidebars = {
       label: 'Get Started',
       link: {type: 'doc', id: 'getting-started/overview'},
       items: [
+        'getting-started/project-overview',
         'getting-started/environment-and-repro',
         'getting-started/installation',
+        'getting-started/source-build',
         'getting-started/quick-start',
         'getting-started/troubleshooting'
       ]

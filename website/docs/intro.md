@@ -61,6 +61,7 @@ entry path for that goal.
 
 | Goal | Start here |
 | --- | --- |
+| Understand the project boundary and intended users | [Project Overview](getting-started/project-overview.md) |
 | First successful NLP/text inference | [Getting Started](getting-started/overview.md) |
 | Exact model/checkpoint lookup | [Models & Recipes](models-recipes/overview.md) |
 | Task and feature lookup | [User Guides](user-guides/overview.md) |
