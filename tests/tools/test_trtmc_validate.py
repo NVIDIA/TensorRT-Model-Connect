@@ -152,7 +152,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     declared = {
         workload
         for spec in catalog["models"].values()
-        for workload in spec.get("workloads", [])
+        for workload in trtmc_validate.declared_workloads(spec)
     }
 
     assert configured == declared
@@ -257,12 +257,13 @@ def test_resolve_bindings_defaults_to_one_workload_per_model():
     ]
 
 
-def test_resolve_bindings_expands_every_declared_workload():
+def test_resolve_bindings_expands_only_full_matrix_workloads():
     catalog = {
         "models": {
             "model-a": {
                 "default": "workload-a",
                 "workloads": ["workload-a", "workload-b"],
+                "diagnostic_workloads": ["workload-c"],
             }
         }
     }
@@ -275,6 +276,47 @@ def test_resolve_bindings_expands_every_declared_workload():
         trtmc_validate.Binding("model-a", "workload-a"),
         trtmc_validate.Binding("model-a", "workload-b"),
     ]
+
+
+def test_resolve_binding_allows_explicit_diagnostic_workload():
+    catalog = {
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a"],
+                "diagnostic_workloads": ["workload-b"],
+            }
+        }
+    }
+
+    assert trtmc_validate.resolve_binding(catalog, "model-a", "workload-b") == (
+        trtmc_validate.Binding("model-a", "workload-b")
+    )
+
+
+def test_list_shows_full_and_diagnostic_sample_limits(capsys, monkeypatch):
+    catalog = {
+        "sample_limits": {"workload-a": 5, "workload-b": 9},
+        "models": {
+            "model-a": {
+                "default": "workload-a",
+                "workloads": ["workload-a"],
+                "diagnostic_workloads": ["workload-b"],
+            }
+        },
+    }
+    arguments = trtmc_validate.build_parser().parse_args(["--list"])
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_load_validation_inputs",
+        lambda _arguments: (catalog, {}, (), {}),
+    )
+
+    assert trtmc_validate._main(arguments) == 0
+    assert capsys.readouterr().out.strip() == (
+        "model-a: workload-a (5 samples, full matrix), "
+        "workload-b (9 samples, diagnostic)"
+    )
 
 
 def test_resolve_bindings_selects_multiple_explicit_workloads():

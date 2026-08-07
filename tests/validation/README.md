@@ -28,8 +28,8 @@ python tools/trtmc_validate.py \
   --model qwen25vl-3b
 ```
 
-The default remains one workload per model. Expand every workload declared for
-the selected model only when requested explicitly:
+The default remains one workload per model. Expand every full-matrix workload
+for the selected model only when requested explicitly:
 
 ```bash
 python tools/trtmc_validate.py \
@@ -67,7 +67,20 @@ python tools/trtmc_validate.py --all
 
 `--all` still selects only each model's default workload. Use
 `--all --all-workloads` only when the intended scope is the complete
-model/workload expansion.
+full-matrix model/workload expansion. Workloads under `diagnostic_workloads`
+remain available by positional workload, `--workload`, or `--binding`, but are
+never selected by either full-matrix mode.
+
+Default sample counts are keyed by workload at the top of
+`model_workloads.yaml`. A heterogeneous full run resolves each binding's own
+sample count independently. Do not pass `--limit` for that path: it is a
+one-off override applied uniformly to every selected binding, with `--limit 0`
+meaning the complete datasets. Audit the resolved full/diagnostic scope and
+sample counts with:
+
+```bash
+python tools/trtmc_validate.py --list
+```
 
 The all-model command supervises one isolated worker process per model. By
 default it records a failed worker and continues with the remaining models.
@@ -373,8 +386,10 @@ variants with the same reference computation can reuse an entry.
 1. Reuse or add a dataset workload in
    `tests/validation/workloads.yaml`. Dataset variants that can change build
    shapes or profiles require distinct workload IDs.
-2. Add that workload under the model in `model_workloads.yaml`.
-3. Add a workload sample limit if the workload is new.
+2. Add that workload under the model's `workloads` in `model_workloads.yaml`,
+   or under `diagnostic_workloads` when it must stay out of full-matrix runs.
+3. Add its workload-owned default to the top-level `sample_limits`; one value
+   is shared by every model using that dataset/workload contract.
 4. Select one workload as the model default.
 
 A model may list multiple workloads; callers select one by passing it after the

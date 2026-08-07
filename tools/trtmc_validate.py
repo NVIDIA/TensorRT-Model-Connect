@@ -162,12 +162,16 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
             raise ValidationError(
                 f"{path}: {name}.not_compared_reason must be a non-empty string"
             )
-        if "default" in spec or "workloads" in spec:
+        if any(
+            field in spec
+            for field in ("default", "workloads", "diagnostic_workloads")
+        ):
             raise ValidationError(
                 f"{path}: {name} cannot declare workloads while marked not compared"
             )
         return
     workloads = spec.get("workloads")
+    diagnostic_workloads = spec.get("diagnostic_workloads", [])
     default = spec.get("default")
     valid_workloads = (
         isinstance(workloads, list)
@@ -176,9 +180,22 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
     )
     if not valid_workloads:
         raise ValidationError(f"{path}: {name}.workloads must contain names")
-    if "e2e" in workloads:
+    valid_diagnostic_workloads = isinstance(diagnostic_workloads, list) and all(
+        isinstance(item, str) and item for item in diagnostic_workloads
+    )
+    if not valid_diagnostic_workloads:
         raise ValidationError(
-            f"{path}: {name}.workloads cannot use e2e; reference consistency "
+            f"{path}: {name}.diagnostic_workloads must contain names"
+        )
+    overlap = sorted(set(workloads).intersection(diagnostic_workloads))
+    if overlap:
+        raise ValidationError(
+            f"{path}: {name} workloads cannot also be diagnostic: "
+            f"{', '.join(overlap)}"
+        )
+    if "e2e" in [*workloads, *diagnostic_workloads]:
+        raise ValidationError(
+            f"{path}: {name} workloads cannot use e2e; reference consistency "
             "requires aligned reference and TRTMC outputs"
         )
     if default not in workloads:
@@ -191,6 +208,19 @@ def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
         raise ValidationError(
             f"{path}: {name}.reference_cache_identity must be a non-empty string"
         )
+
+
+def declared_workloads(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return full-matrix and explicit-only diagnostic workload names."""
+
+    return tuple(
+        dict.fromkeys(
+            [
+                *spec.get("workloads", []),
+                *spec.get("diagnostic_workloads", []),
+            ]
+        )
+    )
 
 
 def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
@@ -320,7 +350,7 @@ def audit_catalog(
         {
             workload
             for spec in models.values()
-            for workload in spec.get("workloads", [])
+            for workload in declared_workloads(spec)
             if workload not in known_workloads
         }
     )
@@ -330,7 +360,7 @@ def audit_catalog(
     declared_sampled = {
         workload
         for spec in models.values()
-        for workload in spec.get("workloads", [])
+        for workload in declared_workloads(spec)
     }
     configured_sampled = set(catalog["sample_limits"])
     missing_limits = sorted(declared_sampled - configured_sampled)
@@ -353,7 +383,7 @@ def audit_workload_compatibility(
     incompatible = []
     reference_cache_contracts: dict[str, set[tuple[str, ...]]] = {}
     for model_name, spec in catalog["models"].items():
-        for workload in spec.get("workloads", []):
+        for workload in declared_workloads(spec):
             matched, reason = validation_catalog.suite_match_reason(
                 suites[workload],
                 task_models[model_name],
@@ -409,8 +439,9 @@ def resolve_binding(
             not_compared_reason=not_compared_reason,
         )
     selected = workload or spec["default"]
-    if selected not in spec["workloads"]:
-        available = ", ".join(spec["workloads"])
+    available_workloads = declared_workloads(spec)
+    if selected not in available_workloads:
+        available = ", ".join(available_workloads)
         raise ValidationError(
             f"model {model} does not declare workload {selected}; available: {available}"
         )
@@ -4035,7 +4066,10 @@ def _main(arguments: argparse.Namespace) -> int:
             workloads = []
             for workload in spec["workloads"]:
                 limit = catalog["sample_limits"][workload]
-                workloads.append(f"{workload} ({limit} samples)")
+                workloads.append(f"{workload} ({limit} samples, full matrix)")
+            for workload in spec.get("diagnostic_workloads", []):
+                limit = catalog["sample_limits"][workload]
+                workloads.append(f"{workload} ({limit} samples, diagnostic)")
             print(f"{name}: {', '.join(workloads)}")
         return 0
     bindings = _select_bindings(arguments, catalog, ready, task_models)
