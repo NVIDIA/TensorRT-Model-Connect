@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -31,6 +32,10 @@ from tools import model_selection  # noqa: E402
 from tools import perf_matrix  # noqa: E402
 from tools import trtmc_validate  # noqa: E402
 from tools.validation import catalog as validation_catalog  # noqa: E402
+from tensorrt_model_connect.python_profiles import (  # noqa: E402
+    PREBUILT_ONLY_ENV,
+    PROFILE_ROOT_ENV,
+)
 
 
 PLATFORM_SCHEMA = "trtmc.model-check-platform/v1"
@@ -302,13 +307,24 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
     for field in ("suite", "environment"):
         if not isinstance(perf.get(field), str) or not perf[field]:
             raise ModelCheckError(f"model-check environment perf.{field} is required")
+    storage_root = _repo_path(str(storage["root"]))
+    python_profiles_root = storage.get("python_profiles_root")
+    if python_profiles_root is None:
+        resolved_python_profiles_root = storage_root / "python-profiles"
+    elif not isinstance(python_profiles_root, str) or not python_profiles_root:
+        raise ModelCheckError(
+            "model-check environment storage.python_profiles_root must be a non-empty path"
+        )
+    else:
+        resolved_python_profiles_root = _repo_path(python_profiles_root)
     return {
         **environment,
         "source": str(path),
         "storage": {
             **storage,
-            "root": str(_repo_path(str(storage["root"]))),
+            "root": str(storage_root),
             "results_root": str(_repo_path(str(storage["results_root"]))),
+            "python_profiles_root": str(resolved_python_profiles_root),
         },
         "tasks": {
             "accuracy": {
@@ -329,6 +345,14 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
             },
         },
     }
+
+
+def _task_environment(environment: Mapping[str, Any]) -> dict[str, str]:
+    """Use a managed shared profile cache and create missing profiles on demand."""
+    child = os.environ.copy()
+    child[PROFILE_ROOT_ENV] = str(environment["storage"]["python_profiles_root"])
+    child.pop(PREBUILT_ONLY_ENV, None)
+    return child
 
 
 def _selected_tasks(profile: Mapping[str, Any], requested: Iterable[str]) -> tuple[str, ...]:
@@ -962,6 +986,11 @@ def _run(arguments: argparse.Namespace) -> int:
         )
     storage_root = Path(environment["storage"]["root"]).resolve()
     _require_platform_storage_root(storage_root, platform)
+    python_profiles_root = _require_managed_path(
+        Path(environment["storage"]["python_profiles_root"]),
+        storage_root,
+        "Python profiles root",
+    )
     results_root = _require_managed_path(
         Path(environment["storage"]["results_root"]),
         storage_root,
@@ -1043,6 +1072,7 @@ def _run(arguments: argparse.Namespace) -> int:
                 )
                 execution_commands.append((task, resume_command or command))
     print(_render_run_header(plan, run_id=run_id, run_root=run_root))
+    print(f"Python profiles: {python_profiles_root} (shared; creates missing profiles)")
     if arguments.verbose or arguments.dry_run:
         print("\nCommands:")
         for task, command in execution_commands:
@@ -1066,6 +1096,7 @@ def _run(arguments: argparse.Namespace) -> int:
             _detailed_command(command, verbose=arguments.verbose),
             cwd=REPOSITORY,
             check=False,
+            env=_task_environment(environment),
         )
         task_results[task] = completed.returncode
         status = "PASSED" if completed.returncode == 0 else "FAILED"

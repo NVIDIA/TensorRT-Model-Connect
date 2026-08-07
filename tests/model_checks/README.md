@@ -76,6 +76,22 @@ Normal execution prints a compact run header, task progress, errors, artifact
 paths, and a final Accuracy/Perf status summary. Add `--verbose` when full
 child, TRTMC, baseline, and reproduction commands are needed for debugging.
 
+The unified runner does not depend on Python profiles baked into a container
+image. It points both task runners at the shared
+`${TRTMC_CHECK_STORAGE_ROOT}/python-profiles` cache and allows the existing
+profile resolver to create missing environments. Before each Accuracy binding,
+the resolver derives the required common, model-family, and suite-scoring
+profiles from the selected model and workload. A matching ready environment is
+reused; otherwise a fingerprinted virtual environment is created under the
+shared cache, exact locked package versions are installed and verified, and
+only then does model execution start. Perf uses the same shared cache for any
+candidate-build or baseline profiles it declares. Creation is protected by a
+file lock, so later runs safely reuse the environment.
+
+`storage.python_profiles_root` may override the derived location in a custom
+execution-environment YAML. The resolved directory must remain below that
+environment's managed storage root. `request.json` records the resolved path.
+
 Resume with the original selection, platform, environment, and run ID:
 
 ```bash
