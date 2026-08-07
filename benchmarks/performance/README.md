@@ -183,7 +183,9 @@ cache can only be retained. With `per_entry`, failed entry work is preserved by
 `delete_on_pass` for diagnosis. Shared-cache runs also preserve failed entry
 scratch while removing successful entry scratch. Optional
 `storage.storage_root` rejects results, scratch, and managed bundle paths
-outside that filesystem before execution.
+outside that filesystem before execution. The checked-in platform environments
+use `delete_always` for managed bundles and omit the optional fixed free-space
+reserve; a host-specific environment may opt into either policy differently.
 
 An individual baseline can set `local_files_only: true` when that reference must
 use an already-provisioned model snapshot even if the rest of the matrix may
