@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.model-check-environment/v1
+id: gb300
+
+storage:
+  root: ${TRTMC_CHECK_STORAGE_ROOT}
+  results_root: ${TRTMC_CHECK_STORAGE_ROOT}/results
+
+tasks:
+  accuracy:
+    runner_python: ${TRTMC_CHECK_PYTHON}
+    options:
+      dataset-root: ${TRTMC_CHECK_DATASET_ROOT}
+      engine-dir: ${TRTMC_CHECK_STORAGE_ROOT}/engines/accuracy
+      reference-cache-dir: ${TRTMC_CHECK_STORAGE_ROOT}/references/accuracy
+      trtmc-binary: ${TRTMC_CHECK_RUNTIME_ROOT}/trtmc
+      benchmark-binary: ${TRTMC_CHECK_RUNTIME_ROOT}/trtmc_dataset_benchmark
+      hf-python: ${TRTMC_CHECK_PYTHON}
+      backend-dir: ${TRTMC_CHECK_RUNTIME_ROOT}
+      model-plugin-dir: ${TRTMC_CHECK_RUNTIME_ROOT}/models
+      cuda-visible-devices: "0"
+      local-files-only: true
+      engine-retention: delete_on_pass
+      hf-cache-mode: shared
+      hf-cache-retention: retain
+      minimum-free-space-gib: 20
+      model-attempts: 2
+      model-retry-delay-seconds: 30
+      on-model-failure: continue
+  perf:
+    runner_python: ${TRTMC_CHECK_PYTHON}
+    suite: benchmarks/performance/release.yaml
+    environment: benchmarks/performance/environments/gb300.yaml

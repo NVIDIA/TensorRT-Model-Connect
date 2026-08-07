@@ -8,6 +8,9 @@ execution:
   task_order: [accuracy, perf]
   serial_tasks: true
 
+storage:
+  root_prefix: /dev/nvme0n1p1
+
 # The initial qualification run supplies evidence for this sparse list. A
 # disagreement is not a hardware exclusion; only an evidence-backed hardware
 # limitation belongs here.

@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
+import shlex
+import subprocess
 import sys
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -29,34 +33,56 @@ from tools.validation import catalog as validation_catalog  # noqa: E402
 
 
 PLATFORM_SCHEMA = "trtmc.model-check-platform/v1"
+ENVIRONMENT_SCHEMA = "trtmc.model-check-environment/v1"
 DEFAULT_PLATFORM_ROOT = REPOSITORY / "tests" / "model_checks" / "platforms"
+DEFAULT_ENVIRONMENT_ROOT = REPOSITORY / "tests" / "model_checks" / "environments"
 DEFAULT_PERF_SUITE = REPOSITORY / "benchmarks" / "performance" / "release.yaml"
 TASKS = ("accuracy", "perf")
+RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class ModelCheckError(ValueError):
     """A model-check selection or platform profile is invalid."""
 
 
+def _add_selection_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--platform", required=True, help="platform ID or profile YAML")
+    selection = command.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--model", action="append", default=[])
+    selection.add_argument("--model-selection", type=Path)
+    selection.add_argument("--all", action="store_true")
+    command.add_argument("--task", action="append", choices=TASKS, default=[])
+    accuracy = command.add_mutually_exclusive_group()
+    accuracy.add_argument("--accuracy-suite", action="append", default=[])
+    accuracy.add_argument(
+        "--accuracy-binding",
+        action="append",
+        default=[],
+        metavar="MODEL=SUITE",
+        help="exact Accuracy binding; repeatable",
+    )
+    accuracy.add_argument("--all-accuracy-suites", action="store_true")
+    command.add_argument("--revision", default="HEAD")
+    command.add_argument("--catalog", type=Path, default=trtmc_validate.DEFAULT_CATALOG)
+    command.add_argument("--suites", type=Path, default=trtmc_validate.DEFAULT_SUITES)
+    command.add_argument("--models-dir", type=Path, default=trtmc_validate.DEFAULT_MODELS)
+    command.add_argument("--perf-suite", type=Path, default=DEFAULT_PERF_SUITE)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     check = commands.add_parser("check", help="show task bindings without running them")
-    check.add_argument("--platform", required=True, help="platform ID or profile YAML")
-    selection = check.add_mutually_exclusive_group(required=True)
-    selection.add_argument("--model", action="append", default=[])
-    selection.add_argument("--model-selection", type=Path)
-    selection.add_argument("--all", action="store_true")
-    check.add_argument("--task", action="append", choices=TASKS, default=[])
-    accuracy = check.add_mutually_exclusive_group()
-    accuracy.add_argument("--accuracy-suite", action="append", default=[])
-    accuracy.add_argument("--all-accuracy-suites", action="store_true")
+    _add_selection_arguments(check)
     check.add_argument("--json", action="store_true", help="print the resolved JSON")
-    check.add_argument("--revision", default="HEAD")
-    check.add_argument("--catalog", type=Path, default=trtmc_validate.DEFAULT_CATALOG)
-    check.add_argument("--suites", type=Path, default=trtmc_validate.DEFAULT_SUITES)
-    check.add_argument("--models-dir", type=Path, default=trtmc_validate.DEFAULT_MODELS)
-    check.add_argument("--perf-suite", type=Path, default=DEFAULT_PERF_SUITE)
+    run = commands.add_parser("run", help="run resolved task bindings locally")
+    _add_selection_arguments(run)
+    run.add_argument(
+        "--environment",
+        help="execution environment ID or YAML; defaults to the platform ID",
+    )
+    run.add_argument("--run-id", help="stable output directory name")
+    run.add_argument("--dry-run", action="store_true", help="write and print commands only")
     return parser
 
 
@@ -100,6 +126,16 @@ def load_platform(value: str) -> dict[str, Any]:
         raise ModelCheckError(f"platform task_order is invalid: {path}")
     if not isinstance(execution.get("serial_tasks"), bool):
         raise ModelCheckError(f"platform serial_tasks must be boolean: {path}")
+    storage = profile.get("storage", {})
+    if not isinstance(storage, Mapping):
+        raise ModelCheckError(f"platform storage must be an object: {path}")
+    root_prefix = storage.get("root_prefix")
+    if root_prefix is not None and (
+        not isinstance(root_prefix, str) or not Path(root_prefix).is_absolute()
+    ):
+        raise ModelCheckError(
+            f"platform storage.root_prefix must be an absolute path: {path}"
+        )
     unsupported = profile.get("unsupported", [])
     if not isinstance(unsupported, list):
         raise ModelCheckError(f"platform unsupported must be a list: {path}")
@@ -115,6 +151,130 @@ def load_platform(value: str) -> dict[str, Any]:
                 f"platform unsupported[{index}] has unknown task {item['task']!r}"
             )
     return {**profile, "source": str(path)}
+
+
+def _environment_path(value: str) -> Path:
+    candidate = Path(value)
+    if candidate.suffix in {".yaml", ".yml"} or candidate.parent != Path("."):
+        return candidate.resolve()
+    return (DEFAULT_ENVIRONMENT_ROOT / f"{value}.yaml").resolve()
+
+
+def _expand_environment(value: Any, field: str) -> Any:
+    if isinstance(value, str):
+        try:
+            return perf_matrix._expand_environment_value(value, field)
+        except perf_matrix.PerfMatrixError as exc:
+            raise ModelCheckError(str(exc)) from exc
+    if isinstance(value, list):
+        return [
+            _expand_environment(item, f"{field}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, Mapping):
+        return {
+            str(key): _expand_environment(item, f"{field}.{key}")
+            for key, item in value.items()
+        }
+    return value
+
+
+def _repo_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (REPOSITORY / path).resolve()
+
+
+def _runner_executable(value: str, field: str) -> str:
+    try:
+        expanded = perf_matrix._expand_environment_value(value, field)
+    except perf_matrix.PerfMatrixError as exc:
+        raise ModelCheckError(str(exc)) from exc
+    path = Path(expanded).expanduser()
+    if path.is_absolute():
+        return str(path.absolute())
+    if path.parent != Path("."):
+        return str((REPOSITORY / path).absolute())
+    return expanded
+
+
+def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any]:
+    path = _environment_path(value)
+    raw = _read_yaml(path, "model-check environment")
+    environment = _expand_environment(raw, "model-check environment")
+    if environment.get("schema_version") != ENVIRONMENT_SCHEMA:
+        raise ModelCheckError(
+            f"model-check environment schema_version must be {ENVIRONMENT_SCHEMA}: {path}"
+        )
+    if environment.get("id") != platform_id:
+        raise ModelCheckError(
+            f"environment platform {environment.get('id')!r} does not match {platform_id!r}"
+        )
+    storage = environment.get("storage")
+    if not isinstance(storage, Mapping):
+        raise ModelCheckError("model-check environment needs storage settings")
+    for field in ("root", "results_root"):
+        if not isinstance(storage.get(field), str) or not storage[field]:
+            raise ModelCheckError(f"model-check environment storage.{field} is required")
+    task_config = environment.get("tasks")
+    if not isinstance(task_config, Mapping):
+        raise ModelCheckError("model-check environment needs task settings")
+    accuracy = task_config.get("accuracy")
+    perf = task_config.get("perf")
+    if not isinstance(accuracy, Mapping) or not isinstance(perf, Mapping):
+        raise ModelCheckError("model-check environment needs Accuracy and Perf settings")
+    for task, config in (("accuracy", accuracy), ("perf", perf)):
+        if not isinstance(config.get("runner_python"), str) or not config["runner_python"]:
+            raise ModelCheckError(f"model-check environment {task}.runner_python is required")
+    options = accuracy.get("options", {})
+    if not isinstance(options, Mapping):
+        raise ModelCheckError("model-check environment accuracy.options must be an object")
+    forbidden = {
+        "all",
+        "all-workloads",
+        "binding",
+        "dry-run",
+        "model",
+        "model-selection",
+        "model-work-dir",
+        "output",
+        "storage-root",
+        "workload",
+    }.intersection(str(name).replace("_", "-") for name in options)
+    if forbidden:
+        raise ModelCheckError(
+            "accuracy.options cannot control selection or output: "
+            + ", ".join(sorted(forbidden))
+        )
+    for field in ("suite", "environment"):
+        if not isinstance(perf.get(field), str) or not perf[field]:
+            raise ModelCheckError(f"model-check environment perf.{field} is required")
+    return {
+        **environment,
+        "source": str(path),
+        "storage": {
+            **storage,
+            "root": str(_repo_path(str(storage["root"]))),
+            "results_root": str(_repo_path(str(storage["results_root"]))),
+        },
+        "tasks": {
+            "accuracy": {
+                **accuracy,
+                "runner_python": _runner_executable(
+                    str(accuracy["runner_python"]),
+                    "model-check environment tasks.accuracy.runner_python",
+                ),
+            },
+            "perf": {
+                **perf,
+                "runner_python": _runner_executable(
+                    str(perf["runner_python"]),
+                    "model-check environment tasks.perf.runner_python",
+                ),
+                "suite": str(_repo_path(str(perf["suite"]))),
+                "environment": str(_repo_path(str(perf["environment"]))),
+            },
+        },
+    }
 
 
 def _selected_tasks(profile: Mapping[str, Any], requested: Iterable[str]) -> tuple[str, ...]:
@@ -216,6 +376,7 @@ def _accuracy_projection(
         projected.append(
             {
                 "id": f"accuracy:{model}:{binding_id}",
+                "model": model,
                 "workload": binding.workload,
                 "status": "unsupported" if reason else "configured",
                 **({"reason": reason} if reason else {}),
@@ -270,6 +431,7 @@ def _perf_projection(
         projected.append(
             {
                 "id": f"perf:{model}:{entry_id}",
+                "model": model,
                 "entry": entry_id,
                 "status": "unsupported" if reason else "configured",
                 **({"reason": reason} if reason else {}),
@@ -290,6 +452,7 @@ def resolve_plan(
     platform: Mapping[str, Any],
     accuracy_catalog: Mapping[str, Any],
     accuracy_workloads: Sequence[str],
+    accuracy_bindings: Mapping[str, Sequence[str]],
     all_accuracy_workloads: bool,
     perf_cases: Sequence[Mapping[str, Any]],
     perf_exclusions: Mapping[str, str],
@@ -302,8 +465,10 @@ def resolve_plan(
             record["tasks"]["accuracy"] = _accuracy_projection(
                 model,
                 catalog=accuracy_catalog,
-                workloads=accuracy_workloads,
-                all_workloads=all_accuracy_workloads,
+                workloads=accuracy_bindings.get(model, accuracy_workloads),
+                all_workloads=(
+                    all_accuracy_workloads if not accuracy_bindings else False
+                ),
                 platform=platform,
             )
         if "perf" in tasks:
@@ -369,7 +534,9 @@ def _render(plan: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _check(arguments: argparse.Namespace) -> int:
+def _resolve_request(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     platform = load_platform(arguments.platform)
     tasks = _selected_tasks(platform, arguments.task)
     accuracy_catalog = trtmc_validate.load_catalog(arguments.catalog)
@@ -420,18 +587,296 @@ def _check(arguments: argparse.Namespace) -> int:
         if unknown:
             raise ModelCheckError("unknown model profiles: " + ", ".join(unknown))
 
+    accuracy_bindings: dict[str, list[str]] = {}
+    for raw_binding in arguments.accuracy_binding:
+        model, separator, workload = raw_binding.partition("=")
+        model = model.strip()
+        workload = workload.strip()
+        if not separator or not model or not workload:
+            raise ModelCheckError(
+                f"invalid --accuracy-binding {raw_binding!r}; expected MODEL=SUITE"
+            )
+        if model not in models:
+            raise ModelCheckError(
+                f"Accuracy binding model {model!r} is not in the selected models"
+            )
+        accuracy_bindings.setdefault(model, [])
+        if workload not in accuracy_bindings[model]:
+            accuracy_bindings[model].append(workload)
+    if accuracy_bindings and "accuracy" not in tasks:
+        raise ModelCheckError("--accuracy-binding requires the Accuracy task")
+    missing_accuracy_bindings = sorted(set(models) - set(accuracy_bindings))
+    if accuracy_bindings and missing_accuracy_bindings:
+        raise ModelCheckError(
+            "exact Accuracy selection needs a binding for every selected model: "
+            + ", ".join(missing_accuracy_bindings)
+        )
+
     plan = resolve_plan(
         models=models,
         tasks=tasks,
         platform=platform,
         accuracy_catalog=accuracy_catalog,
         accuracy_workloads=tuple(arguments.accuracy_suite),
+        accuracy_bindings=accuracy_bindings,
         all_accuracy_workloads=arguments.all_accuracy_suites,
         perf_cases=perf_cases,
         perf_exclusions=perf_exclusions,
     )
+    return plan, platform
+
+
+def _check(arguments: argparse.Namespace) -> int:
+    plan, _ = _resolve_request(arguments)
     print(json.dumps(plan, indent=2) if arguments.json else _render(plan))
     return 2 if plan["summary"]["blocker_count"] else 0
+
+
+def _default_run_id(platform_id: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    revision = subprocess.run(
+        ["git", "rev-parse", "--short=12", "HEAD"],
+        cwd=REPOSITORY,
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    suffix = revision or "unknown"
+    return f"model-check-{platform_id}-{timestamp}-{suffix}"
+
+
+def _require_managed_path(path: Path, root: Path, label: str) -> Path:
+    resolved = path.expanduser().resolve()
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError as exc:
+        raise ModelCheckError(
+            f"{label} must be below storage root {root}: {resolved}"
+        ) from exc
+    if not relative.parts:
+        raise ModelCheckError(f"{label} cannot be the storage root itself: {root}")
+    return resolved
+
+
+def _require_platform_storage_root(
+    root: Path,
+    platform: Mapping[str, Any],
+) -> None:
+    configured = platform.get("storage", {}).get("root_prefix")
+    if not configured:
+        return
+    required = Path(str(configured)).resolve()
+    try:
+        root.relative_to(required)
+    except ValueError as exc:
+        raise ModelCheckError(
+            f"storage root must be below platform root {required}: {root}"
+        ) from exc
+
+
+def _option_arguments(options: Mapping[str, Any]) -> list[str]:
+    arguments: list[str] = []
+    for name, value in options.items():
+        option = "--" + str(name)
+        if isinstance(value, bool):
+            if value:
+                arguments.append(option)
+            continue
+        if value is None or value == "":
+            continue
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, (Mapping, list)):
+                raise ModelCheckError(
+                    f"accuracy option {name} must be scalar or a scalar list"
+                )
+            arguments.extend([option, str(item)])
+    return arguments
+
+
+def _task_bindings(plan: Mapping[str, Any], task: str) -> list[dict[str, Any]]:
+    return [
+        binding
+        for model in plan["models"]
+        for binding in model["tasks"].get(task, {}).get("bindings", [])
+        if binding["status"] == "configured"
+    ]
+
+
+def _accuracy_command(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    arguments: argparse.Namespace,
+    output: Path,
+) -> list[str] | None:
+    bindings = _task_bindings(plan, "accuracy")
+    if not bindings:
+        return None
+    config = environment["tasks"]["accuracy"]
+    command = [
+        str(config["runner_python"]),
+        str(REPOSITORY / "tools" / "trtmc_validate.py"),
+    ]
+    for binding in bindings:
+        command.extend(
+            ["--binding", f"{binding['model']}={binding['workload']}"]
+        )
+    command.extend(
+        [
+            "--catalog",
+            str(arguments.catalog),
+            "--suites",
+            str(arguments.suites),
+            "--models-dir",
+            str(arguments.models_dir),
+            "--output",
+            str(output),
+            "--storage-root",
+            str(environment["storage"]["root"]),
+            "--model-work-dir",
+            str(output.parent / "work" / "accuracy"),
+        ]
+    )
+    command.extend(_option_arguments(config.get("options", {})))
+    return command
+
+
+def _resolved_perf_environment(
+    source: Path,
+    *,
+    destination: Path,
+    storage_root: Path,
+    results_root: Path,
+    scratch_root: Path,
+) -> Path:
+    raw = _read_yaml(source, "performance environment")
+    storage = raw.get("storage")
+    if not isinstance(storage, dict):
+        raise ModelCheckError("performance environment storage must be an object")
+    storage["storage_root"] = str(storage_root)
+    storage["results_root"] = str(results_root)
+    storage["scratch_root"] = str(scratch_root)
+    destination.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return destination
+
+
+def _perf_command(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    resolved_environment: Path,
+) -> list[str] | None:
+    bindings = _task_bindings(plan, "perf")
+    if not bindings:
+        return None
+    config = environment["tasks"]["perf"]
+    command = [
+        str(config["runner_python"]),
+        str(REPOSITORY / "tools" / "perf_matrix.py"),
+        "run",
+        str(config["suite"]),
+        "--environment",
+        str(resolved_environment),
+    ]
+    for binding in bindings:
+        command.extend(["--entry", str(binding["entry"])])
+    return command
+
+
+def _run(arguments: argparse.Namespace) -> int:
+    platform = load_platform(arguments.platform)
+    environment = load_execution_environment(
+        arguments.environment or str(platform["id"]),
+        platform_id=str(platform["id"]),
+    )
+    arguments.perf_suite = Path(environment["tasks"]["perf"]["suite"])
+    plan, _ = _resolve_request(arguments)
+    if plan["summary"]["blocker_count"]:
+        print(_render(plan))
+        raise ModelCheckError("selection has unconfigured task bindings")
+
+    run_id = arguments.run_id or _default_run_id(str(platform["id"]))
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise ModelCheckError(
+            "--run-id must start with an alphanumeric character and contain only "
+            "letters, digits, dot, underscore, or hyphen"
+        )
+    storage_root = Path(environment["storage"]["root"]).resolve()
+    _require_platform_storage_root(storage_root, platform)
+    results_root = _require_managed_path(
+        Path(environment["storage"]["results_root"]),
+        storage_root,
+        "results root",
+    )
+    run_root = _require_managed_path(results_root / run_id, storage_root, "run root")
+    if run_root.exists():
+        raise ModelCheckError(f"run root already exists: {run_root}")
+    run_root.mkdir(parents=True)
+
+    perf_environment = None
+    if _task_bindings(plan, "perf"):
+        perf_environment = _resolved_perf_environment(
+            Path(environment["tasks"]["perf"]["environment"]),
+            destination=run_root / "perf-environment.yaml",
+            storage_root=storage_root,
+            results_root=run_root / "perf" / "results",
+            scratch_root=run_root / "work" / "perf",
+        )
+    commands: list[tuple[str, list[str] | None]] = []
+    for task in plan["execution"]["task_order"]:
+        if task == "accuracy":
+            command = _accuracy_command(
+                plan,
+                environment,
+                arguments,
+                run_root / "accuracy",
+            )
+        else:
+            assert perf_environment is not None
+            command = _perf_command(plan, environment, perf_environment)
+        commands.append((task, command))
+
+    request = {
+        "schema_version": "trtmc.model-check-run/v1",
+        "run_id": run_id,
+        "platform": platform["id"],
+        "platform_source": platform["source"],
+        "environment_source": environment["source"],
+        "selection": plan,
+        "commands": {
+            task: command for task, command in commands if command is not None
+        },
+        "dry_run": bool(arguments.dry_run),
+    }
+    request_path = run_root / "request.json"
+    request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    print(_render(plan))
+    print(f"\nRun root: {run_root}")
+    for task, command in commands:
+        if command is None:
+            print(f"{task}: no configured bindings")
+            continue
+        print(f"{task}: {shlex.join(command)}")
+
+    if arguments.dry_run:
+        return 0
+
+    task_results: dict[str, int] = {}
+    for task, command in commands:
+        if command is None:
+            continue
+        completed = subprocess.run(command, cwd=REPOSITORY, check=False)
+        task_results[task] = completed.returncode
+    result = {
+        "schema_version": "trtmc.model-check-run-result/v1",
+        "run_id": run_id,
+        "task_exit_codes": task_results,
+        "status": "passed" if all(code == 0 for code in task_results.values()) else "failed",
+    }
+    (run_root / "result.json").write_text(
+        json.dumps(result, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return 0 if result["status"] == "passed" else 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -440,6 +885,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if arguments.command == "check":
             return _check(arguments)
+        if arguments.command == "run":
+            return _run(arguments)
         raise ModelCheckError(f"unsupported command: {arguments.command}")
     except (
         ModelCheckError,
