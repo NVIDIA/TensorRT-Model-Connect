@@ -1,12 +1,18 @@
 {
   "name": "gpt-oss-20b",
   "hf_id": "openai/gpt-oss-20b",
+  "hf_revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
   "bundle": "gpt-oss-20b.bundle",
   "family": "gpt_oss",
   "runtime_strategy": "gpt_oss_decoder_moe",
   "task_strategy": "text_generation_causal",
   "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp16",
+  "reference_precision": "bf16",
+  "task_eval": {
+    "reference_precision": "bf16",
+    "allow_reference_precision_mismatch": true
+  },
   "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
