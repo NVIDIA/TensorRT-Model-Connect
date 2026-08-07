@@ -4,6 +4,15 @@
 > Build from a supported checkpoint, run through task-oriented C++ APIs, and
 > use the family-owned implementation as a blueprint for your own changes.
 
+## AI-native quick start
+
+Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
+prompt:
+
+```text
+/goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new TensorRT-Model-Connect directory in the current workspace. Detect the current GPU compute capability, modify the repository development Docker image, build and start the container, install TensorRT-Model-Connect, compile the CLI, TensorRT backend, and all native model DSOs only for that SM, then build and run an end-to-end Qwen/Qwen3-0.6B smoke test. Do not commit or push changes. Report the result of the test, show exact command, input and output of the inference run.
+```
+
 [Documentation](https://nvidia.github.io/TensorRT-Model-Connect/) |
 [Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start) |
 [Model Support](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview) |
@@ -26,15 +35,6 @@ and [Installation](https://nvidia.github.io/TensorRT-Model-Connect/getting-start
 Developers compiling the native CLI, backends, or model DSOs should use the
 [Build from Source](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/source-build)
 guide.
-
-## AI-native quick start
-
-Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
-prompt:
-
-```text
-/goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new TensorRT-Model-Connect directory in the current workspace. Detect the current GPU compute capability, modify the repository development Docker image, build and start the container, install TensorRT-Model-Connect, compile the CLI, TensorRT backend, and all native model DSOs only for that SM, then build and run an end-to-end Qwen/Qwen3-0.6B smoke test. Do not commit or push changes. Report the result of the test, show exact command, input and output of the inference run.
-```
 
 ![TensorRT-Model-Connect build and runtime map](website/static/img/diagrams/trtmc-system-map.svg)
 
