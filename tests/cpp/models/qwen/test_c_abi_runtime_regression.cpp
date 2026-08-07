@@ -15,7 +15,7 @@
 // =============================================================================
 
 // =============================================================================
-// C ABI runtime regression tests for bundle -> TRT runtime -> deserialize path.
+// Qwen C ABI runtime regression tests for bundle -> TRT runtime -> deserialize path.
 //
 // These tests build a syntactically valid .bundle file with an invalid
 // engine_plan payload, then call trtmc_create_pipeline repeatedly. This catches
@@ -23,7 +23,7 @@
 // through trtmc_last_error().
 // =============================================================================
 
-#include "test_helpers.h"
+#include "../../test_helpers.h"
 #include "trtmc/pipeline.h"
 
 #include <cstdint>

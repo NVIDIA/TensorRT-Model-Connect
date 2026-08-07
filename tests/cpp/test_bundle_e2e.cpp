@@ -41,8 +41,8 @@
 //   - InspectBundle utility: handles invalid input without crashing
 // =============================================================================
 
-#include "trtmc/pipeline.h"
 #include "trtmc/bundle.h"
+#include "trtmc/pipeline.h"
 
 #include <cstring>
 #include <exception>
@@ -51,10 +51,8 @@
 
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
@@ -68,8 +66,7 @@ static void check(bool condition, const char* test_name)
 //   return and a non-empty error message. This ensures the bundle loader
 //   gracefully rejects files that lack the .bundle magic bytes.
 // -----------------------------------------------------------------------------
-static void test_non_bundle_file_rejected()
-{
+static void test_non_bundle_file_rejected() {
     auto* p = trtmc_create_pipeline("/dev/null", 0);
     check(p == nullptr, "non-bundle file returns nullptr");
     const char* err = trtmc_last_error();
@@ -83,8 +80,7 @@ static void test_non_bundle_file_rejected()
 // Mechanism: Calls trtmc_create_pipeline with a path that does not exist on
 //   the filesystem, asserts nullptr return and non-empty error.
 // -----------------------------------------------------------------------------
-static void test_nonexistent_bundle_rejected()
-{
+static void test_nonexistent_bundle_rejected() {
     auto* p = trtmc_create_pipeline("/nonexistent/path/to/model.bundle", 0);
     check(p == nullptr, "nonexistent bundle path returns nullptr");
     const char* err = trtmc_last_error();
@@ -96,8 +92,7 @@ static void test_nonexistent_bundle_rejected()
 // Setup: None (uses /dev/null as a known non-bundle file).
 // Mechanism: Calls IsBundle("/dev/null"), asserts it returns false.
 // -----------------------------------------------------------------------------
-static void test_is_bundle_rejects_non_bundle()
-{
+static void test_is_bundle_rejects_non_bundle() {
     check(!trtmc::IsBundle("/dev/null"), "IsBundle rejects /dev/null");
 }
 
@@ -106,8 +101,7 @@ static void test_is_bundle_rejects_non_bundle()
 // Setup: None.
 // Mechanism: Calls IsBundle with a path that does not exist, asserts false.
 // -----------------------------------------------------------------------------
-static void test_is_bundle_rejects_nonexistent()
-{
+static void test_is_bundle_rejects_nonexistent() {
     check(!trtmc::IsBundle("/nonexistent/path/to/model.bundle"),
           "IsBundle rejects nonexistent path");
 }
@@ -119,15 +113,11 @@ static void test_is_bundle_rejects_nonexistent()
 // Mechanism: Calls InspectBundle with a nonexistent path, checks that the
 //   returned model_id is empty (indicating no valid data was extracted).
 // -----------------------------------------------------------------------------
-static void test_inspect_nonexistent_does_not_crash()
-{
+static void test_inspect_nonexistent_does_not_crash() {
     bool threw = false;
-    try
-    {
+    try {
         trtmc::InspectBundle("/nonexistent/path/to/model.bundle");
-    }
-    catch (const std::exception&)
-    {
+    } catch (const std::exception&) {
         threw = true;
     }
     check(threw, "InspectBundle throws for nonexistent path");
@@ -139,22 +129,17 @@ static void test_inspect_nonexistent_does_not_crash()
 // Setup: None (uses /dev/null).
 // Mechanism: Calls InspectBundle("/dev/null"), checks that model_id is empty.
 // -----------------------------------------------------------------------------
-static void test_inspect_non_bundle_does_not_crash()
-{
+static void test_inspect_non_bundle_does_not_crash() {
     bool threw = false;
-    try
-    {
+    try {
         trtmc::InspectBundle("/dev/null");
-    }
-    catch (const std::exception&)
-    {
+    } catch (const std::exception&) {
         threw = true;
     }
     check(threw, "InspectBundle throws for non-bundle file");
 }
 
-int main()
-{
+int main() {
     test_non_bundle_file_rejected();
     test_nonexistent_bundle_rejected();
     test_is_bundle_rejects_non_bundle();
@@ -162,8 +147,7 @@ int main()
     test_inspect_nonexistent_does_not_crash();
     test_inspect_non_bundle_does_not_crash();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

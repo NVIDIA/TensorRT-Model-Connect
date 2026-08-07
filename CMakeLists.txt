@@ -891,9 +891,6 @@ if(_trtmc_python)
 endif()
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
-# This regression drives the qwen runtime strategy and therefore requires a
-# real model plugin even though its source lives beside the shared C ABI tests.
-trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 
 # Config / parsing

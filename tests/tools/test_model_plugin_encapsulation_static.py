@@ -940,6 +940,7 @@ def test_model_owned_cpp_tests_do_not_live_in_shared_cpp_root() -> None:
     """
     forbidden_shared_tests = (
         "test_audio_pipeline_new.cpp",
+        "test_c_abi_runtime_regression.cpp",
         "test_bark_generation_plan.cpp",
         "test_chat_template.cpp",
         "test_decode_runtime.cpp",
@@ -1098,6 +1099,7 @@ def test_top_level_cmake_does_not_hardcode_model_owned_cpp_tests() -> None:
     expected_manifest_entries = {
         "llama": "test_llama_pipeline|test_llama_pipeline.cpp",
         "nemotron_labs_diffusion": "test_nemotron_labs_diffusion_chat_template|test_nemotron_labs_diffusion_chat_template.cpp",
+        "qwen": "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp",
         "qwen_vl": "test_qwen_vl_vl_pipeline|test_qwen_vl_vl_pipeline.cpp",
         "internvl": "test_internvl_vl_pipeline|test_internvl_vl_pipeline.cpp",
         "deepseek_ocr": "test_deepseek_ocr_vl_pipeline|test_deepseek_ocr_vl_pipeline.cpp",

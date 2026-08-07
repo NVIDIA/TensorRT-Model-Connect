@@ -54,10 +54,8 @@
 
 static int failures = 0;
 
-static void check(bool condition, const char* test_name)
-{
-    if (!condition)
-    {
+static void check(bool condition, const char* test_name) {
+    if (!condition) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
@@ -70,8 +68,7 @@ static void check(bool condition, const char* test_name)
 // Mechanism: Calls trtmc_version(), checks the pointer is non-null and the
 //   string has length > 0.
 // -----------------------------------------------------------------------------
-static void test_version_not_null()
-{
+static void test_version_not_null() {
     const char* ver = trtmc_version();
     check(ver != nullptr, "trtmc_version returns non-null");
     check(std::strlen(ver) > 0, "trtmc_version is non-empty");
@@ -83,8 +80,7 @@ static void test_version_not_null()
 // Setup: None.
 // Mechanism: Calls trtmc_has_trt(), checks the return value is exactly 0 or 1.
 // -----------------------------------------------------------------------------
-static void test_has_trt_returns_bool()
-{
+static void test_has_trt_returns_bool() {
     const int val = trtmc_has_trt();
     check(val == 0 || val == 1, "trtmc_has_trt returns 0 or 1");
 }
@@ -96,8 +92,7 @@ static void test_has_trt_returns_bool()
 // Mechanism: Calls trtmc_create_pipeline(nullptr, 0), asserts the return is
 //   nullptr, then checks trtmc_last_error() is non-null and non-empty.
 // -----------------------------------------------------------------------------
-static void test_create_null_returns_null()
-{
+static void test_create_null_returns_null() {
     auto* p = trtmc_create_pipeline(nullptr, 0);
     check(p == nullptr, "null input returns nullptr");
     const char* err = trtmc_last_error();
@@ -111,8 +106,7 @@ static void test_create_null_returns_null()
 // Mechanism: Calls trtmc_create_pipeline("", 0), asserts nullptr return, checks
 //   trtmc_last_error() is non-null and non-empty.
 // -----------------------------------------------------------------------------
-static void test_create_empty_returns_null()
-{
+static void test_create_empty_returns_null() {
     auto* p = trtmc_create_pipeline("", 0);
     check(p == nullptr, "empty input returns nullptr");
     const char* err = trtmc_last_error();
@@ -126,8 +120,7 @@ static void test_create_empty_returns_null()
 // Mechanism: Calls trtmc_create_pipeline("/nonexistent/path/to/bundle.bundle", 0),
 //   asserts nullptr return, checks trtmc_last_error() is non-null and non-empty.
 // -----------------------------------------------------------------------------
-static void test_create_bad_path_returns_null()
-{
+static void test_create_bad_path_returns_null() {
     auto* p = trtmc_create_pipeline("/nonexistent/path/to/bundle.bundle", 0);
     check(p == nullptr, "bad path returns nullptr");
     const char* err = trtmc_last_error();
@@ -142,8 +135,7 @@ static void test_create_bad_path_returns_null()
 // Mechanism: Calls delete on the null pointer, then asserts true (if we reach
 //   the assertion, the delete did not crash).
 // -----------------------------------------------------------------------------
-static void test_delete_null_safe()
-{
+static void test_delete_null_safe() {
     trtmc::IPipeline* p = nullptr;
     delete p;
     check(true, "delete null IPipeline is safe");
@@ -161,8 +153,7 @@ static void test_delete_null_safe()
 //   2. Verifies trtmc_last_error() returns a non-empty string.
 //   3. Calls trtmc_version() to confirm it works after an error state.
 // -----------------------------------------------------------------------------
-static void test_last_error_cleared_on_success()
-{
+static void test_last_error_cleared_on_success() {
     // Create failure first
     auto* p1 = trtmc_create_pipeline("/nonexistent", 0);
     check(p1 == nullptr, "bad path fails");
@@ -183,8 +174,7 @@ static void test_last_error_cleared_on_success()
 //   verifies that trtmc_create_pipeline_ex with null options and a bad path
 //   returns nullptr (null options should use defaults).
 // -----------------------------------------------------------------------------
-static void test_pipeline_options_zero_init()
-{
+static void test_pipeline_options_zero_init() {
     // Verify that zero-initialized TrtmcPipelineOptions is safe and backward-compatible
     TrtmcPipelineOptions opts{};
     check(opts.max_new_tokens == 0, "zero-init max_new_tokens == 0");
@@ -206,8 +196,7 @@ static void test_pipeline_options_zero_init()
 //   the options struct. Asserts nullptr return and a non-empty error message.
 //   This ensures the extended API processes all option fields without crashing.
 // -----------------------------------------------------------------------------
-static void test_create_ex_with_options()
-{
+static void test_create_ex_with_options() {
     TrtmcPipelineOptions opts{};
     opts.max_new_tokens = 5;
     opts.hf_python = "/nonexistent/python";
@@ -227,15 +216,13 @@ static void test_create_ex_with_options()
 //   return. This ensures the bundle detection logic gracefully rejects
 //   non-bundle files.
 // -----------------------------------------------------------------------------
-static void test_bundle_path_not_bundle()
-{
+static void test_bundle_path_not_bundle() {
     // Test that passing a non-bundle file doesn't crash
     auto* p = trtmc_create_pipeline("/dev/null", 0);
     check(p == nullptr, "non-bundle file returns null");
 }
 
-int main()
-{
+int main() {
     test_version_not_null();
     test_has_trt_returns_bool();
     test_create_null_returns_null();
@@ -247,8 +234,7 @@ int main()
     test_create_ex_with_options();
     test_bundle_path_not_bundle();
 
-    if (failures > 0)
-    {
+    if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;
     }

@@ -1038,7 +1038,6 @@ def test_impact_rejects_unowned_path_below_model_root(tmp_path: Path) -> None:
         "tests/builder/test_flashinfer_benchmark.py",
         "tests/builder/test_graph_blocks.py",
         "tests/builder/test_tvm_ffi_plugin.py",
-        "tests/cpp/test_c_abi_runtime_regression.cpp",
         "tests/cpp/test_cuda_buffer.cpp",
         "tests/cpp/test_cuda_graph.cpp",
         "tests/cpp/test_cuda_stream.cpp",

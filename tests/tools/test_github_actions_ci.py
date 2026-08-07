@@ -1279,6 +1279,7 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     script = _ci_source("quality.py")
     stage = script.split("def premerge", maxsplit=1)[1].split("def _premerge_scope", maxsplit=1)[0]
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
+    qwen_manifest = (REPO_ROOT / "src" / "runtime" / "models" / "qwen" / "MODEL.toml").read_text()
 
     assert "pip install" not in stage
     assert "source / 'python'" in stage
@@ -1311,7 +1312,11 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert "trtmc_model_plugins" not in stage
     assert "add_custom_target(trtmc_platform_cpp_tests)" in cmake
     assert "trtmc_add_test(test_model_plugin_loader MODEL_OWNED)" in cmake
-    assert "test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED" in cmake
+    assert "test_c_abi_runtime_regression" not in cmake
+    assert (
+        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|trtmc_model_qwen|_|_"
+        in qwen_manifest
+    )
     assert "MODEL_OWNED\n        ${_trtmc_test_options}" in cmake
     for gpu_test in (
         "test_trt_runtime_lifetime REQUIRES_TRT REQUIRES_GPU",
