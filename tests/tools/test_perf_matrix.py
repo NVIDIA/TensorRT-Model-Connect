@@ -26,6 +26,9 @@ GB300_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/gb300.yaml
 L4T_THOR_ENVIRONMENT = (
     REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
 )
+AUTO_THOR_ENVIRONMENT = (
+    REPOSITORY / "benchmarks/performance/environments/auto-thor.yaml"
+)
 MINIMAX_H3_EXCLUSION_REASON = (
     "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
     "into the release performance runner."
@@ -400,7 +403,8 @@ def test_checked_in_gb300_environment_is_ci_runnable() -> None:
     assert raw["storage"]["bundle_cache"] == "${TRTMC_PERF_BUNDLE_CACHE}"
     assert raw["storage"]["bundle_roots"] == "${TRTMC_PERF_BUNDLE_ROOTS}"
     assert raw["storage"]["runtime_dirs"] == "${TRTMC_PERF_RUNTIME_DIRS}"
-    assert raw["storage"]["bundle_retention"] == "retain"
+    assert raw["storage"]["bundle_retention"] == "delete_always"
+    assert "minimum_free_space_gib" not in raw["storage"]
     assert raw["execution"]["hf_cache_mode"] == "shared"
     assert raw["execution"]["hf_cache_retention"] == "retain"
     assert raw["execution"]["minimum_gpu_free_fraction"] == 0.0
@@ -411,7 +415,17 @@ def test_checked_in_l4t_environment_bounds_storage_and_cleanup() -> None:
     raw = yaml.safe_load(L4T_THOR_ENVIRONMENT.read_text(encoding="utf-8"))
 
     assert raw["storage"]["storage_root"] == "${TRTMC_CHECK_STORAGE_ROOT}"
-    assert raw["storage"]["bundle_retention"] == "delete_on_pass"
+    assert raw["storage"]["bundle_retention"] == "delete_always"
+    assert "minimum_free_space_gib" not in raw["storage"]
+    assert raw["execution"]["hf_cache_mode"] == "shared"
+    assert raw["execution"]["hf_cache_retention"] == "retain"
+
+
+def test_checked_in_auto_thor_environment_deletes_managed_bundles() -> None:
+    raw = yaml.safe_load(AUTO_THOR_ENVIRONMENT.read_text(encoding="utf-8"))
+
+    assert raw["storage"]["bundle_retention"] == "delete_always"
+    assert "minimum_free_space_gib" not in raw["storage"]
     assert raw["execution"]["hf_cache_mode"] == "shared"
     assert raw["execution"]["hf_cache_retention"] == "retain"
 

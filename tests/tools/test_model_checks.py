@@ -323,6 +323,20 @@ def test_runner_executable_preserves_virtual_environment_symlink(tmp_path):
     assert model_checks._runner_executable(str(runner), "runner") == str(runner)
 
 
+@pytest.mark.parametrize("platform", ["gb300", "l4t-thor", "auto-thor"])
+def test_checked_in_accuracy_environment_deletes_engines_without_fixed_reserve(
+    platform,
+):
+    path = model_checks.DEFAULT_ENVIRONMENT_ROOT / f"{platform}.yaml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    options = raw["tasks"]["accuracy"]["options"]
+
+    assert options["engine-retention"] == "delete_always"
+    assert "minimum-free-space-gib" not in options
+    assert options["hf-cache-mode"] == "shared"
+    assert options["hf-cache-retention"] == "retain"
+
+
 def test_l4t_platform_rejects_unverifiable_nvme_partition():
     platform = model_checks.load_platform("l4t-thor")
 

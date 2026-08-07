@@ -17,8 +17,7 @@ storage:
   bundle_cache: ${TRTMC_PERF_BUNDLE_CACHE}
   bundle_roots: ${TRTMC_PERF_BUNDLE_ROOTS}
   runtime_dirs: ${TRTMC_PERF_RUNTIME_DIRS}
-  minimum_free_space_gib: 64
-  bundle_retention: delete_on_pass
+  bundle_retention: delete_always
 
 execution:
   local_files_only: false
