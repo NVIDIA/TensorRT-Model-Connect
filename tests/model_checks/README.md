@@ -26,6 +26,15 @@ python tools/model_checks.py check \
   --all-accuracy-suites
 ```
 
+Auto Thor uses the same model-first interface with its own platform and
+execution-environment profiles:
+
+```bash
+python tools/model_checks.py check \
+  --platform auto-thor \
+  --model qwen25vl-3b
+```
+
 Select heterogeneous model/suite pairs without applying a shared suite list
 to every model:
 
@@ -71,6 +80,19 @@ Remove `--dry-run` to execute. Tasks are launched in the platform profile's
 order. Accuracy receives exact `MODEL=SUITE` bindings and Perf receives exact
 entry IDs, so the two task configurations cannot silently broaden selection.
 
+Resume with the original selection, platform, environment, and run ID:
+
+```bash
+python tools/model_checks.py run \
+  --platform l4t-thor \
+  --all \
+  --run-id model-check-l4t-thor-nightly \
+  --resume
+```
+
+The stored request must match. Accuracy keeps exact terminal binding results;
+Perf delegates to its native fingerprint- and revision-checked `resume` mode.
+
 The checked-in platform environments keep Accuracy and Perf artifacts
 separate. Accuracy isolates engines by exact `MODEL=SUITE` binding because a
 suite's dataset can change static shapes, optimization profiles, or the
@@ -93,8 +115,9 @@ This supports “delete only TRT engines”, “delete both engine and isolated 
 cache”, and “delete passing artifacts but preserve failed artifacts” without
 sharing fingerprints between Accuracy and Perf.
 
-On L4T Thor, `TRTMC_CHECK_STORAGE_ROOT` must resolve below
-`/dev/nvme0n1p1`. The run is rejected before runner launch otherwise.
+On L4T Thor, `TRTMC_CHECK_STORAGE_ROOT` must be on the filesystem backed by
+`/dev/nvme0n1p1`. The run compares device identities and is rejected before
+runner launch when the storage root is on another filesystem.
 
 ## Adding coverage
 
@@ -114,3 +137,8 @@ On L4T Thor, `TRTMC_CHECK_STORAGE_ROOT` must resolve below
 There is no additional model roster to synchronize. A model may have any
 number of Accuracy suites, while Perf remains a separate list of concrete
 entries.
+
+`--all` means the complete matrix for each selected task. A profile that exists
+only in Accuracy or only in Perf does not become a missing-configuration blocker
+for the other task. Explicit `--model` selection remains strict and reports a
+missing selected-task configuration as a blocker.

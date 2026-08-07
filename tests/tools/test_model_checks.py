@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 import pytest
@@ -72,6 +73,8 @@ def test_plan_defaults_accuracy_and_expands_every_perf_entry():
     assert plan["summary"] == {
         "model_count": 1,
         "binding_count": 3,
+        "configured_binding_count": 3,
+        "unsupported_binding_count": 0,
         "blocker_count": 0,
     }
 
@@ -150,6 +153,24 @@ def test_platform_hardware_exclusion_can_target_one_accuracy_suite():
     assert plan["models"][0]["tasks"]["accuracy"]["status"] == "configured"
 
 
+def test_platform_hardware_exclusion_must_name_a_real_binding():
+    with pytest.raises(model_checks.ModelCheckError, match="unknown Accuracy binding"):
+        model_checks.audit_platform_unsupported(
+            _platform(
+                unsupported=(
+                    {
+                        "model": "model-a",
+                        "task": "accuracy",
+                        "binding": "missing-suite",
+                        "reason": "hardware evidence",
+                    },
+                )
+            ),
+            accuracy_catalog=_accuracy_catalog(),
+            perf_cases=_perf_cases(),
+        )
+
+
 def test_missing_task_binding_is_a_blocker_not_hardware_unsupported():
     plan = model_checks.resolve_plan(
         models=["model-b"],
@@ -171,6 +192,59 @@ def test_missing_task_binding_is_a_blocker_not_hardware_unsupported():
         "bindings": [],
     }
     assert plan["summary"]["blocker_count"] == 1
+
+
+def test_complete_task_matrices_do_not_cross_require_task_bindings():
+    plan = model_checks.resolve_plan(
+        models=["model-a", "model-c"],
+        tasks=["accuracy", "perf"],
+        platform=_platform(),
+        accuracy_catalog=_accuracy_catalog(),
+        accuracy_workloads=(),
+        accuracy_bindings={},
+        all_accuracy_workloads=False,
+        perf_cases=_perf_cases(),
+        perf_exclusions={},
+        complete_task_matrices=True,
+    )
+
+    model_c = next(model for model in plan["models"] if model["model"] == "model-c")
+    assert model_c["tasks"]["accuracy"] == {
+        "status": "not_applicable",
+        "reason": "model belongs only to another selected task's complete matrix",
+        "bindings": [],
+    }
+    assert plan["summary"]["blocker_count"] == 0
+
+
+def test_all_accuracy_selects_only_accuracy_catalog_models(monkeypatch):
+    arguments = model_checks.build_parser().parse_args(
+        ["check", "--platform", "gb300", "--task", "accuracy", "--all"]
+    )
+    captured = {}
+
+    def resolve_plan(**kwargs):
+        captured.update(kwargs)
+        return {
+            "schema_version": "trtmc.model-check-selection/v1",
+            "platform": "gb300",
+            "platform_source": "platform.yaml",
+            "execution": {"task_order": ["accuracy"], "serial_tasks": False},
+            "models": [],
+            "summary": {
+                "model_count": 0,
+                "binding_count": 0,
+                "configured_binding_count": 0,
+                "unsupported_binding_count": 0,
+                "blocker_count": 0,
+            },
+        }
+
+    monkeypatch.setattr(model_checks, "resolve_plan", resolve_plan)
+    model_checks._resolve_request(arguments)
+
+    assert set(captured["models"]) == set(captured["accuracy_catalog"]["models"])
+    assert captured["complete_task_matrices"] is True
 
 
 def test_explicit_perf_exclusion_is_not_a_blocker():
@@ -261,11 +335,29 @@ def test_runner_executable_preserves_virtual_environment_symlink(tmp_path):
     assert model_checks._runner_executable(str(runner), "runner") == str(runner)
 
 
-def test_l4t_platform_rejects_storage_outside_nvme_partition():
+def test_l4t_platform_rejects_unverifiable_nvme_partition():
     platform = model_checks.load_platform("l4t-thor")
 
     with pytest.raises(model_checks.ModelCheckError, match="/dev/nvme0n1p1"):
         model_checks._require_platform_storage_root(Path("/tmp/run"), platform)
+
+
+def test_platform_accepts_storage_on_required_device(tmp_path):
+    root = tmp_path / "runs"
+    root.mkdir()
+    platform = {
+        "storage": {"device": str(tmp_path / "device-anchor")},
+    }
+    (tmp_path / "device-anchor").touch()
+
+    model_checks._require_platform_storage_root(root, platform)
+
+
+@pytest.mark.parametrize("platform", ["gb300", "l4t-thor", "auto-thor"])
+def test_checked_in_platform_resolves_complete_task_matrices(platform):
+    assert model_checks.main(
+        ["check", "--platform", platform, "--all", "--json"]
+    ) == 0
 
 
 def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
@@ -304,3 +396,94 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
         "qwen25vl-3b=vlm_mmmu_pro_vision_mcq"
     )
     assert "perf" not in request["commands"]
+
+
+def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    selection = [
+        "run",
+        "--platform",
+        "gb300",
+        "--task",
+        "accuracy",
+        "--model",
+        "qwen25vl-3b",
+        "--run-id",
+        "resume-unit",
+    ]
+    assert model_checks.main([*selection, "--dry-run"]) == 0
+
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(model_checks.subprocess, "run", run)
+
+    assert model_checks.main([*selection, "--resume"]) == 0
+    assert commands[0][-1] == "--resume-existing"
+    result = json.loads(
+        (storage / "results/resume-unit/result.json").read_text(encoding="utf-8")
+    )
+    assert result["resumed"] is True
+
+
+def test_perf_resume_command_requires_one_existing_run(tmp_path):
+    results = tmp_path / "results"
+    run = results / "release-family-performance-example"
+    run.mkdir(parents=True)
+    (run / "results.json").write_text("{}", encoding="utf-8")
+    environment = {
+        "tasks": {"perf": {"runner_python": "/venv/bin/python"}}
+    }
+
+    command = model_checks._perf_resume_command(environment, results)
+
+    assert command == [
+        "/venv/bin/python",
+        str(model_checks.REPOSITORY / "tools/perf_matrix.py"),
+        "resume",
+        str(run),
+    ]
+
+
+def test_auto_thor_environment_builds_both_task_commands(tmp_path, monkeypatch):
+    storage = tmp_path / "storage"
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setenv("TRTMC_PERF_WORKER", str(runtime / "trtmc_benchmark_worker"))
+    monkeypatch.setenv("TRTMC_PERF_BUNDLE_CACHE", str(storage / "bundles"))
+    monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
+    monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
+
+    assert model_checks.main(
+        [
+            "run",
+            "--platform",
+            "auto-thor",
+            "--model",
+            "distilgpt2",
+            "--run-id",
+            "auto-thor-unit",
+            "--dry-run",
+        ]
+    ) == 0
+
+    request = json.loads(
+        (storage / "results/auto-thor-unit/request.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(request["commands"]) == {"accuracy", "perf"}
+    assert request["selection"]["execution"]["serial_tasks"] is True
+    assert request["perf_environment_config"]["storage"]["bundle_cache"] == str(
+        storage / "bundles"
+    )

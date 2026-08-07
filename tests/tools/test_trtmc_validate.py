@@ -569,6 +569,140 @@ def test_binding_failure_retains_engine_and_per_model_hf_cache(tmp_path):
     assert (model_work / "hf-cache/blob").is_file()
 
 
+def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
+    tmp_path,
+    monkeypatch,
+):
+    output = tmp_path / "results"
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--binding",
+            "model-a=suite-a",
+            "--output",
+            str(output),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--resume-existing",
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "suite-a")
+    case_dir = trtmc_validate._case_directory(output, binding)
+    case_dir.mkdir(parents=True)
+    (output / "run.json").write_text(
+        json.dumps(
+            {
+                "source_revision": "same-revision",
+                "command": "tools/trtmc_validate.py --binding model-a=suite-a "
+                f"--output {output} --model-work-dir {tmp_path / 'work'} "
+                "--engine-retention delete_on_pass "
+                f"--reference-cache-dir {tmp_path / 'references'}",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "suite-a",
+                "execution": {"status": "completed"},
+                "validation": {"status": "passed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "same-revision")
+    monkeypatch.setattr(
+        trtmc_validate.sys,
+        "argv",
+        [
+            "tools/trtmc_validate.py",
+            "--binding",
+            "model-a=suite-a",
+            "--output",
+            str(output),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-retention",
+            "delete_on_pass",
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--resume-existing",
+        ],
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        lambda *args, **kwargs: pytest.fail("terminal binding was rerun"),
+    )
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trtmc_validate, "finalize_run_metadata", lambda *args: None)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "write_report",
+        lambda output: (output / "report.json", output / "report.html", {}),
+    )
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+
+    returncode = trtmc_validate._run_all_bindings(
+        [binding],
+        arguments=arguments,
+        catalog={"sample_limits": {"suite-a": 1}},
+    )
+
+    assert returncode == 0
+    result = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
+    assert result["resource_cleanup"]["engine"]["status"] == "deleted"
+
+
+def test_resume_existing_rejects_different_source_revision(tmp_path, monkeypatch):
+    output = tmp_path / "results"
+    output.mkdir()
+    (output / "run.json").write_text(
+        json.dumps({"source_revision": "old-revision"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "new-revision")
+
+    with pytest.raises(trtmc_validate.ValidationError, match="different source revision"):
+        trtmc_validate._validate_resume_request(output)
+
+
+def test_resume_existing_rejects_different_command(tmp_path, monkeypatch):
+    output = tmp_path / "results"
+    output.mkdir()
+    (output / "run.json").write_text(
+        json.dumps(
+            {
+                "source_revision": "same-revision",
+                "command": "tools/trtmc_validate.py --model model-a --limit 5",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "same-revision")
+    monkeypatch.setattr(
+        trtmc_validate.sys,
+        "argv",
+        [
+            "tools/trtmc_validate.py",
+            "--model",
+            "model-a",
+            "--limit",
+            "10",
+            "--resume-existing",
+        ],
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="different resolved command"):
+        trtmc_validate._validate_resume_request(output)
+
+
 def test_shared_hf_cache_cannot_be_deleted_by_accuracy_runner(tmp_path):
     arguments = trtmc_validate.build_parser().parse_args(
         [

@@ -3095,6 +3095,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--resume-existing",
+        action="store_true",
+        help=(
+            "keep terminal results for exact bindings in an existing output "
+            "from the same source revision"
+        ),
+    )
     parser.add_argument("--list", action="store_true", help="list model-first workloads")
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--suites", type=Path, default=DEFAULT_SUITES)
@@ -3767,6 +3775,69 @@ def _run_supervised_binding_with_retries(
     return result
 
 
+def _resumable_binding_result(
+    output: Path,
+    binding: Binding,
+) -> dict[str, Any] | None:
+    comparison = _case_directory(output, binding) / "comparison.json"
+    try:
+        loaded = json.loads(comparison.read_text(encoding="utf-8"))
+        result = _normalize_result(loaded)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if result.get("model") != binding.model or result.get("workload") != binding.workload:
+        return None
+    execution = result.get("execution")
+    validation = result.get("validation")
+    if not isinstance(execution, Mapping) or execution.get("status") not in {
+        "completed",
+        "error",
+    }:
+        return None
+    if not isinstance(validation, Mapping) or validation.get("status") not in {
+        "passed",
+        "failed",
+        "skipped",
+    }:
+        return None
+    return result
+
+
+def _resume_command(command: str) -> list[str]:
+    try:
+        arguments = shlex.split(command)
+    except ValueError as exc:
+        raise ValidationError(f"cannot parse recorded Accuracy command: {exc}") from exc
+    return [argument for argument in arguments if argument != "--resume-existing"]
+
+
+def _validate_resume_request(output: Path) -> None:
+    run_path = output / "run.json"
+    try:
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValidationError(f"cannot resume without run metadata: {run_path}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"cannot read resume metadata {run_path}: {exc}") from exc
+    if not isinstance(run, Mapping):
+        raise ValidationError(f"resume metadata must contain a JSON object: {run_path}")
+    previous = str(run.get("source_revision", "") or "")
+    current = _source_revision()
+    if not previous or previous != current:
+        raise ValidationError(
+            "cannot resume Accuracy results from a different source revision: "
+            f"recorded={previous or '<missing>'}, current={current or '<missing>'}"
+        )
+    recorded_command = str(run.get("command", "") or "")
+    current_command = shlex.join(sys.argv)
+    if not recorded_command or _resume_command(recorded_command) != _resume_command(
+        current_command
+    ):
+        raise ValidationError(
+            "cannot resume Accuracy results with a different resolved command"
+        )
+
+
 def _run_all_bindings(
     bindings: Iterable[Binding],
     *,
@@ -3776,6 +3847,8 @@ def _run_all_bindings(
     bindings = tuple(bindings)
     _prepare_run_directories(arguments)
     _reused_bundle_revalidation_budget(arguments)
+    if arguments.resume_existing:
+        _validate_resume_request(arguments.output)
     write_run_metadata(
         arguments.output,
         cuda_visible_devices=arguments.cuda_visible_devices,
@@ -3805,21 +3878,33 @@ def _run_all_bindings(
             if sample_limit == 0
             else f"{sample_limit} samples"
         )
-        free_gib = _check_free_space(arguments, binding)
-        print(
-            f"\nStarting worker: {binding.model} / {binding.workload} / {sample_note} "
-            f"/ {free_gib:.1f} GiB free",
-            flush=True,
-        )
         binding_arguments, binding_work, model_work = _binding_resource_arguments(
             arguments,
             binding,
         )
-        result = _run_supervised_binding_with_retries(
-            binding,
-            arguments=binding_arguments,
-            catalog=catalog,
+        result = (
+            _resumable_binding_result(arguments.output, binding)
+            if arguments.resume_existing
+            else None
         )
+        if result is None:
+            free_gib = _check_free_space(arguments, binding)
+            print(
+                f"\nStarting worker: {binding.model} / {binding.workload} / "
+                f"{sample_note} / {free_gib:.1f} GiB free",
+                flush=True,
+            )
+            result = _run_supervised_binding_with_retries(
+                binding,
+                arguments=binding_arguments,
+                catalog=catalog,
+            )
+        else:
+            print(
+                f"\nResume: keeping terminal result for "
+                f"{binding.model} / {binding.workload}",
+                flush=True,
+            )
         model_failed = result["validation"]["status"] == "failed"
         model_passed[binding.model] = model_passed[binding.model] and not model_failed
         remaining[binding.model] -= 1

@@ -81,6 +81,16 @@ Both policies return a nonzero exit status when any attempted model fails.
 Process isolation also covers failures that happen before backend execution,
 such as reference-environment setup or uncaught model-specific Python errors.
 
+Resume an interrupted output only from the same source revision and the same
+resolved command. Terminal execution results, including disagreements and
+exhausted worker errors, are kept; incomplete or malformed bindings run again:
+
+```bash
+python tools/trtmc_validate.py --all \
+  --output /runs/results/accuracy \
+  --resume-existing
+```
+
 For disk-bounded runs, `--model-work-dir` isolates engines by exact
 model/workload binding. Suites for the same model do not share engines because
 their datasets may resolve to different static shapes, optimization profiles,

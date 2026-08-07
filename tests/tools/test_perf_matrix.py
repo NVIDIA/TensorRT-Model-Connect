@@ -508,6 +508,36 @@ def test_perf_per_entry_hf_cache_can_retain_failure_and_delete_success(
     assert not case_work.exists()
 
 
+def test_perf_shared_hf_cache_retains_failed_entry_work(tmp_path: Path) -> None:
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        hf_cache_mode="shared",
+        hf_cache_retention="retain",
+    )
+    case_work = tmp_path / "scratch/case"
+    case_work.mkdir(parents=True)
+
+    retained = perf_matrix._cleanup_entry_work(case_work, options, passed=False)
+    assert retained["status"] == "retained"
+    assert case_work.is_dir()
+
+    deleted = perf_matrix._cleanup_entry_work(case_work, options, passed=True)
+    assert deleted["status"] == "deleted"
+    assert not case_work.exists()
+
+
 
 
 def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
