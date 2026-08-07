@@ -17,7 +17,7 @@ from .references.hf_transformers import (
     _existing_path_reader,
     _json_output_reader,
     _reference_env,
-    _resolve_cached_model_ref,
+    _resolve_pinned_sam3_model_ref,
     _torch_dtype_for_case,
     run_reference_subprocess,
 )
@@ -43,7 +43,7 @@ class Sam3HfTransformersReference(HfTransformersReference):
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
         model_revision = case.hf_revision
-        model_ref = _resolve_cached_model_ref(hf_id, model_revision)
+        model_ref = _resolve_pinned_sam3_model_ref(hf_id, model_revision)
         prompt = (
             case.inputs.get("text_prompt")
             or case.inputs.get("prompt")

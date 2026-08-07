@@ -40,7 +40,7 @@ def test_cached_model_resolution_honors_sam3_revision(monkeypatch) -> None:
         SimpleNamespace(snapshot_download=fake_snapshot_download),
     )
 
-    resolved = hf_transformers._resolve_cached_model_ref(
+    resolved = hf_transformers._resolve_pinned_sam3_model_ref(
         "facebook/sam3",
         SAM3_REVISION,
     )
@@ -77,7 +77,7 @@ def test_missing_pinned_sam3_snapshot_fails_without_network(monkeypatch) -> None
             f"facebook/sam3@{SAM3_REVISION}"
         ),
     ):
-        hf_transformers._resolve_cached_model_ref(
+        hf_transformers._resolve_pinned_sam3_model_ref(
             "facebook/sam3",
             SAM3_REVISION,
         )
@@ -119,7 +119,7 @@ def test_incomplete_hub_snapshot_uses_pinned_runtime_files(
         ),
     )
 
-    resolved = hf_transformers._resolve_cached_model_ref(
+    resolved = hf_transformers._resolve_pinned_sam3_model_ref(
         "facebook/sam3",
         SAM3_REVISION,
     )
@@ -133,7 +133,7 @@ def test_sam3_reference_propagates_pinned_snapshot(monkeypatch) -> None:
 
     monkeypatch.setattr(
         reference,
-        "_resolve_cached_model_ref",
+        "_resolve_pinned_sam3_model_ref",
         lambda _hf_id, revision: (
             "/cache/pinned-sam3-snapshot"
             if revision == SAM3_REVISION

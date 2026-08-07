@@ -19,7 +19,7 @@ SAM3_REVISION = "3c879f39826c281e95690f02c7821c4de09afae7"
 def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_resolve_cached_model_ref(hf_id: str, revision: str) -> str:
+    def _fake_resolve_pinned_sam3_model_ref(hf_id: str, revision: str) -> str:
         captured["model_ref_request"] = (hf_id, revision)
         return "/cached/sam3"
 
@@ -47,8 +47,8 @@ def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(
         sam3_reference,
-        "_resolve_cached_model_ref",
-        _fake_resolve_cached_model_ref,
+        "_resolve_pinned_sam3_model_ref",
+        _fake_resolve_pinned_sam3_model_ref,
     )
     monkeypatch.setattr(sam3_hf_base.subprocess, "run", _fake_run)
 
