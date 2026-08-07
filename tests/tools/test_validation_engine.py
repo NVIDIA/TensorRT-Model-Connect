@@ -617,19 +617,25 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
 def test_default_suites_include_text_generation_gap_models() -> None:
     suites = validation_engine.load_suites()
     expected = {
-        "humaneval_code_continuation_parity": ["codegen-350m", "starcoder2-3b"],
-        "wikitext103_distilgpt2_continuation_parity": ["distilgpt2"],
-        "newstest2019_en_ru_marian_translation_parity": ["marian-en-ru"],
-        "wmt14_en_de_t5_translation_parity": ["t5-small"],
-        "flores200_en_fr_riva_translation_parity": ["riva-translate-4b"],
+        "humaneval_code_continuation_parity": (
+            ["codegen-350m", "starcoder2-3b"],
+            {},
+        ),
+        "wikitext103_distilgpt2_continuation_parity": (
+            ["distilgpt2"],
+            {"min_tie_adjusted_exact_match_rate": 0.9},
+        ),
+        "newstest2019_en_ru_marian_translation_parity": (["marian-en-ru"], {}),
+        "wmt14_en_de_t5_translation_parity": (["t5-small"], {}),
+        "flores200_en_fr_riva_translation_parity": (["riva-translate-4b"], {}),
     }
 
-    for suite_id, model_names in expected.items():
+    for suite_id, (model_names, gates) in expected.items():
         suite = validation_engine.suite_by_id(suites, suite_id)
         assert suite["dataset"]["kind"] == "text_generation_json"
         assert suite["scoring"]["scorer"] == "continuation"
         assert suite["default_model_names"] == model_names
-        assert suite["gates"] == {}
+        assert suite["gates"] == gates
 
     for suite_id in (
         "newstest2019_en_ru_marian_translation_parity",

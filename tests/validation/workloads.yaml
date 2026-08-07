@@ -247,7 +247,8 @@ suites:
     description: >
       Greedy language-model continuation parity for DistilGPT2 on WikiText-103,
       the benchmark reported by its model card. Full-corpus perplexity is outside
-      this smoke runner; divergence frequency and severity are diagnostic.
+      this smoke runner; sample exact-match rate is gated while token-prefix
+      severity remains diagnostic.
     user_contract: continuation_parity
     default_model_names:
       - distilgpt2
@@ -282,7 +283,10 @@ suites:
       by_model:
         distilgpt2:
           build_generation_headroom: true
-    gates: {}
+    gates:
+      # Samples are the pass/fail unit. Exact HF argmax ties remain visible in
+      # raw diagnostics but are gate-equivalent.
+      min_tie_adjusted_exact_match_rate: 0.9
     ci:
       eligible: false
       lane: local_only
