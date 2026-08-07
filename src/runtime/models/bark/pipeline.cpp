@@ -7,6 +7,7 @@
 
 #include "runtime/models/bark/bark_generation_plan.h"
 #include "runtime/models/bark/decode_runtime.h"
+#include "runtime/models/bark/sampler.h"
 #include "trtmc/tokenizer.h"
 
 #include <algorithm>
@@ -16,7 +17,6 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
-#include <numeric>
 #include <stdexcept>
 
 namespace trtmc {
@@ -92,16 +92,6 @@ void maybe_dump_tokens(const std::string& dump_path, const char* suffix,
     }
 }
 
-// Seed the sampler RNG from the request, falling back to audio_bark.seed.
-// A value of -1 (default) means "leave the RNG at its constructed state."
-void maybe_seed_bark_rng(std::mt19937& rng, std::int64_t seed) {
-    if (seed < 0)
-        return;
-    const auto converted = static_cast<std::mt19937::result_type>(seed);
-    rng.seed(converted);
-    std::cerr << "[trtmc] Bark: sampler seed=" << converted << std::endl;
-}
-
 std::vector<float> synthesize_simple_waveform(const std::vector<int32_t>& codes_flat,
                                               int32_t n_frames, const BarkConfig& cfg) {
     const int32_t samples_per_frame = cfg.sample_rate / cfg.coarse_rate_hz;
@@ -154,7 +144,7 @@ BarkPipeline::BarkPipeline(std::unique_ptr<TrtModule> semantic, std::unique_ptr<
       semantic_state_(std::move(semantic_state)), coarse_state_(std::move(coarse_state)),
       semantic_embed_(std::move(semantic_embed)), coarse_embed_(std::move(coarse_embed)),
       config_(std::move(config)), stream_(stream), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)) {
+      model_id_(std::move(model_id_str)), sampler_(std::make_unique<BarkSampler>(stream)) {
     if (!semantic_ || !semantic_->ok())
         throw std::runtime_error("BarkPipeline: invalid semantic module");
     if (!coarse_ || !coarse_->ok())
@@ -188,7 +178,12 @@ AudioResult BarkPipeline::generate_audio(const std::string& prompt, const Genera
 
     // A public request seed takes precedence over the session-level
     // audio_bark.seed fallback populated by bark_plugin.cpp.
-    maybe_seed_bark_rng(rng_, resolve_bark_seed(config_.seed, cfg.seed));
+    const int64_t sampler_seed = resolve_bark_seed(config_.seed, cfg.seed);
+    sampler_->reset(sampler_seed);
+    if (sampler_seed >= 0) {
+        std::cerr << "[trtmc] Bark: sampler seed=" << sampler_seed
+                  << ", type=" << sampler_->sampler_type() << std::endl;
+    }
 
     std::cerr << "[trtmc] Bark: starting pipeline with " << input_ids.size()
               << " text tokens, max_semantic=" << max_tokens << (config_.greedy ? " (greedy)" : "")
@@ -322,34 +317,7 @@ int32_t BarkPipeline::sample_top_k(const float* logits, int32_t vocab_size, floa
         return best;
     }
 
-    top_k = std::min(top_k, vocab_size);
-    std::vector<int32_t> indices(static_cast<std::size_t>(vocab_size));
-    std::iota(indices.begin(), indices.end(), 0);
-    if (top_k < vocab_size) {
-        std::partial_sort(indices.begin(), indices.begin() + top_k, indices.end(),
-                          [logits](int32_t a, int32_t b) { return logits[a] > logits[b]; });
-    }
-
-    std::vector<float> probs(static_cast<std::size_t>(top_k));
-    const float max_logit =
-        top_k < vocab_size ? logits[indices[0]] : *std::max_element(logits, logits + vocab_size);
-    float sum = 0.0F;
-    for (int32_t i = 0; i < top_k; ++i) {
-        probs[i] = std::exp((logits[indices[i]] - max_logit) / temperature);
-        sum += probs[i];
-    }
-    for (int32_t i = 0; i < top_k; ++i)
-        probs[i] /= sum;
-
-    std::uniform_real_distribution<float> dist(0.0F, 1.0F);
-    float r = dist(rng_);
-    float cumulative = 0.0F;
-    for (int32_t i = 0; i < top_k; ++i) {
-        cumulative += probs[i];
-        if (r < cumulative)
-            return indices[i];
-    }
-    return indices[top_k - 1];
+    return sampler_->sample(logits, vocab_size, temperature, top_k);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,7 +362,7 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
             break;
         suppress_semantic_logits(logits, cfg.semantic_pad_token);
 
-        const int32_t token = sample_top_k(logits.data(), cfg.semantic_pad_token + 1,
+        const int32_t token = sample_top_k(logits.data(), static_cast<int32_t>(logits.size()),
                                            cfg.semantic_temperature, cfg.top_k);
         if (token == cfg.semantic_pad_token)
             break;
@@ -535,11 +503,15 @@ std::vector<int32_t> BarkPipeline::run_fine(const std::vector<int32_t>& coarse_t
 
         if (bark_fine_uses_sampling(cfg)) {
             const int32_t valid_range = std::min(cfg.codebook_size, fine_cb_size);
+            // HF samples every padded frame in one batched torch.multinomial call,
+            // then discards the padded tail. Preserve that RNG consumption so the
+            // next codebook starts at the same Philox offset.
+            const std::vector<int32_t> sampled_tokens =
+                sampler_->sample_rows(host_logits.data(), max_seq, fine_cb_size, valid_range,
+                                      cfg.fine_temperature, valid_range);
             for (int32_t frame = 0; frame < plan.actual_frames; ++frame) {
-                const float* frame_logits =
-                    host_logits.data() + static_cast<std::size_t>(frame) * fine_cb_size;
                 codes[static_cast<std::size_t>(cb_idx) * plan.n_frames + frame] =
-                    sample_top_k(frame_logits, valid_range, cfg.fine_temperature, valid_range);
+                    sampled_tokens[static_cast<std::size_t>(frame)];
             }
         } else {
             update_fine_codes_from_logits(codes, host_logits, cb_idx, plan.n_frames,

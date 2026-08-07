@@ -19,11 +19,12 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <memory>
-#include <random>
 #include <string>
 #include <vector>
 
 namespace trtmc {
+
+class BarkSampler;
 
 class BarkPipeline final : public IPipeline {
   public:
@@ -72,7 +73,7 @@ class BarkPipeline final : public IPipeline {
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
-    std::mt19937 rng_{std::random_device{}()};
+    std::unique_ptr<BarkSampler> sampler_;
 };
 
 } // namespace trtmc

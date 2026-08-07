@@ -66,15 +66,21 @@ inline int32_t compute_bark_coarse_steps(int32_t semantic_len, const BarkConfig&
     return std::max(frames * cfg.n_coarse_codebooks, 0);
 }
 
+inline float bark_semantic_to_coarse_ratio(const BarkConfig& cfg) {
+    return static_cast<float>(cfg.coarse_rate_hz) / cfg.semantic_rate_hz *
+           static_cast<float>(std::max(cfg.n_coarse_codebooks, 1));
+}
+
 inline std::vector<int32_t>
 build_bark_coarse_input_tokens(const std::vector<int32_t>& remapped_semantic,
                                const std::vector<int32_t>& coarse_tokens, const BarkConfig& cfg) {
     const int32_t semantic_len = static_cast<int32_t>(remapped_semantic.size());
     const int32_t total_generated = static_cast<int32_t>(coarse_tokens.size());
-    const int32_t max_semantic_history = static_cast<int32_t>(std::floor(
-        static_cast<float>(cfg.max_coarse_history) * cfg.semantic_rate_hz / cfg.coarse_rate_hz));
-    const int32_t semantic_idx = static_cast<int32_t>(std::round(
-        static_cast<float>(total_generated) * cfg.semantic_rate_hz / cfg.coarse_rate_hz));
+    const float semantic_to_coarse_ratio = bark_semantic_to_coarse_ratio(cfg);
+    const int32_t max_semantic_history = static_cast<int32_t>(
+        std::floor(static_cast<float>(cfg.max_coarse_history) / semantic_to_coarse_ratio));
+    const int32_t semantic_idx = static_cast<int32_t>(
+        std::round(static_cast<float>(total_generated) / semantic_to_coarse_ratio));
     const int32_t semantic_start = std::max(0, semantic_idx - max_semantic_history);
     const int32_t semantic_context_len =
         std::min(semantic_len - semantic_start, cfg.max_coarse_input_length);

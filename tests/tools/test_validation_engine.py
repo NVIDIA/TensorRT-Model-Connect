@@ -3614,6 +3614,100 @@ def test_tts_intelligibility_gate_accepts_matching_correctness() -> None:
     assert result["status"] == "passed"
 
 
+@pytest.mark.parametrize(
+    ("bundle_seconds", "expected_status", "expected_drop", "expected_agreement"),
+    [
+        (2.5, "failed", 1.0, 0.0),
+        (1.0, "passed", 0.0, 1.0),
+    ],
+)
+def test_eval_one_model_applies_tts_accuracy_gates(
+    tmp_path: Path,
+    monkeypatch,
+    bundle_seconds: float,
+    expected_status: str,
+    expected_drop: float,
+    expected_agreement: float,
+) -> None:
+    dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
+    dataset.parent.mkdir()
+    _write_seedtts(dataset)
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "seedtts_en_tts_intelligibility"
+    )
+    model = {
+        "name": "bark-large",
+        "hf_id": "suno/bark",
+        "family": "bark",
+        "bundle": "bark-large.bundle",
+        "max_cache_length": 1024,
+        "precision": "fp32",
+        "trust_remote_code": False,
+        "build_args": {},
+        "quantization": {},
+    }
+
+    def fake_run_hf(_args, _model, work_dir):
+        wav_path = work_dir / "hf_audio" / "seedtts-1.wav"
+        _write_pcm_wav(wav_path)
+        validation_engine.write_predictions(
+            work_dir / "hf_predictions.json",
+            [
+                {
+                    "sample_id": "seedtts-1",
+                    "output_text": "The test sentence.",
+                    "wav_path": str(wav_path),
+                }
+            ],
+        )
+
+    def fake_ensure_bundle(*_args, **kwargs):
+        bundle = kwargs["bundle_path"]
+        bundle.parent.mkdir(parents=True, exist_ok=True)
+        bundle.write_bytes(b"bundle")
+        return bundle, True
+
+    def fake_run_bundle(args):
+        wav_path = Path(args.work_dir) / "bundle_audio" / "seedtts-1.wav"
+        _write_pcm_wav(wav_path, seconds=bundle_seconds)
+        validation_engine.write_predictions(
+            Path(args.work_dir) / "bundle_predictions.json",
+            [
+                {
+                    "sample_id": "seedtts-1",
+                    "output_text": "The test sentence.",
+                    "wav_path": str(wav_path),
+                }
+            ],
+        )
+
+    monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
+    monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
+    monkeypatch.setattr(validation_engine, "run_bundle", fake_run_bundle)
+    args = validation_engine.build_arg_parser().parse_args(
+        [
+            "eval",
+            "--dataset",
+            str(dataset),
+            "--work-root",
+            str(tmp_path / "work"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--model",
+            model["name"],
+            "--local-files-only",
+        ]
+    )
+
+    result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
+
+    assert result["hf_accuracy"] == 1.0
+    assert result["bundle_accuracy"] == 1.0 - expected_drop
+    assert result["pass_rate_drop_from_hf"] == expected_drop
+    assert result["correctness_agreement_rate"] == expected_agreement
+    assert result["status"] == expected_status
+
+
 def test_run_tts_bundle_generates_audio_and_batches_asr(tmp_path: Path, monkeypatch) -> None:
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()

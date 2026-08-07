@@ -72,6 +72,22 @@ void test_coarse_window_plan_builds_context_and_history() {
     check(window.input_tokens.back() == 20004, "bark window plan appends generated history");
 }
 
+void test_coarse_window_semantic_alignment_counts_codebooks() {
+    trtmc::BarkConfig cfg = make_config();
+    cfg.max_coarse_history = 4;
+    const auto coarse_plan = trtmc::make_bark_coarse_plan({10, 11, 12, 13, 14}, cfg);
+    const std::vector<int32_t> generated_tokens = {
+        20001, 20002, 20003, 20004, 20005, 20006, 20007, 20008,
+    };
+
+    const auto window = trtmc::make_bark_coarse_window_plan(coarse_plan, generated_tokens, cfg);
+
+    check(window.input_tokens[0] == 11,
+          "bark coarse window converts interleaved codebook tokens to semantic time");
+    check(window.input_tokens[1] == 12 && window.input_tokens[3] == 14,
+          "bark coarse window preserves HF semantic context alignment");
+}
+
 void test_codec_plan_prefers_fine_codes_when_available() {
     const std::vector<int32_t> fine_codes(16, 7);
     const std::vector<int32_t> coarse_tokens(12, 3);
@@ -184,6 +200,7 @@ void test_codec_input_builder_transposes_codebooks() {
 int main() {
     test_coarse_plan_derives_total_steps_and_windows();
     test_coarse_window_plan_builds_context_and_history();
+    test_coarse_window_semantic_alignment_counts_codebooks();
     test_codec_plan_prefers_fine_codes_when_available();
     test_fine_plan_and_code_initialization();
     test_fine_sampling_policy_matches_hf();
