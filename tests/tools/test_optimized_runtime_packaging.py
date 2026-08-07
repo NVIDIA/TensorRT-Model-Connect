@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import importlib.util
+import json
 import shutil
 import sys
 import tarfile
@@ -19,6 +20,32 @@ from _pyproject_backend import _append_benchmark_catalog_to_sdist
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _manifest_audio_assets(manifest: Path) -> tuple[Path, ...]:
+    """Return every local transcription input declared by one manifest."""
+
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    family = manifest.parent.parent.resolve()
+    source_prefix = Path("tests/e2e/models") / family.name
+    assets: set[Path] = set()
+    for testcase in raw.get("testcases", []):
+        declared = testcase.get("test_input_audio") if isinstance(testcase, dict) else None
+        if declared is None:
+            continue
+        assert isinstance(declared, str) and declared
+        path = Path(declared).expanduser()
+        candidate = path if path.is_absolute() else family / path
+        if (
+            not candidate.is_file()
+            and not path.is_absolute()
+            and path.is_relative_to(source_prefix)
+        ):
+            candidate = family / path.relative_to(source_prefix)
+        resolved = candidate.resolve()
+        assert resolved.is_relative_to(family) and resolved.is_file()
+        assets.add(resolved)
+    return tuple(sorted(assets))
 
 
 def _load_conan_recipe(monkeypatch: pytest.MonkeyPatch):
@@ -122,7 +149,8 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     (catalog_family / "manifests/example.json").write_text(
         '{"fp8_scales": "data/fp8-scales.json", '
         '"testcases": [{"test_image": "data/test_img.jpeg", '
-        '"prompt_file": "data/prompt.txt"}]}\n',
+        '"prompt_file": "data/prompt.txt", '
+        '"test_input_audio": "data/transcription.wav"}]}\n',
         encoding="utf-8",
     )
     (catalog_family / "data").mkdir()
@@ -130,6 +158,7 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     (catalog_family / "data/fp8-scales.json").write_text("{}\n", encoding="utf-8")
     (catalog_family / "data/test_img.jpeg").write_bytes(b"test-image")
     (catalog_family / "data/prompt.txt").write_text("test prompt\n", encoding="utf-8")
+    (catalog_family / "data/transcription.wav").write_bytes(b"RIFF-transcription-audio")
     recipe = recipe_module.TensorRTModelConnectConan()
     recipe.source_folder = str(source)
     recipe.build_folder = str(build)
@@ -193,6 +222,7 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (catalog / "data/fp8-scales.json").is_file()
     assert (catalog / "data/test_img.jpeg").is_file()
     assert (catalog / "data/prompt.txt").is_file()
+    assert (catalog / "data/transcription.wav").is_file()
 
 
 def test_package_stages_the_complete_canonical_benchmark_catalog(
@@ -217,10 +247,18 @@ def test_package_stages_the_complete_canonical_benchmark_catalog(
     )
     assert (installed / "gpt2/manifests/distilgpt2.json").is_file()
     assert (installed / "whisper/data/Recording.wav").is_file()
+    assert (installed / "whisper/data/librispeech-test-clean-6930-75918-0003.wav").is_file()
     assert (installed / "flux/data/flux2-fp8-scales.json").is_file()
     assert (installed / "qwen_image/data/test_img.jpeg").is_file()
     assert (installed / "sana_wm/assets/demo_0.png").is_file()
     assert (installed / "sana_wm/assets/demo_0.txt").is_file()
+    missing_audio_assets = [
+        asset.relative_to(source).as_posix()
+        for manifest in source.glob("*/manifests/*.json")
+        for asset in _manifest_audio_assets(manifest)
+        if not (installed / asset.relative_to(source)).is_file()
+    ]
+    assert not missing_audio_assets
 
 
 def test_sdist_appends_only_the_minimal_benchmark_catalog(
@@ -237,7 +275,8 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     (family / "manifests/example.json").write_text(
         '{"fp8_scales": "data/fp8-scales.json", '
         '"testcases": [{"test_image": "data/test_img.jpeg", '
-        '"prompt_file": "data/prompt.txt"}]}\n',
+        '"prompt_file": "data/prompt.txt", '
+        '"test_input_audio": "data/transcription.wav"}]}\n',
         encoding="utf-8",
     )
     (family / "data").mkdir()
@@ -245,6 +284,7 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     (family / "data/fp8-scales.json").write_text("{}\n", encoding="utf-8")
     (family / "data/test_img.jpeg").write_bytes(b"test-image")
     (family / "data/prompt.txt").write_text("test prompt\n", encoding="utf-8")
+    (family / "data/transcription.wav").write_bytes(b"RIFF-transcription-audio")
     (family / "data/not-a-benchmark-input.bin").write_bytes(b"large fixture")
     archive = tmp_path / "example-0.1.0.tar.gz"
     with tarfile.open(archive, "w:gz") as destination:
@@ -262,6 +302,7 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     assert f"{prefix}/data/fp8-scales.json" in names
     assert f"{prefix}/data/test_img.jpeg" in names
     assert f"{prefix}/data/prompt.txt" in names
+    assert f"{prefix}/data/transcription.wav" in names
     assert f"{prefix}/data/not-a-benchmark-input.bin" not in names
 
 

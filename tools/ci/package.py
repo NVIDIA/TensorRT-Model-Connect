@@ -61,7 +61,17 @@ class InstalledWheelValidator:
             raise CiError("wheel did not install trtmc-bench on PATH")
         if not benchmark_catalog.is_dir():
             raise CiError(f"packaged benchmark catalog is missing under {benchmark_catalog}")
-        benchmark_model = ManifestCatalog(benchmark_catalog).resolve("distilgpt2")
+        catalog = ManifestCatalog(benchmark_catalog)
+        catalog_entries = catalog.entries()
+        unusable_entries = [
+            entry for entry in catalog_entries if entry.status in {"invalid", "unsupported"}
+        ]
+        if unusable_entries:
+            details = "; ".join(
+                f"{entry.name} ({entry.status}): {entry.reason}" for entry in unusable_entries
+            )
+            raise CiError(f"packaged benchmark catalog has unusable entries: {details}")
+        benchmark_model = catalog.resolve("distilgpt2")
         if not backends:
             raise CiError(f"packaged TensorRT backend DSO is missing under {native_dir}")
         print(f"installed_wheel={wheel}")
@@ -71,6 +81,7 @@ class InstalledWheelValidator:
         print(f"installed_trtmc_bench={benchmark_script}")
         print(f"packaged_benchmark_worker={benchmark_worker}")
         print(f"packaged_benchmark_catalog={benchmark_catalog}")
+        print(f"packaged_benchmark_catalog_entries={len(catalog_entries)}")
         print(f"packaged_benchmark_smoke_model={benchmark_model.name}")
         for backend in backends:
             print(f"packaged_backend={backend}")

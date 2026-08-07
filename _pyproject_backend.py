@@ -93,7 +93,7 @@ def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
         for index, testcase in enumerate(raw.get("testcases", [])):
             if not isinstance(testcase, dict):
                 continue
-            for field in ("test_image", "prompt_file"):
+            for field in ("test_image", "prompt_file", "test_input_audio"):
                 if field in testcase:
                     references.append((f"testcases[{index}].{field}", testcase[field]))
         for field, declared in references:
