@@ -144,7 +144,7 @@ def test_c829_deepseek_ocr_receipt_passes_declared_parity_gates() -> None:
             # QA run trtmc-validate-gb300-2-20260726-c8291be0-all105,
             # five-sample DeepSeek-OCR receipt.
             "hf": {"overall_accuracy": 0.6},
-            "trtfb": {"overall_accuracy": 0.6},
+            "bundle": {"overall_accuracy": 0.6},
             "prediction_agreement_rate": 1.0,
         },
         suite["gates"],
@@ -163,7 +163,7 @@ def test_deepseek_ocr_bad_receipt_fails_both_parity_gates() -> None:
     result = validation_engine.prediction_agreement_gate_result(
         {
             "hf": {"overall_accuracy": 0.6},
-            "trtfb": {"overall_accuracy": 0.4},
+            "bundle": {"overall_accuracy": 0.4},
             "prediction_agreement_rate": 0.8,
         },
         suite["gates"],
