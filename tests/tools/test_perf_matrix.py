@@ -1735,6 +1735,93 @@ def test_entry_is_the_only_run_selection() -> None:
     assert [case["id"] for case in selected] == ["flux.generate_image"]
 
 
+def test_model_selection_expands_every_matching_perf_entry_in_model_order() -> None:
+    cases = [
+        {"id": "model-a.long", "family": "family-a", "model": "model-a"},
+        {"id": "model-b.default", "family": "family-b", "model": "model-b"},
+        {"id": "model-a.short", "family": "family-a", "model": "model-a"},
+    ]
+
+    selected = perf_matrix._selected_cases(
+        cases,
+        requested=[],
+        requested_models=["model-b", "model-a"],
+    )
+
+    assert [case["id"] for case in selected] == [
+        "model-b.default",
+        "model-a.long",
+        "model-a.short",
+    ]
+
+
+def test_model_ci_family_selection_expands_owned_perf_profiles():
+    cases = [
+        {"id": "a.one", "family": "family-a", "model": "model-a1"},
+        {"id": "b.one", "family": "family-b", "model": "model-b1"},
+        {"id": "a.two", "family": "family-a", "model": "model-a2"},
+    ]
+
+    selected = perf_matrix._selected_cases(
+        cases,
+        requested=[],
+        requested_families=["family-a"],
+    )
+
+    assert [case["id"] for case in selected] == ["a.one", "a.two"]
+
+
+def test_model_selection_rejects_models_without_perf_entries() -> None:
+    cases = [
+        {"id": "model-a.default", "family": "family-a", "model": "model-a"}
+    ]
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="models have no performance entries: model-b",
+    ):
+        perf_matrix._selected_cases(
+            cases,
+            requested=[],
+            requested_models=["model-b"],
+        )
+
+
+def test_model_selection_reports_explicit_perf_exclusion() -> None:
+    cases = [
+        {"id": "model-a.default", "family": "family-a", "model": "model-a"}
+    ]
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="excluded performance models: model-b: baseline unavailable",
+    ):
+        perf_matrix._selected_cases(
+            cases,
+            requested=[],
+            requested_models=["model-b"],
+            excluded_profiles={"model-b": "baseline unavailable"},
+        )
+
+
+def test_perf_selection_modes_are_mutually_exclusive() -> None:
+    arguments = perf_matrix.build_parser().parse_args(
+        [
+            "check",
+            str(SUITE),
+            "--environment",
+            str(GB300_ENVIRONMENT),
+            "--entry",
+            "flux.generate_image",
+            "--model",
+            "flux-schnell",
+        ]
+    )
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="choose exactly one"):
+        perf_matrix._load_suite_request(arguments)
+
+
 def test_candidate_preflight_resolves_the_build_python_profile(monkeypatch) -> None:
     calls = []
 

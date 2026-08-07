@@ -57,6 +57,7 @@ from tools.reporting_html import (  # noqa: E402
 )
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
+from tools import model_selection  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
@@ -407,6 +408,74 @@ def resolve_binding(
             spec.get("reference_cache_identity", "") or ""
         ),
     )
+
+
+def resolve_bindings(
+    catalog: Mapping[str, Any],
+    models: Iterable[str],
+    *,
+    workloads: Iterable[str] = (),
+    all_workloads: bool = False,
+) -> list[Binding]:
+    """Resolve model selection into independent model/workload bindings."""
+
+    selected_models = model_selection.normalize_models(models)
+    selected_workloads = model_selection.normalize_models(workloads)
+    if all_workloads and selected_workloads:
+        raise ValidationError("--all-workloads cannot be combined with --workload")
+
+    bindings: list[Binding] = []
+    for model in selected_models:
+        spec = catalog["models"].get(model)
+        if not isinstance(spec, Mapping):
+            raise ValidationError(f"unknown or unsupported model: {model}")
+        not_compared_reason = str(spec.get("not_compared_reason", "") or "")
+        if not_compared_reason:
+            if selected_workloads:
+                raise ValidationError(
+                    f"model {model} has no reference-consistency workloads: "
+                    f"{not_compared_reason}"
+                )
+            bindings.append(resolve_binding(catalog, model))
+            continue
+
+        if selected_workloads:
+            model_workloads = selected_workloads
+        elif all_workloads:
+            model_workloads = model_selection.normalize_models(spec["workloads"])
+        else:
+            model_workloads = (str(spec["default"]),)
+        bindings.extend(
+            resolve_binding(catalog, model, workload) for workload in model_workloads
+        )
+    return bindings
+
+
+def model_profiles_for_families(
+    task_models: Mapping[str, Mapping[str, Any]],
+    ready_models: Iterable[str],
+    families: Iterable[str],
+) -> tuple[str, ...]:
+    """Expand model_ci owner/family IDs into ready Accuracy model profiles."""
+
+    selected_families = model_selection.normalize_models(families)
+    ready = set(ready_models)
+    profiles: list[str] = []
+    missing: list[str] = []
+    for family in selected_families:
+        matched = sorted(
+            model
+            for model, record in task_models.items()
+            if model in ready and str(record.get("family", "")) == family
+        )
+        if not matched:
+            missing.append(family)
+        profiles.extend(matched)
+    if missing:
+        raise ValidationError(
+            "model owners have no ready Accuracy profiles: " + ", ".join(missing)
+        )
+    return tuple(profiles)
 
 
 def resolve_sample_limit(
@@ -2941,6 +3010,33 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("workload", nargs="?")
     parser.add_argument("--all", action="store_true", help="run every ready model")
     parser.add_argument(
+        "--model",
+        dest="selected_models",
+        action="append",
+        default=[],
+        help="canonical model name; repeatable",
+    )
+    parser.add_argument(
+        "--model-selection",
+        type=Path,
+        help=(
+            "JSON owner/family selection emitted by tools/model_ci.py; "
+            "selects matching model profiles"
+        ),
+    )
+    parser.add_argument(
+        "--workload",
+        dest="selected_workloads",
+        action="append",
+        default=[],
+        help="Accuracy workload to run for every selected model; repeatable",
+    )
+    parser.add_argument(
+        "--all-workloads",
+        action="store_true",
+        help="run every declared Accuracy workload for each selected model",
+    )
+    parser.add_argument(
         "--on-model-failure",
         choices=("continue", "stop"),
         default="continue",
@@ -3043,14 +3139,66 @@ def _select_bindings(
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
     ready_models: Iterable[str],
+    task_models: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[Binding]:
+    selection_modes = sum(
+        bool(value)
+        for value in (
+            arguments.all,
+            arguments.model,
+            arguments.selected_models,
+            arguments.model_selection,
+        )
+    )
+    if selection_modes > 1:
+        raise ValidationError(
+            "choose exactly one model selection: MODEL, --model, "
+            "--model-selection, or --all"
+        )
+    if not selection_modes:
+        raise ValidationError(
+            "provide MODEL [WORKLOAD], --model, --model-selection, --all, or --list"
+        )
+    if arguments.workload and (
+        arguments.selected_workloads or arguments.all_workloads
+    ):
+        raise ValidationError(
+            "positional WORKLOAD cannot be combined with --workload or --all-workloads"
+        )
+    if arguments.selected_workloads and arguments.all_workloads:
+        raise ValidationError("--workload cannot be combined with --all-workloads")
+
     if arguments.all:
-        if arguments.model or arguments.workload or arguments.dataset:
-            raise ValidationError("--all cannot be combined with MODEL, WORKLOAD, or --dataset")
-        return [resolve_binding(catalog, model) for model in ready_models]
-    if not arguments.model:
-        raise ValidationError("provide MODEL [WORKLOAD], --all, or --list")
-    return [resolve_binding(catalog, arguments.model, arguments.workload)]
+        models = tuple(ready_models)
+    elif arguments.model:
+        models = (arguments.model,)
+    elif arguments.model_selection:
+        if task_models is None:
+            raise ValidationError(
+                "task model metadata is required for --model-selection"
+            )
+        models = model_profiles_for_families(
+            task_models,
+            ready_models,
+            model_selection.load_model_selection(arguments.model_selection),
+        )
+    else:
+        models = model_selection.normalize_models(arguments.selected_models)
+
+    workloads = (
+        (arguments.workload,)
+        if arguments.workload
+        else tuple(arguments.selected_workloads)
+    )
+    bindings = resolve_bindings(
+        catalog,
+        models,
+        workloads=workloads,
+        all_workloads=arguments.all_workloads,
+    )
+    if arguments.dataset and len(bindings) != 1:
+        raise ValidationError("--dataset requires exactly one model/workload binding")
+    return bindings
 
 
 def _print_bindings(
@@ -3508,7 +3656,7 @@ def _main(arguments: argparse.Namespace) -> int:
                 workloads.append(f"{workload} ({limit} samples)")
             print(f"{name}: {', '.join(workloads)}")
         return 0
-    bindings = _select_bindings(arguments, catalog, ready)
+    bindings = _select_bindings(arguments, catalog, ready, task_models)
     if arguments.dry_run:
         _print_bindings(
             bindings,
