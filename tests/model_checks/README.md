@@ -72,6 +72,9 @@ python tools/model_checks.py run \
 Remove `--dry-run` to execute. Tasks are launched in the platform profile's
 order. Accuracy receives exact `MODEL=SUITE` bindings and Perf receives exact
 entry IDs, so the two task configurations cannot silently broaden selection.
+Normal execution prints a compact run header, task progress, errors, artifact
+paths, and a final Accuracy/Perf status summary. Add `--verbose` when full
+child, TRTMC, baseline, and reproduction commands are needed for debugging.
 
 Resume with the original selection, platform, environment, and run ID:
 

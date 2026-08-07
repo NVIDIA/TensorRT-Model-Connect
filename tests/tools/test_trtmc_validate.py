@@ -1057,6 +1057,7 @@ def test_all_supervisor_applies_model_failure_policy(
 def test_supervisor_retries_execution_error_but_not_disagreement(
     tmp_path,
     monkeypatch,
+    capsys,
 ):
     arguments = trtmc_validate.build_parser().parse_args(
         [
@@ -1086,6 +1087,7 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
             "raw_result": {
                 "status": validation_status,
                 "error_type": "WorkerProcessError" if attempt == 1 else "",
+                "error": "RuntimeError: stale Python profile" if attempt == 1 else "",
             },
             "worker_log": str(tmp_path / f"worker-{attempt}.log"),
         }
@@ -1109,6 +1111,10 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
     assert result["execution"]["status"] == "completed"
     assert result["execution"]["attempt_count"] == 2
     assert result["execution"]["retry_count"] == 1
+    output = capsys.readouterr().out
+    assert "Attempt 1/2: FAILED" in output
+    assert "Error: RuntimeError: stale Python profile" in output
+    assert f"Worker log: {tmp_path / 'worker-1.log'}" in output
 
     attempts.clear()
 
@@ -1358,7 +1364,12 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
     )
 
     def crash(command, log_path, env):
-        log_path.write_text("worker crashed before comparison\n", encoding="utf-8")
+        log_path.write_text(
+            "Traceback (most recent call last):\n"
+            "  worker setup failed\n"
+            "RuntimeError: required Python profile is not prebuilt\n",
+            encoding="utf-8",
+        )
         return 2
 
     monkeypatch.setattr(trtmc_validate, "_run_subprocess", crash)
@@ -1373,6 +1384,9 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
     assert result["comparison"]["status"] == "not_run"
     assert result["validation"]["status"] == "failed"
     assert result["raw_result"]["error_type"] == "WorkerProcessError"
+    assert result["raw_result"]["error"] == (
+        "RuntimeError: required Python profile is not prebuilt"
+    )
     assert result["reproduce"]["dataset"]["sample_limit"] == 5
     assert "--model-worker" in result["reproduce"]["dataset"]["command"]
     assert "--local-files-only" in result["reproduce"]["dataset"]["command"]
@@ -1794,11 +1808,12 @@ def test_reference_sources_reject_incomplete_model_contract(
         )
 
 
-def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, capsys):
+def test_print_result_verbose_exposes_raw_commands_and_result_locations(tmp_path, capsys):
     comparison = tmp_path / "comparison.json"
     report = tmp_path / "report.html"
     trtmc_validate._print_result(
         {
+            "validation": {"status": "passed"},
             "reproduce": {
                 "dataset": {
                     "command": "python tools/trtmc_validate.py model-a --limit 1000",
@@ -1811,10 +1826,13 @@ def test_print_result_only_exposes_raw_commands_and_result_locations(tmp_path, c
         },
         comparison,
         report,
+        verbose=True,
     )
 
     output = capsys.readouterr().out
     assert output == (
+        "\n"
+        "Status: PASSED\n"
         "\n"
         "Reproduce dataset run:\n"
         "  python tools/trtmc_validate.py model-a --limit 1000\n"
@@ -1846,11 +1864,46 @@ def test_print_result_does_not_mislabel_validation_wrapper_as_raw_command(tmp_pa
         },
         comparison,
         report,
+        verbose=True,
     )
 
     output = capsys.readouterr().out
     assert output.count("unavailable; see comparison result") == 3
     assert "python tools/trtmc_validate.py model-a" not in output
+
+
+def test_print_result_default_is_concise_and_shows_execution_error(tmp_path, capsys):
+    comparison = tmp_path / "comparison.json"
+    report = tmp_path / "report.html"
+    worker_log = tmp_path / "worker.log"
+
+    trtmc_validate._print_result(
+        {
+            "execution": {"status": "error", "exit_code": 1},
+            "validation": {"status": "failed"},
+            "raw_result": {
+                "error_type": "WorkerProcessError",
+                "error": "RuntimeError: required Python profile is not prebuilt",
+            },
+            "worker_log": str(worker_log),
+            "reproduce": {
+                "dataset": {"command": "python very-long-worker-command"},
+                "hf": [],
+                "trtmc": [],
+            },
+        },
+        comparison,
+        report,
+    )
+
+    output = capsys.readouterr().out
+    assert "Status: FAILED" in output
+    assert "Error: RuntimeError: required Python profile is not prebuilt" in output
+    assert f"Worker log: {worker_log}" in output
+    assert f"Compare result: {comparison}" in output
+    assert f"Report: {report}" in output
+    assert "Reproduce" not in output
+    assert "very-long-worker-command" not in output
 
 
 def test_write_report_links_each_comparison(tmp_path):

@@ -136,6 +136,7 @@ class RunOptions:
     bundle_retention: str = "retain"
     hf_cache_mode: str = "shared"
     hf_cache_retention: str = "retain"
+    verbose: bool = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -173,8 +174,18 @@ def build_parser() -> argparse.ArgumentParser:
                 "selects matching model profiles"
             ),
         )
+        command.add_argument(
+            "--verbose",
+            action="store_true",
+            help="print full TRTMC and reference commands",
+        )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
+    resume.add_argument(
+        "--verbose",
+        action="store_true",
+        help="print full TRTMC and reference commands",
+    )
     report = commands.add_parser(
         "report",
         help="render an existing run with optional test-task preparation evidence",
@@ -426,7 +437,12 @@ def _read_environment(path: Path) -> dict[str, Any]:
     }
 
 
-def _run_options(environment: Mapping[str, Any], output: Path) -> RunOptions:
+def _run_options(
+    environment: Mapping[str, Any],
+    output: Path,
+    *,
+    verbose: bool = False,
+) -> RunOptions:
     tools = environment["tools"]
     storage = environment["storage"]
     execution = environment["execution"]
@@ -454,6 +470,7 @@ def _run_options(environment: Mapping[str, Any], output: Path) -> RunOptions:
         bundle_retention=str(storage["bundle_retention"]),
         hf_cache_mode=str(execution["hf_cache_mode"]),
         hf_cache_retention=str(execution["hf_cache_retention"]),
+        verbose=verbose,
     )
 
 
@@ -2221,8 +2238,9 @@ def _run_supported_case(
         "baseline": {"argv": baseline_argv, "rendered": shlex.join(baseline_argv)},
     }
     row["commands"] = commands
-    print(f"[{case['id']}] TRTMC: {commands['trtmc']['rendered']}", flush=True)
-    print(f"[{case['id']}] baseline: {commands['baseline']['rendered']}", flush=True)
+    if getattr(options, "verbose", False):
+        print(f"[{case['id']}] TRTMC: {commands['trtmc']['rendered']}", flush=True)
+        print(f"[{case['id']}] baseline: {commands['baseline']['rendered']}", flush=True)
     order = ("trtmc", "baseline") if _stable_even(str(case["id"])) else ("baseline", "trtmc")
     for side in order:
         argv = candidate_argv if side == "trtmc" else baseline_argv
@@ -3388,12 +3406,16 @@ def _check(arguments: argparse.Namespace) -> int:
 def _run_new(arguments: argparse.Namespace) -> int:
     suite_path, suite, cases, selected, environment = _load_suite_request(arguments)
     results_root = Path(str(environment["storage"]["results_root"]))
-    preliminary_options = _run_options(environment, results_root)
+    preliminary_options = _run_options(
+        environment,
+        results_root,
+        verbose=arguments.verbose,
+    )
     storage = _environment_preflight(environment, preliminary_options)
     worker = _preflight_worker(preliminary_options)
     preflight, references, failures = _preflight_selected(selected, preliminary_options)
     run_id, output = _new_run_directory(results_root, suite)
-    options = _run_options(environment, output)
+    options = _run_options(environment, output, verbose=arguments.verbose)
     results = _initial_results(suite_path, suite, cases, selected, environment)
     results["run_id"] = run_id
     return _execute_campaign(
@@ -3443,7 +3465,7 @@ def _resume(arguments: argparse.Namespace) -> int:
         raise PerfMatrixError(
             "cannot resume because the resolved environment values changed"
         )
-    options = _run_options(environment, output)
+    options = _run_options(environment, output, verbose=arguments.verbose)
     storage = _environment_preflight(environment, options)
     worker = _preflight_worker(options)
     preflight, references, failures = _preflight_selected(selected, options)

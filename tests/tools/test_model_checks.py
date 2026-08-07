@@ -394,6 +394,93 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
     assert "perf" not in request["commands"]
 
 
+def test_run_default_output_is_concise_and_ends_with_task_summary(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    storage = tmp_path / "storage"
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setenv("TRTMC_PERF_WORKER", str(runtime / "trtmc_benchmark_worker"))
+    monkeypatch.setenv("TRTMC_PERF_BUNDLE_CACHE", str(storage / "bundles"))
+    monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
+    monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
+    returncodes = iter((1, 0))
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=next(returncodes))
+
+    monkeypatch.setattr(model_checks.subprocess, "run", run)
+
+    result = model_checks.main(
+        [
+            "run",
+            "--platform",
+            "gb300",
+            "--model",
+            "distilgpt2",
+            "--run-id",
+            "concise-unit",
+        ]
+    )
+
+    assert result == 1
+    assert len(commands) == 2
+    output = capsys.readouterr().out
+    assert "Run: concise-unit" in output
+    assert "Order: Accuracy -> Perf" in output
+    assert "[1/2] Accuracy" in output
+    assert "[2/2] Perf" in output
+    assert "Accuracy: FAILED" in output
+    assert "Perf: PASSED" in output
+    assert "Overall: FAILED" in output
+    assert "tools/trtmc_validate.py --binding" not in output
+    assert "tools/perf_matrix.py run" not in output
+
+
+def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch, capsys):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(model_checks.subprocess, "run", run)
+
+    assert (
+        model_checks.main(
+            [
+                "run",
+                "--platform",
+                "gb300",
+                "--task",
+                "accuracy",
+                "--model",
+                "distilgpt2",
+                "--run-id",
+                "verbose-unit",
+                "--verbose",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "tools/trtmc_validate.py --binding" in output
+    assert commands[0][-1] == "--verbose"
+
+
 def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch):
     storage = tmp_path / "storage"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
