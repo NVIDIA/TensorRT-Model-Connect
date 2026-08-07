@@ -633,13 +633,15 @@ def test_default_suites_include_text_generation_gap_models() -> None:
 
     codegen = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "codegen-350m"
     )
-    humaneval = task_eval.suite_by_id(
+    humaneval = validation_engine.suite_by_id(
         suites, "humaneval_code_continuation_parity"
     )
-    resolved_codegen = task_eval.resolve_suite_for_model(humaneval, codegen)
+    resolved_codegen = validation_engine.resolve_suite_for_model(
+        humaneval, codegen
+    )
     assert resolved_codegen["gates"] == {"min_exact_match_rate": 1.0}
 
     for suite_id in (
@@ -3180,24 +3182,24 @@ def test_codegen_humaneval_gate_rejects_qa_accuracy_replays(
             1000 + sample_index
         ] * (64 - divergence_index)
 
-    summary = task_eval.compare_continuation_sets(
+    summary = validation_engine.compare_continuation_sets(
         hf, trtfb, require_token_ids=True
     )
     result = {
         "exact_match_rate": summary["exact_match_rate"],
         "token_prefix_agreement": summary["token_prefix_agreement"],
     }
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "humaneval_code_continuation_parity"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "humaneval_code_continuation_parity"
     )
     codegen = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "codegen-350m"
     )
-    suite = task_eval.resolve_suite_for_model(suite, codegen)
+    suite = validation_engine.resolve_suite_for_model(suite, codegen)
 
-    task_eval.apply_metric_gates(result, suite["gates"])
+    validation_engine.apply_metric_gates(result, suite["gates"])
 
     assert result["exact_match_rate"] == exact_match_rate
     assert result["token_prefix_agreement"] == token_prefix_agreement
@@ -3223,21 +3225,21 @@ def test_codegen_humaneval_gate_accepts_exact_replay() -> None:
             for index in range(10)
         ]
     }
-    summary = task_eval.compare_continuation_sets(
+    summary = validation_engine.compare_continuation_sets(
         predictions, predictions, require_token_ids=True
     )
     result = {"exact_match_rate": summary["exact_match_rate"]}
-    suite = task_eval.suite_by_id(
-        task_eval.load_suites(), "humaneval_code_continuation_parity"
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "humaneval_code_continuation_parity"
     )
     codegen = next(
         model
-        for model in task_eval.load_manifest_records()
+        for model in validation_engine.load_manifest_records()
         if model["name"] == "codegen-350m"
     )
-    suite = task_eval.resolve_suite_for_model(suite, codegen)
+    suite = validation_engine.resolve_suite_for_model(suite, codegen)
 
-    task_eval.apply_metric_gates(result, suite["gates"])
+    validation_engine.apply_metric_gates(result, suite["gates"])
 
     assert result["exact_match_rate"] == 1.0
     assert result["status"] == "passed"
