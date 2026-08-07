@@ -28,16 +28,15 @@ def _platform(*, serial: bool = True, unsupported=()):
 
 def _accuracy_catalog():
     return {
+        "sample_limits": {"suite-a": 5, "suite-b": 5, "suite-c": 5},
         "models": {
             "model-a": {
-                "default": "suite-a",
                 "workloads": ["suite-a", "suite-b"],
             },
             "model-b": {
-                "default": "suite-c",
                 "workloads": ["suite-c"],
             },
-        }
+        },
     }
 
 
@@ -49,7 +48,7 @@ def _perf_cases():
     ]
 
 
-def test_plan_defaults_accuracy_and_expands_every_perf_entry():
+def test_plan_expands_every_accuracy_workload_and_perf_entry():
     plan = model_checks.resolve_plan(
         models=["model-a"],
         tasks=["accuracy", "perf"],
@@ -57,14 +56,14 @@ def test_plan_defaults_accuracy_and_expands_every_perf_entry():
         accuracy_catalog=_accuracy_catalog(),
         accuracy_workloads=(),
         accuracy_bindings={},
-        all_accuracy_workloads=False,
         perf_cases=_perf_cases(),
         perf_exclusions={},
     )
 
     model = plan["models"][0]
     assert [binding["workload"] for binding in model["tasks"]["accuracy"]["bindings"]] == [
-        "suite-a"
+        "suite-a",
+        "suite-b",
     ]
     assert [binding["entry"] for binding in model["tasks"]["perf"]["bindings"]] == [
         "family-a.default",
@@ -72,32 +71,28 @@ def test_plan_defaults_accuracy_and_expands_every_perf_entry():
     ]
     assert plan["summary"] == {
         "model_count": 1,
-        "binding_count": 3,
-        "configured_binding_count": 3,
+        "binding_count": 4,
+        "configured_binding_count": 4,
         "unsupported_binding_count": 0,
         "blocker_count": 0,
     }
 
 
-def test_plan_can_expand_all_accuracy_suites():
+def test_plan_can_select_one_accuracy_suite_explicitly():
     plan = model_checks.resolve_plan(
         models=["model-a"],
         tasks=["accuracy"],
         platform=_platform(),
         accuracy_catalog=_accuracy_catalog(),
-        accuracy_workloads=(),
+        accuracy_workloads=("suite-b",),
         accuracy_bindings={},
-        all_accuracy_workloads=True,
         perf_cases=_perf_cases(),
         perf_exclusions={},
     )
 
     bindings = plan["models"][0]["tasks"]["accuracy"]["bindings"]
-    assert [binding["workload"] for binding in bindings] == ["suite-a", "suite-b"]
-    assert [binding["id"] for binding in bindings] == [
-        "accuracy:model-a:suite-a",
-        "accuracy:model-a:suite-b",
-    ]
+    assert [binding["workload"] for binding in bindings] == ["suite-b"]
+    assert [binding["id"] for binding in bindings] == ["accuracy:model-a:suite-b"]
 
 
 def test_plan_can_select_distinct_accuracy_suites_per_model():
@@ -111,7 +106,6 @@ def test_plan_can_select_distinct_accuracy_suites_per_model():
             "model-a": ["suite-b"],
             "model-b": ["suite-c"],
         },
-        all_accuracy_workloads=False,
         perf_cases=_perf_cases(),
         perf_exclusions={},
     )
@@ -140,7 +134,6 @@ def test_platform_hardware_exclusion_can_target_one_accuracy_suite():
         accuracy_catalog=_accuracy_catalog(),
         accuracy_workloads=(),
         accuracy_bindings={},
-        all_accuracy_workloads=True,
         perf_cases=_perf_cases(),
         perf_exclusions={},
     )
@@ -179,7 +172,6 @@ def test_missing_task_binding_is_a_blocker_not_hardware_unsupported():
         accuracy_catalog=_accuracy_catalog(),
         accuracy_workloads=(),
         accuracy_bindings={},
-        all_accuracy_workloads=False,
         perf_cases=_perf_cases(),
         perf_exclusions={},
     )
@@ -202,7 +194,6 @@ def test_complete_task_matrices_do_not_cross_require_task_bindings():
         accuracy_catalog=_accuracy_catalog(),
         accuracy_workloads=(),
         accuracy_bindings={},
-        all_accuracy_workloads=False,
         perf_cases=_perf_cases(),
         perf_exclusions={},
         complete_task_matrices=True,
@@ -255,7 +246,6 @@ def test_explicit_perf_exclusion_is_not_a_blocker():
         accuracy_catalog=_accuracy_catalog(),
         accuracy_workloads=(),
         accuracy_bindings={},
-        all_accuracy_workloads=False,
         perf_cases=_perf_cases(),
         perf_exclusions={"model-b": "baseline unavailable"},
     )
@@ -305,9 +295,7 @@ def test_execution_environment_preserves_command_name_and_resolves_paths(
                     "perf": {
                         "runner_python": "python3",
                         "suite": "benchmarks/performance/release.yaml",
-                        "environment": (
-                            "benchmarks/performance/environments/gb300.yaml"
-                        ),
+                        "environment": ("benchmarks/performance/environments/gb300.yaml"),
                     },
                 },
             },
@@ -355,9 +343,7 @@ def test_platform_accepts_storage_on_required_device(tmp_path):
 
 @pytest.mark.parametrize("platform", ["gb300", "l4t-thor", "auto-thor"])
 def test_checked_in_platform_resolves_complete_task_matrices(platform):
-    assert model_checks.main(
-        ["check", "--platform", platform, "--all", "--json"]
-    ) == 0
+    assert model_checks.main(["check", "--platform", platform, "--all", "--json"]) == 0
 
 
 def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
@@ -386,15 +372,11 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
 
     assert result == 0
     request = json.loads(
-        (storage / "results" / "unit-dry-run" / "request.json").read_text(
-            encoding="utf-8"
-        )
+        (storage / "results" / "unit-dry-run" / "request.json").read_text(encoding="utf-8")
     )
     command = request["commands"]["accuracy"]
     binding_index = command.index("--binding")
-    assert command[binding_index + 1] == (
-        "qwen25vl-3b=vlm_mmmu_pro_vision_mcq"
-    )
+    assert command[binding_index + 1] == ("qwen25vl-3b=vlm_mmmu_pro_vision_mcq")
     assert "perf" not in request["commands"]
 
 
@@ -427,9 +409,7 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
 
     assert model_checks.main([*selection, "--resume"]) == 0
     assert commands[0][-1] == "--resume-existing"
-    result = json.loads(
-        (storage / "results/resume-unit/result.json").read_text(encoding="utf-8")
-    )
+    result = json.loads((storage / "results/resume-unit/result.json").read_text(encoding="utf-8"))
     assert result["resumed"] is True
 
 
@@ -438,9 +418,7 @@ def test_perf_resume_command_requires_one_existing_run(tmp_path):
     run = results / "release-family-performance-example"
     run.mkdir(parents=True)
     (run / "results.json").write_text("{}", encoding="utf-8")
-    environment = {
-        "tasks": {"perf": {"runner_python": "/venv/bin/python"}}
-    }
+    environment = {"tasks": {"perf": {"runner_python": "/venv/bin/python"}}}
 
     command = model_checks._perf_resume_command(environment, results)
 
@@ -464,26 +442,25 @@ def test_auto_thor_environment_builds_both_task_commands(tmp_path, monkeypatch):
     monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
     monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
 
-    assert model_checks.main(
-        [
-            "run",
-            "--platform",
-            "auto-thor",
-            "--model",
-            "distilgpt2",
-            "--run-id",
-            "auto-thor-unit",
-            "--dry-run",
-        ]
-    ) == 0
+    assert (
+        model_checks.main(
+            [
+                "run",
+                "--platform",
+                "auto-thor",
+                "--model",
+                "distilgpt2",
+                "--run-id",
+                "auto-thor-unit",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
 
     request = json.loads(
-        (storage / "results/auto-thor-unit/request.json").read_text(
-            encoding="utf-8"
-        )
+        (storage / "results/auto-thor-unit/request.json").read_text(encoding="utf-8")
     )
     assert set(request["commands"]) == {"accuracy", "perf"}
     assert request["selection"]["execution"]["serial_tasks"] is True
-    assert request["perf_environment_config"]["storage"]["bundle_cache"] == str(
-        storage / "bundles"
-    )
+    assert request["perf_environment_config"]["storage"]["bundle_cache"] == str(storage / "bundles")

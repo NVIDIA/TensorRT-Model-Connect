@@ -62,7 +62,6 @@ def _add_selection_arguments(command: argparse.ArgumentParser) -> None:
         metavar="MODEL=SUITE",
         help="exact Accuracy binding; repeatable",
     )
-    accuracy.add_argument("--all-accuracy-suites", action="store_true")
     command.add_argument("--revision", default="HEAD")
     command.add_argument("--catalog", type=Path, default=trtmc_validate.DEFAULT_CATALOG)
     command.add_argument("--suites", type=Path, default=trtmc_validate.DEFAULT_SUITES)
@@ -113,9 +112,7 @@ def load_platform(value: str) -> dict[str, Any]:
     path = _platform_path(value)
     profile = _read_yaml(path, "platform profile")
     if profile.get("schema_version") != PLATFORM_SCHEMA:
-        raise ModelCheckError(
-            f"platform profile schema_version must be {PLATFORM_SCHEMA}: {path}"
-        )
+        raise ModelCheckError(f"platform profile schema_version must be {PLATFORM_SCHEMA}: {path}")
     platform_id = profile.get("id")
     if not isinstance(platform_id, str) or not platform_id.strip():
         raise ModelCheckError(f"platform profile needs a non-empty id: {path}")
@@ -139,35 +136,28 @@ def load_platform(value: str) -> dict[str, Any]:
     if root_prefix is not None and (
         not isinstance(root_prefix, str) or not Path(root_prefix).is_absolute()
     ):
-        raise ModelCheckError(
-            f"platform storage.root_prefix must be an absolute path: {path}"
-        )
+        raise ModelCheckError(f"platform storage.root_prefix must be an absolute path: {path}")
     required_device = storage.get("device")
     if required_device is not None and (
-        not isinstance(required_device, str)
-        or not Path(required_device).is_absolute()
+        not isinstance(required_device, str) or not Path(required_device).is_absolute()
     ):
-        raise ModelCheckError(
-            f"platform storage.device must be an absolute path: {path}"
-        )
+        raise ModelCheckError(f"platform storage.device must be an absolute path: {path}")
     unsupported = profile.get("unsupported", [])
     if not isinstance(unsupported, list):
         raise ModelCheckError(f"platform unsupported must be a list: {path}")
     for index, item in enumerate(unsupported):
         if not isinstance(item, Mapping):
             raise ModelCheckError(f"platform unsupported[{index}] must be an object")
-        if not all(isinstance(item.get(key), str) and item[key] for key in ("model", "task", "reason")):
-            raise ModelCheckError(
-                f"platform unsupported[{index}] needs model, task, and reason"
-            )
+        if not all(
+            isinstance(item.get(key), str) and item[key] for key in ("model", "task", "reason")
+        ):
+            raise ModelCheckError(f"platform unsupported[{index}] needs model, task, and reason")
         if item["task"] not in TASKS:
             raise ModelCheckError(
                 f"platform unsupported[{index}] has unknown task {item['task']!r}"
             )
         binding = item.get("binding")
-        if binding is not None and (
-            not isinstance(binding, str) or not binding.strip()
-        ):
+        if binding is not None and (not isinstance(binding, str) or not binding.strip()):
             raise ModelCheckError(
                 f"platform unsupported[{index}].binding must be a non-empty string"
             )
@@ -201,7 +191,7 @@ def audit_platform_unsupported(
                 raise ModelCheckError(
                     f"platform unsupported[{index}] names unknown Accuracy model {model}"
                 )
-            if binding and binding not in trtmc_validate.declared_workloads(spec):
+            if binding and binding not in accuracy_catalog["sample_limits"]:
                 raise ModelCheckError(
                     f"platform unsupported[{index}] names unknown Accuracy binding "
                     f"{model}={binding}"
@@ -214,8 +204,7 @@ def audit_platform_unsupported(
                 )
             if binding and binding not in entries:
                 raise ModelCheckError(
-                    f"platform unsupported[{index}] names unknown Perf binding "
-                    f"{model}={binding}"
+                    f"platform unsupported[{index}] names unknown Perf binding {model}={binding}"
                 )
 
 
@@ -233,14 +222,10 @@ def _expand_environment(value: Any, field: str) -> Any:
         except perf_matrix.PerfMatrixError as exc:
             raise ModelCheckError(str(exc)) from exc
     if isinstance(value, list):
-        return [
-            _expand_environment(item, f"{field}[{index}]")
-            for index, item in enumerate(value)
-        ]
+        return [_expand_environment(item, f"{field}[{index}]") for index, item in enumerate(value)]
     if isinstance(value, Mapping):
         return {
-            str(key): _expand_environment(item, f"{field}.{key}")
-            for key, item in value.items()
+            str(key): _expand_environment(item, f"{field}.{key}") for key, item in value.items()
         }
     return value
 
@@ -296,7 +281,6 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
         raise ModelCheckError("model-check environment accuracy.options must be an object")
     forbidden = {
         "all",
-        "all-workloads",
         "binding",
         "dry-run",
         "model",
@@ -308,8 +292,7 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
     }.intersection(str(name).replace("_", "-") for name in options)
     if forbidden:
         raise ModelCheckError(
-            "accuracy.options cannot control selection or output: "
-            + ", ".join(sorted(forbidden))
+            "accuracy.options cannot control selection or output: " + ", ".join(sorted(forbidden))
         )
     for field in ("suite", "environment"):
         if not isinstance(perf.get(field), str) or not perf[field]:
@@ -346,11 +329,7 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
 def _selected_tasks(profile: Mapping[str, Any], requested: Iterable[str]) -> tuple[str, ...]:
     task_order = tuple(profile["execution"]["task_order"])
     requested = tuple(dict.fromkeys(requested))
-    return (
-        tuple(task for task in task_order if task in requested)
-        if requested
-        else task_order
-    )
+    return tuple(task for task in task_order if task in requested) if requested else task_order
 
 
 def model_profiles_for_owners(
@@ -372,22 +351,17 @@ def model_profiles_for_owners(
             matched.update(
                 model
                 for model, record in accuracy_models.items()
-                if model in accuracy_catalog["models"]
-                and str(record.get("family", "")) == owner
+                if model in accuracy_catalog["models"] and str(record.get("family", "")) == owner
             )
         if "perf" in tasks:
             matched.update(
-                str(case["model"])
-                for case in perf_cases
-                if str(case["family"]) == owner
+                str(case["model"]) for case in perf_cases if str(case["family"]) == owner
             )
         if not matched:
             missing.append(owner)
         profiles.extend(sorted(matched))
     if missing:
-        raise ModelCheckError(
-            "model owners have no selected task profiles: " + ", ".join(missing)
-        )
+        raise ModelCheckError("model owners have no selected task profiles: " + ", ".join(missing))
     return model_selection.normalize_models(profiles)
 
 
@@ -412,15 +386,12 @@ def _accuracy_projection(
     *,
     catalog: Mapping[str, Any],
     workloads: Sequence[str],
-    all_workloads: bool,
     missing_is_not_applicable: bool,
     platform: Mapping[str, Any],
 ) -> dict[str, Any]:
     if model not in catalog["models"]:
         return {
-            "status": (
-                "not_applicable" if missing_is_not_applicable else "unconfigured"
-            ),
+            "status": ("not_applicable" if missing_is_not_applicable else "unconfigured"),
             "reason": (
                 "model belongs only to another selected task's complete matrix"
                 if missing_is_not_applicable
@@ -433,7 +404,6 @@ def _accuracy_projection(
             catalog,
             [model],
             workloads=workloads,
-            all_workloads=all_workloads,
         )
     except trtmc_validate.ValidationError as exc:
         return {"status": "unconfigured", "reason": str(exc), "bindings": []}
@@ -526,7 +496,6 @@ def resolve_plan(
     accuracy_catalog: Mapping[str, Any],
     accuracy_workloads: Sequence[str],
     accuracy_bindings: Mapping[str, Sequence[str]],
-    all_accuracy_workloads: bool,
     perf_cases: Sequence[Mapping[str, Any]],
     perf_exclusions: Mapping[str, str],
     complete_task_matrices: bool = False,
@@ -540,9 +509,6 @@ def resolve_plan(
                 model,
                 catalog=accuracy_catalog,
                 workloads=accuracy_bindings.get(model, accuracy_workloads),
-                all_workloads=(
-                    all_accuracy_workloads if not accuracy_bindings else False
-                ),
                 missing_is_not_applicable=complete_task_matrices,
                 platform=platform,
             )
@@ -553,9 +519,7 @@ def resolve_plan(
                 exclusions=perf_exclusions,
                 platform=platform,
             )
-        blocker_count += sum(
-            task["status"] == "unconfigured" for task in record["tasks"].values()
-        )
+        blocker_count += sum(task["status"] == "unconfigured" for task in record["tasks"].values())
         results.append(record)
     bindings = [
         binding
@@ -660,14 +624,10 @@ def _resolve_request(
         models = tuple(sorted(complete_profiles))
     elif arguments.model_selection:
         owners = model_selection.load_model_selection(arguments.model_selection)
-        known_owners = set(
-            model_ci.discover_catalog(REPOSITORY, arguments.revision).models
-        )
+        known_owners = set(model_ci.discover_catalog(REPOSITORY, arguments.revision).models)
         unknown_owners = sorted(set(owners) - known_owners)
         if unknown_owners:
-            raise ModelCheckError(
-                "unknown model owners: " + ", ".join(unknown_owners)
-            )
+            raise ModelCheckError("unknown model owners: " + ", ".join(unknown_owners))
         models = model_profiles_for_owners(
             owners,
             tasks=tasks,
@@ -691,9 +651,7 @@ def _resolve_request(
                 f"invalid --accuracy-binding {raw_binding!r}; expected MODEL=SUITE"
             )
         if model not in models:
-            raise ModelCheckError(
-                f"Accuracy binding model {model!r} is not in the selected models"
-            )
+            raise ModelCheckError(f"Accuracy binding model {model!r} is not in the selected models")
         accuracy_bindings.setdefault(model, [])
         if workload not in accuracy_bindings[model]:
             accuracy_bindings[model].append(workload)
@@ -713,10 +671,22 @@ def _resolve_request(
         accuracy_catalog=accuracy_catalog,
         accuracy_workloads=tuple(arguments.accuracy_suite),
         accuracy_bindings=accuracy_bindings,
-        all_accuracy_workloads=arguments.all_accuracy_suites,
         perf_cases=perf_cases,
         perf_exclusions=perf_exclusions,
         complete_task_matrices=arguments.all,
+    )
+    trtmc_validate.audit_binding_compatibility(
+        (
+            trtmc_validate.Binding(
+                str(binding["model"]),
+                str(binding["workload"]),
+            )
+            for model in plan["models"]
+            for binding in model["tasks"].get("accuracy", {}).get("bindings", [])
+            if binding.get("workload")
+        ),
+        suites=accuracy_suite_map,
+        task_models=accuracy_models,
     )
     return plan, platform
 
@@ -745,9 +715,7 @@ def _require_managed_path(path: Path, root: Path, label: str) -> Path:
     try:
         relative = resolved.relative_to(root)
     except ValueError as exc:
-        raise ModelCheckError(
-            f"{label} must be below storage root {root}: {resolved}"
-        ) from exc
+        raise ModelCheckError(f"{label} must be below storage root {root}: {resolved}") from exc
     if not relative.parts:
         raise ModelCheckError(f"{label} cannot be the storage root itself: {root}")
     return resolved
@@ -778,14 +746,10 @@ def _require_platform_storage_root(
             f"cannot verify storage device {device_path} for {root}: {exc}"
         ) from exc
     expected_device = (
-        device_stat.st_rdev
-        if stat.S_ISBLK(device_stat.st_mode)
-        else device_stat.st_dev
+        device_stat.st_rdev if stat.S_ISBLK(device_stat.st_mode) else device_stat.st_dev
     )
     if root_device != expected_device:
-        raise ModelCheckError(
-            f"storage root must be on device {device_path}: {root}"
-        )
+        raise ModelCheckError(f"storage root must be on device {device_path}: {root}")
 
 
 def _option_arguments(options: Mapping[str, Any]) -> list[str]:
@@ -801,9 +765,7 @@ def _option_arguments(options: Mapping[str, Any]) -> list[str]:
         values = value if isinstance(value, list) else [value]
         for item in values:
             if isinstance(item, (Mapping, list)):
-                raise ModelCheckError(
-                    f"accuracy option {name} must be scalar or a scalar list"
-                )
+                raise ModelCheckError(f"accuracy option {name} must be scalar or a scalar list")
             arguments.extend([option, str(item)])
     return arguments
 
@@ -832,9 +794,7 @@ def _accuracy_command(
         str(REPOSITORY / "tools" / "trtmc_validate.py"),
     ]
     for binding in bindings:
-        command.extend(
-            ["--binding", f"{binding['model']}={binding['workload']}"]
-        )
+        command.extend(["--binding", f"{binding['model']}={binding['workload']}"])
     command.extend(
         [
             "--catalog",
@@ -912,8 +872,7 @@ def _perf_resume_command(
         return None
     if len(candidates) != 1:
         raise ModelCheckError(
-            "cannot identify one Perf run to resume below "
-            f"{results_root}: found {len(candidates)}"
+            f"cannot identify one Perf run to resume below {results_root}: found {len(candidates)}"
         )
     config = environment["tasks"]["perf"]
     return [
@@ -946,9 +905,7 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
         "commands",
     ):
         if previous.get(field) != request.get(field):
-            raise ModelCheckError(
-                f"cannot resume because the resolved {field} changed"
-            )
+            raise ModelCheckError(f"cannot resume because the resolved {field} changed")
 
 
 def _run(arguments: argparse.Namespace) -> int:
@@ -1025,9 +982,7 @@ def _run(arguments: argparse.Namespace) -> int:
             else None
         ),
         "selection": plan,
-        "commands": {
-            task: command for task, command in commands if command is not None
-        },
+        "commands": {task: command for task, command in commands if command is not None},
         "dry_run": bool(arguments.dry_run),
     }
     request_path = run_root / "request.json"
