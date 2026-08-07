@@ -408,7 +408,11 @@ def _run_nemotron35_asr(
     return responses
 
 
-def _resolve_nemotron35_archive(arguments: argparse.Namespace) -> Path:
+def _resolve_nemo_archive(
+    arguments: argparse.Namespace,
+    *,
+    model_label: str,
+) -> Path:
     model_path = Path(arguments.model)
     if model_path.is_file() and model_path.suffix == ".nemo":
         return model_path
@@ -419,7 +423,7 @@ def _resolve_nemotron35_archive(arguments: argparse.Namespace) -> Path:
 
         snapshot = Path(
             snapshot_download(
-                arguments.model,
+                repo_id=arguments.model,
                 allow_patterns=["*.nemo"],
                 local_files_only=arguments.local_files_only,
                 **(
@@ -432,9 +436,16 @@ def _resolve_nemotron35_archive(arguments: argparse.Namespace) -> Path:
         archives = sorted(snapshot.glob("*.nemo"))
     if not archives:
         raise FileNotFoundError(
-            f"Nemotron 3.5 ASR NeMo archive is missing for {arguments.model}"
+            f"{model_label} NeMo archive is missing for {arguments.model}"
         )
     return archives[0]
+
+
+def _resolve_nemotron35_archive(arguments: argparse.Namespace) -> Path:
+    return _resolve_nemo_archive(
+        arguments,
+        model_label="Nemotron 3.5 ASR",
+    )
 
 
 def _load_nemotron35_model(
@@ -455,6 +466,22 @@ def _load_nemotron35_model(
     return torch, model
 
 
+def _load_nemo_asr_model(arguments: argparse.Namespace, nemo_asr: Any) -> Any:
+    if arguments.local_files_only:
+        archive = _resolve_nemo_archive(
+            arguments,
+            model_label="ASR",
+        )
+        return nemo_asr.models.ASRModel.restore_from(
+            restore_path=str(archive),
+            map_location=arguments.device,
+        )
+    return nemo_asr.models.ASRModel.from_pretrained(
+        arguments.model,
+        map_location=arguments.device,
+    )
+
+
 def _run_nemo_asr(
     arguments: argparse.Namespace,
     prompts: Sequence[Mapping[str, Any]],
@@ -473,10 +500,7 @@ def _run_nemo_asr(
             target_rate,
             output_dir,
         )
-    model = nemo_asr.models.ASRModel.from_pretrained(
-        arguments.model,
-        map_location=arguments.device,
-    )
+    model = _load_nemo_asr_model(arguments, nemo_asr)
     if arguments.device != "cpu" and hasattr(model, "to"):
         model = model.to(arguments.device)
     model.eval()
