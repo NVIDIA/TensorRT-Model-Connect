@@ -248,6 +248,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "internlm",
         "lance_reference",
         "magpie_tts_reference",
+        "minimax_h3_reference",
         "nemotron_h_reference",
         "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
@@ -270,6 +271,7 @@ def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
 
     assert "personaplex_full_duplex_evaluator" not in prebuilt
+    assert "minimax_h3_reference" not in prebuilt
     assert "reference_common" in prebuilt
 
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
