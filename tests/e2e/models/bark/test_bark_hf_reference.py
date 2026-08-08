@@ -28,6 +28,16 @@ def test_bark_small_and_nightly_probes_use_fp32_reference() -> None:
     assert all(case.metadata["reference_precision"] == "fp32" for case in model.testcases)
 
 
+def test_bark_nightly_probes_pin_qualified_sampling_seed() -> None:
+    model = _bark_small_model()
+
+    assert {case.name: case.determinism.get("seed") for case in model.testcases} == {
+        "bark-small": 0,
+        "bark-small-tts-probe01": 42,
+        "bark-small-tts-probe02": 42,
+    }
+
+
 def test_bark_hf_reference_moves_model_and_inputs_to_available_device(
     monkeypatch,
     tmp_path: Path,
@@ -55,5 +65,6 @@ def test_bark_hf_reference_moves_model_and_inputs_to_available_device(
     assert "torch_dtype=torch.float32" in script
     assert "model.to(device)" in script
     assert 'value.to(device) if hasattr(value, "to") else value' in script
+    assert "seed = 42" in script
     assert "random.seed(seed)" in script
     assert "torch.cuda.manual_seed_all(seed)" in script
