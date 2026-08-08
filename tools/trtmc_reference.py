@@ -222,7 +222,10 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
     settings = {
         "implementation": CACHE_IMPLEMENTATION,
         "native_runner": _native_runner_identity(native_runner),
-        "python": str(Path(sys.executable).resolve()),
+        # Keep the profile path rather than resolving the venv's interpreter
+        # symlink. Fingerprinted profiles may share the same base executable
+        # while carrying different locked dependencies.
+        "python": str(Path(sys.executable).absolute()),
         "model": args.model,
         "model_revision": args.model_revision,
         "family": args.family,

@@ -486,6 +486,36 @@ def test_reference_cache_key_changes_with_inference_setting(
     assert len([path for path in cache_dir.iterdir() if not path.name.startswith(".")]) == 2
 
 
+def test_reference_cache_key_tracks_profile_interpreter_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    work_dir = tmp_path / "work"
+    _prepare_work(work_dir)
+    interpreter = tmp_path / "python3.12"
+    interpreter.write_text("python", encoding="utf-8")
+    first_profile = tmp_path / "profile-a" / "bin" / "python"
+    second_profile = tmp_path / "profile-b" / "bin" / "python"
+    first_profile.parent.mkdir(parents=True)
+    second_profile.parent.mkdir(parents=True)
+    first_profile.symlink_to(interpreter)
+    second_profile.symlink_to(interpreter)
+
+    monkeypatch.setattr(trtmc_reference.sys, "executable", str(first_profile))
+    first_key, first_settings = trtmc_reference.reference_key(
+        _args(work_dir, cache_dir)
+    )
+    monkeypatch.setattr(trtmc_reference.sys, "executable", str(second_profile))
+    second_key, second_settings = trtmc_reference.reference_key(
+        _args(work_dir, cache_dir)
+    )
+
+    assert first_settings["python"] == str(first_profile.absolute())
+    assert second_settings["python"] == str(second_profile.absolute())
+    assert first_key != second_key
+
+
 def test_reference_cache_key_changes_with_experts_implementation(
     tmp_path: Path,
 ) -> None:
