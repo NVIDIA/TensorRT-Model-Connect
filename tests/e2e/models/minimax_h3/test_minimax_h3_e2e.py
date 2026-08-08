@@ -36,6 +36,9 @@ from tests.e2e_harness.registry import (
 _MODEL_DIR = Path(__file__).resolve().parent
 _PROJECT_DIR = _MODEL_DIR.parents[3]
 _MANIFEST_PATH = _MODEL_DIR / "manifests" / "minimax-h3-768p.json"
+_FAMILY_DIR = (
+    _PROJECT_DIR / "python" / "tensorrt_model_connect" / "families" / "minimax_h3"
+)
 _RUNNER_PATH = _MODEL_DIR / "runner.py"
 _SPEC = importlib.util.spec_from_file_location(
     f"{_MODEL_DIR.name}_e2e_runner",
@@ -64,6 +67,7 @@ def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     case = model.testcases[0]
     assert case.runtime_strategy == "diffusion_minimax_h3"
     assert case.task_strategy == "diffusion_media_generation"
+    assert case.execution_profiles["reference"] == "minimax_h3_reference"
     assert "ci_tier" not in case.metadata
     assert case.metadata["build_args"]["parallel"] == {
         "mode": "single",
@@ -82,6 +86,18 @@ def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     assert case.threshold_overrides["minimum_mean_low_frequency_correlation"] == 0.9
     assert "minimum_psnr_db" not in case.threshold_overrides
     assert "maximum_mean_absolute_error" not in case.threshold_overrides
+
+
+def test_minimax_h3_reference_profile_pins_required_hub_api() -> None:
+    lock = (
+        _FAMILY_DIR / "python_profile_requirements/minimax_h3_reference.lock.txt"
+    ).read_text(encoding="utf-8")
+    verify = (_FAMILY_DIR / "python_profile_reference_verify.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "huggingface-hub==1.23.0" in lock
+    assert "get_cached_repo_tree" in verify
 
 
 def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
