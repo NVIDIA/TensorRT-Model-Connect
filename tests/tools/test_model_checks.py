@@ -345,6 +345,123 @@ def test_task_environment_uses_shared_profiles_and_allows_missing_profiles(
     assert os.environ["TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"] == "1"
 
 
+def test_perf_reference_contracts_come_from_selected_model_owners() -> None:
+    plan = {
+        "models": [
+            {
+                "model": model,
+                "tasks": {
+                    "perf": {
+                        "bindings": [
+                            {
+                                "model": model,
+                                "entry": entry,
+                                "status": "configured",
+                            }
+                        ]
+                    }
+                },
+            }
+            for model, entry in (
+                ("lance-3b-x2t-image", "lance.generate"),
+                ("personaplex-7b", "personaplex.speak"),
+                ("sana-wm-bidirectional", "sana_wm.generate_image"),
+            )
+        ]
+    }
+
+    contracts = model_checks._selected_perf_reference_contracts(
+        plan,
+        model_checks.trtmc_validate.DEFAULT_MODELS,
+    )
+
+    assert len(contracts) == 3
+    assert {contract.environment_variable for contract in contracts} == {
+        "TRTMC_LANCE_REFERENCE_REPO",
+        "PERSONAPLEX_OFFICIAL_REPO",
+        "TRTMC_SANA_WM_REFERENCE_REPO",
+    }
+
+
+def test_prepare_perf_reference_dependencies_warms_once_and_exports_paths(
+    tmp_path,
+    monkeypatch,
+):
+    contracts = (
+        model_checks.ModelReferenceContract(
+            family="family-a",
+            repository="https://example.invalid/family-a.git",
+            revision="a" * 40,
+            relative_path="family-a/reference/source-a",
+            entrypoint="entry.py",
+            environment_variable="FAMILY_A_REPO",
+        ),
+        model_checks.ModelReferenceContract(
+            family="family-b",
+            repository="https://example.invalid/family-b.git",
+            revision="b" * 40,
+            relative_path="family-b/reference/source-b",
+            entrypoint="entry.py",
+        ),
+    )
+    warmed = []
+
+    def warm(_self, contract):
+        warmed.append(contract.family)
+        return tmp_path / contract.relative_path
+
+    monkeypatch.setattr(model_checks.ModelReferenceCacheWarmer, "warm_contract", warm)
+
+    environment = model_checks._prepare_perf_reference_dependencies(
+        contracts,
+        tmp_path,
+    )
+
+    assert warmed == ["family-a", "family-b"]
+    assert environment == {
+        "TRTMC_MODEL_REFERENCE_CACHE_ROOT": str(tmp_path),
+        "FAMILY_A_REPO": str(tmp_path / "family-a/reference/source-a"),
+    }
+
+
+def test_hf_cache_prepare_command_selects_only_configured_models(tmp_path) -> None:
+    plan = {
+        "models": [
+            {
+                "tasks": {
+                    "accuracy": {
+                        "bindings": [
+                            {"model": "model-a", "status": "configured"},
+                            {"model": "model-b", "status": "unsupported"},
+                        ]
+                    },
+                    "perf": {
+                        "bindings": [
+                            {"model": "model-a", "status": "configured"},
+                            {"model": "model-c", "status": "configured"},
+                        ]
+                    },
+                }
+            }
+        ]
+    }
+    environment = {"tasks": {"accuracy": {"runner_python": "/venv/bin/python"}}}
+
+    command = model_checks._hf_cache_prepare_command(plan, environment, tmp_path)
+
+    assert command == [
+        "/venv/bin/python",
+        str(model_checks.REPOSITORY / "scripts/warm_hf_cache.py"),
+        "--models-file",
+        str(tmp_path / "selected-models.txt"),
+        "--attempt-timeout-seconds",
+        "7200",
+    ]
+    assert (tmp_path / "selected-models.txt").read_text(encoding="utf-8") == (
+        "model-a\nmodel-c\n"
+    )
+
+
 @pytest.mark.parametrize("platform", ["gb300", "l4t-thor", "auto-thor"])
 def test_checked_in_accuracy_environment_deletes_engines_without_fixed_reserve(
     platform,
@@ -432,7 +549,7 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
     monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
     monkeypatch.setenv("TRTMC_PYTHON_PROFILE_PREBUILT_ONLY", "1")
-    returncodes = iter((1, 0))
+    returncodes = iter((0, 1, 0))
     commands = []
     child_environments = []
 
@@ -456,7 +573,7 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     )
 
     assert result == 1
-    assert len(commands) == 2
+    assert len(commands) == 3
     assert all(
         environment["TRTMC_PYTHON_PROFILE_ROOT"]
         == str(storage / "python-profiles")
@@ -512,7 +629,7 @@ def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch
 
     output = capsys.readouterr().out
     assert "tools/trtmc_validate.py --binding" in output
-    assert commands[0][-1] == "--verbose"
+    assert commands[-1][-1] == "--verbose"
 
 
 def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch):
@@ -543,7 +660,7 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
     monkeypatch.setattr(model_checks.subprocess, "run", run)
 
     assert model_checks.main([*selection, "--resume"]) == 0
-    assert commands[0][-1] == "--resume-existing"
+    assert commands[-1][-1] == "--resume-existing"
     result = json.loads((storage / "results/resume-unit/result.json").read_text(encoding="utf-8"))
     assert result["resumed"] is True
 

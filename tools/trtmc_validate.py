@@ -717,6 +717,8 @@ def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
     if not raw:
         raise ValidationError(f"workload {suite.get('id')} has no default dataset path")
     path = Path(raw)
+    if not path.is_absolute():
+        return REPO_ROOT / path
     if dataset_root is None:
         return path
     try:
@@ -1710,7 +1712,10 @@ def run_binding(
     environment = ensure_environments(profiles, str(arguments.hf_python))
     reference_sources = ensure_reference_sources(
         str(task_models[binding.model].get("family", "") or ""),
-        Path(arguments.reference_cache_dir),
+        Path(
+            getattr(arguments, "reference_source_cache_dir", None)
+            or arguments.reference_cache_dir
+        ),
         task_models[binding.model].get("model_reference_cache"),
     )
     process_env = _source_environment()
@@ -3115,6 +3120,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REFERENCE_CACHE,
     )
     parser.add_argument(
+        "--reference-source-cache-dir",
+        type=Path,
+        help=(
+            "shared cache for pinned model-owned source repositories; defaults "
+            "to --reference-cache-dir"
+        ),
+    )
+    parser.add_argument(
         "--storage-root",
         type=Path,
         help="require mutable validation paths to stay below this root",
@@ -3332,6 +3345,7 @@ def _prepare_run_directories(arguments: argparse.Namespace) -> None:
             ("output", arguments.output),
             ("engine directory", arguments.engine_dir),
             ("reference cache directory", arguments.reference_cache_dir),
+            ("reference source cache directory", arguments.reference_source_cache_dir),
             ("model work directory", arguments.model_work_dir),
         ):
             if path is None:
@@ -3360,6 +3374,8 @@ def _prepare_run_directories(arguments: argparse.Namespace) -> None:
     else:
         arguments.model_work_dir.mkdir(parents=True, exist_ok=True)
     arguments.reference_cache_dir.mkdir(parents=True, exist_ok=True)
+    if arguments.reference_source_cache_dir is not None:
+        arguments.reference_source_cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _binding_resource_arguments(
@@ -3520,6 +3536,7 @@ def _worker_command(
     ):
         command.extend([option, str(value)])
     for option, value in (
+        ("--reference-source-cache-dir", arguments.reference_source_cache_dir),
         ("--dataset-root", arguments.dataset_root),
         ("--backend-dir", arguments.backend_dir),
         ("--model-plugin-dir", arguments.model_plugin_dir),

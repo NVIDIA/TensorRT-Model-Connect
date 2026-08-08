@@ -116,6 +116,31 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     }
 
 
+def test_dataset_path_keeps_repository_owned_default_with_dataset_root(tmp_path: Path) -> None:
+    suite = {
+        "id": "repo-owned",
+        "dataset": {
+            "default_path": "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
+        },
+    }
+
+    assert trtmc_validate._dataset_path(suite, tmp_path / "datasets") == (
+        trtmc_validate.REPO_ROOT
+        / "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
+    )
+
+
+def test_dataset_path_rebases_mounted_defaults_under_dataset_root(tmp_path: Path) -> None:
+    suite = {
+        "id": "mounted",
+        "dataset": {"default_path": "/mnt/data/example/dataset.json"},
+    }
+
+    assert trtmc_validate._dataset_path(suite, tmp_path / "datasets") == (
+        tmp_path / "datasets/example/dataset.json"
+    )
+
+
 def test_validation_ready_models_exclude_l0_only_profiles():
     records = validation_catalog.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
     eligible = {

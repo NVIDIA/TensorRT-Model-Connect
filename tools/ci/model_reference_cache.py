@@ -55,7 +55,7 @@ def parse_model_reference_contract(
     owner: dict[str, object],
     family: str,
     manifest: Path,
-    suite: str,
+    suite: str | None,
 ) -> ModelReferenceContract | None:
     """Validate and select one owner-declared reference-cache contract."""
     raw = owner.get("model_reference_cache")
@@ -128,7 +128,7 @@ def parse_model_reference_contract(
             "model_reference_cache.environment_variable must be a valid environment "
             "variable name"
         )
-    if suites is not None and suite not in suites:
+    if suites is not None and suite is not None and suite not in suites:
         return None
     return ModelReferenceContract(
         family=family,

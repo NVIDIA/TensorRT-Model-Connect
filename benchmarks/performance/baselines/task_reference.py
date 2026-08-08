@@ -1885,8 +1885,17 @@ def _load_personaplex(
         repository="https://github.com/NVIDIA/personaplex",
     )
     # The official checkout vendors the importable package below ``moshi/``.
-    # Keep the checkout root too so sibling repository modules remain visible.
-    sys.path[:0] = [str(Path(official_repo) / "moshi"), official_repo]
+    # Use the model-owned sphn compatibility layer as well: PyPI does not
+    # publish sphn for every supported architecture (notably L4T aarch64).
+    personaplex_audio_compat = (
+        REPOSITORY
+        / "tests/e2e/models/personaplex/e2e_plugins/references/personaplex_audio_compat"
+    )
+    sys.path[:0] = [
+        str(personaplex_audio_compat),
+        str(Path(official_repo) / "moshi"),
+        official_repo,
+    ]
     import torch
     from huggingface_hub import hf_hub_download
     from moshi.models import LMGen, loaders

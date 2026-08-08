@@ -76,6 +76,16 @@ Normal execution prints a compact run header, task progress, errors, artifact
 paths, and a final Accuracy/Perf status summary. Add `--verbose` when full
 child, TRTMC, baseline, and reproduction commands are needed for debugging.
 
+Before either task starts, the runner invokes the repository's selective HF
+cache warmer for the configured model bindings. Existing complete snapshots
+make no network request; missing snapshots and family-owned HF files are
+downloaded into the inherited shared HF cache. Individual download failures
+remain visible warnings so an all-model run can continue and report the exact
+affected model instead of blocking unrelated models. Accuracy can therefore
+keep `local-files-only` enabled during validation while still preparing a cold
+cache before execution. Each download attempt allows up to two hours for large
+checkpoints and can reuse partial cache files on a later attempt or run.
+
 The unified runner does not depend on Python profiles baked into a container
 image. It points both task runners at the shared
 `${TRTMC_CHECK_STORAGE_ROOT}/python-profiles` cache and allows the existing
@@ -91,6 +101,16 @@ file lock, so later runs safely reuse the environment.
 `storage.python_profiles_root` may override the derived location in a custom
 execution-environment YAML. The resolved directory must remain below that
 environment's managed storage root. `request.json` records the resolved path.
+
+Pinned external reference repositories use the model-owned
+`model_reference_cache` contract in `tests/e2e/models/<family>/MODEL.toml`.
+Perf dependencies with an `environment_variable` are fetched and verified at
+the declared commit before Perf starts, then injected only into the child
+task environment. Accuracy uses the same source cache instead of cloning a
+second copy. The default is
+`${TRTMC_CHECK_STORAGE_ROOT}/references/model-sources`; a custom environment
+may set `storage.model_reference_cache_root`, which must remain under the
+managed storage root.
 
 Resume with the original selection, platform, environment, and run ID:
 
@@ -143,6 +163,9 @@ runner launch when the storage root is on another filesystem.
   explicit-only experiment.
 - Add the model's task metadata under `tests/e2e/models/` when it is a new
   ready model profile.
+- If an official reference needs a pinned external repository, declare its
+  repository, full commit, relative cache path, entrypoint, and (when Perf
+  consumes it) environment variable in that family's `MODEL.toml`.
 - Add its independent Perf entry to
   `benchmarks/performance/release.yaml` when Perf applies.
 - Add only evidence-backed hardware exclusions to the sparse platform profile

@@ -101,12 +101,10 @@ def ensure_tokenizer_json(
         return tokenizer_path.is_file()
 
     try:
-        if tokenizer_path.exists():
-            _require_sha256(
-                tokenizer_path,
-                PINNED_TOKENIZER_SHA256,
-                "installed InternLM tokenizer.json",
-            )
+        if (
+            tokenizer_path.is_file()
+            and _sha256_file(tokenizer_path) == PINNED_TOKENIZER_SHA256
+        ):
             return True
 
         pinned_path = resolve_pinned_tokenizer_json(path)

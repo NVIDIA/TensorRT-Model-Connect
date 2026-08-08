@@ -215,7 +215,7 @@ def test_pinned_tokenizer_hash_mismatch_is_gating(
     assert not (tmp_path / "tokenizer.json").exists()
 
 
-def test_builder_revalidates_existing_tokenizer_json(
+def test_builder_repairs_stale_existing_tokenizer_json_from_pinned_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -237,14 +237,13 @@ def test_builder_revalidates_existing_tokenizer_json(
     )
     _install_fake_hub(monkeypatch, lambda **_kwargs: str(artifact))
 
-    with pytest.raises(
-        RuntimeError,
-        match="installed InternLM tokenizer.json SHA256 mismatch",
-    ):
-        _ensure_tokenizer_json(
-            tmp_path,
-            plugin=_InternLMTokenizerPlugin(),
-        )
+    _ensure_tokenizer_json(
+        tmp_path,
+        plugin=_InternLMTokenizerPlugin(),
+    )
+
+    assert (tmp_path / "tokenizer.json").read_bytes() == official_payload
+    assert not list(tmp_path.glob(".trtmc-internlm-tokenizer-*.json"))
 
 
 def test_existing_target_json_validates_without_pinned_cache(

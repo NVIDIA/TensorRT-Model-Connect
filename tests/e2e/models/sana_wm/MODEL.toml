@@ -12,6 +12,7 @@ repository = "https://github.com/NVlabs/Sana.git"
 revision = "59629fdf790850797cb657bad014fce432bd713d"
 relative_path = "sana_wm/reference/Sana-59629fdf7908"
 entrypoint = "inference_video_scripts/wm/inference_sana_wm.py"
+environment_variable = "TRTMC_SANA_WM_REFERENCE_REPO"
 
 [e2e_defaults.diffusion_media_generation]
 reference_backend = "hf_diffusers"
