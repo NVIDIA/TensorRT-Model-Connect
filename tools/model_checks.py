@@ -16,6 +16,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tomllib
 from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
@@ -31,6 +32,13 @@ from tools import model_ci  # noqa: E402
 from tools import model_selection  # noqa: E402
 from tools import perf_matrix  # noqa: E402
 from tools import trtmc_validate  # noqa: E402
+from tools.ci.context import CiContext  # noqa: E402
+from tools.ci.model_reference_cache import (  # noqa: E402
+    ModelReferenceCacheWarmer,
+    ModelReferenceContract,
+    parse_model_reference_contract,
+)
+from tools.ci.process import CiError  # noqa: E402
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tensorrt_model_connect.python_profiles import (  # noqa: E402
     PREBUILT_ONLY_ENV,
@@ -44,6 +52,7 @@ DEFAULT_PLATFORM_ROOT = REPOSITORY / "tests" / "model_checks" / "platforms"
 DEFAULT_ENVIRONMENT_ROOT = REPOSITORY / "tests" / "model_checks" / "environments"
 DEFAULT_PERF_SUITE = REPOSITORY / "benchmarks" / "performance" / "release.yaml"
 TASKS = ("accuracy", "perf")
+HF_PREPARE_ATTEMPT_TIMEOUT_SECONDS = 7200
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -317,6 +326,15 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
         )
     else:
         resolved_python_profiles_root = _repo_path(python_profiles_root)
+    model_reference_cache_root = storage.get("model_reference_cache_root")
+    if model_reference_cache_root is None:
+        resolved_model_reference_cache_root = storage_root / "references" / "model-sources"
+    elif not isinstance(model_reference_cache_root, str) or not model_reference_cache_root:
+        raise ModelCheckError(
+            "model-check environment storage.model_reference_cache_root must be a non-empty path"
+        )
+    else:
+        resolved_model_reference_cache_root = _repo_path(model_reference_cache_root)
     return {
         **environment,
         "source": str(path),
@@ -325,6 +343,7 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
             "root": str(storage_root),
             "results_root": str(_repo_path(str(storage["results_root"]))),
             "python_profiles_root": str(resolved_python_profiles_root),
+            "model_reference_cache_root": str(resolved_model_reference_cache_root),
         },
         "tasks": {
             "accuracy": {
@@ -347,11 +366,15 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
     }
 
 
-def _task_environment(environment: Mapping[str, Any]) -> dict[str, str]:
+def _task_environment(
+    environment: Mapping[str, Any],
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Use a managed shared profile cache and create missing profiles on demand."""
     child = os.environ.copy()
     child[PROFILE_ROOT_ENV] = str(environment["storage"]["python_profiles_root"])
     child.pop(PREBUILT_ONLY_ENV, None)
+    child.update(overrides or {})
     return child
 
 
@@ -837,6 +860,110 @@ def _task_bindings(plan: Mapping[str, Any], task: str) -> list[dict[str, Any]]:
     ]
 
 
+def _selected_perf_reference_contracts(
+    plan: Mapping[str, Any],
+    models_dir: Path,
+) -> tuple[ModelReferenceContract, ...]:
+    selected_models = {
+        str(binding["model"])
+        for binding in _task_bindings(plan, "perf")
+    }
+    if not selected_models:
+        return ()
+    records = {
+        str(record["name"]): record
+        for record in validation_catalog.load_manifest_records(models_dir)
+    }
+    contracts: list[ModelReferenceContract] = []
+    seen: set[str] = set()
+    for model in sorted(selected_models):
+        record = records.get(model)
+        if record is None:
+            raise ModelCheckError(f"Perf model has no owner manifest: {model}")
+        family = str(record.get("family", "") or "")
+        if not family:
+            continue
+        manifest_path = Path(str(record["manifest"]))
+        if not manifest_path.is_absolute():
+            manifest_path = REPOSITORY / manifest_path
+        owner_path = (
+            manifest_path.parent.parent / "MODEL.toml"
+            if manifest_path.parent.name == "manifests"
+            else manifest_path.parent / "MODEL.toml"
+        )
+        try:
+            owner = tomllib.loads(owner_path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError) as exc:
+            raise ModelCheckError(f"cannot read model owner {owner_path}: {exc}") from exc
+        try:
+            contract = parse_model_reference_contract(
+                owner,
+                family,
+                owner_path,
+                suite=None,
+            )
+        except CiError as exc:
+            raise ModelCheckError(str(exc)) from exc
+        if (
+            contract is None
+            or not contract.environment_variable
+            or contract.relative_path in seen
+        ):
+            continue
+        seen.add(contract.relative_path)
+        contracts.append(contract)
+    return tuple(contracts)
+
+
+def _prepare_perf_reference_dependencies(
+    contracts: Sequence[ModelReferenceContract],
+    cache_root: Path,
+) -> dict[str, str]:
+    if not contracts:
+        return {}
+    cache_root = cache_root.resolve()
+    environment = os.environ.copy()
+    environment["TRTMC_MODEL_REFERENCE_CACHE_ROOT"] = str(cache_root)
+    warmer = ModelReferenceCacheWarmer(CiContext(REPOSITORY, environment))
+    child = {"TRTMC_MODEL_REFERENCE_CACHE_ROOT": str(cache_root)}
+    for contract in contracts:
+        try:
+            checkout = warmer.warm_contract(contract)
+        except CiError as exc:
+            raise ModelCheckError(
+                f"could not prepare {contract.family} reference source: {exc}"
+            ) from exc
+        if contract.environment_variable:
+            child[contract.environment_variable] = str(checkout)
+    return child
+
+
+def _hf_cache_prepare_command(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    run_root: Path,
+) -> list[str] | None:
+    models = sorted(
+        {
+            str(binding["model"])
+            for task in TASKS
+            for binding in _task_bindings(plan, task)
+        }
+    )
+    if not models:
+        return None
+    selection = run_root / "selected-models.txt"
+    selection.write_text("".join(f"{model}\n" for model in models), encoding="utf-8")
+    return [
+        str(environment["tasks"]["accuracy"]["runner_python"]),
+        str(REPOSITORY / "scripts" / "warm_hf_cache.py"),
+        "--models-file",
+        str(selection),
+        "--attempt-timeout-seconds",
+        str(HF_PREPARE_ATTEMPT_TIMEOUT_SECONDS),
+    ]
+
+
 def _accuracy_command(
     plan: Mapping[str, Any],
     environment: Mapping[str, Any],
@@ -867,6 +994,8 @@ def _accuracy_command(
             str(environment["storage"]["root"]),
             "--model-work-dir",
             str(output.parent / "work" / "accuracy"),
+            "--reference-source-cache-dir",
+            str(environment["storage"]["model_reference_cache_root"]),
         ]
     )
     command.extend(_option_arguments(config.get("options", {})))
@@ -961,6 +1090,7 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
         "perf_environment_config",
         "selection",
         "commands",
+        "preparation_commands",
     ):
         if previous.get(field) != request.get(field):
             raise ModelCheckError(f"cannot resume because the resolved {field} changed")
@@ -990,6 +1120,11 @@ def _run(arguments: argparse.Namespace) -> int:
         Path(environment["storage"]["python_profiles_root"]),
         storage_root,
         "Python profiles root",
+    )
+    model_reference_cache_root = _require_managed_path(
+        Path(environment["storage"]["model_reference_cache_root"]),
+        storage_root,
+        "model reference cache root",
     )
     results_root = _require_managed_path(
         Path(environment["storage"]["results_root"]),
@@ -1030,6 +1165,7 @@ def _run(arguments: argparse.Namespace) -> int:
                 else None
             )
         commands.append((task, command))
+    hf_cache_prepare_command = _hf_cache_prepare_command(plan, environment, run_root)
 
     request = {
         "schema_version": "trtmc.model-check-run/v1",
@@ -1046,6 +1182,7 @@ def _run(arguments: argparse.Namespace) -> int:
         ),
         "selection": plan,
         "commands": {task: command for task, command in commands if command is not None},
+        "preparation_commands": {"hf_cache": hf_cache_prepare_command},
         "dry_run": bool(arguments.dry_run),
     }
     request_path = run_root / "request.json"
@@ -1085,6 +1222,35 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.dry_run:
         return 0
 
+    reference_environment: dict[str, str] = {}
+    if hf_cache_prepare_command is not None:
+        print("\n[prepare] Hugging Face cache", flush=True)
+        completed = subprocess.run(
+            hf_cache_prepare_command,
+            cwd=REPOSITORY,
+            check=False,
+            env=_task_environment(environment),
+        )
+        if completed.returncode != 0:
+            raise ModelCheckError(
+                "Hugging Face cache preparation failed with "
+                f"exit code {completed.returncode}"
+            )
+
+    reference_contracts = _selected_perf_reference_contracts(plan, arguments.models_dir)
+    reference_environment.update(
+        _prepare_perf_reference_dependencies(
+            reference_contracts,
+            model_reference_cache_root,
+        )
+    )
+    if reference_contracts:
+        print(
+            f"Prepared external model sources: {len(reference_contracts)} "
+            f"under {model_reference_cache_root}",
+            flush=True,
+        )
+
     task_results: dict[str, int] = {}
     runnable = [(task, command) for task, command in execution_commands if command is not None]
     for index, (task, command) in enumerate(runnable, start=1):
@@ -1096,7 +1262,7 @@ def _run(arguments: argparse.Namespace) -> int:
             _detailed_command(command, verbose=arguments.verbose),
             cwd=REPOSITORY,
             check=False,
-            env=_task_environment(environment),
+            env=_task_environment(environment, reference_environment),
         )
         task_results[task] = completed.returncode
         status = "PASSED" if completed.returncode == 0 else "FAILED"
@@ -1135,6 +1301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model_selection.ModelSelectionError,
         perf_matrix.PerfMatrixError,
         trtmc_validate.ValidationError,
+        CiError,
     ) as exc:
         parser.error(str(exc))
     return 2

@@ -2912,6 +2912,7 @@ def test_personaplex_loader_adds_vendored_moshi_package_root() -> None:
     source = (REPOSITORY / "benchmarks/performance/baselines/task_reference.py").read_text()
 
     assert 'str(Path(official_repo) / "moshi")' in source
+    assert "personaplex_audio_compat" in source
 
 
 @pytest.mark.parametrize(
