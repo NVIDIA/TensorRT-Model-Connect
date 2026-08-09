@@ -52,7 +52,6 @@ DEFAULT_PLATFORM_ROOT = REPOSITORY / "tests" / "model_checks" / "platforms"
 DEFAULT_ENVIRONMENT_ROOT = REPOSITORY / "tests" / "model_checks" / "environments"
 DEFAULT_PERF_SUITE = REPOSITORY / "benchmarks" / "performance" / "release.yaml"
 TASKS = ("accuracy", "perf")
-HF_PREPARE_ATTEMPT_TIMEOUT_SECONDS = 7200
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
@@ -938,11 +937,7 @@ def _prepare_perf_reference_dependencies(
     return child
 
 
-def _hf_cache_prepare_command(
-    plan: Mapping[str, Any],
-    environment: Mapping[str, Any],
-    run_root: Path,
-) -> list[str] | None:
+def _write_selected_models(plan: Mapping[str, Any], run_root: Path) -> Path:
     models = sorted(
         {
             str(binding["model"])
@@ -950,18 +945,9 @@ def _hf_cache_prepare_command(
             for binding in _task_bindings(plan, task)
         }
     )
-    if not models:
-        return None
     selection = run_root / "selected-models.txt"
     selection.write_text("".join(f"{model}\n" for model in models), encoding="utf-8")
-    return [
-        str(environment["tasks"]["accuracy"]["runner_python"]),
-        str(REPOSITORY / "scripts" / "warm_hf_cache.py"),
-        "--models-file",
-        str(selection),
-        "--attempt-timeout-seconds",
-        str(HF_PREPARE_ATTEMPT_TIMEOUT_SECONDS),
-    ]
+    return selection
 
 
 def _accuracy_command(
@@ -1090,7 +1076,6 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
         "perf_environment_config",
         "selection",
         "commands",
-        "preparation_commands",
     ):
         if previous.get(field) != request.get(field):
             raise ModelCheckError(f"cannot resume because the resolved {field} changed")
@@ -1139,6 +1124,7 @@ def _run(arguments: argparse.Namespace) -> int:
         if run_root.exists():
             raise ModelCheckError(f"run root already exists: {run_root}")
         run_root.mkdir(parents=True)
+    _write_selected_models(plan, run_root)
 
     perf_environment = None
     if _task_bindings(plan, "perf"):
@@ -1165,8 +1151,6 @@ def _run(arguments: argparse.Namespace) -> int:
                 else None
             )
         commands.append((task, command))
-    hf_cache_prepare_command = _hf_cache_prepare_command(plan, environment, run_root)
-
     request = {
         "schema_version": "trtmc.model-check-run/v1",
         "run_id": run_id,
@@ -1182,7 +1166,6 @@ def _run(arguments: argparse.Namespace) -> int:
         ),
         "selection": plan,
         "commands": {task: command for task, command in commands if command is not None},
-        "preparation_commands": {"hf_cache": hf_cache_prepare_command},
         "dry_run": bool(arguments.dry_run),
     }
     request_path = run_root / "request.json"
@@ -1223,20 +1206,6 @@ def _run(arguments: argparse.Namespace) -> int:
         return 0
 
     reference_environment: dict[str, str] = {}
-    if hf_cache_prepare_command is not None:
-        print("\n[prepare] Hugging Face cache", flush=True)
-        completed = subprocess.run(
-            hf_cache_prepare_command,
-            cwd=REPOSITORY,
-            check=False,
-            env=_task_environment(environment),
-        )
-        if completed.returncode != 0:
-            raise ModelCheckError(
-                "Hugging Face cache preparation failed with "
-                f"exit code {completed.returncode}"
-            )
-
     reference_contracts = _selected_perf_reference_contracts(plan, arguments.models_dir)
     reference_environment.update(
         _prepare_perf_reference_dependencies(
