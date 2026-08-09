@@ -424,7 +424,7 @@ def test_prepare_perf_reference_dependencies_warms_once_and_exports_paths(
     }
 
 
-def test_hf_cache_prepare_command_selects_only_configured_models(tmp_path) -> None:
+def test_selected_models_artifact_records_configured_bindings(tmp_path) -> None:
     plan = {
         "models": [
             {
@@ -445,21 +445,10 @@ def test_hf_cache_prepare_command_selects_only_configured_models(tmp_path) -> No
             }
         ]
     }
-    environment = {"tasks": {"accuracy": {"runner_python": "/venv/bin/python"}}}
 
-    command = model_checks._hf_cache_prepare_command(plan, environment, tmp_path)
+    selection = model_checks._write_selected_models(plan, tmp_path)
 
-    assert command == [
-        "/venv/bin/python",
-        str(model_checks.REPOSITORY / "scripts/warm_hf_cache.py"),
-        "--models-file",
-        str(tmp_path / "selected-models.txt"),
-        "--attempt-timeout-seconds",
-        "7200",
-    ]
-    assert (tmp_path / "selected-models.txt").read_text(encoding="utf-8") == (
-        "model-a\nmodel-c\n"
-    )
+    assert selection.read_text(encoding="utf-8") == "model-a\nmodel-c\n"
 
 
 @pytest.mark.parametrize("platform", ["gb300", "l4t-thor", "auto-thor"])
@@ -472,6 +461,7 @@ def test_checked_in_accuracy_environment_deletes_engines_without_fixed_reserve(
 
     assert options["engine-retention"] == "delete_always"
     assert "minimum-free-space-gib" not in options
+    assert "local-files-only" not in options
     assert options["hf-cache-mode"] == "shared"
     assert options["hf-cache-retention"] == "retain"
 
@@ -530,6 +520,8 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
     command = request["commands"]["accuracy"]
     binding_index = command.index("--binding")
     assert command[binding_index + 1] == ("qwen25vl-3b=vlm_mmmu_pro_vision_mcq")
+    assert "--local-files-only" not in command
+    assert "preparation_commands" not in request
     assert "perf" not in request["commands"]
 
 
@@ -549,7 +541,7 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
     monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
     monkeypatch.setenv("TRTMC_PYTHON_PROFILE_PREBUILT_ONLY", "1")
-    returncodes = iter((0, 1, 0))
+    returncodes = iter((1, 0))
     commands = []
     child_environments = []
 
@@ -573,7 +565,8 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     )
 
     assert result == 1
-    assert len(commands) == 3
+    assert len(commands) == 2
+    assert all("warm_hf_cache.py" not in command for command in commands)
     assert all(
         environment["TRTMC_PYTHON_PROFILE_ROOT"]
         == str(storage / "python-profiles")

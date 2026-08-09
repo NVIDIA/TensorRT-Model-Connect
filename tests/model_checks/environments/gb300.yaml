@@ -21,7 +21,6 @@ tasks:
       backend-dir: ${TRTMC_CHECK_RUNTIME_ROOT}
       model-plugin-dir: ${TRTMC_CHECK_RUNTIME_ROOT}/models
       cuda-visible-devices: "0"
-      local-files-only: true
       engine-retention: delete_always
       hf-cache-mode: shared
       hf-cache-retention: retain

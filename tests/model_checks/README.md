@@ -76,15 +76,14 @@ Normal execution prints a compact run header, task progress, errors, artifact
 paths, and a final Accuracy/Perf status summary. Add `--verbose` when full
 child, TRTMC, baseline, and reproduction commands are needed for debugging.
 
-Before either task starts, the runner invokes the repository's selective HF
-cache warmer for the configured model bindings. Existing complete snapshots
-make no network request; missing snapshots and family-owned HF files are
-downloaded into the inherited shared HF cache. Individual download failures
-remain visible warnings so an all-model run can continue and report the exact
-affected model instead of blocking unrelated models. Accuracy can therefore
-keep `local-files-only` enabled during validation while still preparing a cold
-cache before execution. Each download attempt allows up to two hours for large
-checkpoints and can reuse partial cache files on a later attempt or run.
+The unified runner does not warm the complete selected HF model set before a
+task starts. Accuracy and Perf resolve each model on demand inside their native
+serial model/entry loops, so a missing snapshot is downloaded only when that
+model is about to run. A download failure is therefore scoped to that model
+instead of blocking every later model before the first case starts. The active
+HF cache location and its retention policy still come from the task execution
+environment: shared caches are retained, while isolated per-model or per-entry
+caches can use `delete_on_pass` or `delete_always`.
 
 The unified runner does not depend on Python profiles baked into a container
 image. It points both task runners at the shared
