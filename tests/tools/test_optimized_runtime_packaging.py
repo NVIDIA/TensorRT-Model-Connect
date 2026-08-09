@@ -163,8 +163,35 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     recipe.source_folder = str(source)
     recipe.build_folder = str(build)
     recipe.package_folder = str(package)
-    recipe.package()
+    set_runpath = recipe_module._set_wheel_runpath
+    try:
+        # This source-staging fixture uses text placeholders instead of ELF
+        # build outputs. RUNPATH behavior has its own focused assertion below.
+        recipe_module._set_wheel_runpath = lambda _path, _runpath: None
+        recipe.package()
+    finally:
+        recipe_module._set_wheel_runpath = set_runpath
     return package / "tensorrt_model_connect"
+
+
+def test_wheel_runpath_rewrite_invokes_patchelf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    binary = tmp_path / "libtrtmc_core.so"
+    binary.write_bytes(b"ELF fixture")
+    calls = []
+    monkeypatch.setattr(recipe_module.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+
+    recipe_module._set_wheel_runpath(binary, "$ORIGIN:/usr/local/cuda/lib64")
+
+    assert calls == [
+        (
+            (["patchelf", "--set-rpath", "$ORIGIN:/usr/local/cuda/lib64", str(binary)],),
+            {"check": True, "capture_output": True, "text": True},
+        )
+    ]
 
 
 def test_package_stages_a_model_owned_adapter_as_inert_source(
