@@ -417,8 +417,8 @@ def test_checked_in_l4t_environment_bounds_storage_and_cleanup() -> None:
     assert raw["storage"]["storage_root"] == "${TRTMC_CHECK_STORAGE_ROOT}"
     assert raw["storage"]["bundle_retention"] == "delete_always"
     assert "minimum_free_space_gib" not in raw["storage"]
-    assert raw["execution"]["hf_cache_mode"] == "shared"
-    assert raw["execution"]["hf_cache_retention"] == "retain"
+    assert raw["execution"]["hf_cache_mode"] == "per_entry"
+    assert raw["execution"]["hf_cache_retention"] == "delete_always"
 
 
 def test_checked_in_auto_thor_environment_deletes_managed_bundles() -> None:

@@ -22,8 +22,8 @@ tasks:
       model-plugin-dir: ${TRTMC_CHECK_RUNTIME_ROOT}/models
       cuda-visible-devices: "0"
       engine-retention: delete_always
-      hf-cache-mode: shared
-      hf-cache-retention: retain
+      hf-cache-mode: per_model
+      hf-cache-retention: delete_always
       model-attempts: 2
       model-retry-delay-seconds: 30
       on-model-failure: continue

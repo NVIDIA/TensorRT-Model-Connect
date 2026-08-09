@@ -451,9 +451,18 @@ def test_selected_models_artifact_records_configured_bindings(tmp_path) -> None:
     assert selection.read_text(encoding="utf-8") == "model-a\nmodel-c\n"
 
 
-@pytest.mark.parametrize("platform", ["gb300", "l4t-thor", "auto-thor"])
+@pytest.mark.parametrize(
+    ("platform", "hf_cache_mode", "hf_cache_retention"),
+    [
+        ("gb300", "shared", "retain"),
+        ("l4t-thor", "per_model", "delete_always"),
+        ("auto-thor", "shared", "retain"),
+    ],
+)
 def test_checked_in_accuracy_environment_deletes_engines_without_fixed_reserve(
     platform,
+    hf_cache_mode,
+    hf_cache_retention,
 ):
     path = model_checks.DEFAULT_ENVIRONMENT_ROOT / f"{platform}.yaml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -462,8 +471,17 @@ def test_checked_in_accuracy_environment_deletes_engines_without_fixed_reserve(
     assert options["engine-retention"] == "delete_always"
     assert "minimum-free-space-gib" not in options
     assert "local-files-only" not in options
-    assert options["hf-cache-mode"] == "shared"
-    assert options["hf-cache-retention"] == "retain"
+    assert options["hf-cache-mode"] == hf_cache_mode
+    assert options["hf-cache-retention"] == hf_cache_retention
+
+
+def test_l4t_perf_environment_deletes_entry_cache_and_bundle() -> None:
+    path = model_checks.REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert raw["storage"]["bundle_retention"] == "delete_always"
+    assert raw["execution"]["hf_cache_mode"] == "per_entry"
+    assert raw["execution"]["hf_cache_retention"] == "delete_always"
 
 
 def test_l4t_platform_rejects_unverifiable_nvme_partition():
