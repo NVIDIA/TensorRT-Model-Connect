@@ -252,6 +252,16 @@ def test_family_profile_registry_is_fully_exact_pinned():
         assert pins, name
 
 
+def test_reference_common_pins_the_transformers_hub_pair():
+    profile = shared_profiles.load_python_profile_registry()["profiles"]["reference_common"]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert shared_profiles._exact_pinned_requirements(requirements).items() >= {
+        "transformers": "5.2.0",
+        "huggingface-hub": "1.22.0",
+    }.items()
+
+
 def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
