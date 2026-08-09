@@ -2,5 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 transformers==5.2.0
+huggingface-hub==1.22.0
 rouge-score==0.1.2
 sacrebleu==2.5.1
