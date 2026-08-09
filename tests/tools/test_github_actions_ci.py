@@ -1511,15 +1511,22 @@ def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
     pyproject = (REPO_ROOT / "pyproject.toml").read_text()
 
     assert "set_target_properties(trtmc PROPERTIES" in cmake
+    assert "set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)" in cmake
+    assert "TRTMC_DISTRIBUTABLE_BUILD" in cmake
+    assert 'toolchain.cache_variables["TRTMC_DISTRIBUTABLE_BUILD"]' in conanfile
     assert "BUILD_RPATH_USE_ORIGIN TRUE" in cmake
     assert 'INSTALL_RPATH "\\$ORIGIN"' in cmake
     assert '"libtrtmc_core.so*"' in conanfile
     assert "for destination in (package_bin, wheel_data_scripts):" in conanfile
     assert "TRTMC core DSO was not staged beside the wheel script" in conanfile
+    assert "_set_wheel_runpath" in conanfile
+    assert '"$ORIGIN:$ORIGIN/../../tensorrt_libs:/usr/local/cuda/lib64"' in conanfile
     assert "apache-tvm-ffi==0.1.12" in pyproject
     assert "script_cores" in script
     assert 'if "$ORIGIN" not in dynamic' in script
     assert "installed trtmc RUNPATH leaks the CI build directory" in script
+    assert '"TRTMC_DISTRIBUTABLE_BUILD": "1"' in script
+    assert "wheel embeds its CI checkout path" in script
 
 
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:

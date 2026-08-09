@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 from pathlib import Path
 
 from conan import ConanFile
@@ -144,6 +145,20 @@ def _set_wheel_python_shebang(script: Path) -> None:
     script.write_text(f"#!python\n{body}", encoding="utf-8")
 
 
+def _set_wheel_runpath(path: Path, runpath: str) -> None:
+    """Replace build-tree RUNPATH entries with the wheel's runtime layout."""
+
+    try:
+        subprocess.run(
+            ["patchelf", "--set-rpath", runpath, str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ConanException(f"cannot set wheel RUNPATH for {path.name}: {exc}") from exc
+
+
 class TensorRTModelConnectConan(ConanFile):
     name = "tensorrt-model-connect"
     version = "0.1.0"
@@ -167,6 +182,9 @@ class TensorRTModelConnectConan(ConanFile):
         )
         toolchain.cache_variables["TRTMC_BUILD_BENCHMARKS"] = True
         toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False
+        toolchain.cache_variables["TRTMC_DISTRIBUTABLE_BUILD"] = _env_flag(
+            "TRTMC_DISTRIBUTABLE_BUILD"
+        )
 
         for name in (
             "TRTMC_TRT_INCLUDE_DIR",
@@ -305,6 +323,18 @@ class TensorRTModelConnectConan(ConanFile):
             raise ConanException("TRTMC TensorRT backend DSO was not staged into the wheel package")
         if not model_plugins:
             raise ConanException("TRTMC model plugin DSOs were not staged into the wheel package")
+
+        for executable in (native, installed_script, benchmark_worker):
+            _set_wheel_runpath(executable, "$ORIGIN")
+        for core in (*package_cores, *script_cores):
+            _set_wheel_runpath(core, "$ORIGIN:/usr/local/cuda/lib64")
+        for backend in backends:
+            _set_wheel_runpath(
+                backend,
+                "$ORIGIN:$ORIGIN/../../tensorrt_libs:/usr/local/cuda/lib64",
+            )
+        for model_plugin in model_plugins:
+            _set_wheel_runpath(model_plugin, "$ORIGIN:/usr/local/cuda/lib64")
 
         for executable in (native, installed_script, benchmark_worker, benchmark_script):
             mode = executable.stat().st_mode

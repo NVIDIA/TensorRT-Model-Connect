@@ -4,6 +4,10 @@
 cmake_minimum_required(VERSION 3.20)
 project(tensorrt_model_connect VERSION 0.1.0 LANGUAGES CXX)
 
+# Release wheels package build outputs directly. Keep CMake's automatically
+# generated build-tree RPATH entries relative to each ELF file.
+set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
+
 # Enable CUDA for runtime GPU kernels when a CUDA compiler is available.
 include(CheckLanguage)
 check_language(CUDA)
@@ -25,6 +29,8 @@ option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
 option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
 option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
 option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
+option(TRTMC_DISTRIBUTABLE_BUILD
+       "Build distributable artifacts without embedding source/build paths" OFF)
 set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
   "Require the source tree to contain exactly this runtime model (CI isolation proof mode).")
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
@@ -246,13 +252,13 @@ target_include_directories(trtmc_core SYSTEM PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/stb
 )
 
-target_compile_definitions(trtmc_core
-  PUBLIC
-    TRTMC_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\"
-    TRTMC_VERSION_STRING=\"${PROJECT_VERSION}\"
-  PRIVATE
-    TRTMC_BINARY_DIR=\"${CMAKE_BINARY_DIR}\"
-)
+target_compile_definitions(trtmc_core PUBLIC TRTMC_VERSION_STRING=\"${PROJECT_VERSION}\")
+if(NOT TRTMC_DISTRIBUTABLE_BUILD)
+  target_compile_definitions(trtmc_core
+    PUBLIC TRTMC_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\"
+    PRIVATE TRTMC_BINARY_DIR=\"${CMAKE_BINARY_DIR}\"
+  )
+endif()
 
 target_compile_options(trtmc_core
   PRIVATE

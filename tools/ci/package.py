@@ -112,6 +112,17 @@ class WheelArchiveValidator:
             raise CiError(f"{wheel}: expected platform tag {self.platform}")
         with zipfile.ZipFile(wheel) as archive:
             names = set(archive.namelist())
+            repository_marker = str(self.context.repository.resolve()).encode()
+            leaked_entries = sorted(
+                name
+                for name in names
+                if not name.endswith("/") and repository_marker in archive.read(name)
+            )
+            if leaked_entries:
+                raise CiError(
+                    f"{wheel}: wheel embeds its CI checkout path in "
+                    f"{len(leaked_entries)} entries"
+                )
             if any(".data/purelib/" in name for name in names):
                 raise CiError(f"{wheel}: native wheel must not contain .data/purelib entries")
             binaries = [name for name in names if name.endswith("/bin/trtmc")]
@@ -322,6 +333,7 @@ class WheelPackageManager:
                     "TRTMC_CUDA_INCLUDE_DIR": cuda_include,
                     "TRTMC_CUDART_LIBRARY": cudart,
                     "TRTMC_CONAN_ENABLE_TEST_TARGETS": "1",
+                    "TRTMC_DISTRIBUTABLE_BUILD": "1",
                     "WHEEL_PYVER": tag,
                     "WHEEL_ABI": "none",
                     "WHEEL_ARCH": platform,
