@@ -128,11 +128,13 @@ The checked-in platform environments keep Accuracy and Perf artifacts
 separate. Accuracy isolates engines by exact `MODEL=SUITE` binding because a
 suite's dataset can change static shapes, optimization profiles, or the
 dataset-derived cache length. It may still share the HF cache per model. Perf
-keeps entry-scoped work and its own bundle cache. The checked-in GB300, L4T,
-and Auto Thor environments delete each managed Accuracy engine and Perf bundle
-after its binding finishes, including failures, while retaining the shared HF
-cache. They do not enforce a fixed free-space reserve; unattended jobs can add
-one explicitly when the runner's disk capacity and workload peak are known.
+keeps entry-scoped work and its own bundle cache. Every checked-in environment
+deletes each managed Accuracy engine and Perf bundle after its binding finishes,
+including failures. GB300 and Auto Thor retain their shared HF cache. L4T Thor
+isolates HF files per Accuracy model and Perf entry and always deletes that
+isolated cache after the model or entry finishes. The environments do not
+enforce a fixed free-space reserve; unattended jobs can add one explicitly when
+the runner's disk capacity and workload peak are known.
 
 Native runner policies are independent:
 
