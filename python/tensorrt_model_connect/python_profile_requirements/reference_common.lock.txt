@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-transformers==5.2.0
+transformers==5.5.0
 rouge-score==0.1.2
 sacrebleu==2.5.1

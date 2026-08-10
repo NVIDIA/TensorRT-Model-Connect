@@ -42,7 +42,7 @@
           "ocr_mode": true
         }
       },
-      "notes": "The reference runs the official BF16 model.infer path in the family-owned Transformers 4.46.3 profile and preserves the original OCR prompt and full-text contract. TensorRT uses the checkpoint's official 768-pixel single-view query table, resized SAM position embedding, and mixed image/query attention policy. Decoder layers 6-11 and selector 12's embedding/final-logit boundary remain FP32 to preserve runtime stability. The official TensorRT 11.1.0.106 result requires requalification before this acceptance result is treated as portable to that release."
+      "notes": "The reference runs the official BF16 model.infer path in the family-owned Transformers 5.5.0 profile and preserves the original OCR prompt and full-text contract. TensorRT uses the checkpoint's official 768-pixel single-view query table, resized SAM position embedding, and mixed image/query attention policy. Decoder layers 6-11 and selector 12's embedding/final-logit boundary remain FP32 to preserve runtime stability. The official TensorRT 11.1.0.106 result requires requalification before this acceptance result is treated as portable to that release."
     }
   ]
 }

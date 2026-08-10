@@ -8,6 +8,6 @@ import tokenizers
 import transformers
 
 
-assert transformers.__version__ == "4.44.2"
-assert tokenizers.__version__ == "0.19.1"
-assert huggingface_hub.__version__ == "0.24.7"
+assert transformers.__version__ == "5.5.0"
+assert tokenizers.__version__ == "0.22.2"
+assert huggingface_hub.__version__ == "1.26.0"

@@ -78,7 +78,7 @@ RUN pip install "apache-tvm-ffi==0.1.12"
 
 # Core Python deps
 RUN pip install \
-    "transformers==5.2.0" \
+    "transformers==5.5.0" \
     tokenizers \
     safetensors \
     sentencepiece \
@@ -120,10 +120,10 @@ RUN pip install \
 # the torch installation already present in this image for GPU inference.
 RUN pip install "open-clip-torch>=2.20"
 
-# NeMo currently declares transformers~=4.57; force the runtime pin we need.
+# NeMo currently declares transformers~=4.57; force the secure runtime pin we need.
 RUN pip install "nemo_toolkit[tts]==2.7.0" && \
-    pip install --upgrade "transformers==5.2.0" && \
-    python3 -c "import transformers; assert transformers.__version__ == '5.2.0', transformers.__version__" && \
+    pip install --upgrade "transformers==5.5.0" && \
+    python3 -c "import transformers; assert transformers.__version__ == '5.5.0', transformers.__version__" && \
     python3 -c "import diffusers, ftfy; print('deps_ok', diffusers.__version__)"
 
 # Upgrade NeMo to a main-branch SHA that ships

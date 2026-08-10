@@ -13,12 +13,12 @@ def test_lance_reference_profile_pins_upstream_transformers_stack() -> None:
         / "lance_reference.lock.txt"
     ).read_text(encoding="utf-8")
 
-    assert "flash-attn==2.8.3" in requirements
-    assert "huggingface-hub==0.29.1" in requirements
+    assert "flash-attn==" not in requirements
+    assert "huggingface-hub==1.26.0" in requirements
     assert "imageio==2.34.0" in requirements
     assert "numpy==1.26.4" in requirements
-    assert "opencv-python-headless==4.7.0.72" in requirements
-    assert "scikit-learn==1.4.2" in requirements
+    assert "opencv-python-headless==4.8.1.78" in requirements
+    assert "scikit-learn==1.5.0" in requirements
     assert "scipy==1.12.0" in requirements
-    assert "tokenizers==0.21.4" in requirements
-    assert "transformers==4.49.0" in requirements
+    assert "tokenizers==0.22.2" in requirements
+    assert "transformers==5.5.0" in requirements

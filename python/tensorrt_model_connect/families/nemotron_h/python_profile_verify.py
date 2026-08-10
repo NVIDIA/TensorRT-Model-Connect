@@ -10,7 +10,7 @@ import transformers
 from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn  # noqa: F401
 
 
-assert transformers.__version__ == "4.48.3"
+assert transformers.__version__ == "5.5.0"
 assert version("causal-conv1d") == "1.6.2.post1"
 assert version("mamba-ssm") == "2.3.2.post1"
 print(

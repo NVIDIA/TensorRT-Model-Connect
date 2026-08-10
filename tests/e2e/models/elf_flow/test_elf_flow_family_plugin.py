@@ -67,12 +67,12 @@ def test_elf_reference_profile_pins_upstream_transformers_version() -> None:
         encoding="utf-8"
     )
 
-    assert "transformers==4.44.2" in lock
-    assert "tokenizers==0.19.1" in lock
-    assert "huggingface-hub==0.24.7" in lock
-    assert 'transformers.__version__ == "4.44.2"' in verify
-    assert 'tokenizers.__version__ == "0.19.1"' in verify
-    assert 'huggingface_hub.__version__ == "0.24.7"' in verify
+    assert "transformers==5.5.0" in lock
+    assert "tokenizers==0.22.2" in lock
+    assert "huggingface-hub==1.26.0" in lock
+    assert 'transformers.__version__ == "5.5.0"' in verify
+    assert 'tokenizers.__version__ == "0.22.2"' in verify
+    assert 'huggingface_hub.__version__ == "1.26.0"' in verify
 
 
 def _rand(*shape: int) -> np.ndarray:

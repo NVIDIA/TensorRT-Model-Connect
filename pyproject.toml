@@ -18,7 +18,7 @@ dependencies = [
     "ml_dtypes>=0.4",
     "onnx>=1.16",
     "onnxscript>=0.2",
-    "transformers>=4.40",
+    "transformers>=5.5.0",
     "huggingface_hub>=0.23",
     "sentencepiece>=0.1.99",
     "tensorrt==11.1.0.106; platform_machine == 'aarch64'",
@@ -34,7 +34,7 @@ test = ["pytest>=7.0", "torch>=2.0"]
 # Build-only dependency for official Wan checkpoints containing T5/VAE .pth
 # files. Kept out of the base install and never required by the C++ runtime.
 wan = ["torch>=2.0"]
-chronos = ["chronos-forecasting>=2.2.2"]
+chronos = ["chronos-forecasting>=2.3.1"]
 # clip: required by tests/e2e/models/flux/e2e_plugins/comparators/clip_metrics.py for
 # CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped
 # at runtime when absent, but all CLIP gates become no-ops without it.

@@ -82,9 +82,9 @@ def test_reference_profile_supports_current_internlm_dynamic_cache_api() -> None
     ).read_text(encoding="utf-8")
     verify = (_FAMILY_DIR / "python_profile_verify.py").read_text(encoding="utf-8")
 
-    assert "huggingface-hub==0.26.5" in lock
-    assert "tokenizers==0.20.3" in lock
-    assert "transformers==4.46.3" in lock
+    assert "huggingface-hub==1.26.0" in lock
+    assert "tokenizers==0.22.2" in lock
+    assert "transformers==5.5.0" in lock
     assert "protobuf==" not in lock
     assert "sentencepiece==" not in lock
     assert "import google.protobuf" not in verify

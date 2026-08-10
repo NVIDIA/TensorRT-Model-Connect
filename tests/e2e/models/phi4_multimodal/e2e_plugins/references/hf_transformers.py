@@ -882,11 +882,46 @@ class HfTransformersReference:
         script = textwrap.dedent(f"""\
             import sys, torch
             from transformers import AutoProcessor
+            from transformers.cache_utils import Cache, DynamicCache
+            import transformers.cache_utils as cache_utils
             from PIL import Image
             from {__name__} import (
                 _decode_vl_generated_text,
                 _vl_prompt_has_image_placeholder,
             )
+
+            if not hasattr(Cache, "get_usable_length"):
+                def _get_usable_length(self, new_seq_length, layer_idx=0):
+                    previous = self.get_seq_length(layer_idx)
+                    maximum = self.get_max_cache_shape()
+                    if maximum is None or maximum < 0:
+                        return previous
+                    if previous + new_seq_length > maximum:
+                        return max(0, maximum - new_seq_length)
+                    return previous
+
+                Cache.get_usable_length = _get_usable_length
+            if not hasattr(DynamicCache, "to_legacy_cache"):
+                def _to_legacy_cache(self):
+                    return tuple((layer.keys, layer.values) for layer in self.layers)
+
+                DynamicCache.to_legacy_cache = _to_legacy_cache
+            if not hasattr(DynamicCache, "from_legacy_cache"):
+                @classmethod
+                def _from_legacy_cache(cls, past_key_values=None):
+                    cache = cls()
+                    for layer_idx, (key_states, value_states) in enumerate(
+                        past_key_values or ()
+                    ):
+                        cache.update(key_states, value_states, layer_idx)
+                    return cache
+
+                DynamicCache.from_legacy_cache = _from_legacy_cache
+            if not hasattr(cache_utils, "SlidingWindowCache"):
+                class _LegacySlidingWindowCache:
+                    pass
+
+                cache_utils.SlidingWindowCache = _LegacySlidingWindowCache
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}

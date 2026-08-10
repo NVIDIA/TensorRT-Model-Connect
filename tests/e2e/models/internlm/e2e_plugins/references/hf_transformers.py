@@ -407,10 +407,21 @@ class HfTransformersReference:
                 PreTrainedTokenizerFast,
             )
 
+            if not hasattr(DynamicCache, "to_legacy_cache"):
+                def _to_legacy_cache(self):
+                    return tuple((layer.keys, layer.values) for layer in self.layers)
+
+                DynamicCache.to_legacy_cache = _to_legacy_cache
+
             if not hasattr(DynamicCache, "from_legacy_cache"):
                 @classmethod
                 def _from_legacy_cache(cls, past_key_values=None):
-                    return cls(past_key_values) if past_key_values else cls()
+                    cache = cls()
+                    for layer_idx, (key_states, value_states) in enumerate(
+                        past_key_values or ()
+                    ):
+                        cache.update(key_states, value_states, layer_idx)
+                    return cache
 
                 DynamicCache.from_legacy_cache = _from_legacy_cache
 

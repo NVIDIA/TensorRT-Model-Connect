@@ -9,7 +9,7 @@ import importlib
 import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -334,40 +334,43 @@ def test_transformers_base_qualification_is_exact_and_honest(
 ) -> None:
     entrypoint = tmp_path / "immutable" / "transformers" / "__init__.py"
     entrypoint.parent.mkdir(parents=True)
-    entrypoint.write_text('__version__ = "5.2.0"\n', encoding="utf-8")
+    entrypoint.write_text('__version__ = "5.5.0"\n', encoding="utf-8")
     monkeypatch.setattr(hf_reference, "BASE_TRANSFORMERS_ENTRYPOINT", entrypoint)
     monkeypatch.setattr(
         hf_reference, "BASE_TRANSFORMERS_ENTRYPOINT_RECORD", file_record(entrypoint)
     )
 
-    record = hf_reference.qualified_transformers_source(entrypoint, "5.2.0")
+    record = hf_reference.qualified_transformers_source(entrypoint, "5.5.0")
 
     assert record == {
-        "qualification": "immutable_base_5_2_plus_local_shim",
-        "version": "5.2.0",
+        "qualification": "immutable_base_5_5",
+        "version": "5.5.0",
         "entrypoint": str(entrypoint),
         "entrypoint_record": file_record(entrypoint),
     }
     assert "revision" not in record
     with pytest.raises(ValueError, match="version mismatch"):
-        hf_reference.qualified_transformers_source(entrypoint, "5.2.1")
+        hf_reference.qualified_transformers_source(entrypoint, "5.5.1")
 
     entrypoint.write_text('__version__ = "5.2.x"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="entrypoint mismatch"):
-        hf_reference.qualified_transformers_source(entrypoint, "5.2.0")
+        hf_reference.qualified_transformers_source(entrypoint, "5.5.0")
 
 
-def test_local_processor_compat_is_bound_and_stable() -> None:
+def test_secure_base_uses_transformers_processor_helper() -> None:
     processor = SimpleNamespace(
         image_token_ids=[10, 11],
         video_token_id=20,
         audio_token_ids=[30],
     )
-    source = {"qualification": "immutable_base_5_2_plus_local_shim"}
+    processor.create_mm_token_type_ids = MethodType(
+        hf_reference.create_mm_token_type_ids, processor
+    )
+    source = {"qualification": "immutable_base_5_5"}
 
     label, identity = hf_reference.prepare_processor_compat(processor, source)
 
-    assert label == "local-create-mm-token-type-ids-for-transformers-5.2.0"
+    assert label is None
     assert processor.create_mm_token_type_ids([[0, 10, 20, 30, 11]]) == [[0, 1, 2, 3, 1]]
     hf_reference.validate_processor_method_unchanged(processor, identity)
 

@@ -144,7 +144,7 @@ path; the manifest notes that the FP16 attention path does not satisfy its
 framework-reference accuracy contract.
 
 On its first build, the CLI may materialize the family-owned `chronos` Python
-profile, which pins `chronos-forecasting==2.2.2`. The build therefore needs the
+profile, which pins `chronos-forecasting==2.3.1`. The build therefore needs the
 TensorRT/CUDA GPU environment plus access to the checkpoint and Python
 packages, or populated caches. The resulting bundle runs through the native
 `chronos_bolt_trt` C++/TensorRT strategy and does not invoke that Python profile

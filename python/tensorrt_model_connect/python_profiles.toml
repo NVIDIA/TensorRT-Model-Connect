@@ -13,7 +13,7 @@ system_site_packages = true
 verification_script = """
 from importlib.metadata import version
 import transformers
-assert transformers.__version__ == "5.2.0", transformers.__version__
+assert transformers.__version__ == "5.5.0", transformers.__version__
 assert version("rouge-score") == "0.1.2"
 assert version("sacrebleu") == "2.5.1"
 """

@@ -3,8 +3,9 @@
 
 import backoff
 import transformers
-from transformers.cache_utils import SlidingWindowCache
+from transformers.cache_utils import DynamicCache, StaticCache
 
-assert transformers.__version__ == "4.48.2"
-assert SlidingWindowCache is not None
+assert transformers.__version__ == "5.5.0"
+assert hasattr(DynamicCache, "get_max_cache_shape")
+assert StaticCache is not None
 print(f"backoff={backoff.__version__} transformers={transformers.__version__}")

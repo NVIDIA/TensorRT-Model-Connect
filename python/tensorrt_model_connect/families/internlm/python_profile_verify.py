@@ -5,6 +5,6 @@ import einops
 import transformers
 from transformers.cache_utils import DynamicCache
 
-assert hasattr(DynamicCache, "from_legacy_cache")
 assert hasattr(DynamicCache, "get_max_cache_shape")
+assert transformers.__version__ == "5.5.0"
 print(f"einops={einops.__version__} transformers={transformers.__version__}")

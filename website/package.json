@@ -2,6 +2,9 @@
   "name": "tensorrt-model-connect-docs",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "npm run diagrams:check && docusaurus build",
     "clear": "docusaurus clear",
@@ -9,16 +12,22 @@
     "diagrams:check": "node scripts/render-diagrams.mjs --check",
     "serve": "docusaurus serve",
     "start": "docusaurus start --host 0.0.0.0",
-    "test:model-support": "node --test plugins/model-support-inventory/index.test.js"
+    "test:model-support": "node --test plugins/model-support-inventory/index.test.js",
+    "test:safe-image-size": "node --test vendor/safe-image-size/fromFile.test.js"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",
     "@docusaurus/preset-classic": "3.10.2",
     "@mdx-js/react": "^3.1.0",
     "clsx": "^2.1.1",
+    "image-size": "file:vendor/safe-image-size",
     "prism-react-renderer": "^2.4.1"
   },
   "devDependencies": {
     "@viz-js/viz": "3.28.0"
+  },
+  "overrides": {
+    "serialize-javascript": "7.0.5",
+    "uuid": "11.1.1"
   }
 }

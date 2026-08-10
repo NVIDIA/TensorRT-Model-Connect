@@ -66,6 +66,56 @@ def test_lance_image_reference_provides_decord_import_without_video_support() ->
     assert environment["PYTHONPATH"].endswith(":/existing/python/path")
 
 
+def test_lance_image_reference_uses_safe_pytorch_packed_attention() -> None:
+    environment = lance_official._image_reference_environment(os.environ)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import torch
+import torch.nn.functional as F
+from flash_attn import flash_attn_varlen_func
+
+torch.manual_seed(7)
+query = torch.randn(5, 2, 4)
+key = torch.randn(5, 2, 4)
+value = torch.randn(5, 2, 4)
+offsets = torch.tensor([0, 2, 5], dtype=torch.int32)
+actual = flash_attn_varlen_func(query, key, value, offsets, offsets, 3, 3)
+expected = torch.cat([
+    F.scaled_dot_product_attention(
+        query[start:end].transpose(0, 1),
+        key[start:end].transpose(0, 1),
+        value[start:end].transpose(0, 1),
+        dropout_p=0.0,
+    ).transpose(0, 1)
+    for start, end in ((0, 2), (2, 5))
+])
+torch.testing.assert_close(actual, expected)
+
+for invalid_offsets, message in (
+    (torch.tensor([1, 2, 5], dtype=torch.int32), "start at zero"),
+    (torch.tensor([0.0, 2.0, 5.0]), "must be integers"),
+):
+    try:
+        flash_attn_varlen_func(
+            query, key, value, invalid_offsets, invalid_offsets, 3, 3
+        )
+    except ValueError as error:
+        assert message in str(error)
+    else:
+        raise AssertionError(f"invalid offsets were accepted: {invalid_offsets}")
+""",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_lance_image_reference_keeps_upstream_visual_generation_contract(
     monkeypatch,
     tmp_path: Path,

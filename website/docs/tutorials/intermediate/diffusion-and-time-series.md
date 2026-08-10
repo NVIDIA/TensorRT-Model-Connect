@@ -174,7 +174,7 @@ builds on this page. Chronos-Bolt also declares a build-time Python profile
 named `chronos`. On first use, the CLI materializes the pinned dependencies
 from
 `python/tensorrt_model_connect/families/chronos_bolt/python_profile_requirements/chronos.lock.txt`,
-including `chronos-forecasting==2.2.2`. That step needs package access or a
+including `chronos-forecasting==2.3.1`. That step needs package access or a
 pre-populated profile/cache. A successful build exits with status 0 and creates
 `/tmp/chronos-bolt-tiny-official.bundle`.
 

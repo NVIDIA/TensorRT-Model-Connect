@@ -24,7 +24,7 @@
           "enable_thinking": false
         }
       },
-      "notes": "The reference runs the checkpoint's documented original PyTorch implementation in BF16 with Transformers 4.48.3, causal-conv1d 1.6.2.post1, and mamba-ssm 2.3.2.post1. TensorRT projections, transformer layers, final normalization, and LM head run in FP16 with FP32 GEMM accumulation. Mamba softplus and recurrent state accumulation remain FP32 to avoid checkpoint-scale overflow. The family-owned grouped RMSNorm fallback is used only when the official kernels are unavailable."
+      "notes": "The reference runs the checkpoint's documented original PyTorch implementation in BF16 with Transformers 5.5.0, causal-conv1d 1.6.2.post1, and mamba-ssm 2.3.2.post1. TensorRT projections, transformer layers, final normalization, and LM head run in FP16 with FP32 GEMM accumulation. Mamba softplus and recurrent state accumulation remain FP32 to avoid checkpoint-scale overflow. The family-owned grouped RMSNorm fallback is used only when the official kernels are unavailable."
     }
   ]
 }

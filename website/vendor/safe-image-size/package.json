@@ -1,0 +1,13 @@
+{
+  "name": "image-size",
+  "version": "2.0.3",
+  "description": "Bounded SVG-only image-size adapter for the TensorRT Model Connect documentation site",
+  "license": "Apache-2.0",
+  "main": "fromFile.js",
+  "exports": {
+    "./fromFile": "./fromFile.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
