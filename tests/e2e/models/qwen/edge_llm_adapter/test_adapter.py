@@ -34,6 +34,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
     import tomli as tomllib
 
+import _pyproject_backend as project_backend  # noqa: E402
 from tensorrt_model_connect.runtime_provider.provider_process import (  # noqa: E402
     BuildAdapterError,
     ImplementationRequest,
@@ -596,12 +597,18 @@ def _make_edge_source(root: Path) -> Path:
     return root
 
 
-def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> None:
+def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manifest = load_implementation_manifest(MANIFEST_PATH)
     with (CAPSULE_ROOT / "dependency.lock").open("rb") as dependency_file:
         dependency = tomllib.load(dependency_file)
-    with (REPOSITORY_ROOT / "pyproject.toml").open("rb") as project_file:
-        project_dependencies = set(tomllib.load(project_file)["project"]["dependencies"])
+    monkeypatch.setenv(
+        "TRTMC_PACKAGE_TENSORRT_VERSION", dependency["tensorrt"]["version"]
+    )
+    project_dependencies = set(
+        project_backend._resolved_project_metadata(REPOSITORY_ROOT)["dependencies"]
+    )
     adapter = _load_adapter_module()
     dependency_spec = adapter._load_dependency_spec()
     profiles = adapter._load_profiles()
@@ -637,11 +644,12 @@ def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> N
         dependency["host_toolchain"]["major"],
     )
     assert (
-        f"tensorrt=={dependency_spec.tensorrt_version_text}; platform_machine == 'x86_64'"
+        f'tensorrt=={dependency_spec.tensorrt_version_text}; platform_machine == "x86_64"'
         in project_dependencies
     )
     assert (
-        "tensorrt==11.1.0.106; platform_machine == 'aarch64'" in project_dependencies
+        f'tensorrt=={dependency_spec.tensorrt_version_text}; platform_machine == "aarch64"'
+        in project_dependencies
     )
     exporter_python = dependency["exporter_python"]
     exporter_spec = dependency_spec.exporter_python
