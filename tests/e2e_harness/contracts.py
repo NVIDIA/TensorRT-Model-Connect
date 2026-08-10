@@ -555,6 +555,7 @@ class RunContext:
         engine_dir: Directory containing .bundle artifacts.
         model_plugin_dir: Directory containing isolated model plugin DSOs.
         rebuild: If True, force rebuild bundles from HF.
+        local_files_only: If True, references must not download model assets.
         verbose: If True, emit extra debug output.
     """
 
@@ -572,6 +573,7 @@ class RunContext:
     engine_dir: str = ""
     model_plugin_dir: str = ""
     rebuild: bool = False
+    local_files_only: bool = False
     verbose: bool = False
 
     def build_python_path(self) -> str:

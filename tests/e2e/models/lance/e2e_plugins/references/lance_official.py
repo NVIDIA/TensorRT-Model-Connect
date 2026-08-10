@@ -66,7 +66,11 @@ def _image_reference_workspace(
     return workspace
 
 
-def _cached_model_root(model_id: str) -> Path:
+def _cached_model_root(
+    model_id: str,
+    *,
+    local_files_only: bool = True,
+) -> Path:
     path = Path(model_id)
     if path.is_dir():
         return path.resolve()
@@ -77,7 +81,7 @@ def _cached_model_root(model_id: str) -> Path:
             snapshot_download(
                 model_id,
                 allow_patterns=_IMAGE_MODEL_ALLOW_PATTERNS,
-                local_files_only=True,
+                local_files_only=local_files_only,
             )
         ).resolve()
     except Exception as exc:
@@ -152,7 +156,10 @@ class LanceOfficialReference:
             raise RuntimeError("Lance reference requires a non-empty prompt")
 
         source = _official_source()
-        model_root = _cached_model_root(case.hf_id)
+        model_root = _cached_model_root(
+            case.hf_id,
+            local_files_only=ctx.local_files_only,
+        )
         model_path = model_root / _MODEL_DIRECTORY
         vit_path = model_root / _VIT_DIRECTORY
         if not model_path.is_dir() or not vit_path.is_dir():

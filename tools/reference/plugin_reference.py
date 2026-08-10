@@ -255,12 +255,18 @@ def _stage(case: Any, name: str) -> Any:
     return StageSpec(name=name, required=True)
 
 
-def _context(case: Any, artifacts_dir: Path) -> RunContext:
+def _context(
+    case: Any,
+    artifacts_dir: Path,
+    *,
+    local_files_only: bool,
+) -> RunContext:
     return RunContext(
         case=case,
         artifacts_dir=str(artifacts_dir),
         hf_python=sys.executable,
         reference_python=sys.executable,
+        local_files_only=local_files_only,
     )
 
 
@@ -321,6 +327,7 @@ def _run_time_series(
     rows: Sequence[tuple[int, dict[str, Any]]],
     artifacts_dir: Path,
     command_path: Path,
+    local_files_only: bool,
 ) -> list[dict[str, Any]]:
     responses = []
     for run_index, (source_index, prompt_row) in enumerate(rows):
@@ -329,7 +336,7 @@ def _run_time_series(
             reference,
             case,
             _stage(case, "full_inference"),
-            _context(case, artifacts_dir),
+            _context(case, artifacts_dir, local_files_only=local_files_only),
         )
         _record_native_command(command_path, case.name, output)
         responses.append(_time_series_response(case, output))
@@ -511,6 +518,7 @@ def _run_vision(
     artifacts_dir: Path,
     manifest: Mapping[str, Any],
     command_path: Path,
+    local_files_only: bool,
 ) -> list[dict[str, Any]]:
     task_config = manifest.get("task_eval", {})
     task_config = task_config if isinstance(task_config, dict) else {}
@@ -522,7 +530,7 @@ def _run_vision(
             reference,
             case,
             _stage(case, "full_inference"),
-            _context(case, artifacts_dir),
+            _context(case, artifacts_dir, local_files_only=local_files_only),
         )
         _record_native_command(command_path, case.name, output)
         responses.append(
@@ -585,6 +593,7 @@ def _run_reranking(
     rows: Sequence[tuple[int, dict[str, Any]]],
     artifacts_dir: Path,
     command_path: Path,
+    local_files_only: bool,
 ) -> list[dict[str, Any]]:
     responses = []
     for run_index, (source_index, prompt_row) in enumerate(rows):
@@ -593,7 +602,7 @@ def _run_reranking(
             reference,
             case,
             _stage(case, "full_inference"),
-            _context(case, artifacts_dir),
+            _context(case, artifacts_dir, local_files_only=local_files_only),
         )
         _record_native_command(command_path, case.name, output)
         responses.append(_reranking_response(case, output, prompt_row))
@@ -659,6 +668,7 @@ def _run_diffusion(
     artifacts_dir: Path,
     manifest: Mapping[str, Any],
     command_path: Path,
+    local_files_only: bool,
 ) -> list[dict[str, Any]]:
     generation = manifest.get("generation", {})
     generation = generation if isinstance(generation, dict) else {}
@@ -669,7 +679,7 @@ def _run_diffusion(
             reference,
             case,
             _stage(case, "end_to_end"),
-            _context(case, artifacts_dir),
+            _context(case, artifacts_dir, local_files_only=local_files_only),
         )
         _record_native_command(command_path, case.name, output)
         responses.append(
@@ -688,6 +698,7 @@ def _run_model_plugin(
     rows: Sequence[tuple[int, dict[str, Any]]],
     artifacts_dir: Path,
     command_path: Path,
+    local_files_only: bool,
 ) -> list[dict[str, Any]]:
     manifest_path = manifest_path_from_work_manifest(
         manifest,
@@ -715,7 +726,11 @@ def _run_model_plugin(
             reference,
             case,
             stage,
-            _context(case, sample_artifacts),
+            _context(
+                case,
+                sample_artifacts,
+                local_files_only=local_files_only,
+            ),
         )
         _record_native_command(command_path, sample_id, output)
         serialized = serialize_stage_output(
@@ -747,6 +762,7 @@ def _run_dataset_kind(
     rows: Sequence[tuple[int, dict[str, Any]]],
     artifacts_dir: Path,
     command_path: Path,
+    local_files_only: bool,
 ) -> list[dict[str, Any]]:
     dataset_kind = str(manifest.get("dataset_kind", "") or "")
     if dataset_kind == "time_series_csv":
@@ -756,6 +772,7 @@ def _run_dataset_kind(
             rows,
             artifacts_dir,
             command_path,
+            local_files_only,
         )
     if dataset_kind in _VISION_DATASET_KINDS:
         return _run_vision(
@@ -765,6 +782,7 @@ def _run_dataset_kind(
             artifacts_dir,
             manifest,
             command_path,
+            local_files_only,
         )
     if dataset_kind == "reranking_json":
         return _run_reranking(
@@ -773,6 +791,7 @@ def _run_dataset_kind(
             rows,
             artifacts_dir,
             command_path,
+            local_files_only,
         )
     if dataset_kind == "diffusion_prompt_json":
         return _run_diffusion(
@@ -782,6 +801,7 @@ def _run_dataset_kind(
             artifacts_dir,
             manifest,
             command_path,
+            local_files_only,
         )
     if dataset_kind == "model_plugin_json":
         return _run_model_plugin(
@@ -789,6 +809,7 @@ def _run_dataset_kind(
             rows=rows,
             artifacts_dir=artifacts_dir,
             command_path=command_path,
+            local_files_only=local_files_only,
         )
     raise ValueError(f"Unsupported reference plugin dataset kind {dataset_kind!r}")
 
@@ -821,6 +842,7 @@ def run(arguments: argparse.Namespace) -> None:
         rows=rows,
         artifacts_dir=artifacts_dir,
         command_path=command_path,
+        local_files_only=arguments.local_files_only,
     )
     arguments.raw_output.parent.mkdir(parents=True, exist_ok=True)
     with arguments.raw_output.open("w", encoding="utf-8") as raw_file:
