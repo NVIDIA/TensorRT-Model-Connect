@@ -251,6 +251,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "magpie_tts_reference",
         "minimax_h3_reference",
         "nemotron_h_reference",
+        "olmo_tokenizer",
         "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
         "sana_wm_reference",
