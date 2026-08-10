@@ -151,7 +151,10 @@ sharing fingerprints between Accuracy and Perf.
 
 On L4T Thor, `TRTMC_CHECK_STORAGE_ROOT` must be on the filesystem backed by
 `/dev/nvme0n1p1`. The run compares device identities and is rejected before
-runner launch when the storage root is on another filesystem.
+runner launch when the storage root is on another filesystem. Its Accuracy
+profile also bounds each model-worker attempt at six hours. A timeout terminates
+the worker's complete process group, records an execution failure, and allows
+the configured retry/continue policy to advance the matrix.
 
 ## Adding coverage
 
