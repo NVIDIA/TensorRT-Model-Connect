@@ -35,7 +35,12 @@ def test_elf_reference_profile_pins_inference_only_dependencies() -> None:
     }
 
     assert requirements == {
+        "colorama==0.4.6",
         "huggingface-hub==0.24.7",
+        "lxml==6.1.1",
+        "portalocker==3.2.0",
+        "sacrebleu==2.5.1",
+        "tabulate==0.10.0",
         "tokenizers==0.19.1",
         "transformers==4.44.2",
     }

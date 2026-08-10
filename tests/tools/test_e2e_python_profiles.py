@@ -277,6 +277,24 @@ def test_reference_common_pins_the_transformers_hub_pair():
     }.items()
 
 
+def test_reference_common_pins_sacrebleu_runtime_dependencies() -> None:
+    profile = shared_profiles.load_python_profile_registry()["profiles"][
+        "reference_common"
+    ]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert "sacrebleu==2.5.1" in requirements
+    assert "colorama==0.4.6" in requirements
+    assert "portalocker==3.2.0" in requirements
+    assert "tabulate==0.10.0" in requirements
+    assert "lxml==6.1.1" in requirements
+    assert 'version("colorama") == "0.4.6"' in profile["verification_script"]
+    assert 'version("portalocker") == "3.2.0"' in profile["verification_script"]
+    assert 'version("tabulate") == "0.10.0"' in profile["verification_script"]
+    assert 'version("lxml") == "6.1.1"' in profile["verification_script"]
+    assert "import sacrebleu" in profile["verification_script"]
+
+
 def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
