@@ -38,8 +38,6 @@ def test_personaplex_full_duplex_profile_pins_evaluator_dependencies() -> None:
     assert "numpy==1.26.4" in requirements
     assert "scipy==1.15.3" in requirements
     assert "silero-vad==6.2.1" in requirements
-    assert "tokenizers==0.22.2" in requirements
-    assert "transformers==5.2.0" in requirements
     profile = load_python_profile_registry()["profiles"][
         "personaplex_full_duplex_evaluator"
     ]

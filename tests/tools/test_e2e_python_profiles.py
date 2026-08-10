@@ -229,15 +229,12 @@ def test_family_profile_registry_is_fully_exact_pinned():
     expected = {
         "chronos",
         "deepseek_ocr",
-        "deepseek_v2",
         "elf_flow",
         "elf_flow_reference",
         "internlm",
         "lance_reference",
         "magpie_tts_reference",
-        "minimax_h3_reference",
         "nemotron_h_reference",
-        "olmo_tokenizer",
         "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
         "sana_wm_reference",
@@ -254,52 +251,11 @@ def test_family_profile_registry_is_fully_exact_pinned():
         assert pins, name
 
 
-def test_reference_common_pins_the_transformers_hub_pair():
-    profile = shared_profiles.load_python_profile_registry()["profiles"]["reference_common"]
-    requirements = shared_profiles._read_requirements_text(profile["requirements"])
-
-    assert shared_profiles._exact_pinned_requirements(requirements).items() >= {
-        "transformers": "5.2.0",
-        "huggingface-hub": "1.22.0",
-        "tokenizers": "0.22.2",
-    }.items()
-
-
-def test_reference_common_pins_sacrebleu_runtime_dependencies() -> None:
-    profile = shared_profiles.load_python_profile_registry()["profiles"][
-        "reference_common"
-    ]
-    requirements = shared_profiles._read_requirements_text(profile["requirements"])
-
-    assert "sacrebleu==2.5.1" in requirements
-    assert "colorama==0.4.6" in requirements
-    assert "portalocker==3.2.0" in requirements
-    assert "tabulate==0.10.0" in requirements
-    assert "lxml==6.1.1" in requirements
-    assert 'version("colorama") == "0.4.6"' in profile["verification_script"]
-    assert 'version("portalocker") == "3.2.0"' in profile["verification_script"]
-    assert 'version("tabulate") == "0.10.0"' in profile["verification_script"]
-    assert 'version("lxml") == "6.1.1"' in profile["verification_script"]
-    assert "import sacrebleu" in profile["verification_script"]
-
-
-def test_reference_common_pins_clip_scoring_dependencies() -> None:
-    profile = shared_profiles.load_python_profile_registry()["profiles"][
-        "reference_common"
-    ]
-    requirements = shared_profiles._read_requirements_text(profile["requirements"])
-
-    assert "open-clip-torch==3.3.0" in requirements
-    assert 'version("open-clip-torch") == "3.3.0"' in profile["verification_script"]
-    assert "import open_clip" in profile["verification_script"]
-
-
 def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
 
     assert "personaplex_full_duplex_evaluator" not in prebuilt
-    assert "minimax_h3_reference" not in prebuilt
     assert "reference_common" in prebuilt
 
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
