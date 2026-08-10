@@ -8,12 +8,16 @@ backend-path = ["."]
 
 [project]
 name = "tensorrt-model-connect"
-version = "0.1.0"
+dynamic = ["version", "dependencies"]
 description = "TensorRT-Model-Connect builder for HuggingFace models and .bundle artifacts"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE", "ASSET_LICENSES.md"]
 requires-python = ">=3.10"
+
+[tool.tensorrt-model-connect.package]
+base-version = "0.1.0"
+default-tensorrt-version = "11.1.0.106"
 dependencies = [
     "safetensors>=0.4",
     "numpy>=1.24",
@@ -23,8 +27,6 @@ dependencies = [
     "transformers>=4.40",
     "huggingface_hub>=0.23",
     "sentencepiece>=0.1.99",
-    "tensorrt==11.1.0.106; platform_machine == 'aarch64'",
-    "tensorrt==11.1.0.106; platform_machine == 'x86_64'",
     "cuda-python>=13.0.3,<14",
     "apache-tvm-ffi==0.1.12",
     "PyYAML>=6.0",

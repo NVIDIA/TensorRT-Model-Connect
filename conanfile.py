@@ -161,7 +161,9 @@ def _set_wheel_runpath(path: Path, runpath: str) -> None:
 
 class TensorRTModelConnectConan(ConanFile):
     name = "tensorrt-model-connect"
-    version = "0.1.0"
+    # The custom PEP 517 backend derives this internal value from the selected
+    # TensorRT wheel profile. It is not a user-facing configuration input.
+    version = os.environ.get("TRTMC_PACKAGE_VERSION", "0.1.0")
     package_type = "application"
 
     settings = "os", "compiler", "build_type", "arch"

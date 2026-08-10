@@ -47,7 +47,7 @@ TensorRT dependency from NVIDIA's official TensorRT 11.1.0.106 distribution:
 python3.12 -m venv .venv-trtmc
 . .venv-trtmc/bin/activate
 
-pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
+pip install ./tensorrt_model_connect-0.1.0+trt111-py312-none-manylinux_2_39_aarch64.whl
 
 trtmc version
 trtmc build --help
@@ -56,7 +56,7 @@ trtmc build --help
 To create Wan2.2 bundles, install the same wheel with its build-only extra:
 
 ```bash
-pip install './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl[wan]'
+pip install './tensorrt_model_connect-0.1.0+trt111-py312-none-manylinux_2_39_aarch64.whl[wan]'
 ```
 
 PyTorch reads the official checkpoint during `trtmc build`; it is not used by
@@ -98,6 +98,7 @@ python -m pip install --upgrade build auditwheel
 rm -rf dist /tmp/trtmc-conan-py-wheel-py312
 
 CONAN_PY_BUILD_PROFILE_AUTODETECT=1 \
+TRTMC_PACKAGE_TENSORRT_VERSION=11.1.0.106 \
 TRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
 TRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/usr/lib/aarch64-linux-gnu}/libnvinfer.so" \
 TRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
@@ -119,7 +120,7 @@ environment. Install the built wheel in a fresh environment:
 python3.12 -m venv /tmp/trtmc-wheel-smoke
 /tmp/trtmc-wheel-smoke/bin/python -m pip install --upgrade pip
 /tmp/trtmc-wheel-smoke/bin/python -m pip install \
-  dist/tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
+  dist/tensorrt_model_connect-0.1.0+trt111-py312-none-manylinux_2_39_aarch64.whl
 . /tmp/trtmc-wheel-smoke/bin/activate
 trtmc version
 ```

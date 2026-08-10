@@ -15,6 +15,7 @@ import importlib.resources
 import re
 import shutil
 import sys
+import tempfile
 import zipfile
 from email.parser import Parser
 from pathlib import Path
@@ -22,10 +23,43 @@ from pathlib import Path
 from .context import CiContext
 from .process import CiError
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore[no-redef]
+
 
 WHEEL_BUILD_STATE = "wheel-build.json"
 WHEEL_INSTALL_STATE = "wheel-installed.json"
 RELEASE_LEGAL_FILES = ("LICENSE", "NOTICE", "ASSET_LICENSES.md")
+PACKAGE_TENSORRT_VERSION_ENV = "TRTMC_PACKAGE_TENSORRT_VERSION"
+EXACT_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def _target_tensorrt_version(
+    env: dict[str, str],
+    *,
+    required: bool,
+) -> str | None:
+    version = env.get(PACKAGE_TENSORRT_VERSION_ENV, "").strip()
+    if not version:
+        if required:
+            raise CiError(f"{PACKAGE_TENSORRT_VERSION_ENV} must select an exact wheel target")
+        return None
+    if not EXACT_TENSORRT_VERSION.fullmatch(version):
+        raise CiError(f"{PACKAGE_TENSORRT_VERSION_ENV} must be an exact four-part version")
+    return version
+
+
+def _package_variant_version(repository: Path, tensorrt_version: str) -> str:
+    with (repository / "pyproject.toml").open("rb") as stream:
+        pyproject = tomllib.load(stream)
+    package = pyproject["tool"]["tensorrt-model-connect"]["package"]
+    base_version = str(package["base-version"])
+    if "+" in base_version:
+        raise CiError("base package version must not contain a local version segment")
+    major, minor, *_ = tensorrt_version.split(".")
+    return f"{base_version}+trt{major}{minor}"
 
 
 def _required_tensorrt_version(metadata_text: str) -> str:
@@ -53,6 +87,35 @@ def _required_tensorrt_version(metadata_text: str) -> str:
             f"wheel must declare one exact TensorRT dependency version; found {sorted(versions)}"
         )
     return versions.pop()
+
+
+def _validate_package_variant(
+    location: str,
+    metadata_text: str,
+    repository: Path,
+    target_tensorrt_version: str | None,
+    wheel_name: str,
+) -> tuple[str, str]:
+    tensorrt_version = _required_tensorrt_version(metadata_text)
+    metadata = Parser().parsestr(metadata_text)
+    package_version = metadata.get("Version", "").strip()
+    if not package_version:
+        raise CiError(f"{location}: wheel package version is missing")
+    if target_tensorrt_version is not None and tensorrt_version != target_tensorrt_version:
+        raise CiError(
+            f"{location}: wheel pins TensorRT {tensorrt_version}; selected target is "
+            f"{target_tensorrt_version}"
+        )
+    expected_version = _package_variant_version(repository, tensorrt_version)
+    if package_version != expected_version:
+        raise CiError(
+            f"{location}: package version is {package_version}; expected {expected_version}"
+        )
+    if f"-{package_version}-" not in wheel_name:
+        raise CiError(
+            f"{location}: wheel filename does not contain package version {package_version}"
+        )
+    return tensorrt_version, package_version
 
 
 def _tensorrt_abi(version: str) -> str:
@@ -115,11 +178,31 @@ def _probe_backend_identity(path: Path) -> tuple[str, str]:
         raise CiError(f"{path}: could not read TensorRT backend identity: {error}") from error
 
 
+def _validate_archive_backend_identity(
+    location: str,
+    tensorrt_version: str,
+    native_payloads: dict[str, bytes],
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="trtmc-wheel-backend-") as directory:
+        root = Path(directory)
+        for name, payload in native_payloads.items():
+            (root / name).write_bytes(payload)
+        backend_abi, runtime_version = _probe_backend_identity(
+            root / "libtrtmc_backend_trt.so"
+        )
+    _validate_backend_identity(location, tensorrt_version, backend_abi, runtime_version)
+
+
 class InstalledWheelValidator:
     """Prove that imports and the CLI resolve to the installed native wheel."""
 
-    def __init__(self, repository: Path):
+    def __init__(
+        self,
+        repository: Path,
+        target_tensorrt_version: str | None = None,
+    ):
         self.repository = repository.resolve()
+        self.target_tensorrt_version = target_tensorrt_version
 
     def validate(self, wheel: Path) -> None:
         import tensorrt_model_connect
@@ -147,7 +230,14 @@ class InstalledWheelValidator:
             metadata_name = next(
                 name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
             )
-            tensorrt_version = _required_tensorrt_version(archive.read(metadata_name).decode())
+            metadata = archive.read(metadata_name).decode()
+            tensorrt_version, package_version = _validate_package_variant(
+                str(wheel),
+                metadata,
+                self.repository,
+                self.target_tensorrt_version,
+                wheel.name,
+            )
         if not native.is_file():
             raise CiError(f"packaged native trtmc executable is missing under {native_dir}")
         if not benchmark_worker.is_file():
@@ -174,6 +264,7 @@ class InstalledWheelValidator:
         )
         _validate_backend_identity(str(native_dir), tensorrt_version, backend_abi, runtime_version)
         print(f"installed_wheel={wheel}")
+        print(f"installed_package_version={package_version}")
         print(f"imported_package={package_file}")
         print(f"installed_trtmc={script_path}")
         print(f"packaged_native_trtmc={native}")
@@ -201,6 +292,10 @@ class WheelArchiveValidator:
         if not match:
             raise CiError(f"expected a manylinux aarch64 platform tag, got {platform}")
         self.max_glibc_minor = int(match.group(1))
+        self.target_tensorrt_version = _target_tensorrt_version(
+            getattr(self.context, "env", {}),
+            required=False,
+        )
 
     def validate(self, wheels: list[Path]) -> None:
         for wheel in wheels:
@@ -286,14 +381,34 @@ class WheelArchiveValidator:
             metadata_name = metadata_entries[0]
             metadata = archive.read(metadata_name).decode()
             self._validate_legal_payload(wheel, archive, names, metadata_name, metadata)
-            tensorrt_version = _required_tensorrt_version(metadata)
+            tensorrt_version, package_version = _validate_package_variant(
+                str(wheel),
+                metadata,
+                self.context.repository,
+                self.target_tensorrt_version,
+                wheel.name,
+            )
             backend_payloads = {Path(name).name: archive.read(name) for name in backends}
             if len(backend_payloads) != len(backends):
                 raise CiError(f"{wheel}: duplicate TensorRT backend filenames")
             _validate_backend_files(str(wheel), tensorrt_version, backend_payloads)
+            native_names = [*package_cores, *backends]
+            native_payloads = {
+                Path(name).name: archive.read(name) for name in native_names
+            }
+            if len(native_payloads) != len(native_names):
+                raise CiError(f"{wheel}: duplicate native runtime filenames")
+            _validate_archive_backend_identity(
+                str(wheel),
+                tensorrt_version,
+                native_payloads,
+            )
             wheel_metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/WHEEL"))
             ).decode()
+        metadata_fields = Parser().parsestr(metadata)
+        distribution = re.sub(r"[-_.]+", "_", metadata_fields.get("Name", "")).strip("_")
+        script_root = f"{distribution}-{package_version}.data/scripts"
         checks = (
             (len(binaries) == 1, "expected one packaged trtmc executable"),
             (len(scripts) == 1, "expected one native trtmc script executable"),
@@ -310,6 +425,18 @@ class WheelArchiveValidator:
             (bool(benchmark_image_assets), "packaged benchmark image assets are missing"),
             (bool(package_cores), "packaged core DSO is missing"),
             (bool(script_cores), "core DSO beside native trtmc script is missing"),
+            (
+                scripts == [f"{script_root}/trtmc"],
+                "native trtmc script uses the wrong package version",
+            ),
+            (
+                benchmark_scripts == [f"{script_root}/trtmc-bench"],
+                "trtmc-bench script uses the wrong package version",
+            ),
+            (
+                all(name.startswith(f"{script_root}/") for name in script_cores),
+                "native script DSOs use the wrong package version",
+            ),
             (
                 not any(name.endswith(".dist-info/entry_points.txt") for name in names),
                 "native trtmc must be installed directly, not via console_scripts",
@@ -387,6 +514,28 @@ class WheelPackageManager:
         self.context = context
 
     def build(self) -> None:
+        target_tensorrt_version = _target_tensorrt_version(
+            self.context.env,
+            required=True,
+        )
+        assert target_tensorrt_version is not None
+        package_version = _package_variant_version(
+            self.context.repository,
+            target_tensorrt_version,
+        )
+        runtime_version = self.context.output(
+            [
+                sys.executable,
+                "-c",
+                "import tensorrt; print(tensorrt.__version__)",
+            ]
+        )
+        if runtime_version != target_tensorrt_version:
+            raise CiError(
+                f"package target is TensorRT {target_tensorrt_version}, but the build runtime "
+                f"provides {runtime_version}"
+            )
+        print(f"wheel_profile=TensorRT {target_tensorrt_version} package {package_version}")
         trt_include = self._tensorrt_include()
         trt_library = self._tensorrt_library()
         cuda_include = self.context.env.get("TRTMC_CUDA_INCLUDE_DIR", "/usr/local/cuda/include")
@@ -472,6 +621,7 @@ class WheelPackageManager:
                     "TRTMC_CUDART_LIBRARY": cudart,
                     "TRTMC_CONAN_ENABLE_TEST_TARGETS": "1",
                     "TRTMC_DISTRIBUTABLE_BUILD": "1",
+                    PACKAGE_TENSORRT_VERSION_ENV: target_tensorrt_version,
                     "WHEEL_PYVER": tag,
                     "WHEEL_ABI": "none",
                     "WHEEL_ARCH": platform,
@@ -485,6 +635,9 @@ class WheelPackageManager:
         wheels = sorted((self.context.repository / "dist").glob("*.whl"))
         if len(wheels) != len(tags):
             raise CiError(f"expected {len(tags)} wheels, found {len(wheels)}: {wheels}")
+        observed_tags = [wheel.name.removesuffix(".whl").rsplit("-", 3)[-3] for wheel in wheels]
+        if len(set(tags)) != len(tags) or sorted(observed_tags) != sorted(tags):
+            raise CiError(f"expected wheel tags {sorted(tags)}, found {sorted(observed_tags)}")
         WheelArchiveValidator(self.context, platform).validate(wheels)
         assert reusable is not None
         tag, conan_out, cmake_build = reusable
@@ -498,6 +651,8 @@ class WheelPackageManager:
                 "trt_library": trt_library,
                 "cuda_include_dir": cuda_include,
                 "cudart_library": cudart,
+                "tensorrt_version": target_tensorrt_version,
+                "package_version": package_version,
             },
         )
         print("Reusable wheel build metadata:")
@@ -509,7 +664,12 @@ class WheelPackageManager:
         if sentinel.is_file():
             print("Built wheel already installed in this CI container:")
             print(sentinel.read_text(encoding="utf-8"), end="")
-            return Path(self.context.read_state(WHEEL_INSTALL_STATE)["wheel"])
+            wheel = Path(self.context.read_state(WHEEL_INSTALL_STATE)["wheel"])
+            InstalledWheelValidator(
+                self.context.repository,
+                _target_tensorrt_version(self.context.env, required=True),
+            ).validate(wheel)
+            return wheel
         wheel = self.select_compatible_wheel()
         self.context.run(
             [
@@ -523,7 +683,10 @@ class WheelPackageManager:
                 wheel,
             ]
         )
-        InstalledWheelValidator(self.context.repository).validate(wheel)
+        InstalledWheelValidator(
+            self.context.repository,
+            _target_tensorrt_version(self.context.env, required=True),
+        ).validate(wheel)
         self.context.write_state(
             WHEEL_INSTALL_STATE,
             {"wheel": str(wheel), "installed_at": dt.datetime.now(dt.UTC).isoformat()},
@@ -532,7 +695,10 @@ class WheelPackageManager:
 
     def verify_installed(self) -> None:
         state = self.context.read_state(WHEEL_INSTALL_STATE)
-        InstalledWheelValidator(self.context.repository).validate(Path(state["wheel"]))
+        InstalledWheelValidator(
+            self.context.repository,
+            _target_tensorrt_version(self.context.env, required=True),
+        ).validate(Path(state["wheel"]))
 
     def build_metadata(self) -> dict[str, str]:
         state = self.context.read_state(WHEEL_BUILD_STATE)

@@ -445,8 +445,11 @@ the producing class remains the source of truth for optional evidence fields.
 - **Functionality / units:** Archive and installed-wheel validators inspect
   native contents; `WheelPackageManager` builds tagged wheels, installs once,
   records reusable build state, and runs package smoke tests.
-- **Inputs:** Source tree, TensorRT/CUDA include and library paths, Python tags,
-  wheel architecture, package build directory, and an existing `CiContext`.
+- **Inputs:** Source tree, TensorRT/CUDA include and library paths, the explicit
+  `TRTMC_PACKAGE_TENSORRT_VERSION` wheel target, Python tags, wheel architecture,
+  package build directory, and an existing `CiContext`. The target derives the
+  exact TensorRT dependency and a unique local package version such as
+  `0.1.0+trt111`; CMake still derives the backend ABI from the runtime headers.
 - **Outputs:** `dist/*.whl` plus two state contracts:
 
   ```json
@@ -458,7 +461,9 @@ the producing class remains the source of truth for optional evidence fields.
       "trt_include_dir": "...",
       "trt_library": "...",
       "cuda_include_dir": "...",
-      "cudart_library": "..."
+      "cudart_library": "...",
+      "tensorrt_version": "11.1.0.106",
+      "package_version": "0.1.0+trt111"
     },
     ".ci/wheel-installed.json": {
       "wheel": "/src/dist/package.whl",

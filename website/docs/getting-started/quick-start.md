@@ -132,7 +132,7 @@ automatically; the `wan` extra is needed only while the bundle is built:
 python3.12 -m venv ~/.venvs/trtmc
 . ~/.venvs/trtmc/bin/activate
 python -m pip install \
-  './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl[wan]'
+  './tensorrt_model_connect-0.1.0+trt111-py312-none-manylinux_2_39_aarch64.whl[wan]'
 ```
 
 Then run these two native Model Connect commands:

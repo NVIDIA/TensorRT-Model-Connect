@@ -124,8 +124,9 @@ wheel; source tests configure, build, and test the exact source revision
 separately.
 
 To build the release wheel manually, run `python -m build --wheel .` from the
-repository root with `WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the
-`TRTMC_TRT_*` / `TRTMC_CUDA_*` paths set. See
+repository root with the exact `TRTMC_PACKAGE_TENSORRT_VERSION`,
+`WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the `TRTMC_TRT_*` /
+`TRTMC_CUDA_*` paths set. See
 [Installation](../getting-started/installation.md#2-build-the-aarch64-wheel-from-source)
 for the full command.
 

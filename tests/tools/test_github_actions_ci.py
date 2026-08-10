@@ -888,12 +888,15 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     assert "/opt/tensorrt/python" not in dockerfile
 
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "tensorrt==11.1.0.106; platform_machine == 'aarch64'" in pyproject
-    assert "tensorrt==11.1.0.106; platform_machine == 'x86_64'" in pyproject
+    assert 'dynamic = ["version", "dependencies"]' in pyproject
+    assert 'base-version = "0.1.0"' in pyproject
+    assert 'default-tensorrt-version = "11.1.0.106"' in pyproject
 
     package = _ci_source("package.py")
     assert "_install_tensorrt_sdk" not in package
-    assert "_required_tensorrt_version(metadata)" in package
+    assert 'PACKAGE_TENSORRT_VERSION_ENV = "TRTMC_PACKAGE_TENSORRT_VERSION"' in package
+    assert "_package_variant_version" in package
+    assert "_validate_package_variant" in package
     assert "_validate_backend_files" in package
     assert "_validate_backend_identity" in package
 
@@ -1124,6 +1127,7 @@ def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
         "TRTMC_PACKAGE_PYTHON_TAGS",
         "TRTMC_PACKAGE_WHEEL_ARCH",
         "TRTMC_PACKAGE_BUILD_ROOT",
+        "TRTMC_PACKAGE_TENSORRT_VERSION",
         "TRTMC_WHEEL_SMOKE_CONFIG",
         "TRTMC_WHEEL_SMOKE_MODEL_ID",
         "TRTMC_WHEEL_SMOKE_MAX_CACHE",
@@ -1133,6 +1137,7 @@ def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
         "TRTMC_WHEEL_SMOKE_RUN_TIMEOUT",
     ):
         assert name in text
+    assert "TRTMC_PACKAGE_VERSION" not in text
 
 
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:

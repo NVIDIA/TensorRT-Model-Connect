@@ -4,17 +4,21 @@
 from __future__ import annotations
 
 import base64
+import copy
 import csv
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 import tarfile
 import tempfile
 import zipfile
+from contextlib import contextmanager
+from email.parser import Parser
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 try:
     import tomllib
@@ -24,6 +28,15 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 _CONAN_PY_BUILD_REQUIREMENT = "conan-py-build==0.4.3"
 _PYTHON_SOURCE_ROOT = "python"
+_PACKAGE_TENSORRT_VERSION_ENV = "TRTMC_PACKAGE_TENSORRT_VERSION"
+_PACKAGE_VERSION_ENV = "TRTMC_PACKAGE_VERSION"
+_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
+_TENSORRT_REQUIREMENT = re.compile(
+    r"tensorrt\s*==\s*"
+    r"(?P<version>[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)"
+    r"\s*;\s*platform_machine\s*==\s*[\"'](?P<arch>aarch64|x86_64)[\"']\s*",
+    re.IGNORECASE,
+)
 
 
 def get_requires_for_build_wheel(config_settings: dict[str, Any] | None = None) -> list[str]:
@@ -46,11 +59,11 @@ def prepare_metadata_for_build_wheel(
     metadata_directory: str,
     config_settings: dict[str, Any] | None = None,
 ) -> str:
-    conan_build = _conan_build_backend()
-    return conan_build.prepare_metadata_for_build_wheel(
-        metadata_directory,
-        config_settings,
-    )
+    with _variant_conan_build_backend() as conan_build:
+        return conan_build.prepare_metadata_for_build_wheel(
+            metadata_directory,
+            config_settings,
+        )
 
 
 def build_wheel(
@@ -58,20 +71,22 @@ def build_wheel(
     config_settings: dict[str, Any] | None = None,
     metadata_directory: str | None = None,
 ) -> str:
-    conan_build = _conan_build_backend()
-    return conan_build.build_wheel(
-        wheel_directory,
-        config_settings,
-        metadata_directory,
-    )
+    with _variant_conan_build_backend(metadata_directory) as conan_build:
+        return conan_build.build_wheel(
+            wheel_directory,
+            config_settings,
+            metadata_directory,
+        )
 
 
 def build_sdist(
     sdist_directory: str,
     config_settings: dict[str, Any] | None = None,
 ) -> str:
-    conan_build = _conan_build_backend()
-    filename = conan_build.build_sdist(sdist_directory, config_settings)
+    if os.environ.get(_PACKAGE_TENSORRT_VERSION_ENV, "").strip():
+        raise RuntimeError("TensorRT package profiles apply to wheels, not source archives")
+    with _variant_conan_build_backend() as conan_build:
+        filename = conan_build.build_sdist(sdist_directory, config_settings)
     _append_benchmark_catalog_to_sdist(Path(sdist_directory) / filename)
     return filename
 
@@ -162,12 +177,12 @@ def build_editable(
     metadata_directory: str | None = None,
 ) -> str:
     if not _py_only_enabled(config_settings):
-        conan_build = _conan_build_backend()
-        return conan_build.build_editable(
-            wheel_directory,
-            config_settings,
-            metadata_directory,
-        )
+        with _variant_conan_build_backend(metadata_directory) as conan_build:
+            return conan_build.build_editable(
+                wheel_directory,
+                config_settings,
+                metadata_directory,
+            )
 
     wheel_dir = Path(wheel_directory)
     wheel_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +198,7 @@ def build_editable(
             dist_info = _write_dist_info(Path(tmp))
             _write_editable_wheel(wheel_path, dist_info, expected_dist_info)
     else:
+        _validate_prepared_metadata(Path(metadata_directory), project)
         dist_info = _find_dist_info(Path(metadata_directory))
         _write_editable_wheel(wheel_path, dist_info, expected_dist_info)
 
@@ -193,6 +209,40 @@ def _conan_build_backend() -> Any:
     from conan_py_build import build as conan_build
 
     return conan_build
+
+
+@contextmanager
+def _variant_conan_build_backend(
+    metadata_directory: str | None = None,
+) -> Iterator[Any]:
+    """Apply the selected wheel profile to the pinned native build backend."""
+
+    conan_build = _conan_build_backend()
+    metadata_reader = getattr(conan_build, "_get_project_metadata", None)
+    if metadata_reader is None:
+        raise RuntimeError(
+            f"{_CONAN_PY_BUILD_REQUIREMENT} no longer exposes its pinned metadata reader"
+        )
+
+    resolved = _resolved_project_metadata(Path.cwd())
+    if metadata_directory is not None:
+        _validate_prepared_metadata(Path(metadata_directory), resolved)
+
+    def variant_metadata(project_dir: Path) -> dict[str, Any]:
+        return copy.deepcopy(_resolved_project_metadata(project_dir))
+
+    missing = object()
+    previous_package_version = os.environ.get(_PACKAGE_VERSION_ENV, missing)
+    os.environ[_PACKAGE_VERSION_ENV] = resolved["version"]
+    conan_build._get_project_metadata = variant_metadata
+    try:
+        yield conan_build
+    finally:
+        conan_build._get_project_metadata = metadata_reader
+        if previous_package_version is missing:
+            os.environ.pop(_PACKAGE_VERSION_ENV, None)
+        else:
+            os.environ[_PACKAGE_VERSION_ENV] = previous_package_version
 
 
 def _py_only_enabled(config_settings: dict[str, Any] | None) -> bool:
@@ -215,23 +265,88 @@ def _truthy(value: Any) -> bool:
     return text in {"", "1", "true", "yes", "on"}
 
 
-def _read_pyproject() -> dict[str, Any]:
-    with open(Path.cwd() / "pyproject.toml", "rb") as f:
-        return tomllib.load(f)
-
-
 def _project_metadata() -> dict[str, Any]:
-    project = _read_pyproject()["project"]
-    return {
-        "name": project["name"],
-        "version": project["version"],
-        "description": project.get("description", ""),
-        "license": project.get("license"),
-        "license-files": project.get("license-files", []),
-        "requires-python": project.get("requires-python"),
-        "dependencies": project.get("dependencies", []),
-        "optional-dependencies": project.get("optional-dependencies", {}),
-    }
+    return _resolved_project_metadata(Path.cwd())
+
+
+def _resolved_project_metadata(project_dir: Path) -> dict[str, Any]:
+    """Resolve the dynamic package version and TensorRT dependency profile."""
+
+    with (project_dir / "pyproject.toml").open("rb") as stream:
+        pyproject = tomllib.load(stream)
+    project = copy.deepcopy(pyproject["project"])
+    package = pyproject["tool"]["tensorrt-model-connect"]["package"]
+    base_version = str(package["base-version"])
+    target = os.environ.get(_PACKAGE_TENSORRT_VERSION_ENV, "").strip()
+    if not target:
+        target = str(package["default-tensorrt-version"])
+        package_version = base_version
+    else:
+        if not _TENSORRT_VERSION.fullmatch(target):
+            raise RuntimeError(
+                f"{_PACKAGE_TENSORRT_VERSION_ENV} must be an exact four-part version"
+            )
+        major, minor, *_ = target.split(".")
+        package_version = f"{base_version}+trt{major}{minor}"
+
+    dynamic = set(project.get("dynamic", []))
+    if not {"version", "dependencies"}.issubset(dynamic):
+        raise RuntimeError("project version and dependencies must remain backend-resolved")
+    project["dynamic"] = sorted(dynamic - {"version", "dependencies"})
+    if not project["dynamic"]:
+        project.pop("dynamic")
+    project["version"] = package_version
+    project["dependencies"] = [
+        *package.get("dependencies", []),
+        f'tensorrt=={target}; platform_machine == "aarch64"',
+        f'tensorrt=={target}; platform_machine == "x86_64"',
+    ]
+    return project
+
+
+def _validate_prepared_metadata(
+    metadata_directory: Path,
+    expected: dict[str, Any],
+) -> None:
+    """Reject metadata prepared for a different wheel profile."""
+
+    dist_info = _find_dist_info(metadata_directory)
+    expected_dist_info = (
+        f"{_wheel_distribution_name(expected['name'])}-{expected['version']}.dist-info"
+    )
+    if dist_info.name != expected_dist_info:
+        raise RuntimeError(
+            f"prepared wheel metadata directory is {dist_info.name}; expected {expected_dist_info}"
+        )
+    metadata_path = dist_info / "METADATA"
+    if not metadata_path.is_file():
+        raise RuntimeError(f"prepared wheel metadata is missing: {metadata_path}")
+    metadata = Parser().parsestr(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("Name") != expected["name"] or metadata.get("Version") != expected["version"]:
+        raise RuntimeError("prepared wheel metadata does not match the selected package variant")
+    expected_tensorrt = _tensorrt_dependency_profile(expected["dependencies"])
+    observed_tensorrt = _tensorrt_dependency_profile(
+        metadata.get_all("Requires-Dist", [])
+    )
+    if observed_tensorrt != expected_tensorrt:
+        raise RuntimeError("prepared wheel metadata has the wrong TensorRT dependency")
+
+
+def _tensorrt_dependency_profile(dependencies: list[str]) -> dict[str, str]:
+    candidates = [
+        dependency
+        for dependency in dependencies
+        if re.match(r"tensorrt(?:\s|[<>=!~@;\[])", dependency, re.IGNORECASE)
+    ]
+    profile: dict[str, str] = {}
+    for dependency in candidates:
+        match = _TENSORRT_REQUIREMENT.fullmatch(dependency)
+        if match is None or match.group("arch") in profile:
+            raise RuntimeError("TensorRT dependencies must be exact per-architecture pins")
+        profile[match.group("arch").lower()] = match.group("version")
+    if set(profile) != {"aarch64", "x86_64"} or len(set(profile.values())) != 1:
+        raise RuntimeError("TensorRT dependencies must pin one version for both architectures")
+    return profile
 
 
 def _write_dist_info(parent: Path) -> Path:

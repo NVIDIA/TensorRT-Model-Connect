@@ -194,6 +194,22 @@ def test_wheel_runpath_rewrite_invokes_patchelf(
     ]
 
 
+def test_conan_wheel_script_directory_uses_selected_package_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRTMC_PACKAGE_VERSION", "0.1.0+trt111")
+    recipe_module = _load_conan_recipe(monkeypatch)
+    source = tmp_path / "source"
+
+    module = _package(recipe_module, source, tmp_path)
+
+    scripts = module.parent / "tensorrt_model_connect-0.1.0+trt111.data/scripts"
+    assert (scripts / "trtmc").is_file()
+    assert (scripts / "trtmc-bench").is_file()
+    assert (scripts / "libtrtmc_core.so").is_file()
+
+
 def test_package_stages_a_model_owned_adapter_as_inert_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
