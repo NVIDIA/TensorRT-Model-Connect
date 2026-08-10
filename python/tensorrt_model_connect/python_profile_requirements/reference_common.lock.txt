@@ -3,6 +3,8 @@
 
 transformers==5.2.0
 huggingface-hub==1.22.0
+tokenizers==0.22.2
+open-clip-torch==3.3.0
 rouge-score==0.1.2
 sacrebleu==2.5.1
 colorama==0.4.6
