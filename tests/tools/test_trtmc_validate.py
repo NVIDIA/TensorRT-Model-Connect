@@ -60,13 +60,18 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 107
+    assert len(bindings) == 106
     assert [
         binding.workload for binding in bindings if binding.model == "personaplex-7b"
-    ] == [
-        "full_duplex_bench_behavior_parity",
+    ] == ["full_duplex_bench_behavior_parity"]
+    assert trtmc_validate.resolve_binding(
+        catalog,
+        "personaplex-7b",
         "full_duplex_bench_speech_parity",
-    ]
+    ) == trtmc_validate.Binding(
+        "personaplex-7b",
+        "full_duplex_bench_speech_parity",
+    )
     assert [
         binding.workload for binding in bindings if binding.model == "qwen25vl-3b"
     ] == ["vlm_mmmu_pro_vision_fixed_mcq"]
@@ -165,7 +170,10 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     }
 
     assert declared <= configured
-    assert configured - declared == {"vlm_mmmu_pro_vision_mcq"}
+    assert configured - declared == {
+        "full_duplex_bench_speech_parity",
+        "vlm_mmmu_pro_vision_mcq",
+    }
     assert min(catalog["sample_limits"].values()) >= 1
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
         "minimax_h3_official_profile_parity",

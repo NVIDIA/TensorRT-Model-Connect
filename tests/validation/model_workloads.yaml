@@ -186,9 +186,7 @@ models:
   patchtst-granite-official:
     workloads: [etth1_time_series_parity]
   personaplex-7b:
-    workloads:
-      - full_duplex_bench_behavior_parity
-      - full_duplex_bench_speech_parity
+    workloads: [full_duplex_bench_behavior_parity]
   phi-moe:
     workloads: [mmlu_five_shot_mcq]
   phi3-mini:
