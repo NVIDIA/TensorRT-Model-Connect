@@ -12,15 +12,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tensorrt_model_connect.python_profiles import prebuilt_python_profile_names
 from tools.ci.docker_image import WorkflowImageLock
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT = REPO_ROOT / "tools" / "ci" / "docker_image.py"
-DEFAULT_PROFILES = (
-    "chronos,deepseek_ocr,elf_flow,elf_flow_reference,internlm,lance_reference,magpie_tts_reference,"
-    "nemotron_h_reference,phi4_multimodal,reference_common,sana_wm_reference"
-)
+DEFAULT_PROFILES = ",".join(prebuilt_python_profile_names())
 
 
 def _record_lock_open_modes(monkeypatch, lock_path: Path, *, lose_create_race=False) -> list[str]:
@@ -105,7 +103,7 @@ fi
 
 if [ "${1:-}" = "run" ]; then
   capability="${FAKE_DOCKER_CAPABILITY:-available}"
-  profiles="${FAKE_DOCKER_PROFILES-chronos,deepseek_ocr,elf_flow,elf_flow_reference,internlm,lance_reference,magpie_tts_reference,nemotron_h_reference,phi4_multimodal,reference_common,sana_wm_reference}"
+  profiles="${FAKE_DOCKER_PROFILES-}"
   if [ -f "$FAKE_DOCKER_REBUILT" ]; then
     capability="available"
     profiles="$FAKE_DOCKER_REBUILT_PROFILES"
