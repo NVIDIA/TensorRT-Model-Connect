@@ -669,8 +669,11 @@ def ensure_reference_sources(
     family: str,
     cache_root: Path,
     model_reference_cache: Mapping[str, Any] | None = None,
+    *,
+    source_cache_root: Path | None = None,
 ) -> ReferenceSourceSelection:
     environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
+    checkout_root = source_cache_root or cache_root
     declared_source = None
     if model_reference_cache:
         required = ("repository", "revision", "relative_path", "entrypoint")
@@ -686,7 +689,7 @@ def ensure_reference_sources(
             relative_checkout=Path(str(model_reference_cache["relative_path"])),
             entrypoint=Path(str(model_reference_cache["entrypoint"])),
         )
-        checkout = _ensure_reference_source(declared_source, cache_root)
+        checkout = _ensure_reference_source(declared_source, checkout_root)
         environment_variable = str(
             model_reference_cache.get("environment_variable", "") or ""
         ).strip()
@@ -699,7 +702,7 @@ def ensure_reference_sources(
             environment[environment_variable] = str(checkout)
 
     if family == "elf_flow":
-        checkout = _ensure_reference_source(ELF_SOURCE, cache_root)
+        checkout = _ensure_reference_source(ELF_SOURCE, checkout_root)
         return ReferenceSourceSelection(
             environment=environment,
             elf_reference_repo=checkout,
@@ -707,7 +710,7 @@ def ensure_reference_sources(
     if family == "sana_wm":
         if declared_source is None:
             declared_source = SANA_WM_SOURCE
-            checkout = _ensure_reference_source(declared_source, cache_root)
+            checkout = _ensure_reference_source(declared_source, checkout_root)
         environment["SANA_WM_SCRIPT"] = str(checkout / declared_source.entrypoint)
     return ReferenceSourceSelection(environment=environment)
 
@@ -1712,11 +1715,13 @@ def run_binding(
     environment = ensure_environments(profiles, str(arguments.hf_python))
     reference_sources = ensure_reference_sources(
         str(task_models[binding.model].get("family", "") or ""),
-        Path(
-            getattr(arguments, "reference_source_cache_dir", None)
-            or arguments.reference_cache_dir
-        ),
+        Path(arguments.reference_cache_dir),
         task_models[binding.model].get("model_reference_cache"),
+        source_cache_root=(
+            Path(arguments.reference_source_cache_dir)
+            if arguments.reference_source_cache_dir is not None
+            else None
+        ),
     )
     process_env = _source_environment()
     process_env.update(environment.overrides)

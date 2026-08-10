@@ -759,6 +759,32 @@ def test_shared_hf_cache_cannot_be_deleted_by_accuracy_runner(tmp_path):
         trtmc_validate._prepare_run_directories(arguments)
 
 
+def test_storage_root_rejects_reference_source_cache_outside_root(tmp_path):
+    storage = tmp_path / "nvme"
+    storage.mkdir()
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--storage-root",
+            str(storage),
+            "--output",
+            str(storage / "results"),
+            "--engine-dir",
+            str(storage / "engines"),
+            "--reference-cache-dir",
+            str(storage / "references"),
+            "--reference-source-cache-dir",
+            str(tmp_path / "outside-references"),
+        ]
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="reference source cache directory must stay below storage root",
+    ):
+        trtmc_validate._prepare_run_directories(arguments)
+
+
 def test_resolve_binding_keeps_unimplemented_model_visible_but_not_runnable():
     catalog = {
         "models": {
@@ -990,6 +1016,7 @@ def test_all_defaults_to_continue_and_accepts_stop_policy():
     assert stop.on_model_failure == "stop"
     assert default.model_attempts == 2
     assert default.model_retry_delay_seconds == 5.0
+    assert default.reference_source_cache_dir is None
     assert default.reused_bundle_revalidation_limit == 1
     assert default.reused_bundle_revalidation_attempts_used == 0
 
@@ -1821,6 +1848,33 @@ def test_reference_sources_select_model_specific_inputs(
         "TRTMC_STORAGE_ROOT": str(tmp_path),
         "TRTMC_LANCE_REFERENCE_REPO": str(tmp_path / "lance/reference/Lance-4baeee086648"),
     }
+
+
+def test_reference_sources_keep_outputs_separate_from_pinned_checkouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_cache = tmp_path / "model-work" / "references"
+    source_cache = tmp_path / "reference-sources"
+
+    def prepare(source, cache_root):
+        checkout = cache_root / source.relative_checkout
+        entrypoint = checkout / source.entrypoint
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("# reference\n", encoding="utf-8")
+        return checkout
+
+    monkeypatch.setattr(trtmc_validate, "_ensure_reference_source", prepare)
+
+    selection = trtmc_validate.ensure_reference_sources(
+        "elf_flow",
+        output_cache,
+        source_cache_root=source_cache,
+    )
+
+    assert selection.environment["TRTMC_STORAGE_ROOT"] == str(output_cache)
+    assert selection.elf_reference_repo == (
+        source_cache / trtmc_validate.ELF_SOURCE.relative_checkout
+    )
 
 
 def test_reference_sources_reject_incomplete_model_contract(
@@ -3538,7 +3592,7 @@ def test_run_binding_wires_reference_source_command_and_environment(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache, _contract=None: selection,
+        lambda _family, _cache, _contract=None, **_kwargs: selection,
     )
 
     def run(command, _log_path, environment):
@@ -3610,7 +3664,7 @@ def _run_binding_with_comparison_results(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache, _contract=None: trtmc_validate.ReferenceSourceSelection(
+        lambda _family, _cache, _contract=None, **_kwargs: trtmc_validate.ReferenceSourceSelection(
             environment={},
         ),
     )
@@ -3699,7 +3753,7 @@ def _run_multiple_bindings_with_comparison_results(
     monkeypatch.setattr(
         trtmc_validate,
         "ensure_reference_sources",
-        lambda _family, _cache, _contract=None: trtmc_validate.ReferenceSourceSelection(
+        lambda _family, _cache, _contract=None, **_kwargs: trtmc_validate.ReferenceSourceSelection(
             environment={},
         ),
     )
