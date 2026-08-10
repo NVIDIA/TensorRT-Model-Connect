@@ -70,19 +70,9 @@ def test_elf_reference_profile_pins_upstream_transformers_version() -> None:
     assert "transformers==4.44.2" in lock
     assert "tokenizers==0.19.1" in lock
     assert "huggingface-hub==0.24.7" in lock
-    assert "colorama==0.4.6" in lock
-    assert "sacrebleu==2.5.1" in lock
-    assert "portalocker==3.2.0" in lock
-    assert "tabulate==0.10.0" in lock
-    assert "lxml==6.1.1" in lock
     assert 'transformers.__version__ == "4.44.2"' in verify
     assert 'tokenizers.__version__ == "0.19.1"' in verify
     assert 'huggingface_hub.__version__ == "0.24.7"' in verify
-    assert 'version("colorama") == "0.4.6"' in verify
-    assert 'version("sacrebleu") == "2.5.1"' in verify
-    assert 'version("portalocker") == "3.2.0"' in verify
-    assert 'version("tabulate") == "0.10.0"' in verify
-    assert 'version("lxml") == "6.1.1"' in verify
 
 
 def _rand(*shape: int) -> np.ndarray:

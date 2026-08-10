@@ -11,7 +11,6 @@ import silero_vad
 import soundfile
 import torch
 import torchaudio
-import transformers
 
 assert version("huggingface-hub") == "1.22.0"
 assert version("nemo_toolkit") == "2.7.3"
@@ -19,8 +18,6 @@ assert version("numpy") == "1.26.4"
 assert version("scipy") == "1.15.3"
 assert version("silero-vad") == "6.2.1"
 assert version("soundfile") == "0.14.0"
-assert version("tokenizers") == "0.22.2"
-assert transformers.__version__ == "5.2.0"
 assert version("torch") == "2.12.0+cu130"
 assert version("torchaudio") == "2.11.0+cu130"
 assert nemo is not None
@@ -40,8 +37,6 @@ print(
             f"scipy={scipy.__version__}",
             f"silero-vad={silero_vad.__version__}",
             f"soundfile={soundfile.__version__}",
-            f"tokenizers={version('tokenizers')}",
-            f"transformers={transformers.__version__}",
             f"torch={torch.__version__}",
             f"torchaudio={version('torchaudio')}",
         )
