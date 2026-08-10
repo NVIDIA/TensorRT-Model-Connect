@@ -10,20 +10,13 @@ GB300 example:
 ```bash
 export TRTMC_CHECK_STORAGE_ROOT=/runs
 export TRTMC_CHECK_DATASET_ROOT=/mnt/data
-export TRTMC_CHECK_RUNTIME_ROOT=/runs/tmp/build-trt112
+export TRTMC_CHECK_BUILD_DIR=/runs/tmp/build-trt112
 export TRTMC_CHECK_PYTHON=/opt/venv/bin/python3
-
-# Native executable that loads TRTMC bundles and records Perf measurements.
-export TRTMC_PERF_WORKER=/runs/tmp/build-trt112/trtmc_benchmark_worker
-export TRTMC_PERF_BUNDLE_CACHE=/runs/engines/perf
-export TRTMC_PERF_BUNDLE_ROOTS=:
-export TRTMC_PERF_RUNTIME_DIRS=/runs/tmp/build-trt112
 ```
 
-`TRTMC_CHECK_RUNTIME_ROOT` contains the Accuracy binaries, model plugins, and
-TensorRT backend. `TRTMC_PERF_WORKER` must point to a Release
-`trtmc_benchmark_worker` built from the selected source revision. Perf checks
-its revision and backend ABI before running.
+`TRTMC_CHECK_BUILD_DIR` is the native CMake build output. The runner derives
+the Accuracy binaries, model plugins, TensorRT backend, Perf worker, and Perf
+bundle cache from this directory and `TRTMC_CHECK_STORAGE_ROOT`.
 
 The controller Python must contain the repository's base dependencies. Missing
 family build, reference, and scoring profiles are created under

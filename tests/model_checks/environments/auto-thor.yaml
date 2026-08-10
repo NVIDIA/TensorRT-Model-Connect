@@ -15,11 +15,11 @@ tasks:
       dataset-root: ${TRTMC_CHECK_DATASET_ROOT}
       engine-dir: ${TRTMC_CHECK_STORAGE_ROOT}/engines/accuracy
       reference-cache-dir: ${TRTMC_CHECK_STORAGE_ROOT}/references/accuracy
-      trtmc-binary: ${TRTMC_CHECK_RUNTIME_ROOT}/trtmc
-      benchmark-binary: ${TRTMC_CHECK_RUNTIME_ROOT}/trtmc_dataset_benchmark
+      trtmc-binary: ${TRTMC_CHECK_BUILD_DIR}/trtmc
+      benchmark-binary: ${TRTMC_CHECK_BUILD_DIR}/trtmc_dataset_benchmark
       hf-python: ${TRTMC_CHECK_PYTHON}
-      backend-dir: ${TRTMC_CHECK_RUNTIME_ROOT}
-      model-plugin-dir: ${TRTMC_CHECK_RUNTIME_ROOT}/models
+      backend-dir: ${TRTMC_CHECK_BUILD_DIR}
+      model-plugin-dir: ${TRTMC_CHECK_BUILD_DIR}/models
       cuda-visible-devices: "0"
       engine-retention: delete_always
       hf-cache-mode: shared

@@ -520,7 +520,7 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
     storage = tmp_path / "storage"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
     monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
-    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
 
     result = model_checks.main(
@@ -561,12 +561,8 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     runtime = tmp_path / "runtime"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
     monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
-    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(runtime))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
-    monkeypatch.setenv("TRTMC_PERF_WORKER", str(runtime / "trtmc_benchmark_worker"))
-    monkeypatch.setenv("TRTMC_PERF_BUNDLE_CACHE", str(storage / "bundles"))
-    monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
-    monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
     monkeypatch.setenv("TRTMC_PYTHON_PROFILE_PREBUILT_ONLY", "1")
     returncodes = iter((1, 0))
     commands = []
@@ -619,7 +615,7 @@ def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch
     storage = tmp_path / "storage"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
     monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
-    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     commands = []
 
@@ -656,7 +652,7 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
     storage = tmp_path / "storage"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
     monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
-    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     selection = [
         "run",
@@ -707,12 +703,8 @@ def test_auto_thor_environment_builds_both_task_commands(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
     monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
-    monkeypatch.setenv("TRTMC_CHECK_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(runtime))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
-    monkeypatch.setenv("TRTMC_PERF_WORKER", str(runtime / "trtmc_benchmark_worker"))
-    monkeypatch.setenv("TRTMC_PERF_BUNDLE_CACHE", str(storage / "bundles"))
-    monkeypatch.setenv("TRTMC_PERF_BUNDLE_ROOTS", ":")
-    monkeypatch.setenv("TRTMC_PERF_RUNTIME_DIRS", str(runtime))
 
     assert (
         model_checks.main(
@@ -735,4 +727,12 @@ def test_auto_thor_environment_builds_both_task_commands(tmp_path, monkeypatch):
     )
     assert set(request["commands"]) == {"accuracy", "perf"}
     assert request["selection"]["execution"]["serial_tasks"] is True
-    assert request["perf_environment_config"]["storage"]["bundle_cache"] == str(storage / "bundles")
+    perf_environment = request["perf_environment_config"]
+    assert perf_environment["tools"]["trtmc_worker"] == str(
+        runtime / "trtmc_benchmark_worker"
+    )
+    assert perf_environment["storage"]["bundle_cache"] == str(
+        storage / "engines/perf"
+    )
+    assert perf_environment["storage"]["bundle_roots"] == []
+    assert perf_environment["storage"]["runtime_dirs"] == [str(runtime)]
