@@ -50,7 +50,7 @@ SOFTWARE.
 nlohmann/json
 -------------------------------------------------------------------------------
 
-This product compiles and redistributes nlohmann/json, version 3.11.3:
+This product includes compiled portions of nlohmann/json, version 3.11.3:
 
   https://github.com/nlohmann/json/tree/v3.11.3
 
