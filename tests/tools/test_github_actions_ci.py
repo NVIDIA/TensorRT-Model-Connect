@@ -887,9 +887,15 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     assert "TENSORRT_SDK_IMAGE" not in dockerfile
     assert "/opt/tensorrt/python" not in dockerfile
 
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "tensorrt==11.1.0.106; platform_machine == 'aarch64'" in pyproject
+    assert "tensorrt==11.1.0.106; platform_machine == 'x86_64'" in pyproject
+
     package = _ci_source("package.py")
     assert "_install_tensorrt_sdk" not in package
-    assert "Requires-Dist: tensorrt==11.1.0.106" in package
+    assert "_required_tensorrt_version(metadata)" in package
+    assert "_validate_backend_files" in package
+    assert "_validate_backend_identity" in package
 
 
 def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:

@@ -8,6 +8,7 @@ Boundary: package correctness and reuse state; source-only unit tests live elsew
 
 from __future__ import annotations
 
+import ctypes
 import datetime as dt
 import importlib.metadata
 import importlib.resources
@@ -25,6 +26,93 @@ from .process import CiError
 WHEEL_BUILD_STATE = "wheel-build.json"
 WHEEL_INSTALL_STATE = "wheel-installed.json"
 RELEASE_LEGAL_FILES = ("LICENSE", "NOTICE", "ASSET_LICENSES.md")
+
+
+def _required_tensorrt_version(metadata_text: str) -> str:
+    metadata = Parser().parsestr(metadata_text)
+    requirements = [
+        requirement
+        for requirement in metadata.get_all("Requires-Dist", [])
+        if re.match(r"^tensorrt(?:\s|[<>=!~@;\[])", requirement, re.IGNORECASE)
+    ]
+    versions = set()
+    for requirement in requirements:
+        match = re.fullmatch(
+            r"tensorrt\s*==\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)(?:\s*;.*)?",
+            requirement,
+            re.IGNORECASE,
+        )
+        if not match:
+            raise CiError(
+                "wheel must declare only exact TensorRT dependency pins; "
+                f"found {requirements}"
+            )
+        versions.add(match.group(1))
+    if not requirements or len(versions) != 1:
+        raise CiError(
+            f"wheel must declare one exact TensorRT dependency version; found {sorted(versions)}"
+        )
+    return versions.pop()
+
+
+def _tensorrt_abi(version: str) -> str:
+    major, minor, *_ = version.split(".")
+    return f"{major}_{minor}"
+
+
+def _validate_backend_files(
+    location: str,
+    tensorrt_version: str,
+    backends: dict[str, bytes],
+) -> None:
+    abi = _tensorrt_abi(tensorrt_version)
+    generic = "libtrtmc_backend_trt.so"
+    versioned = f"libtrtmc_backend_trt_{abi}.so"
+    expected = {generic, versioned}
+    if set(backends) != expected:
+        raise CiError(
+            f"{location}: expected TensorRT backend files {sorted(expected)} for "
+            f"TensorRT {tensorrt_version}, found {sorted(backends)}"
+        )
+    if backends[generic] != backends[versioned]:
+        raise CiError(f"{location}: generic and {abi} TensorRT backend DSOs differ")
+
+
+def _validate_backend_identity(
+    location: str,
+    tensorrt_version: str,
+    backend_abi: str,
+    runtime_version: str,
+) -> None:
+    expected_abi = _tensorrt_abi(tensorrt_version)
+    if backend_abi.replace(".", "_") != expected_abi:
+        raise CiError(
+            f"{location}: TensorRT backend reports ABI {backend_abi}; expected "
+            f"{expected_abi} from wheel dependency {tensorrt_version}"
+        )
+    if runtime_version != tensorrt_version:
+        raise CiError(
+            f"{location}: TensorRT backend reports runtime {runtime_version}; expected "
+            f"wheel dependency {tensorrt_version}"
+        )
+
+
+def _probe_backend_identity(path: Path) -> tuple[str, str]:
+    try:
+        library = ctypes.CDLL(str(path))
+        abi = library.trtmc_backend_abi
+        abi.argtypes = []
+        abi.restype = ctypes.c_char_p
+        runtime = library.trtmc_backend_runtime_version
+        runtime.argtypes = []
+        runtime.restype = ctypes.c_char_p
+        abi_value = abi()
+        runtime_value = runtime()
+        if not abi_value or not runtime_value:
+            raise CiError(f"{path}: TensorRT backend returned empty version metadata")
+        return abi_value.decode(), runtime_value.decode()
+    except (AttributeError, OSError, UnicodeError) as error:
+        raise CiError(f"{path}: could not read TensorRT backend identity: {error}") from error
 
 
 class InstalledWheelValidator:
@@ -55,6 +143,11 @@ class InstalledWheelValidator:
             importlib.resources.files("tensorrt_model_connect").joinpath("benchmark", "_catalog")
         )
         backends = sorted(native_dir.glob("libtrtmc_backend_trt*.so*"))
+        with zipfile.ZipFile(wheel) as archive:
+            metadata_name = next(
+                name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+            )
+            tensorrt_version = _required_tensorrt_version(archive.read(metadata_name).decode())
         if not native.is_file():
             raise CiError(f"packaged native trtmc executable is missing under {native_dir}")
         if not benchmark_worker.is_file():
@@ -74,8 +167,12 @@ class InstalledWheelValidator:
             )
             raise CiError(f"packaged benchmark catalog has unusable entries: {details}")
         benchmark_model = catalog.resolve("distilgpt2")
-        if not backends:
-            raise CiError(f"packaged TensorRT backend DSO is missing under {native_dir}")
+        backend_payloads = {backend.name: backend.read_bytes() for backend in backends}
+        _validate_backend_files(str(native_dir), tensorrt_version, backend_payloads)
+        backend_abi, runtime_version = _probe_backend_identity(
+            native_dir / "libtrtmc_backend_trt.so"
+        )
+        _validate_backend_identity(str(native_dir), tensorrt_version, backend_abi, runtime_version)
         print(f"installed_wheel={wheel}")
         print(f"imported_package={package_file}")
         print(f"installed_trtmc={script_path}")
@@ -174,7 +271,9 @@ class WheelArchiveValidator:
             package_cores = [name for name in names if "/bin/libtrtmc_core.so" in name]
             script_cores = [name for name in names if ".data/scripts/libtrtmc_core.so" in name]
             backends = [
-                name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
+                name
+                for name in names
+                if "/bin/libtrtmc_backend_trt" in name and name.endswith(".so")
             ]
             metadata_entries = sorted(
                 name for name in names if name.endswith(".dist-info/METADATA")
@@ -187,6 +286,11 @@ class WheelArchiveValidator:
             metadata_name = metadata_entries[0]
             metadata = archive.read(metadata_name).decode()
             self._validate_legal_payload(wheel, archive, names, metadata_name, metadata)
+            tensorrt_version = _required_tensorrt_version(metadata)
+            backend_payloads = {Path(name).name: archive.read(name) for name in backends}
+            if len(backend_payloads) != len(backends):
+                raise CiError(f"{wheel}: duplicate TensorRT backend filenames")
+            _validate_backend_files(str(wheel), tensorrt_version, backend_payloads)
             wheel_metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/WHEEL"))
             ).decode()
@@ -209,11 +313,6 @@ class WheelArchiveValidator:
             (
                 not any(name.endswith(".dist-info/entry_points.txt") for name in names),
                 "native trtmc must be installed directly, not via console_scripts",
-            ),
-            (bool(backends), "packaged native TensorRT backend DSO is missing"),
-            (
-                "Requires-Dist: tensorrt==11.1.0.106" in metadata,
-                "pinned official TensorRT 11.1.0.106 dependency metadata is missing",
             ),
             (
                 "Requires-Dist: apache-tvm-ffi==0.1.12" in metadata,
