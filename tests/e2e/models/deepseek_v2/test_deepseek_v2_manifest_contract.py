@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tensorrt_model_connect.python_profiles import default_execution_profiles
+
 
 @pytest.mark.parametrize(
     "manifest_name",
@@ -38,3 +40,17 @@ def test_deepseek_v2_l0_replacement_preserves_precision() -> None:
     assert lite["testcases"][0]["reference_precision"] == lite["precision"]
     assert tiny["testcases"][0]["reference_precision"] == tiny["precision"]
     assert tiny["task_eval"]["hf_experts_implementation"] == "batched_mm"
+
+
+def test_deepseek_v2_build_and_reference_share_versioned_tokenizer_profile() -> None:
+    profiles = default_execution_profiles(
+        family="deepseek_v2",
+        runtime_strategy="deepseek_v2_decoder_kv_cache",
+        reference_backend="hf_transformers",
+    )
+
+    assert profiles == {
+        "build": "deepseek_v2",
+        "runtime": "base",
+        "reference": "deepseek_v2",
+    }
