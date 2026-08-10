@@ -76,6 +76,53 @@ Normal execution prints a compact run header, task progress, errors, artifact
 paths, and a final Accuracy/Perf status summary. Add `--verbose` when full
 child, TRTMC, baseline, and reproduction commands are needed for debugging.
 
+### L4T Thor bare-metal preparation
+
+L4T uses the TensorRT 11 installation provided on that machine. Keep the source
+checkout, controller environment, native build, results, and all mutable caches
+on the filesystem backed by `/dev/nvme0n1p1`. The concrete mount path and
+TensorRT installation path are host inputs:
+
+```bash
+export TRTMC_CHECK_STORAGE_ROOT=/path/on/nvme0n1p1/trtmc-model-checks
+export TRTMC_CHECK_DATASET_ROOT=/path/to/datasets
+export TRTMC_SOURCE_REVISION=candidate-commit
+export TRTMC_L4T_BUILD_ROOT=$TRTMC_CHECK_STORAGE_ROOT/build/$TRTMC_SOURCE_REVISION
+export TRTMC_CHECK_RUNTIME_ROOT=$TRTMC_L4T_BUILD_ROOT
+export TRTMC_CHECK_PYTHON=$TRTMC_CHECK_STORAGE_ROOT/controller-venv/bin/python
+export TENSORRT_ROOT=/path/to/TensorRT-11.0
+
+cmake -S . -B "$TRTMC_L4T_BUILD_ROOT" -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DPython3_EXECUTABLE="$TRTMC_CHECK_PYTHON" \
+  -DTRTMC_SOURCE_REVISION="$TRTMC_SOURCE_REVISION" \
+  -DTRTMC_TRT_INCLUDE_DIR="$TENSORRT_ROOT/include" \
+  -DTRTMC_TRT_LIBRARY="$TENSORRT_ROOT/lib/libnvinfer.so" \
+  -DTRTMC_BUILD_BACKEND_RTX=OFF \
+  -DTRTMC_BUILD_BACKEND_TRT=ON \
+  -DTRTMC_BUILD_BENCHMARKS=ON \
+  -DTRTMC_BUILD_TESTS=OFF
+cmake --build "$TRTMC_L4T_BUILD_ROOT" --parallel 1
+
+export TRTMC_PERF_WORKER=$TRTMC_L4T_BUILD_ROOT/trtmc_benchmark_worker
+export TRTMC_PERF_BUNDLE_CACHE=$TRTMC_CHECK_STORAGE_ROOT/engines/perf
+export TRTMC_PERF_BUNDLE_ROOTS=:
+export TRTMC_PERF_RUNTIME_DIRS=$TRTMC_L4T_BUILD_ROOT
+
+python tools/model_checks.py check --platform l4t-thor --model distilgpt2
+python tools/model_checks.py run \
+  --platform l4t-thor \
+  --model distilgpt2 \
+  --run-id l4t-distilgpt2-smoke
+```
+
+The controller interpreter must already be able to import this repository's
+base orchestration dependencies and must use Python TensorRT bindings compatible
+with the selected TensorRT 11 C++ installation. Family-specific build,
+reference, and scoring environments are then created and verified on demand by
+the unified runner; they are not baked into a container image.
+
 The unified runner does not warm the complete selected HF model set before a
 task starts. Accuracy and Perf resolve each model on demand inside their native
 serial model/entry loops, so a missing snapshot is downloaded only when that
