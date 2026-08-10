@@ -259,12 +259,12 @@ Because those aggregate gates are sized for 30 samples per category, the
 validation engine rejects a reduced `--limit` before launching HF or TRTMC
 instead of reporting a statistically unsupported pass.
 
-PersonaPlex also runs `full_duplex_bench_speech_parity` as a separate
-five-sample regression benchmark. It contains the original `000000` and
+PersonaPlex uses `full_duplex_bench_behavior_parity` as its normal Accuracy
+workload. `full_duplex_bench_speech_parity` remains available as an explicit
+five-sample diagnostic benchmark. It contains the original `000000` and
 `000002` synthetic-interruption failures from issue #767 and provides
-per-sample token, waveform, and vanilla reproduction evidence. It complements
-the aggregate behavior suite; it does not replace the 150-sample behavioral
-gate.
+per-sample token, waveform, and vanilla reproduction evidence, but it is not
+selected by full-matrix model checks.
 
 LocateAnything grounding accuracy uses the public `lscpku/RefCOCO_rec`
 dataset pinned at revision
