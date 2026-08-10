@@ -14,7 +14,11 @@ const config = {
   organizationName,
   projectName: repositoryName,
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'warn'
+    }
+  },
   plugins: [require.resolve('./plugins/model-support-inventory')],
   presets: [
     [
