@@ -2339,19 +2339,15 @@ def _cleanup_managed_bundle(
         }
     cache_entry = bundle.parent
     evidence["cache_entry"] = str(cache_entry)
+    evidence["scope"] = "bundle_only"
     try:
-        shutil.rmtree(cache_entry)
+        bundle.unlink()
     except FileNotFoundError:
         evidence["status"] = "already_absent"
     except OSError as exc:
         evidence.update({"status": "failed", "error": str(exc)})
     else:
         evidence["status"] = "deleted"
-        model_cache = cache / relative.parts[0]
-        try:
-            model_cache.rmdir()
-        except OSError:
-            pass
     return evidence
 
 

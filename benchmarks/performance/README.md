@@ -175,9 +175,11 @@ The environment file owns machine-specific execution settings:
 - minimum free disk space.
 
 `storage.bundle_retention` accepts `retain`, `delete_on_pass`, or
-`delete_always`. Deletion is limited to the resolved cache entry below the
-configured managed `bundle_cache`; bundles found in external roots are
-preserved. `execution.hf_cache_mode` is `shared` or `per_entry`, and
+`delete_always`. Deletion is limited to the resolved bundle/engine file below
+the configured managed `bundle_cache`; sibling build evidence such as
+`build.stdout.log`, `build.stderr.log`, and `build-timing.json` is retained for
+diagnosis. Bundles found in external roots are preserved.
+`execution.hf_cache_mode` is `shared` or `per_entry`, and
 `execution.hf_cache_retention` uses the same retention values. A shared HF
 cache can only be retained. With `per_entry`, failed entry work is preserved by
 `delete_on_pass` for diagnosis. Shared-cache runs also preserve failed entry

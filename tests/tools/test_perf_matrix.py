@@ -449,9 +449,57 @@ def test_environment_rejects_deleting_a_shared_hf_cache(tmp_path: Path) -> None:
         perf_matrix._read_environment(environment_path)
 
 
-def test_perf_bundle_delete_on_pass_retains_failure_then_deletes_success(
+@pytest.mark.parametrize(
+    ("policy", "passed"),
+    (("delete_on_pass", True), ("delete_always", False)),
+)
+def test_perf_bundle_cleanup_deletes_only_engine_and_retains_build_artifacts(
     tmp_path: Path,
+    policy: str,
+    passed: bool,
 ) -> None:
+    cache = tmp_path / "bundles"
+    bundle = cache / "model-a" / "fingerprint" / "model-a.bundle"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text("engine", encoding="utf-8")
+    stdout_log = bundle.parent / "build.stdout.log"
+    stderr_log = bundle.parent / "build.stderr.log"
+    timing = bundle.parent / "build-timing.json"
+    stdout_log.write_text("stdout evidence", encoding="utf-8")
+    stderr_log.write_text("stderr evidence", encoding="utf-8")
+    timing.write_text('{"build_seconds": 1}', encoding="utf-8")
+    options = perf_matrix.RunOptions(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        hf_transformers_runner=tmp_path / "hf.py",
+        task_reference_runner=tmp_path / "task.py",
+        bundle_cache=cache,
+        bundle_roots=(),
+        runtime_dirs=(),
+        local_files_only=False,
+        minimum_free_space_gib=0,
+        minimum_gpu_free_fraction=0.0,
+        timeout_seconds=1,
+        bundle_retention=policy,
+    )
+
+    deleted = perf_matrix._cleanup_managed_bundle(
+        {"bundle_path": str(bundle)},
+        options,
+        passed=passed,
+    )
+    assert deleted["status"] == "deleted"
+    assert deleted["scope"] == "bundle_only"
+    assert not bundle.exists()
+    assert bundle.parent.is_dir()
+    assert stdout_log.read_text(encoding="utf-8") == "stdout evidence"
+    assert stderr_log.read_text(encoding="utf-8") == "stderr evidence"
+    assert timing.read_text(encoding="utf-8") == '{"build_seconds": 1}'
+
+
+def test_perf_bundle_delete_on_pass_retains_failure(tmp_path: Path) -> None:
     cache = tmp_path / "bundles"
     bundle = cache / "model-a" / "fingerprint" / "model-a.bundle"
     bundle.parent.mkdir(parents=True)
@@ -480,14 +528,6 @@ def test_perf_bundle_delete_on_pass_retains_failure_then_deletes_success(
     )
     assert retained["status"] == "retained"
     assert bundle.is_file()
-
-    deleted = perf_matrix._cleanup_managed_bundle(
-        {"bundle_path": str(bundle)},
-        options,
-        passed=True,
-    )
-    assert deleted["status"] == "deleted"
-    assert not bundle.parent.exists()
 
 
 def test_perf_per_entry_hf_cache_can_retain_failure_and_delete_success(
