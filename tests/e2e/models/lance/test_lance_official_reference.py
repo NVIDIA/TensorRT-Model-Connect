@@ -31,7 +31,13 @@ def test_lance_image_reference_checks_only_its_image_checkpoint(
         SimpleNamespace(snapshot_download=snapshot_download),
     )
 
-    assert lance_official._cached_model_root("bytedance-research/Lance") == tmp_path
+    assert (
+        lance_official._cached_model_root(
+            "bytedance-research/Lance",
+            local_files_only=True,
+        )
+        == tmp_path
+    )
     assert captured == {
         "model_id": "bytedance-research/Lance",
         "allow_patterns": [
@@ -81,6 +87,11 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
     captured: dict[str, list[str]] = {}
+    captured_local_files_only: list[bool] = []
+
+    def resolve_model(_model_id, *, local_files_only):
+        captured_local_files_only.append(local_files_only)
+        return model_root
 
     def run(command, **_kwargs):
         captured["command"] = command
@@ -96,7 +107,7 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
     monkeypatch.setattr(
         lance_official,
         "_cached_model_root",
-        lambda _model_id: model_root,
+        resolve_model,
     )
     monkeypatch.setattr(
         lance_official,
@@ -121,6 +132,7 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
         SimpleNamespace(
             artifacts_dir=str(artifact_dir),
             reference_python_path=lambda: sys.executable,
+            local_files_only=False,
         ),
     )
 
@@ -140,6 +152,7 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
     assert (workspace / "downloads").resolve() == model_root.resolve()
     preserved_result = artifact_dir / "official_output/official_reference_result.json"
     assert output.text == "reference answer"
+    assert captured_local_files_only == [False]
     assert output.data["result_path"] == str(preserved_result)
     assert preserved_result.is_file()
     assert not (artifact_dir / "official_output/result.json").exists()
