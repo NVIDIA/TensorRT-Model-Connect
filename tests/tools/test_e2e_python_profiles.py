@@ -229,6 +229,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
     expected = {
         "chronos",
         "deepseek_ocr",
+        "deepseek_v2",
         "elf_flow",
         "elf_flow_reference",
         "internlm",
