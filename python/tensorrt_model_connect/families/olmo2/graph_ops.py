@@ -288,6 +288,21 @@ def reshape_heads_4d_to_rows(
     return out.get_output(0)
 
 
+def add_2d_mask_to_4d(
+    network: trt.INetworkDefinition,
+    mask_2d: trt.ITensor,
+) -> trt.ITensor:
+    """Reshape additive attention mask [Sq, K] to [1, 1, Sq, K]."""
+    mask_shape = network.add_shape(mask_2d).get_output(0)
+    ones = add_constant(
+        network, (2,), np.array([1, 1], dtype=np.int64), dtype=np.int64)
+    target = network.add_concatenation([ones, mask_shape])
+    target.axis = 0
+    mask_4d = network.add_shuffle(mask_2d)
+    mask_4d.set_input(1, target.get_output(0))
+    return mask_4d.get_output(0)
+
+
 def add_apply_rope_native(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

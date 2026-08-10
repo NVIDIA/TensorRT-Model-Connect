@@ -105,3 +105,37 @@ class TestOlmo2BuildEngine:
 
         assert isinstance(engine, bytes)
         assert len(engine) > 0
+
+    def test_split_prefill_engine_has_dynamic_prompt_profile(self, tmp_path):
+        import tensorrt as trt
+
+        from tensorrt_model_connect.families.olmo2 import plugin
+
+        config = {
+            "model_type": "olmo2",
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": self.LAYERS,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+            "intermediate_size": self.MLP,
+        }
+        tensors = self._make_tensors(
+            self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.KV_HEADS, self.MLP)
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+        cfg.raw["_decoder_engine_role"] = "prefill"
+        weights = plugin.load_weights(str(tmp_path), cfg)
+        plan = plugin.build_engine(
+            cfg, weights, max_cache_length=32, precision="fp32", verbose=False)
+
+        runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+        engine = runtime.deserialize_cuda_engine(plan)
+
+        assert engine is not None
+        assert engine.num_optimization_profiles == 1
+        assert engine.get_tensor_shape("token_id") == (-1,)
+        assert engine.get_tensor_profile_shape("token_id", 0) == [
+            (1,), (32,), (32,)]

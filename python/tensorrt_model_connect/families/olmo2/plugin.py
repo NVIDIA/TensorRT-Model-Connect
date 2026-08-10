@@ -49,6 +49,7 @@ class Olmo2Plugin:
 
     runtime_strategy = "olmo2_decoder_kv_cache"
     runtime_capabilities = {"decoder_kv"}
+    supports_split_decoder_roles = True
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
@@ -162,6 +163,16 @@ class Olmo2Plugin:
                 config, weights, max_cache_length,
                 verbose=verbose,
                 parallel_config=parallel)
+
+        if config.raw.get("_decoder_engine_role") == "prefill":
+            from .prefill_builder import build_olmo2_prefill_engine
+            return build_olmo2_prefill_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                verbose=verbose,
+            )
 
         import sys
         from tensorrt_model_connect import trt_compat

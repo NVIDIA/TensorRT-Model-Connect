@@ -30,6 +30,9 @@ class _Config:
     rope_theta = 10000.0
     rms_norm_eps = 1e-6
 
+    def __init__(self) -> None:
+        self.raw = {}
+
 
 def _weights() -> WeightDict:
     hidden = _Config.hidden_size
@@ -130,3 +133,41 @@ def test_olmo2_plugin_routes_parallel_builds(monkeypatch) -> None:
     assert calls["require"] == (parallel, "OLMo2 tensor-parallel builds")
     assert calls["build"]["max_cache_length"] == 256
     assert calls["build"]["kwargs"]["parallel_config"] == parallel
+
+
+def test_olmo2_plugin_routes_split_prefill_builds(monkeypatch) -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.olmo2.plugin")
+    prefill_builder = importlib.import_module(
+        "tensorrt_model_connect.families.olmo2.prefill_builder")
+
+    calls = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = {
+            "config": config,
+            "weights": weights,
+            "max_cache_length": max_cache_length,
+            "kwargs": kwargs,
+        }
+        return b"olmo2-prefill-plan"
+
+    monkeypatch.setattr(
+        prefill_builder, "build_olmo2_prefill_engine", fake_build)
+
+    config = _Config()
+    config.raw["_decoder_engine_role"] = "prefill"
+    result = plugin_module.plugin.build_engine(
+        config,
+        _weights(),
+        max_cache_length=352,
+        precision="fp32",
+    )
+
+    assert plugin_module.plugin.supports_split_decoder_roles is True
+    assert result == b"olmo2-prefill-plan"
+    assert calls["build"]["max_cache_length"] == 352
+    assert calls["build"]["kwargs"] == {
+        "precision": "fp32",
+        "verbose": False,
+    }
