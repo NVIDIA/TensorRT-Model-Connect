@@ -13,9 +13,11 @@ system_site_packages = true
 verification_script = """
 from importlib.metadata import version
 import transformers
-assert transformers.__version__ == "5.5.0", transformers.__version__
+assert version("huggingface-hub") == "1.5.0"
 assert version("rouge-score") == "0.1.2"
 assert version("sacrebleu") == "2.5.1"
+assert version("tokenizers") == "0.22.2"
+assert transformers.__version__ == "5.5.4", transformers.__version__
 """
 
 [reference_backend_defaults.golden_snapshot]

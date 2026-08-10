@@ -18,7 +18,7 @@ dependencies = [
     "ml_dtypes>=0.4",
     "onnx>=1.16",
     "onnxscript>=0.2",
-    "transformers>=5.5.0",
+    "transformers>=5.5.4",
     "huggingface_hub>=0.23",
     "sentencepiece>=0.1.99",
     "tensorrt==11.1.0.106; platform_machine == 'aarch64'",

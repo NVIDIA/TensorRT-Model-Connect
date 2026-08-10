@@ -10,10 +10,13 @@ import transformers
 from mamba_ssm.ops.triton.layernorm_gated import rmsnorm_fn  # noqa: F401
 
 
-assert transformers.__version__ == "5.5.0"
+assert version("huggingface-hub") == "1.5.0"
+assert version("tokenizers") == "0.22.2"
+assert transformers.__version__ == "5.5.4"
 assert version("causal-conv1d") == "1.6.2.post1"
 assert version("mamba-ssm") == "2.3.2.post1"
 print(
     f"transformers={transformers.__version__} "
     f"causal-conv1d={version('causal-conv1d')} "
-    f"mamba-ssm={version('mamba-ssm')}")
+    f"mamba-ssm={version('mamba-ssm')}"
+)

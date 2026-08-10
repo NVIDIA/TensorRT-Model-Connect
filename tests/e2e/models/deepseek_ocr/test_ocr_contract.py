@@ -5,9 +5,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
-
 from tests.e2e.models.deepseek_ocr.e2e_plugins.contract import DeepseekOcrVLQAPlugin
 from tests.e2e_harness.contracts import (
     E2ECase,
@@ -16,50 +13,6 @@ from tests.e2e_harness.contracts import (
     StageStatus,
     ThresholdProfile,
 )
-
-
-def test_secure_transformers_preserves_deepseek_eager_attention_contract() -> None:
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            """
-from types import SimpleNamespace
-import torch
-from tests.e2e.models.deepseek_ocr import hf_reference
-
-hf_reference._install_transformers_5_legacy_model_compat()
-from transformers.models.llama.modeling_llama import LlamaAttention
-config = SimpleNamespace(
-    hidden_size=16,
-    num_attention_heads=2,
-    num_key_value_heads=2,
-    max_position_embeddings=32,
-    attention_dropout=0.0,
-    attention_bias=False,
-    rope_scaling=None,
-    rope_theta=10000.0,
-)
-attention = LlamaAttention(config=config, layer_idx=0)
-hidden = torch.randn(1, 3, 16)
-mask = torch.zeros(1, 1, 3, 3)
-position_ids = torch.arange(3).unsqueeze(0)
-output, weights, cache = attention(
-    hidden,
-    attention_mask=mask,
-    position_ids=position_ids,
-    output_attentions=True,
-)
-assert output.shape == (1, 3, 16)
-assert weights.shape == (1, 2, 3, 3)
-assert cache is None
-""",
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
 
 
 def _case(

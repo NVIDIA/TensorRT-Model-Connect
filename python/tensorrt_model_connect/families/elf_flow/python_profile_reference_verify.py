@@ -3,11 +3,11 @@
 
 """Verify the official PyTorch ELF reference environment."""
 
-import huggingface_hub
-import tokenizers
+from importlib.metadata import version
+
 import transformers
 
 
-assert transformers.__version__ == "5.5.0"
-assert tokenizers.__version__ == "0.22.2"
-assert huggingface_hub.__version__ == "1.26.0"
+assert version("huggingface-hub") == "1.5.0"
+assert version("tokenizers") == "0.22.2"
+assert transformers.__version__ == "5.5.4"

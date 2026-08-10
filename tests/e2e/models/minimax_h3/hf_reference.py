@@ -31,13 +31,13 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
 
 DIFFUSERS_REVISION = "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc"
 TRANSFORMERS_COMPAT_REVISION = "bed02e1faee69e866e382f835b4f7b0a3c7b8431"
-BASE_TRANSFORMERS_VERSION = "5.5.0"
+BASE_TRANSFORMERS_VERSION = "5.5.4"
 BASE_TRANSFORMERS_ENTRYPOINT = Path(
     "/opt/venv/lib/python3.12/site-packages/transformers/__init__.py"
 )
 BASE_TRANSFORMERS_ENTRYPOINT_RECORD = {
     "bytes": 40505,
-    "sha256": "460fadeb41958b1b47d7df8769b5f0ca3f46554ab733f52cf03a2b92d55d899a",
+    "sha256": "9efd2360b4a0b2e1165dceebc90a5c899a1360bf719157bb27512cae4e929ccd",
 }
 EXPECTED_NUM_FRAMES = 124
 

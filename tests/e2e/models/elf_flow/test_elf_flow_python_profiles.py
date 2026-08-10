@@ -35,9 +35,9 @@ def test_elf_reference_profile_pins_inference_only_dependencies() -> None:
     }
 
     assert requirements == {
-        "huggingface-hub==1.26.0",
+        "huggingface-hub==1.5.0",
         "tokenizers==0.22.2",
-        "transformers==5.5.0",
+        "transformers==5.5.4",
     }
     assert default_execution_profiles(family="elf_flow") == {
         "build": "elf_flow",

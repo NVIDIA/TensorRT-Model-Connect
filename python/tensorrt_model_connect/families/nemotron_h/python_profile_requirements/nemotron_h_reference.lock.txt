@@ -1,6 +1,6 @@
 apache-tvm-ffi==0.1.9
 causal-conv1d==1.6.2.post1
-huggingface-hub==1.26.0
+huggingface-hub==1.5.0
 mamba-ssm==2.3.2.post1
 nvidia-cutlass-dsl==4.6.0.dev0
 nvidia-cutlass-dsl-libs-base==4.6.0.dev0
@@ -9,5 +9,5 @@ quack-kernels==0.5.3
 tilelang==0.1.8
 tokenizers==0.22.2
 torch-c-dlpack-ext==0.1.5
-transformers==5.5.0
+transformers==5.5.4
 z3-solver==4.15.4.0

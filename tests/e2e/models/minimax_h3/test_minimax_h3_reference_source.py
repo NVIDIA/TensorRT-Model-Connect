@@ -334,17 +334,17 @@ def test_transformers_base_qualification_is_exact_and_honest(
 ) -> None:
     entrypoint = tmp_path / "immutable" / "transformers" / "__init__.py"
     entrypoint.parent.mkdir(parents=True)
-    entrypoint.write_text('__version__ = "5.5.0"\n', encoding="utf-8")
+    entrypoint.write_text('__version__ = "5.5.4"\n', encoding="utf-8")
     monkeypatch.setattr(hf_reference, "BASE_TRANSFORMERS_ENTRYPOINT", entrypoint)
     monkeypatch.setattr(
         hf_reference, "BASE_TRANSFORMERS_ENTRYPOINT_RECORD", file_record(entrypoint)
     )
 
-    record = hf_reference.qualified_transformers_source(entrypoint, "5.5.0")
+    record = hf_reference.qualified_transformers_source(entrypoint, "5.5.4")
 
     assert record == {
         "qualification": "immutable_base_5_5",
-        "version": "5.5.0",
+        "version": "5.5.4",
         "entrypoint": str(entrypoint),
         "entrypoint_record": file_record(entrypoint),
     }
@@ -354,7 +354,7 @@ def test_transformers_base_qualification_is_exact_and_honest(
 
     entrypoint.write_text('__version__ = "5.2.x"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="entrypoint mismatch"):
-        hf_reference.qualified_transformers_source(entrypoint, "5.5.0")
+        hf_reference.qualified_transformers_source(entrypoint, "5.5.4")
 
 
 def test_secure_base_uses_transformers_processor_helper() -> None:

@@ -1,8 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from importlib.metadata import version
+
 import chronos
 import transformers
+
+assert version("chronos-forecasting") == "2.3.1"
+assert version("huggingface-hub") == "1.5.0"
+assert version("tokenizers") == "0.22.2"
+assert transformers.__version__ == "5.5.4"
 
 config = transformers.T5Config(
     d_model=16,
@@ -25,8 +32,4 @@ config.chronos_config = {
     "use_reg_token": True,
 }
 chronos.chronos_bolt.ChronosBoltModelForForecasting(config).eval()
-print(
-    f"chronos={chronos.__version__} "
-    f"transformers={transformers.__version__} "
-    "chronos_bolt_ctor=ok"
-)
+print(f"chronos={chronos.__version__} transformers={transformers.__version__} chronos_bolt_ctor=ok")

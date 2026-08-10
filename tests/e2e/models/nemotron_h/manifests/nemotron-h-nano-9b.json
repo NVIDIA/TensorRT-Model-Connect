@@ -1,6 +1,7 @@
 {
   "name": "nemotron-h-nano-9b",
   "hf_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+  "hf_revision": "6533e8de2c68e4536bf7c411d7a3ce5734111476",
   "bundle": "nemotron-h-nano-9b.bundle",
   "family": "nemotron_h",
   "runtime_strategy": "nemotron_h_hybrid_mamba_attention",
@@ -24,7 +25,7 @@
           "enable_thinking": false
         }
       },
-      "notes": "The reference runs the checkpoint's documented original PyTorch implementation in BF16 with Transformers 5.5.0, causal-conv1d 1.6.2.post1, and mamba-ssm 2.3.2.post1. TensorRT projections, transformer layers, final normalization, and LM head run in FP16 with FP32 GEMM accumulation. Mamba softplus and recurrent state accumulation remain FP32 to avoid checkpoint-scale overflow. The family-owned grouped RMSNorm fallback is used only when the official kernels are unavailable."
+      "notes": "The reference runs the checkpoint's documented original PyTorch implementation in BF16 with Transformers 5.5.4, causal-conv1d 1.6.2.post1, and mamba-ssm 2.3.2.post1. TensorRT projections, transformer layers, final normalization, and LM head run in FP16 with FP32 GEMM accumulation. Mamba softplus and recurrent state accumulation remain FP32 to avoid checkpoint-scale overflow. The family-owned grouped RMSNorm fallback is used only when the official kernels are unavailable."
     }
   ]
 }

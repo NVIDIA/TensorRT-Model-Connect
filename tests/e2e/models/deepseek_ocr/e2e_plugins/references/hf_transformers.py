@@ -21,9 +21,7 @@ class DeepSeekOcrHfReference:
     def backend_name(self) -> str:
         return "hf_transformers"
 
-    def run_stage(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
+    def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
         if stage.name != "full_generation":
             return StageOutput(
                 stage_name=stage.name,
@@ -35,24 +33,29 @@ class DeepSeekOcrHfReference:
         cmd = [
             ctx.reference_python_path() or "python3",
             str(script),
-            "--model", case.hf_id,
-            "--image", str(case.inputs.get("image", "")),
-            "--prompt", str(case.inputs.get("prompt", "")),
+            "--model",
+            case.hf_id,
+            "--revision",
+            case.hf_revision,
+            "--image",
+            str(case.inputs.get("image", "")),
+            "--prompt",
+            str(case.inputs.get("prompt", "")),
         ]
         env = dict(os.environ)
         if ctx.ld_library_path:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
 
         started = time.monotonic()
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, timeout=1800)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=1800)
         elapsed = time.monotonic() - started
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "", "hf_transformers", case.name)
+                result.stderr, ctx.artifacts_dir or "", "hf_transformers", case.name
+            )
             message = (
-                f"DeepSeek-OCR Hugging Face reference failed "
-                f"(rc={result.returncode}): {truncated}")
+                f"DeepSeek-OCR Hugging Face reference failed (rc={result.returncode}): {truncated}"
+            )
             if log_path:
                 message += f" (full stderr: {log_path})"
             raise RuntimeError(message)
