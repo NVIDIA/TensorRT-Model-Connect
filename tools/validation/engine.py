@@ -2955,6 +2955,52 @@ def max_prompt_token_length(
     return max_len
 
 
+def native_reference_input_token_ids(
+    work_dir: Path,
+) -> dict[str, list[int]] | None:
+    """Load input IDs emitted by the model's exact native-reference profile."""
+
+    predictions_path = work_dir / "hf_predictions.json"
+    if not predictions_path.is_file():
+        return None
+    payload = json.loads(predictions_path.read_text(encoding="utf-8"))
+    responses = payload.get("responses", []) if isinstance(payload, dict) else []
+    if not isinstance(responses, list):
+        raise ValueError(f"{predictions_path} responses must be a list")
+    if not any(
+        isinstance(response, dict) and "input_token_ids" in response
+        for response in responses
+    ):
+        return None
+
+    result: dict[str, list[int]] = {}
+    for index, response in enumerate(responses):
+        if not isinstance(response, dict):
+            raise ValueError(f"{predictions_path} response {index} must be an object")
+        sample_id = str(response.get("sample_id", "") or "")
+        if not sample_id:
+            raise ValueError(f"{predictions_path} response {index} has no sample_id")
+        raw_token_ids = response.get("input_token_ids")
+        if not isinstance(raw_token_ids, list) or not all(
+            isinstance(token_id, int) and not isinstance(token_id, bool)
+            for token_id in raw_token_ids
+        ):
+            raise ValueError(
+                f"{predictions_path} response {sample_id} has invalid input_token_ids"
+            )
+        if sample_id in result:
+            raise ValueError(f"{predictions_path} has duplicate sample_id {sample_id}")
+        result[sample_id] = [int(token_id) for token_id in raw_token_ids]
+    return result
+
+
+def max_native_reference_input_token_length(work_dir: Path) -> int | None:
+    token_ids = native_reference_input_token_ids(work_dir)
+    if token_ids is None:
+        return None
+    return max((len(ids) for ids in token_ids.values()), default=0)
+
+
 def validate_prompt_lengths_for_cache(
     *,
     model: dict[str, Any],
@@ -8973,26 +9019,68 @@ def requested_build_max_cache_length(
     return max(model_cache, suite_cache, prompt_cache)
 
 
+def uses_split_decoder_cache_layout(
+    model: Mapping[str, Any],
+    validation_config: Mapping[str, Any],
+) -> bool:
+    mode = str(
+        validation_config.get("build_generation_headroom_mode", "auto") or "auto"
+    )
+    if mode == "prefill_first_token":
+        return True
+    if mode == "full":
+        return False
+    if mode != "auto":
+        raise ValueError(
+            "build_generation_headroom_mode must be auto, full, or "
+            f"prefill_first_token; got {mode!r}"
+        )
+
+    build_args = model.get("build_args", {})
+    if not isinstance(build_args, dict):
+        build_args = {}
+    if str(build_args.get("decoder_engine_layout", "") or "") == "dual_profile":
+        return False
+    tp_size = _manifest_tensor_parallel_size(build_args)
+    if tp_size is not None and tp_size > 1:
+        return False
+    if model.get("fp32_layers"):
+        return False
+
+    from tensorrt_model_connect.families import family_has_capability
+
+    return family_has_capability(
+        str(model.get("family", "") or ""),
+        "split_decoder_roles",
+    )
+
+
 def generation_cache_headroom(
     *,
     scorer: str,
     validation_config: dict[str, Any],
     generation: dict[str, Any],
     max_new_tokens: int | None,
+    model: Mapping[str, Any],
 ) -> int:
-    # A prompt that exactly fills the measured cache still needs room for the
-    # first generated token. Reserve the declared generation budget unless a
-    # non-continuation workload explicitly proves that it does not generate.
+    # Reserve the declared generation budget unless a non-continuation
+    # workload explicitly proves that it does not generate. Split decoder
+    # layouts can exclude the first token below because prefill produces it.
     reserve_headroom = scorer == "continuation" or bool(
         validation_config.get("build_generation_headroom", True)
     )
     if not reserve_headroom:
         return 0
-    return int(
+    generated_tokens = int(
         max_new_tokens
         if max_new_tokens is not None
         else generation.get("max_new_tokens", 0)
     )
+    if uses_split_decoder_cache_layout(model, validation_config):
+        # A split prefill engine computes the first generated token. Only the
+        # remaining tokens are subsequently fed into the decode KV cache.
+        return max(generated_tokens - 1, 0)
+    return max(generated_tokens, 0)
 
 
 def bundle_inspection(
@@ -9638,27 +9726,12 @@ def _effective_bundle_tokenizer_payload(
     return json.dumps(tokenizer, separators=(",", ":")).encode("utf-8")
 
 
-def _load_text_input_contract(
+def _load_bundle_text_input_contract(
     *,
-    model: Mapping[str, Any],
     bundle_path: Path,
-    local_files_only: bool,
-    trust_remote_code: bool,
-) -> tuple[Any, Any, dict[str, Any]]:
+) -> tuple[Any, dict[str, Any]]:
     from tokenizers import Tokenizer
-    from transformers import AutoTokenizer
 
-    tokenizer_kwargs = {
-        "local_files_only": local_files_only,
-        "trust_remote_code": trust_remote_code,
-    }
-    revision = str(model.get("hf_revision", "") or "")
-    if revision:
-        tokenizer_kwargs["revision"] = revision
-    hf_tokenizer = AutoTokenizer.from_pretrained(
-        str(model["hf_id"]),
-        **tokenizer_kwargs,
-    )
     tokenizer_payload = _read_bundle_section(bundle_path, "tokenizer.json")
     tokenizer_config = _read_optional_bundle_json_object(
         bundle_path,
@@ -9675,6 +9748,32 @@ def _load_text_input_contract(
     )
     if not isinstance(bundle_config, dict):
         raise ValueError(f"{bundle_path} config.json must contain an object")
+    return bundle_tokenizer, bundle_config
+
+
+def _load_text_input_contract(
+    *,
+    model: Mapping[str, Any],
+    bundle_path: Path,
+    local_files_only: bool,
+    trust_remote_code: bool,
+) -> tuple[Any, Any, dict[str, Any]]:
+    from transformers import AutoTokenizer
+
+    tokenizer_kwargs = {
+        "local_files_only": local_files_only,
+        "trust_remote_code": trust_remote_code,
+    }
+    revision = str(model.get("hf_revision", "") or "")
+    if revision:
+        tokenizer_kwargs["revision"] = revision
+    hf_tokenizer = AutoTokenizer.from_pretrained(
+        str(model["hf_id"]),
+        **tokenizer_kwargs,
+    )
+    bundle_tokenizer, bundle_config = _load_bundle_text_input_contract(
+        bundle_path=bundle_path,
+    )
     return hf_tokenizer, bundle_tokenizer, bundle_config
 
 
@@ -9705,12 +9804,19 @@ def validate_text_input_token_contract(
 ) -> None:
     """Fail before inference when HF and the bundle would consume different IDs."""
 
-    hf_tokenizer, bundle_tokenizer, bundle_config = _load_text_input_contract(
-        model=model,
-        bundle_path=bundle_path,
-        local_files_only=local_files_only,
-        trust_remote_code=trust_remote_code,
-    )
+    reference_token_ids = native_reference_input_token_ids(work_dir)
+    if reference_token_ids is None:
+        hf_tokenizer, bundle_tokenizer, bundle_config = _load_text_input_contract(
+            model=model,
+            bundle_path=bundle_path,
+            local_files_only=local_files_only,
+            trust_remote_code=trust_remote_code,
+        )
+    else:
+        hf_tokenizer = None
+        bundle_tokenizer, bundle_config = _load_bundle_text_input_contract(
+            bundle_path=bundle_path,
+        )
     has_exact_frame = (
         "tokenizer_special_prefix_ids" in bundle_config
         or "tokenizer_special_suffix_ids" in bundle_config
@@ -9732,7 +9838,17 @@ def validate_text_input_token_contract(
     for index, row in enumerate(load_jsonl(work_dir / "prompts.jsonl")):
         sample_id = str(row.get("sample_id", f"sample-{index}"))
         prompt = str(row.get("prompt", ""))
-        hf_ids = [int(token_id) for token_id in hf_tokenizer(prompt).input_ids]
+        if reference_token_ids is None:
+            hf_ids = [int(token_id) for token_id in hf_tokenizer(prompt).input_ids]
+        else:
+            try:
+                hf_ids = reference_token_ids[sample_id]
+            except KeyError as exc:
+                raise ValueError(
+                    "Native reference input-token contract is incomplete: "
+                    f"sample_id={sample_id} is missing from "
+                    f"{work_dir / 'hf_predictions.json'}"
+                ) from exc
         bundle_encoding = bundle_tokenizer.encode(
             prompt,
             add_special_tokens=False if has_exact_frame else bundle_add_special_tokens,
@@ -11133,19 +11249,25 @@ def eval_one_model(
         and not _is_model_plugin_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
-        max_prompt_len = max_prompt_token_length(
-            model_id=str(model["hf_id"]),
-            model_revision=str(model.get("hf_revision", "") or ""),
-            prompts_path=prompt_rows_path,
-            local_files_only=args.local_files_only,
-            trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
-        )
+        max_prompt_len = max_native_reference_input_token_length(work_dir)
+        if max_prompt_len is None:
+            max_prompt_len = max_prompt_token_length(
+                model_id=str(model["hf_id"]),
+                model_revision=str(model.get("hf_revision", "") or ""),
+                prompts_path=prompt_rows_path,
+                local_files_only=args.local_files_only,
+                trust_remote_code=(
+                    args.trust_remote_code
+                    or bool(model.get("trust_remote_code", False))
+                ),
+            )
     generation = generation_defaults(work_dir)
     generation_headroom = generation_cache_headroom(
         scorer=scorer,
         validation_config=validation_config,
         generation=generation,
         max_new_tokens=args.max_new_tokens,
+        model=model,
     )
     required_prompt_cache = (
         int(max_prompt_len or 0) + generation_headroom if max_prompt_len is not None else None
@@ -11184,7 +11306,7 @@ def eval_one_model(
     )
 
     if (
-        scorer == "continuation"
+        scorer in {"continuation", "mcq"}
         and dataset_kind in {"mmlu_five_shot_json", "text_generation_json"}
         and not args.apply_chat_template
         and not bool(generation.get("apply_chat_template", False))
