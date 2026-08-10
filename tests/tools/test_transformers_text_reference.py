@@ -86,3 +86,10 @@ def test_generated_token_max_score_ids_preserve_exact_ties() -> None:
     )
 
     assert candidates == [[1, 2], [0, 2]]
+
+
+def test_input_token_ids_preserve_native_tokenizer_framing() -> None:
+    torch = pytest.importorskip("torch")
+    module = _load_reference_module()
+
+    assert module._input_token_ids(torch.tensor([[2, 10, 11]])) == [2, 10, 11]

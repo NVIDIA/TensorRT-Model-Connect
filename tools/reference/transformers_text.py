@@ -328,6 +328,12 @@ def _generated_token_max_score_ids(scores: Sequence[Any]) -> list[list[int]]:
     return candidates
 
 
+def _input_token_ids(input_ids: Any) -> list[int]:
+    """Preserve the exact IDs produced by the model-specific tokenizer."""
+
+    return [int(token_id) for token_id in input_ids[0].tolist()]
+
+
 def _generate_sample(
     *,
     torch_module: Any,
@@ -339,7 +345,7 @@ def _generate_sample(
     prompt_row: Mapping[str, Any],
     source_index: int,
     settings: Mapping[str, Any],
-) -> tuple[str, Any, float, list[list[int]]]:
+) -> tuple[str, Any, float, list[list[int]], list[int]]:
     prompt = str(prompt_row.get("prompt") or _request_prompt(request))
     if settings["apply_chat_template"]:
         prompt = tokenizer.apply_chat_template(
@@ -348,6 +354,7 @@ def _generate_sample(
             add_generation_prompt=True,
         )
     encoded = tokenizer(prompt, return_tensors="pt")
+    input_token_ids = _input_token_ids(encoded["input_ids"])
     encoded = {name: value.to(device) for name, value in encoded.items()}
     _seed_runtime(torch_module, int(settings["seed"]), source_index)
     generation_overrides = dict(settings["generation_overrides"])
@@ -379,6 +386,7 @@ def _generate_sample(
         generated,
         wall_ms,
         _generated_token_max_score_ids(generation.scores),
+        input_token_ids,
     )
 
 
@@ -407,16 +415,18 @@ def run(arguments: argparse.Namespace) -> None:
             request = requests[source_index]
             if not isinstance(request, dict):
                 raise ValueError(f"request {source_index} must be a JSON object")
-            output_text, generated, wall_ms, max_score_ids = _generate_sample(
-                torch_module=torch,
-                tokenizer=tokenizer,
-                model=model,
-                device=device,
-                is_encoder_decoder=is_encoder_decoder,
-                request=request,
-                prompt_row=prompt_row,
-                source_index=source_index,
-                settings=settings,
+            output_text, generated, wall_ms, max_score_ids, input_token_ids = (
+                _generate_sample(
+                    torch_module=torch,
+                    tokenizer=tokenizer,
+                    model=model,
+                    device=device,
+                    is_encoder_decoder=is_encoder_decoder,
+                    request=request,
+                    prompt_row=prompt_row,
+                    source_index=source_index,
+                    settings=settings,
+                )
             )
             row = {
                 "sample_id": prompt_row.get("sample_id", f"sample_{source_index:06d}"),
@@ -426,6 +436,7 @@ def run(arguments: argparse.Namespace) -> None:
                     int(token_id) for token_id in generated.tolist()
                 ],
                 "generated_token_max_score_ids": max_score_ids,
+                "input_token_ids": input_token_ids,
                 "wall_ms": wall_ms,
                 "source": "hf",
             }

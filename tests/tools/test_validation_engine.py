@@ -660,6 +660,23 @@ def test_default_suites_include_text_generation_gap_models() -> None:
         )
 
 
+def test_phi_moe_mmlu_uses_model_specific_agreement_gate() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "mmlu_five_shot_mcq"
+    )
+    models = {
+        model["name"]: model for model in validation_engine.load_manifest_records()
+    }
+
+    phi = validation_engine.resolve_suite_for_model(suite, models["phi-moe"])
+    internlm = validation_engine.resolve_suite_for_model(
+        suite, models["internlm2-1.8b"]
+    )
+
+    assert phi["gates"]["min_prediction_agreement"] == 0.95
+    assert internlm["gates"]["min_prediction_agreement"] == 0.98
+
+
 def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     suites = validation_engine.load_suites()
     suite = validation_engine.suite_by_id(suites, "dpg_bench_diffusion_image")
@@ -4744,8 +4761,9 @@ def test_continuation_reserves_generation_cache_headroom() -> None:
             validation_config={},
             generation={"max_new_tokens": 64},
             max_new_tokens=None,
+            model={"family": "gpt2"},
         )
-        == 64
+        == 63
     )
     assert (
         validation_engine.generation_cache_headroom(
@@ -4753,8 +4771,9 @@ def test_continuation_reserves_generation_cache_headroom() -> None:
             validation_config={},
             generation={"max_new_tokens": 64},
             max_new_tokens=8,
+            model={"family": "gpt2"},
         )
-        == 8
+        == 7
     )
 
 
@@ -4767,6 +4786,7 @@ def test_non_continuation_reserves_generation_headroom_by_default() -> None:
             validation_config={},
             generation=generation,
             max_new_tokens=None,
+            model={"family": "phi_moe"},
         )
         == 8
     )
@@ -4776,6 +4796,7 @@ def test_non_continuation_reserves_generation_headroom_by_default() -> None:
             validation_config={"build_generation_headroom": False},
             generation=generation,
             max_new_tokens=None,
+            model={"family": "phi_moe"},
         )
         == 0
     )
@@ -4799,8 +4820,52 @@ def test_nemotron_nano_mcq_reserves_generation_cache_headroom() -> None:
             ),
             generation=suite["generation"],
             max_new_tokens=None,
+            model=model,
         )
-        == 1
+        == 0
+    )
+
+
+def test_generation_cache_headroom_layout_override() -> None:
+    assert (
+        validation_engine.generation_cache_headroom(
+            scorer="continuation",
+            validation_config={"build_generation_headroom_mode": "full"},
+            generation={"max_new_tokens": 8},
+            max_new_tokens=None,
+            model={"family": "gpt2"},
+        )
+        == 8
+    )
+    assert (
+        validation_engine.generation_cache_headroom(
+            scorer="continuation",
+            validation_config={
+                "build_generation_headroom_mode": "prefill_first_token"
+            },
+            generation={"max_new_tokens": 8},
+            max_new_tokens=None,
+            model={"family": "phi_moe"},
+        )
+        == 7
+    )
+
+
+def test_tensor_parallel_build_keeps_full_generation_headroom() -> None:
+    assert (
+        validation_engine.generation_cache_headroom(
+            scorer="continuation",
+            validation_config={},
+            generation={"max_new_tokens": 8},
+            max_new_tokens=None,
+            model={
+                "family": "gpt2",
+                "build_args": {
+                    "parallel": {"mode": "tensor_parallel", "tp_size": 4}
+                },
+            },
+        )
+        == 8
     )
 
 
@@ -4818,6 +4883,7 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
     model = {
         "name": "decoder-small",
         "hf_id": "example-org/decoder-small",
+        "family": "gpt2",
         "hf_revision": "0123456789abcdef",
         "bundle": "decoder-small.bundle",
         "max_cache_length": 256,
@@ -4831,11 +4897,13 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
             "sample_id": "mmlu_000000",
             "output_text": " A",
             "generated_token_ids": [1],
+            "input_token_ids": list(range(381)),
         },
         {
             "sample_id": "mmlu_000001",
             "output_text": " B",
             "generated_token_ids": [2],
+            "input_token_ids": list(range(381)),
         },
     ]
 
@@ -4845,7 +4913,7 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
 
     def fake_ensure_bundle(*_args, **kwargs):
         assert _args[0]["precision"] == "fp32"
-        assert kwargs["max_cache_length"] == 445
+        assert kwargs["max_cache_length"] == 444
         bundle = kwargs["bundle_path"]
         bundle.parent.mkdir(parents=True, exist_ok=True)
         bundle.write_bytes(b"bundle")
@@ -4856,14 +4924,10 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
             Path(args.work_dir) / "bundle_predictions.json", responses
         )
 
-    def fake_max_prompt_token_length(**kwargs):
-        assert kwargs["model_revision"] == "0123456789abcdef"
-        return 381
-
     monkeypatch.setattr(
         validation_engine,
         "max_prompt_token_length",
-        fake_max_prompt_token_length,
+        lambda **_kwargs: pytest.fail("native reference token IDs must be preferred"),
     )
     monkeypatch.setattr(
         validation_engine, "run_hf_reference_subprocess", fake_run_hf
@@ -4892,8 +4956,8 @@ def test_eval_continuation_builds_for_prompt_and_generated_tokens(
 
     result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
-    assert result["build_max_cache_length"] == 445
-    assert result["generation_cache_headroom"] == 64
+    assert result["build_max_cache_length"] == 444
+    assert result["generation_cache_headroom"] == 63
     assert result["status"] == "passed"
 
 
@@ -5740,6 +5804,75 @@ def test_text_input_contract_records_aligned_token_digests(
     assert artifact["samples"][0]["hf_token_sha256"] == (
         artifact["samples"][0]["trtmc_token_sha256"]
     )
+
+
+def test_native_reference_input_token_ids_supply_prompt_length(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    validation_engine.write_predictions(
+        work_dir / "hf_predictions.json",
+        [
+            {"sample_id": "sample-1", "input_token_ids": [2, 10]},
+            {"sample_id": "sample-2", "input_token_ids": [2, 20, 21]},
+        ],
+    )
+
+    token_ids = validation_engine.native_reference_input_token_ids(work_dir)
+
+    assert token_ids == {"sample-1": [2, 10], "sample-2": [2, 20, 21]}
+    assert validation_engine.max_native_reference_input_token_length(work_dir) == 3
+
+
+def test_text_input_contract_prefers_native_reference_token_ids(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "sample-1", "prompt": "Question"}) + "\n",
+        encoding="utf-8",
+    )
+    validation_engine.write_predictions(
+        work_dir / "hf_predictions.json",
+        [{"sample_id": "sample-1", "input_token_ids": [2, 10, 11]}],
+    )
+
+    class BundleTokenizer:
+        def encode(self, _text, *, add_special_tokens):
+            assert add_special_tokens is False
+            return SimpleNamespace(ids=[10, 11])
+
+    monkeypatch.setattr(
+        validation_engine,
+        "_load_bundle_text_input_contract",
+        lambda **_kwargs: (
+            BundleTokenizer(),
+            {
+                "tokenizer_special_prefix_ids": [2],
+                "tokenizer_special_suffix_ids": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        validation_engine,
+        "_load_text_input_contract",
+        lambda **_kwargs: pytest.fail("the common profile must not load the HF tokenizer"),
+    )
+
+    validation_engine.validate_text_input_token_contract(
+        model={"name": "decoder", "hf_id": "org/decoder"},
+        work_dir=work_dir,
+        bundle_path=tmp_path / "decoder.bundle",
+        local_files_only=True,
+        trust_remote_code=False,
+    )
+
+    artifact = json.loads(
+        (work_dir / "input_token_contract.json").read_text(encoding="utf-8")
+    )
+    assert artifact["status"] == "aligned"
+    assert artifact["samples"][0]["hf_token_count"] == 3
 
 
 def test_run_hf_reference_subprocess_passes_asr_family_metadata(
@@ -7128,6 +7261,7 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
     model = {
         "name": "decoder-small",
         "hf_id": "example-org/decoder-small",
+        "family": "gpt2",
         "bundle": "decoder-small.bundle",
         "max_cache_length": 256,
         "precision": "fp32",
@@ -7146,8 +7280,16 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
         json.dumps(
             {
                 "responses": [
-                    {"sample_id": "mmlu_000000", "output_text": "B"},
-                    {"sample_id": "mmlu_000001", "output_text": "A"},
+                    {
+                        "sample_id": "mmlu_000000",
+                        "output_text": "B",
+                        "input_token_ids": list(range(405)),
+                    },
+                    {
+                        "sample_id": "mmlu_000001",
+                        "output_text": "A",
+                        "input_token_ids": list(range(404)),
+                    },
                 ]
             }
         ),
@@ -7162,11 +7304,15 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(validation_engine, "max_prompt_token_length", lambda **_kwargs: 405)
+    monkeypatch.setattr(
+        validation_engine,
+        "max_prompt_token_length",
+        lambda **_kwargs: pytest.fail("native reference token IDs must be preferred"),
+    )
 
     def fake_ensure_bundle(*_args, **kwargs):
         calls.append("build")
-        assert kwargs["max_cache_length"] == 406
+        assert kwargs["max_cache_length"] == 405
         bundle = kwargs["bundle_path"]
         bundle.parent.mkdir(parents=True, exist_ok=True)
         bundle.write_bytes(b"bundle")
@@ -7189,6 +7335,11 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_run_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_ensure_bundle)
     monkeypatch.setattr(validation_engine, "run_bundle", fake_run_bundle)
+    monkeypatch.setattr(
+        validation_engine,
+        "validate_text_input_token_contract",
+        lambda **_kwargs: calls.append("contract"),
+    )
 
     args = argparse.Namespace(
         work_root=str(tmp_path / "work"),
@@ -7231,13 +7382,13 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
 
     result = validation_engine.eval_one_model(suite=suite, model=model, args=args)
 
-    assert calls == ["hf-cache", "build", "bundle-seed=123"]
+    assert calls == ["hf-cache", "build", "contract", "bundle-seed=123"]
     assert result["hf_reused"] is True
     assert result["hf_cache_key"] == "abc123"
     assert result["bundle_built"] is True
     assert result["max_prompt_tokens"] == 405
-    assert result["generation_cache_headroom"] == 1
-    assert result["build_max_cache_length"] == 406
+    assert result["generation_cache_headroom"] == 0
+    assert result["build_max_cache_length"] == 405
     assert result["bundle_accuracy"] == 0.5
     assert result["prediction_agreement_rate"] == 0.5
     assert result["status"] == "failed"
