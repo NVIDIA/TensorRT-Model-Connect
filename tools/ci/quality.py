@@ -47,7 +47,7 @@ class EnvironmentVerifier:
                 "-c",
                 "import transformers, sys; "
                 "print(f'python={sys.executable} transformers={transformers.__version__}'); "
-                "assert transformers.__version__ == '5.5.0', transformers.__version__",
+                "assert transformers.__version__ == '5.2.0', transformers.__version__",
             ]
         )
         binary = self.context.repository / "build" / "trtmc"
