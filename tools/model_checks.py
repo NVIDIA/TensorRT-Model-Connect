@@ -992,20 +992,30 @@ def _resolved_perf_environment(
     source: Path,
     *,
     destination: Path,
+    build_dir: Path,
     storage_root: Path,
     results_root: Path,
     scratch_root: Path,
 ) -> Path:
-    raw = _expand_environment(
-        _read_yaml(source, "performance environment"),
-        "performance environment",
-    )
+    raw = _read_yaml(source, "performance environment")
+    tools = raw.get("tools")
+    if not isinstance(tools, dict):
+        raise ModelCheckError("performance environment tools must be an object")
     storage = raw.get("storage")
     if not isinstance(storage, dict):
         raise ModelCheckError("performance environment storage must be an object")
+
+    # The unified entry point owns one native build. Keep standalone Perf
+    # environments configurable, but do not expose their internal path knobs
+    # to model-check users.
+    tools["trtmc_worker"] = str(build_dir / "trtmc_benchmark_worker")
     storage["storage_root"] = str(storage_root)
     storage["results_root"] = str(results_root)
     storage["scratch_root"] = str(scratch_root)
+    storage["bundle_cache"] = str(storage_root / "engines" / "perf")
+    storage["bundle_roots"] = []
+    storage["runtime_dirs"] = [str(build_dir)]
+    raw = _expand_environment(raw, "performance environment")
     destination.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return destination
 
@@ -1128,9 +1138,16 @@ def _run(arguments: argparse.Namespace) -> int:
 
     perf_environment = None
     if _task_bindings(plan, "perf"):
+        build_dir_value = environment["tasks"]["accuracy"]["options"].get("backend-dir")
+        if not isinstance(build_dir_value, str) or not build_dir_value:
+            raise ModelCheckError(
+                "model-check environment accuracy.options.backend-dir is required "
+                "as the shared native build directory"
+            )
         perf_environment = _resolved_perf_environment(
             Path(environment["tasks"]["perf"]["environment"]),
             destination=run_root / "perf-environment.yaml",
+            build_dir=Path(build_dir_value),
             storage_root=storage_root,
             results_root=run_root / "perf" / "results",
             scratch_root=run_root / "work" / "perf",
