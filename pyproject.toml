@@ -11,6 +11,8 @@ name = "tensorrt-model-connect"
 version = "0.1.0"
 description = "TensorRT-Model-Connect builder for HuggingFace models and .bundle artifacts"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "ASSET_LICENSES.md"]
 requires-python = ">=3.10"
 dependencies = [
     "safetensors>=0.4",

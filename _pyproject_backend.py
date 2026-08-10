@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import tarfile
 import tempfile
 import zipfile
@@ -225,6 +226,8 @@ def _project_metadata() -> dict[str, Any]:
         "name": project["name"],
         "version": project["version"],
         "description": project.get("description", ""),
+        "license": project.get("license"),
+        "license-files": project.get("license-files", []),
         "requires-python": project.get("requires-python"),
         "dependencies": project.get("dependencies", []),
         "optional-dependencies": project.get("optional-dependencies", {}),
@@ -239,17 +242,22 @@ def _write_dist_info(parent: Path) -> Path:
     dist_info.mkdir(parents=True, exist_ok=True)
     (dist_info / "METADATA").write_text(_metadata_text(project), encoding="utf-8")
     (dist_info / "WHEEL").write_text(_wheel_text(), encoding="utf-8")
+    _copy_license_files(dist_info, project)
     return dist_info
 
 
 def _metadata_text(project: dict[str, Any]) -> str:
     lines = [
-        "Metadata-Version: 2.1",
+        "Metadata-Version: 2.4",
         f"Name: {project['name']}",
         f"Version: {project['version']}",
     ]
     if project["description"]:
         lines.append(f"Summary: {project['description']}")
+    if project.get("license"):
+        lines.append(f"License-Expression: {project['license']}")
+    for license_file in project.get("license-files", []):
+        lines.append(f"License-File: {license_file}")
     if project["requires-python"]:
         lines.append(f"Requires-Python: {project['requires-python']}")
     for dependency in project["dependencies"]:
@@ -263,6 +271,18 @@ def _metadata_text(project: dict[str, Any]) -> str:
             )
     lines.append("")
     return "\n".join(lines)
+
+
+def _copy_license_files(dist_info: Path, project: dict[str, Any]) -> None:
+    repository = Path.cwd().resolve()
+    destination = dist_info / "licenses"
+    for relative in project.get("license-files", []):
+        source = (repository / relative).resolve()
+        if not source.is_relative_to(repository) or not source.is_file():
+            raise FileNotFoundError(f"license file is missing or outside the project: {relative}")
+        target = destination / source.relative_to(repository)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _dependency_with_extra_marker(dependency: str, extra: str) -> str:
@@ -288,9 +308,10 @@ def _write_editable_wheel(wheel_path: Path, dist_info: Path, dist_info_name: str
     source_path = (Path.cwd() / _PYTHON_SOURCE_ROOT).resolve()
     pth_name = "__editable__.tensorrt_model_connect.pth"
     entries: list[tuple[str, bytes]] = [(pth_name, f"{source_path}\n".encode())]
-    for path in sorted(dist_info.iterdir()):
+    for path in sorted(dist_info.rglob("*")):
         if path.is_file() and path.name != "RECORD":
-            entries.append((f"{dist_info_name}/{path.name}", path.read_bytes()))
+            relative = path.relative_to(dist_info).as_posix()
+            entries.append((f"{dist_info_name}/{relative}", path.read_bytes()))
 
     records: list[tuple[str, str, str]] = []
     with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as wheel:

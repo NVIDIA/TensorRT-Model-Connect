@@ -50,6 +50,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
     {
         ".clang-format",
         ".github/scripts/write-model-proof-fallback-report.py",
+        "ASSET_LICENSES.md",
         "CMakeLists.txt",
         "Dockerfile",
         "LICENSE",
@@ -122,6 +123,7 @@ PLATFORM_PROJECTION_PREFIXES = (
 LEGAL_OR_DOC_EXACT = frozenset(
     {
         "AGENTS.md",
+        "ASSET_LICENSES.md",
         "CODEOWNERS",
         "CONTRIBUTING.md",
         "LICENSE",

@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 import zipfile
+from email.parser import Parser
 from pathlib import Path
 
 from .context import CiContext
@@ -23,6 +24,7 @@ from .process import CiError
 
 WHEEL_BUILD_STATE = "wheel-build.json"
 WHEEL_INSTALL_STATE = "wheel-installed.json"
+RELEASE_LEGAL_FILES = ("LICENSE", "NOTICE", "ASSET_LICENSES.md")
 
 
 class InstalledWheelValidator:
@@ -174,9 +176,17 @@ class WheelArchiveValidator:
             backends = [
                 name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
             ]
-            metadata = archive.read(
-                next(name for name in names if name.endswith(".dist-info/METADATA"))
-            ).decode()
+            metadata_entries = sorted(
+                name for name in names if name.endswith(".dist-info/METADATA")
+            )
+            if len(metadata_entries) != 1:
+                raise CiError(
+                    f"{wheel}: expected exactly one .dist-info/METADATA entry, "
+                    f"found {len(metadata_entries)}"
+                )
+            metadata_name = metadata_entries[0]
+            metadata = archive.read(metadata_name).decode()
+            self._validate_legal_payload(wheel, archive, names, metadata_name, metadata)
             wheel_metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/WHEEL"))
             ).decode()
@@ -240,6 +250,35 @@ class WheelArchiveValidator:
             ]
         ):
             print(f"  {entry}")
+
+    def _validate_legal_payload(
+        self,
+        wheel: Path,
+        archive: zipfile.ZipFile,
+        names: set[str],
+        metadata_name: str,
+        metadata_text: str,
+    ) -> None:
+        metadata = Parser().parsestr(metadata_text)
+        if metadata.get("Metadata-Version") != "2.4":
+            raise CiError(f"{wheel}: package metadata must use Metadata-Version 2.4")
+        if metadata.get("License-Expression") != "Apache-2.0":
+            raise CiError(f"{wheel}: package metadata must declare Apache-2.0")
+        declared = metadata.get_all("License-File", [])
+        if sorted(declared) != sorted(RELEASE_LEGAL_FILES):
+            raise CiError(
+                f"{wheel}: package metadata must declare legal files "
+                f"{', '.join(RELEASE_LEGAL_FILES)}"
+            )
+
+        dist_info = metadata_name.rsplit("/", maxsplit=1)[0]
+        for relative in RELEASE_LEGAL_FILES:
+            member = f"{dist_info}/licenses/{relative}"
+            if member not in names:
+                raise CiError(f"{wheel}: packaged legal file is missing: {member}")
+            source = self.context.repository / relative
+            if not source.is_file() or archive.read(member) != source.read_bytes():
+                raise CiError(f"{wheel}: packaged legal file is stale: {relative}")
 
 
 class WheelPackageManager:
