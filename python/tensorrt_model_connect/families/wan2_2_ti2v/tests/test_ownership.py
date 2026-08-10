@@ -69,8 +69,11 @@ def test_wan22_production_python_is_native_only_and_does_not_reference_wan21() -
 
 def test_wan22_torch_is_build_extra_not_global_runtime_dependency() -> None:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime_dependencies = pyproject["tool"]["tensorrt-model-connect"]["package"][
+        "dependencies"
+    ]
 
-    assert "torch>=2.0" not in pyproject["project"]["dependencies"]
+    assert "torch>=2.0" not in runtime_dependencies
     assert pyproject["project"]["optional-dependencies"]["wan"] == ["torch>=2.0"]
 
 
