@@ -349,6 +349,7 @@ def _sana_reference_contract() -> dict[str, str]:
         "revision": SANA_REFERENCE_REVISION,
         "relative_path": SANA_REFERENCE_RELATIVE_PATH,
         "entrypoint": SANA_REFERENCE_ENTRYPOINT,
+        "environment_variable": "TRTMC_SANA_WM_REFERENCE_REPO",
     }
 
 
@@ -710,6 +711,7 @@ def test_sana_selection_declares_its_pinned_model_reference_cache(
         "revision": SANA_REFERENCE_REVISION,
         "relative_path": SANA_REFERENCE_RELATIVE_PATH,
         "entrypoint": SANA_REFERENCE_ENTRYPOINT,
+        "environment_variable": "TRTMC_SANA_WM_REFERENCE_REPO",
     }
 
 
