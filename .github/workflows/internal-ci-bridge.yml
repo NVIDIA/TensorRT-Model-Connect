@@ -122,14 +122,23 @@ jobs:
                 "PR source repository or branch is unavailable."
             fi
             [[ "$head_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
-            head_ref_uri="$(jq -rn --arg value "$head_ref" '$value | @uri')"
-            if ! branch_sha="$(
+            if [ "$head_repo" = "$GITHUB_REPOSITORY" ]; then
+              head_ref_uri="$(jq -rn --arg value "$head_ref" '$value | @uri')"
+              if ! branch_sha="$(
+                gh api --method GET \
+                  "/repos/$head_repo/branches/$head_ref_uri" \
+                  --jq '.commit.sha'
+              )"; then
+                fail_guard HEAD_SOURCE_UNAVAILABLE \
+                  "Cannot read source branch $head_repo:$head_ref."
+              fi
+            elif ! branch_sha="$(
               gh api --method GET \
-                "/repos/$head_repo/branches/$head_ref_uri" \
-                --jq '.commit.sha'
+                "/repos/$GITHUB_REPOSITORY/commits/$head_sha" \
+                --jq '.sha'
             )"; then
               fail_guard HEAD_SOURCE_UNAVAILABLE \
-                "Cannot read source branch $head_repo:$head_ref."
+                "Cannot read fork PR head commit $head_sha from $GITHUB_REPOSITORY."
             fi
             [[ "$branch_sha" =~ ^[0-9a-f]{40}$ ]]
             if [ "$head_sha" = "$branch_sha" ]; then

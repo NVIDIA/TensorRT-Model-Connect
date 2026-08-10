@@ -210,6 +210,7 @@ def _run_internal_ci_snapshot(
     actor_role: str = "maintain",
     max_attempts: int = 1,
     branch_available: bool = True,
+    commit_available: bool = True,
     system_path: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = tmp_path / "bin"
@@ -256,6 +257,15 @@ elif "/branches/" in endpoint:
     with open(counter_path, "w", encoding="utf-8") as counter:
         counter.write(str(index + 1))
     print(sequence[min(index, len(sequence) - 1)])
+elif "/commits/" in endpoint:
+    expected = f"/repos/{os.environ['GITHUB_REPOSITORY']}/commits/"
+    if expected not in endpoint:
+        print(f"wrong PR head commit endpoint: {endpoint}", file=sys.stderr)
+        raise SystemExit(5)
+    if os.environ["FAKE_COMMIT_AVAILABLE"] != "true":
+        print("commit not found", file=sys.stderr)
+        raise SystemExit(6)
+    print(os.environ["FAKE_PR_HEAD_COMMIT_SHA"])
 else:
     print(f"unexpected gh invocation: {arguments}", file=sys.stderr)
     raise SystemExit(2)
@@ -293,7 +303,9 @@ else:
             "FAKE_BRANCH_COUNTER": str(tmp_path / "branch-counter"),
             "FAKE_BRANCH_AVAILABLE": "true" if branch_available else "false",
             "FAKE_BRANCH_HEAD_SHAS": json.dumps(branch_head_shas),
+            "FAKE_COMMIT_AVAILABLE": "true" if commit_available else "false",
             "FAKE_EXPECTED_HEAD_REPO": head_repo or "",
+            "FAKE_PR_HEAD_COMMIT_SHA": pr_head_shas[-1],
             "FAKE_PULL_COUNTER": str(tmp_path / "pull-counter"),
             "FAKE_PULL_JSONS": json.dumps(pulls),
             "GH_TOKEN": "test-token",
@@ -633,7 +645,7 @@ def test_internal_ci_guard_only_allows_maintainers_and_admins(
     assert "Only actors with maintain or admin access" in result.stdout + result.stderr
 
 
-def test_internal_ci_guard_reports_an_inaccessible_fork_branch(
+def test_internal_ci_guard_accepts_a_private_fork_via_its_pr_head_commit(
     tmp_path: Path,
 ) -> None:
     head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
@@ -645,6 +657,24 @@ def test_internal_ci_guard_reports_an_inaccessible_fork_branch(
         branch_head_sha=head_sha,
         head_repo="external-contributor/TensorRT-Model-Connect",
         branch_available=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_internal_ci_guard_reports_an_unavailable_fork_head_commit(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        branch_head_sha=head_sha,
+        head_repo="external-contributor/TensorRT-Model-Connect",
+        branch_available=False,
+        commit_available=False,
     )
 
     assert result.returncode != 0
