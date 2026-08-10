@@ -12,9 +12,13 @@ requirements = "python_profile_requirements/reference_common.lock.txt"
 system_site_packages = true
 verification_script = """
 from importlib.metadata import version
+import open_clip
 import sacrebleu
 import transformers
 assert transformers.__version__ == "5.2.0", transformers.__version__
+assert version("huggingface-hub") == "1.22.0"
+assert version("tokenizers") == "0.22.2"
+assert version("open-clip-torch") == "3.3.0"
 assert version("rouge-score") == "0.1.2"
 assert version("sacrebleu") == "2.5.1"
 assert version("colorama") == "0.4.6"
