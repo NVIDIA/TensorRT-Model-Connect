@@ -475,6 +475,15 @@ def test_checked_in_accuracy_environment_deletes_engines_without_fixed_reserve(
     assert options["hf-cache-retention"] == hf_cache_retention
 
 
+def test_l4t_accuracy_environment_bounds_each_model_attempt() -> None:
+    raw = model_checks._read_yaml(
+        model_checks.DEFAULT_ENVIRONMENT_ROOT / "l4t-thor.yaml",
+        "model-check environment",
+    )
+
+    assert raw["tasks"]["accuracy"]["options"]["model-timeout-seconds"] == 21600
+
+
 def test_l4t_perf_environment_deletes_entry_cache_and_bundle() -> None:
     path = model_checks.REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))

@@ -26,6 +26,7 @@ tasks:
       hf-cache-retention: delete_always
       model-attempts: 2
       model-retry-delay-seconds: 30
+      model-timeout-seconds: 21600
       on-model-failure: continue
   perf:
     runner_python: ${TRTMC_CHECK_PYTHON}

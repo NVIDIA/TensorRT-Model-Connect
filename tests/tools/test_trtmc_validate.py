@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import shlex
+import sys
 
 import pytest
 
@@ -1016,6 +1018,7 @@ def test_all_defaults_to_continue_and_accepts_stop_policy():
     assert stop.on_model_failure == "stop"
     assert default.model_attempts == 2
     assert default.model_retry_delay_seconds == 5.0
+    assert default.model_timeout_seconds == 0.0
     assert default.reference_source_cache_dir is None
     assert default.reused_bundle_revalidation_limit == 1
     assert default.reused_bundle_revalidation_attempts_used == 0
@@ -1451,6 +1454,60 @@ def test_supervised_binding_replaces_stale_result_with_worker_crash(tmp_path, mo
     assert "--model-worker" in result["reproduce"]["dataset"]["command"]
     assert "--local-files-only" in result["reproduce"]["dataset"]["command"]
     assert json.loads(comparison.read_text(encoding="utf-8")) == result
+
+
+def test_supervised_binding_records_worker_timeout(tmp_path, monkeypatch):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-timeout-seconds",
+            "42",
+            "--output",
+            str(tmp_path / "results"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "workload-a")
+
+    def timeout(command, log_path, env, timeout_seconds):
+        assert timeout_seconds == 42
+        log_path.write_text("worker timed out\n", encoding="utf-8")
+        raise trtmc_validate.WorkerTimeoutError(
+            "model worker exceeded 42 seconds"
+        )
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_subprocess", timeout)
+
+    result = trtmc_validate._run_supervised_binding(
+        binding,
+        arguments=arguments,
+        catalog={"sample_limits": {"workload-a": 5}},
+    )
+
+    assert result["execution"] == {"status": "error", "exit_code": 124}
+    assert result["raw_result"]["error_type"] == "WorkerTimeoutError"
+    assert result["raw_result"]["error"] == "model worker exceeded 42 seconds"
+    assert result["validation"]["status"] == "failed"
+
+
+def test_supervised_subprocess_terminates_on_timeout(tmp_path):
+    log_path = tmp_path / "worker.log"
+
+    with pytest.raises(
+        trtmc_validate.WorkerTimeoutError,
+        match="exceeded 0.05 seconds",
+    ):
+        trtmc_validate._run_supervised_subprocess(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            log_path,
+            os.environ,
+            0.05,
+        )
+
+    assert "terminating process group" in log_path.read_text(encoding="utf-8")
 
 
 def test_supervised_binding_accepts_fresh_worker_result(tmp_path, monkeypatch):

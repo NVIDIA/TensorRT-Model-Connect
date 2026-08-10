@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -745,6 +746,61 @@ def _run_subprocess(command: Sequence[str], log_path: Path, env: Mapping[str, st
             env=dict(env),
         )
     return completed.returncode
+
+
+class WorkerTimeoutError(RuntimeError):
+    """A supervised model worker exceeded its configured wall-clock limit."""
+
+
+def _run_supervised_subprocess(
+    command: Sequence[str],
+    log_path: Path,
+    env: Mapping[str, str],
+    timeout_seconds: float,
+) -> int:
+    if timeout_seconds <= 0:
+        return _run_subprocess(command, log_path, env)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as output:
+        output.write(f"$ {shlex.join(command)}\n")
+        output.flush()
+        process = subprocess.Popen(
+            list(command),
+            text=True,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            env=dict(env),
+            start_new_session=os.name == "posix",
+        )
+        try:
+            return process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            output.write(
+                "\n[trtmc-validate] model worker timed out after "
+                f"{timeout_seconds:g} seconds; terminating process group\n"
+            )
+            output.flush()
+            if os.name == "posix":
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
+                process.wait()
+            raise WorkerTimeoutError(
+                f"model worker exceeded {timeout_seconds:g} seconds"
+            ) from exc
 
 
 def _source_environment() -> dict[str, str]:
@@ -3084,6 +3140,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="delay before retrying a model worker after an execution error",
     )
     parser.add_argument(
+        "--model-timeout-seconds",
+        type=_nonnegative_float,
+        default=0.0,
+        help=(
+            "wall-clock limit for each model-worker attempt; terminate its process "
+            "group and record an execution error on timeout (0 disables the limit)"
+        ),
+    )
+    parser.add_argument(
         "--reused-bundle-revalidation-limit",
         type=_nonnegative_int,
         default=DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT,
@@ -3570,6 +3635,7 @@ def _worker_error_result(
     worker_log: Path,
     sample_limit: int,
     error: str,
+    error_type: str = "WorkerProcessError",
 ) -> dict[str, Any]:
     return _normalize_result(
         {
@@ -3591,7 +3657,7 @@ def _worker_error_result(
             },
             "raw_result": {
                 "status": "failed",
-                "error_type": "WorkerProcessError",
+                "error_type": error_type,
                 "error": error,
             },
             "raw_result_path": "",
@@ -3640,8 +3706,18 @@ def _run_supervised_binding(
     worker_log = case_dir / ("worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log")
     command = _worker_command(binding, arguments)
     launch_error = ""
+    error_type = "WorkerProcessError"
     try:
-        returncode = _run_subprocess(command, worker_log, _worker_environment(arguments))
+        returncode = _run_supervised_subprocess(
+            command,
+            worker_log,
+            _worker_environment(arguments),
+            arguments.model_timeout_seconds,
+        )
+    except WorkerTimeoutError as exc:
+        returncode = 124
+        launch_error = str(exc)
+        error_type = "WorkerTimeoutError"
     except OSError as exc:
         returncode = 127
         launch_error = f"could not start model worker: {exc}"
@@ -3665,6 +3741,7 @@ def _run_supervised_binding(
             worker_log=worker_log,
             sample_limit=resolve_sample_limit(catalog, binding, arguments.limit),
             error=worker_error or str(exc),
+            error_type=error_type,
         )
         (case_dir / "disagreements.jsonl").write_text("", encoding="utf-8")
     else:
