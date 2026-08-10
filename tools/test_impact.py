@@ -1386,6 +1386,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
+            priority=85,
+            name="family_reference_compat",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/"
+                r"([A-Za-z]\w*)_reference_compat\.py$"
+            ),
+            resolver=_match_result("family_reference_compat", _family_models),
+            covered_by=(
+                "TestFamilyPlugin.test_root_reference_compat_is_family_owned",
+            ),
+        ),
+        ClassificationRule(
             priority=90,
             name="specialized_builder",
             matcher=_regex_rule(

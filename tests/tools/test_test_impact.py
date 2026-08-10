@@ -931,6 +931,17 @@ class TestModelOwnedAdapterIsolation:
             assert expected_tier in match.unit_tiers
 
 class TestFamilyPlugin:
+    def test_root_reference_compat_is_family_owned(self, imap):
+        """A root reference adapter maps only to its named family."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/decoder_family_reference_compat.py",
+            imap,
+        )
+
+        assert match.rule == "family_reference_compat"
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert "decoder-peer" not in match.models
+
     def test_family_only_change(self, imap):
         """families/decoder_family/plugin.py -> exactly decoder_family models."""
         match = test_impact.classify_file(
