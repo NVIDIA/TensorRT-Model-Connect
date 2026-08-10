@@ -260,6 +260,7 @@ def test_reference_common_pins_the_transformers_hub_pair():
     assert shared_profiles._exact_pinned_requirements(requirements).items() >= {
         "transformers": "5.2.0",
         "huggingface-hub": "1.22.0",
+        "tokenizers": "0.22.2",
     }.items()
 
 
@@ -279,6 +280,17 @@ def test_reference_common_pins_sacrebleu_runtime_dependencies() -> None:
     assert 'version("tabulate") == "0.10.0"' in profile["verification_script"]
     assert 'version("lxml") == "6.1.1"' in profile["verification_script"]
     assert "import sacrebleu" in profile["verification_script"]
+
+
+def test_reference_common_pins_clip_scoring_dependencies() -> None:
+    profile = shared_profiles.load_python_profile_registry()["profiles"][
+        "reference_common"
+    ]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert "open-clip-torch==3.3.0" in requirements
+    assert 'version("open-clip-torch") == "3.3.0"' in profile["verification_script"]
+    assert "import open_clip" in profile["verification_script"]
 
 
 def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
