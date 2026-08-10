@@ -1728,6 +1728,24 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/model_checks.py",
+            "tools/model_selection.py",
+            "tests/model_checks/environments/gb300.yaml",
+            "tests/model_checks/platforms/l4t-thor.yaml",
+        ],
+    )
+    def test_model_checks_tool_triggers_tools_tier(self, imap, path):
+        """Platform model-check orchestration runs tools tests without model proofs."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "model_checks_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
             "tools/validation/README.md",
             "tools/validation/__init__.py",
             "tools/validation/artifacts.py",

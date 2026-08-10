@@ -1885,6 +1885,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_nightly_artifact_selector_tool",),
         ),
         ClassificationRule(
+            priority=482,
+            name="model_checks_tool",
+            matcher=_regex_rule(
+                r"(?:tools/model_(?:checks|selection)\.py|"
+                r"tests/model_checks/(?:environments|platforms)/[^/]+\.yaml)$"
+            ),
+            resolver=_match_result(
+                "model_checks_tool", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_model_checks_tool_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
             priority=483,
             name="report_generation_tool",
             matcher=_path_in(
