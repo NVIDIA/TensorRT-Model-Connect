@@ -139,11 +139,15 @@ def test_qwen_adapter_package_inventory_is_model_owned() -> None:
     }
 
 
-def test_source_checkout_discovers_edge_llm_only_from_qwen_builder() -> None:
+def test_imported_package_discovers_edge_llm_only_from_qwen_builder() -> None:
+    qwen_spec = importlib.util.find_spec("tensorrt_model_connect.families.qwen")
+    assert qwen_spec is not None
+    assert qwen_spec.origin is not None
+
     root = family_implementation_root("qwen")
     discovered = discover_family_implementations("qwen")
 
-    assert root == CAPSULE_ROOT.parent
+    assert root == Path(qwen_spec.origin).resolve().parent
     assert [manifest.implementation_id for manifest in discovered] == [IMPLEMENTATION_ID]
 
 
