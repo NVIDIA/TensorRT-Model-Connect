@@ -25,6 +25,8 @@ assert version("colorama") == "0.4.6"
 assert version("portalocker") == "3.2.0"
 assert version("tabulate") == "0.10.0"
 assert version("lxml") == "6.1.1"
+assert version("Jinja2") == "3.1.6"
+assert version("MarkupSafe") == "3.0.3"
 """
 
 [reference_backend_defaults.golden_snapshot]

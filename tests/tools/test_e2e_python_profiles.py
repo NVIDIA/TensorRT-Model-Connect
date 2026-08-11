@@ -255,6 +255,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
         "sana_wm_reference",
+        "xglm_tokenizer",
         "reference_common",
     }
     profiles = shared_profiles.load_python_profile_registry()["profiles"]
@@ -306,6 +307,18 @@ def test_reference_common_pins_clip_scoring_dependencies() -> None:
     assert "open-clip-torch==3.3.0" in requirements
     assert 'version("open-clip-torch") == "3.3.0"' in profile["verification_script"]
     assert "import open_clip" in profile["verification_script"]
+
+
+def test_reference_common_pins_chat_template_dependencies() -> None:
+    profile = shared_profiles.load_python_profile_registry()["profiles"][
+        "reference_common"
+    ]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert "Jinja2==3.1.6" in requirements
+    assert "MarkupSafe==3.0.3" in requirements
+    assert 'version("Jinja2") == "3.1.6"' in profile["verification_script"]
+    assert 'version("MarkupSafe") == "3.0.3"' in profile["verification_script"]
 
 
 def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
