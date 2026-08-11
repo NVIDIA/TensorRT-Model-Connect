@@ -9,8 +9,8 @@ import sentencepiece
 import transformers
 
 
-assert transformers.__version__ == "4.57.6", transformers.__version__
-assert version("huggingface-hub") == "0.36.2"
+assert transformers.__version__ == "5.2.0", transformers.__version__
+assert version("huggingface-hub") == "1.22.0"
 assert version("tokenizers") == "0.22.2"
 assert version("sentencepiece") == "0.2.2"
 assert hasattr(sentencepiece, "SentencePieceProcessor")

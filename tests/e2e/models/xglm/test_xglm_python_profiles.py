@@ -31,7 +31,7 @@ def test_xglm_tokenizer_profile_is_fully_pinned() -> None:
         family_dir / "python_profile_requirements/xglm_tokenizer.lock.txt"
     ).read_text(encoding="utf-8")
 
-    assert "transformers==4.57.6" in requirements
-    assert "huggingface-hub==0.36.2" in requirements
+    assert "transformers==5.2.0" in requirements
+    assert "huggingface-hub==1.22.0" in requirements
     assert "tokenizers==0.22.2" in requirements
     assert "sentencepiece==0.2.2" in requirements
