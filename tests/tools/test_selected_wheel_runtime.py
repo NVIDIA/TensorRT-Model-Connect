@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,6 +71,9 @@ def test_selected_wheel_installs_one_wheel_without_dependencies_and_records_safe
     commands: list[list[object]] = []
     work = tmp_path / "work"
     provenance = tmp_path / "artifacts/selected-wheel.json"
+    base_python = tmp_path / "venv/bin/python"
+    base_python.parent.mkdir(parents=True)
+    base_python.symlink_to(sys.executable)
 
     def run(command: list[object], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         commands.append(command)
@@ -86,7 +90,7 @@ def test_selected_wheel_installs_one_wheel_without_dependencies_and_records_safe
         package = work / "site-packages/tensorrt_model_connect/__init__.py"
         return json.dumps(
             {
-                "python": str(Path("/opt/venv/bin/python").resolve()),
+                "python": str(base_python.resolve()),
                 "python_tag": PYTHON_TAG,
                 "package_file": str(package.resolve()),
                 "package_version": PACKAGE_VERSION,
@@ -103,15 +107,16 @@ def test_selected_wheel_installs_one_wheel_without_dependencies_and_records_safe
         context,
         work,
         provenance,
-        base_python="/opt/venv/bin/python",
+        base_python=base_python,
     )
 
     assert runtime is not None and runtime.wheel == wheel.resolve()
-    assert not [command for command in commands if "venv" in command]
+    assert not [command for command in commands if command[1:3] == ["-m", "venv"]]
     install = next(command for command in commands if "pip" in command)
+    assert install[0] == base_python
     assert "--no-deps" in install and install[-1] == wheel.resolve()
     assert install[install.index("--target") + 1] == runtime.site_packages
-    assert runtime.python == Path("/opt/venv/bin/python").resolve()
+    assert runtime.python == base_python
     payload = json.loads(provenance.read_text(encoding="utf-8"))
     assert payload["wheel"] == wheel.name
     assert payload["tensorrt_version"] == TENSORRT_VERSION

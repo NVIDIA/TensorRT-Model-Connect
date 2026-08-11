@@ -109,7 +109,9 @@ class SelectedWheelRuntime:
             if Path("/opt/venv/bin/python").is_file()
             else shutil.which("python") or "python"
         )
-        python = Path(interpreter).resolve()
+        # Preserve the virtualenv entrypoint. Resolving its symlink would invoke
+        # the system interpreter and lose the base runtime's site-packages.
+        python = Path(interpreter)
         context.run(
             [
                 python,
