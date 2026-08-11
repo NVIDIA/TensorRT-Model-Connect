@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -346,3 +347,69 @@ def test_model_proof_python_and_e2e_route_only_through_selected_wheel(
     assert proof["selected_wheel"] == runtime.wheel.name
     assert proof["selected_wheel_package_version"] == PACKAGE_VERSION
     assert not any(str(tmp_path) in str(value) for value in proof.values())
+
+
+def test_model_proof_stages_wheel_model_dso_but_keeps_source_cpp_tests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    work = tmp_path / "work"
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    runtime_library = "libtrtmc_model_fixture.so"
+    scratch = work / "build/models/fixture" / runtime_library
+    scratch.parent.mkdir(parents=True)
+    scratch.write_bytes(b"\x7fELFsource")
+    target = work / "selected-wheel-runtime/site-packages"
+    packaged = target / "tensorrt_model_connect/bin" / runtime_library
+    packaged.parent.mkdir(parents=True)
+    packaged.write_bytes(b"\x7fELFwheel")
+    runtime = SelectedWheelRuntime(
+        wheel=tmp_path / "wheel.whl",
+        site_packages=target,
+        python=Path("/opt/venv/bin/python"),
+        trtmc=target / "tensorrt_model_connect/bin/trtmc",
+        python_tag=PYTHON_TAG,
+        tensorrt_version=TENSORRT_VERSION,
+        package_version=PACKAGE_VERSION,
+        provenance=artifacts / "selected-wheel.json",
+    )
+    context = CiContext(source, {})
+    monkeypatch.setattr(context, "output", lambda *_args, **_kwargs: "")
+    facts: dict[str, object] = {}
+    pipeline = ModelProofInnerPipeline(
+        context,
+        ModelProofRequest("fixture", revision="a" * 40),
+    )
+    pipeline.source = source
+    pipeline.work = work
+    pipeline.artifacts = artifacts
+    pipeline.selected_wheel = runtime
+    pipeline.status = SimpleNamespace(
+        step=lambda *_args: None,
+        fact=lambda key, value: facts.__setitem__(key, value),
+    )
+
+    staged, scratch_digest, runtime_source = pipeline._validate_dso(
+        "fixture", runtime_library
+    )
+
+    assert staged.read_bytes() == packaged.read_bytes()
+    assert staged.read_bytes() != scratch.read_bytes()
+    assert scratch_digest == hashlib.sha256(scratch.read_bytes()).hexdigest()
+    assert runtime_source == "selected-wheel"
+    assert facts["runtime_library_source"] == "selected-wheel"
+    assert facts["runtime_library_sha256"] == hashlib.sha256(
+        packaged.read_bytes()
+    ).hexdigest()
+
+    calls: list[tuple[list[object], dict[str, str]]] = []
+    monkeypatch.setattr(
+        pipeline,
+        "_run_logged",
+        lambda command, _path, **kwargs: calls.append((command, kwargs["updates"])),
+    )
+    pipeline._run_cpp_tests(["test_fixture"])
+    assert calls[0][1]["TRTMC_MODEL_PLUGIN_DIR"] == str(work / "build/models")

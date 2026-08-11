@@ -481,7 +481,9 @@ class ModelProofInnerPipeline:
             self.artifacts / "build.log",
         )
         self.status.step("scratch_build", "passed")
-        dso = self._validate_dso(runtime_model, runtime_library)
+        dso, scratch_digest, runtime_library_source = self._validate_dso(
+            runtime_model, runtime_library
+        )
         self._run_cpp_tests(payload["runtime_tests"])
         self._run_python_tests(payload)
         verification = self._run_e2e(payload)
@@ -496,6 +498,8 @@ class ModelProofInnerPipeline:
             "runtime_library": runtime_library,
             "runtime_library_sha256": digest,
             "staged_runtime_library_sha256": digest,
+            "scratch_runtime_library_sha256": scratch_digest,
+            "runtime_library_source": runtime_library_source,
             "staged_model_dso_count": 1,
             **{
                 key: payload[key]
@@ -565,7 +569,9 @@ class ModelProofInnerPipeline:
                 "not an ETTh1 time-series nightly model",
             )
 
-    def _validate_dso(self, runtime_model: str, runtime_library: str) -> Path:
+    def _validate_dso(
+        self, runtime_model: str, runtime_library: str
+    ) -> tuple[Path, str, str]:
         assert self.status
         self.status.step("dso_isolation", "running")
         dsos = sorted((self.work / "build/models").rglob("libtrtmc_model_*.so"))
@@ -581,18 +587,40 @@ class ModelProofInnerPipeline:
         dependencies = set(re.findall(r"libtrtmc_model_[^\] ]*\.so", dynamic)) - {runtime_library}
         if dependencies:
             raise CiError(f"model DSO links a sibling model DSO: {sorted(dependencies)}")
+        scratch = dsos[0]
+        runtime_dso = scratch
+        runtime_library_source = "scratch-build"
+        if self.selected_wheel:
+            native_dir = (
+                self.selected_wheel.site_packages / "tensorrt_model_connect" / "bin"
+            ).resolve()
+            runtime_dso = native_dir / runtime_library
+            if (
+                Path(runtime_library).name != runtime_library
+                or runtime_dso.is_symlink()
+                or not runtime_dso.is_file()
+                or not runtime_dso.resolve().is_relative_to(native_dir)
+            ):
+                raise CiError(
+                    f"selected wheel model DSO is missing or unsafe: {runtime_library}"
+                )
+            runtime_library_source = "selected-wheel"
+
         plugin_dir = self.work / "model-plugins" / runtime_model
         plugin_dir.mkdir(parents=True)
         staged = plugin_dir / runtime_library
-        shutil.copy2(dsos[0], staged)
-        if staged.read_bytes() != dsos[0].read_bytes():
-            raise CiError("staged plugin DSO does not byte-match the scratch-built DSO")
-        digest = hashlib.sha256(dsos[0].read_bytes()).hexdigest()
+        shutil.copy2(runtime_dso, staged)
+        if staged.read_bytes() != runtime_dso.read_bytes():
+            raise CiError("staged plugin DSO does not byte-match its runtime source")
+        scratch_digest = hashlib.sha256(scratch.read_bytes()).hexdigest()
+        digest = hashlib.sha256(staged.read_bytes()).hexdigest()
         for key, value in {
             "runtime_model": runtime_model,
             "runtime_library": runtime_library,
             "runtime_library_sha256": digest,
             "staged_runtime_library_sha256": digest,
+            "scratch_runtime_library_sha256": scratch_digest,
+            "runtime_library_source": runtime_library_source,
             "sibling_model_count": "0",
             "model_dso_count": "1",
             "network": "disabled",
@@ -600,7 +628,7 @@ class ModelProofInnerPipeline:
         }.items():
             self.status.fact(key, value)
         self.status.step("dso_isolation", "passed", "exactly one DSO; no sibling model DT_NEEDED")
-        return dsos[0]
+        return staged, scratch_digest, runtime_library_source
 
     def _run_cpp_tests(self, tests: list[str]) -> None:
         assert self.status
@@ -621,7 +649,10 @@ class ModelProofInnerPipeline:
                 append=True,
                 updates={
                     "TRTMC_MODEL_PLUGIN_STRICT": "1",
-                    "TRTMC_MODEL_PLUGIN_DIR": str(self.work / "model-plugins"),
+                    "TRTMC_MODEL_PLUGIN_DIR": str(
+                        self.work
+                        / ("build/models" if self.selected_wheel else "model-plugins")
+                    ),
                 },
             )
         self.status.step("cpp_tests", "passed")
