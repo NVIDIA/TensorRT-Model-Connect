@@ -225,6 +225,20 @@ def test_profile_command_timeout_terminates_descendants(tmp_path):
     assert not sentinel.exists()
 
 
+def test_process_session_members_ignores_vanished_proc_entry(monkeypatch):
+    class VanishedStat:
+        def read_text(self, *, encoding):
+            raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(
+        shared_profiles.Path,
+        "glob",
+        lambda _path, _pattern: [VanishedStat()],
+    )
+
+    assert shared_profiles._process_session_members(123) == []
+
+
 def test_family_profile_registry_is_fully_exact_pinned():
     expected = {
         "chronos",

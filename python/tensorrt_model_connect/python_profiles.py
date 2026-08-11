@@ -301,7 +301,12 @@ def _process_session_members(session_id: int) -> list[int]:
             fields = remainder.split()
             if len(fields) > 3 and int(fields[3]) == session_id:
                 members.append(int(stat_path.parent.name))
-        except (FileNotFoundError, PermissionError, ValueError):
+        except (
+            FileNotFoundError,
+            PermissionError,
+            ProcessLookupError,
+            ValueError,
+        ):
             continue
     return members
 
