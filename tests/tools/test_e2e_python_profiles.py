@@ -250,6 +250,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "lance_reference",
         "magpie_tts_reference",
         "minimax_h3_reference",
+        "nemotron_labs_diffusion_reference",
         "nemotron_h_reference",
         "olmo_tokenizer",
         "personaplex_full_duplex_evaluator",

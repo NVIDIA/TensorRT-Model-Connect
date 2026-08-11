@@ -13,14 +13,14 @@ import torch
 import torchaudio
 import transformers
 
-assert version("huggingface-hub") == "1.22.0"
+assert version("huggingface-hub") == "0.36.2"
 assert version("nemo_toolkit") == "2.7.3"
 assert version("numpy") == "1.26.4"
 assert version("scipy") == "1.15.3"
 assert version("silero-vad") == "6.2.1"
 assert version("soundfile") == "0.14.0"
 assert version("tokenizers") == "0.22.2"
-assert transformers.__version__ == "5.2.0"
+assert transformers.__version__ == "4.57.6"
 assert version("torch") == "2.12.0+cu130"
 assert version("torchaudio") == "2.11.0+cu130"
 assert nemo is not None
