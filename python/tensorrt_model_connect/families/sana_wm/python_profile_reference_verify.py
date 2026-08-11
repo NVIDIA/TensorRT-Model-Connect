@@ -13,6 +13,9 @@ import yaml
 
 
 assert version("PyYAML") == "6.0.3"
+assert transformers.__version__ == "5.2.0", transformers.__version__
+assert version("huggingface-hub") == "1.22.0"
+assert version("tokenizers") == "0.22.2"
 assert callable(torch.cuda.is_available)
 assert hasattr(torchvision.transforms, "Compose")
 assert hasattr(diffusers, "DiffusionPipeline")

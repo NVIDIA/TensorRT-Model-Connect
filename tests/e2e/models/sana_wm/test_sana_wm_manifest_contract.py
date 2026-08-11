@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from tensorrt_model_connect.python_profiles import default_execution_profiles
+
 from tests.e2e_harness.manifest_loader import load_model_manifest
 
 
@@ -37,3 +39,17 @@ def test_sana_wm_build_timeout_covers_the_full_model_card_build() -> None:
 
     assert manifest["build_timeout_s"] == 7200
     assert model.testcases[0].metadata["build_timeout_s"] == 7200
+
+
+def test_sana_wm_build_and_reference_share_transformers_profile() -> None:
+    profiles = default_execution_profiles(
+        family="sana_wm",
+        runtime_strategy="diffusion_sana_wm",
+        reference_backend="hf_transformers",
+    )
+
+    assert profiles == {
+        "build": "sana_wm_reference",
+        "runtime": "base",
+        "reference": "sana_wm_reference",
+    }

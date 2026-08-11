@@ -1,1 +1,4 @@
 PyYAML==6.0.3
+transformers==5.2.0
+huggingface-hub==1.22.0
+tokenizers==0.22.2
