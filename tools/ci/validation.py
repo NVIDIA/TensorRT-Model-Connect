@@ -128,9 +128,23 @@ class ValidationDatasetPreparer:
 class ValidationRunner:
     """Run the reviewed ETTh1 parity suite with the already-built model bundle."""
 
-    def __init__(self, context: CiContext, suite: str, runtime_model: str):
+    def __init__(
+        self,
+        context: CiContext,
+        suite: str,
+        runtime_model: str,
+        *,
+        python: str | Path | None = None,
+        trtmc: str | Path | None = None,
+        pythonpath: str | None = None,
+        installed_wheel: bool = False,
+    ):
         self.context = context
         self.models = ValidationPolicy.models(suite, runtime_model)
+        self.python = python or self.context.env.get("TRTMC_HF_PYTHON", "/opt/venv/bin/python")
+        self.trtmc = trtmc or "/work/build/trtmc"
+        self.pythonpath = pythonpath or "/src/python:/src"
+        self.installed_wheel = installed_wheel
 
     def run(self) -> bool:
         if not self.models:
@@ -142,7 +156,7 @@ class ValidationRunner:
         if not dataset.is_file():
             raise CiError("verified ETTh1 validation dataset is missing")
         command: list[str | Path] = [
-            self.context.env.get("TRTMC_HF_PYTHON", "/opt/venv/bin/python"),
+            self.python,
             "/src/tools/validation/engine.py",
             "eval",
             "--suite",
@@ -162,21 +176,30 @@ class ValidationRunner:
             "--model-plugin-dir",
             "/work/model-plugins",
             "--trtmc-binary",
-            "/work/build/trtmc",
+            self.trtmc,
             "--hf-python",
-            self.context.env.get("TRTMC_HF_PYTHON", "/opt/venv/bin/python"),
+            self.python,
             "--require-prebuilt-bundles",
         ]
         for model in self.models:
             command.extend(["--model", model])
+        environment = {
+            "PYTHONPATH": self.pythonpath,
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TRTMC_MODEL_PLUGIN_STRICT": "1",
+            "TRTMC_MODEL_PLUGIN_DIR": "/work/model-plugins",
+        }
+        if self.installed_wheel:
+            environment.update(
+                {
+                    "TRTMC_BINARY": str(self.trtmc),
+                    "TRTMC_HF_PYTHON": str(self.python),
+                    "TRTMC_TEST_INSTALLED_WHEEL": "1",
+                }
+            )
         self.context.run(
             command,
-            updates={
-                "PYTHONPATH": "/src/python:/src",
-                "PYTHONNOUSERSITE": "1",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "TRTMC_MODEL_PLUGIN_STRICT": "1",
-                "TRTMC_MODEL_PLUGIN_DIR": "/work/model-plugins",
-            },
+            updates=environment,
         )
         return True

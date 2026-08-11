@@ -20,6 +20,16 @@ E2E_DIR = Path(__file__).resolve().parent
 MODELS_DIR = E2E_DIR / "models"
 PROJECT_DIR = E2E_DIR.parents[1]
 
+if os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1":
+    import tensorrt_model_connect as _installed_package
+
+    installed_path = Path(_installed_package.__file__).resolve()
+    if installed_path.is_relative_to(PROJECT_DIR / "python"):
+        raise RuntimeError(
+            "TRTMC_TEST_INSTALLED_WHEEL=1 imported tensorrt_model_connect "
+            f"from the source checkout: {installed_path}"
+        )
+
 
 def _load_manifest():
     """Load model manifests from flat and model-owned E2E layouts."""

@@ -251,6 +251,7 @@ path-scoped Pages builds are independent.
 | `quality.py` | Run impact support, source quality, and unit tests | Container |
 | `coverage.py` | Select tests, collect coverage, and enforce thresholds | Container |
 | `package.py` | Build, validate, install, and smoke-test wheels | Container |
+| `selected_wheel.py` | Target-install one certified wheel for selected nightly tests | Container |
 | `e2e.py` | Choose selective or full E2E policy | Container |
 | `e2e_schedule.py` | Calculate balanced GPU/worker assignments | Pure planning |
 | `e2e_scheduler.py` | Launch workers, enforce timeouts, and merge results | Container |
@@ -474,6 +475,17 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Boundary:** It certifies packaging and installed runtime reuse. It does not
   decide affected models or perform model/reference comparison.
+
+### `selected_wheel.py`
+
+- **Functionality / units:** Selects and target-installs the configured nightly
+  wheel without changing the stable base interpreter.
+- **Inputs:** A wheel directory, Python tag, exact TensorRT version, and writable
+  work directory.
+- **Outputs:** Stable Python and selected `trtmc` paths plus safe basename, digest, and
+  version provenance.
+- **Boundary:** The package job certifies wheel contents; this module only
+  verifies that the selected consumer runtime resolves to that installed wheel.
 
 ### `e2e.py`
 

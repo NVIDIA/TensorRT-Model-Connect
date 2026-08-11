@@ -18,6 +18,7 @@ from tools.test_impact import ImpactResult, format_human
 from .context import CiContext
 from .package import WheelPackageManager
 from .process import CiError
+from .selected_wheel import SelectedWheelRuntime
 
 
 class EnvironmentVerifier:
@@ -192,11 +193,26 @@ class UnitTestRunner:
         python_tests, native_targets, ctest_selector = self._premerge_scope(scope)
         print(f"Premerge unit scope: {scope}")
 
-        python_path = f"{source / 'python'}:{source}"
-        if self.context.env.get("PYTHONPATH"):
-            python_path += f":{self.context.env['PYTHONPATH']}"
+        selected_wheel = SelectedWheelRuntime.prepare(
+            self.context,
+            scratch / "selected-wheel-runtime",
+            scratch / "selected-wheel-provenance.json",
+            base_python=(
+                "/opt/venv/bin/python"
+                if Path("/opt/venv/bin/python").is_file()
+                else shutil.which("python") or "python"
+            ),
+        )
+        python = str(selected_wheel.python) if selected_wheel else "python"
+        if selected_wheel:
+            python_environment = selected_wheel.environment(source, self.context.env)
+        else:
+            python_path = f"{source / 'python'}:{source}"
+            if self.context.env.get("PYTHONPATH"):
+                python_path += f":{self.context.env['PYTHONPATH']}"
+            python_environment = {"PYTHONPATH": python_path}
         pytest = [
-            "python",
+            python,
             "-m",
             "pytest",
             *python_tests,
@@ -212,27 +228,32 @@ class UnitTestRunner:
             "--ignore=tests/builder/test_flashinfer_benchmark.py",
             "--ignore=tests/builder/test_tvm_ffi_plugin.py",
         ]
+        if selected_wheel:
+            pytest.append("--import-mode=importlib")
         self.context.run(
             pytest,
             limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
-            updates={"PYTHONPATH": python_path},
+            updates=python_environment,
         )
         if scope == "all":
+            allocator = [
+                python,
+                "-m",
+                "pytest",
+                "tests/tools/test_model_proof_runner.py",
+                "-q",
+                "-x",
+                "-p",
+                "no:cacheprovider",
+                "-m",
+                "model_proof_allocator",
+            ]
+            if selected_wheel:
+                allocator.append("--import-mode=importlib")
             self.context.run(
-                [
-                    "python",
-                    "-m",
-                    "pytest",
-                    "tests/tools/test_model_proof_runner.py",
-                    "-q",
-                    "-x",
-                    "-p",
-                    "no:cacheprovider",
-                    "-m",
-                    "model_proof_allocator",
-                ],
+                allocator,
                 limit=self.context.env.get("MODEL_PROOF_ALLOCATOR_TIMEOUT", "30m"),
-                updates={"PYTHONPATH": python_path},
+                updates=python_environment,
             )
 
         if native_targets:

@@ -441,7 +441,8 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
         revision,
     ]
     environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(_PROJECT_DIR / "python")
+    if environment.get("TRTMC_TEST_INSTALLED_WHEEL") != "1":
+        environment["PYTHONPATH"] = str(_PROJECT_DIR / "python")
     result = subprocess.run(
         command, cwd=_PROJECT_DIR, env=environment, capture_output=True, text=True
     )

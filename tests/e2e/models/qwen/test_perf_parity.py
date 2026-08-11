@@ -135,8 +135,10 @@ def _run_cpp(binary: Path, bundle: Path, hf_python: Path) -> tuple[str, float]:
 def _run_python(hf_python: Path, bundle: Path) -> tuple[str, float]:
     """Run Python TrtRunner via subprocess and return (output_text, wall_clock_seconds)."""
     script = f"""
+import os
 import sys
-sys.path.insert(0, "{PROJECT_DIR / 'python'}")
+if os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") != "1":
+    sys.path.insert(0, "{PROJECT_DIR / 'python'}")
 from tensorrt_model_connect.families.qwen.debug_runner import load_engine_from_bundle
 from tensorrt_model_connect.families.qwen.debug_runner import TrtRunner
 import numpy as np

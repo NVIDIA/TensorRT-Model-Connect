@@ -23,6 +23,12 @@ from .gpu_lease import GpuLease
 from .model_reference_cache import ModelReferenceCacheWarmer, ModelReferenceContract
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
+from .selected_wheel import (
+    SELECTED_WHEEL_DIR_ENV,
+    SELECTED_WHEEL_PYTHON_TAG_ENV,
+    SELECTED_WHEEL_TENSORRT_VERSION_ENV,
+    SelectedWheelContract,
+)
 from .validation import ValidationDatasetPreparer
 
 
@@ -599,6 +605,7 @@ class ModelProofRunner:
         name = self._base_container_name()
         self.container_name = name
         slots = ",".join(map(str, self.lease.slot_ids))
+        selected_wheel = SelectedWheelContract.from_context(self.context)
         self.context.run(["docker", "rm", "-f", name], check=False, capture_output=True)
         mounts = [
             "--mount",
@@ -615,6 +622,13 @@ class ModelProofRunner:
                 [
                     "--mount",
                     f"type=bind,src={validation_dir},dst=/validation-data,readonly",
+                ]
+            )
+        if selected_wheel is not None:
+            mounts.extend(
+                [
+                    "--mount",
+                    f"type=bind,src={selected_wheel.directory},dst=/selected-wheel,readonly",
                 ]
             )
         command = [
@@ -652,7 +666,7 @@ class ModelProofRunner:
             "/src",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=4g",
-            *self._proof_environment(slots, selection.reference_cache),
+            *self._proof_environment(slots, selection.reference_cache, selected_wheel),
             image,
             "python3",
             "-m",
@@ -676,6 +690,7 @@ class ModelProofRunner:
         self,
         slots: str,
         reference: dict[str, str] | None,
+        selected_wheel: SelectedWheelContract | None = None,
     ) -> list[str]:
         assert self.lease and self.lease.gpu_id is not None
         values = {
@@ -714,6 +729,14 @@ class ModelProofRunner:
                 values[environment_variable] = (
                     f"/work/reference-private/{reference['relative_path']}"
                 )
+        if selected_wheel is not None:
+            values.update(
+                {
+                    SELECTED_WHEEL_DIR_ENV: "/selected-wheel",
+                    SELECTED_WHEEL_PYTHON_TAG_ENV: selected_wheel.python_tag,
+                    SELECTED_WHEEL_TENSORRT_VERSION_ENV: selected_wheel.tensorrt_version,
+                }
+            )
         return [item for name, value in values.items() for item in ("-e", f"{name}={value}")]
 
     def _reclaim_orphans(self) -> None:

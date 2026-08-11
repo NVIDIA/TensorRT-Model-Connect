@@ -20,6 +20,7 @@ from .context import CiContext
 from .model_proof import ModelProofRequest
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
+from .selected_wheel import SelectedWheelRuntime
 from .validation import ValidationRunner
 
 
@@ -120,6 +121,7 @@ class ModelProofInnerPipeline:
         self.artifacts = Path("/artifacts")
         self.status: ProofStatus | None = None
         self.selection: ModelProofSelection | None = None
+        self.selected_wheel: SelectedWheelRuntime | None = None
 
     def run(self) -> None:
         validation_rc = 0
@@ -174,6 +176,12 @@ class ModelProofInnerPipeline:
             self.work / "hf-modules",
         ):
             path.mkdir(parents=True, exist_ok=True)
+        self.selected_wheel = SelectedWheelRuntime.prepare(
+            self.context,
+            self.work / "selected-wheel-runtime",
+            self.artifacts / "selected-wheel.json",
+            base_python=self._base_python(),
+        )
 
     def _validate_gpu_lease(self) -> dict[str, object]:
         gpu_id = self.context.env.get("TRTMC_MODEL_PROOF_GPU_ID", "")
@@ -528,6 +536,7 @@ class ModelProofInnerPipeline:
         if self.selection.reference_cache:
             proof["model_reference_revision"] = self.selection.reference_cache["revision"]
             proof["model_reference_evidence"] = "model-reference-cache.json"
+        proof.update(self._selected_wheel_proof())
         (self.artifacts / "proof.json").write_text(
             json.dumps(proof, indent=2) + "\n", encoding="utf-8"
         )
@@ -539,7 +548,15 @@ class ModelProofInnerPipeline:
             "running",
             "validation/eval_summary.json, validation/models/*/summary.json",
         )
-        if ValidationRunner(self.context, self.request.suite, runtime_model).run():
+        if ValidationRunner(
+            self.context,
+            self.request.suite,
+            runtime_model,
+            python=self._python(),
+            trtmc=self._trtmc(),
+            pythonpath=self._pythonpath(),
+            installed_wheel=self.selected_wheel is not None,
+        ).run():
             self.status.step("validation", "passed")
         else:
             self.status.step(
@@ -618,6 +635,13 @@ class ModelProofInnerPipeline:
         self.status.step(
             "python_tests", "running", "python-model-tests.xml, python-model-tests.log"
         )
+        pytest_options = ["--import-mode=importlib"] if self.selected_wheel else []
+        environment = {
+            "TRTMC_ELF_TIMING_CACHE_PATH": "",
+            "TRTMC_ELF_TIMING_CACHE_METADATA_PATH": "",
+            "TRTMC_ELF_TIMING_CACHE_GENERATE": "0",
+        }
+        environment.update(self._python_environment())
         self._run_logged(
             [
                 self._python(),
@@ -632,17 +656,10 @@ class ModelProofInnerPipeline:
                 "-c",
                 self.source / "pyproject.toml",
                 f"--junitxml={self.artifacts / 'python-model-tests.xml'}",
+                *pytest_options,
             ],
             self.artifacts / "python-model-tests.log",
-            updates={
-                "PYTHONPATH": f"{self.source / 'python'}:{self.source}",
-                "PYTHONNOUSERSITE": "1",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                "TRTMC_BINARY": str(self.work / "build/trtmc"),
-                "TRTMC_ELF_TIMING_CACHE_PATH": "",
-                "TRTMC_ELF_TIMING_CACHE_METADATA_PATH": "",
-                "TRTMC_ELF_TIMING_CACHE_GENERATE": "0",
-            },
+            updates=environment,
         )
         self.status.step("python_tests", "passed")
 
@@ -655,18 +672,21 @@ class ModelProofInnerPipeline:
         filters = [item for name in self.selection.e2e_models for item in ("--e2e-model", name)] + [
             item for name in self.selection.e2e_cases for item in ("--e2e-testcase", name)
         ]
+        pytest_options = ["--import-mode=importlib"] if self.selected_wheel else []
         self.status.step("e2e_reference", "running")
         self.status.step("engine_build_budget", "running")
         environment = {
-            "PYTHONPATH": f"{self.source / 'python'}:{self.source}",
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
             "TRTMC_MODEL_PLUGIN_STRICT": "1",
             "TRTMC_MODEL_PLUGIN_DIR": str(self.work / "model-plugins"),
             "TRTMC_ENGINE_BUILD_GUARD_DIR": str(self.artifacts / "engine-builds"),
             "TRTMC_ENGINE_BUILD_REVISION": self.request.revision,
-            "LD_LIBRARY_PATH": f"{self.work / 'build'}:{self.context.env.get('LD_LIBRARY_PATH', '')}",
+            "LD_LIBRARY_PATH": (
+                self.context.env.get("LD_LIBRARY_PATH", "")
+                if self.selected_wheel
+                else f"{self.work / 'build'}:{self.context.env.get('LD_LIBRARY_PATH', '')}"
+            ),
         }
+        environment.update(self._python_environment())
         self._run_logged(
             [
                 self._python(),
@@ -685,7 +705,7 @@ class ModelProofInnerPipeline:
                 "--engine-dir",
                 self.work / "engines",
                 "--trtmc-binary",
-                self.work / "build/trtmc",
+                self._trtmc(),
                 "--hf-python",
                 self._python(),
                 "--e2e-artifacts-dir",
@@ -694,6 +714,7 @@ class ModelProofInnerPipeline:
                 self.work / "model-plugins",
                 "--rebuild-engines",
                 f"--junitxml={self.artifacts / 'e2e/junit.xml'}",
+                *pytest_options,
             ],
             self.artifacts / "e2e.log",
             updates=environment,
@@ -831,5 +852,42 @@ class ModelProofInnerPipeline:
             raise CiError(f"command failed ({returncode}): {' '.join(map(str, command))}")
 
     def _python(self) -> str:
+        if self.selected_wheel:
+            return str(self.selected_wheel.python)
+        return self._base_python()
+
+    def _base_python(self) -> str:
         configured = self.context.env.get("TRTMC_HF_PYTHON", "/opt/venv/bin/python")
         return configured if Path(configured).is_file() else shutil.which("python3") or "python3"
+
+    def _trtmc(self) -> str:
+        if self.selected_wheel:
+            return str(self.selected_wheel.trtmc)
+        return str(self.work / "build/trtmc")
+
+    def _pythonpath(self) -> str:
+        if self.selected_wheel:
+            return f"{self.selected_wheel.site_packages}:{self.source}"
+        return f"{self.source / 'python'}:{self.source}"
+
+    def _python_environment(self) -> dict[str, str]:
+        if self.selected_wheel:
+            return self.selected_wheel.environment(self.source, self.context.env)
+        return {
+            "PYTHONPATH": self._pythonpath(),
+            "PYTHONNOUSERSITE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TRTMC_BINARY": self._trtmc(),
+        }
+
+    def _selected_wheel_proof(self) -> dict[str, object]:
+        if not self.selected_wheel:
+            return {}
+        selected = json.loads(self.selected_wheel.provenance.read_text(encoding="utf-8"))
+        return {
+            "python_runtime": "selected-wheel",
+            "selected_wheel_evidence": "selected-wheel.json",
+            "selected_wheel": selected["wheel"],
+            "selected_wheel_package_version": selected["package_version"],
+            "selected_wheel_tensorrt_version": selected["tensorrt_version"],
+        }

@@ -148,10 +148,11 @@ def model_plugin_dir(ctx: RunContext) -> Path:
 
 def subprocess_env(ctx: RunContext) -> dict[str, str]:
     env = os.environ.copy()
-    python_path = str(PROJECT_DIR / "python")
-    if env.get("PYTHONPATH"):
-        python_path = f"{python_path}:{env['PYTHONPATH']}"
-    env["PYTHONPATH"] = python_path
+    if env.get("TRTMC_TEST_INSTALLED_WHEEL") != "1":
+        python_path = str(PROJECT_DIR / "python")
+        if env.get("PYTHONPATH"):
+            python_path = f"{python_path}:{env['PYTHONPATH']}"
+        env["PYTHONPATH"] = python_path
     if ctx.ld_library_path:
         env["LD_LIBRARY_PATH"] = ctx.ld_library_path
     return env
