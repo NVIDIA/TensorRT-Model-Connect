@@ -529,9 +529,9 @@ class TestEnsureTokenizerJson:
 
         class FakeAutoTokenizer:
             @staticmethod
-            def from_pretrained(path, use_fast=False):
+            def from_pretrained(path, use_fast=True):
                 assert Path(path) == tmp_path
-                assert use_fast is False
+                assert use_fast is True
                 return FakeTokenizer()
 
         monkeypatch.setitem(
@@ -545,17 +545,17 @@ class TestEnsureTokenizerJson:
         tokenizer = json.loads((tmp_path / "tokenizer.json").read_text())
         assert tokenizer["model"]["vocab"]["hello"] == 5
 
-    def test_missing_fast_tokenizer_delegates_to_family_plugin(
+    def test_failed_fast_tokenizer_delegates_to_family_plugin(
         self,
         tmp_path,
         monkeypatch,
     ):
         class FakeAutoTokenizer:
             @staticmethod
-            def from_pretrained(path, use_fast=False):
+            def from_pretrained(path, use_fast=True):
                 assert Path(path) == tmp_path
-                assert use_fast is False
-                raise RuntimeError("slow tokenizer unavailable")
+                assert use_fast is True
+                raise RuntimeError("fast tokenizer unavailable")
 
         monkeypatch.setitem(
             sys.modules,
@@ -574,7 +574,7 @@ class TestEnsureTokenizerJson:
         _ensure_tokenizer_json(tmp_path, plugin=FakePlugin())
 
         assert captured["model_dir"] == tmp_path
-        assert "slow tokenizer conversion failed" in captured["previous_error"]
+        assert "fast tokenizer conversion failed" in captured["previous_error"]
         assert (tmp_path / "tokenizer.json").exists()
 
 

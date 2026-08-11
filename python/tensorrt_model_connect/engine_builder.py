@@ -776,9 +776,11 @@ def _wordpiece_tokenizer_needs_rebuild(model_dir: Path) -> bool:
 
 
 def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
-    """If the model directory lacks tokenizer.json, generate it from the
-    slow tokenizer using HF transformers. This ensures the C++ runtime can
-    always load the tokenizer natively.
+    """Generate a native tokenizer.json from the Hugging Face fast tokenizer.
+
+    Slow tokenizers commonly save only their source vocabulary files.  The
+    C++ runtime needs the serialized Rust tokenizer backend, which is exposed
+    by fast tokenizers as ``backend_tokenizer``.
     """
     tokenizer_path = model_dir / "tokenizer.json"
     rebuild_wordpiece = _wordpiece_tokenizer_needs_rebuild(model_dir)
@@ -810,13 +812,13 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
             file=sys.stderr,
         )
 
-    slow_tokenizer_error: str | None = None
+    tokenizer_conversion_error: str | None = None
 
     # --- Attempt 1: standard HF conversion in an isolated directory ---
     try:
         from transformers import AutoTokenizer
 
-        tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=False)
+        tok = AutoTokenizer.from_pretrained(str(model_dir), use_fast=True)
         with tempfile.TemporaryDirectory(prefix="trtmc-tokenizer-") as temporary_dir:
             generated_path = Path(temporary_dir) / "tokenizer.json"
             backend_tokenizer = getattr(tok, "backend_tokenizer", None)
@@ -843,17 +845,21 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
               file=sys.stderr)
         return
     except Exception as e:
-        slow_tokenizer_error = f"slow tokenizer conversion failed: {e}"
+        tokenizer_conversion_error = f"fast tokenizer conversion failed: {e}"
 
     if callable(family_ensure):
         kwargs = {}
         if _call_supports_kwarg(family_ensure, "previous_error"):
-            kwargs["previous_error"] = slow_tokenizer_error
+            kwargs["previous_error"] = tokenizer_conversion_error
         if bool(family_ensure(model_dir, **kwargs)):
             return
 
-    print("[trtmc build] Warning: could not generate tokenizer.json "
-          "(C++ runtime may fail to create tokenizer)", file=sys.stderr)
+    detail = tokenizer_conversion_error or "no tokenizer conversion was attempted"
+    print(
+        "[trtmc build] Warning: could not generate tokenizer.json "
+        f"(C++ runtime may fail to create tokenizer): {detail}",
+        file=sys.stderr,
+    )
 
 
 def _prepare_tokenizer_special_frame(
