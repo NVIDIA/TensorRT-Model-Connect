@@ -11,7 +11,7 @@ from tensorrt_model_connect.python_profiles import (
 )
 
 
-def test_personaplex_reference_keeps_the_default_profile() -> None:
+def test_personaplex_reference_uses_full_duplex_environment() -> None:
     profiles = default_execution_profiles(
         family="personaplex",
         runtime_strategy="personaplex_speech_to_speech",
@@ -21,7 +21,7 @@ def test_personaplex_reference_keeps_the_default_profile() -> None:
     assert profiles == {
         "build": "base",
         "runtime": "base",
-        "reference": "base",
+        "reference": "personaplex_full_duplex_evaluator",
     }
 
 

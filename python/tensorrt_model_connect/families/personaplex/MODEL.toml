@@ -6,6 +6,9 @@ plugin = "personaplex"
 python_profile_specs = [
   "personaplex_full_duplex_evaluator|families/personaplex/python_profile_requirements/full_duplex_evaluator.lock.txt|families/personaplex/full_duplex_evaluator_verify.py|true|false",
 ]
+default_execution_profiles = [
+  "reference|personaplex_full_duplex_evaluator",
+]
 module = "plugin"
 aliases = [
   "moshi",

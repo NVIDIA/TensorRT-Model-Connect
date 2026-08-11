@@ -53,3 +53,14 @@ def test_sana_wm_build_and_reference_share_transformers_profile() -> None:
         "runtime": "base",
         "reference": "sana_wm_reference",
     }
+
+
+def test_sana_wm_reference_profile_includes_official_script_dependencies() -> None:
+    repository = Path(__file__).resolve().parents[4]
+    requirements = (
+        repository
+        / "python/tensorrt_model_connect/families/sana_wm/"
+        "python_profile_requirements/sana_wm_reference.lock.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "einops==0.8.2" in requirements.splitlines()
