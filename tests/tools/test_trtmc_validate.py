@@ -608,6 +608,92 @@ def test_binding_failure_retains_engine_and_per_model_hf_cache(tmp_path):
     assert (model_work / "hf-cache/blob").is_file()
 
 
+def test_per_model_hf_cache_hardlinks_seed_and_deletes_only_working_copy(tmp_path):
+    seed = tmp_path / "seed"
+    blob = seed / "hub/models--org--model/blobs/content"
+    blob.parent.mkdir(parents=True)
+    blob.write_text("weights", encoding="utf-8")
+    snapshot = seed / "hub/models--org--model/snapshots/revision"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.bin").symlink_to("../../blobs/content")
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--storage-root",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "results"),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--engine-retention",
+            "delete_always",
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-retention",
+            "delete_always",
+            "--hf-cache-seed-dir",
+            str(seed),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    trtmc_validate._prepare_run_directories(arguments)
+
+    selected, _, model_work = trtmc_validate._binding_resource_arguments(
+        arguments,
+        trtmc_validate.Binding("model-a", "suite-a"),
+    )
+
+    linked_blob = selected.hf_cache_dir / "hub/models--org--model/blobs/content"
+    linked_snapshot = (
+        selected.hf_cache_dir / "hub/models--org--model/snapshots/revision/model.bin"
+    )
+    assert linked_blob.stat().st_ino == blob.stat().st_ino
+    assert linked_snapshot.is_symlink()
+    assert linked_snapshot.resolve() == linked_blob
+    cleanup = trtmc_validate._cleanup_model_hf_cache(
+        arguments,
+        model_work,
+        passed=False,
+        model_complete=True,
+    )
+    assert cleanup["status"] == "deleted"
+    assert blob.read_text(encoding="utf-8") == "weights"
+
+
+def test_hf_cache_seed_requires_per_model_mode(tmp_path):
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["--all", "--hf-cache-seed-dir", str(seed)]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="requires.*per_model"):
+        trtmc_validate._prepare_run_directories(arguments)
+
+
+def test_hf_cache_seed_must_be_disjoint_from_model_work(tmp_path):
+    work = tmp_path / "work"
+    seed = work / "seed"
+    seed.mkdir(parents=True)
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--model-work-dir",
+            str(work),
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-seed-dir",
+            str(seed),
+        ]
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="must be disjoint"):
+        trtmc_validate._prepare_run_directories(arguments)
+
+
 def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     tmp_path,
     monkeypatch,

@@ -3229,6 +3229,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="retention for a per-model Hugging Face cache",
     )
     parser.add_argument(
+        "--hf-cache-seed-dir",
+        type=Path,
+        help=(
+            "existing HF_HOME tree to hard-link into each empty per-model cache; "
+            "the seed is never deleted"
+        ),
+    )
+    parser.add_argument(
         "--minimum-free-space-gib",
         type=_nonnegative_float,
         default=0.0,
@@ -3406,6 +3414,8 @@ def _prepare_run_directories(arguments: argparse.Namespace) -> None:
         raise ValidationError(
             "a shared Hugging Face cache only supports --hf-cache-retention retain"
         )
+    if arguments.hf_cache_seed_dir is not None and arguments.hf_cache_mode != "per_model":
+        raise ValidationError("--hf-cache-seed-dir requires --hf-cache-mode per_model")
     if arguments.storage_root is not None:
         storage_root = arguments.storage_root.expanduser().resolve()
         if not storage_root.is_dir():
@@ -3417,6 +3427,7 @@ def _prepare_run_directories(arguments: argparse.Namespace) -> None:
             ("reference cache directory", arguments.reference_cache_dir),
             ("reference source cache directory", arguments.reference_source_cache_dir),
             ("model work directory", arguments.model_work_dir),
+            ("Hugging Face cache seed directory", arguments.hf_cache_seed_dir),
         ):
             if path is None:
                 continue
@@ -3427,6 +3438,11 @@ def _prepare_run_directories(arguments: argparse.Namespace) -> None:
                 raise ValidationError(
                     f"{label} must stay below storage root {storage_root}: {resolved}"
                 ) from exc
+    if arguments.hf_cache_seed_dir is not None:
+        seed = arguments.hf_cache_seed_dir.expanduser().resolve()
+        if not seed.is_dir():
+            raise ValidationError(f"Hugging Face cache seed directory does not exist: {seed}")
+        arguments.hf_cache_seed_dir = seed
     if arguments.model_work_dir is not None:
         output = arguments.output.expanduser().resolve()
         model_work = arguments.model_work_dir.expanduser().resolve()
@@ -3438,6 +3454,14 @@ def _prepare_run_directories(arguments: argparse.Namespace) -> None:
             raise ValidationError("output and model work directory must be disjoint")
         arguments.output = output
         arguments.model_work_dir = model_work
+        if arguments.hf_cache_seed_dir is not None and (
+            arguments.hf_cache_seed_dir == model_work
+            or arguments.hf_cache_seed_dir.is_relative_to(model_work)
+            or model_work.is_relative_to(arguments.hf_cache_seed_dir)
+        ):
+            raise ValidationError(
+                "Hugging Face cache seed and model work directory must be disjoint"
+            )
     arguments.output.mkdir(parents=True, exist_ok=True)
     if arguments.model_work_dir is None:
         arguments.engine_dir.mkdir(parents=True, exist_ok=True)
@@ -3470,6 +3494,30 @@ def _binding_resource_arguments(
     if arguments.hf_cache_mode == "per_model":
         selected.hf_cache_dir = model_work / "hf-cache"
         selected.hf_cache_dir.mkdir(parents=True, exist_ok=True)
+        if arguments.hf_cache_seed_dir is not None and not any(
+            selected.hf_cache_dir.iterdir()
+        ):
+            if (
+                arguments.hf_cache_seed_dir.stat().st_dev
+                != selected.hf_cache_dir.stat().st_dev
+            ):
+                raise ValidationError(
+                    "Hugging Face cache seed and per-model cache must use the same filesystem"
+                )
+            try:
+                shutil.copytree(
+                    arguments.hf_cache_seed_dir,
+                    selected.hf_cache_dir,
+                    dirs_exist_ok=True,
+                    symlinks=True,
+                    copy_function=os.link,
+                )
+            except OSError as exc:
+                shutil.rmtree(selected.hf_cache_dir, ignore_errors=True)
+                raise ValidationError(
+                    f"could not hard-link Hugging Face cache seed "
+                    f"{arguments.hf_cache_seed_dir}: {exc}"
+                ) from exc
     return selected, binding_work, model_work
 
 

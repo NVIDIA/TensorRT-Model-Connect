@@ -564,6 +564,42 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
     assert "perf" not in request["commands"]
 
 
+def test_l4t_dry_run_passes_managed_hf_cache_seed_to_accuracy(tmp_path, monkeypatch):
+    storage = tmp_path / "storage"
+    seed = storage / "cache-staging/model"
+    seed.mkdir(parents=True)
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_require_platform_storage_root", lambda *args: None)
+
+    result = model_checks.main(
+        [
+            "run",
+            "--platform",
+            "l4t-thor",
+            "--task",
+            "accuracy",
+            "--model",
+            "distilgpt2",
+            "--run-id",
+            "seeded-unit",
+            "--hf-cache-seed-dir",
+            str(seed),
+            "--dry-run",
+        ]
+    )
+
+    assert result == 0
+    request = json.loads(
+        (storage / "results/seeded-unit/request.json").read_text(encoding="utf-8")
+    )
+    command = request["commands"]["accuracy"]
+    seed_index = command.index("--hf-cache-seed-dir")
+    assert command[seed_index + 1] == str(seed)
+
+
 def test_run_default_output_is_concise_and_ends_with_task_summary(
     tmp_path,
     monkeypatch,

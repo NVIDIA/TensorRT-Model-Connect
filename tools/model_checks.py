@@ -106,6 +106,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="resume the existing --run-id after verifying its request",
     )
+    run.add_argument(
+        "--hf-cache-seed-dir",
+        type=Path,
+        help="existing HF_HOME tree to hard-link into isolated Accuracy caches",
+    )
     return parser
 
 
@@ -984,6 +989,8 @@ def _accuracy_command(
             str(environment["storage"]["model_reference_cache_root"]),
         ]
     )
+    if arguments.hf_cache_seed_dir is not None:
+        command.extend(["--hf-cache-seed-dir", str(arguments.hf_cache_seed_dir)])
     command.extend(_option_arguments(config.get("options", {})))
     return command
 
@@ -1127,6 +1134,26 @@ def _run(arguments: argparse.Namespace) -> int:
         "results root",
     )
     run_root = _require_managed_path(results_root / run_id, storage_root, "run root")
+    if arguments.hf_cache_seed_dir is not None:
+        if not _task_bindings(plan, "accuracy"):
+            raise ModelCheckError("--hf-cache-seed-dir requires the Accuracy task")
+        if (
+            environment["tasks"]["accuracy"]["options"].get("hf-cache-mode", "shared")
+            != "per_model"
+        ):
+            raise ModelCheckError(
+                "--hf-cache-seed-dir requires Accuracy hf-cache-mode per_model"
+            )
+        arguments.hf_cache_seed_dir = _require_managed_path(
+            arguments.hf_cache_seed_dir,
+            storage_root,
+            "Hugging Face cache seed directory",
+        )
+        if not arguments.hf_cache_seed_dir.is_dir():
+            raise ModelCheckError(
+                "Hugging Face cache seed directory does not exist: "
+                f"{arguments.hf_cache_seed_dir}"
+            )
     if arguments.resume:
         if not run_root.is_dir():
             raise ModelCheckError(f"cannot resume missing run root: {run_root}")

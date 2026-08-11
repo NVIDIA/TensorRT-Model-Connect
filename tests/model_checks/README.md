@@ -74,6 +74,19 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --run-id gb300-perf-all
 ```
 
+Seed an isolated L4T Accuracy cache from an existing `HF_HOME` tree on the same
+filesystem. Files are hard-linked on demand; per-model cleanup never deletes the
+seed:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform l4t-thor \
+  --task accuracy \
+  --model sam3 \
+  --hf-cache-seed-dir /home/nvidia/trtmc-l4t-thor/hf-cache \
+  --run-id l4t-sam3
+```
+
 Add `--dry-run` to print the resolved child commands, or `--verbose` to retain
 detailed runner output.
 
