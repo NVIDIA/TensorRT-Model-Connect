@@ -31,6 +31,21 @@ class TestQwenPlugin:
 
         assert not plugin.matches("qwen3_moe")
 
+    def test_quantized_qwen_uses_single_engine_layout(self):
+        from tensorrt_model_connect.families.qwen import plugin
+
+        config = ModelConfig(
+            hidden_size=self.HIDDEN,
+            vocab_size=self.VOCAB,
+            num_hidden_layers=self.LAYERS,
+            num_attention_heads=self.HEADS,
+            num_key_value_heads=self.KV_HEADS,
+        )
+        assert plugin.supports_split_decoder_roles(config)
+
+        config.raw["_quantized_build_requested"] = True
+        assert not plugin.supports_split_decoder_roles(config)
+
     @staticmethod
     def _make_tensors(vocab, hidden, layers, heads, kv_heads, mlp):
         head_dim = hidden // heads

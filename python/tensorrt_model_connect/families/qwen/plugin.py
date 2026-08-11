@@ -85,6 +85,10 @@ class QwenPlugin:
         capability = native_kv_architecture_capability(config)
         return int(config.max_position_embeddings) if capability.eligible else 256
 
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        """Keep quantized Qwen on the single-engine correctness path."""
+        return not bool(config.raw.get("_quantized_build_requested"))
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
         *, precision: str = "fp32",
