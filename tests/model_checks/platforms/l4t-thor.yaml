@@ -14,6 +14,12 @@ storage:
 # A disagreement is not a hardware exclusion. Keep only reproduced hardware
 # limits here, scoped to the exact task binding that requires the engine.
 unsupported:
+  - model: minimax-h3-768p
+    task: accuracy
+    binding: minimax_h3_official_profile_parity
+    reason: >-
+      The qualified single-device profile requires 180 GiB of free GPU memory,
+      which exceeds this platform's approximately 128 GiB unified memory.
   - model: qwen-image-2512
     task: accuracy
     binding: dpg_bench_diffusion_image

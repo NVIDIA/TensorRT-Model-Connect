@@ -484,6 +484,18 @@ def test_l4t_accuracy_environment_bounds_each_model_attempt() -> None:
     assert raw["tasks"]["accuracy"]["options"]["model-timeout-seconds"] == 21600
 
 
+def test_l4t_marks_minimax_profile_unsupported_by_memory_contract() -> None:
+    platform = model_checks.load_platform("l4t-thor")
+
+    assert any(
+        item["model"] == "minimax-h3-768p"
+        and item["task"] == "accuracy"
+        and item["binding"] == "minimax_h3_official_profile_parity"
+        and "180 GiB" in item["reason"]
+        for item in platform["unsupported"]
+    )
+
+
 def test_l4t_perf_environment_deletes_entry_cache_and_bundle() -> None:
     path = model_checks.REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
