@@ -30,7 +30,7 @@ LEGACY_PROFILE_ROOT_ENV = "TRTMC_E2E_PROFILE_ROOT"
 PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
 DEFAULT_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_PROFILE_LAYOUT_VERSION = "overlay-v3-exact-pins"
+_PROFILE_LAYOUT_VERSION = "overlay-v4-transitive-site-packages"
 _DEFAULT_PROFILE_BUILD_JOBS = "4"
 _PROFILE_INSTALL_TIMEOUT_SECONDS = 7200
 _EXACT_REQUIREMENT_RE = re.compile(
@@ -368,10 +368,24 @@ def _profile_install_environment() -> dict[str, str]:
 
 
 def _python_site_packages(python: str) -> list[str]:
-    script = (
-        "import json, site; "
-        "print(json.dumps(site.getsitepackages()))"
-    )
+    script = """
+import json
+import site
+import sys
+from pathlib import Path
+
+paths = []
+for value in [*site.getsitepackages(), *sys.path]:
+    if not value:
+        continue
+    path = Path(value).absolute()
+    if path.name not in {"site-packages", "dist-packages"}:
+        continue
+    normalized = str(path)
+    if normalized not in paths:
+        paths.append(normalized)
+print(json.dumps(paths))
+"""
     result = subprocess.run(
         [python, "-c", script],
         capture_output=True,

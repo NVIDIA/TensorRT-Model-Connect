@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,37 @@ def test_python_profile_key_preserves_non_virtualenv_interpreter_path(tmp_path):
     interpreter = tmp_path / "python3"
 
     assert shared_profiles._absolute_python(str(interpreter)) == str(interpreter)
+
+
+def test_python_site_packages_preserves_transitive_profile_overlays(tmp_path):
+    base_environment = tmp_path / "base-environment"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(base_environment)],
+        check=True,
+    )
+    base_python = base_environment / "bin" / "python"
+    base_site_packages = Path(
+        subprocess.run(
+            [
+                str(base_python),
+                "-c",
+                "import site; print(site.getsitepackages()[0])",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    inherited_site_packages = tmp_path / "inherited" / "site-packages"
+    inherited_site_packages.mkdir(parents=True)
+    (base_site_packages / "inherited-profile.pth").write_text(
+        f"{inherited_site_packages}\n",
+        encoding="utf-8",
+    )
+
+    assert str(inherited_site_packages) in shared_profiles._python_site_packages(
+        str(base_python)
+    )
 
 
 def test_resolve_case_profile_names_apply_manifest_profiles():
