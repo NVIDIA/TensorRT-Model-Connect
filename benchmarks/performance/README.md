@@ -229,6 +229,24 @@ CI should prebuild the selected Python profiles and set
 `TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1`. Dependency installation is outside the
 measured campaign.
 
+### L4T Thor native build
+
+Build the shared Accuracy/Perf binaries from the selected source revision and
+TensorRT 11 installation. L4T does not always put `nvcc` on `PATH`, so pass its
+absolute path; otherwise CMake omits model-owned CUDA sources and can produce an
+incomplete runtime plugin.
+
+```bash
+cmake -S . -B "$TRTMC_CHECK_BUILD_DIR" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc \
+  -DTRTMC_BUILD_BACKEND_TRT=ON \
+  -DTRTMC_BUILD_BENCHMARKS=ON \
+  -DTRTMC_TRT_INCLUDE_DIR="$TRT_ROOT/include" \
+  -DTRTMC_TRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so"
+cmake --build "$TRTMC_CHECK_BUILD_DIR" --parallel
+```
+
 ## Preflight and timing contract
 
 `check` and `run` perform the same preflight:
