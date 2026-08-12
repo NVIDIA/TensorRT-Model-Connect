@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 import re
 import signal
 import shutil
@@ -34,7 +35,8 @@ _PROFILE_LAYOUT_VERSION = "overlay-v4-transitive-site-packages"
 _DEFAULT_PROFILE_BUILD_JOBS = "4"
 _PROFILE_INSTALL_TIMEOUT_SECONDS = 7200
 _EXACT_REQUIREMENT_RE = re.compile(
-    r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9,._-]+\])?==([^\s;]+)$"
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9,._-]+\])?==([^\s;]+)"
+    r"(?:;\s*platform_machine\s*(==|!=)\s*(['\"])([^'\"]+)\4)?$"
 )
 
 
@@ -154,9 +156,14 @@ def _exact_pinned_requirements(requirements_text: str) -> dict[str, str]:
         if match is None:
             raise ValueError(
                 "Python profile requirements must be exact name==version pins; "
+                "only exact platform_machine markers are supported; "
                 f"line {line_number} is {raw_line!r}"
             )
-        name, version = match.groups()
+        name, version, operator, _, machine = match.groups()
+        if operator:
+            matches_machine = platform.machine() == machine
+            if (operator == "==") != matches_machine:
+                continue
         normalized_name = re.sub(r"[-_.]+", "-", name).lower()
         if normalized_name in pinned:
             raise ValueError(

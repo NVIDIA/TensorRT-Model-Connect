@@ -1,4 +1,4 @@
-flash-attn==2.8.3
+flash-attn==2.8.3; platform_machine != "aarch64"
 huggingface-hub==0.29.1
 imageio==2.34.0
 numpy==1.26.4

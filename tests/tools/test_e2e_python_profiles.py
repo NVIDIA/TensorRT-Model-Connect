@@ -421,6 +421,32 @@ def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
         )
 
 
+def test_profile_lock_filters_exact_platform_machine_markers(monkeypatch):
+    requirements = (
+        'flash-attn==2.8.3; platform_machine != "aarch64"\n'
+        "numpy==1.26.4\n"
+    )
+    monkeypatch.setattr(shared_profiles.platform, "machine", lambda: "aarch64")
+
+    assert shared_profiles._exact_pinned_requirements(requirements) == {
+        "numpy": "1.26.4"
+    }
+
+    monkeypatch.setattr(shared_profiles.platform, "machine", lambda: "x86_64")
+
+    assert shared_profiles._exact_pinned_requirements(requirements) == {
+        "flash-attn": "2.8.3",
+        "numpy": "1.26.4",
+    }
+
+
+def test_profile_lock_rejects_unrestricted_environment_markers():
+    with pytest.raises(ValueError, match="platform_machine"):
+        shared_profiles._exact_pinned_requirements(
+            'transformers==4.49.0; python_version >= "3.11"\n'
+        )
+
+
 def test_exact_profile_pin_accepts_only_local_builds_of_same_public_version():
     assert shared_profiles._pinned_version_matches(
         "3.1.0",
