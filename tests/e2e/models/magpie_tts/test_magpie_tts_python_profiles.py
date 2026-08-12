@@ -37,6 +37,7 @@ def test_magpie_reference_profile_pins_import_dependencies() -> None:
         "kiwisolver==1.5.0",
         "matplotlib==3.11.1",
         "nemo_toolkit==2.7.3",
+        "parso==0.8.7",
         "numpy==1.26.4",
         "pydub==0.25.1",
         "pyloudnorm==0.2.0",

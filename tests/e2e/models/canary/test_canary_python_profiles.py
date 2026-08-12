@@ -36,6 +36,7 @@ def test_canary_reference_profile_pins_nemo_asr_dependencies() -> None:
         "lhotse==1.33.0",
         "matplotlib==3.11.1",
         "nemo_toolkit[asr]==2.7.3",
+        "parso==0.8.7",
         "numpy==1.26.4",
         "soundfile==0.14.0",
         "transformers==4.57.6",
