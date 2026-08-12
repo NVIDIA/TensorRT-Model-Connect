@@ -14,6 +14,7 @@ import numpy
 import pandas
 import pycparser
 import pydantic
+import pyopenjtalk
 import pypinyin
 import pypinyin_dict
 import sentencepiece
@@ -39,6 +40,7 @@ assert version("soundfile") == "0.14.0"
 assert version("wandb") == "0.23.0"
 assert version("pycparser") == "3.0"
 assert version("pydantic") == "2.10.6"
+assert version("pyopenjtalk") == "0.4.1"
 assert version("pypinyin") == "0.55.0"
 assert version("pypinyin-dict") == "0.9.0"
 assert version("sentencepiece") == "0.2.2"
@@ -55,6 +57,8 @@ assert jieba is not None
 assert librosa is not None
 assert pycparser is not None
 assert pydantic is not None
+assert pyopenjtalk is not None
+assert pyopenjtalk.g2p("テスト")
 assert pypinyin is not None
 assert pypinyin_dict is not None
 assert sentencepiece is not None

@@ -438,6 +438,26 @@ def _materialize_venv_profile(
         )
     requirements_text = _read_requirements_text(requirements_spec)
     pinned_requirements = _exact_pinned_requirements(requirements_text)
+    bootstrap_requirements_spec = str(
+        spec.get("bootstrap_requirements", "") or ""
+    ).strip()
+    bootstrap_requirements_text = (
+        _read_requirements_text(bootstrap_requirements_spec)
+        if bootstrap_requirements_spec
+        else ""
+    )
+    bootstrap_pins = _exact_pinned_requirements(bootstrap_requirements_text)
+    conflicting_pins = {
+        name: (bootstrap_pins[name], pinned_requirements[name])
+        for name in bootstrap_pins.keys() & pinned_requirements.keys()
+        if bootstrap_pins[name] != pinned_requirements[name]
+    }
+    if conflicting_pins:
+        raise ValueError(
+            f"Execution profile {profile_name!r} has conflicting bootstrap and "
+            f"runtime pins: {conflicting_pins}"
+        )
+    all_pinned_requirements = {**bootstrap_pins, **pinned_requirements}
     verification_script = str(spec.get("verification_script", "") or "").strip()
     verification_script_file = str(
         spec.get("verification_script_file", "") or ""
@@ -457,6 +477,8 @@ def _materialize_venv_profile(
             _PROFILE_LAYOUT_VERSION,
             requirements_spec,
             requirements_text,
+            bootstrap_requirements_spec,
+            bootstrap_requirements_text,
             verification_script,
             f"system_site_packages={int(system_site_packages)}",
         ]
@@ -494,6 +516,11 @@ def _materialize_venv_profile(
         tmp_python = tmp_dir / "bin" / "python"
         requirements_file = tmp_dir / "requirements.lock.txt"
         requirements_file.write_text(requirements_text, encoding="utf-8")
+        bootstrap_requirements_file = tmp_dir / "bootstrap-requirements.lock.txt"
+        bootstrap_requirements_file.write_text(
+            bootstrap_requirements_text,
+            encoding="utf-8",
+        )
 
         try:
             create_cmd = [base_python, "-m", "venv", str(tmp_dir)]
@@ -505,6 +532,28 @@ def _materialize_venv_profile(
 
             if system_site_packages:
                 _write_base_site_packages_overlay(base_python, str(tmp_python))
+
+            if bootstrap_requirements_text.strip():
+                _run_profile_command(
+                    [
+                        str(tmp_python),
+                        "-m",
+                        "pip",
+                        "install",
+                        "--disable-pip-version-check",
+                        "--quiet",
+                        "--no-deps",
+                        "--no-build-isolation",
+                        "-r",
+                        str(bootstrap_requirements_file),
+                    ],
+                    description=(
+                        f"install bootstrap requirements for Python profile "
+                        f"{profile_name!r}"
+                    ),
+                    timeout=_PROFILE_INSTALL_TIMEOUT_SECONDS,
+                    env=_profile_install_environment(),
+                )
 
             if requirements_text.strip():
                 _run_profile_command(
@@ -528,7 +577,7 @@ def _materialize_venv_profile(
             _verify_exact_requirements(
                 profile_name,
                 str(tmp_python),
-                pinned_requirements,
+                all_pinned_requirements,
             )
 
             if verification_script:

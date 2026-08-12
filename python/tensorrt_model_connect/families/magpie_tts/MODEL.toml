@@ -4,7 +4,7 @@
 id = "magpie_tts"
 plugin = "magpie_tts"
 python_profile_specs = [
-  "magpie_tts_reference|families/magpie_tts/python_profile_requirements/magpie_tts_reference.lock.txt|families/magpie_tts/python_profile_verify.py|true|false",
+  "magpie_tts_reference|families/magpie_tts/python_profile_requirements/magpie_tts_reference.lock.txt|families/magpie_tts/python_profile_verify.py|true|false|families/magpie_tts/python_profile_requirements/magpie_tts_reference.bootstrap.lock.txt",
 ]
 default_execution_profiles = [
   "reference|magpie_tts_reference",

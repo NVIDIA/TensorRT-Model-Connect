@@ -5,7 +5,10 @@
 
 from pathlib import Path
 
-from tensorrt_model_connect.python_profiles import default_execution_profiles
+from tensorrt_model_connect.python_profiles import (
+    default_execution_profiles,
+    load_python_profile_registry,
+)
 
 
 def test_magpie_reference_uses_tts_environment() -> None:
@@ -53,6 +56,7 @@ def test_magpie_reference_profile_pins_import_dependencies() -> None:
         "pyparsing==3.3.2",
         "pycparser==3.0",
         "pydantic==2.10.6",
+        "pyopenjtalk==0.4.1",
         "pypinyin==0.55.0",
         "pypinyin-dict==0.9.0",
         "pytz==2026.3.post1",
@@ -60,6 +64,19 @@ def test_magpie_reference_profile_pins_import_dependencies() -> None:
         "sentencepiece==0.2.2",
         "tzdata==2026.3",
         "tensorboard==2.20.0",
+        "tqdm==4.70.0",
         "wandb==0.23.0",
         "sox==1.5.0",
     } <= set(requirements.splitlines())
+
+    profile = load_python_profile_registry()["profiles"]["magpie_tts_reference"]
+    bootstrap = (
+        repository
+        / "python/tensorrt_model_connect"
+        / profile["bootstrap_requirements"]
+    ).read_text(encoding="utf-8")
+    assert {
+        "Cython==3.1.3",
+        "numpy==1.26.4",
+        "setuptools-scm==9.2.2",
+    } <= set(bootstrap.splitlines())

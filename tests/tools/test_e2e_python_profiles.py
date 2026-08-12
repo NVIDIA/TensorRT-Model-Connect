@@ -221,6 +221,49 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
     assert install[2] == 7200
 
 
+def test_profile_installs_bootstrap_requirements_before_runtime_requirements(
+    monkeypatch, tmp_path
+):
+    bootstrap = tmp_path / "bootstrap.lock.txt"
+    bootstrap.write_text("build-helper==1.0\n", encoding="utf-8")
+    requirements = tmp_path / "requirements.lock.txt"
+    requirements.write_text("source-package==2.0\n", encoding="utf-8")
+    monkeypatch.delenv(shared_profiles.PREBUILT_ONLY_ENV, raising=False)
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+    monkeypatch.setattr(
+        shared_profiles,
+        "_verify_exact_requirements",
+        lambda *_args, **_kwargs: None,
+    )
+
+    commands = []
+
+    def run_command(cmd, *, description, timeout=1800, **kwargs):
+        commands.append((cmd, description, timeout, kwargs))
+        if description.startswith("create Python profile"):
+            python = Path(cmd[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(shared_profiles, "_run_profile_command", run_command)
+
+    shared_profiles._materialize_venv_profile(
+        "custom",
+        {
+            "bootstrap_requirements": str(bootstrap),
+            "requirements": str(requirements),
+            "system_site_packages": False,
+        },
+        sys.executable,
+    )
+
+    installs = [call for call in commands if call[1].startswith("install ")]
+    assert [call[1] for call in installs] == [
+        "install bootstrap requirements for Python profile 'custom'",
+        "install Python profile 'custom'",
+    ]
+
+
 def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
     monkeypatch.setenv("MAX_JOBS", "2")
 
