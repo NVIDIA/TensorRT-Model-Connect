@@ -309,4 +309,107 @@ class QwenSamplingPlugin:
             "Top-p sampling contract failed",
         )
 
-plugin = [QwenPostTrainedChatPlugin(), QwenSamplingPlugin()]
+
+class QwenNativeKvChunkedPrefillRegressionPlugin:
+    reference_families = ["qwen_native_kv_chunked_prefill_regression"]
+    user_contract = "runtime_invariants"
+
+    def configure_reference(self, case: E2ECase) -> dict:
+        del case
+        return {}
+
+    def verify(
+        self,
+        trt_output: StageOutput,
+        ref_output: StageOutput,
+        case: E2ECase,
+        threshold: ThresholdProfile,
+    ):
+        del ref_output, threshold
+        stage = trt_output.stage_name
+        if stage != "full_generation":
+            return make_pass(stage, {}, f"{stage} completed")
+
+        data = trt_output.data or {}
+        cpp_meta = (trt_output.metadata or {}).get("cpp", {})
+        cpp_rc = int(data.get("cpp_returncode", -1))
+        token_ids = data.get("token_ids", [])
+        expected_generated = int(case.inputs.get("max_new_tokens", 0))
+        expected_prompt = int(case.inputs.get("expected_prompt_tokens", -1))
+        actual_prompt = int(data.get("prompt_token_count", -1))
+        decode_s = float(cpp_meta.get("trt_engine_decode_s", 0.0))
+        stderr = str(cpp_meta.get("stderr", ""))
+        expected_rows = int(case.metadata.get("expected_kv_cache_rows", -1))
+        expected_chunks = int(case.metadata.get("expected_prefill_chunks", -1))
+        expected_limit = int(case.metadata.get("expected_prefill_chunk_limit", -1))
+        cache_marker = f"KV cache rows={expected_rows} (bundle max={expected_rows}"
+        prefill_marker = 'label="prefill_engine_plan:prefill"'
+        chunk_plan_is_consistent = (
+            expected_limit > 0
+            and expected_chunks
+            == (expected_prompt + expected_limit - 1) // expected_limit
+        )
+        chunked_prefill_observed = chunk_plan_is_consistent and any(
+            prefill_marker in line and f"launches={expected_chunks}" in line
+            for line in stderr.splitlines()
+        )
+
+        checks = {
+            "runtime_returncode_ok": (
+                cpp_rc == 0,
+                f"cpp_returncode={cpp_rc}",
+            ),
+            "fixed_prompt_token_count": (
+                actual_prompt == expected_prompt,
+                f"expected={expected_prompt}, actual={actual_prompt}",
+            ),
+            "full_native_kv_capacity_loaded": (
+                cache_marker in stderr,
+                cache_marker,
+            ),
+            "chunked_prefill_executed": (
+                chunked_prefill_observed,
+                f"max_chunk={expected_limit}; {prefill_marker} with "
+                f"launches={expected_chunks}",
+            ),
+            "requested_tokens_generated": (
+                isinstance(token_ids, list) and len(token_ids) == expected_generated,
+                f"expected={expected_generated}, actual={len(token_ids) if isinstance(token_ids, list) else 'missing'}",
+            ),
+            "decode_step_executed": (
+                expected_generated >= 2 and decode_s > 0.0,
+                f"generated_tokens={expected_generated}, decode_s={decode_s}",
+            ),
+            "no_runtime_error_signature": (
+                not data.get("cpp_runtime_error"),
+                str(data.get("cpp_runtime_error") or "none detected"),
+            ),
+        }
+        metrics = {
+            name: MetricResult(
+                value=1.0 if passed else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=passed,
+                note=note,
+            )
+            for name, (passed, note) in checks.items()
+        }
+        rule = " AND ".join(checks)
+        if all(passed for passed, _note in checks.values()):
+            return make_pass(stage, metrics, rule)
+        failed = [name for name, (passed, _note) in checks.items() if not passed]
+        return make_fail(
+            stage,
+            metrics,
+            rule,
+            "Qwen native-KV chunked-prefill regression contract failed: "
+            + ", ".join(failed),
+        )
+
+
+plugin = [
+    QwenPostTrainedChatPlugin(),
+    QwenSamplingPlugin(),
+    QwenNativeKvChunkedPrefillRegressionPlugin(),
+]

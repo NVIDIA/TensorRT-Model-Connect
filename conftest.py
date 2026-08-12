@@ -22,6 +22,14 @@ def pytest_addoption(parser):
             "--e2e-testcase",
             dict(action="append", default=[], help="Filter child testcases by exact name"),
         ),
+        (
+            "--e2e-category",
+            dict(
+                choices=("e2e", "regression"),
+                default=None,
+                help="Only run ordinary E2E or historical regression testcases",
+            ),
+        ),
         ("--e2e-artifacts-dir", dict(default=None, help="Artifacts output dir")),
         (
             "--e2e-core-only",

@@ -78,6 +78,40 @@ def test_ci_tier_filters_children_without_changing_model_identity() -> None:
     assert [case.name for case in selected] == ["canary-1b-v2"]
 
 
+def test_category_filter_separates_e2e_from_historical_regressions() -> None:
+    qwen_dir = MODELS_DIR / "qwen"
+    regression = get_model_by_name(
+        "qwen3-0.6b-regression-native-kv-chunked-prefill", qwen_dir
+    )
+    ordinary = get_model_by_name("qwen3-0.6b-fp16", qwen_dir)
+    assert regression is not None
+    assert ordinary is not None
+
+    config = _Config(
+        **{
+            "--e2e-category": "regression",
+            "--e2e-exclude-ci-tier": [],
+        }
+    )
+    selected_regressions = model_runner.selected_testcases(
+        regression,
+        config=config,
+        case_matches_model=_case_matches,
+        is_multi_device_case=_is_multi_device,
+    )
+    selected_ordinary = model_runner.selected_testcases(
+        ordinary,
+        config=config,
+        case_matches_model=_case_matches,
+        is_multi_device_case=_is_multi_device,
+    )
+
+    assert [case.name for case in selected_regressions] == [
+        "qwen3-0.6b-regression-native-kv-chunked-prefill"
+    ]
+    assert selected_ordinary == []
+
+
 def test_platform_threshold_overrides_are_scoped_to_matching_platform() -> None:
     case = E2ECase(
         name="elf-b-owt-l0",

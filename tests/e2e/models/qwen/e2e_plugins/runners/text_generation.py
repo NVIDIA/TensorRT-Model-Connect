@@ -121,6 +121,83 @@ def _expected_answers(case: E2ECase) -> list[str]:
     return [str(value) for value in raw_values if str(value).strip()]
 
 
+def _prompt_from_case(case: E2ECase, ctx: RunContext | None = None) -> str:
+    repeat = case.inputs.get("prompt_repeat")
+    if isinstance(repeat, dict):
+        text = str(repeat["text"])
+        separator = str(repeat.get("separator", ""))
+        count = int(repeat["count"])
+        prompt = separator.join([text] * count) + str(repeat.get("suffix", ""))
+        if ctx is not None and ctx.artifacts_dir:
+            output_dir = Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "resolved_prompt.txt").write_text(prompt, encoding="utf-8")
+        return prompt
+
+    prompt_file = case.inputs.get("prompt_file")
+    if not prompt_file:
+        return str(case.inputs.get("prompt", "The capital of France is"))
+
+    path = Path(str(prompt_file))
+    if not path.is_file():
+        raise FileNotFoundError(f"Prompt fixture not found: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def _count_prompt_tokens(
+    case: E2ECase,
+    ctx: RunContext,
+    prompt: str,
+) -> tuple[int, dict]:
+    python = ctx.runtime_python_path() or sys.executable
+    script = textwrap.dedent(
+        """\
+        import sys
+        from transformers import AutoTokenizer
+
+        revision = sys.argv[2] or None
+        tokenizer = AutoTokenizer.from_pretrained(
+            sys.argv[1],
+            revision=revision,
+            trust_remote_code=sys.argv[3] == "1",
+        )
+        print(len(tokenizer.encode(sys.stdin.read(), add_special_tokens=False)))
+        """
+    )
+    cmd = [
+        python,
+        "-c",
+        script,
+        case.hf_id,
+        case.hf_revision,
+        "1" if case.metadata.get("trust_remote_code") else "0",
+    ]
+    result = subprocess.run(
+        cmd,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    meta = {
+        "command": cmd,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Failed to count prompt tokens with the pinned model tokenizer: "
+            f"{result.stderr.strip()}"
+        )
+    try:
+        return int(result.stdout.strip()), meta
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Tokenizer returned an invalid prompt token count: {result.stdout!r}"
+        ) from exc
+
+
 def _ensure_distributed_runtime_env(
     case: E2ECase,
     ctx: RunContext,
@@ -366,8 +443,20 @@ class TextGenerationCausalRunner:
     ) -> StageOutput:
         """Run C++ binary inference and capture per-step logits via debug runner."""
         bundle_path = str(Path(ctx.engine_dir) / case.bundle)
-        prompt = case.inputs.get("prompt", "The capital of France is")
+        prompt = _prompt_from_case(case, ctx)
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
+        prompt_token_count = None
+        prompt_validation_meta = None
+        if "expected_prompt_tokens" in case.inputs:
+            prompt_token_count, prompt_validation_meta = _count_prompt_tokens(
+                case, ctx, prompt
+            )
+            expected_prompt_tokens = int(case.inputs["expected_prompt_tokens"])
+            if prompt_token_count != expected_prompt_tokens:
+                raise RuntimeError(
+                    f"Prompt fixture token count changed: expected "
+                    f"{expected_prompt_tokens}, got {prompt_token_count}"
+                )
         has_contract = bool(case.reference_family and case.user_contract)
         is_acceptance = case.ci_lane == "acceptance"
 
@@ -386,6 +475,8 @@ class TextGenerationCausalRunner:
                 "prompt": prompt,
                 "runner_mode": "single_process_debug_generation",
             }
+            if prompt_token_count is not None:
+                data["prompt_token_count"] = prompt_token_count
             answers = _expected_answers(case)
             if answers:
                 data["expected_answers"] = answers
@@ -400,6 +491,7 @@ class TextGenerationCausalRunner:
                 metadata={
                     "cpp": {"skipped": "single_process_debug_generation"},
                     "debug_runner": debug_meta,
+                    "prompt_validation": prompt_validation_meta,
                 },
             )
 
@@ -428,6 +520,8 @@ class TextGenerationCausalRunner:
             "cpp_returncode": cpp_meta.get("effective_returncode", cpp_meta.get("returncode", -1)),
             "prompt": prompt,
         }
+        if prompt_token_count is not None:
+            data["prompt_token_count"] = prompt_token_count
         answers = _expected_answers(case)
         if answers:
             data["expected_answers"] = answers
@@ -455,7 +549,11 @@ class TextGenerationCausalRunner:
             text=cpp_text,
             logits=logits_path,
             timing_s=cpp_time + debug_time,
-            metadata={"cpp": cpp_meta, "debug_runner": debug_meta},
+            metadata={
+                "cpp": cpp_meta,
+                "debug_runner": debug_meta,
+                "prompt_validation": prompt_validation_meta,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -467,7 +565,7 @@ class TextGenerationCausalRunner:
     ) -> StageOutput:
         """Run debug runner prefill phase only -- logits for each input token."""
         bundle_path = str(Path(ctx.engine_dir) / case.bundle)
-        prompt = case.inputs.get("prompt", "The capital of France is")
+        prompt = _prompt_from_case(case, ctx)
 
         logits_path, elapsed, meta = self._run_debug_runner_logits(
             ctx, bundle_path, prompt, max_new_tokens=0, case=case, phase="prefill"
@@ -497,7 +595,7 @@ class TextGenerationCausalRunner:
     ) -> StageOutput:
         """Run debug runner decode phase only -- logits for generated tokens."""
         bundle_path = str(Path(ctx.engine_dir) / case.bundle)
-        prompt = case.inputs.get("prompt", "The capital of France is")
+        prompt = _prompt_from_case(case, ctx)
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
 
         logits_path, elapsed, meta = self._run_debug_runner_logits(

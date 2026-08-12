@@ -6,9 +6,15 @@
 from __future__ import annotations
 
 from .references.hf_transformers import HfTransformersReference
+from .references.invariant_only import InvariantOnlyReference
 
 
 class LlamaHfTransformersReference(HfTransformersReference):
     """llama local reference for hf_transformers."""
 
-reference = LlamaHfTransformersReference()
+
+class LlamaInvariantOnlyReference(InvariantOnlyReference):
+    """llama local reference for invariant_only."""
+
+
+reference = [LlamaHfTransformersReference(), LlamaInvariantOnlyReference()]

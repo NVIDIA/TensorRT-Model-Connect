@@ -39,6 +39,54 @@ def test_fp16_manifest_keeps_legacy_build_contract() -> None:
     assert case.inputs["max_cache_length"] == 256
 
 
+def test_native_kv_regression_exceeds_one_prefill_profile() -> None:
+    manifest_path = (
+        Path(__file__).with_name("manifests")
+        / "qwen3-0.6b-regression-native-kv-chunked-prefill.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    case = load_manifest(manifest_path)
+
+    assert case.hf_revision == "c1899de289a04d12100db370d81485cdf75e47ca"
+    assert "precision" not in manifest
+    assert "max_cache_length" not in manifest
+    assert "precision" not in case.metadata
+    assert "max_cache_length" not in case.inputs
+    assert case.metadata["test_category"] == "regression"
+    assert case.metadata["ci_tier"] == "nightly_only"
+    assert case.reference_backend == "invariant_only"
+    assert case.oracle_level == "L4_invariants"
+    assert case.reference_family == "qwen_native_kv_chunked_prefill_regression"
+    assert case.user_contract == "runtime_invariants"
+    assert case.inputs["prompt_repeat"] == {
+        "text": "a",
+        "separator": " ",
+        "count": 32768,
+        "suffix": "\n",
+    }
+    assert case.inputs["expected_prompt_tokens"] == 32769
+    assert case.metadata["expected_kv_cache_rows"] == 40960
+    assert case.metadata["expected_prefill_chunks"] == 2
+    assert case.metadata["expected_prefill_chunk_limit"] == 32768
+    assert case.inputs["max_new_tokens"] == 2
+    assert case.inputs["temperature"] == 0.0
+    assert case.inputs["top_k"] == 1
+    assert case.metadata["regression"] == {
+        "id": "qwen3-native-kv-full-context-chunked-prefill",
+        "issue": "https://github.com/NVIDIA/TensorRT-Model-Connect/pull/673",
+        "previous_failure": (
+            "The Qwen prefill path could only submit a prompt within the "
+            "prefill engine's 32768-token profile in one call, so it could not "
+            "progress through the model's larger 40960-token native KV capacity."
+        ),
+        "prevents": (
+            "A model-only Qwen build losing the BF16 native-KV route or failing "
+            "to split a 32769-token prompt across the full 40960-token cache "
+            "before decode and clean teardown."
+        ),
+    }
+
+
 @pytest.mark.parametrize(
     "manifest_name",
     ["qwen3-0.6b-fp8.json", "qwen3-0.6b-fp8-tp4.json"],

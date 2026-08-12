@@ -62,6 +62,7 @@ _MODEL_ASSET_FIELDS = frozenset(
         "test_input_audio",
         "speech_reference_tokens",
         "golden_snapshot_path",
+        "prompt_file",
         "edit_condition_image",
         "fp8_scales",
         "elf_replay_artifact",
@@ -612,6 +613,9 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
         "oracle_level",
         "prompt",
         "test_prompt",
+        "prompt_file",
+        "expected_prompt_tokens",
+        "prompt_repeat",
         "max_new_tokens",
         "max_cache_length",
         "precision",
@@ -657,6 +661,8 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
         "determinism",
         "inputs",
         "metadata",
+        "test_category",
+        "regression",
         "reference_family",
         "user_contract",
         "ci_lane",
@@ -678,6 +684,10 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
     for k, v in manifest.items():
         if k not in standard_fields:
             meta[k] = v
+
+    meta["test_category"] = manifest.get("test_category", "e2e")
+    if "regression" in manifest:
+        meta["regression"] = dict(manifest["regression"])
 
     # Explicitly propagate trust_remote_code to metadata so reference runners
     # can access it via case.metadata["trust_remote_code"].
@@ -839,6 +849,91 @@ def _validate_manifest(raw: dict, path: str) -> None:
         raise TypeError(
             f"Manifest {path!r}: 'hf_revision' must be a non-empty string"
         )
+
+    test_category = raw.get("test_category", "e2e")
+    if not isinstance(test_category, str) or test_category not in {
+        "e2e",
+        "regression",
+    }:
+        raise ValueError(
+            f"Manifest {path!r}: test_category must be 'e2e' or 'regression'"
+        )
+    regression = raw.get("regression")
+    if test_category == "regression":
+        if not isinstance(regression, dict):
+            raise TypeError(
+                f"Manifest {path!r}: regression testcases require a regression object"
+            )
+        required_regression_fields = (
+            "id",
+            "issue",
+            "previous_failure",
+            "prevents",
+        )
+        missing = [
+            field
+            for field in required_regression_fields
+            if not isinstance(regression.get(field), str)
+            or not regression[field].strip()
+        ]
+        if missing:
+            raise ValueError(
+                f"Manifest {path!r}: regression metadata is missing non-empty "
+                f"field(s): {missing}"
+            )
+    elif regression is not None:
+        raise ValueError(
+            f"Manifest {path!r}: regression metadata requires "
+            "test_category='regression'"
+        )
+
+    prompt_file = raw.get("prompt_file")
+    if prompt_file is not None and (
+        not isinstance(prompt_file, str) or not prompt_file.strip()
+    ):
+        raise TypeError(f"Manifest {path!r}: prompt_file must be a non-empty string")
+    expected_prompt_tokens = raw.get("expected_prompt_tokens")
+    if expected_prompt_tokens is not None:
+        if (
+            not isinstance(expected_prompt_tokens, int)
+            or isinstance(expected_prompt_tokens, bool)
+            or expected_prompt_tokens <= 0
+        ):
+            raise TypeError(
+                f"Manifest {path!r}: expected_prompt_tokens must be a positive integer"
+            )
+        if prompt_file is None and raw.get("prompt_repeat") is None:
+            raise ValueError(
+                f"Manifest {path!r}: expected_prompt_tokens requires prompt_file "
+                "or prompt_repeat"
+            )
+
+    prompt_repeat = raw.get("prompt_repeat")
+    if prompt_repeat is not None:
+        if not isinstance(prompt_repeat, dict):
+            raise TypeError(f"Manifest {path!r}: prompt_repeat must be an object")
+        unknown = set(prompt_repeat) - {"text", "separator", "count", "suffix"}
+        if unknown:
+            raise ValueError(
+                f"Manifest {path!r}: prompt_repeat has unsupported fields: "
+                f"{sorted(unknown)}"
+            )
+        text = prompt_repeat.get("text")
+        count = prompt_repeat.get("count")
+        if not isinstance(text, str) or not text:
+            raise TypeError(
+                f"Manifest {path!r}: prompt_repeat.text must be a non-empty string"
+            )
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise TypeError(
+                f"Manifest {path!r}: prompt_repeat.count must be a positive integer"
+            )
+        for field in ("separator", "suffix"):
+            value = prompt_repeat.get(field, "")
+            if not isinstance(value, str):
+                raise TypeError(
+                    f"Manifest {path!r}: prompt_repeat.{field} must be a string"
+                )
 
     # 3. Type checks for int fields
     for field_name in ("max_new_tokens", "max_cache_length"):

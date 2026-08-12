@@ -14,6 +14,9 @@ Usage:
     # Filter by strategy:
     pytest tests/test_e2e.py --e2e-task-strategy text_generation_causal
 
+    # Historical regressions only:
+    pytest tests/test_e2e.py --e2e-category regression
+
     # Core models only:
     pytest tests/test_e2e.py --e2e-core-only
 

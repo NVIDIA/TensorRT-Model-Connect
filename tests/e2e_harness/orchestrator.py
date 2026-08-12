@@ -54,7 +54,7 @@ from .contracts import (
     StageStatus,
     ThresholdProfile,
 )
-from . import save_full_stderr
+from . import _case_artifact_dir, save_full_stderr
 from .python_profiles import profile_env_var
 from .runtime_strategy_metadata import runtime_strategy_requires_new_runtime_guard
 from .registry import (
@@ -795,6 +795,9 @@ def _build_repro_commands(
         )
     if case.hf_revision:
         build_parts.extend(["--model-revision", case.hf_revision])
+    precision = case.metadata.get("precision", "fp32")
+    if precision != "fp32":
+        build_parts.extend(["--precision", str(precision)])
     build_method = _manifest_build_method(case.metadata.get("build_args", {}))
     if build_method:
         build_parts.extend(["--method", build_method])
@@ -816,11 +819,38 @@ def _build_repro_commands(
                 ctx.binary_path,
                 "run",
                 bundle_path,
-                "--prompt",
-                _shell_quote(case.inputs.get("prompt", "")),
-                "--max-new-tokens",
-                str(case.inputs.get("max_new_tokens", 20)),
             ]
+            if case.inputs.get("prompt_file"):
+                infer_parts.extend(
+                    ["--prompts-file", _shell_quote(str(case.inputs["prompt_file"]))]
+                )
+            elif case.inputs.get("prompt_repeat") and ctx.artifacts_dir:
+                resolved_prompt = (
+                    Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
+                    / "resolved_prompt.txt"
+                )
+                infer_parts.extend(
+                    ["--prompts-file", _shell_quote(str(resolved_prompt))]
+                )
+            else:
+                infer_parts.extend(
+                    ["--prompt", _shell_quote(str(case.inputs.get("prompt", "")))]
+                )
+            infer_parts.extend(
+                ["--max-new-tokens", str(case.inputs.get("max_new_tokens", 20))]
+            )
+            if case.inputs.get("temperature", 1.0) != 1.0:
+                infer_parts.extend(
+                    ["--temperature", str(case.inputs["temperature"])]
+                )
+            if case.inputs.get("top_p", 1.0) < 1.0 - 1e-6:
+                infer_parts.extend(["--top-p", str(case.inputs["top_p"])])
+            if case.inputs.get("min_p", 0.0) > 1e-6:
+                infer_parts.extend(["--min-p", str(case.inputs["min_p"])])
+            if case.inputs.get("top_k", 1) != 1:
+                infer_parts.extend(["--top-k", str(case.inputs["top_k"])])
+            if case.inputs.get("seed", -1) >= 0:
+                infer_parts.extend(["--seed", str(case.inputs["seed"])])
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
                 infer_parts.extend(["--hf-python", runtime_cli_python])
@@ -841,6 +871,8 @@ def _build_repro_commands(
     ]
     if _distributed_runtime_config(case):
         rerun_parts.append("--multi-device-only")
+    if case.metadata.get("test_category") == "regression":
+        rerun_parts.extend(["--e2e-category", "regression"])
     repro["rerun_test"] = " ".join(rerun_parts)
 
     profile_exports: list[str] = []

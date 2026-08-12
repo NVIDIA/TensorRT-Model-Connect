@@ -6,6 +6,7 @@ plugin = "qwen"
 test_manifests = [
   "manifests/qwen3-0.6b-fp16-tp4.json",
   "manifests/qwen3-0.6b-fp16.json",
+  "manifests/qwen3-0.6b-regression-native-kv-chunked-prefill.json",
   "manifests/qwen3-0.6b-native-l0.json",
   "manifests/qwen3-0.6b-fp8-tp4.json",
   "manifests/qwen3-0.6b-fp8.json",
@@ -18,6 +19,12 @@ test_manifests = [
 [e2e_defaults.text_generation_causal]
 reference_backend = "hf_transformers"
 oracle_level = "L1_external_reference"
+preflight_asset_fields = ["prompt_file"]
+input_fields = [
+  { input = "prompt_file", manifest = "prompt_file" },
+  { input = "prompt_repeat", manifest = "prompt_repeat" },
+  { input = "expected_prompt_tokens", manifest = "expected_prompt_tokens" },
+]
 stages = [
   { name = "full_generation", required = true },
 ]

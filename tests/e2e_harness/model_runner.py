@@ -80,6 +80,14 @@ def selected_testcases(
     if testcase_filters:
         cases = [case for case in cases if case.name in testcase_filters]
 
+    category_filter = config.getoption("--e2e-category", default=None)
+    if category_filter:
+        cases = [
+            case
+            for case in cases
+            if case.metadata.get("test_category", "e2e") == category_filter
+        ]
+
     excluded_ci_tiers = set(config.getoption("--e2e-exclude-ci-tier", default=[]) or [])
     if excluded_ci_tiers:
         cases = [
