@@ -15,7 +15,7 @@ import pydantic
 import sentencepiece
 import soundfile
 import transformers
-from nemo.collections.asr.models import ASRModel
+from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModelWithPrompt
 
 assert version("absl-py") == "2.5.0"
 assert version("cffi") == "2.1.1"
@@ -30,7 +30,7 @@ assert version("pydantic") == "2.10.6"
 assert version("sentencepiece") == "0.2.2"
 assert transformers.__version__ == "4.57.6"
 assert nemo_asr is not None
-assert ASRModel is not None
+assert EncDecHybridRNNTCTCBPEModelWithPrompt is not None
 assert numpy.__version__ == "1.26.4"
 assert pandas.__version__ == "2.2.3"
 assert soundfile.__version__ == "0.14.0"

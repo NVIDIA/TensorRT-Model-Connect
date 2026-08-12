@@ -67,5 +67,5 @@ def test_nemotron_streaming_profile_verifies_the_runtime_entrypoint() -> None:
         "python_profile_verify.py"
     ).read_text(encoding="utf-8")
 
-    assert "ASRModel" in verify
+    assert "EncDecHybridRNNTCTCBPEModelWithPrompt" in verify
     assert "EncDecRNNTBPEModelWithPrompt" not in verify

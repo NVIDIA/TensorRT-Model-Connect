@@ -298,7 +298,7 @@ import json
 from pathlib import Path
 
 import tensorrt
-from nemo.collections.asr.models.rnnt_bpe_models_prompt import EncDecRNNTBPEModelWithPrompt
+from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModelWithPrompt
 
 print(f"TENSORRT_VERSION={tensorrt.__version__}")
 print("MODELOPT_VERSION=" + metadata.version("nvidia-modelopt"))
