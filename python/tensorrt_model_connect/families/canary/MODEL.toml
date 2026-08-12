@@ -3,6 +3,12 @@
 
 id = "canary"
 plugin = "canary"
+python_profile_specs = [
+  "canary_reference|families/canary/python_profile_requirements/canary_reference.lock.txt|families/canary/python_profile_verify.py|true|false",
+]
+default_execution_profiles = [
+  "reference|canary_reference",
+]
 module = "plugin"
 model_dir_adapter = "nemo_archive.py|resolve_model_dir"
 nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"

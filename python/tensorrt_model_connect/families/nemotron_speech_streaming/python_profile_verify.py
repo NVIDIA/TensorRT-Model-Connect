@@ -3,23 +3,18 @@
 
 from importlib.metadata import version
 
-import matplotlib
-import nemo
+import nemo.collections.asr as nemo_asr
 import numpy
 import soundfile
 import transformers
-try:
-    from nemo.collections.tts.models import MagpieTTSModel
-except ImportError:
-    from nemo.collections.tts.models import MagpieTTS_Model as MagpieTTSModel
+from nemo.collections.asr.models import ASRModel, EncDecRNNTBPEModelWithPrompt
 
-assert nemo.__version__.startswith("2.7."), nemo.__version__
-assert version("matplotlib") == "3.11.1"
 assert version("nemo_toolkit") == "2.7.3"
 assert version("numpy") == "1.26.4"
 assert version("soundfile") == "0.14.0"
 assert transformers.__version__ == "4.57.6"
-assert matplotlib.__version__ == "3.11.1"
+assert nemo_asr is not None
+assert ASRModel is not None
+assert EncDecRNNTBPEModelWithPrompt is not None
 assert numpy.__version__ == "1.26.4"
 assert soundfile.__version__ == "0.14.0"
-assert MagpieTTSModel is not None

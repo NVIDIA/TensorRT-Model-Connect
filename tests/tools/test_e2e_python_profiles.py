@@ -273,6 +273,7 @@ def test_process_session_members_ignores_vanished_proc_entry(monkeypatch):
 
 def test_family_profile_registry_is_fully_exact_pinned():
     expected = {
+        "canary_reference",
         "chronos",
         "deepseek_ocr",
         "deepseek_v2",
@@ -283,6 +284,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "magpie_tts_reference",
         "minimax_h3_reference",
         "nemotron_labs_diffusion_reference",
+        "nemotron_speech_streaming_reference",
         "nemotron_h_reference",
         "olmo_tokenizer",
         "personaplex_full_duplex_evaluator",
@@ -358,6 +360,9 @@ def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
 
+    assert "canary_reference" not in prebuilt
+    assert "magpie_tts_reference" not in prebuilt
+    assert "nemotron_speech_streaming_reference" not in prebuilt
     assert "personaplex_full_duplex_evaluator" not in prebuilt
     assert "minimax_h3_reference" not in prebuilt
     assert "reference_common" in prebuilt

@@ -30,7 +30,7 @@ lightning-utilities==0.15.3
 marshmallow==4.3.1
 matplotlib==3.11.1
 matplotlib-inline==0.2.2
-nemo_toolkit==2.7.3
+nemo_toolkit[asr]==2.7.3
 numpy==1.26.4
 nv-one-logger-core==2.3.1
 nv-one-logger-pytorch-lightning-integration==2.3.1
