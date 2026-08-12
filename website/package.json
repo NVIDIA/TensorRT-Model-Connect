@@ -20,5 +20,8 @@
   },
   "devDependencies": {
     "@viz-js/viz": "3.28.0"
+  },
+  "overrides": {
+    "serialize-javascript": "7.0.7"
   }
 }
