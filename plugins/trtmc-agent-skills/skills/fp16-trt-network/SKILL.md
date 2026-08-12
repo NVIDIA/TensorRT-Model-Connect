@@ -163,4 +163,4 @@ Compare FP32 and low-precision artifacts with the same implementation path.
 Use `$debug-trt-mismatch` for the first divergent token, layer, stage, or
 runtime boundary. Report checks that were not run on target hardware.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

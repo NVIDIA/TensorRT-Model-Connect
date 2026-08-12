@@ -69,4 +69,4 @@ exception:
   website color modes; and
 - a nearby figure caption in the Markdown page explaining what to notice.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

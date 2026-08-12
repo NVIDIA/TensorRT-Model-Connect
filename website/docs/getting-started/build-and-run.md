@@ -146,4 +146,4 @@ floating-point forecast values. See
 [Diffusion, Vision, and Time-Series Pipelines](../tutorials/intermediate/diffusion-and-time-series.md)
 for the input/output mental model and dependency boundaries.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

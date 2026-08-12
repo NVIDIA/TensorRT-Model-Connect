@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 Use the maintained contributor guide to add and validate a model family.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

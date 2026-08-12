@@ -24,3 +24,5 @@ description: Current boundaries that users must account for when interpreting fe
 
 Use the current source, exact manifest, and test evidence when this page and a
 newer implementation differ.
+
+{/* Collaborative review anchor: batch 2. */}

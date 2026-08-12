@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 
 Test ownership and evidence boundaries are documented in Validation Design.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

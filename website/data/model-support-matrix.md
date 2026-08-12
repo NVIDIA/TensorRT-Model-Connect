@@ -112,3 +112,5 @@ SPDX-License-Identifier: Apache-2.0
 | `FacebookAI/xlm-roberta-base` | `xlm-roberta-base` | `FP16` | None | — | 🟢 Green |
 | `xlnet/xlnet-base-cased` | `xlnet-base` | `FP16` | None | — | 🟢 Green |
 | `Tongyi-MAI/Z-Image-Turbo` | `z-image-turbo` | `FP16`<br />FP32 layers: `2, 3, 4, 7, 8` | None | — | 🔴 Red |
+
+<!-- Collaborative review anchor: batch 2. -->

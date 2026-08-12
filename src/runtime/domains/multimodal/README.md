@@ -11,4 +11,4 @@ How to understand:
 2. Inspect model-owned `src/runtime/models/<family>/pipeline.*` files for
    end-to-end vision-language decode behavior.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 This archived overview moved to the maintained architecture documentation.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

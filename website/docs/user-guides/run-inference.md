@@ -30,3 +30,5 @@ Shared loading controls such as `--backend-dir`, `--model-plugin-dir`,
 `--runtime-cache`, `--config`, and `--set` have execution-path-specific
 meaning. Read [Configure Runtime Behavior](configure-runtime.md) before using
 one as a generic fix.
+
+{/* Collaborative review anchor: batch 2. */}

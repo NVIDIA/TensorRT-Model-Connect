@@ -39,4 +39,4 @@ Continue in the source container prepared by
 Do not mix a wheel, backend DSO, bundle, or TensorRT library from another
 architecture or TensorRT cohort.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

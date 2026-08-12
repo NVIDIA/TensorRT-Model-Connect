@@ -31,3 +31,5 @@ workspace conventions.
 Keep model-specific dependencies on demand and follow each family's own lock
 and verification files. Report setup evidence separately from compilation,
 tests, model parity, performance, and production-deployment evidence.
+
+<!-- Collaborative review anchor: batch 2. -->

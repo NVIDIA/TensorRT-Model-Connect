@@ -19,4 +19,4 @@ Current ownership:
 `bundle/README.md` is an ownership note only; no C-linkage bundle-helper
 implementation remains in that subdirectory.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

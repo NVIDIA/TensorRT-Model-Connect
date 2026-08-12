@@ -83,3 +83,5 @@ Platform specializations will roll out in phases aligned with model coverage
 available in TensorRT Edge-LLM and TensorRT-Model-Connect releases. Each batch
 must document the exact qualified model, target, precision, and configuration
 tuple.
+
+{/* Collaborative review anchor: batch 2. */}

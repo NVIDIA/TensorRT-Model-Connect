@@ -21,3 +21,5 @@ maintained by hand. Use
 [Supported Models](overview.md) for the retained release-support snapshot.
 
 <ModelRecipeTaskIndex />
+
+{/* Collaborative review anchor: batch 2. */}

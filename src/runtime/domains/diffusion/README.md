@@ -22,4 +22,4 @@ How to understand:
 There is no shared `diffusion_types.h`; each model that needs such a contract
 owns a family-prefixed type header.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

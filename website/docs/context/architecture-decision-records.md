@@ -13,4 +13,4 @@ import {Redirect} from '@docusaurus/router';
 The Architecture Decision Records index moved to the
 [current ADR index](./adr/).
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

@@ -31,3 +31,5 @@ Use [Testing Reference](../reference/testing.md) and
 [Benchmarking Reference](../reference/benchmarking.md) for command details.
 The [Validation and Benchmarking Tutorial](../tutorials/advanced/validation-and-benchmarking.md)
 is the course-style lab.
+
+{/* Collaborative review anchor: batch 2. */}

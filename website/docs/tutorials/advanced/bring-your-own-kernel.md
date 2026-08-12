@@ -774,4 +774,4 @@ no-regression gates. The success criterion is not “the DSO loaded”; it is
 
 </details>
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

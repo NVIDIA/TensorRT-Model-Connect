@@ -1080,4 +1080,4 @@ Commit chain:
   After Phase 3 closes, parallelize Phase 4 across clusters (Cluster A
   is the big one — 17 TriAttention fields + codegen).
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

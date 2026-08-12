@@ -788,4 +788,4 @@ login, cleanup, and artifact safeguards. Some low-level developer test engines
 also remain shell commands behind Python classes. Pipeline decisions, ordering,
 selection, isolation, and certification belong in this package.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

@@ -572,4 +572,4 @@ profile declarations retain their exact semantic qualification snapshot.
 - Qualification logs, comparison output, benchmark results, and generated
   engines remain external artifacts and must not be committed as proof.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

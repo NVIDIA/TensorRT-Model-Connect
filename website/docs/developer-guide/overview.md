@@ -39,3 +39,5 @@ The native and platform-specialized paths are separate implementation
 boundaries. Users normally interact with the same bundle/task API; advanced
 developers use the provider/profile metadata and runtime lifecycle pages to
 understand which backend owns execution.
+
+{/* Collaborative review anchor: batch 2. */}

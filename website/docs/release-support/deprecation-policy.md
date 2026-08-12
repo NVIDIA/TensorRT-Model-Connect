@@ -18,3 +18,5 @@ A future deprecation should include:
 Do not weaken validation criteria to preserve a deprecated path. If a test no
 longer represents the intended contract, change the contract and test through
 normal human review with a migration note.
+
+{/* Collaborative review anchor: batch 2. */}

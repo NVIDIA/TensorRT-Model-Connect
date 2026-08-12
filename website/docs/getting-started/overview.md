@@ -20,4 +20,4 @@ request. It does not qualify every model or hardware profile on that machine.
 
 After the first run, continue to [Learning Path](../learning-path.md).
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

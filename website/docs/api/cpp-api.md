@@ -436,4 +436,4 @@ consumed during creation. The current implementation does not consume the
 legacy `max_new_tokens` or `image_path` fields; generation settings belong on
 the request API.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

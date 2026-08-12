@@ -327,3 +327,5 @@ assets. A skipped preflight is not a passing model result.
    without error before the model-owned output oracle can establish success.
 
 </details>
+
+{/* Collaborative review anchor: batch 2. */}

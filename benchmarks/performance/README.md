@@ -338,4 +338,4 @@ TTS, VLM, embedding, reranking, vision, time-series, Qwen3-Omni, PersonaPlex, EL
 Lance, or SANA-WM workloads. Do not silently substitute HF eager for a declared
 torch.compile entry.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

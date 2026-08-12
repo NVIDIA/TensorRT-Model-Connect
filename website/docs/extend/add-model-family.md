@@ -300,4 +300,4 @@ evidence and retain the validator's artifacts separately. In either flow, the
 evidence—not the presence of the three descriptors alone—is the acceptance
 signal.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

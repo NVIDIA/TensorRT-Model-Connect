@@ -139,4 +139,4 @@ The dated implementation investigation is retained in the
 its temporary paths and benchmark numbers are historical evidence, not a
 current runbook.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

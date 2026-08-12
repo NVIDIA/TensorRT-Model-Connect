@@ -100,4 +100,4 @@ dispatch, configuration, and qualification evidence.
 - Report security concerns according to [SECURITY.md](SECURITY.md).
 - TensorRT-Model-Connect is licensed under the terms in [LICENSE](LICENSE).
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

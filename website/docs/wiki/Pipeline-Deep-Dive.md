@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 Pipeline construction and plugin dispatch are documented in Runtime Lifecycle.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

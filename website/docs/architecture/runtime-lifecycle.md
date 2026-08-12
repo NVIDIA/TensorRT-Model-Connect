@@ -166,4 +166,4 @@ support. Use bundle inspection plus the owning build/profile contract.
 | Backend abstraction | `include/trtmc/runtime/trt_backend.h`, `include/trtmc/runtime/trt_module.h` |
 | Model pipelines | `src/runtime/models/<owner>/` |
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

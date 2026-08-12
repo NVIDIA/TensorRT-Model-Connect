@@ -135,4 +135,4 @@ Before returning a message, verify:
   repository-banned terms.
 - Future-reader notes capture any review order, limitation, or maintenance warning that is not obvious from the diff.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

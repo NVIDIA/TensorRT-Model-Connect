@@ -122,3 +122,5 @@ licensed and is attributed in `NOTICE`.
 | `elf-b-owt-replay/sampling_steps.f32` | `fc47f743709eb080e0c060422c1a39fb55e44d5e7a2f5f9fa3437ca7b269be12` |
 | `elf-b-xsum-replay/initial_latents.f32` | `5153428af20ad73e2ba40e72a7d7cbd5dd10bf4cc7026bbdaad91fb12ae4ddd0` |
 | `elf-b-xsum-replay/sampling_steps.f32` | `79c790d0590ebf5d1838da98ed968b0e7c6b4309d56d50890ae3b0e025cc982e` |
+
+<!-- Collaborative review anchor: batch 2. -->

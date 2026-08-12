@@ -175,4 +175,4 @@ diffusion component/bundle ownership, and FP8 calibration behavior. Treat the
 live protocol as the source of truth instead of copying its complete optional
 surface into downstream integrations.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

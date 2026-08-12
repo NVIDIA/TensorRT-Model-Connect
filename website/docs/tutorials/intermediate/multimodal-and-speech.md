@@ -226,4 +226,4 @@ Text-to-audio is a good example of why `IPipeline` has task-specific methods. Th
 
 </details>
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

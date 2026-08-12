@@ -43,4 +43,4 @@
   `plugins/trtmc-agent-skills/skills/write-git-messages/SKILL.md` directly and
   follow it.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

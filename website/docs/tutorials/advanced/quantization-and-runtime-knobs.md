@@ -244,4 +244,4 @@ When reporting a result, always include:
 
 </details>
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

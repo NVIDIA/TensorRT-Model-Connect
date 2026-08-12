@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 This advanced tutorial moved to
 [Advanced: Bring Your Own Kernel](../advanced/bring-your-own-kernel.md).
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

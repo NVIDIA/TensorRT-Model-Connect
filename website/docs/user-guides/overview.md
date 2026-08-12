@@ -33,3 +33,5 @@ know the concept and need every option or API field.
 The supported-model inventory is separate from these instructions. Confirm an
 exact checkpoint/configuration in [Models & Recipes](../models-recipes/overview.md)
 before treating a generic command as a support claim.
+
+{/* Collaborative review anchor: batch 2. */}

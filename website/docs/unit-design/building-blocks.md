@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 
 The source-unit map and public contract table moved to Units and Ownership.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

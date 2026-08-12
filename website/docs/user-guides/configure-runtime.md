@@ -32,3 +32,5 @@ schema catalog and backend/cache behavior. Use
 [Quantization](../features/quantization.md) and
 [Multi-Device Execution](../features/multi-device.md) for their model-owned
 build contracts.
+
+{/* Collaborative review anchor: batch 2. */}

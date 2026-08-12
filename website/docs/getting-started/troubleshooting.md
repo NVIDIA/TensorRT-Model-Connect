@@ -35,3 +35,5 @@ Complete error:
 For failures after the first smoke test, use
 [Troubleshooting](../release-support/troubleshooting.md) and the task-specific
 User Guide.
+
+{/* Collaborative review anchor: batch 2. */}

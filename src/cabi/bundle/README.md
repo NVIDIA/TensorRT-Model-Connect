@@ -16,4 +16,4 @@ Current owners:
 Keep new model-specific engine setup and tokenizer policy under the owning
 `src/runtime/models/<family>/` directory.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

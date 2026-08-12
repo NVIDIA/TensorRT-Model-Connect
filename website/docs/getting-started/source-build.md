@@ -75,4 +75,4 @@ This path skips CI-only Python profiles and unrelated model DSOs. Continue to
 advanced backend options belong in the
 [Build System](../architecture/build-system.md) reference.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

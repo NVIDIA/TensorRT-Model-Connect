@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 
 Family discovery and build behavior are documented in Build Pipeline.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

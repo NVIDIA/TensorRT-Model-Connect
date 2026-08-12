@@ -22,3 +22,5 @@ model revision × build configuration × bundle contract × runtime implementati
 The [Supported Models](../models-recipes/overview.md) page lists declared
 checkpoint/configuration contracts. A current target-hardware E2E result is the
 evidence required for a verified target claim.
+
+{/* Collaborative review anchor: batch 2. */}

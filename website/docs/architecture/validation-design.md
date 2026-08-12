@@ -127,4 +127,4 @@ The canonical evidence sources are:
 - `tools/model_ci.py`
 - `tools/test_impact.py`
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

@@ -116,4 +116,4 @@ maintainer who has repository `maintain` or `admin` permission. Private CI
 repository details,
 runner information, logs, artifacts, and URLs are not public documentation.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

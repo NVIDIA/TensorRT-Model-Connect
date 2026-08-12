@@ -80,4 +80,4 @@ The E2E test covers the user-visible sampling contract, not device placement.
 The CPU/host-side implementation constraint is covered by the sampler interface
 and unit tests.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

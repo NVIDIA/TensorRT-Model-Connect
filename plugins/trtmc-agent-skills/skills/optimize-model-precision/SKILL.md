@@ -186,4 +186,4 @@ Provide the full matrix, exact commands, artifact paths and hashes, objective
 comparison, selected configuration, failures and first divergent boundaries,
 code changes, and unrun target-hardware or broad-regression checks.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

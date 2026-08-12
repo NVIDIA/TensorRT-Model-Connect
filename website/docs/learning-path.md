@@ -169,4 +169,4 @@ implementation is the goal.
 runtime strategy and DSO owner, public API boundary, tests, E2E manifest, and
 documentation that form the vertical slice of your change.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

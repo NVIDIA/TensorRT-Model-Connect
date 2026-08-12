@@ -126,4 +126,4 @@ code elsewhere:
 
 For implementation recipes, continue to [Extend the Project](../extend/overview.md).
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

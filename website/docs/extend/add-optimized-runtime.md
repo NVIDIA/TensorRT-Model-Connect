@@ -112,4 +112,4 @@ See the
 [optimized-runtime design record](../context/optimized-runtime-family-adapter-plan.md)
 for rationale and historical implementation detail.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

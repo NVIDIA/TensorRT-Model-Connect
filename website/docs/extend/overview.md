@@ -67,4 +67,4 @@ The [Developer Guide](../developer-guide/overview.md) and
 these extension points. Historical migration plans and worklogs are project
 records, not current contributor runbooks.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

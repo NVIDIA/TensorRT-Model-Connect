@@ -197,4 +197,4 @@ Report the PR URL and number, draft state, pushed head SHA, validation evidence,
 initial exact-head CI state, and any dependency or unrun gate. Hand monitoring
 and any merge work to `$pr-babysitter`; this skill never merges.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

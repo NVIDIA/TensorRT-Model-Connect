@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 The current model contribution validation workflow moved to Extend.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

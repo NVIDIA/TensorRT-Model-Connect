@@ -17,3 +17,5 @@ SHA-256:
 ```text
 166d138dc95c706e4eedbebb48f4ac4c8cb1b77ea796c0bc650da518308657e2
 ```
+
+<!-- Collaborative review anchor: batch 2. -->

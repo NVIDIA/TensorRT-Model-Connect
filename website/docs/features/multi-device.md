@@ -210,3 +210,5 @@ does not prove that all ranks completed without a TensorRT or NCCL error.
 
 For complete commands and two worked models, see
 [Run Inference on Multiple GPUs](../tutorials/advanced/multi-device-inference.md).
+
+{/* Collaborative review anchor: batch 2. */}

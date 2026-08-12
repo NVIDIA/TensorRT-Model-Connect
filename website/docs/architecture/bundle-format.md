@@ -197,4 +197,4 @@ kernel-binding parameter.
 Continue with [Runtime Lifecycle](runtime-lifecycle.md) to see how these
 identities drive pipeline construction.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

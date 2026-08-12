@@ -145,4 +145,4 @@ no repository-supported conversion command for that trace.
 - Retain JSON artifacts with the tested commit, GPU, TensorRT version, and
   exact command when using results as qualification evidence.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

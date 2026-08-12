@@ -37,3 +37,5 @@ Use [Sampling Reference](../features/sampling.md) for algorithm semantics,
 [CLI Reference](../api/cli-reference.md#runtime-commands) for every accepted
 option, and the [Text Generation Tutorial](../tutorials/beginner/text-generation.md)
 for a progressive lab with exercises.
+
+{/* Collaborative review anchor: batch 2. */}

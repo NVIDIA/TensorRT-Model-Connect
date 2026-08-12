@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 The repository map moved to the maintained Source Layout page.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

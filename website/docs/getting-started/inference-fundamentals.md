@@ -212,4 +212,4 @@ After this page:
 - Use [Beginner Text Generation](../tutorials/beginner/text-generation.md) to follow every step of decoder inference.
 - Use [Architecture Overview](../architecture/overview.md) to map these concepts to the actual source files.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

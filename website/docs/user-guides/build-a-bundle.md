@@ -51,3 +51,5 @@ Record at least:
 Run [Inspect a Bundle](inspect-a-bundle.md) before inference. The
 [CLI Reference](../api/cli-reference.md#trtmc-build) is the source for the
 complete option inventory.
+
+{/* Collaborative review anchor: batch 2. */}

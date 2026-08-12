@@ -17,3 +17,5 @@ Future migration entries should be organized by `from → to` and state:
 
 Historical design plans and worklogs are not migration instructions unless a
 released contract links them explicitly.
+
+{/* Collaborative review anchor: batch 2. */}

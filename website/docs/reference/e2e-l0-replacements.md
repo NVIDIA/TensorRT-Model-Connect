@@ -55,4 +55,4 @@ This table is a checked snapshot of non-self replacements declared by
 `PYTHONPATH=python:. python3 tools/test_impact.py --validate` after changing a
 replacement.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

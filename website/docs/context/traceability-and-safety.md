@@ -119,4 +119,4 @@ Before publishing a normative traceability matrix or compliance claim:
 Until those criteria are met, use model manifests as a partial E2E evidence
 index and describe repository-wide traceability as incomplete.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

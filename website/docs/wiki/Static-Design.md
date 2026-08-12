@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 The static design material is now part of the maintained architecture
 documentation.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

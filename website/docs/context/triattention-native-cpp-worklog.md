@@ -2406,4 +2406,4 @@ Result:
 So the sparse exact sampler preserves the already-proven dense parity behavior
 while avoiding the expensive full-vocab scatter plus `at::multinomial` call.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

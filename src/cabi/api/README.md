@@ -19,4 +19,4 @@ Bundle parsing itself lives under `src/bundle/`. Optimized-runtime hosting
 lives under `src/runtime/providers/`; native runtime-strategy resolution and
 model-plugin loading live under `src/runtime/registry/`.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

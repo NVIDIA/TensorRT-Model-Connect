@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 
 Native and optimized load paths are documented in Runtime Lifecycle.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

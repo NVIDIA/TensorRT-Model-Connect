@@ -86,4 +86,4 @@ The current example is the Qwen TensorRT Edge-LLM adapter with three qualified
 Qwen3/A100 SM80/FP16 profiles. These profiles do not add native strategy keys
 or claim support for arbitrary Qwen checkpoints and targets.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

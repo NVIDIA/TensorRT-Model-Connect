@@ -10,4 +10,4 @@ Current recurrent contract owners:
 - `src/runtime/models/nemotron_h/nemotron_h_recurrent_step_contracts.h`
 - `src/runtime/models/qwen3_5/qwen3_5_recurrent_step_contracts.h`
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

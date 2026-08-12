@@ -22,4 +22,4 @@ include:
 For non-security bugs, feature requests, and documentation issues, use this
 repository's GitHub issue tracker.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

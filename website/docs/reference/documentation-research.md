@@ -43,4 +43,4 @@ Applied rules:
 - The visual style favors technical documentation over marketing: square corners, light borders, neutral surfaces, concise tables, and NVIDIA-green accents.
 - Source-derived counts and strategy names are taken from the current checkout, not copied from older wiki text.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

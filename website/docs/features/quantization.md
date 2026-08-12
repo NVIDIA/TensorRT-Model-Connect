@@ -228,4 +228,4 @@ image/video health and reference comparisons for diffusion, waveform or ASR
 checks for audio, and numerical error metrics for time-series models. A generic
 unit test of the shared format core is not model qualification.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

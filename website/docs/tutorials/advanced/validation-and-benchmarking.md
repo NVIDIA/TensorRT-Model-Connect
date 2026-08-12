@@ -223,4 +223,4 @@ The input is part of the benchmark. A one-token prompt, a 2K-token prompt, a sin
 
 </details>
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

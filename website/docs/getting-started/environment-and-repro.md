@@ -61,4 +61,4 @@ continue to [Installation](installation.md).
 | CMake cannot find CUDA or TensorRT | Use the repository source container. |
 | TensorRT reports an ABI mismatch | Build and run in a compatible TensorRT cohort. |
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

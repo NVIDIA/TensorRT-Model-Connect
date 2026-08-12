@@ -209,4 +209,4 @@ File one issue per root cause. Do not bundle unrelated failures into a single
 issue just because they came from the same QA report. If several cases share the
 same root cause, include them as affected scope/evidence in one issue.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

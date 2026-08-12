@@ -331,4 +331,4 @@ current status/check URLs and states, action, validation, mergeability/review
 state, blockers, residual risk, and whether a branch was pushed or merged. An
 unchanged pending state is normal during monitoring.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

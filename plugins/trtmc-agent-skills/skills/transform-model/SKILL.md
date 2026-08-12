@@ -193,4 +193,4 @@ runtime/bundle path, build and validation commands, artifact hashes/paths,
 comparison metrics, target hardware, performance evidence if claimed, and
 unrun or blocked gates.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

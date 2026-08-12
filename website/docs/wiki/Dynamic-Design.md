@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 The build and request sequences are now part of the maintained architecture
 documentation.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

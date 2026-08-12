@@ -27,3 +27,5 @@ oracle from an exact manifest in the
 [Time Series Forecasting recipes](/models-recipes/model-recipes/tasks/time-series-forecasting).
 Success is a zero exit status plus an output vector whose shape and values pass
 the model-owned comparator; a plausible vector alone is not parity evidence.
+
+{/* Collaborative review anchor: batch 2. */}

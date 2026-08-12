@@ -95,4 +95,4 @@ For exact CLI options, use the [CLI Reference](/api/cli-reference). For parity
 and performance work, continue to
 [Validation and Benchmarking](/tutorials/advanced/validation-and-benchmarking).
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

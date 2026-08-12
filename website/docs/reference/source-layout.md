@@ -97,4 +97,4 @@ new changes; do not present the command as a passing consistency check.
 Use `tools/test_impact.py` for change selection. Do not infer ownership from an
 old document count or from a removed shared runtime directory.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

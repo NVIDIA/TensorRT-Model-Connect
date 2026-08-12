@@ -185,4 +185,4 @@ $TRTMC run /tmp/optimized.bundle \
 Check the selected implementation's qualification contract before passing
 provider-specific options such as CUDA graphs.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

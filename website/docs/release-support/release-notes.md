@@ -16,3 +16,5 @@ When the first release is published, this page should record:
 - links to the immutable versioned documentation snapshot and migration notes.
 
 Do not use branch commit history as a substitute for release notes.
+
+{/* Collaborative review anchor: batch 2. */}

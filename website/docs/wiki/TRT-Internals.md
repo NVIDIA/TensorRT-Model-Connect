@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 TensorRT build, bundle, and runtime boundaries are documented in Architecture.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

@@ -53,4 +53,4 @@ family.
 The `doc-sync` and `submit-github-pr` skills maintain this index as part of
 their documentation and PR workflows.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

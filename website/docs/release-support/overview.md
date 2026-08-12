@@ -22,3 +22,5 @@ site must not imply that unreleased APIs belong to a stable numbered release.
 
 Support claims remain exact: model ID/revision, configuration, runtime path,
 target, software cohort, and evidence level all matter.
+
+{/* Collaborative review anchor: batch 2. */}

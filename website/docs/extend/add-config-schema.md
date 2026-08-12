@@ -103,4 +103,4 @@ effect.
    `MODEL.toml` and build that model DSO.
 5. Verify the effective-config artifact and the user-visible behavior.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

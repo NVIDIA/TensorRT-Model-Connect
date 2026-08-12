@@ -34,4 +34,4 @@ Hugging Face model or local model directory
   -> task-specific output
 ```
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

@@ -232,4 +232,4 @@ Before leaving the tutorial, write short answers to these prompts:
 
 </details>
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

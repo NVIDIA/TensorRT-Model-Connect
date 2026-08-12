@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 FP8 commands, ownership, and evidence requirements moved to Quantization.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

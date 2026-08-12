@@ -165,4 +165,4 @@ For branch, pull-request, and one-shot `run-internal-ci` handling, follow
 [Contributing](contributing.md). CI success does not widen the evidence boundary
 beyond the jobs and models that actually ran.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

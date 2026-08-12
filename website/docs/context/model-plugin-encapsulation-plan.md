@@ -378,4 +378,4 @@ The migration is done when:
 - pytestE2E can load only that model plugin through `trtmc` and reproduce the
   saved `origin/main` user-contract result for that model
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

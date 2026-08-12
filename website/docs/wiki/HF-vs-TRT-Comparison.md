@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 The comparison and inference concepts moved to Inference Fundamentals.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

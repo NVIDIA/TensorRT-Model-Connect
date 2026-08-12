@@ -23,4 +23,4 @@ sampling, masks, and KV-cache policy are model-owned under
 under `src/runtime/providers/` to verify and load their embedded implementation
 DSO.
 
-<!-- Collaborative review anchor. -->
+<!-- Collaborative review anchor: batch 2. -->

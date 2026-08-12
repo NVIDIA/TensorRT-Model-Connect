@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 
 Architecture and Unit Design now share one canonical documentation area.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

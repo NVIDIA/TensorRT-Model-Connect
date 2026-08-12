@@ -78,3 +78,5 @@ documentation.
 
 The agent should use [Build from Source](getting-started/source-build.md) and
 [Quick Start](getting-started/quick-start.md), not invent a parallel setup.
+
+{/* Collaborative review anchor: batch 2. */}

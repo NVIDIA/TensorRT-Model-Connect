@@ -48,3 +48,5 @@ organized by the corresponding Hugging Face multimodal or audio task.
 For concept-first labs covering preprocessing, engine components, streaming
 state, and typed results, follow [Multimodal and Speech](../tutorials/intermediate/multimodal-and-speech.md)
 and [Canary Decoding](../tutorials/intermediate/canary-decoding.md).
+
+{/* Collaborative review anchor: batch 2. */}

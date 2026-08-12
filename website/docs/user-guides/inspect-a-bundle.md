@@ -29,3 +29,5 @@ the default search path.
 
 For a guided artifact-debugging lab, use
 [Inspect Bundles](../tutorials/beginner/inspect-bundles.md).
+
+{/* Collaborative review anchor: batch 2. */}

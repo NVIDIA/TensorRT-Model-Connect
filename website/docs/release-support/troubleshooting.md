@@ -21,3 +21,5 @@ For a new installation, start with
 [First-run Troubleshooting](../getting-started/troubleshooting.md). For a model
 result, reproduce the exact model-owned manifest before opening a generalized
 framework issue.
+
+{/* Collaborative review anchor: batch 2. */}

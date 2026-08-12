@@ -12,4 +12,4 @@ import {Redirect} from '@docusaurus/router';
 
 Runtime plugin dispatch and request flow are documented in Runtime Lifecycle.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

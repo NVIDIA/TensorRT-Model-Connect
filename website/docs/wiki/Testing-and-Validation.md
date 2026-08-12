@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 The maintained commands and evidence model are in the Testing Reference.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

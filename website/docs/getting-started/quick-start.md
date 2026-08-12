@@ -63,4 +63,4 @@ error. If it does not, keep the first error and use
 Continue with [Learning Path](../learning-path.md) or choose another model from
 [Model Support](../models-recipes/overview.md).
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

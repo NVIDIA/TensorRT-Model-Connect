@@ -107,4 +107,4 @@ After Getting Started:
 4. use [Developer Guide](developer-guide/overview.md) only when you need
    source-level ownership or contribution instructions.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

@@ -31,4 +31,4 @@ contracts.
 the canonical [Quantization](/features/quantization) page for the complete
 workflow and current command examples.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}

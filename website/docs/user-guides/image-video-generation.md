@@ -41,3 +41,5 @@ Hugging Face image or video task.
 
 For the denoising-loop and task-result mental model, follow the
 [Diffusion, Vision, and Time-Series Tutorial](../tutorials/intermediate/diffusion-and-time-series.md).
+
+{/* Collaborative review anchor: batch 2. */}

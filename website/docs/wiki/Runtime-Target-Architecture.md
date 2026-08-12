@@ -11,4 +11,4 @@ import {Redirect} from '@docusaurus/router';
 
 Native and optimized runtime dispatch are documented in Runtime Lifecycle.
 
-{/* Collaborative review anchor. */}
+{/* Collaborative review anchor: batch 2. */}
