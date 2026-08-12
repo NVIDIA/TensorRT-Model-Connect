@@ -11,7 +11,7 @@ from tensorrt_model_connect.python_profiles import (
 )
 
 
-def test_magpie_reference_uses_tts_environment() -> None:
+def test_magpie_build_and_reference_use_tts_environment() -> None:
     profiles = default_execution_profiles(
         family="magpie_tts",
         runtime_strategy="magpie_tts_text_to_speech",
@@ -19,7 +19,7 @@ def test_magpie_reference_uses_tts_environment() -> None:
     )
 
     assert profiles == {
-        "build": "base",
+        "build": "magpie_tts_reference",
         "runtime": "base",
         "reference": "magpie_tts_reference",
     }
