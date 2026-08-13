@@ -334,6 +334,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "phi4_multimodal",
         "qwen_image_reference",
         "sana_wm_reference",
+        "timm_reference",
         "wan2_2_ti2v_reference",
         "xglm_tokenizer",
         "reference_common",

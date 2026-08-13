@@ -295,6 +295,10 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
+    assert (
+        by_id["timm_vit.classify"]["baseline"]["python_profile"]
+        == "timm_reference"
+    )
     assert by_id["sana_wm.generate_image"]["baseline"]["adapter_options"] == {
         "reference_commit": "59629fdf790850797cb657bad014fce432bd713d",
         "intrinsics": "assets/demo_0_intrinsics.npy",

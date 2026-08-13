@@ -872,6 +872,7 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-vision
+      python_profile: timm_reference
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
