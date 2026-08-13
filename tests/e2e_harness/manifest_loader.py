@@ -182,21 +182,6 @@ def _threshold_sidecar_path(
     return manifest_path.parent / "thresholds" / filename
 
 
-def requires_threshold_sidecar(testcase: dict[str, Any]) -> bool:
-    """Return whether a testcase consumes configurable numeric thresholds.
-
-    Fixed runtime-invariant contracts assert exact build and execution facts in
-    their model-owned verifier and deliberately ignore ``ThresholdProfile``.
-    Other invariant-only contracts may still use numeric quality or shape
-    thresholds, so the exemption stays intentionally narrow.
-    """
-    return not (
-        testcase.get("reference_backend") == "invariant_only"
-        and testcase.get("oracle_level") == "L4_invariants"
-        and testcase.get("user_contract") == "runtime_invariants"
-    )
-
-
 def _load_threshold_sidecar(
     manifest_path: Path,
     testcase_name: str | None = None,

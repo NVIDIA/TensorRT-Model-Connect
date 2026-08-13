@@ -24,8 +24,8 @@ try:
         load_all_manifests,
         load_manifest,
         load_model_manifest,
-        requires_threshold_sidecar,
     )
+    from tests.e2e_harness.threshold_policy import requires_threshold_sidecar
     from tests.e2e_harness.registry import (
         activate_model_plugins,
         get_comparator,

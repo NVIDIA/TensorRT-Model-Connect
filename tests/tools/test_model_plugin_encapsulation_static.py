@@ -17,7 +17,7 @@ import json
 import re
 from pathlib import Path
 
-from tests.e2e_harness.manifest_loader import requires_threshold_sidecar
+from tests.e2e_harness.threshold_policy import requires_threshold_sidecar
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
