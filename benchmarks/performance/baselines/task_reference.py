@@ -479,6 +479,32 @@ def _load_tts(
     return Session(invoke, revision, framework, reference_dependencies=dependencies)
 
 
+def _load_nemo_asr_reference_model(
+    arguments: argparse.Namespace,
+    *,
+    device: Any,
+) -> Any:
+    if (
+        arguments.family == "nemotron_speech_streaming"
+        and "nemotron-3.5-asr-streaming" in arguments.model.lower()
+    ):
+        from tools.reference.speech import load_nemotron35_asr_model
+
+        return load_nemotron35_asr_model(
+            model=arguments.model,
+            revision=arguments.revision or "",
+            local_files_only=arguments.local_files_only,
+            device=str(device),
+        )
+
+    import nemo.collections.asr as nemo_asr
+
+    return nemo_asr.models.ASRModel.from_pretrained(
+        arguments.model,
+        map_location="cpu",
+    )
+
+
 def _load_asr(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
@@ -494,14 +520,9 @@ def _load_asr(
     device = torch.device("cuda")
 
     if arguments.family in {"canary", "nemotron_speech_streaming"}:
-        import nemo.collections.asr as nemo_asr
         from tools.validation.engine import _transcription_text
 
-        model = (
-            nemo_asr.models.ASRModel.from_pretrained(arguments.model, map_location="cpu")
-            .eval()
-            .to(device)
-        )
+        model = _load_nemo_asr_reference_model(arguments, device=device).eval().to(device)
         reference_dtype = _torch_dtype(torch, arguments.precision)
         autocast_dtype = reference_dtype if arguments.precision != "fp32" else torch.float16
         temporary = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)

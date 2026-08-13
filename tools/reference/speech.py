@@ -466,6 +466,25 @@ def _load_nemotron35_model(
     return torch, model
 
 
+def load_nemotron35_asr_model(
+    *,
+    model: str,
+    device: str,
+    revision: str = "",
+    local_files_only: bool = False,
+) -> Any:
+    """Load Nemotron 3.5 through its archive-compatible NeMo model class."""
+    arguments = argparse.Namespace(
+        model=model,
+        model_revision=revision,
+        local_files_only=local_files_only,
+        device=device,
+    )
+    archive = _resolve_nemotron35_archive(arguments)
+    _torch, loaded = _load_nemotron35_model(arguments, archive)
+    return loaded
+
+
 def _load_nemo_asr_model(arguments: argparse.Namespace, nemo_asr: Any) -> Any:
     if arguments.local_files_only:
         archive = _resolve_nemo_archive(
