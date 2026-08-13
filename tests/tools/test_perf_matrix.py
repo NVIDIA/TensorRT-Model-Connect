@@ -2079,6 +2079,78 @@ def test_candidate_preflight_rejects_an_unavailable_build_python_profile(
         perf_matrix._candidate_build_python_profile({"model": {"family": "example"}})
 
 
+def test_candidate_preflight_requires_modelopt_for_auto_fp8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_command",
+        lambda argv, _environment, timeout: calls.append((argv, timeout))
+        or {
+            "exit_code": 1,
+            "stderr_tail": "ModuleNotFoundError: No module named 'modelopt'",
+        },
+    )
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="candidate build Python profile 'base' is missing nvidia-modelopt",
+    ):
+        perf_matrix._candidate_build_dependency_preflight(
+            {
+                "model": {
+                    "build": {
+                        "quantization": {
+                            "format": "fp8",
+                            "scale_source": "modelopt",
+                        }
+                    }
+                }
+            },
+            profile="base",
+            python="/profile/python",
+            timeout_seconds=30,
+        )
+
+    assert calls == [
+        (
+            [
+                "/profile/python",
+                "-c",
+                "import modelopt.torch.quantization",
+            ],
+            30,
+        )
+    ]
+
+
+def test_candidate_preflight_skips_modelopt_for_non_calibrated_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_command",
+        lambda *_args, **_kwargs: pytest.fail("dependency probe must not run"),
+    )
+
+    perf_matrix._candidate_build_dependency_preflight(
+        {
+            "model": {
+                "build": {
+                    "quantization": {
+                        "format": "fp8",
+                        "scale_source": "precomputed",
+                    }
+                }
+            }
+        },
+        profile="base",
+        python="/profile/python",
+        timeout_seconds=30,
+    )
+
+
 def test_seq2seq_token_framing_is_explicit_and_exact() -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py"))
     normalize = runner["_normalize_seq2seq_tokens"]
