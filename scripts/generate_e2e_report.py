@@ -3249,7 +3249,11 @@ def validate_proof_context(
     ):
         issues.append("Final proof JSON has no valid E2E proof-kind classification")
     raw_e2e_proof_kinds = proof.get("e2e_proof_kinds")
-    if raw_e2e_proof_kinds is None and e2e_proof_kind in supported_e2e_proof_kinds:
+    if (
+        raw_e2e_proof_kinds is None
+        and isinstance(e2e_proof_kind, str)
+        and e2e_proof_kind in supported_e2e_proof_kinds
+    ):
         e2e_proof_kinds = [e2e_proof_kind]
     elif (
         isinstance(raw_e2e_proof_kinds, list)
