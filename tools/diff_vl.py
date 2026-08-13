@@ -105,6 +105,16 @@ def _find_family_diff_vl_handler(model_type: str) -> ModuleType | None:
     return None
 
 
+def _get_auto_vision_model_class():
+    """Return the current Transformers auto class with legacy fallback."""
+    import transformers
+
+    try:
+        return transformers.AutoModelForImageTextToText
+    except AttributeError:
+        return transformers.AutoModelForVision2Seq
+
+
 def _read_bundle_header(bundle_path: str) -> dict:
     with open(bundle_path, "rb") as f:
         magic = f.read(8)
@@ -163,15 +173,16 @@ def _get_hf_vision_features_generic(
     image_path: str,
     fixed_image_size: int = 448,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generic HF vision feature extraction using AutoModelForVision2Seq."""
+    """Generic HF vision feature extraction using a Transformers auto model."""
     import torch
     from PIL import Image
 
     print(f"[diff_vl] Loading HF generic VL model {model_id} ...", file=sys.stderr)
-    from transformers import AutoModelForVision2Seq, AutoProcessor
+    from transformers import AutoProcessor
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AutoModelForVision2Seq.from_pretrained(
+    model_class = _get_auto_vision_model_class()
+    model = model_class.from_pretrained(
         model_id, torch_dtype=torch.float32, device_map=device,
         trust_remote_code=True)
     model.eval()

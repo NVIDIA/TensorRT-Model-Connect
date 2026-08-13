@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from types import MethodType
 
 import numpy as np
 import torch
@@ -32,13 +31,13 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
 
 DIFFUSERS_REVISION = "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc"
 TRANSFORMERS_COMPAT_REVISION = "bed02e1faee69e866e382f835b4f7b0a3c7b8431"
-BASE_TRANSFORMERS_VERSION = "5.2.0"
+BASE_TRANSFORMERS_VERSION = "5.5.0"
 BASE_TRANSFORMERS_ENTRYPOINT = Path(
     "/opt/venv/lib/python3.12/site-packages/transformers/__init__.py"
 )
 BASE_TRANSFORMERS_ENTRYPOINT_RECORD = {
-    "bytes": 38424,
-    "sha256": "91b2c544c6848f4ce8213c770aaa705ce682ee656c995f4ce58352c4b7368ee7",
+    "bytes": 40505,
+    "sha256": "460fadeb41958b1b47d7df8769b5f0ca3f46554ab733f52cf03a2b92d55d899a",
 }
 EXPECTED_NUM_FRAMES = 124
 
@@ -152,7 +151,7 @@ def qualified_transformers_source(entrypoint: Path, version: str) -> dict:
     if entrypoint_record != BASE_TRANSFORMERS_ENTRYPOINT_RECORD:
         raise ValueError("MiniMax-H3 immutable base Transformers entrypoint mismatch")
     return {
-        "qualification": "immutable_base_5_2_plus_local_shim",
+        "qualification": "immutable_base_5_5_with_native_processor_helper",
         "version": version,
         "entrypoint": str(entrypoint),
         "entrypoint_record": entrypoint_record,
@@ -177,6 +176,26 @@ def create_mm_token_type_ids(processor, input_ids):
     return result
 
 
+def _processor_compat_probe(processor) -> list[list[int]]:
+    token_ids = set()
+    for name in ("image", "video", "audio"):
+        for attribute in (f"{name}_token_ids", f"{name}_ids"):
+            values = getattr(processor, attribute, None)
+            if values is None:
+                continue
+            if not isinstance(values, (list, tuple, np.ndarray)):
+                values = [values]
+            token_ids.update(int(value) for value in values if value is not None)
+        value = getattr(processor, f"{name}_token_id", None)
+        if value is not None:
+            token_ids.add(int(value))
+
+    neutral_id = 0
+    while neutral_id in token_ids:
+        neutral_id += 1
+    return [[neutral_id, *sorted(token_ids)]]
+
+
 def _processor_method_identity(processor) -> tuple[object, object]:
     method = getattr(processor, "create_mm_token_type_ids", None)
     if not callable(method):
@@ -186,17 +205,17 @@ def _processor_method_identity(processor) -> tuple[object, object]:
 
 def prepare_processor_compat(processor, transformers_source: dict) -> tuple[str | None, tuple]:
     qualification = transformers_source.get("qualification")
-    if qualification == "immutable_base_5_2_plus_local_shim":
-        if hasattr(processor, "create_mm_token_type_ids"):
-            raise ValueError(
-                "MiniMax-H3 immutable Transformers base unexpectedly provides "
-                "create_mm_token_type_ids"
-            )
-        processor.create_mm_token_type_ids = MethodType(create_mm_token_type_ids, processor)
+    if qualification == "immutable_base_5_5_with_native_processor_helper":
         identity = _processor_method_identity(processor)
-        if identity != (processor, create_mm_token_type_ids):
-            raise ValueError("MiniMax-H3 could not bind its local processor compatibility helper")
-        return "local-create-mm-token-type-ids-for-transformers-5.2.0", identity
+        probe = _processor_compat_probe(processor)
+        native_result = processor.create_mm_token_type_ids(probe)
+        local_result = create_mm_token_type_ids(processor, probe)
+        if native_result != local_result:
+            raise ValueError(
+                "MiniMax-H3 native create_mm_token_type_ids is not semantically "
+                "equivalent to the local compatibility helper"
+            )
+        return "native-create-mm-token-type-ids-for-transformers-5.5.0", identity
     if qualification != "clean_git_checkout":
         raise ValueError("MiniMax-H3 Transformers source has an unknown qualification")
     return None, _processor_method_identity(processor)

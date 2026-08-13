@@ -11,7 +11,11 @@ Postconditions: Family-owned handlers are discovered and cosine similarity match
 
 from __future__ import annotations
 
+import sys
+from types import ModuleType
+
 import numpy as np
+import pytest
 
 
 class TestFamilyHandlerDispatch:
@@ -23,6 +27,49 @@ class TestFamilyHandlerDispatch:
         mod = importlib.import_module("diff_vl")
         assert mod._find_family_diff_vl_handler("example_decoder") is None
         assert mod._find_family_diff_vl_handler("generic_text") is None
+
+
+class TestAutoVisionModelClass:
+    """Test Transformers 5.5 model class selection and legacy fallback."""
+
+    def test_prefers_current_image_text_api(self, monkeypatch):
+        import diff_vl
+
+        transformers = ModuleType("transformers")
+        current_class = object()
+        transformers.AutoModelForImageTextToText = current_class
+        transformers.AutoModelForVision2Seq = object()
+        monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+        assert diff_vl._get_auto_vision_model_class() is current_class
+
+    def test_falls_back_when_current_api_is_unavailable(self, monkeypatch):
+        import diff_vl
+
+        transformers = ModuleType("transformers")
+        legacy_class = object()
+        transformers.AutoModelForVision2Seq = legacy_class
+        monkeypatch.setitem(sys.modules, "transformers", transformers)
+
+        assert diff_vl._get_auto_vision_model_class() is legacy_class
+
+    def test_does_not_mask_current_api_import_errors(self, monkeypatch):
+        import diff_vl
+
+        class BrokenTransformersModule(ModuleType):
+            def __getattr__(self, name):
+                if name == "AutoModelForImageTextToText":
+                    raise ImportError("current API dependency failed")
+                if name == "AutoModelForVision2Seq":
+                    raise AssertionError("legacy fallback must not be used")
+                raise AttributeError(name)
+
+        monkeypatch.setitem(
+            sys.modules, "transformers", BrokenTransformersModule("transformers")
+        )
+
+        with pytest.raises(ImportError, match="current API dependency failed"):
+            diff_vl._get_auto_vision_model_class()
 
 
 class TestCosineSimilarity:

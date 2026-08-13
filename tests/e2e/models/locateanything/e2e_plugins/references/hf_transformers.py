@@ -893,10 +893,14 @@ class HfTransformersReference:
             from pathlib import Path
 
             import torch
+            from tensorrt_model_connect.families.locateanything.transformers_compat import (
+                install_remote_attention_compat,
+            )
             from tensorrt_model_connect.families.locateanything.vl_debug_runner import (
                 preprocess_image_inputs_for_trt,
             )
             from transformers import AutoConfig, AutoModel, AutoTokenizer, PretrainedConfig
+            from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
             if torch.cuda.is_available():
                 # Avoid Thor PyTorch/cuDNN sublibrary mismatches in HF reference conv2d.
@@ -1120,6 +1124,9 @@ class HfTransformersReference:
             _install_tied_weight_compat()
             config = _load_locateanything_config(model_ref)
             tokenizer = _load_locateanything_tokenizer(model_ref)
+            remote_model_class = get_class_from_dynamic_module(
+                config.auto_map["AutoModel"], model_ref, local_files_only=True)
+            install_remote_attention_compat(remote_model_class)
             model = AutoModel.from_pretrained(
                 model_ref, config=config, trust_remote_code=trust_remote_code,
                 torch_dtype={torch_dtype_expr})

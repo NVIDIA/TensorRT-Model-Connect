@@ -6,9 +6,14 @@
 from __future__ import annotations
 
 import subprocess
+import sys
+import types
 
 import huggingface_hub
 
+from tensorrt_model_connect.families.locateanything.transformers_compat import (
+    install_remote_attention_compat,
+)
 from tests.e2e.models.locateanything.e2e_plugins.references import (
     hf_transformers as locateanything_hf_transformers,
 )
@@ -93,6 +98,8 @@ def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:
     assert "DynamicCache.from_legacy_cache" in script
     assert "get_expanded_tied_weights_keys" in script
     assert "model.embed_tokens.weight" in script
+    assert "get_class_from_dynamic_module" in script
+    assert "install_remote_attention_compat" in script
     assert "torch.backends.cudnn.enabled = False" in script
     assert "def _load_locateanything_config" in script
     assert "def _load_locateanything_raw_config" in script
@@ -116,3 +123,64 @@ def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:
     assert out.text == "found"
     assert out.metadata["reference_variant"] == "locateanything_manual_processor"
     assert out.logits is None
+
+
+def test_remote_attention_compat_accepts_transformers_55_keyword(monkeypatch) -> None:
+    calls: list[tuple[str | None, bool, bool]] = []
+
+    class NativePreTrainedModel:
+        def _check_and_adjust_attn_implementation(
+            self,
+            attn_implementation,
+            is_init_check=False,
+            allow_all_kernels=False,
+        ):
+            calls.append((attn_implementation, is_init_check, allow_all_kernels))
+            return attn_implementation
+
+    class LocateAnythingPreTrainedModel(NativePreTrainedModel):
+        def _check_and_adjust_attn_implementation(self, attn_implementation, is_init_check=False):
+            if attn_implementation == "magi":
+                return "magi"
+            return super()._check_and_adjust_attn_implementation(attn_implementation, is_init_check)
+
+    class LocateAnythingForConditionalGeneration(LocateAnythingPreTrainedModel):
+        pass
+
+    class Qwen2PreTrainedModel(NativePreTrainedModel):
+        def _check_and_adjust_attn_implementation(self, attn_implementation, is_init_check=False):
+            return super()._check_and_adjust_attn_implementation(attn_implementation, is_init_check)
+
+    class Qwen2ForCausalLM(Qwen2PreTrainedModel):
+        pass
+
+    module_name = "transformers_modules.test_locateanything.modeling_locateanything"
+    for remote_class in (
+        LocateAnythingPreTrainedModel,
+        LocateAnythingForConditionalGeneration,
+        Qwen2PreTrainedModel,
+        Qwen2ForCausalLM,
+    ):
+        remote_class.__module__ = module_name
+    remote_module = types.ModuleType(module_name)
+    remote_module.Qwen2ForCausalLM = Qwen2ForCausalLM
+    monkeypatch.setitem(sys.modules, module_name, remote_module)
+
+    assert install_remote_attention_compat(LocateAnythingForConditionalGeneration) == 2
+    assert (
+        LocateAnythingForConditionalGeneration()._check_and_adjust_attn_implementation(
+            "sdpa", is_init_check=True, allow_all_kernels=True
+        )
+        == "sdpa"
+    )
+    assert (
+        Qwen2ForCausalLM()._check_and_adjust_attn_implementation("eager", allow_all_kernels=True)
+        == "eager"
+    )
+    assert (
+        LocateAnythingForConditionalGeneration()._check_and_adjust_attn_implementation(
+            "magi", allow_all_kernels=True
+        )
+        == "magi"
+    )
+    assert calls == [("sdpa", True, False), ("eager", False, False)]
