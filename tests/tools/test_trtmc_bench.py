@@ -308,6 +308,24 @@ def test_catalog_exposes_every_declared_profile_and_family() -> None:
 
 
 @pytest.mark.parametrize(
+    "model_name",
+    [
+        "minitron-4b-width-regression-native-kv-chunked-prefill",
+        "qwen3-0.6b-regression-native-kv-chunked-prefill",
+    ],
+)
+def test_native_kv_regression_prompt_repeat_resolves_deterministically(
+    tmp_path: Path,
+    model_name: str,
+) -> None:
+    model = ManifestCatalog().resolve(model_name)
+    case = resolve_case(model, tmp_path / model.bundle_name)
+
+    assert case.request["prompt"] == " ".join(["a"] * 32768) + "\n"
+    assert case.sources["request.prompt"] == "model testcase"
+
+
+@pytest.mark.parametrize(
     ("model_name", "operation"),
     [
         ("bark-small", "generate_audio"),

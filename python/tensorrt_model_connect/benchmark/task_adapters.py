@@ -57,9 +57,42 @@ class TaskAdapter:
 
 
 def _prompt(testcase: Mapping[str, Any], operation: str, *, allow_empty: bool = False) -> str:
+    repeat = testcase.get("prompt_repeat")
+    if repeat is not None:
+        if not isinstance(repeat, Mapping):
+            raise BenchmarkError(f"{operation} testcase prompt_repeat must be an object")
+        unknown = sorted(set(repeat) - {"text", "separator", "count", "suffix"})
+        if unknown:
+            raise BenchmarkError(
+                f"{operation} testcase prompt_repeat has unsupported fields: {unknown}"
+            )
+        text = repeat.get("text")
+        count = repeat.get("count")
+        separator = repeat.get("separator", "")
+        suffix = repeat.get("suffix", "")
+        if not isinstance(text, str) or not text:
+            raise BenchmarkError(
+                f"{operation} testcase prompt_repeat.text must be a non-empty string"
+            )
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise BenchmarkError(
+                f"{operation} testcase prompt_repeat.count must be a positive integer"
+            )
+        if not isinstance(separator, str):
+            raise BenchmarkError(
+                f"{operation} testcase prompt_repeat.separator must be a string"
+            )
+        if not isinstance(suffix, str):
+            raise BenchmarkError(
+                f"{operation} testcase prompt_repeat.suffix must be a string"
+            )
+        return separator.join([text] * count) + suffix
+
     prompt = testcase.get("prompt", testcase.get("test_prompt"))
     if not isinstance(prompt, str) or (not prompt and not allow_empty):
-        raise BenchmarkError(f"{operation} testcase requires prompt/test_prompt")
+        raise BenchmarkError(
+            f"{operation} testcase requires prompt/test_prompt/prompt_repeat"
+        )
     return prompt
 
 
