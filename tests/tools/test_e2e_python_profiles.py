@@ -332,6 +332,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "olmo_tokenizer",
         "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
+        "qwen_image_reference",
         "sana_wm_reference",
         "wan2_2_ti2v_reference",
         "xglm_tokenizer",
