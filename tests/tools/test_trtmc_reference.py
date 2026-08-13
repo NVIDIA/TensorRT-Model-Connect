@@ -108,6 +108,64 @@ def test_tts_transcriber_passes_local_files_only_once(monkeypatch) -> None:
     }
 
 
+def test_tts_transcriber_limits_cuda_memory(monkeypatch) -> None:
+    load_calls: list[dict[str, object]] = []
+    transcribe_calls: list[dict[str, object]] = []
+    loaded_processor = SimpleNamespace(
+        tokenizer=object(),
+        feature_extractor=SimpleNamespace(sampling_rate=16000),
+    )
+
+    class FakeTranscriber:
+        feature_extractor = SimpleNamespace(sampling_rate=16000)
+
+        def __call__(self, _waveforms, **kwargs):
+            transcribe_calls.append(kwargs)
+            return [{"text": "hello"}, {"text": "world"}]
+
+    class FakeModelLoader:
+        @staticmethod
+        def from_pretrained(_model_id: str, **kwargs):
+            load_calls.append(kwargs)
+            return object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            cuda=SimpleNamespace(is_available=lambda: True),
+            float16="fp16",
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoModelForSpeechSeq2Seq=FakeModelLoader,
+            AutoProcessor=SimpleNamespace(
+                from_pretrained=lambda *_args, **_kwargs: loaded_processor
+            ),
+            pipeline=lambda *_args, **_kwargs: FakeTranscriber(),
+        ),
+    )
+    monkeypatch.setattr(speech, "_read_wav_float32", lambda _path: ([0.0], 16000))
+    monkeypatch.setattr(
+        speech,
+        "_resample_audio",
+        lambda audio, _source_rate, _target_rate: audio,
+    )
+
+    result = speech._transcribe_tts(
+        SimpleNamespace(device="cuda", local_files_only=True),
+        [Path("one.wav"), Path("two.wav")],
+        "openai/whisper-large-v3-turbo",
+    )
+
+    assert result == ["hello", "world"]
+    assert load_calls == [{"local_files_only": True, "torch_dtype": "fp16"}]
+    assert transcribe_calls == [{"batch_size": 1}]
+
+
 def _prepare_work(path: Path, *, model_manifest: str = "") -> None:
     path.mkdir(parents=True)
     (path / "answers.json").write_text(
