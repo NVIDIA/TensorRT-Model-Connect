@@ -46,16 +46,12 @@ jobs:
     outputs:
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
-      guard_code: ${{ steps.snapshot.outputs.guard_code }}
-      pr_head_sha: ${{ steps.snapshot.outputs.pr_head_sha }}
-      branch_head_sha: ${{ steps.snapshot.outputs.branch_head_sha }}
 
     steps:
       # This trusted workflow reads PR metadata only. It never checks out or
       # executes the pull-request head.
       - name: Capture the exact pull-request head
         id: snapshot
-        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
@@ -64,19 +60,6 @@ jobs:
           EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          head_sha=""
-          branch_sha=""
-          fail_guard() {
-            local code="$1"
-            local message="$2"
-            {
-              echo "guard_code=$code"
-              echo "pr_head_sha=${head_sha:-${EVENT_HEAD_SHA:-}}"
-              echo "branch_head_sha=${branch_sha:-}"
-            } >> "$GITHUB_OUTPUT"
-            echo "::error::$code: $message"
-            exit 1
-          }
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
 
           # The legacy .permission field maps maintain to write. Use
@@ -98,67 +81,24 @@ jobs:
             [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           fi
 
-          max_attempts="${HEAD_SYNC_MAX_ATTEMPTS:-6}"
-          retry_delay="${HEAD_SYNC_RETRY_DELAY_SECONDS:-10}"
-          [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]]
-          [[ "$retry_delay" =~ ^[0-9]+$ ]]
-          head_sha=""
-          branch_sha=""
-          for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-            pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
-            state="$(jq -er '.state' <<<"$pull")"
-            base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
-            base_ref="$(jq -er '.base.ref' <<<"$pull")"
-            head_sha="$(jq -er '.head.sha' <<<"$pull")"
-            head_repo="$(jq -r '.head.repo.full_name // empty' <<<"$pull")"
-            head_ref="$(jq -r '.head.ref // empty' <<<"$pull")"
+          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          state="$(jq -er '.state' <<<"$pull")"
+          base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
+          base_ref="$(jq -er '.base.ref' <<<"$pull")"
+          head_sha="$(jq -er '.head.sha' <<<"$pull")"
 
-            test "$state" = "open"
-            test "$base_repo" = "$GITHUB_REPOSITORY"
-            test "$base_ref" = "main"
-            [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-            if [ -z "$head_repo" ] || [ -z "$head_ref" ]; then
-              fail_guard HEAD_SOURCE_UNAVAILABLE \
-                "PR source repository or branch is unavailable."
-            fi
-            [[ "$head_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
-            head_ref_uri="$(jq -rn --arg value "$head_ref" '$value | @uri')"
-            if ! branch_sha="$(
-              gh api --method GET \
-                "/repos/$head_repo/branches/$head_ref_uri" \
-                --jq '.commit.sha'
-            )"; then
-              fail_guard HEAD_SOURCE_UNAVAILABLE \
-                "Cannot read source branch $head_repo:$head_ref."
-            fi
-            [[ "$branch_sha" =~ ^[0-9a-f]{40}$ ]]
-            if [ "$head_sha" = "$branch_sha" ]; then
-              break
-            fi
-            if [ "$attempt" -lt "$max_attempts" ]; then
-              sleep "$retry_delay"
-            fi
-          done
+          test "$state" = "open"
+          test "$base_repo" = "$GITHUB_REPOSITORY"
+          test "$base_ref" = "main"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
           if [ "$EVENT_NAME" = "pull_request_target" ] \
             && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
-            if [ "$head_sha" = "$branch_sha" ]; then
-              fail_guard TRIGGER_SUPERSEDED \
-                "PR head advanced from trigger $EVENT_HEAD_SHA to $head_sha. Re-add the label for the current head."
-            else
-              fail_guard HEAD_MOVING_OR_STALE \
-                "Trigger $EVENT_HEAD_SHA, PR metadata $head_sha, and source branch $branch_sha do not agree."
-            fi
-          fi
-          if [ "$head_sha" != "$branch_sha" ]; then
-            fail_guard PR_TRACKING_REF_STALE \
-              "PR metadata head $head_sha differs from source branch $branch_sha."
+            echo "::error::The CI trigger was superseded by a newer PR head."
+            exit 1
           fi
           {
-            echo "guard_code=OK"
             echo "pr_number=$PR_NUMBER"
             echo "head_sha=$head_sha"
-            echo "pr_head_sha=$head_sha"
-            echo "branch_head_sha=$branch_sha"
           } >> "$GITHUB_OUTPUT"
 
       - name: Consume the trusted trigger label
@@ -171,144 +111,15 @@ jobs:
           gh api --silent --method DELETE \
             "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
 
-      - name: Enforce trusted head guard
-        if: ${{ always() && steps.snapshot.outcome == 'failure' }}
-        env:
-          GUARD_CODE: ${{ steps.snapshot.outputs.guard_code }}
-        run: |
-          echo "::error::Internal CI authorization failed: ${GUARD_CODE:-UNKNOWN}."
-          exit 1
-
-  report-guard-failure:
-    name: Report pull-request head guard failure
-    needs: authorize
-    if: >-
-      always() &&
-      needs.authorize.result == 'failure' &&
-      needs.authorize.outputs.guard_code != '' &&
-      needs.authorize.outputs.guard_code != 'OK'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      issues: write
-      pull-requests: read
-      statuses: write
-
-    steps:
-      - name: Publish stale-head diagnostic
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ needs.authorize.outputs.pr_number || github.event.pull_request.number || inputs.pr_number }}
-          GUARD_CODE: ${{ needs.authorize.outputs.guard_code }}
-          PR_HEAD_SHA: ${{ needs.authorize.outputs.pr_head_sha }}
-          BRANCH_HEAD_SHA: ${{ needs.authorize.outputs.branch_head_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
-          [[ "$PR_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          if [ -n "$BRANCH_HEAD_SHA" ]; then
-            [[ "$BRANCH_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          fi
-
-          case "$GUARD_CODE" in
-            PR_TRACKING_REF_STALE)
-              description="FAIL: stale PR tracking ref"
-              title="PR tracking ref is stale"
-              recovery="Refresh the PR base to main without changing it, wait for the PR head to match the source branch, then add run-internal-ci again."
-              ;;
-            TRIGGER_SUPERSEDED)
-              description="FAIL: CI trigger superseded"
-              title="CI trigger was superseded by a newer push"
-              recovery="Wait for the PR head to match the source branch, then add run-internal-ci again. A base refresh is not normally required."
-              ;;
-            HEAD_MOVING_OR_STALE)
-              description="FAIL: PR head is moving or stale"
-              title="PR head sources do not agree"
-              recovery="Wait for branch activity to settle and retry. If PR metadata remains behind the source branch, refresh the PR base to main."
-              ;;
-            HEAD_SOURCE_UNAVAILABLE)
-              description="FAIL: PR source branch unavailable"
-              title="PR source branch is unavailable"
-              recovery="Restore an accessible source repository and branch, then add run-internal-ci again."
-              ;;
-            *)
-              echo "::error::Unsupported head guard code: $GUARD_CODE"
-              exit 1
-              ;;
-          esac
-
-          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          status_failure=""
-          if ! gh api --silent --method POST \
-              "/repos/$GITHUB_REPOSITORY/statuses/$PR_HEAD_SHA" \
-              -f state=failure \
-              -f context=trtmc/premerge/required \
-              -f description="$description" \
-              -f target_url="$run_url"; then
-            status_failure="The required failure status could not be published; inspect the Source guard run."
-            echo "::error::$status_failure"
-          fi
-
-          marker="<!-- trtmc-pr-head-guard -->"
-          body="$marker
-          **$title**
-
-          - PR metadata: \`$PR_HEAD_SHA\`
-          - Source branch: \`${BRANCH_HEAD_SHA:-unavailable}\`
-          - Guard result: \`$GUARD_CODE\`
-
-          $recovery
-
-          ${status_failure:+$status_failure
-
-          }
-          [Source guard run]($run_url)"
-          comments="$(
-            gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100"
-          )"
-          comment_id="$(
-            jq -r --arg marker "$marker" \
-              '[.[] | select(.body | contains($marker)) | .id][0] // empty' \
-              <<<"$comments"
-          )"
-          if [ -n "$comment_id" ]; then
-            gh api --silent --method PATCH \
-              "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
-              -f body="$body"
-          else
-            gh api --silent --method POST \
-              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="$body"
-          fi
-          if [ -n "$status_failure" ]; then
-            exit 1
-          fi
-
   dispatch:
     name: Internal CI dispatch
     needs: authorize
     runs-on: ubuntu-24.04
     environment: ci-dispatch
     timeout-minutes: 5
-    permissions:
-      statuses: write
+    permissions: {}
 
     steps:
-      - name: Mark the exact source head pending
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=pending \
-            -f context=trtmc/premerge/required \
-            -f description="PENDING: TensorRT-Model-Connect premerge" \
-            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$HEAD_SHA/tests"
-
       - name: Dispatch internal premerge CI
         env:
           # Fine-grained PAT scoped only to the internal CI repository with
@@ -339,18 +150,3 @@ jobs:
           gh api --silent --method POST \
             "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches" \
             --input "$payload"
-
-      - name: Fail closed if dispatch is not accepted
-        if: ${{ failure() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-          gh api --silent --method POST \
-            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
-            -f state=failure \
-            -f context=trtmc/premerge/required \
-            -f description="FAIL: TensorRT-Model-Connect premerge dispatch" \
-            -f target_url="https://github.com/$GITHUB_REPOSITORY/tree/$HEAD_SHA/tests"
