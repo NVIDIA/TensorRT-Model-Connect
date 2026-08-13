@@ -24,6 +24,7 @@ from .checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
     _has_tensor,
+    _target_np_dtype,
     _transpose_2d,
 )
 from ...parallel_config import (
@@ -31,6 +32,12 @@ from ...parallel_config import (
     require_tensorrt_11_for_tensor_parallel,
 )
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+from .build_routing import (
+    native_kv_architecture_capability,
+    native_kv_build_capability,
+)
+from .native_decoder_builder import build_native_decoder_engine
+from .native_kv_contract import validate_native_kv_weights
 from .standard_decoder_builder import build_standard_decoder_engine
 
 
@@ -43,8 +50,18 @@ class StableLMPlugin:
         mt = model_type.lower()
         return mt == "stablelm" or mt.startswith("stablelm")
 
+    def default_build_precision(self, config: ModelConfig) -> str:
+        return "fp16" if native_kv_architecture_capability(config).eligible else "fp32"
+
+    def default_max_cache_length(self, config: ModelConfig) -> int:
+        capability = native_kv_architecture_capability(config)
+        return int(config.max_position_embeddings) if capability.eligible else 256
+
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        return not bool(config.raw.get("_quantized_build_requested"))
+
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -53,13 +70,14 @@ class StableLMPlugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         kv_attention_size = config.num_key_value_heads * config.head_dim
+        storage_dtype = _target_np_dtype(precision)
         weights = WeightDict()
 
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-        weights["embedding"] = embedding.astype(np.float32)
+        weights["embedding"] = embedding.astype(storage_dtype)
 
         mlp_size = 0
         attention_size = 0
@@ -78,10 +96,10 @@ class StableLMPlugin:
             post_norm_beta = _load_tensor(
                 readers, f"{hf_prefix}.post_attention_layernorm.bias")
 
-            weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
-            weights[f"{prefix}.input_norm_beta"] = input_norm_beta.astype(np.float32)
-            weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
-            weights[f"{prefix}.post_attn_norm_beta"] = post_norm_beta.astype(np.float32)
+            weights[f"{prefix}.input_norm"] = input_norm.astype(storage_dtype)
+            weights[f"{prefix}.input_norm_beta"] = input_norm_beta.astype(storage_dtype)
+            weights[f"{prefix}.post_attn_norm"] = post_norm.astype(storage_dtype)
+            weights[f"{prefix}.post_attn_norm_beta"] = post_norm_beta.astype(storage_dtype)
 
             # Q/K/V projections (separate)
             q_raw = _load_tensor(
@@ -96,10 +114,10 @@ class StableLMPlugin:
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
 
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", precision)
+            k_t = _transpose_2d(k_raw, "k_proj", precision)
+            v_t = _transpose_2d(v_raw, "v_proj", precision)
+            o_t = _transpose_2d(o_raw, "o_proj", precision)
 
             # Keep compact GQA/MQA K/V
 
@@ -114,13 +132,13 @@ class StableLMPlugin:
             v_bias_key = f"{hf_prefix}.self_attn.v_proj.bias"
             if _has_tensor(readers, q_bias_key):
                 weights[f"{prefix}.q_bias"] = _load_tensor(
-                    readers, q_bias_key).astype(np.float32)
+                    readers, q_bias_key).astype(storage_dtype)
             if _has_tensor(readers, k_bias_key):
                 weights[f"{prefix}.k_bias"] = _load_tensor(
-                    readers, k_bias_key).astype(np.float32)
+                    readers, k_bias_key).astype(storage_dtype)
             if _has_tensor(readers, v_bias_key):
                 weights[f"{prefix}.v_bias"] = _load_tensor(
-                    readers, v_bias_key).astype(np.float32)
+                    readers, v_bias_key).astype(storage_dtype)
 
             # SwiGLU MLP (gate/up/down)
             gate_raw = _load_tensor(
@@ -132,30 +150,33 @@ class StableLMPlugin:
             if mlp_size == 0:
                 mlp_size = gate_raw.shape[0]
 
-            weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
-            weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
-            weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+            weights[f"{prefix}.w_gate"] = _transpose_2d(
+                gate_raw, "gate_proj", precision)
+            weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", precision)
+            weights[f"{prefix}.w_down"] = _transpose_2d(
+                down_raw, "down_proj", precision)
 
         # Final LayerNorm
         final_norm_key = "model.norm.weight"
         if _has_tensor(readers, final_norm_key):
             weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+                readers, final_norm_key).astype(storage_dtype)
         else:
-            weights["final_norm"] = np.ones(hidden, dtype=np.float32)
+            weights["final_norm"] = np.ones(hidden, dtype=storage_dtype)
 
         final_norm_beta_key = "model.norm.bias"
         if _has_tensor(readers, final_norm_beta_key):
             weights["final_norm_beta"] = _load_tensor(
-                readers, final_norm_beta_key).astype(np.float32)
+                readers, final_norm_beta_key).astype(storage_dtype)
 
         # LM head
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
             weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+                _load_tensor(readers, lm_head_key), "lm_head", precision)
         else:
-            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
+            weights["w_out"] = _transpose_2d(
+                embedding.copy(), "embedding_tied", precision)
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
@@ -172,6 +193,31 @@ class StableLMPlugin:
     ) -> bytes:
         partial_rotary = config.raw.get("partial_rotary_factor", 1.0)
         parallel = normalize_parallel_config(parallel_config)
+        capability = native_kv_build_capability(
+            config,
+            precision=precision,
+            max_cache_length=max_cache_length,
+            parallel_enabled=parallel.enabled,
+            quantized=quant_ctx is not None,
+            debug_layer_outputs=debug_layer_outputs,
+        )
+        if capability.eligible:
+            validate_native_kv_weights(config, weights)
+            config.raw["_decoder_engine_layout_supported"] = True
+            config.raw["_native_kv_cache_metadata"] = {
+                "native_kv_contract_version": 1,
+                "native_kv_cache": True,
+            }
+            role = str(config.raw.get("_decoder_engine_role", ""))
+            if role not in ("prefill", "decode"):
+                raise ValueError(
+                    "native StableLM requires explicit split engine role "
+                    f"'prefill' or 'decode', got {role!r}")
+            return build_native_decoder_engine(
+                config, weights, max_cache_length, precision="fp16",
+                profile_mode=role, verbose=verbose)
+
+        config.raw.pop("_native_kv_cache_metadata", None)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="StableLM tensor-parallel builds")
@@ -200,6 +246,10 @@ class StableLMPlugin:
             partial_rotary_factor=partial_rotary,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
+
+    def get_bundle_config_overrides(self, config: ModelConfig) -> dict | None:
+        metadata = config.raw.get("_native_kv_cache_metadata")
+        return dict(metadata) if isinstance(metadata, dict) else None
 
 
 plugin = StableLMPlugin()

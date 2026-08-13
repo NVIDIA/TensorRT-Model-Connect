@@ -5,5 +5,8 @@ id = "stablelm"
 runtime_library = "libtrtmc_model_stablelm.so"
 runtime_plugins = ["plugin.cpp|register_stablelm_plugin"]
 runtime_strategies = ["stablelm_decoder_kv_cache"]
+runtime_tests = [
+  "test_stablelm_native_kv_cache|test_stablelm_native_kv_cache.cpp|trtmc_model_stablelm,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
+]
 [validation_profiles]
 decoder_debug = ["stablelm_decoder_kv_cache"]

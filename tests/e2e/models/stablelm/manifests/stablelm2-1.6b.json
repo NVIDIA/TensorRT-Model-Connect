@@ -7,7 +7,6 @@
   "runtime_strategy": "stablelm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
-  "max_cache_length": 384,
   "trust_remote_code": false,
   "testcases": [
     {
