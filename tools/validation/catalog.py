@@ -146,6 +146,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
             else {}
         ),
         "user_contract": user_contract,
+        "test_category": raw.get("test_category", "e2e"),
         "ci_tier": raw.get("ci_tier", "default"),
         "core": bool(raw.get("core", False)),
         "skip": raw.get("skip", ""),

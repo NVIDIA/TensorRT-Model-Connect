@@ -116,6 +116,19 @@ class ManifestCatalog:
                     _catalog_entry(model, "invalid", str(exc), operation=adapter.operation)
                 )
                 continue
+            if all(
+                testcase.get("test_category", "e2e") == "regression"
+                for testcase in model.testcases
+            ):
+                entries.append(
+                    _catalog_entry(
+                        model,
+                        "regression",
+                        "requires explicit regression selection",
+                        operation=adapter.operation,
+                    )
+                )
+                continue
             entries.append(_catalog_entry(model, "ready", operation=adapter.operation))
         return tuple(sorted(entries, key=lambda item: (item.name, item.hf_id)))
 
@@ -193,6 +206,19 @@ class ManifestCatalog:
             raise BenchmarkError(f"model manifest has no testcases: {path}")
         if not all(isinstance(item, dict) for item in testcases):
             raise BenchmarkError(f"model manifest testcases must be objects: {path}")
+        test_categories = [
+            testcase.get("test_category", "e2e") for testcase in testcases
+        ]
+        invalid_categories = sorted(
+            repr(category)
+            for category in test_categories
+            if not isinstance(category, str) or category not in {"e2e", "regression"}
+        )
+        if invalid_categories:
+            raise BenchmarkError(
+                f"model manifest {path} has unsupported test categories: "
+                f"{invalid_categories}"
+            )
         distributed_runtime = raw.get("distributed_runtime", {})
         if not isinstance(distributed_runtime, Mapping):
             raise BenchmarkError(f"distributed_runtime in model manifest {path} must be an object")

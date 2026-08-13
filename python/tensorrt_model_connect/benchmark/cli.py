@@ -126,7 +126,9 @@ def _list_models(arguments: argparse.Namespace) -> int:
     print("  ".join(value.ljust(widths[index]) for index, value in enumerate(headers)))
     for row in rows:
         print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
-    unavailable = [entry for entry in entries if entry.status != "ready"]
+    unavailable = [
+        entry for entry in entries if entry.status not in {"ready", "regression"}
+    ]
     if unavailable:
         print("\nUnavailable profiles:")
         for entry in unavailable:

@@ -148,7 +148,7 @@ def test_dataset_path_rebases_mounted_defaults_under_dataset_root(tmp_path: Path
     )
 
 
-def test_validation_ready_models_exclude_l0_only_profiles():
+def test_validation_ready_models_exclude_l0_and_regression_profiles():
     records = validation_catalog.load_manifest_records(trtmc_validate.DEFAULT_MODELS)
     eligible = {
         str(record["name"])
@@ -156,10 +156,19 @@ def test_validation_ready_models_exclude_l0_only_profiles():
         if not record["requires_multi_device"] and not record.get("skip")
     }
     l0_only = {str(record["name"]) for record in records if record.get("ci_tier") == "l0_only"}
+    regressions = {
+        str(record["name"])
+        for record in records
+        if record.get("test_category") == "regression"
+    }
     selected = set(trtmc_validate.ready_model_names())
 
     assert l0_only
-    assert selected == eligible - l0_only
+    assert regressions == {
+        "minitron-4b-width-regression-native-kv-chunked-prefill",
+        "qwen3-0.6b-regression-native-kv-chunked-prefill",
+    }
+    assert selected == eligible - l0_only - regressions
 
 
 def test_catalog_defines_sample_limit_for_every_dataset_workload():

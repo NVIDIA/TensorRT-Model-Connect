@@ -610,13 +610,14 @@ def test_qwen_premerge_selects_native_defaults_l0(tmp_path: Path) -> None:
     ]
 
 
-def test_qwen_nightly_keeps_production_cases(tmp_path: Path) -> None:
+def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -> None:
     selection = _run_test_selection(tmp_path, "qwen", "nightly")
 
     assert selection["suite"] == "nightly"
     assert {case["name"] for case in selection["e2e_cases"]} == {
         "qwen3-0.6b-fp16",
         "qwen3-0.6b-fp8",
+        "qwen3-0.6b-regression-native-kv-chunked-prefill",
         "qwen3-0.6b-topp",
         "qwen3-4b-instruct-2507",
     }
@@ -1223,6 +1224,7 @@ def test_llama_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> 
         "falcon3-1b": "exclusive_gpu",
         "minitron-4b-depth": "shared",
         "minitron-4b-width": "shared",
+        "minitron-4b-width-regression-native-kv-chunked-prefill": "shared",
         "nemotron-nano-4b": "shared",
         "tinyllama-1.1b": "shared",
     }

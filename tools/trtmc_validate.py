@@ -299,6 +299,7 @@ def ready_model_names(models_root: Path = DEFAULT_MODELS) -> tuple[str, ...]:
             if not model["requires_multi_device"]
             and not model.get("skip")
             and model.get("ci_tier") != "l0_only"
+            and model.get("test_category", "e2e") != "regression"
         )
     )
 

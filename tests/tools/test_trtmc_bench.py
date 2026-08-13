@@ -294,16 +294,23 @@ def test_catalog_exposes_every_declared_profile_and_family() -> None:
             declared = tomllib.load(stream)["test_manifests"]
         expected_manifests.extend(descriptor.parent / path for path in declared)
     expected_distributed = 0
+    expected_regressions = 0
     for manifest in expected_manifests:
         raw = json.loads(manifest.read_text(encoding="utf-8"))
-        expected_distributed += bool(raw.get("distributed_runtime", {}).get("enabled"))
+        distributed = bool(raw.get("distributed_runtime", {}).get("enabled"))
+        expected_distributed += distributed
+        expected_regressions += not distributed and all(
+            testcase.get("test_category", "e2e") == "regression"
+            for testcase in raw["testcases"]
+        )
 
     assert len(entries) == len(expected_manifests)
     assert len({entry.family for entry in entries}) == len(descriptors)
     assert sum(entry.status == "ready" for entry in entries) == (
-        len(expected_manifests) - expected_distributed
+        len(expected_manifests) - expected_distributed - expected_regressions
     )
     assert sum(entry.status == "distributed" for entry in entries) == expected_distributed
+    assert sum(entry.status == "regression" for entry in entries) == expected_regressions
     assert not [entry for entry in entries if entry.status in {"invalid", "unsupported"}]
 
 
@@ -320,7 +327,11 @@ def test_native_kv_regression_prompt_repeat_resolves_deterministically(
 ) -> None:
     model = ManifestCatalog().resolve(model_name)
     case = resolve_case(model, tmp_path / model.bundle_name)
+    entry = next(
+        entry for entry in ManifestCatalog().entries() if entry.name == model_name
+    )
 
+    assert entry.status == "regression"
     assert case.request["prompt"] == " ".join(["a"] * 32768) + "\n"
     assert case.sources["request.prompt"] == "model testcase"
 

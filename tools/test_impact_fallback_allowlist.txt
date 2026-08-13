@@ -58,6 +58,7 @@ harness_shared tests/e2e_harness/registry.py # shared E2E harness surface; broad
 harness_shared tests/e2e_harness/result_schema.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/runtime_config.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/runtime_strategy_metadata.py # shared E2E strategy metadata surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/threshold_policy.py # shared E2E threshold ownership policy; broad E2E impact is intentional
 harness_shared tests/e2e_harness/thresholds/__init__.py # shared E2E harness surface; broad E2E impact is intentional
 no_impact scripts/_build_fp8_onnx_monolithic.py # developer utility script; no CI test impact is intentional
 no_impact scripts/_inject_fp8_qdq_proto.py # developer utility script; no CI test impact is intentional
