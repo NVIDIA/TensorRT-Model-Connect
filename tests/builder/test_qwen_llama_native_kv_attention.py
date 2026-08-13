@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -61,7 +63,7 @@ class _FakeNetwork:
         return layer
 
 
-def _add_native_attention(monkeypatch, graph_ops, dtype):
+def _add_native_attention(monkeypatch, graph_ops, dtype, **kwargs):
     network = _FakeNetwork()
     heads, kv_heads, head_dim = 4, 2, 128
     tensors = {
@@ -96,6 +98,7 @@ def _add_native_attention(monkeypatch, graph_ops, dtype):
         num_kv_heads=kv_heads,
         head_dim=head_dim,
         q_seq=1,
+        **kwargs,
     )
     return network, tensors, result
 
@@ -152,6 +155,58 @@ def test_bf16_uses_exact_fp32_scale_before_fused_attention(
     assert attention[6].decomposable is False
     assert attention[6].key_value_lengths is tensors["lengths"]
     assert result["context"] is attention[6].get_output(0)
+
+
+@pytest.mark.parametrize("allow_decomposition", [False, True])
+def test_qwen_forwards_native_attention_decomposition_policy(
+    monkeypatch,
+    allow_decomposition,
+):
+    graph_ops = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.graph_ops"
+    )
+    monkeypatch.setattr(
+        graph_ops,
+        "add_constant",
+        lambda *_args, **_kwargs: _FakeTensor("scale", trt.float32),
+    )
+
+    network, _, _ = _add_native_attention(
+        monkeypatch,
+        graph_ops,
+        trt.bfloat16,
+        allow_decomposition=allow_decomposition,
+    )
+
+    attention = next(call for call in network.calls if call[0] == "attention")
+    assert attention[6].decomposable is allow_decomposition
+
+
+def test_qwen_builder_only_allows_decode_attention_decomposition():
+    graph_ops = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.graph_ops"
+    )
+    builder_path = Path(graph_ops.__file__).with_name(
+        "dual_profile_decoder_builder.py"
+    )
+    tree = ast.parse(builder_path.read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_native_kv_cache_attention_from_rows"
+    ]
+
+    assert len(calls) == 1
+    decomposition_values = [
+        keyword.value
+        for keyword in calls[0].keywords
+        if keyword.arg == "allow_decomposition"
+    ]
+    assert len(decomposition_values) == 1
+    expected = ast.parse('profile_mode == "decode"', mode="eval").body
+    assert ast.dump(decomposition_values[0]) == ast.dump(expected)
 
 
 @pytest.mark.parametrize("module_name", _FAMILIES)

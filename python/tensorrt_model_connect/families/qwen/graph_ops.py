@@ -1148,6 +1148,7 @@ def add_native_kv_cache_attention_from_rows(
     scale: float | None = None,
     tag: str | None = None,
     recipe_instance: str | None = None,
+    allow_decomposition: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Update a user-owned KV cache and attend over its active prefix.
 
@@ -1160,6 +1161,10 @@ def add_native_kv_cache_attention_from_rows(
     Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The caller
     must bind each output to the same device address as its corresponding
     input, as required by TensorRT's KV-cache aliasing contract.
+
+    ``allow_decomposition`` lets TensorRT fall back to primitive attention
+    operations when no fused tactic is available. Keep it disabled for long
+    prefill shapes, where a decomposed score matrix can be prohibitively large.
     """
     if not hasattr(network, "add_kv_cache_update") or not hasattr(
         network, "add_attention_v2"
@@ -1254,10 +1259,7 @@ def add_native_kv_cache_attention_from_rows(
         )
         if attention is None:
             raise RuntimeError("TensorRT failed to create Qwen native attention")
-        # The prototype deliberately requires TensorRT's fused attention tactic.
-        # Unsupported dtype/head geometries fail at build time instead of silently
-        # falling back to a primitive graph with materially lower decode speed.
-        attention.decomposable = False
+        attention.decomposable = allow_decomposition
         attention.key_value_lengths = key_value_lengths
         if tag:
             attention.name = tag
