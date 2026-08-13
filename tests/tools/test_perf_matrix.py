@@ -2476,6 +2476,67 @@ def test_sam3_reference_reports_source_image_dimensions(
     assert session.invoke() == {"num_masks": 2, "height": 4, "width": 6}
 
 
+def test_sam3_reference_falls_back_to_processor_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    processor_config = snapshot / "processor_config.json"
+    processor_config.write_text(
+        json.dumps(
+            {
+                "target_size": 1008,
+                "image_processor": {
+                    "image_processor_type": "Sam3ImageProcessorFast",
+                    "size": {"height": 1008, "width": 1008},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeProcessor:
+        def __init__(self, image_processor, tokenizer, *, target_size):
+            self.image_processor = image_processor
+            self.tokenizer = tokenizer
+            self.target_size = target_size
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            raise OSError("preprocessor_config.json is absent")
+
+    class FakeImageProcessor:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return "tokenizer"
+
+    fake_transformers = Namespace(
+        AutoTokenizer=FakeTokenizer,
+        Sam3ImageProcessorFast=FakeImageProcessor,
+        Sam3Processor=FakeProcessor,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        Namespace(try_to_load_from_cache=lambda *_args, **_kwargs: str(processor_config)),
+    )
+
+    processor = runner["_load_sam3_processor"](
+        fake_transformers,
+        "facebook/sam3",
+        {"local_files_only": True, "revision": "pinned"},
+    )
+
+    assert processor.target_size == 1008
+    assert processor.tokenizer == "tokenizer"
+    assert processor.image_processor.kwargs == {"size": {"height": 1008, "width": 1008}}
+
+
 def test_locateanything_fallback_tokenizer_supports_batch_decode(
     tmp_path: Path, monkeypatch
 ) -> None:
