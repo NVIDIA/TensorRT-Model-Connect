@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 from tests.e2e_harness.python_profiles import resolve_case_profile_names
@@ -38,6 +39,20 @@ def test_chronos_bolt_family_metadata_declares_default_execution_profiles():
         "runtime": "base",
         "reference": "chronos",
     }
+
+
+def test_chronos_profile_pins_forecasting_dependency_closure() -> None:
+    repository = Path(__file__).resolve().parents[4]
+    requirements = (
+        repository
+        / "python/tensorrt_model_connect/families/chronos_bolt/python_profile_requirements"
+        / "chronos.lock.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "scikit-learn==1.7.2" in requirements
+    assert "scipy==1.15.3" in requirements
+    assert "joblib==1.5.3" in requirements
+    assert "threadpoolctl==3.6.0" in requirements
 
 
 def test_torch_reference_time_series_uses_reference_python_subprocess(monkeypatch, tmp_path):
