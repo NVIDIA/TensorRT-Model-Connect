@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -69,13 +70,27 @@ int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
 }
 
 int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& tensor_name) {
-    const int32_t static_dim = dim_at(module.tensor_shape(tensor_name), 1);
+    const auto row_dim = [](const std::vector<int64_t>& shape) -> int32_t {
+        if (shape.size() == 2)
+            return dim_at(shape, 1);
+        if (shape.size() == 4) {
+            const int32_t heads = dim_at(shape, 1);
+            const int32_t head_dim = dim_at(shape, 3);
+            if (heads > 0 && head_dim > 0 &&
+                heads <= std::numeric_limits<int32_t>::max() / head_dim) {
+                return heads * head_dim;
+            }
+        }
+        return -1;
+    };
+
+    const int32_t static_dim = row_dim(module.tensor_shape(tensor_name));
     if (static_dim > 0)
         return static_dim;
     const int32_t profile_count = module.optimization_profile_count();
     for (int32_t profile_idx = 0; profile_idx < profile_count; ++profile_idx) {
-        const int32_t profile_dim = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 1);
+        const int32_t profile_dim = row_dim(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax));
         if (profile_dim > 0)
             return profile_dim;
     }
@@ -125,13 +140,16 @@ int32_t profile_token_max_length(const TrtModule& module, const std::string& tok
 
 int32_t profile_cache_rows(const TrtModule& module, const std::string& cache_name,
                            int32_t profile_idx, int32_t fallback_rows) {
-    const int32_t static_rows = dim_at(module.tensor_shape(cache_name), 0);
+    const auto cache_rows = [](const std::vector<int64_t>& shape) {
+        return dim_at(shape, shape.size() == 4 ? 2 : 0);
+    };
+    const int32_t static_rows = cache_rows(module.tensor_shape(cache_name));
     if (static_rows > 0)
         return static_rows;
 
     if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax), 0);
+        const int32_t max_rows = cache_rows(
+            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax));
         if (max_rows > 0)
             return max_rows;
     }
@@ -194,47 +212,120 @@ std::string format_bytes(std::uint64_t bytes) {
     return oss.str();
 }
 
-KvCacheRuntimeSizing
-resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& module,
+bool engine_uses_native_kv_updates(const TrtModule& module, const OptKvCacheNames& kv_names) {
+    const bool has_write_indices = module.has_input(kv_names.cache_write_indices);
+    const bool has_kv_lengths = module.has_input(kv_names.key_value_lengths);
+    if (has_write_indices != has_kv_lengths) {
+        throw std::runtime_error("Opt native KV engine must expose both cache_write_indices and "
+                                 "key_value_lengths");
+    }
+    return has_write_indices;
+}
+
+void validate_native_kv_marker(const std::string& config_json, bool engine_uses_native_kv) {
+    const bool declares_native_kv = extract_json_bool(config_json, "native_kv_cache", false);
+    const bool has_version =
+        config_json.find("\"native_kv_contract_version\"") != std::string::npos;
+    if (!declares_native_kv && !has_version && !engine_uses_native_kv)
+        return;
+    if (!declares_native_kv || !engine_uses_native_kv ||
+        extract_json_int(config_json, "native_kv_contract_version", 0) != 1) {
+        throw std::runtime_error("Opt native KV metadata does not match the engine contract");
+    }
+}
+
+bool validate_native_kv_runtime(const PipelineContext& ctx, const TrtModule& module,
                                 const OptKvCacheNames& kv_names, DType cache_dtype,
-                                const OptTriAttentionConfig& tri_cfg, int32_t kv_dim) {
-    KvCacheRuntimeSizing sizing;
-    const auto elem_bytes = static_cast<std::uint64_t>(dtype_size(cache_dtype));
-    sizing.row_bytes = static_cast<std::uint64_t>(ctx.config.num_layers) *
-                       static_cast<std::uint64_t>(kv_dim) * elem_bytes * 2ULL;
-    if (sizing.row_bytes == 0)
-        throw std::runtime_error("Computed zero bytes per KV row");
+                                const OptTriAttentionConfig& tri_cfg,
+                                const TensorParallelRuntimeConfig& tp_cfg) {
+    const bool native_kv = engine_uses_native_kv_updates(module, kv_names);
+    validate_native_kv_marker(ctx.config_json, native_kv);
+    if (!native_kv)
+        return false;
 
-    const int32_t bundle_max_rows = ctx.config.max_cache_length;
-    sizing.runtime_rows = bundle_max_rows;
-    sizing.cache_bytes = static_cast<std::uint64_t>(bundle_max_rows) * sizing.row_bytes;
+    if (cache_dtype != DType::kFloat16 || tri_cfg.enabled || tp_cfg.enabled) {
+        throw std::runtime_error(
+            "Opt native KV requires FP16, single-GPU, non-TriAttention runtime");
+    }
+    if (ctx.config.head_dim <= 0) {
+        throw std::runtime_error("Opt native KV requires a positive head_dim");
+    }
+    const std::vector<int64_t> expected_shape{1, ctx.config.num_kv_heads,
+                                              ctx.config.max_cache_length, ctx.config.head_dim};
+    if (module.tensor_shape(kv_names.cache_k.front()) != expected_shape) {
+        throw std::runtime_error("Opt native KV cache shape does not match bundle geometry");
+    }
+    return true;
+}
 
-    if (ctx.kv_cache_size_bytes == 0)
-        return sizing;
+std::uint64_t checked_multiply(std::uint64_t lhs, std::uint64_t rhs) {
+    if (lhs != 0 && rhs > std::numeric_limits<std::uint64_t>::max() / lhs)
+        throw std::overflow_error("Opt native KV byte accounting overflow");
+    return lhs * rhs;
+}
 
+void admit_native_kv_allocation(const PipelineContext& ctx, bool native_kv,
+                                const KvCacheRuntimeSizing& sizing) {
+    if (!native_kv)
+        return;
+
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+    const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("Opt native KV CUDA memory query failed: ") +
+                                 cudaGetErrorString(status));
+    }
+
+    constexpr std::uint64_t kTwoGiB = 2ULL << 30;
+    const auto free = static_cast<std::uint64_t>(free_bytes);
+    const auto total = static_cast<std::uint64_t>(total_bytes);
+    const auto reserve = std::max(kTwoGiB, total / 10);
+    const auto available = free > reserve ? free - reserve : 0;
+    if (sizing.cache_bytes > available) {
+        throw std::runtime_error(
+            "Opt native KV cache admission failed before allocation: capacity=" +
+            std::to_string(ctx.config.max_cache_length) +
+            " tokens, required=" + format_bytes(sizing.cache_bytes) +
+            ", free=" + format_bytes(free) + ", reserve=" + format_bytes(reserve));
+    }
+}
+
+void reject_native_kv_size_override(const PipelineContext& ctx) {
+    if (ctx.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Opt native TensorRT KV cache allocates the model's complete fixed "
+            "capacity; kv_cache_size_bytes is not supported");
+    }
+}
+
+void apply_runtime_kv_size_override(const PipelineContext& ctx, const TrtModule& module,
+                                    const OptKvCacheNames& kv_names,
+                                    const OptTriAttentionConfig& tri_cfg, int32_t bundle_max_rows,
+                                    KvCacheRuntimeSizing& sizing) {
     if (!cache_input_supports_runtime_rows(module, kv_names.cache_k.front())) {
         throw std::runtime_error(
             "This bundle was not built with runtime-resizable KV cache support. "
             "Rebuild with trtmc build --dynamic-kv-cache to use --kv-cache-size.");
     }
 
-    const std::uint64_t requested_rows_u64 = ctx.kv_cache_size_bytes / sizing.row_bytes;
-    if (requested_rows_u64 == 0) {
+    const std::uint64_t requested_rows = ctx.kv_cache_size_bytes / sizing.row_bytes;
+    if (requested_rows == 0) {
         throw std::runtime_error("--kv-cache-size is smaller than one KV row (" +
                                  format_bytes(sizing.row_bytes) + ")");
     }
 
-    std::uint64_t runtime_rows_u64 = requested_rows_u64;
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(bundle_max_rows)) {
-        runtime_rows_u64 = static_cast<std::uint64_t>(bundle_max_rows);
+    std::uint64_t runtime_rows = requested_rows;
+    if (runtime_rows > static_cast<std::uint64_t>(bundle_max_rows)) {
+        runtime_rows = static_cast<std::uint64_t>(bundle_max_rows);
         sizing.clamped_to_bundle_max = true;
     }
-    if (runtime_rows_u64 > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())) {
+    if (runtime_rows > static_cast<std::uint64_t>(std::numeric_limits<int32_t>::max())) {
         throw std::runtime_error("Resolved KV cache rows exceed int32 runtime limits");
     }
 
-    sizing.runtime_rows = static_cast<int32_t>(runtime_rows_u64);
-    sizing.cache_bytes = runtime_rows_u64 * sizing.row_bytes;
+    sizing.runtime_rows = static_cast<int32_t>(runtime_rows);
+    sizing.cache_bytes = runtime_rows * sizing.row_bytes;
     sizing.override_applied = true;
 
     if (tri_cfg.enabled && sizing.runtime_rows < tri_cfg.kv_budget) {
@@ -244,7 +335,33 @@ resolve_kv_cache_runtime_sizing(const PipelineContext& ctx, const TrtModule& mod
             " rows, but this TriAttention bundle needs at least " +
             std::to_string(tri_cfg.kv_budget) + " rows (" + format_bytes(minimum_bytes) + ")");
     }
+}
 
+KvCacheRuntimeSizing resolve_kv_cache_runtime_sizing(
+    const PipelineContext& ctx, const TrtModule& module, const OptKvCacheNames& kv_names,
+    DType cache_dtype, const OptTriAttentionConfig& tri_cfg, int32_t kv_dim, bool native_kv) {
+    KvCacheRuntimeSizing sizing;
+    const int32_t bundle_max_rows = ctx.config.max_cache_length;
+    if (ctx.config.num_layers <= 0 || kv_dim <= 0 || bundle_max_rows <= 0)
+        throw std::runtime_error("Opt KV geometry must be positive");
+    sizing.row_bytes = checked_multiply(
+        checked_multiply(checked_multiply(static_cast<std::uint64_t>(ctx.config.num_layers),
+                                          static_cast<std::uint64_t>(kv_dim)),
+                         static_cast<std::uint64_t>(dtype_size(cache_dtype))),
+        2);
+    sizing.runtime_rows = bundle_max_rows;
+    sizing.cache_bytes =
+        checked_multiply(static_cast<std::uint64_t>(bundle_max_rows), sizing.row_bytes);
+
+    if (native_kv) {
+        reject_native_kv_size_override(ctx);
+        return sizing;
+    }
+
+    if (ctx.kv_cache_size_bytes == 0)
+        return sizing;
+
+    apply_runtime_kv_size_override(ctx, module, kv_names, tri_cfg, bundle_max_rows, sizing);
     return sizing;
 }
 
@@ -279,9 +396,11 @@ class DecoderPlugin final : public IPipelinePlugin {
             throw std::runtime_error("No decoder engine profiles were loaded");
         TrtModule& metadata_module = *profile_modules.modules.front().module;
 
+        const bool native_kv = validate_native_kv_runtime(ctx, metadata_module, kv_names,
+                                                          cache_dtype, tri_cfg, tp_runtime.config);
         const int32_t kv_dim = cache_row_dim_from_module(metadata_module, kv_names.cache_k.front());
-        const auto sizing = resolve_kv_cache_runtime_sizing(ctx, metadata_module, kv_names,
-                                                            cache_dtype, tri_cfg, kv_dim);
+        const auto sizing = resolve_kv_cache_runtime_sizing(
+            ctx, metadata_module, kv_names, cache_dtype, tri_cfg, kv_dim, native_kv);
 
         const auto decode_profile_roles = detect_decoder_profile_roles(
             metadata_module, io.token_id, kv_names.cache_k.front(), ctx.config.max_cache_length);
@@ -302,6 +421,10 @@ class DecoderPlugin final : public IPipelinePlugin {
                 prefill_module = std::move(split_prefill_module);
         }
 
+        // Split prefill deserialization can consume additional execution-context
+        // memory. Admit the KV allocation against the free memory that remains
+        // after every engine/context needed by this pipeline has been loaded.
+        admit_native_kv_allocation(ctx, native_kv, sizing);
         auto state =
             build_inference_state(ctx, sizing, tri_cfg, cache_dtype, kv_dim, kv_names, stream);
         log_kv_cache_sizing(ctx, sizing, state.get());
@@ -309,9 +432,8 @@ class DecoderPlugin final : public IPipelinePlugin {
         OptTextGenConfig tgc;
         populate_text_gen_config(ctx, tgc, io, decoders.front(), ctx.runtime_config);
         apply_chat_template_format(ctx.bundle, tgc);
-        // Wire batched prefill: the pipeline forwards the whole prompt
-        // through `prefill_module` (TRT optimization profile 0) and copies
-        // per-layer K/V into the shared cache via write_prefill_kv.
+        // Wire batched prefill. Native TensorRT KV engines update the shared
+        // aliased cache in place; legacy engines copy prefill outputs into it.
         tgc.prefill_max_length = prefill_max_length;
         tgc.prefill_profile_index = prefill_profile_idx;
         tgc.prefill_log_label = std::move(prefill_log_label);

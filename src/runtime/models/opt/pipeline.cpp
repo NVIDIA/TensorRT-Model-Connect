@@ -413,16 +413,107 @@ bool batched_prefill_supported(const TrtModule* prefill, const OptTextGenConfig&
                                OptInferenceState* state) {
     if (prefill == nullptr || sq <= 0)
         return false;
-    if (cfg.prefill_max_length > 0 && sq > cfg.prefill_max_length)
-        return false;
     if (cfg.num_layers <= 0 || cfg.vocab_size <= 0)
         return false;
     return dynamic_cast<OptKvCache*>(state) != nullptr;
 }
+
+void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
+                                  OptInferenceState* state, const TrtModule* prefill,
+                                  const TrtModule* decoder) {
+    const TrtModule* module = prefill != nullptr ? prefill : decoder;
+    if (module == nullptr || !module->has_input("cache_write_indices") ||
+        !module->has_input("key_value_lengths")) {
+        return;
+    }
+    const auto* kv = dynamic_cast<const OptKvCache*>(state);
+    if (kv == nullptr)
+        return;
+
+    const auto capacity = static_cast<std::size_t>(kv->max_length());
+    if (input_ids.size() > capacity ||
+        (max_new_tokens > 0 &&
+         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
+        throw std::runtime_error(
+            "Opt requested prompt and generation exceed the model's fixed KV cache capacity");
+    }
+}
+
+int32_t resolve_batched_prefill_chunk_limit(const OptKvCache& kv, const OptTextGenConfig& config,
+                                            int32_t token_count) {
+    if (kv.needs_attention_mask()) {
+        if (config.prefill_max_length > 0 && token_count > config.prefill_max_length)
+            return 0;
+        return token_count;
+    }
+    if (config.prefill_max_length <= 0)
+        throw std::runtime_error("Opt native KV prefill engine has no valid profile capacity");
+    return config.prefill_max_length;
+}
 } // namespace
 
+void OptTextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,
+                                                  OptKvCache& kv,
+                                                  const std::vector<const void*>& present_k,
+                                                  const std::vector<const void*>& present_v,
+                                                  std::vector<float>& logits,
+                                                  bool retain_device_logits) {
+    TensorMap inputs;
+    Tensor token_tensor;
+    token_tensor.data = const_cast<int32_t*>(token_ids);
+    token_tensor.shape = {static_cast<int64_t>(chunk_size)};
+    token_tensor.dtype = DType::kInt32;
+    inputs[config_.token_id_name] = token_tensor;
+    state_->prepare_step(inputs, chunk_size);
+
+    TensorMap outputs = prefill_->forward(inputs);
+    auto logits_it = outputs.find(config_.logits_output_name);
+    if (logits_it == outputs.end()) {
+        throw std::runtime_error("OptTextGenerationPipeline: prefill module has no logits output");
+    }
+
+    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+    const auto& logits_tensor = logits_it->second;
+    if (static_cast<std::size_t>(logits_tensor.numel()) < vocab) {
+        throw std::runtime_error(
+            "OptTextGenerationPipeline: prefill logits are smaller than vocabulary");
+    }
+    logits.resize(vocab);
+    const auto logits_offset = static_cast<std::size_t>(logits_tensor.numel()) - vocab;
+    std::memcpy(logits.data(), static_cast<const float*>(logits_tensor.data) + logits_offset,
+                vocab * sizeof(float));
+
+    if (retain_device_logits) {
+        const auto* device_logits =
+            static_cast<const float*>(prefill_->device_ptr(config_.logits_output_name));
+        if (device_logits == nullptr) {
+            throw std::runtime_error(
+                "OptTextGenerationPipeline: prefill logits have no device buffer");
+        }
+        d_logits_ptr_ = device_logits + logits_offset;
+    }
+    kv.append_prefill_kv(present_k, present_v, chunk_size);
+}
+
+void OptTextGenerationPipeline::log_batched_prefill(int32_t token_count, int32_t chunk_count,
+                                                    int32_t chunk_limit) const {
+    if (!config_.log_runtime_stats)
+        return;
+
+    std::cerr << "[trtmc] Batched prefill (";
+    if (!config_.prefill_log_label.empty())
+        std::cerr << config_.prefill_log_label;
+    else
+        std::cerr << "profile " << config_.prefill_profile_index;
+    std::cerr << "): " << token_count << " tokens in " << chunk_count << " call";
+    if (chunk_count != 1)
+        std::cerr << 's';
+    std::cerr << " (max chunk=" << chunk_limit << ")\n";
+}
+
 bool OptTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
-                                                    std::vector<float>& logits) {
+                                                    std::vector<float>& logits,
+                                                    bool retain_device_logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
     if (!batched_prefill_supported(prefill_.get(), config_, sq, state_.get()))
         return false;
@@ -432,41 +523,28 @@ bool OptTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& 
     // decode module(s), so we rebind the cache_k/cache_v inputs onto the
     // prefill execution context before running.
     kv->bind_cache_inputs(*prefill_);
-
-    TensorMap inputs;
-    Tensor tok_t;
-    tok_t.data = const_cast<int32_t*>(input_ids.data());
-    tok_t.shape = {static_cast<int64_t>(sq)};
-    tok_t.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = tok_t;
-    state_->prepare_step(inputs, sq);
-
-    TensorMap outputs = prefill_->forward(inputs);
-    auto logits_it = outputs.find(config_.logits_output_name);
-    if (logits_it == outputs.end())
-        return false;
-
-    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
-    const auto& lt = logits_it->second;
-    if (static_cast<std::size_t>(lt.numel()) < vocab)
-        return false;
-    logits.resize(vocab);
-    const auto offset = static_cast<std::size_t>(lt.numel()) - vocab;
-    std::memcpy(logits.data(), static_cast<const float*>(lt.data) + offset, vocab * sizeof(float));
+    if (sq > kv->max_length()) {
+        throw std::runtime_error("Opt sequence exceeds the model's fixed KV cache capacity");
+    }
 
     std::vector<const void*> pk, pv;
     if (!gather_prefill_kv_pointers(*prefill_, config_, pk, pv))
         return false;
-    kv->write_prefill_kv(pk, pv, sq);
-    if (config_.log_runtime_stats) {
-        std::cerr << "[trtmc] Batched prefill (";
-        if (!config_.prefill_log_label.empty()) {
-            std::cerr << config_.prefill_log_label;
-        } else {
-            std::cerr << "profile " << config_.prefill_profile_index;
-        }
-        std::cerr << "): " << sq << " tokens in one call\n";
+
+    const int32_t chunk_limit = resolve_batched_prefill_chunk_limit(*kv, config_, sq);
+    if (chunk_limit <= 0)
+        return false;
+
+    int32_t chunk_count = 0;
+    for (int32_t start = 0; start < sq;) {
+        const int32_t chunk_size = std::min(chunk_limit, sq - start);
+        run_prefill_chunk(input_ids.data() + start, chunk_size, *kv, pk, pv, logits,
+                          retain_device_logits);
+        ++chunk_count;
+        start += chunk_size;
     }
+
+    log_batched_prefill(sq, chunk_count, chunk_limit);
     return true;
 }
 
@@ -494,9 +572,9 @@ void OptTextGenerationPipeline::prime_decoder_after_batched_prefill(
 
 void OptTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                             std::vector<float>& logits, bool gpu_sampling) {
-    // Fast path: batched prefill engine writes K/V for the whole prompt in
-    // one forward and returns last-token logits on host.
-    if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
+    // Fast path: batched prefill writes K/V in profile-bounded chunks and
+    // exposes last-token logits on the sampler's requested host or device path.
+    if (run_prefill_batched(input_ids, logits, gpu_sampling)) {
         prime_decoder_after_batched_prefill(input_ids);
         state_->mark_prefill_complete();
         return;
@@ -552,8 +630,8 @@ void OptTextGenerationPipeline::copy_block_logits(const TensorMap& outputs,
 void OptTextGenerationPipeline::append_prefill_kv(OptKvCache& kv, TrtModule& prefill, int32_t sq) {
     std::vector<const void*> pk, pv;
     if (!gather_prefill_kv_pointers(prefill, config_, pk, pv)) {
-        throw std::runtime_error(
-            "OptTextGenerationPipeline: prefill module is missing present_k/present_v outputs");
+        throw std::runtime_error("OptTextGenerationPipeline: prefill module is missing "
+                                 "present_k/present_v outputs");
     }
     kv.append_prefill_kv(pk, pv, sq);
 }
@@ -603,6 +681,7 @@ void OptTextGenerationPipeline::reset_generation_context() {
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
     state_->reset();
+    d_logits_ptr_ = nullptr;
     state_bound_ = false;
     for (auto& decoder_ctx : decoders_)
         decoder_ctx.module->reset_execution_context();
@@ -759,6 +838,8 @@ OptTextGenerationPipeline::TimedGenResult OptTextGenerationPipeline::generate_fr
     using Clock = std::chrono::steady_clock;
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get(), prefill_.get(),
+                                 decoders_.front().module.get());
 
     const std::string mode = resolve_generation_mode(cfg);
     if (mode == "diffusion" || mode == "dlm")
@@ -802,9 +883,9 @@ OptTextGenerationPipeline::TimedGenResult OptTextGenerationPipeline::generate_di
     const GenerateConfig& cfg) {
     using Clock = std::chrono::steady_clock;
     if (!greedy_text_diffusion_params(params)) {
-        throw std::runtime_error(
-            "OptTextGenerationPipeline: diffusion mode currently supports greedy temperature=0 "
-            "generation");
+        throw std::runtime_error("OptTextGenerationPipeline: diffusion mode currently "
+                                 "supports greedy temperature=0 "
+                                 "generation");
     }
     const int32_t block_len =
         resolve_text_diffusion_block_length(cfg, max_new_tokens, /*require_divisible=*/true);
@@ -848,13 +929,13 @@ OptTextGenerationPipeline::TimedGenResult OptTextGenerationPipeline::generate_li
     const GenerateConfig& cfg, bool use_lora_draft) {
     using Clock = std::chrono::steady_clock;
     if (!greedy_text_diffusion_params(params)) {
-        throw std::runtime_error(
-            "OptTextGenerationPipeline: linear_spec mode currently supports greedy temperature=0 "
-            "generation");
+        throw std::runtime_error("OptTextGenerationPipeline: linear_spec mode currently "
+                                 "supports greedy temperature=0 "
+                                 "generation");
     }
     if (use_lora_draft && linear_spec_lora_prefill_ == nullptr) {
-        throw std::runtime_error(
-            "OptTextGenerationPipeline: linear_spec_lora mode requires a linear-spec LoRA engine");
+        throw std::runtime_error("OptTextGenerationPipeline: linear_spec_lora mode requires a "
+                                 "linear-spec LoRA engine");
     }
     const int32_t block_len =
         resolve_text_diffusion_block_length(cfg, max_new_tokens, /*require_divisible=*/false);

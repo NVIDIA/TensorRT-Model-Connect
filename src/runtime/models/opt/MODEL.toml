@@ -5,5 +5,8 @@ id = "opt"
 runtime_library = "libtrtmc_model_opt.so"
 runtime_plugins = ["plugin.cpp|register_opt_plugin"]
 runtime_strategies = ["opt_decoder_kv_cache"]
+runtime_tests = [
+  "test_opt_native_kv_cache|test_opt_native_kv_cache.cpp|trtmc_model_opt,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
+]
 [validation_profiles]
 decoder_debug = ["opt_decoder_kv_cache"]

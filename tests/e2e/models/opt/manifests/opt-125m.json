@@ -1,12 +1,12 @@
 {
   "name": "opt-125m",
   "hf_id": "facebook/opt-125m",
+  "hf_revision": "27dcfa74d334bc871f3234de431e71c6eeba5dd6",
   "bundle": "opt-125m.bundle",
   "family": "opt",
   "runtime_strategy": "opt_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
-  "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
     {

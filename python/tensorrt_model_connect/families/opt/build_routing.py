@@ -1,0 +1,265 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Fail-closed routing contract for OPT's TensorRT native KV path."""
+
+from __future__ import annotations
+
+import math
+import operator
+
+_INT32_MAX = (1 << 31) - 1
+_UINT64_MAX = (1 << 64) - 1
+
+
+class NativeKvCapability:
+    """Loader-safe capability result without importing TensorRT."""
+
+    __slots__ = ("applicable", "eligible", "reason")
+
+    def __init__(
+        self,
+        applicable: bool,
+        eligible: bool,
+        reason: str,
+    ) -> None:
+        self.applicable = applicable
+        self.eligible = eligible
+        self.reason = reason
+
+
+def _result(
+    *,
+    applicable: bool = True,
+    reasons: list[str] | tuple[str, ...] = (),
+) -> NativeKvCapability:
+    return NativeKvCapability(
+        applicable,
+        applicable and not reasons,
+        "; ".join(reasons) or "supported",
+    )
+
+
+def _raw(config: object) -> dict:
+    value = getattr(config, "raw", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _integer(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer")
+    try:
+        return int(operator.index(value))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+
+
+def _positive(config: object, name: str) -> int:
+    value = _integer(getattr(config, name, None), name)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    if value > _INT32_MAX:
+        raise ValueError(f"{name} exceeds TensorRT's int32 dimension limit")
+    return value
+
+
+def resolved_head_dim(config: object) -> int:
+    """Return the explicit HF head width, or derive it when absent."""
+
+    raw = _raw(config)
+    explicit = raw.get("head_dim", getattr(config, "_head_dim", 0))
+    if explicit not in (None, 0):
+        head_dim = _integer(explicit, "head_dim")
+    else:
+        hidden = _positive(config, "hidden_size")
+        heads = _positive(config, "num_attention_heads")
+        if hidden % heads:
+            raise ValueError(
+                "hidden_size must be divisible by num_attention_heads when head_dim is absent"
+            )
+        head_dim = hidden // heads
+    if not 0 < head_dim <= _INT32_MAX:
+        raise ValueError("head_dim must be a positive TensorRT dimension")
+    return head_dim
+
+
+def _checked_product(label: str, *values: int) -> int:
+    product = 1
+    for value in values:
+        if value <= 0 or product > _UINT64_MAX // value:
+            raise ValueError(f"native OPT KV {label} exceeds uint64")
+        product *= value
+    return product
+
+
+def native_kv_cache_geometry(
+    config: object,
+    capacity: int,
+    *,
+    element_bytes: int = 2,
+) -> tuple[int, int]:
+    """Return byte geometry for the required full-context FP16 cache."""
+
+    capacity = _integer(capacity, "max_cache_length")
+    context = _positive(config, "max_position_embeddings")
+    if capacity != context:
+        raise ValueError(
+            "native OPT KV requires max_cache_length == "
+            f"max_position_embeddings ({context}), got {capacity}"
+        )
+    row_bytes = _checked_product(
+        "row size",
+        2,
+        _positive(config, "num_hidden_layers"),
+        _positive(config, "num_key_value_heads"),
+        resolved_head_dim(config),
+        _integer(element_bytes, "element_bytes"),
+    )
+    return row_bytes, _checked_product("cache size", capacity, row_bytes)
+
+
+def _enabled(value: object) -> bool:
+    return value not in (None, False, 0, "", (), [], {})
+
+
+def native_kv_architecture_capability(
+    config: object,
+) -> NativeKvCapability:
+    """Accept the dense pre-norm OPT graph qualified by this family."""
+
+    model_type = str(getattr(config, "model_type", "")).lower()
+    if not model_type.startswith("opt"):
+        return _result(applicable=False)
+    if model_type != "opt":
+        return _result(reasons=["model_type must be exactly 'opt'"])
+
+    raw = _raw(config)
+    reasons: list[str] = []
+    if "max_position_embeddings" not in raw:
+        reasons.append(
+            "max_position_embeddings must be explicit in the HF config"
+        )
+    if tuple(getattr(config, "architectures", ()) or ()) != ("OPTForCausalLM",):
+        reasons.append("architectures must contain exactly OPTForCausalLM")
+
+    try:
+        dimensions = {
+            name: _positive(config, name)
+            for name in (
+                "vocab_size",
+                "hidden_size",
+                "intermediate_size",
+                "num_hidden_layers",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "max_position_embeddings",
+            )
+        }
+        head_dim = resolved_head_dim(config)
+        if dimensions["hidden_size"] != (dimensions["num_attention_heads"] * head_dim):
+            reasons.append("hidden_size must equal num_attention_heads * head_dim")
+        if dimensions["num_key_value_heads"] != dimensions["num_attention_heads"]:
+            reasons.append(
+                "native OPT currently requires MHA "
+                "(num_key_value_heads == num_attention_heads)"
+            )
+        if head_dim % 8 or head_dim > 128:
+            reasons.append(
+                "native OPT attention requires head_dim to be an "
+                "integer multiple of 8 no larger than 128"
+            )
+    except ValueError as exc:
+        reasons.append(str(exc))
+
+    if str(getattr(config, "hidden_act", "")).lower() != "relu":
+        reasons.append("native OPT requires activation_function='relu'")
+    try:
+        eps = float(getattr(config, "rms_norm_eps"))
+    except (TypeError, ValueError, OverflowError):
+        eps = 0.0
+    if not math.isfinite(eps) or eps <= 0:
+        reasons.append("layer_norm_epsilon must be finite and positive")
+    if raw.get("do_layer_norm_before") is not True:
+        reasons.append("native OPT requires do_layer_norm_before=true")
+    try:
+        word_embed_proj_dim = _integer(
+            raw.get("word_embed_proj_dim"), "word_embed_proj_dim"
+        )
+    except ValueError as exc:
+        reasons.append(str(exc))
+    else:
+        if word_embed_proj_dim != getattr(config, "hidden_size", 0):
+            reasons.append("native OPT requires word_embed_proj_dim == hidden_size")
+    if _enabled(raw.get("scale_embedding")):
+        reasons.append("native OPT does not support scaled token embeddings")
+    if _enabled(raw.get("layerdrop")):
+        reasons.append("native OPT requires layerdrop=0")
+    if _enabled(raw.get("use_parallel_residual")):
+        reasons.append("native OPT requires sequential residuals")
+
+    unsupported_flags = (
+        "is_encoder_decoder",
+        "sliding_window",
+        "use_sliding_window",
+        "num_experts",
+        "num_local_experts",
+        "num_experts_per_tok",
+    )
+    enabled = [name for name in unsupported_flags if _enabled(raw.get(name))]
+    if enabled:
+        reasons.append("unsupported OPT fields: " + ", ".join(enabled))
+    return _result(reasons=reasons)
+
+
+def native_kv_build_capability(
+    config: object,
+    *,
+    precision: str = "fp16",
+    max_cache_length: int | None = None,
+    parallel_enabled: bool | None = None,
+    dynamic_kv_cache: bool | None = None,
+    quantized: bool | None = None,
+    debug_layer_outputs: bool = False,
+) -> NativeKvCapability:
+    """Apply native deployment constraints after architecture routing."""
+
+    architecture = native_kv_architecture_capability(config)
+    if not architecture.eligible:
+        return architecture
+
+    raw = _raw(config)
+    reasons: list[str] = []
+    if str(precision).lower() != "fp16":
+        reasons.append("native OPT requires FP16")
+    if str(raw.get("_decoder_engine_layout", "split")) != "split":
+        reasons.append("native OPT requires split prefill/decode engines")
+    if raw.get("_rtx_build_requested"):
+        reasons.append("native OPT requires the standard TensorRT backend")
+    if parallel_enabled or raw.get("_parallel_build_enabled"):
+        reasons.append("native OPT does not support tensor parallel builds")
+    if dynamic_kv_cache or raw.get("_runtime_dynamic_kv_requested") or raw.get("dynamic_kv_cache"):
+        reasons.append("native OPT uses one fixed physical KV capacity")
+    if quantized or raw.get("quantization_config") or raw.get("_quantized_build_requested"):
+        reasons.append("native OPT does not support quantized builds")
+    if raw.get("_fp32_layers"):
+        reasons.append("native OPT does not support FP32 layer overrides")
+    if debug_layer_outputs:
+        reasons.append("native OPT does not support debug layer outputs")
+    try:
+        native_kv_cache_geometry(
+            config,
+            (
+                int(getattr(config, "max_position_embeddings"))
+                if max_cache_length is None
+                else max_cache_length
+            ),
+        )
+    except ValueError as exc:
+        reasons.append(str(exc))
+    return _result(reasons=reasons)
+
+
+def prefer_native_default(config: object) -> bool:
+    """Prefer native KV for supported OPT architectures."""
+
+    return native_kv_architecture_capability(config).eligible
