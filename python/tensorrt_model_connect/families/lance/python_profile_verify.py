@@ -5,6 +5,7 @@ import importlib.metadata as metadata
 import platform
 
 import cv2
+from einops import rearrange
 import imageio
 import numpy
 import scipy
@@ -22,6 +23,7 @@ else:
     assert callable(flash_attn_varlen_func)
     attention = f"flash-attn={metadata.version('flash-attn')}"
 assert metadata.version("huggingface-hub") == "0.29.1"
+assert metadata.version("einops") == "0.8.1"
 assert metadata.version("imageio") == "2.34.0"
 assert metadata.version("numpy") == "1.26.4"
 assert metadata.version("opencv-python-headless") == "4.7.0.72"
@@ -30,6 +32,7 @@ assert metadata.version("scipy") == "1.12.0"
 assert metadata.version("tokenizers") == "0.21.4"
 assert metadata.version("transformers") == "4.49.0"
 assert callable(cv2.imread)
+assert callable(rearrange)
 assert callable(imageio.imread)
 assert numpy.__version__ == "1.26.4"
 assert scipy.__version__ == "1.12.0"
