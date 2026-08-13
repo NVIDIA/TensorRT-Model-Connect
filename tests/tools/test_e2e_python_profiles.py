@@ -385,8 +385,11 @@ def test_reference_common_pins_clip_scoring_dependencies() -> None:
     requirements = shared_profiles._read_requirements_text(profile["requirements"])
 
     assert "open-clip-torch==3.3.0" in requirements
+    assert "ftfy==6.3.1" in requirements
     assert 'version("open-clip-torch") == "3.3.0"' in profile["verification_script"]
+    assert 'version("ftfy") == "6.3.1"' in profile["verification_script"]
     assert "import open_clip" in profile["verification_script"]
+    assert "import ftfy" in profile["verification_script"]
 
 
 def test_reference_common_pins_chat_template_dependencies() -> None:
