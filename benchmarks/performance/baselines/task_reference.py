@@ -548,6 +548,15 @@ def _load_nemo_asr_reference_model(
     )
 
 
+def _disable_nemo_asr_cuda_graphs(model: Any) -> bool:
+    """Disable NeMo's optional RNNT CUDA Graph decoder when available."""
+    decoding = getattr(getattr(model, "decoding", None), "decoding", None)
+    disable_cuda_graphs = getattr(decoding, "disable_cuda_graphs", None)
+    if not callable(disable_cuda_graphs):
+        return False
+    return bool(disable_cuda_graphs())
+
+
 def _load_asr(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
@@ -566,6 +575,7 @@ def _load_asr(
         from tools.validation.engine import _transcription_text
 
         model = _load_nemo_asr_reference_model(arguments, device=device).eval().to(device)
+        _disable_nemo_asr_cuda_graphs(model)
         reference_dtype = _torch_dtype(torch, arguments.precision)
         autocast_dtype = reference_dtype if arguments.precision != "fp32" else torch.float16
         temporary = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)

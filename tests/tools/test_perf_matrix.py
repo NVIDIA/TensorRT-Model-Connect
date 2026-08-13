@@ -2375,6 +2375,22 @@ def test_nemotron35_perf_reference_uses_archive_compatible_loader(monkeypatch) -
     }
 
 
+def test_nemo_asr_perf_reference_disables_rnnt_cuda_graphs() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    calls = 0
+
+    class GreedyDecoder:
+        def disable_cuda_graphs(self) -> bool:
+            nonlocal calls
+            calls += 1
+            return True
+
+    model = Namespace(decoding=Namespace(decoding=GreedyDecoder()))
+
+    assert runner["_disable_nemo_asr_cuda_graphs"](model) is True
+    assert calls == 1
+
+
 def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     deepseek = object()
