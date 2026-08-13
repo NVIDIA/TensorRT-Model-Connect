@@ -1445,11 +1445,16 @@ class TestNoImpact:
         assert match.rule == "no_impact"
         assert match.models == []
 
-    def test_github_ci_config_triggers_tools_tier(self, imap):
-        """.github workflows should validate CI tooling without selecting E2E."""
-        match = test_impact.classify_file(
-            ".github/workflows/internal-ci-bridge.yml", imap
-        )
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ".github/ISSUE_TEMPLATE/bug_report.yml",
+            ".github/workflows/internal-ci-bridge.yml",
+        ],
+    )
+    def test_github_ci_config_triggers_tools_tier(self, imap, path):
+        """.github configuration should validate tools without selecting E2E."""
+        match = test_impact.classify_file(path, imap)
         assert match.rule == "github_ci_config"
         assert match.models == []
         assert match.unit_tiers == ["tools"]

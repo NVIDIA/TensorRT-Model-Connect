@@ -16,7 +16,7 @@ physical names usually match, but their link is the exact
 `runtime_strategy`, not filename equality: current builder/E2E owners
 `magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
 respectively. At this revision, all three trees contain 79 descriptors. The E2E
-descriptors declare 207 JSON manifests; runtime descriptors declare 80 unique
+descriptors declare 209 JSON manifests; runtime descriptors declare 80 unique
 strategy keys because one runtime owner exposes two strategies. Treat these
 numbers as a checked snapshot, not a constant: the descriptor files are the
 source of truth.

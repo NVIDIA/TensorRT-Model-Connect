@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: Read the help and issue-filing guide
+    url: https://nvidia.github.io/TensorRT-Model-Connect/release-support/get-help
+    about: Choose a support route and collect the evidence maintainers need.
+  - name: Report a security vulnerability
+    url: https://www.nvidia.com/en-us/security/report-vulnerability/
+    about: Report suspected vulnerabilities privately to NVIDIA PSIRT, not in a public issue.

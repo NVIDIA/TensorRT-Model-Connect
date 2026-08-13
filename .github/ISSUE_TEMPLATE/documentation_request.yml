@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Documentation request
+description: Report incorrect, unclear, or missing documentation
+title: "Docs: "
+labels: ["documentation"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the TensorRT-Model-Connect documentation. Do not disclose suspected security vulnerabilities here; report them privately through https://www.nvidia.com/en-us/security/report-vulnerability/. Do not include secrets, credentials, private URLs, internal CI logs or artifacts, package coordinates, runner details, personal paths, proprietary logs, or restricted model assets.
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: Request type
+      options:
+        - Correct or update existing documentation
+        - Clarify existing documentation
+        - Add missing documentation
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - Blocking current usage
+        - High
+        - Medium
+        - Low or nice to have
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link the relevant page or source file and include a heading or line number when possible.
+      placeholder: "https://nvidia.github.io/TensorRT-Model-Connect/..."
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or missing content
+      description: Explain what is incorrect, unclear, or absent and how it affects the reader.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification and search performed
+      description: List the implementation, command help, tests, or other docs you checked before filing.
+
+  - type: textarea
+    id: correction
+    attributes:
+      label: Suggested correction
+      description: Propose wording, structure, commands, or references if you have a specific fix.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched open and closed documentation issues and found no duplicate.
+          required: true
+        - label: I identified what I verified and any runtime or hardware checks I did not run.
+          required: true
+        - label: I removed secrets, private/internal evidence, personal paths, and restricted artifacts.
+          required: true

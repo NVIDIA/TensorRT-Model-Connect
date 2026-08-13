@@ -22,4 +22,8 @@ For a new installation, start with
 result, reproduce the exact model-owned manifest before opening a generalized
 framework issue.
 
+When the failure is reproducible, follow [Get Help and File an Issue](get-help.md)
+to select the right issue form and include the exact environment, model
+revision, commands, expected behavior, observed behavior, and first error.
+
 {/* Collaborative review anchor: batch 2. */}

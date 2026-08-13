@@ -91,13 +91,22 @@ page is the single source of truth for exact checkpoints, Hugging Face
 architectures, TRTMC profiles, precision, quantization, optimized-runtime
 dispatch, configuration, and qualification evidence.
 
-## Contributing and support
+## Get help and file an issue
+
+Start with [Get Help and File an Issue](https://nvidia.github.io/TensorRT-Model-Connect/release-support/get-help)
+to choose the right support route and collect the model, environment, command,
+and log details maintainers need. Use the
+[issue chooser](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/new/choose)
+for usage questions, reproducible bugs, feature or model requests, and
+documentation corrections.
+
+Do not disclose suspected security vulnerabilities in a public issue. Follow
+[SECURITY.md](SECURITY.md) to report them privately to NVIDIA PSIRT.
+
+## Contributing
 
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing source or model
   integration changes.
-- Report reproducible defects through
-  [GitHub Issues](https://github.com/NVIDIA/TensorRT-Model-Connect/issues).
-- Report security concerns according to [SECURITY.md](SECURITY.md).
 - TensorRT-Model-Connect is licensed under the terms in [LICENSE](LICENSE).
 
 <!-- Collaborative review anchor: batch 2. -->

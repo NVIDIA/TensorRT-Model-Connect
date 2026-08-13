@@ -1,6 +1,6 @@
 ---
 title: Release & Support
-description: Compatibility, known limitations, troubleshooting, release history, migration, and deprecation policy.
+description: Help, issue filing, compatibility, known limitations, troubleshooting, release history, migration, and deprecation policy.
 ---
 
 This section defines how to interpret the documentation over time.
@@ -13,6 +13,7 @@ site must not imply that unreleased APIs belong to a stable numbered release.
 
 | Question | Page |
 | --- | --- |
+| How do I get help or file an actionable issue? | [Get Help and File an Issue](get-help.md) |
 | Which artifact/software combinations are meaningful? | [Compatibility](compatibility.md) |
 | Which boundaries are known today? | [Limitations / Known Issues](known-issues.md) |
 | How do I diagnose a failure after first run? | [Troubleshooting](troubleshooting.md) |

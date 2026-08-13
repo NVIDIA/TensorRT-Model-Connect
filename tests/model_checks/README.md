@@ -131,3 +131,5 @@ See `benchmarks/performance/README.md` for the L4T TensorRT 11 bare-metal build.
 
 Each Accuracy `MODEL=SUITE` binding has its own engine directory. Perf bundles
 remain independent from Accuracy engines.
+
+<!-- Collaborative review anchor: batch 2. -->

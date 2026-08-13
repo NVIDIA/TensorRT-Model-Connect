@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Bug report
+description: Report reproducible behavior that differs from the documented contract
+title: "Bug: "
+labels: ["bug"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve TensorRT-Model-Connect. Do not disclose suspected security vulnerabilities here; report them privately through https://www.nvidia.com/en-us/security/report-vulnerability/. Do not include secrets, credentials, private URLs, internal CI logs or artifacts, package coordinates, runner details, personal paths, proprietary logs, or restricted model assets.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Select the boundary where the first failure appears.
+      options:
+        - Installation or source build
+        - Model resolution or TensorRT engine build
+        - Bundle creation or inspection
+        - Runtime loading or dispatch
+        - Inference output or task execution
+        - Validation or benchmarking
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: TensorRT-Model-Connect version
+      description: Provide a release, tag, or full commit SHA.
+      placeholder: "Full commit SHA or release tag"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation_method
+    attributes:
+      label: Installation method
+      multiple: true
+      options:
+        - Development container
+        - Python package or wheel
+        - Source build outside the development container
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and revision
+      description: Provide the exact Hugging Face model ID and revision, or identify the local checkpoint without uploading restricted artifacts.
+      placeholder: "Qwen/Qwen3-0.6B at <revision>, or not model-specific"
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the OS, GPU and compute capability, driver, CUDA, TensorRT, container image or package version, and relevant dependency versions.
+      placeholder: |
+        OS:
+        GPU and compute capability:
+        Driver:
+        CUDA:
+        TensorRT:
+        Container image or package:
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Provide the smallest commands, configuration, and input that reproduce the issue. Redact secrets and private URLs.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed and expected behavior
+      description: Describe what happened, what you expected, and where the behavior differs from documentation or another stated contract.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste the first relevant error and nearby context. Do not include credentials, private URLs, or proprietary logs.
+      render: shell
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched open and closed issues and found no duplicate.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+        - label: I removed secrets, credentials, private URLs, and restricted artifacts.
+          required: true

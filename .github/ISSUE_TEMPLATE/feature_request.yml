@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Feature request
+description: Request a new model, capability, improvement, or behavior change
+title: "Feature: "
+labels: ["enhancement"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. Describe the user problem and evidence boundary before prescribing an implementation. Do not disclose suspected security vulnerabilities here; report them privately through https://www.nvidia.com/en-us/security/report-vulnerability/. Do not include secrets, credentials, private URLs, internal CI logs or artifacts, package coordinates, runner details, personal paths, proprietary logs, or restricted model assets.
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: Request type
+      options:
+        - New model or checkpoint support
+        - New capability
+        - Improvement to existing behavior
+        - Change to an existing contract
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - Blocking a current use case
+        - High
+        - Medium
+        - Low or nice to have
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+      description: Explain the user problem, who encounters it, and why existing behavior is insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe the behavior or acceptance criteria you want, without assuming a specific implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: model_target
+    attributes:
+      label: Model and target details
+      description: For model requests, include the exact model ID/revision, task, precision, target GPU, and expected runtime path.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe existing models, tools, workarounds, or APIs you evaluated.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add public references, examples, compatibility constraints, or performance and quality requirements.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched open and closed issues and found no duplicate request.
+          required: true
+        - label: I identified which claims require source, hardware, parity, or performance evidence.
+          required: true
+        - label: I removed secrets, private/internal evidence, personal paths, and restricted artifacts.
+          required: true

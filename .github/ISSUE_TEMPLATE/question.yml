@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Question
+description: Ask for help using or understanding TensorRT-Model-Connect
+title: "Question: "
+labels: ["question"]
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search the documentation and existing issues before asking. Do not disclose suspected security vulnerabilities here; report them privately through https://www.nvidia.com/en-us/security/report-vulnerability/. Do not include secrets, credentials, private URLs, internal CI logs or artifacts, package coordinates, runner details, personal paths, proprietary logs, or restricted model assets.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Topic
+      options:
+        - Installation or source build
+        - Model support or engine build
+        - Bundle or runtime usage
+        - Task API or inference behavior
+        - Validation, benchmarking, or qualification
+        - Architecture or contribution guidance
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State the goal, the point where you are blocked, and the specific answer you need.
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Link the docs you followed and include relevant commands, configuration, and results.
+
+  - type: input
+    id: version
+    attributes:
+      label: TensorRT-Model-Connect version
+      description: Provide a release, tag, or full commit SHA when the question depends on repository behavior.
+
+  - type: input
+    id: model
+    attributes:
+      label: Model and revision
+      description: Provide the exact model ID/revision when the question is model-specific.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment details
+      description: Include OS, GPU, driver, CUDA, TensorRT, and installation method when they affect the question.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched the documentation and open and closed issues first.
+          required: true
+        - label: This question contains no secrets, private URLs, or restricted artifacts.
+          required: true

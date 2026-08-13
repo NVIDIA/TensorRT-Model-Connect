@@ -177,6 +177,7 @@ const sidebars = {
       link: {type: 'doc', id: 'release-support/overview'},
       collapsed: true,
       items: [
+        'release-support/get-help',
         'release-support/compatibility',
         'release-support/known-issues',
         'release-support/troubleshooting',
