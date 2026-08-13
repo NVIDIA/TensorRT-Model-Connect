@@ -5981,6 +5981,11 @@ def test_run_hf_reference_subprocess_passes_asr_family_metadata(
         return Result()
 
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        validation_engine,
+        "model_reference_python",
+        lambda _model, base_python: base_python,
+    )
     args = argparse.Namespace(
         hf_python="",
         hf_dtype="auto",

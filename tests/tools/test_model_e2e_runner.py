@@ -206,6 +206,15 @@ def test_model_runner_builds_once_then_runs_all_children(monkeypatch, tmp_path) 
     )
     monkeypatch.setattr(model_runner.E2EOrchestrator, "run", run_case)
     monkeypatch.setattr(model_runner, "run_preflight", lambda *_args: (True, []))
+    monkeypatch.setattr(
+        model_runner,
+        "resolve_case_python_profiles",
+        lambda _case, base_python: {
+            "build": base_python,
+            "runtime": base_python,
+            "reference": base_python,
+        },
+    )
 
     config = _Config(
         **{
@@ -262,6 +271,15 @@ def test_model_runner_does_not_build_when_all_preflights_skip(
         resolve_bundle,
     )
     monkeypatch.setattr(model_runner.E2EOrchestrator, "run", run_case)
+    monkeypatch.setattr(
+        model_runner,
+        "resolve_case_python_profiles",
+        lambda _case, base_python: {
+            "build": base_python,
+            "runtime": base_python,
+            "reference": base_python,
+        },
+    )
 
     config = _Config(
         **{
