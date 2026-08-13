@@ -2265,6 +2265,44 @@ def test_task_reference_runner_measures_loaded_public_operation(
     }
 
 
+def test_nemotron35_perf_reference_uses_archive_compatible_loader(monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    from tools.reference import speech
+
+    expected = object()
+    captured: dict[str, object] = {}
+
+    def load_compatible(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(
+        speech,
+        "load_nemotron35_asr_model",
+        load_compatible,
+        raising=False,
+    )
+    arguments = Namespace(
+        family="nemotron_speech_streaming",
+        model="nvidia/nemotron-3.5-asr-streaming-0.6b",
+        revision="model-revision",
+        local_files_only=True,
+    )
+
+    model = runner["_load_nemo_asr_reference_model"](
+        arguments,
+        device="cuda",
+    )
+
+    assert model is expected
+    assert captured == {
+        "model": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+        "revision": "model-revision",
+        "local_files_only": True,
+        "device": "cuda",
+    }
+
+
 def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     deepseek = object()
