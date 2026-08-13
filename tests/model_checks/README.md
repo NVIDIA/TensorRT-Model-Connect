@@ -83,7 +83,7 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --platform l4t-thor \
   --task accuracy \
   --model sam3 \
-  --hf-cache-seed-dir /home/nvidia/trtmc-l4t-thor/hf-cache \
+  --hf-cache-seed-dir /path/to/shared/hf-cache \
   --run-id l4t-sam3
 ```
 
