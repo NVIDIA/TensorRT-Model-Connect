@@ -24,6 +24,7 @@ try:
         load_all_manifests,
         load_manifest,
         load_model_manifest,
+        requires_threshold_sidecar,
     )
     from tests.e2e_harness.registry import (
         activate_model_plugins,
@@ -532,11 +533,15 @@ class TestManifestValidation:
         for manifest_path in sorted(models_dir.glob("*/manifests/*.json")):
             raw = json.loads(manifest_path.read_text(encoding="utf-8"))
             for testcase in raw["testcases"]:
-                testcase_paths[(manifest_path.parent.parent, testcase["name"])] = manifest_path
+                testcase_paths[(manifest_path.parent.parent, testcase["name"])] = (
+                    manifest_path,
+                    testcase,
+                )
         missing_sidecars = [
             f"{manifest.relative_to(models_dir).as_posix()}: {name}"
-            for (family_dir, name), manifest in testcase_paths.items()
-            if not (family_dir / "thresholds" / f"{name}.json").is_file()
+            for (family_dir, name), (manifest, testcase) in testcase_paths.items()
+            if requires_threshold_sidecar(testcase)
+            and not (family_dir / "thresholds" / f"{name}.json").is_file()
         ]
         missing_manifests = [
             path.relative_to(models_dir).as_posix()
@@ -548,6 +553,42 @@ class TestManifestValidation:
         assert not inline_thresholds
         assert not missing_sidecars
         assert not missing_manifests
+
+    @pytest.mark.parametrize(
+        ("testcase", "required"),
+        [
+            (
+                {
+                    "reference_backend": "invariant_only",
+                    "oracle_level": "L4_invariants",
+                    "user_contract": "runtime_invariants",
+                },
+                False,
+            ),
+            (
+                {
+                    "reference_backend": "invariant_only",
+                    "oracle_level": "L4_invariants",
+                    "user_contract": "sampling",
+                },
+                True,
+            ),
+            (
+                {
+                    "reference_backend": "hf_transformers",
+                    "oracle_level": "L1_external_reference",
+                    "user_contract": "continuation_parity",
+                },
+                True,
+            ),
+        ],
+    )
+    def test_threshold_sidecar_exemption_is_limited_to_runtime_invariants(
+        self,
+        testcase,
+        required,
+    ):
+        assert requires_threshold_sidecar(testcase) is required
 
     def test_repo_model_assets_are_local(self):
         """Model E2E manifests resolve data assets from their own folders."""

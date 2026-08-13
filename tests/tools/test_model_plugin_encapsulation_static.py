@@ -17,6 +17,8 @@ import json
 import re
 from pathlib import Path
 
+from tests.e2e_harness.manifest_loader import requires_threshold_sidecar
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_MODELS = REPO_ROOT / "src" / "runtime" / "models"
@@ -9384,6 +9386,8 @@ def test_model_owned_e2e_assets_are_local_and_complete() -> None:
         for manifest in sorted((model_dir / "manifests").glob("*.json")):
             raw = json.loads(manifest.read_text(encoding="utf-8"))
             for testcase in raw.get("testcases", []):
+                if not requires_threshold_sidecar(testcase):
+                    continue
                 threshold = model_dir / "thresholds" / f"{testcase['name']}.json"
                 if not threshold.is_file():
                     violations.append(
