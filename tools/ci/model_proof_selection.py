@@ -246,6 +246,17 @@ class ModelProofSelector:
                 name = str(testcase.get("name") or "")
                 if not name:
                     raise CiError(f"E2E manifest has an unnamed testcase: {path}")
+                test_category = testcase.get(
+                    "test_category", data.get("test_category", "e2e")
+                )
+                if not isinstance(test_category, str) or test_category not in {
+                    "e2e",
+                    "regression",
+                }:
+                    raise CiError(
+                        "E2E manifest test_category must be 'e2e' or 'regression': "
+                        f"{path}"
+                    )
                 tier = str(testcase.get("ci_tier") or data.get("ci_tier") or "")
                 if tier == "multi_device":
                     continue
@@ -254,6 +265,7 @@ class ModelProofSelector:
                         "name": name,
                         "model": model,
                         "manifest": path.name,
+                        "test_category": test_category,
                         "ci_tier": tier,
                         "l0_replacement": str(testcase.get("l0_replacement") or ""),
                         "estimated_seconds": timing.get(name),
@@ -275,12 +287,20 @@ class ModelProofSelector:
         ]
         if not eligible:
             raise CiError(f"no premerge E2E case is available for {family}")
+        regressions = [
+            case for case in eligible if case["test_category"] == "regression"
+        ]
+        smoke_cases = [
+            case for case in eligible if case["test_category"] != "regression"
+        ]
         replacements = {
             case["l0_replacement"]
             for case in cases
             if case["ci_tier"] == "nightly_only" and case["l0_replacement"]
         }
-        candidates = [case for case in eligible if case["name"] in replacements] or eligible
+        candidates = [
+            case for case in smoke_cases if case["name"] in replacements
+        ] or smoke_cases
         priority = {"l0_only": 0, "contract_only": 1, "": 2}
         candidates.sort(
             key=lambda case: (
@@ -292,7 +312,7 @@ class ModelProofSelector:
                 case["model"],
             )
         )
-        return candidates[:1]
+        return candidates[:1] + regressions
 
     @staticmethod
     def _validate_lease(

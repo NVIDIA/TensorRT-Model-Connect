@@ -11,7 +11,7 @@
     {
       "name": "qwen3-0.6b-regression-native-kv-chunked-prefill",
       "test_category": "regression",
-      "ci_tier": "nightly_only",
+      "ci_tier": "default",
       "reference_backend": "invariant_only",
       "oracle_level": "L4_invariants",
       "reference_family": "qwen_native_kv_chunked_prefill_regression",

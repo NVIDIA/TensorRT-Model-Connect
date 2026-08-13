@@ -568,14 +568,19 @@ def test_premerge_selects_one_nested_l0_replacement(
     assert selection["e2e_cases"][0]["model"] == expected_case
 
 
-def test_every_owned_e2e_family_has_one_premerge_case(tmp_path: Path) -> None:
+def test_every_owned_e2e_family_has_one_premerge_smoke_case(tmp_path: Path) -> None:
     model_root = REPO_ROOT / "tests" / "e2e" / "models"
     families = sorted(path.parent.name for path in model_root.glob("*/MODEL.toml"))
 
     assert families
     for family in families:
         selection = _run_test_selection(tmp_path, family, "premerge")
-        assert len(selection["e2e_cases"]) == 1, family
+        smoke_cases = [
+            case
+            for case in selection["e2e_cases"]
+            if case["test_category"] != "regression"
+        ]
+        assert len(smoke_cases) == 1, family
         assert selection["e2e_cases"][0]["ci_tier"] != "nightly_only", family
 
 
@@ -588,26 +593,37 @@ def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
     assert "model_reference_cache" not in selection
 
 
-def test_qwen_premerge_selects_native_defaults_l0(tmp_path: Path) -> None:
-    selection = _run_test_selection(tmp_path, "qwen", "premerge")
+@pytest.mark.parametrize(
+    ("family", "smoke_case", "regression_case"),
+    (
+        (
+            "qwen",
+            "qwen3-0.6b-native-l0",
+            "qwen3-0.6b-regression-native-kv-chunked-prefill",
+        ),
+        (
+            "llama",
+            "minitron-4b-width-l0",
+            "minitron-4b-width-regression-native-kv-chunked-prefill",
+        ),
+    ),
+)
+def test_premerge_selects_smoke_and_native_kv_regression(
+    tmp_path: Path,
+    family: str,
+    smoke_case: str,
+    regression_case: str,
+) -> None:
+    selection = _run_test_selection(tmp_path, family, "premerge")
 
     assert selection["suite"] == "premerge"
-    assert [
-        (
-            case["name"],
-            case["model"],
-            case["manifest"],
-            case["ci_tier"],
-        )
-        for case in selection["e2e_cases"]
-    ] == [
-        (
-            "qwen3-0.6b-native-l0",
-            "qwen3-0.6b-native-l0",
-            "qwen3-0.6b-native-l0.json",
-            "l0_only",
-        )
+    assert [case["name"] for case in selection["e2e_cases"]] == [
+        smoke_case,
+        regression_case,
     ]
+    assert selection["e2e_cases"][0]["test_category"] == "e2e"
+    assert selection["e2e_cases"][1]["test_category"] == "regression"
+    assert selection["e2e_cases"][1]["ci_tier"] == "default"
 
 
 def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -> None:
@@ -933,6 +949,22 @@ def test_selector_rejects_testcase_level_gpu_capacity(
             tmp_path,
             "convbert",
             "nightly",
+            projection_setup=configure,
+        )
+
+
+def test_selector_rejects_unknown_test_category(tmp_path: Path) -> None:
+    def configure(source: Path, _projection: dict[str, object]) -> None:
+        path = next((source / "tests/e2e/models/convbert/manifests").glob("*.json"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["testcases"][0]["test_category"] = "regresion"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CiError, match="test_category must be 'e2e' or 'regression'"):
+        _run_test_selection(
+            tmp_path,
+            "convbert",
+            "premerge",
             projection_setup=configure,
         )
 

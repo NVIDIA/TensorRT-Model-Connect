@@ -44,7 +44,7 @@ def test_native_minitron_regression_exceeds_one_prefill_profile() -> None:
 
     assert case.hf_revision == "5205ef7d36204947e3b973cb8b147a816ccd7e6a"
     assert case.metadata["test_category"] == "regression"
-    assert case.metadata["ci_tier"] == "nightly_only"
+    assert case.metadata["ci_tier"] == "default"
     assert case.reference_backend == "invariant_only"
     assert case.oracle_level == "L4_invariants"
     assert case.reference_family == "llama_native_kv_chunked_prefill_regression"
