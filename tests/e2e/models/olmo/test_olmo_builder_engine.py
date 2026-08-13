@@ -66,8 +66,14 @@ class OlmoPluginTester(FamilyPluginTester):
     model_type = "olmo"
 
     def expected_weight_keys(self) -> set[str]:
-        """OLMo uses standard SwiGLU keys -- same as base class."""
-        return super().expected_weight_keys()
+        """OLMo materializes zero beta tensors for every LayerNorm."""
+        keys = super().expected_weight_keys()
+        keys.add("final_norm_beta")
+        for layer_idx in range(self.spec.num_hidden_layers):
+            prefix = f"layer.{layer_idx}"
+            keys.add(f"{prefix}.input_norm_beta")
+            keys.add(f"{prefix}.post_attn_norm_beta")
+        return keys
 
 
 class TestOlmoEngine(FamilyPluginTestMixin):

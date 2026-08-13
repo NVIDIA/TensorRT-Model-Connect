@@ -1,12 +1,12 @@
 {
   "name": "olmo-1b",
   "hf_id": "allenai/OLMo-1B-hf",
+  "hf_revision": "aee7752d9c08ee4775e9b0091426d8410e8f6a89",
   "bundle": "olmo-1b.bundle",
   "family": "olmo",
   "runtime_strategy": "olmo_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
-  "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
     {

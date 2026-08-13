@@ -5,5 +5,8 @@ id = "olmo"
 runtime_library = "libtrtmc_model_olmo.so"
 runtime_plugins = ["plugin.cpp|register_olmo_plugin"]
 runtime_strategies = ["olmo_decoder_kv_cache"]
+runtime_tests = [
+  "test_olmo_native_kv_cache|test_olmo_native_kv_cache.cpp|trtmc_model_olmo,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
+]
 [validation_profiles]
 decoder_debug = ["olmo_decoder_kv_cache"]
