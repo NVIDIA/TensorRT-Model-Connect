@@ -2823,6 +2823,7 @@ def _proof_context(
         "gpu_slot_ids", "gpu_slots_per_device", "gpu_lease_evidence",
         "min_free_gpu_memory_mib", "gpu_memory_admission",
         "network", "plugin_search", "passed", "e2e_proof_kind",
+        "e2e_proof_kinds",
     ):
         if key in proof:
             context[key] = proof[key]
@@ -3235,22 +3236,46 @@ def validate_proof_context(
     if not selection.get("e2e_test") or not e2e_cases:
         issues.append("Test selection does not identify an E2E test and case")
 
+    supported_e2e_proof_kinds = {
+        "reference",
+        "snapshot_regression",
+        "functional_invariant",
+    }
     e2e_proof_kind = proof.get("e2e_proof_kind")
     if (
         not isinstance(e2e_proof_kind, str)
         or e2e_proof_kind
-        not in {
-            "reference",
-            "snapshot_regression",
-            "functional_invariant",
-        }
+        not in supported_e2e_proof_kinds | {"mixed"}
     ):
         issues.append("Final proof JSON has no valid E2E proof-kind classification")
+    raw_e2e_proof_kinds = proof.get("e2e_proof_kinds")
+    if raw_e2e_proof_kinds is None and e2e_proof_kind in supported_e2e_proof_kinds:
+        e2e_proof_kinds = [e2e_proof_kind]
+    elif (
+        isinstance(raw_e2e_proof_kinds, list)
+        and raw_e2e_proof_kinds
+        and all(isinstance(kind, str) for kind in raw_e2e_proof_kinds)
+        and raw_e2e_proof_kinds == sorted(set(raw_e2e_proof_kinds))
+        and set(raw_e2e_proof_kinds) <= supported_e2e_proof_kinds
+    ):
+        e2e_proof_kinds = raw_e2e_proof_kinds
+    else:
+        e2e_proof_kinds = []
+        issues.append("Final proof JSON has invalid per-case E2E proof kinds")
+    expected_e2e_proof_kind = (
+        e2e_proof_kinds[0]
+        if len(e2e_proof_kinds) == 1
+        else "mixed"
+    )
+    if e2e_proof_kinds and e2e_proof_kind != expected_e2e_proof_kind:
+        issues.append("Aggregate E2E proof kind does not match per-case proof kinds")
     if status.get("e2e_proof_kind") != e2e_proof_kind:
         issues.append("E2E proof kind does not match model-proof status")
+    if raw_e2e_proof_kinds is not None and status.get("e2e_proof_kinds") != e2e_proof_kinds:
+        issues.append("Per-case E2E proof kinds do not match model-proof status")
     e2e_reference = steps.get("e2e_reference")
     expected_reference_status = (
-        "passed" if e2e_proof_kind == "reference" else "skipped"
+        "passed" if "reference" in e2e_proof_kinds else "skipped"
     )
     if (
         not isinstance(e2e_reference, dict)
@@ -3324,6 +3349,17 @@ def render_proof_section(context: Dict[str, Any]) -> str:
             f"{admission.get('required_free_mib')} MiB required"
         )
     rows = []
+    e2e_proof_kinds = context.get("e2e_proof_kinds")
+    proof_kinds_summary = (
+        ", ".join(e2e_proof_kinds)
+        if isinstance(e2e_proof_kinds, list)
+        else None
+    )
+    reference_parity_claimed = (
+        "reference" in e2e_proof_kinds
+        if isinstance(e2e_proof_kinds, list)
+        else context.get("e2e_proof_kind") == "reference"
+    )
     fields = (
         ("Model ownership ID", context.get("model")),
         ("Pinned source revision", context.get("source_revision")),
@@ -3350,7 +3386,8 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("Container network", context.get("network")),
         ("Plugin search", context.get("plugin_search")),
         ("E2E proof kind", context.get("e2e_proof_kind")),
-        ("E2E reference parity claimed", context.get("e2e_proof_kind") == "reference"),
+        ("E2E per-case proof kinds", proof_kinds_summary),
+        ("E2E reference parity claimed", reference_parity_claimed),
     )
     for label, value in fields:
         if value is None or value == "":

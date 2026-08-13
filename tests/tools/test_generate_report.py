@@ -2272,11 +2272,23 @@ class TestEvidenceCompleteness:
         status["steps"]["e2e_reference"] = {"status": "skipped"}
         assert mod.validate_proof_context(status, proof, selection) == []
 
+        proof["e2e_proof_kind"] = "mixed"
+        proof["e2e_proof_kinds"] = ["functional_invariant", "reference"]
+        status["e2e_proof_kind"] = "mixed"
+        status["e2e_proof_kinds"] = ["functional_invariant", "reference"]
         status["steps"]["e2e_reference"] = {"status": "passed"}
-        issues = mod.validate_proof_context(status, proof, selection)
-        assert any("e2e_reference must be skipped" in issue for issue in issues)
+        assert mod.validate_proof_context(status, proof, selection) == []
 
-        status["steps"]["e2e_reference"] = {"status": "skipped"}
+        rendered = mod.render_proof_section(mod._proof_context(status, proof, selection))
+        assert "E2E per-case proof kinds" in rendered
+        assert "functional_invariant, reference" in rendered
+
+        proof.pop("e2e_proof_kinds")
+        issues = mod.validate_proof_context(status, proof, selection)
+        assert any("per-case E2E proof kinds" in issue for issue in issues)
+        proof["e2e_proof_kinds"] = ["functional_invariant", "reference"]
+
+        status["steps"]["e2e_reference"] = {"status": "passed"}
         proof["min_free_gpu_memory_mib"] = True
         assert (
             "Proof has an invalid minimum free GPU memory value"

@@ -27,7 +27,10 @@ from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
 from tools.ci.model_reference_cache import ModelReferenceCacheWarmer
 from tools.ci.model_proof import ModelProofRequest, ModelProofRunner, ModelReferenceCache
-from tools.ci.model_proof_inner import ModelProofInnerPipeline
+from tools.ci.model_proof_inner import (
+    ModelProofInnerPipeline,
+    _classify_e2e_proof_kinds,
+)
 from tools.ci.model_proof_selection import ModelProofSelector
 from tools.ci.process import CiError
 
@@ -1646,14 +1649,43 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
         assert contract in runner
 
     assert runner.index('"verify-builds"') < runner.index('"verify-results"')
-    assert runner.index('"verify-results"') < runner.index(
-        'result.get("proof_kind") for result in e2e_verification.get("results", [])'
+    verify_results_index = runner.index('"verify-results"')
+    assert verify_results_index < runner.index(
+        "e2e_proof_kind, e2e_proof_kinds = _classify_e2e_proof_kinds(",
+        verify_results_index,
     )
-    assert "if len(proof_kinds) != 1:" in runner
     assert 'self.status.fact("e2e_proof_kind", e2e_proof_kind)' in runner
+    assert 'self.status.fact("e2e_proof_kinds", e2e_proof_kinds)' in runner
     assert "self._python()" in runner
     assert '"pytest"' in runner
     assert 'self.source / str(payload["e2e_test"])' in runner
+
+
+@pytest.mark.parametrize(
+    ("proof_kinds", "expected_aggregate"),
+    (
+        (["reference"], "reference"),
+        (["functional_invariant"], "functional_invariant"),
+        (["reference", "functional_invariant"], "mixed"),
+    ),
+)
+def test_model_proof_classifies_single_and_mixed_e2e_oracles(
+    proof_kinds: list[str], expected_aggregate: str
+) -> None:
+    aggregate, ordered = _classify_e2e_proof_kinds(
+        {"results": [{"proof_kind": kind} for kind in proof_kinds]}
+    )
+
+    assert aggregate == expected_aggregate
+    assert ordered == sorted(proof_kinds)
+
+
+@pytest.mark.parametrize("results", ([], [{"proof_kind": "unknown"}]))
+def test_model_proof_rejects_missing_or_unknown_e2e_oracles(
+    results: list[dict[str, str]],
+) -> None:
+    with pytest.raises(CiError, match="invalid E2E proof kinds"):
+        _classify_e2e_proof_kinds({"results": results})
 
 
 def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:

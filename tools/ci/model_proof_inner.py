@@ -24,6 +24,35 @@ from .selected_wheel import SelectedWheelRuntime
 from .validation import ValidationRunner
 
 
+_SUPPORTED_E2E_PROOF_KINDS = {
+    "functional_invariant",
+    "reference",
+    "snapshot_regression",
+}
+
+
+def _classify_e2e_proof_kinds(
+    verification: dict[str, object],
+) -> tuple[str, list[str]]:
+    results = verification.get("results")
+    raw_proof_kinds = (
+        [result.get("proof_kind") for result in results if isinstance(result, dict)]
+        if isinstance(results, list)
+        else []
+    )
+    if (
+        not raw_proof_kinds
+        or not all(isinstance(kind, str) for kind in raw_proof_kinds)
+        or not set(raw_proof_kinds) <= _SUPPORTED_E2E_PROOF_KINDS
+    ):
+        raise CiError(
+            f"Model proof found invalid E2E proof kinds: {raw_proof_kinds}"
+        )
+    proof_kinds = set(raw_proof_kinds)
+    ordered = sorted(proof_kinds)
+    return (ordered[0] if len(ordered) == 1 else "mixed"), ordered
+
+
 class ProofStatus:
     """Persist the status of each proof stage for strict HTML rendering."""
 
@@ -519,6 +548,7 @@ class ModelProofInnerPipeline:
             },
             "e2e_cases": self.selection.e2e_cases,
             "e2e_proof_kind": verification["e2e_proof_kind"],
+            "e2e_proof_kinds": verification["e2e_proof_kinds"],
             "engine_builds_per_model": verification["builds_per_model"],
             "engine_build_count": len(verification["records"]),
             "engine_build_verification": "engine-build-verification.json",
@@ -792,22 +822,24 @@ class ModelProofInnerPipeline:
         e2e_verification = json.loads(
             (self.artifacts / "e2e-verification.json").read_text(encoding="utf-8")
         )
-        proof_kinds = {result.get("proof_kind") for result in e2e_verification.get("results", [])}
-        if len(proof_kinds) != 1:
-            raise CiError(f"Model proof requires one E2E proof kind, found {proof_kinds}")
-        e2e_proof_kind = next(iter(proof_kinds))
+        e2e_proof_kind, e2e_proof_kinds = _classify_e2e_proof_kinds(
+            e2e_verification
+        )
         self.status.fact("e2e_proof_kind", e2e_proof_kind)
+        self.status.fact("e2e_proof_kinds", e2e_proof_kinds)
+        has_reference_proof = "reference" in e2e_proof_kinds
         self.status.step(
             "e2e_reference",
-            "passed" if e2e_proof_kind == "reference" else "skipped",
+            "passed" if has_reference_proof else "skipped",
             (
                 "e2e-verification.json (L1/L2 reference oracle)"
-                if e2e_proof_kind == "reference"
-                else f"not claimed: {e2e_proof_kind} oracle"
+                if has_reference_proof
+                else f"not claimed: {', '.join(e2e_proof_kinds)} oracle"
             ),
         )
         self.status.step("result_verification", "passed")
         verification["e2e_proof_kind"] = e2e_proof_kind
+        verification["e2e_proof_kinds"] = e2e_proof_kinds
         return verification
 
     def _finalize_report(self, validation_rc: int) -> int:

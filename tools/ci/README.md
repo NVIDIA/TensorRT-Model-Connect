@@ -670,7 +670,8 @@ the producing class remains the source of truth for optional evidence fields.
       "source_revision": "<commit>",
       "suite": "premerge",
       "outcome": "passed",
-      "e2e_proof_kind": "reference",
+      "e2e_proof_kind": "mixed",
+      "e2e_proof_kinds": ["functional_invariant", "reference"],
       "steps": {
         "scratch_build": {"status": "passed", "evidence": "build.log"},
         "e2e_reference": {"status": "passed", "evidence": "e2e/junit.xml, e2e/*/result.json"},
@@ -682,8 +683,10 @@ the producing class remains the source of truth for optional evidence fields.
 
   The complete output also includes the single DSO audit, C++/Python JUnit,
   engine-build verification, `proof.json`, and the per-model HTML report.
-  `e2e_reference` is a parity claim only for exclusively L1/L2-selected
-  cases. L3 is reported as snapshot regression and L4 as a functional
+  `e2e_reference` passes when at least one selected case proves L1/L2
+  reference parity. When a proof combines reference and regression cases,
+  `e2e_proof_kind` is `mixed` and `e2e_proof_kinds` preserves every per-case
+  classification. L3 remains snapshot regression and L4 remains a functional
   invariant; neither is promoted to reference parity.
 - **Boundary:** It can see only the projected model and private resources. It
   cannot reach the network, peer model source, or host-wide cache; artifact
