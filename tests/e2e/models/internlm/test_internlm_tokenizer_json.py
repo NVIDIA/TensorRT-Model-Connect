@@ -40,6 +40,8 @@ def _install_fake_hub(
 
 
 class _InternLMTokenizerPlugin:
+    tokenizer_json_conversion_policy = "family_first"
+
     @staticmethod
     def ensure_tokenizer_json(model_dir, *, previous_error=None):
         return tokenizer_json.ensure_tokenizer_json(
