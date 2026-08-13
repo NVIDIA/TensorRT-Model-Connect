@@ -270,6 +270,49 @@ def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
     assert shared_profiles._profile_install_environment()["MAX_JOBS"] == "2"
 
 
+def test_profile_source_builds_filter_hard_coded_cuda_architectures(
+    monkeypatch, tmp_path
+):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    (cuda_home / "include").mkdir()
+    (cuda_home / "lib64").mkdir()
+    nvcc.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    nvcc.chmod(0o755)
+    monkeypatch.setenv("CUDA_HOME", str(cuda_home))
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "10.0;11.0+PTX")
+
+    environment = shared_profiles._profile_install_environment()
+    result = subprocess.run(
+        [
+            str(Path(environment["CUDA_HOME"]) / "bin" / "nvcc"),
+            "-O3",
+            "-gencode",
+            "arch=compute_90,code=sm_90",
+            "-gencode",
+            "arch=compute_100,code=sm_100",
+            "-gencode",
+            "arch=compute_110,code=sm_110",
+            "input.cu",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "arch=compute_90,code=sm_90" not in result.stdout
+    assert "arch=compute_100,code=sm_100" in result.stdout
+    assert "arch=compute_110,code=sm_110" in result.stdout
+    assert Path(environment["CUDA_HOME"], "include").resolve() == cuda_home / "include"
+
+
+def test_cuda_arch_codes_reject_named_architectures() -> None:
+    assert shared_profiles._cuda_arch_codes("8.7;10.0+PTX;11.0") == ("87", "100", "110")
+    assert shared_profiles._cuda_arch_codes("Ampere") == ()
+
+
 def test_profile_command_timeout_terminates_descendants(tmp_path):
     sentinel = tmp_path / "orphan-finished"
     child = (

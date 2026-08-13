@@ -31,7 +31,7 @@ LEGACY_PROFILE_ROOT_ENV = "TRTMC_E2E_PROFILE_ROOT"
 PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
 DEFAULT_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_PROFILE_LAYOUT_VERSION = "overlay-v4-transitive-site-packages"
+_PROFILE_LAYOUT_VERSION = "overlay-v5-targeted-cuda-builds"
 _DEFAULT_PROFILE_BUILD_JOBS = "4"
 _PROFILE_INSTALL_TIMEOUT_SECONDS = 7200
 _EXACT_REQUIREMENT_RE = re.compile(
@@ -371,7 +371,105 @@ def _profile_install_environment() -> dict[str, str]:
     environment = os.environ.copy()
     if not environment.get("MAX_JOBS", "").strip():
         environment["MAX_JOBS"] = _DEFAULT_PROFILE_BUILD_JOBS
+    _configure_targeted_nvcc(environment)
     return environment
+
+
+def _cuda_arch_codes(value: str) -> tuple[str, ...]:
+    """Translate numeric TORCH_CUDA_ARCH_LIST entries to nvcc architecture codes."""
+    codes: list[str] = []
+    for raw in re.split(r"[;,\s]+", value.strip()):
+        if not raw:
+            continue
+        token = raw.removesuffix("+PTX")
+        match = re.fullmatch(r"([0-9]+)\.([0-9]+)", token)
+        if match is None:
+            return ()
+        code = f"{int(match.group(1))}{match.group(2)}"
+        if code not in codes:
+            codes.append(code)
+    return tuple(codes)
+
+
+def _configure_targeted_nvcc(environment: dict[str, str]) -> None:
+    """Make source packages honor the configured CUDA architecture list.
+
+    Some CUDA extension sdists hard-code every architecture supported by the
+    toolkit and ignore ``TORCH_CUDA_ARCH_LIST``. Their redundant compilation
+    multiplies profile build time and memory. Route nvcc through a transparent
+    wrapper that removes only non-requested ``-gencode`` pairs.
+    """
+    arch_codes = _cuda_arch_codes(environment.get("TORCH_CUDA_ARCH_LIST", ""))
+    if not arch_codes:
+        return
+
+    configured_home = environment.get("CUDA_HOME", "").strip() or environment.get(
+        "CUDA_PATH", ""
+    ).strip()
+    candidates = []
+    if configured_home:
+        candidates.append(Path(configured_home) / "bin" / "nvcc")
+    discovered_nvcc = shutil.which("nvcc")
+    if discovered_nvcc:
+        candidates.append(Path(discovered_nvcc))
+    # PyTorch uses this conventional toolkit location even when neither
+    # CUDA_HOME nor PATH advertises nvcc (notably on Thor host images).
+    candidates.append(Path("/usr/local/cuda/bin/nvcc"))
+    real_nvcc = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if real_nvcc is None:
+        return
+    real_nvcc = real_nvcc.resolve()
+    real_cuda_home = real_nvcc.parent.parent
+
+    identity = hashlib.sha256(
+        f"{real_nvcc}\0{','.join(arch_codes)}".encode("utf-8")
+    ).hexdigest()[:12]
+    wrapper_home = Path(tempfile.gettempdir()) / f"trtmc-cuda-arch-{identity}"
+    wrapper_bin = wrapper_home / "bin"
+    wrapper_nvcc = wrapper_bin / "nvcc"
+    wrapper_bin.mkdir(parents=True, exist_ok=True)
+    for name in ("include", "lib64"):
+        source = real_cuda_home / name
+        target = wrapper_home / name
+        if source.is_dir() and not target.exists():
+            target.symlink_to(source, target_is_directory=True)
+
+    script = """#!/usr/bin/env bash
+set -euo pipefail
+args=()
+saw_gencode=0
+kept_gencode=0
+while (($#)); do
+    if [[ "$1" == "-gencode" && $# -ge 2 && "$2" == arch=compute_* ]]; then
+        saw_gencode=1
+        code="${2#arch=compute_}"
+        code="${code%%,*}"
+        if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
+            args+=("$1" "$2")
+            kept_gencode=1
+        fi
+        shift 2
+        continue
+    fi
+    args+=("$1")
+    shift
+done
+if ((saw_gencode && !kept_gencode)); then
+    echo "nvcc command has no requested CUDA architecture (${TRTMC_NVCC_ARCH_CODES})" >&2
+    exit 2
+fi
+exec "${TRTMC_REAL_NVCC}" "${args[@]}"
+"""
+    if not wrapper_nvcc.is_file() or wrapper_nvcc.read_text(encoding="utf-8") != script:
+        temporary = wrapper_nvcc.with_name(f"nvcc.tmp.{os.getpid()}")
+        temporary.write_text(script, encoding="utf-8")
+        temporary.chmod(0o755)
+        temporary.replace(wrapper_nvcc)
+
+    environment["CUDA_HOME"] = str(wrapper_home)
+    environment["CUDA_PATH"] = str(wrapper_home)
+    environment["TRTMC_REAL_NVCC"] = str(real_nvcc)
+    environment["TRTMC_NVCC_ARCH_CODES"] = ",".join(arch_codes)
 
 
 def _python_site_packages(python: str) -> list[str]:
