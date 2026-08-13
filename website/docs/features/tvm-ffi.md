@@ -2,9 +2,10 @@
 title: TVM FFI Kernel Bridge
 ---
 
-Model Connect can replace one selected TensorRT graph region with a TVM-FFI
-kernel. The TensorRT engine fixes the region boundary; the external kernel DSO
-is chosen when a new pipeline loads.
+Model Connect can replace one selected TensorRT graph region with an
+[Apache TVM FFI](https://tvm.apache.org/ffi/) kernel. The TensorRT engine fixes
+the region boundary; the external kernel DSO is chosen when a new pipeline
+loads.
 
 There are two ways to select the region:
 
