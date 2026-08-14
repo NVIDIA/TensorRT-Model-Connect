@@ -8,6 +8,27 @@ project(tensorrt_model_connect VERSION 0.1.0 LANGUAGES CXX)
 # generated build-tree RPATH entries relative to each ELF file.
 set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
 
+# Standard CUDA installations do not always add their bin directory to PATH
+# (notably bare-metal L4T images). Preserve an explicit CUDACXX selection, but
+# otherwise probe the same CUDA roots used later for headers and libraries.
+if(NOT CMAKE_CUDA_COMPILER AND NOT DEFINED ENV{CUDACXX})
+  find_program(_trtmc_cuda_compiler
+    NAMES nvcc
+    HINTS
+      "$ENV{CUDA_HOME}"
+      "$ENV{CUDAToolkit_ROOT}"
+      "$ENV{CUDA_PATH}"
+    PATHS
+      /usr/local/cuda
+      /opt/cuda
+    PATH_SUFFIXES bin
+  )
+  if(_trtmc_cuda_compiler)
+    set(CMAKE_CUDA_COMPILER "${_trtmc_cuda_compiler}"
+      CACHE FILEPATH "CUDA compiler" FORCE)
+  endif()
+endif()
+
 # Enable CUDA for runtime GPU kernels when a CUDA compiler is available.
 include(CheckLanguage)
 check_language(CUDA)

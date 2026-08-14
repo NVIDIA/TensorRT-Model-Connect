@@ -820,6 +820,21 @@ def _model_prefix(model: str) -> str:
     return "".join(part.capitalize() for part in model.split("_"))
 
 
+def test_cmake_discovers_nvcc_from_cuda_roots_before_enabling_cuda() -> None:
+    """Keep standard CUDA installs usable when ``nvcc`` is absent from PATH."""
+    text = CMAKE_ROOT.read_text(encoding="utf-8")
+    discovery = text.index("find_program(_trtmc_cuda_compiler")
+    language_probe = text.index("check_language(CUDA)")
+    discovery_block = text[discovery:language_probe]
+
+    assert discovery < language_probe
+    assert '"$ENV{CUDA_HOME}"' in discovery_block
+    assert '"$ENV{CUDAToolkit_ROOT}"' in discovery_block
+    assert "/usr/local/cuda" in discovery_block
+    assert "PATH_SUFFIXES bin" in discovery_block
+    assert 'set(CMAKE_CUDA_COMPILER "${_trtmc_cuda_compiler}"' in discovery_block
+
+
 def test_runtime_models_do_not_include_sibling_model_folders() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: prove each runtime model implementation includes only local model code.
