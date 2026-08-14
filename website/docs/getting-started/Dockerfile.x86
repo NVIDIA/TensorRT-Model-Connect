@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Minimal x86_64 source-development image. The ARM64 CI image remains isolated
-# in Dockerfile; source is mounted at runtime.
+# Minimal x86_64 source-development image for the documented source path.
+# Repository CI does not build this file; source is mounted at runtime.
 ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a
 FROM ${TENSORRT_IMAGE}
 
