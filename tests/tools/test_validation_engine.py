@@ -8,6 +8,7 @@ import ast
 import hashlib
 import io
 import json
+import os
 import struct
 import sys
 import types
@@ -2743,6 +2744,28 @@ def test_model_reference_python_resolves_family_profile(monkeypatch) -> None:
     ]
 
 
+def test_model_build_python_resolves_family_profile(monkeypatch) -> None:
+    monkeypatch.setattr(
+        validation_engine,
+        "normalize_execution_profiles",
+        lambda _raw, **_kwargs: {
+            "build": "elf_flow",
+            "runtime": "base",
+            "reference": "elf_flow_reference",
+        },
+    )
+    monkeypatch.setattr(
+        validation_engine,
+        "resolve_profile_python",
+        lambda profile, _base_python: f"/profiles/{profile}/bin/python",
+    )
+
+    assert validation_engine.model_build_python(
+        {"family": "elf_flow"},
+        "/opt/venv/bin/python3",
+    ) == "/profiles/elf_flow/bin/python"
+
+
 def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Path) -> None:
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()
@@ -4513,6 +4536,43 @@ def test_ensure_bundle_applies_selected_cuda_device_to_build(
     )
 
     assert captured["cuda_visible_devices"] == "selected-device"
+
+
+def test_ensure_bundle_prepends_selected_build_python_to_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.bundle"
+    build_python = tmp_path / "profiles" / "build" / "bin" / "python"
+    captured: dict[str, str] = {}
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **kwargs):
+        captured["path"] = kwargs["env"]["PATH"]
+        Path(command[command.index("-o") + 1]).write_bytes(b"bundle")
+        return Result()
+
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin")
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    validation_engine.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        build_python=str(build_python),
+    )
+
+    assert captured["path"].split(os.pathsep) == [
+        str(build_python.parent),
+        "/usr/local/bin",
+        "/usr/bin",
+    ]
 
 
 def test_ensure_bundle_reuses_matching_source_revision(
