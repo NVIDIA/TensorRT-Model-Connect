@@ -29,6 +29,8 @@ trtmc build Qwen/Qwen3-0.6B \
 
 The bounded cache profile is intended for the first portable native-attention
 build. The first build may download model files and compile TensorRT engines.
+`qwen3-0.6b.bundle` is the runnable output; the neighboring
+`qwen3-0.6b.effective_config.json` file is diagnostic only.
 
 ## 3. Inspect the bundle
 
