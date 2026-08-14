@@ -14,8 +14,9 @@ Release wheels currently support aarch64 only. x86_64 wheels are planned; use
 
 ## Install a release wheel
 
-Use an officially published wheel matching the Python version and TensorRT
-cohort. If no wheel is published for the release, use the source path instead.
+Download the matching `.whl` asset from
+[GitHub Releases](https://github.com/NVIDIA/TensorRT-Model-Connect/releases).
+If no wheel is published for the release, use the source path instead.
 
 ```bash
 python3.12 -m venv .venv-trtmc

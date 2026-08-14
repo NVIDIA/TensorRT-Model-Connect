@@ -10,12 +10,13 @@ Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
 prompt:
 
 ```text
-/goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new
-TensorRT-Model-Connect directory, read AGENTS.md, select the target GPU by
-following Build from Source, and follow the documented Qwen Quick Start
-exactly. Do not modify source, tests, Dockerfiles, git history, or remote
-state. Report the selected GPU, exact commands, bundle path, inference output,
-and any deviation from the documentation.
+/goal Use the current TensorRT-Model-Connect checkout, or clone
+https://github.com/NVIDIA/TensorRT-Model-Connect.git if none is provided. Read
+AGENTS.md, then follow website/docs/getting-started/source-build.md and
+website/docs/getting-started/quick-start.md exactly. Do not modify source,
+tests, Dockerfiles, git history, or remote state. Report the selected GPU,
+exact commands, bundle path, inference output, and any deviation from the
+documentation.
 ```
 
 [Documentation](https://nvidia.github.io/TensorRT-Model-Connect/) |
