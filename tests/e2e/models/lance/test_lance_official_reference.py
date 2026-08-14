@@ -104,7 +104,10 @@ def test_lance_sdpa_fallback_is_importable_without_distribution_metadata() -> No
             ),
         ],
         env=lance_official._image_reference_environment(
-            {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"}
+            {
+                **os.environ,
+                "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa",
+            }
         ),
         capture_output=True,
         text=True,
