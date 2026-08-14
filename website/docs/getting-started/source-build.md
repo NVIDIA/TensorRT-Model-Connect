@@ -70,8 +70,6 @@ cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
 
 export TRTMC_MODEL_PLUGIN_DIR="$TRTMC_BUILD_DIR/models"
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
-
-trtmc version
 ```
 
 Continue to [Quick Start](quick-start.md) in the same container shell. Advanced

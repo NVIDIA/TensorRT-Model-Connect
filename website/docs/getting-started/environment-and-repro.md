@@ -29,7 +29,7 @@ Source users also need Docker:
 docker --version
 ```
 
-Wheel users instead check glibc and the Python version matching the wheel:
+Wheel users following the first-time Python 3.12 path instead check:
 
 ```bash
 getconf GNU_LIBC_VERSION
