@@ -28,26 +28,6 @@ std::cout << pipeline->generate("What is the capital of France? Answer in one wo
 **TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
 <img width="1318" height="1088" alt="MC-what-it-is" src="https://github.com/user-attachments/assets/85850b96-5a30-4531-bcec-98e00883dedb" />
 
-## Getting Started
-
-**Recommended Quick Start: AI-Native**
-
-Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
-prompt:
-
-```text
-/goal Use the current TensorRT-Model-Connect checkout, or clone
-https://github.com/NVIDIA/TensorRT-Model-Connect.git if none is provided. Read
-AGENTS.md, then follow website/docs/getting-started/source-build.md and
-website/docs/getting-started/quick-start.md exactly. Do not modify source,
-tests, Dockerfiles, git history, or remote state. Report the selected GPU,
-exact commands, bundle path, inference output, and any deviation from the
-documentation.
-```
-
-Want to know more? See the
-[Quick Start documentation](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start).
-
 ## Why TensorRT-Model-Connect?
 
 - Start from a supported Hugging Face or local checkpoint and build TensorRT
@@ -68,6 +48,26 @@ TensorRT integration paths.
 TensorRT-Model-Connect is a reference implementation. Users are responsible
 for trusting the checkpoints, bundles, native libraries, and local environment
 they provide when building or running models.
+
+## Getting Started
+
+**Recommended Quick Start: AI-Native**
+
+Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
+prompt:
+
+```text
+/goal Use the current TensorRT-Model-Connect checkout, or clone
+https://github.com/NVIDIA/TensorRT-Model-Connect.git if none is provided. Read
+AGENTS.md, then follow website/docs/getting-started/source-build.md and
+website/docs/getting-started/quick-start.md exactly. Do not modify source,
+tests, Dockerfiles, git history, or remote state. Report the selected GPU,
+exact commands, bundle path, inference output, and any deviation from the
+documentation.
+```
+
+Want to know more? See the
+[Quick Start documentation](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start).
 
 ## 📚 Explore the documentation
 
