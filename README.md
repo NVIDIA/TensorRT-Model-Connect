@@ -8,7 +8,7 @@
 
 </div>
 
-## AI Native QuickStart
+## 🤖 AI Native QuickStart
 
 Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
 prompt:
@@ -23,7 +23,7 @@ exact commands, bundle path, inference output, and any deviation from the
 documentation.
 ```
 
-## Build a Deployment Bundle
+## 📦 Build a Deployment Bundle
 
 Once your environment is ready, use this workflow to build a deployment bundle
 from a supported Hugging Face model and run native inference.
@@ -76,7 +76,7 @@ TensorRT-Model-Connect is a reference implementation. Users are responsible
 for trusting the checkpoints, bundles, native libraries, and local environment
 they provide when building or running models.
 
-## Explore the documentation
+## 📚 Explore the documentation
 
 | Goal | Start here |
 | --- | --- |
