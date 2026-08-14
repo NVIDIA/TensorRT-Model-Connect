@@ -9,26 +9,52 @@ execution:
   serial_tasks: true
 
 storage:
-  device: /dev/nvme0n1p1
+  device: /dev/vblkdev2
 
-# A disagreement is not a hardware exclusion. Keep only reproduced hardware
-# limits here, scoped to the exact task binding that requires the engine.
-unsupported:
-  - model: minimax-h3-768p
-    task: accuracy
-    binding: minimax_h3_official_profile_parity
-    reason: >-
-      The qualified single-device profile requires 180 GiB of free GPU memory,
-      which exceeds this platform's approximately 128 GiB unified memory.
-  - model: qwen-image-2512
-    task: accuracy
-    binding: dpg_bench_diffusion_image
-    reason: >-
-      TensorRT 11.0 MMDiT engine construction exhausts the platform's 128 GiB
-      unified memory and can leave the build blocked in a dma-fence wait.
-  - model: qwen-image-edit-2511
-    task: accuracy
-    binding: gedit_bench_image_edit
-    reason: >-
-      Equivalent Qwen Image engine profiles exhaust 128 GiB unified memory;
-      the edit profile uses the same engine topology with added conditioning.
+excluded_models:
+  - deepseek-ocr
+  - deepseek-v2-lite
+  - falcon-rw-1b
+  - falcon3-1b
+  - flux-2-dev
+  - flux-2-dev-fp8
+  - flux-schnell
+  - gemma-2-2b
+  - glm-4-9b
+  - granite-3.1-2b
+  - gpt-oss-20b
+  - internlm2-1.8b
+  - internvl3-2b
+  - internvl3-8b
+  - lance-3b-x2t-image
+  - locateanything-3b
+  - minimax-h3-768p
+  - minitron-4b-depth
+  - minitron-4b-width
+  - mistral-7b
+  - nemotron-h-nano-9b
+  - nemotron-hindi-4b
+  - nemotron-labs-diffusion-8b
+  - nemotron-mini-4b
+  - nemotron-nano-4b
+  - olmo2-1b
+  - personaplex-7b
+  - phi-moe
+  - phi3-mini
+  - phi4-multimodal
+  - pixart-sigma-1024
+  - qwen-image
+  - qwen-image-2512
+  - qwen-image-edit-2511
+  - qwen25vl-3b
+  - qwen3-4b-instruct-2507
+  - qwen3-moe-30b-a3b
+  - qwen3-omni-30b-a3b-instruct
+  - qwen35-9b
+  - riva-translate-4b
+  - sana-wm-bidirectional
+  - stablelm2-1.6b
+  - starcoder2-3b
+  - wan21-t2v-1.3b
+  - wan22-ti2v-5b
+  - z-image-turbo

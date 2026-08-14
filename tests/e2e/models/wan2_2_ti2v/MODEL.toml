@@ -13,6 +13,7 @@ repository = "https://github.com/Wan-Video/Wan2.2.git"
 revision = "42bf4cfaa384bc21833865abc2f9e6c0e67233dc"
 relative_path = "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"
 entrypoint = "wan/textimage2video.py"
+environment_variable = "TRTMC_WAN_REFERENCE_REPO"
 suites = ["nightly"]
 
 [e2e_defaults.diffusion_media_generation]

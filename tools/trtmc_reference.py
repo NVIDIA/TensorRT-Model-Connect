@@ -499,7 +499,7 @@ def _native_reference_command(
         command.extend(["--model-revision", str(args.model_revision)])
     if runner == _ELF_PREPARED_RUNNER and args.elf_reference_repo:
         command.extend(["--elf-reference-repo", str(args.elf_reference_repo)])
-    if runner == _SPEECH_REFERENCE_RUNNER and args.family:
+    if runner in {_SPEECH_REFERENCE_RUNNER, _TRANSFORMERS_TEXT_RUNNER} and args.family:
         command.extend(["--family", str(args.family)])
     if runner == _TRANSFORMERS_TEXT_RUNNER and args.experts_implementation:
         command.extend(

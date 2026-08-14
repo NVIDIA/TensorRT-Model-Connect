@@ -76,6 +76,7 @@ suite_match_reason = validation_catalog.suite_match_reason
 
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 REFERENCE_RUNNER = REPO_ROOT / "tools" / "trtmc_reference.py"
+REFERENCE_CUDA_ALLOC_CONF_ENV = "TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
 GPT_OSS_MMLU_SYSTEM_PROMPT = "You are a helpful assistant. Answer with only the option letter."
@@ -7219,6 +7220,7 @@ def run_time_series_bundle(args: argparse.Namespace) -> None:
                 binary_path=str(args.trtmc_binary),
                 hf_python=str(getattr(args, "hf_python", "") or ""),
                 runtime_python=str(getattr(args, "hf_python", "") or ""),
+                ld_library_path=os.environ.get("LD_LIBRARY_PATH", ""),
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
@@ -7445,6 +7447,7 @@ def run_vision_bundle(args: argparse.Namespace) -> None:
                 binary_path=str(args.trtmc_binary),
                 hf_python=str(getattr(args, "hf_python", "") or ""),
                 runtime_python=str(getattr(args, "hf_python", "") or ""),
+                ld_library_path=os.environ.get("LD_LIBRARY_PATH", ""),
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
@@ -7624,6 +7627,7 @@ def run_reranking_bundle(args: argparse.Namespace) -> None:
                 binary_path=str(args.trtmc_binary),
                 hf_python=str(getattr(args, "hf_python", "") or ""),
                 runtime_python=str(getattr(args, "hf_python", "") or ""),
+                ld_library_path=os.environ.get("LD_LIBRARY_PATH", ""),
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
@@ -8218,6 +8222,7 @@ def run_diffusion_bundle(args: argparse.Namespace) -> None:
                 binary_path=str(args.trtmc_binary),
                 hf_python=str(getattr(args, "hf_python", "") or ""),
                 runtime_python=str(getattr(args, "hf_python", "") or ""),
+                ld_library_path=os.environ.get("LD_LIBRARY_PATH", ""),
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
@@ -8355,6 +8360,7 @@ def run_diffusion_text_bundle(args: argparse.Namespace) -> None:
                 binary_path=str(args.trtmc_binary),
                 hf_python=str(getattr(args, "hf_python", "") or ""),
                 runtime_python=str(getattr(args, "hf_python", "") or ""),
+                ld_library_path=os.environ.get("LD_LIBRARY_PATH", ""),
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
@@ -8732,6 +8738,7 @@ def run_model_plugin_bundle(args: argparse.Namespace) -> None:
                 hf_python=str(getattr(args, "hf_python", "") or ""),
                 runtime_python=str(getattr(args, "hf_python", "") or ""),
                 reference_python=str(getattr(args, "hf_python", "") or ""),
+                ld_library_path=os.environ.get("LD_LIBRARY_PATH", ""),
                 engine_dir=str(bundle_path.parent),
                 model_plugin_dir=str(
                     getattr(args, "model_plugin_dir", "") or ""
@@ -9986,7 +9993,15 @@ def run_hf_reference_subprocess(
     log_path = work_dir / "hf_run.log"
     env = os.environ.copy()
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
-    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    allocator_conf = os.environ.get(REFERENCE_CUDA_ALLOC_CONF_ENV)
+    if allocator_conf is None:
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    elif allocator_conf.strip().lower() in {"disable", "disabled", "none"}:
+        env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    elif allocator_conf.strip():
+        env["PYTORCH_CUDA_ALLOC_CONF"] = allocator_conf.strip()
+    else:
+        raise RuntimeError(f"{REFERENCE_CUDA_ALLOC_CONF_ENV} cannot be empty")
     with log_path.open("w", encoding="utf-8") as log_f:
         log_f.write(f"$ {shlex.join(cmd)}\n")
         log_f.flush()

@@ -25,7 +25,7 @@
         "att_context_size": [56, 13]
       },
       "metadata": {
-        "notes": "Reference runs NeMo's EncDecRNNTBPEModelWithPrompt via a JSONL manifest with `lang: en-US` (the field NeMo's Lhotse loader maps to supervisions[0].language); audio is converted to mono 16 kHz first. Comparator gates on WER/CER thresholds set in the sidecar."
+        "notes": "Reference runs NeMo's EncDecHybridRNNTCTCBPEModelWithPrompt via a JSONL manifest with `lang: en-US` (the field NeMo's Lhotse loader maps to supervisions[0].language); audio is converted to mono 16 kHz first. Comparator gates on WER/CER thresholds set in the sidecar."
       }
     }
   ]

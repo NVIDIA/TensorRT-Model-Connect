@@ -615,6 +615,7 @@ def test_causal_reference_uses_native_transformers_entrypoint(
         "batched_mm",
     )
     arguments.reference_family = "causal_base_continuation"
+    arguments.family = "internlm"
     manifest_path = work_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["dataset_kind"] = "mmlu_five_shot_json"
@@ -657,6 +658,7 @@ def test_causal_reference_uses_native_transformers_entrypoint(
     assert command[1].endswith("tools/reference/transformers_text.py")
     assert command[command.index("--model-revision") + 1] == "0123456789abcdef"
     assert command[command.index("--experts-implementation") + 1] == "batched_mm"
+    assert command[command.index("--family") + 1] == "internlm"
     assert "validation/engine.py" not in " ".join(command)
     assert (work_dir / "hf_native_run.log").is_symlink()
     assert (work_dir / "hf_native_repro.json").is_symlink()
@@ -1290,6 +1292,26 @@ def test_plugin_reference_records_nested_upstream_command(tmp_path: Path) -> Non
     assert "plugin_reference.py" not in " ".join(row["command"])
 
 
+def test_plugin_diffusion_failure_preserves_nested_stderr() -> None:
+    case = SimpleNamespace(
+        name="sana-wm-sample",
+        inputs={"seed": 42},
+        determinism={"seed": 42},
+    )
+    output = SimpleNamespace(
+        timing_s=0.25,
+        data={
+            "returncode": 1,
+            "num_frames": 0,
+            "stderr": "official SANA reference exploded",
+            "stdout": "",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="official SANA reference exploded"):
+        plugin_reference._diffusion_response(case, output, "a red cube")
+
+
 def test_plugin_reference_preserves_model_owned_subprocess_command() -> None:
     namespace: dict[str, object] = {}
 
@@ -1777,7 +1799,14 @@ def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
     fake_torch = SimpleNamespace(cuda=FakeCuda())
 
     class FakeModel:
+        def __init__(self) -> None:
+            self.forward_during_transcribe = None
+
+        def forward(self, *args, **kwargs):
+            return args, kwargs
+
         def transcribe(self, manifest_path, *, batch_size, verbose):
+            self.forward_during_transcribe = self.forward
             rows = [
                 json.loads(line)
                 for line in Path(manifest_path)
@@ -1802,12 +1831,14 @@ def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
             assert verbose is False
             return [SimpleNamespace(text="CONCORD RETURNED")]
 
+    fake_model = FakeModel()
+    original_forward = fake_model.forward
     monkeypatch.setattr(
         speech,
         "_load_nemotron35_model",
         lambda _arguments, resolved_archive: (
             fake_torch,
-            FakeModel(),
+            fake_model,
         ),
     )
     monkeypatch.setattr(
@@ -1841,8 +1872,155 @@ def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
     )
 
     assert len(transcribe_calls) == 1
+    assert fake_model.forward_during_transcribe is not None
+    assert fake_model.forward_during_transcribe != original_forward
+    assert fake_model.forward == original_forward
     assert responses[0]["output_text"] == "CONCORD RETURNED"
     assert responses[0]["generated_token_ids"] is None
+
+
+def test_nemotron35_forward_adapter_extends_prompt_by_one_frame() -> None:
+    prompt_tail = object()
+    extended_prompt = object()
+
+    class FakePrompt:
+        shape = (1, 44, 8)
+
+        def __getitem__(self, key):
+            assert key == (slice(None), slice(-1, None), slice(None))
+            return prompt_tail
+
+    prompt = FakePrompt()
+
+    class FakeTorch:
+        @staticmethod
+        def cat(tensors, *, dim):
+            assert tensors == (prompt, prompt_tail)
+            assert dim == 1
+            return extended_prompt
+
+    args, kwargs = speech._extend_nemotron35_prompt_for_forward(
+        FakeTorch(),
+        (),
+        {"prompt": prompt, "input_signal": object()},
+    )
+
+    assert args == ()
+    assert kwargs["prompt"] is extended_prompt
+
+
+def test_nemotron35_model_uses_hybrid_prompt_nemo_loader(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    archive = tmp_path / "nemotron.nemo"
+    archive.write_bytes(b"archive")
+    restore_calls: list[tuple[str, object, bool, object]] = []
+    device = object()
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.eval_called = False
+            self.device = None
+            self.restore_state = None
+
+        def load_state_dict(self, _state_dict, *, strict):
+            assert strict is False
+            return SimpleNamespace(
+                missing_keys=[
+                    "ctc_decoder.decoder_layers.0.weight",
+                    "ctc_decoder.decoder_layers.0.bias",
+                ],
+                unexpected_keys=[],
+            )
+
+        def _set_model_restore_state(self, *, is_being_restored):
+            self.restore_state = is_being_restored
+
+        def eval(self) -> None:
+            self.eval_called = True
+
+        def to(self, selected_device) -> None:
+            self.device = selected_device
+
+    restored = FakeModel()
+
+    class FakeHybridPromptModel:
+        @staticmethod
+        def restore_from(
+            path: str,
+            *,
+            map_location,
+            strict,
+            save_restore_connector,
+        ):
+            restore_calls.append(
+                (path, map_location, strict, save_restore_connector)
+            )
+            save_restore_connector.load_instance_with_state_dict(
+                restored,
+                {},
+                strict,
+            )
+            return restored
+
+    class FakeSaveRestoreConnector:
+        pass
+
+    torch_module = ModuleType("torch")
+    torch_module.device = lambda name: device  # type: ignore[attr-defined]
+    models_module = ModuleType("nemo.collections.asr.models")
+    models_module.EncDecHybridRNNTCTCBPEModelWithPrompt = (  # type: ignore[attr-defined]
+        FakeHybridPromptModel
+    )
+    asr_module = ModuleType("nemo.collections.asr")
+    asr_module.__path__ = []  # type: ignore[attr-defined]
+    asr_module.models = models_module  # type: ignore[attr-defined]
+    collections_module = ModuleType("nemo.collections")
+    collections_module.__path__ = []  # type: ignore[attr-defined]
+    collections_module.asr = asr_module  # type: ignore[attr-defined]
+    nemo_module = ModuleType("nemo")
+    nemo_module.__path__ = []  # type: ignore[attr-defined]
+    nemo_module.collections = collections_module  # type: ignore[attr-defined]
+    save_restore_module = ModuleType("nemo.core.connectors.save_restore_connector")
+    save_restore_module.SaveRestoreConnector = (  # type: ignore[attr-defined]
+        FakeSaveRestoreConnector
+    )
+    connectors_module = ModuleType("nemo.core.connectors")
+    connectors_module.__path__ = []  # type: ignore[attr-defined]
+    connectors_module.save_restore_connector = (  # type: ignore[attr-defined]
+        save_restore_module
+    )
+    core_module = ModuleType("nemo.core")
+    core_module.__path__ = []  # type: ignore[attr-defined]
+    core_module.connectors = connectors_module  # type: ignore[attr-defined]
+    nemo_module.core = core_module  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
+    monkeypatch.setitem(sys.modules, "nemo", nemo_module)
+    monkeypatch.setitem(sys.modules, "nemo.collections", collections_module)
+    monkeypatch.setitem(sys.modules, "nemo.collections.asr", asr_module)
+    monkeypatch.setitem(sys.modules, "nemo.collections.asr.models", models_module)
+    monkeypatch.setitem(sys.modules, "nemo.core", core_module)
+    monkeypatch.setitem(sys.modules, "nemo.core.connectors", connectors_module)
+    monkeypatch.setitem(
+        sys.modules,
+        "nemo.core.connectors.save_restore_connector",
+        save_restore_module,
+    )
+
+    returned_torch, returned_model = speech._load_nemotron35_model(
+        SimpleNamespace(device="cuda"),
+        archive,
+    )
+
+    assert returned_torch is torch_module
+    assert returned_model is restored
+    assert len(restore_calls) == 1
+    assert restore_calls[0][:3] == (str(archive), device, False)
+    assert restored.eval_called is True
+    assert restored.device is device
+    assert restored.restore_state is False
 
 
 def test_plugin_reference_records_actual_command_during_inference(
@@ -1878,6 +2056,7 @@ def test_plugin_reference_records_actual_command_during_inference(
     template = SimpleNamespace(
         name="template",
         inputs={},
+        metadata={},
         stages=[SimpleNamespace(name="full_inference")],
     )
 
@@ -1886,6 +2065,8 @@ def test_plugin_reference_records_actual_command_during_inference(
             assert case.name == "series-1"
             assert stage.name == "full_inference"
             assert context.artifacts_dir.endswith("hf_artifacts")
+            assert case.metadata["reference_device"] == "cpu"
+            assert case.metadata["reference_device_map"] == ""
             return SimpleNamespace(
                 data={
                     "output_field": [3.0, 4.0],
@@ -1924,6 +2105,8 @@ def test_plugin_reference_records_actual_command_during_inference(
             str(raw_output),
             "--repro-metadata",
             str(metadata),
+            "--device",
+            "cpu",
         ]
     )
 

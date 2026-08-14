@@ -654,9 +654,19 @@ def _diffusion_response(case: Any, output: Any, prompt: str) -> dict[str, Any]:
     if image_path is not None and image_path.is_file():
         response["condition_image_sha256"] = _sha256_file(image_path)
     if response["returncode"] != 0 or response["num_frames"] < 1:
+        detail = ""
+        for stream_name in ("stderr", "stdout"):
+            stream = data.get(stream_name, "")
+            if isinstance(stream, bytes):
+                stream = stream.decode(errors="replace")
+            stream = str(stream).strip()
+            if stream:
+                detail = f"\nNested reference {stream_name} (tail):\n{stream[-8000:]}"
+                break
         raise RuntimeError(
             f"HF diffusion reference failed for {case.name}: "
             f"returncode={response['returncode']} frames={response['num_frames']}"
+            f"{detail}"
         )
     return response
 
@@ -831,6 +841,8 @@ def run(arguments: argparse.Namespace) -> None:
         arguments.sample_id,
     )
     template, reference = _load_reference_plugin(manifest)
+    template.metadata["reference_device"] = arguments.device
+    template.metadata["reference_device_map"] = arguments.device_map
     artifacts_dir = arguments.predictions.parent / "hf_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     command_path = arguments.predictions.parent / "hf_native_commands.jsonl"

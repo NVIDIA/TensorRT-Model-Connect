@@ -3212,6 +3212,25 @@ def test_lance_image_only_decord_stub_rejects_video_use() -> None:
         modules["decord"].VideoReader("video.mp4")
 
 
+def test_lance_reference_loads_explicit_sdpa_attention_compat(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
+    reference_repo = tmp_path / "Lance"
+    reference_repo.mkdir()
+    (reference_repo / "inference_lance.py").write_text(
+        "import flash_attn\nATTENTION = flash_attn.flash_attn_varlen_func.__module__\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND", "torch_sdpa")
+    monkeypatch.delitem(sys.modules, "flash_attn", raising=False)
+
+    upstream = runner["_load_upstream"](reference_repo)
+
+    assert upstream.ATTENTION.endswith("flash_attn")
+    assert "lance_image_attention_compat" in sys.modules["flash_attn"].__file__
+
+
 def test_lance_git_revision_scopes_safe_directory(tmp_path: Path, monkeypatch) -> None:
     runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
     captured: list[str] = []

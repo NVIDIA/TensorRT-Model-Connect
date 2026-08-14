@@ -754,6 +754,7 @@ class HfTransformersReference:
         hf_id = case.hf_id
         model_ref = _resolve_cached_model_ref(hf_id)
         torch_dtype_expr = _torch_dtype_for_case(case)
+        reference_device = str(case.metadata.get("reference_device", "cuda") or "cuda")
 
         script = textwrap.dedent(f"""\
             import json, torch
@@ -770,7 +771,7 @@ class HfTransformersReference:
             model = AutoModelForSequenceClassification.from_pretrained(
                 model_ref, trust_remote_code=trust_remote_code,
                 torch_dtype=torch_dtype)
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = {reference_device!r}
             model.to(device)
             model.eval()
 

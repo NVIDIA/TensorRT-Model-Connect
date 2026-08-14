@@ -745,6 +745,7 @@ def test_wan22_nightly_selection_emits_only_the_pinned_source_contract(
         "revision": "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
         "relative_path": "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384",
         "entrypoint": "wan/textimage2video.py",
+        "environment_variable": "TRTMC_WAN_REFERENCE_REPO",
     }
 
 

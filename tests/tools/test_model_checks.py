@@ -15,7 +15,7 @@ import yaml
 from tools import model_checks
 
 
-def _platform(*, serial: bool = True, unsupported=()):
+def _platform(*, serial: bool = True, excluded_models=()):
     return {
         "id": "test-platform",
         "source": "platform.yaml",
@@ -23,7 +23,7 @@ def _platform(*, serial: bool = True, unsupported=()):
             "task_order": ["accuracy", "perf"],
             "serial_tasks": serial,
         },
-        "unsupported": list(unsupported),
+        "excluded_models": list(excluded_models),
     }
 
 
@@ -74,7 +74,7 @@ def test_plan_expands_every_accuracy_workload_and_perf_entry():
         "model_count": 1,
         "binding_count": 4,
         "configured_binding_count": 4,
-        "unsupported_binding_count": 0,
+        "excluded_binding_count": 0,
         "blocker_count": 0,
     }
 
@@ -118,20 +118,11 @@ def test_plan_can_select_distinct_accuracy_suites_per_model():
     ] == [("model-a", "suite-b"), ("model-b", "suite-c")]
 
 
-def test_platform_hardware_exclusion_can_target_one_accuracy_suite():
+def test_platform_model_exclusion_applies_to_every_accuracy_and_perf_binding():
     plan = model_checks.resolve_plan(
         models=["model-a"],
-        tasks=["accuracy"],
-        platform=_platform(
-            unsupported=(
-                {
-                    "model": "model-a",
-                    "task": "accuracy",
-                    "binding": "suite-b",
-                    "reason": "suite-b exceeds unified memory",
-                },
-            )
-        ),
+        tasks=["accuracy", "perf"],
+        platform=_platform(excluded_models=("model-a",)),
         accuracy_catalog=_accuracy_catalog(),
         accuracy_workloads=(),
         accuracy_bindings={},
@@ -141,31 +132,54 @@ def test_platform_hardware_exclusion_can_target_one_accuracy_suite():
 
     bindings = plan["models"][0]["tasks"]["accuracy"]["bindings"]
     assert [(binding["workload"], binding["status"]) for binding in bindings] == [
-        ("suite-a", "configured"),
-        ("suite-b", "unsupported"),
+        ("suite-a", "excluded"),
+        ("suite-b", "excluded"),
     ]
-    assert plan["models"][0]["tasks"]["accuracy"]["status"] == "configured"
+    assert plan["models"][0]["tasks"]["accuracy"]["status"] == "excluded"
+    perf = plan["models"][0]["tasks"]["perf"]["bindings"]
+    assert [(binding["entry"], binding["status"]) for binding in perf] == [
+        ("family-a.default", "excluded"),
+        ("family-a.long", "excluded"),
+    ]
+    assert plan["models"][0]["tasks"]["perf"]["status"] == "excluded"
+    assert plan["summary"]["excluded_binding_count"] == 4
 
 
-def test_platform_hardware_exclusion_must_name_a_real_binding():
-    with pytest.raises(model_checks.ModelCheckError, match="unknown Accuracy binding"):
-        model_checks.audit_platform_unsupported(
-            _platform(
-                unsupported=(
-                    {
-                        "model": "model-a",
-                        "task": "accuracy",
-                        "binding": "missing-suite",
-                        "reason": "hardware evidence",
-                    },
-                )
-            ),
+def test_platform_exclusion_must_name_a_real_model():
+    with pytest.raises(model_checks.ModelCheckError, match="unknown models: missing-model"):
+        model_checks.audit_platform_exclusions(
+            _platform(excluded_models=("missing-model",)),
             accuracy_catalog=_accuracy_catalog(),
             perf_cases=_perf_cases(),
         )
 
 
-def test_missing_task_binding_is_a_blocker_not_hardware_unsupported():
+@pytest.mark.parametrize("legacy_field", ["unsupported", "excluded"])
+def test_platform_rejects_legacy_binding_exclusions(
+    tmp_path: Path,
+    legacy_field: str,
+) -> None:
+    path = tmp_path / "legacy-platform.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": model_checks.PLATFORM_SCHEMA,
+                "id": "legacy-platform",
+                "execution": {
+                    "task_order": ["accuracy", "perf"],
+                    "serial_tasks": True,
+                },
+                legacy_field: [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(model_checks.ModelCheckError, match="use excluded_models"):
+        model_checks.load_platform(str(path))
+
+
+def test_missing_task_binding_is_a_blocker_not_a_platform_exclusion():
     plan = model_checks.resolve_plan(
         models=["model-b"],
         tasks=["accuracy", "perf"],
@@ -227,7 +241,7 @@ def test_all_accuracy_selects_only_accuracy_catalog_models(monkeypatch):
                 "model_count": 0,
                 "binding_count": 0,
                 "configured_binding_count": 0,
-                "unsupported_binding_count": 0,
+                "excluded_binding_count": 0,
                 "blocker_count": 0,
             },
         }
@@ -284,6 +298,7 @@ def test_execution_environment_preserves_command_name_and_resolves_paths(
             {
                 "schema_version": model_checks.ENVIRONMENT_SCHEMA,
                 "id": "test-platform",
+                "environment_variables": {"TRTMC_MODEL_FEATURE": "enabled"},
                 "storage": {
                     "root": "${TEST_STORAGE}",
                     "results_root": "${TEST_STORAGE}/results",
@@ -317,6 +332,62 @@ def test_execution_environment_preserves_command_name_and_resolves_paths(
     )
     assert environment["tasks"]["accuracy"]["runner_python"] == "python3"
     assert Path(environment["tasks"]["perf"]["suite"]).is_absolute()
+    assert environment["environment_variables"] == {
+        "TRTMC_MODEL_FEATURE": "enabled"
+    }
+
+
+@pytest.mark.parametrize(
+    "environment_variables",
+    [
+        {"PATH": "/unmanaged"},
+        {"TRTMC_VALIDATION_SOURCE_REVISION": "unmanaged"},
+        {"TRTMC_MODEL_FEATURE": ""},
+        {"TRTMC_MODEL_FEATURE": True},
+    ],
+)
+def test_execution_environment_rejects_unsafe_environment_variables(
+    tmp_path,
+    monkeypatch,
+    environment_variables,
+):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("TEST_STORAGE", str(storage))
+    environment_path = tmp_path / "environment.yaml"
+    environment_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": model_checks.ENVIRONMENT_SCHEMA,
+                "id": "test-platform",
+                "environment_variables": environment_variables,
+                "storage": {
+                    "root": "${TEST_STORAGE}",
+                    "results_root": "${TEST_STORAGE}/results",
+                },
+                "tasks": {
+                    "accuracy": {"runner_python": "python3", "options": {}},
+                    "perf": {
+                        "runner_python": "python3",
+                        "suite": "benchmarks/performance/release.yaml",
+                        "environment": (
+                            "benchmarks/performance/environments/gb300.yaml"
+                        ),
+                    },
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        model_checks.ModelCheckError,
+        match="environment_variables must map unmanaged TRTMC_",
+    ):
+        model_checks.load_execution_environment(
+            str(environment_path),
+            platform_id="test-platform",
+        )
 
 
 def test_runner_executable_preserves_virtual_environment_symlink(tmp_path):
@@ -343,6 +414,87 @@ def test_task_environment_uses_shared_profiles_and_allows_missing_profiles(
     assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY" not in environment
     assert os.environ["TRTMC_PYTHON_PROFILE_ROOT"] == "/opt/trtmc-python-profiles"
     assert os.environ["TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"] == "1"
+
+
+def test_task_environment_prepends_configured_runtime_libraries(
+    tmp_path,
+    monkeypatch,
+):
+    runtime_library = tmp_path / "runtime/lib"
+    runtime_library.mkdir(parents=True)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/system/lib")
+
+    environment = model_checks._task_environment(
+        {
+            "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+            "library_dirs": [str(runtime_library)],
+        }
+    )
+
+    assert environment["LD_LIBRARY_PATH"] == (
+        f"{runtime_library}{os.pathsep}/system/lib"
+    )
+
+
+def test_task_environment_prepends_configured_executable_directories(
+    tmp_path,
+    monkeypatch,
+):
+    cuda_bin = tmp_path / "cuda/bin"
+    cuda_bin.mkdir(parents=True)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    environment = model_checks._task_environment(
+        {
+            "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+            "executable_dirs": [str(cuda_bin)],
+        }
+    )
+
+    assert environment["PATH"] == f"{cuda_bin}{os.pathsep}/usr/bin:/bin"
+
+
+def test_task_environment_exports_checked_in_environment_variables(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND", "ambient")
+
+    environment = model_checks._task_environment(
+        {
+            "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+            "environment_variables": {
+                "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"
+            },
+        }
+    )
+
+    assert environment["TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"] == "torch_sdpa"
+    assert os.environ["TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"] == "ambient"
+
+
+def test_task_environment_rejects_missing_executable_directory(tmp_path):
+    missing = tmp_path / "missing/bin"
+
+    with pytest.raises(model_checks.ModelCheckError, match=str(missing)):
+        model_checks._task_environment(
+            {
+                "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+                "executable_dirs": [str(missing)],
+            }
+        )
+
+
+def test_task_environment_rejects_missing_runtime_library_directory(tmp_path):
+    missing = tmp_path / "missing/lib"
+
+    with pytest.raises(model_checks.ModelCheckError, match=str(missing)):
+        model_checks._task_environment(
+            {
+                "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+                "library_dirs": [str(missing)],
+            }
+        )
 
 
 def test_perf_reference_contracts_come_from_selected_model_owners() -> None:
@@ -432,7 +584,7 @@ def test_selected_models_artifact_records_configured_bindings(tmp_path) -> None:
                     "accuracy": {
                         "bindings": [
                             {"model": "model-a", "status": "configured"},
-                            {"model": "model-b", "status": "unsupported"},
+                            {"model": "model-b", "status": "excluded"},
                         ]
                     },
                     "perf": {
@@ -448,7 +600,105 @@ def test_selected_models_artifact_records_configured_bindings(tmp_path) -> None:
 
     selection = model_checks._write_selected_models(plan, tmp_path)
 
-    assert selection.read_text(encoding="utf-8") == "model-a\nmodel-c\n"
+    assert selection.read_text(encoding="utf-8") == "model-a\nmodel-b\nmodel-c\n"
+
+
+def test_accuracy_platform_exclusions_are_reported_without_execution(tmp_path) -> None:
+    plan = {
+        "models": [
+            {
+                "tasks": {
+                    "accuracy": {
+                        "bindings": [
+                            {
+                                "model": "model-a",
+                                "workload": "suite-a",
+                                "status": "configured",
+                            },
+                            {
+                                "model": "model-b",
+                                "workload": "suite-b",
+                                "status": "excluded",
+                                "reason": "Model is excluded from platform test-platform",
+                            },
+                            {
+                                "model": "model-c",
+                                "workload": "suite-c",
+                                "status": "excluded",
+                                "reason": "qualification is intentionally deferred",
+                            },
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+    output = tmp_path / "accuracy"
+
+    assert [
+        (binding["model"], binding["workload"])
+        for binding in model_checks._task_bindings(plan, "accuracy")
+    ] == [("model-a", "suite-a")]
+    written = model_checks._write_accuracy_platform_results(plan, output)
+    _, html_path, report = model_checks.trtmc_validate.write_report(output)
+
+    assert [path.relative_to(output).as_posix() for path in written] == [
+        "model-b/suite-b/comparison.json",
+        "model-c/suite-c/comparison.json",
+    ]
+    assert report["summary"]["platform_excluded"] == 2
+    assert report["summary"]["not_compared"] == 2
+    assert all(result["execution"]["status"] == "not_run" for result in report["results"])
+    assert all("platform_exclusion" in result for result in report["results"])
+    html = html_path.read_text(encoding="utf-8")
+    assert "2 platform excluded" in html
+    assert "Model is excluded from platform test-platform" in html
+    assert "qualification is intentionally deferred" in html
+
+
+def test_accuracy_platform_exclusion_does_not_replace_executed_result(tmp_path) -> None:
+    output = tmp_path / "accuracy"
+    comparison = output / "model-b" / "suite-b" / "comparison.json"
+    comparison.parent.mkdir(parents=True)
+    comparison.write_text(
+        json.dumps(
+            {
+                "model": "model-b",
+                "workload": "suite-b",
+                "execution": {"status": "completed"},
+                "validation": {"status": "passed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan = {
+        "models": [
+            {
+                "tasks": {
+                    "accuracy": {
+                        "bindings": [
+                            {
+                                "model": "model-b",
+                                "workload": "suite-b",
+                                "status": "excluded",
+                                "reason": "Model is excluded from platform test-platform",
+                            }
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+
+    with pytest.raises(
+        model_checks.ModelCheckError,
+        match="refusing to replace a previously executed Accuracy result",
+    ):
+        model_checks._write_accuracy_platform_results(plan, output)
+
+    assert json.loads(comparison.read_text(encoding="utf-8"))["execution"] == {
+        "status": "completed"
+    }
 
 
 @pytest.mark.parametrize(
@@ -473,6 +723,7 @@ def test_checked_in_accuracy_environment_deletes_engines_without_fixed_reserve(
     assert "local-files-only" not in options
     assert options["hf-cache-mode"] == hf_cache_mode
     assert options["hf-cache-retention"] == hf_cache_retention
+    assert options["prepare-hf-on-demand"] is True
 
 
 def test_l4t_accuracy_environment_bounds_each_model_attempt() -> None:
@@ -484,16 +735,91 @@ def test_l4t_accuracy_environment_bounds_each_model_attempt() -> None:
     assert raw["tasks"]["accuracy"]["options"]["model-timeout-seconds"] == 21600
 
 
-def test_l4t_marks_minimax_profile_unsupported_by_memory_contract() -> None:
+def test_l4t_environment_selects_qualified_tensorrt_libraries() -> None:
+    raw = model_checks._read_yaml(
+        model_checks.DEFAULT_ENVIRONMENT_ROOT / "l4t-thor.yaml",
+        "model-check environment",
+    )
+
+    assert raw["library_dirs"] == [
+        "${TRTMC_CHECK_STORAGE_ROOT}/runtime/TensorRT-11.0.2.2/lib"
+    ]
+    assert raw["executable_dirs"] == ["/usr/local/cuda/bin"]
+
+
+@pytest.mark.parametrize(
+    ("platform", "attention_backend"),
+    [
+        ("l4t-thor", "torch_sdpa"),
+        ("gb300", "torch_sdpa"),
+        ("auto-thor", "torch_sdpa"),
+    ],
+)
+def test_checked_in_environment_selects_lance_reference_attention_backend(
+    platform,
+    attention_backend,
+) -> None:
+    environment = model_checks._read_yaml(
+        model_checks.DEFAULT_ENVIRONMENT_ROOT / f"{platform}.yaml",
+        "model-check environment",
+    )
+
+    assert environment["environment_variables"] == {
+        "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": attention_backend
+    }
+
+
+def test_l4t_excludes_models_outside_thor_capacity_or_configuration() -> None:
     platform = model_checks.load_platform("l4t-thor")
 
-    assert any(
-        item["model"] == "minimax-h3-768p"
-        and item["task"] == "accuracy"
-        and item["binding"] == "minimax_h3_official_profile_parity"
-        and "180 GiB" in item["reason"]
-        for item in platform["unsupported"]
-    )
+    assert platform["excluded_models"] == [
+        "deepseek-ocr",
+        "deepseek-v2-lite",
+        "falcon-rw-1b",
+        "falcon3-1b",
+        "flux-2-dev",
+        "flux-2-dev-fp8",
+        "flux-schnell",
+        "gemma-2-2b",
+        "glm-4-9b",
+        "granite-3.1-2b",
+        "gpt-oss-20b",
+        "internlm2-1.8b",
+        "internvl3-2b",
+        "internvl3-8b",
+        "lance-3b-x2t-image",
+        "locateanything-3b",
+        "minimax-h3-768p",
+        "minitron-4b-depth",
+        "minitron-4b-width",
+        "mistral-7b",
+        "nemotron-h-nano-9b",
+        "nemotron-hindi-4b",
+        "nemotron-labs-diffusion-8b",
+        "nemotron-mini-4b",
+        "nemotron-nano-4b",
+        "olmo2-1b",
+        "personaplex-7b",
+        "phi-moe",
+        "phi3-mini",
+        "phi4-multimodal",
+        "pixart-sigma-1024",
+        "qwen-image",
+        "qwen-image-2512",
+        "qwen-image-edit-2511",
+        "qwen25vl-3b",
+        "qwen3-4b-instruct-2507",
+        "qwen3-moe-30b-a3b",
+        "qwen3-omni-30b-a3b-instruct",
+        "qwen35-9b",
+        "riva-translate-4b",
+        "sana-wm-bidirectional",
+        "stablelm2-1.6b",
+        "starcoder2-3b",
+        "wan21-t2v-1.3b",
+        "wan22-ti2v-5b",
+        "z-image-turbo",
+    ]
 
 
 def test_l4t_perf_environment_deletes_entry_cache_and_bundle() -> None:
@@ -505,10 +831,10 @@ def test_l4t_perf_environment_deletes_entry_cache_and_bundle() -> None:
     assert raw["execution"]["hf_cache_retention"] == "delete_always"
 
 
-def test_l4t_platform_rejects_unverifiable_nvme_partition():
+def test_l4t_platform_rejects_unverifiable_data_partition():
     platform = model_checks.load_platform("l4t-thor")
 
-    with pytest.raises(model_checks.ModelCheckError, match="/dev/nvme0n1p1"):
+    with pytest.raises(model_checks.ModelCheckError, match="/dev/vblkdev2"):
         model_checks._require_platform_storage_root(Path("/tmp/run"), platform)
 
 
@@ -598,6 +924,7 @@ def test_l4t_dry_run_passes_managed_hf_cache_seed_to_accuracy(tmp_path, monkeypa
     command = request["commands"]["accuracy"]
     seed_index = command.index("--hf-cache-seed-dir")
     assert command[seed_index + 1] == str(seed)
+    assert "--local-files-only" not in command
 
 
 def test_run_default_output_is_concise_and_ends_with_task_summary(
@@ -694,6 +1021,61 @@ def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch
     output = capsys.readouterr().out
     assert "tools/trtmc_validate.py --binding" in output
     assert commands[-1][-1] == "--verbose"
+
+
+def test_run_forwards_exact_source_revision_to_accuracy_and_perf(
+    tmp_path, monkeypatch
+):
+    storage = tmp_path / "storage"
+    revision = "A" * 40
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    child_environments = []
+
+    def run(_command, **kwargs):
+        child_environments.append(kwargs["env"])
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(model_checks.subprocess, "run", run)
+
+    assert (
+        model_checks.main(
+            [
+                "run",
+                "--platform",
+                "gb300",
+                "--model",
+                "distilgpt2",
+                "--revision",
+                revision,
+                "--run-id",
+                "revision-unit",
+            ]
+        )
+        == 0
+    )
+
+    assert len(child_environments) == 2
+    for child in child_environments:
+        assert child["TRTMC_VALIDATION_SOURCE_REVISION"] == revision.lower()
+        assert child["TRTMC_PERF_SOURCE_REVISION"] == revision.lower()
+
+
+def test_task_environment_does_not_export_symbolic_revision(tmp_path, monkeypatch):
+    monkeypatch.delenv("TRTMC_VALIDATION_SOURCE_REVISION", raising=False)
+    monkeypatch.delenv("TRTMC_PERF_SOURCE_REVISION", raising=False)
+    environment = {
+        "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+        "library_dirs": [],
+        "executable_dirs": [],
+    }
+
+    child = model_checks._task_environment(environment, source_revision="HEAD")
+
+    assert "TRTMC_VALIDATION_SOURCE_REVISION" not in child
+    assert "TRTMC_PERF_SOURCE_REVISION" not in child
 
 
 def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch):

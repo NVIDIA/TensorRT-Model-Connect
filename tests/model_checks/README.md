@@ -111,8 +111,9 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
 
 Use `--platform gb300`, `--platform auto-thor`, or `--platform l4t-thor`.
 Platform files under `tests/model_checks/platforms/` define task order and
-hardware exclusions. Files under `tests/model_checks/environments/` define
-paths and retention.
+model exclusions. An excluded model runs no Accuracy suite or Perf entry;
+Accuracy suites remain in the report as `not compared`. Files under
+`tests/model_checks/environments/` define paths and retention.
 
 Checked-in environments delete Accuracy engines and Perf bundles after each
 binding. GB300 and Auto Thor retain their shared Hugging Face cache. L4T Thor
@@ -126,7 +127,7 @@ See `benchmarks/performance/README.md` for the L4T TensorRT 11 bare-metal build.
 - Define an Accuracy suite in `tests/validation/workloads.yaml`.
 - Assign one or more suites in `tests/validation/model_workloads.yaml`.
 - Add the Perf entry independently in `benchmarks/performance/release.yaml`.
-- Add only verified hardware exclusions under `tests/model_checks/platforms/`.
+- Add platform-wide model exclusions under `tests/model_checks/platforms/`.
 
 Each Accuracy `MODEL=SUITE` binding has its own engine directory. Perf bundles
 remain independent from Accuracy engines.

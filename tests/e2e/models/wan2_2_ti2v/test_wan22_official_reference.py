@@ -8,6 +8,7 @@ from __future__ import annotations
 import subprocess
 import struct
 import sys
+import tomllib
 import zlib
 from pathlib import Path
 from types import ModuleType
@@ -265,6 +266,26 @@ def test_reference_requires_the_pinned_official_source(
 
     with pytest.raises(RuntimeError, match="Pinned official Wan reference is unavailable"):
         wan22_official._resolve_official_source(str(tmp_path))
+
+
+def test_reference_uses_the_declared_checkout_when_output_cache_is_separate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_cache = tmp_path / "accuracy-references"
+    source_cache = tmp_path / "model-sources"
+    source = _write_official_source(source_cache)
+    monkeypatch.setenv("TRTMC_STORAGE_ROOT", str(output_cache))
+    monkeypatch.setenv("TRTMC_WAN_REFERENCE_REPO", str(source))
+
+    assert wan22_official._resolve_official_source() == source
+
+
+def test_family_declares_the_official_source_environment_variable() -> None:
+    manifest = tomllib.loads((_MODEL_DIR / "MODEL.toml").read_text(encoding="utf-8"))
+
+    assert manifest["model_reference_cache"]["environment_variable"] == (
+        "TRTMC_WAN_REFERENCE_REPO"
+    )
 
 
 def test_reference_fails_closed_on_subprocess_error(

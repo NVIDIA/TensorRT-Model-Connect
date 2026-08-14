@@ -28,6 +28,7 @@ import sys
 import tempfile
 import time
 from typing import Any, Iterable, Mapping, Sequence
+import uuid as uuidlib
 
 import yaml
 
@@ -68,6 +69,7 @@ DEFAULT_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_OUTPUT = REPO_ROOT / "artifacts" / "trtmc-validate"
 DEFAULT_ENGINE_DIR = DEFAULT_OUTPUT / "engines"
 DEFAULT_REFERENCE_CACHE = DEFAULT_OUTPUT / "references"
+HF_WARM_SCRIPT = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 COMMON_REFERENCE_PROFILE = "reference_common"
 NOT_COMPARED_DIRECTORY = "not-compared"
 DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT = 1
@@ -876,6 +878,9 @@ def _comparison_command(
         command.extend(["--model-plugin-dir", str(arguments.model_plugin_dir)])
     if arguments.cuda_visible_devices:
         command.extend(["--cuda-visible-devices", arguments.cuda_visible_devices])
+    command.extend(["--hf-device", getattr(arguments, "hf_device", "cuda")])
+    if getattr(arguments, "hf_device_map", ""):
+        command.extend(["--hf-device-map", arguments.hf_device_map])
     if reference_sources and reference_sources.elf_reference_repo:
         command.extend(
             [
@@ -2071,6 +2076,61 @@ def _query_nvidia_smi_gpus() -> list[dict[str, Any]]:
     return inventory
 
 
+def _query_cuda_runtime_gpus() -> list[dict[str, Any]]:
+    """Query identity through CUDA on platforms that do not ship nvidia-smi."""
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError as exc:
+        raise ValidationError(f"could not import CUDA runtime bindings: {exc}") from exc
+
+    try:
+        status, count = cudart.cudaGetDeviceCount()
+        if int(status) != 0:
+            raise ValidationError(f"cudaGetDeviceCount failed with status {status}")
+        inventory: list[dict[str, Any]] = []
+        for index in range(int(count)):
+            status, properties = cudart.cudaGetDeviceProperties(index)
+            if int(status) != 0:
+                raise ValidationError(
+                    f"cudaGetDeviceProperties({index}) failed with status {status}"
+                )
+            status, pci_bus_id = cudart.cudaDeviceGetPCIBusId(32, index)
+            if int(status) != 0:
+                raise ValidationError(
+                    f"cudaDeviceGetPCIBusId({index}) failed with status {status}"
+                )
+            name = properties.name
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace").rstrip("\x00")
+            raw_uuid = bytes(properties.uuid.bytes)
+            try:
+                gpu_uuid = f"GPU-{uuidlib.UUID(bytes=raw_uuid)}"
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"CUDA runtime returned an invalid UUID for device {index}"
+                ) from exc
+            if isinstance(pci_bus_id, bytes):
+                pci_bus_id = pci_bus_id.decode("utf-8", errors="replace")
+            pci_bus_id = str(pci_bus_id).rstrip("\x00 ").strip()
+            if not str(name).strip() or not pci_bus_id:
+                raise ValidationError(
+                    f"CUDA runtime returned incomplete GPU identity for device {index}"
+                )
+            inventory.append(
+                {
+                    "cuda_runtime_index": index,
+                    "uuid": gpu_uuid,
+                    "name": str(name).strip(),
+                    "pci_bus_id": pci_bus_id,
+                }
+            )
+        return inventory
+    except ValidationError:
+        raise
+    except Exception as exc:
+        raise ValidationError(f"could not query CUDA runtime GPU identity: {exc}") from exc
+
+
 def _resolve_cuda_devices(
     cuda_visible_devices: str,
     inventory: Sequence[Mapping[str, Any]],
@@ -2109,11 +2169,63 @@ def _resolve_cuda_devices(
     return resolved
 
 
-def _runtime_gpu_devices(cuda_visible_devices: str) -> list[dict[str, Any]]:
-    return _resolve_cuda_devices(
-        cuda_visible_devices,
-        _query_nvidia_smi_gpus(),
+def _resolve_cuda_runtime_devices(
+    cuda_visible_devices: str,
+    inventory: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    visible = cuda_visible_devices.strip()
+    if visible.lower() in {"-1", "none", "void"}:
+        return []
+    selectors = (
+        [str(device["cuda_runtime_index"]) for device in inventory]
+        if not visible or visible.lower() == "all"
+        else [selector.strip() for selector in visible.split(",")]
     )
+    if not selectors or any(not selector for selector in selectors):
+        raise ValidationError("CUDA_VISIBLE_DEVICES contains an empty selector")
+
+    resolved: list[dict[str, Any]] = []
+    for logical_index, selector in enumerate(selectors):
+        if selector.isdigit():
+            matches = [
+                device
+                for device in inventory
+                if int(device["cuda_runtime_index"]) == int(selector)
+            ]
+        else:
+            matches = [
+                device
+                for device in inventory
+                if str(device["uuid"]) == selector or str(device["uuid"]).startswith(selector)
+            ]
+        if len(matches) != 1:
+            raise ValidationError(
+                "CUDA_VISIBLE_DEVICES selector does not resolve to exactly one "
+                f"CUDA runtime GPU identity: {selector}"
+            )
+        device = dict(matches[0])
+        device["cuda_logical_index"] = logical_index
+        resolved.append(device)
+    return resolved
+
+
+def _runtime_gpu_devices(cuda_visible_devices: str) -> list[dict[str, Any]]:
+    try:
+        return _resolve_cuda_devices(
+            cuda_visible_devices,
+            _query_nvidia_smi_gpus(),
+        )
+    except ValidationError as nvidia_smi_error:
+        try:
+            return _resolve_cuda_runtime_devices(
+                cuda_visible_devices,
+                _query_cuda_runtime_gpus(),
+            )
+        except ValidationError as cuda_runtime_error:
+            raise ValidationError(
+                "could not query GPU identity with nvidia-smi or CUDA runtime: "
+                f"nvidia-smi: {nvidia_smi_error}; CUDA runtime: {cuda_runtime_error}"
+            ) from cuda_runtime_error
 
 
 def write_run_metadata(
@@ -2138,7 +2250,11 @@ def write_run_metadata(
         "hostname": platform.node(),
         "cuda_visible_devices": effective_cuda_visible_devices,
         "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES", ""),
-        "gpu_identity_source": "nvidia-smi",
+        "gpu_identity_source": (
+            "nvidia-smi"
+            if all("nvidia_smi_index" in device for device in gpu_devices)
+            else "cuda-runtime"
+        ),
         "gpu_devices": gpu_devices,
         "command": shlex.join(sys.argv),
         "started_at": started_at,
@@ -2589,6 +2705,12 @@ def _render_comparison(result: Mapping[str, Any]) -> str:
     mode = str(comparison.get("mode", "") or "")
     not_compared_reason = str(result.get("not_compared_reason", "") or "")
     details = [value for value in (mode, not_compared_reason) if value]
+    exclusion = result.get("platform_exclusion", {})
+    if isinstance(exclusion, Mapping) and exclusion:
+        reason = str(exclusion.get("reason", "") or "")
+        detail = ": ".join(value for value in ("Platform excluded", reason) if value)
+        if detail and detail not in details:
+            details.append(detail)
     contract = result.get("precision_contract", {})
     if isinstance(contract, Mapping) and contract:
         base = str(contract.get("trtmc_base_precision", "") or "").upper()
@@ -2738,6 +2860,10 @@ def _traffic_light_counts(
     return counts
 
 
+def _platform_exclusion_count(results: Sequence[Mapping[str, Any]]) -> int:
+    return sum(isinstance(result.get("platform_exclusion"), Mapping) for result in results)
+
+
 def _traffic_light_status(result: Mapping[str, Any]) -> str:
     validation_status = str(result["validation"]["status"])
     comparison_status = str(result["comparison"]["status"])
@@ -2823,6 +2949,10 @@ def _report_document(
     provenance = _report_provenance(report.get("run", {}))
     duration = _format_duration(report["summary"].get("duration_seconds"))
     duration_summary = f" · {html.escape(duration)} total duration" if duration else ""
+    platform_summary = ""
+    excluded = int(report["summary"].get("platform_excluded", 0))
+    if excluded:
+        platform_summary = f" · {excluded} platform excluded"
     filters = render_report_filters(
         row_count=len(results),
         search_placeholder="Model type, operation, model, task type, or workload",
@@ -2920,7 +3050,7 @@ details {{ min-width: 210px; }}
 {comparison_counts["disagreement"]} disagreements ·
 {comparison_counts["not_run"]} not compared ·
 {execution_errors} execution errors ·
-{report["summary"]["selected_samples"]} samples{duration_summary}<br>
+{report["summary"]["selected_samples"]} samples{platform_summary}{duration_summary}<br>
 {html.escape(provenance)}</div>
 {filters}
 <div class="table-wrap"><table><thead><tr><th>Model type</th><th>Operation</th><th>Model</th><th>Task type</th><th>Workload</th><th>Samples</th><th>Execution</th>
@@ -2938,6 +3068,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths, results = _deduplicate_results(result_paths, results)
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
     traffic_light_counts = _traffic_light_counts(results)
+    platform_excluded = _platform_exclusion_count(results)
     sample_counts = [
         count for result in results if (count := _selected_sample_count(result)) is not None
     ]
@@ -2964,6 +3095,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             "validation_passed": validation_counts["passed"],
             "validation_failed": validation_counts["failed"],
             "validation_skipped": validation_counts["skipped"],
+            "platform_excluded": platform_excluded,
             "selected_samples": sum(sample_counts),
         },
         "results": results,
@@ -3238,6 +3370,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--prepare-hf-on-demand",
+        action="store_true",
+        help=(
+            "prepare the selected model and its family-owned Hugging Face "
+            "dependencies immediately before each model worker"
+        ),
+    )
+    parser.add_argument(
         "--minimum-free-space-gib",
         type=_nonnegative_float,
         default=0.0,
@@ -3250,6 +3390,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=REPO_ROOT / "build" / "trtmc_dataset_benchmark",
     )
     parser.add_argument("--hf-python", type=Path, default=Path(sys.executable))
+    parser.add_argument(
+        "--hf-device",
+        default="cuda",
+        help="device used by the Hugging Face Accuracy reference",
+    )
+    parser.add_argument(
+        "--hf-device-map",
+        default="",
+        help="optional Hugging Face device map for the Accuracy reference",
+    )
     parser.add_argument("--backend-dir", type=Path)
     parser.add_argument("--model-plugin-dir", type=Path)
     parser.add_argument("--cuda-visible-devices", default="")
@@ -3498,8 +3648,18 @@ def _binding_resource_arguments(
         if arguments.hf_cache_seed_dir is not None and not any(
             selected.hf_cache_dir.iterdir()
         ):
+            seed_source = arguments.hf_cache_seed_dir
+            seed_destination = selected.hf_cache_dir
+            if any(
+                child.name.startswith(("models--", "datasets--", "spaces--"))
+                for child in seed_source.iterdir()
+            ):
+                # Accept the common Hugging Face hub cache layout in addition
+                # to a complete HF_HOME tree. HF_HOME expects these entries
+                # below its hub/ directory.
+                seed_destination = selected.hf_cache_dir / "hub"
             if (
-                arguments.hf_cache_seed_dir.stat().st_dev
+                seed_source.stat().st_dev
                 != selected.hf_cache_dir.stat().st_dev
             ):
                 raise ValidationError(
@@ -3507,8 +3667,8 @@ def _binding_resource_arguments(
                 )
             try:
                 shutil.copytree(
-                    arguments.hf_cache_seed_dir,
-                    selected.hf_cache_dir,
+                    seed_source,
+                    seed_destination,
                     dirs_exist_ok=True,
                     symlinks=True,
                     copy_function=os.link,
@@ -3517,7 +3677,7 @@ def _binding_resource_arguments(
                 shutil.rmtree(selected.hf_cache_dir, ignore_errors=True)
                 raise ValidationError(
                     f"could not hard-link Hugging Face cache seed "
-                    f"{arguments.hf_cache_seed_dir}: {exc}"
+                    f"{seed_source}: {exc}"
                 ) from exc
     return selected, binding_work, model_work
 
@@ -3608,6 +3768,46 @@ def _worker_environment(arguments: argparse.Namespace) -> dict[str, str]:
     return environment
 
 
+def _prepare_hf_on_demand(
+    binding: Binding,
+    arguments: argparse.Namespace,
+) -> None:
+    if not arguments.prepare_hf_on_demand:
+        return
+    case_dir = _case_directory(arguments.output, binding)
+    case_dir.mkdir(parents=True, exist_ok=True)
+    selected_models = case_dir / "hf_prepare.models.txt"
+    selected_models.write_text(f"{binding.model}\n", encoding="utf-8")
+    log_path = case_dir / "hf_prepare.log"
+    command = [
+        str(arguments.hf_python),
+        str(HF_WARM_SCRIPT),
+        "--models-file",
+        str(selected_models),
+        "--strict",
+        "--fail-fast",
+    ]
+    if arguments.local_files_only:
+        command.append("--local-only")
+    with log_path.open("a", encoding="utf-8") as log_file:
+        log_file.write(f"$ {shlex.join(command)}\n")
+        log_file.flush()
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            check=False,
+            env=_worker_environment(arguments),
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    if completed.returncode != 0:
+        raise ValidationError(
+            f"Hugging Face preparation failed for {binding.model} "
+            f"with rc={completed.returncode}; see {log_path}"
+        )
+
+
 def _check_free_space(arguments: argparse.Namespace, binding: Binding) -> float:
     root = arguments.storage_root or arguments.model_work_dir or arguments.output
     free_gib = shutil.disk_usage(root).free / 1024**3
@@ -3642,6 +3842,7 @@ def _worker_command(
         ("--trtmc-binary", arguments.trtmc_binary),
         ("--benchmark-binary", arguments.benchmark_binary),
         ("--hf-python", arguments.hf_python),
+        ("--hf-device", arguments.hf_device),
         ("--model-attempts", arguments.model_attempts),
         ("--model-retry-delay-seconds", arguments.model_retry_delay_seconds),
         (
@@ -3656,6 +3857,7 @@ def _worker_command(
         command.extend([option, str(value)])
     for option, value in (
         ("--reference-source-cache-dir", arguments.reference_source_cache_dir),
+        ("--hf-device-map", arguments.hf_device_map),
         ("--dataset-root", arguments.dataset_root),
         ("--backend-dir", arguments.backend_dir),
         ("--model-plugin-dir", arguments.model_plugin_dir),
@@ -3670,6 +3872,7 @@ def _worker_command(
         ("--force-build", arguments.force_build),
         ("--no-build", arguments.no_build),
         ("--local-files-only", arguments.local_files_only),
+        ("--prepare-hf-on-demand", arguments.prepare_hf_on_demand),
     ):
         if enabled:
             command.append(option)
@@ -4138,6 +4341,7 @@ def _run_bindings(
             f"\n{binding.model} / {binding.workload} / {sample_note}",
             flush=True,
         )
+        _prepare_hf_on_demand(binding, binding_arguments)
         result = run_binding(
             binding,
             arguments=binding_arguments,

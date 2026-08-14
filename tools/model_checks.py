@@ -53,6 +53,16 @@ DEFAULT_ENVIRONMENT_ROOT = REPOSITORY / "tests" / "model_checks" / "environments
 DEFAULT_PERF_SUITE = REPOSITORY / "benchmarks" / "performance" / "release.yaml"
 TASKS = ("accuracy", "perf")
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+EXACT_GIT_REVISION_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
+ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"TRTMC_[A-Z0-9_]+")
+MANAGED_TASK_ENVIRONMENT_VARIABLES = frozenset(
+    {
+        PROFILE_ROOT_ENV,
+        PREBUILT_ONLY_ENV,
+        "TRTMC_PERF_SOURCE_REVISION",
+        "TRTMC_VALIDATION_SOURCE_REVISION",
+    }
+)
 
 
 class ModelCheckError(ValueError):
@@ -165,70 +175,35 @@ def load_platform(value: str) -> dict[str, Any]:
         not isinstance(required_device, str) or not Path(required_device).is_absolute()
     ):
         raise ModelCheckError(f"platform storage.device must be an absolute path: {path}")
-    unsupported = profile.get("unsupported", [])
-    if not isinstance(unsupported, list):
-        raise ModelCheckError(f"platform unsupported must be a list: {path}")
-    for index, item in enumerate(unsupported):
-        if not isinstance(item, Mapping):
-            raise ModelCheckError(f"platform unsupported[{index}] must be an object")
-        if not all(
-            isinstance(item.get(key), str) and item[key] for key in ("model", "task", "reason")
-        ):
-            raise ModelCheckError(f"platform unsupported[{index}] needs model, task, and reason")
-        if item["task"] not in TASKS:
-            raise ModelCheckError(
-                f"platform unsupported[{index}] has unknown task {item['task']!r}"
-            )
-        binding = item.get("binding")
-        if binding is not None and (not isinstance(binding, str) or not binding.strip()):
-            raise ModelCheckError(
-                f"platform unsupported[{index}].binding must be a non-empty string"
-            )
+    legacy_exclusions = sorted({"unsupported", "excluded"}.intersection(profile))
+    if legacy_exclusions:
+        raise ModelCheckError(
+            "platform binding-level exclusions are no longer supported; use "
+            f"excluded_models instead of {', '.join(legacy_exclusions)}: {path}"
+        )
+    excluded_models = profile.get("excluded_models", [])
+    if not isinstance(excluded_models, list) or any(
+        not isinstance(model, str) or not model.strip() for model in excluded_models
+    ):
+        raise ModelCheckError(f"platform excluded_models must be a list of models: {path}")
+    if len(excluded_models) != len(set(excluded_models)):
+        raise ModelCheckError(f"platform excluded_models contains duplicates: {path}")
     return {**profile, "source": str(path)}
 
 
-def audit_platform_unsupported(
+def audit_platform_exclusions(
     platform: Mapping[str, Any],
     *,
     accuracy_catalog: Mapping[str, Any],
     perf_cases: Sequence[Mapping[str, Any]],
 ) -> None:
-    accuracy_models = accuracy_catalog["models"]
-    perf_bindings: dict[str, set[str]] = {}
-    for case in perf_cases:
-        perf_bindings.setdefault(str(case["model"]), set()).add(str(case["id"]))
-    seen: set[tuple[str, str, str]] = set()
-    for index, item in enumerate(platform.get("unsupported", [])):
-        model = str(item["model"])
-        task = str(item["task"])
-        binding = str(item.get("binding", "") or "")
-        key = (model, task, binding)
-        if key in seen:
-            raise ModelCheckError(
-                f"platform unsupported[{index}] duplicates {model}/{task}/{binding or '*'}"
-            )
-        seen.add(key)
-        if task == "accuracy":
-            spec = accuracy_models.get(model)
-            if not isinstance(spec, Mapping):
-                raise ModelCheckError(
-                    f"platform unsupported[{index}] names unknown Accuracy model {model}"
-                )
-            if binding and binding not in accuracy_catalog["sample_limits"]:
-                raise ModelCheckError(
-                    f"platform unsupported[{index}] names unknown Accuracy binding "
-                    f"{model}={binding}"
-                )
-        else:
-            entries = perf_bindings.get(model, set())
-            if not entries:
-                raise ModelCheckError(
-                    f"platform unsupported[{index}] names unknown Perf model {model}"
-                )
-            if binding and binding not in entries:
-                raise ModelCheckError(
-                    f"platform unsupported[{index}] names unknown Perf binding {model}={binding}"
-                )
+    known_models = set(accuracy_catalog["models"])
+    known_models.update(str(case["model"]) for case in perf_cases)
+    unknown = sorted(set(platform.get("excluded_models", [])) - known_models)
+    if unknown:
+        raise ModelCheckError(
+            "platform excluded_models names unknown models: " + ", ".join(unknown)
+        )
 
 
 def _environment_path(value: str) -> Path:
@@ -282,6 +257,31 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
     if environment.get("id") != platform_id:
         raise ModelCheckError(
             f"environment platform {environment.get('id')!r} does not match {platform_id!r}"
+        )
+    library_dirs = environment.get("library_dirs", [])
+    if not isinstance(library_dirs, list) or any(
+        not isinstance(path, str) or not path for path in library_dirs
+    ):
+        raise ModelCheckError("model-check environment library_dirs must be a list of paths")
+    executable_dirs = environment.get("executable_dirs", [])
+    if not isinstance(executable_dirs, list) or any(
+        not isinstance(path, str) or not path for path in executable_dirs
+    ):
+        raise ModelCheckError(
+            "model-check environment executable_dirs must be a list of paths"
+        )
+    environment_variables = environment.get("environment_variables", {})
+    if not isinstance(environment_variables, Mapping) or any(
+        not isinstance(name, str)
+        or ENVIRONMENT_VARIABLE_PATTERN.fullmatch(name) is None
+        or name in MANAGED_TASK_ENVIRONMENT_VARIABLES
+        or not isinstance(value, str)
+        or not value
+        for name, value in environment_variables.items()
+    ):
+        raise ModelCheckError(
+            "model-check environment environment_variables must map unmanaged "
+            "TRTMC_* names to non-empty strings"
         )
     storage = environment.get("storage")
     if not isinstance(storage, Mapping):
@@ -342,6 +342,9 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
     return {
         **environment,
         "source": str(path),
+        "library_dirs": [str(_repo_path(path)) for path in library_dirs],
+        "executable_dirs": [str(_repo_path(path)) for path in executable_dirs],
+        "environment_variables": dict(environment_variables),
         "storage": {
             **storage,
             "root": str(storage_root),
@@ -373,11 +376,49 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
 def _task_environment(
     environment: Mapping[str, Any],
     overrides: Mapping[str, str] | None = None,
+    *,
+    source_revision: str = "",
 ) -> dict[str, str]:
     """Use a managed shared profile cache and create missing profiles on demand."""
     child = os.environ.copy()
     child[PROFILE_ROOT_ENV] = str(environment["storage"]["python_profiles_root"])
     child.pop(PREBUILT_ONLY_ENV, None)
+    library_dirs = [str(path) for path in environment.get("library_dirs", [])]
+    missing_library_dirs = [path for path in library_dirs if not Path(path).is_dir()]
+    if missing_library_dirs:
+        raise ModelCheckError(
+            "model-check runtime library directory does not exist: "
+            + ", ".join(missing_library_dirs)
+        )
+    inherited_library_path = child.get("LD_LIBRARY_PATH", "")
+    if inherited_library_path:
+        library_dirs.append(inherited_library_path)
+    if library_dirs:
+        child["LD_LIBRARY_PATH"] = os.pathsep.join(library_dirs)
+    executable_dirs = [str(path) for path in environment.get("executable_dirs", [])]
+    missing_executable_dirs = [
+        path for path in executable_dirs if not Path(path).is_dir()
+    ]
+    if missing_executable_dirs:
+        raise ModelCheckError(
+            "model-check executable directory does not exist: "
+            + ", ".join(missing_executable_dirs)
+        )
+    inherited_path = child.get("PATH", "")
+    if inherited_path:
+        executable_dirs.append(inherited_path)
+    if executable_dirs:
+        child["PATH"] = os.pathsep.join(executable_dirs)
+    child.update(
+        {
+            str(name): str(value)
+            for name, value in environment.get("environment_variables", {}).items()
+        }
+    )
+    if EXACT_GIT_REVISION_PATTERN.fullmatch(source_revision):
+        revision = source_revision.lower()
+        child["TRTMC_VALIDATION_SOURCE_REVISION"] = revision
+        child["TRTMC_PERF_SOURCE_REVISION"] = revision
     child.update(overrides or {})
     return child
 
@@ -421,20 +462,19 @@ def model_profiles_for_owners(
     return model_selection.normalize_models(profiles)
 
 
-def _unsupported_reason(
-    profile: Mapping[str, Any],
-    *,
-    model: str,
-    task: str,
-    binding: str,
-) -> str:
-    for item in profile.get("unsupported", []):
-        if item["model"] != model or item["task"] != task:
-            continue
-        selected_binding = str(item.get("binding", "") or "")
-        if not selected_binding or selected_binding == binding:
-            return str(item["reason"])
-    return ""
+def _platform_exclusion_reason(profile: Mapping[str, Any], model: str) -> str:
+    if model not in profile.get("excluded_models", []):
+        return ""
+    return f"Model is excluded from platform {profile['id']}"
+
+
+def _projection_status(bindings: Sequence[Mapping[str, Any]]) -> str:
+    statuses = {str(binding["status"]) for binding in bindings}
+    if len(statuses) == 1:
+        status = next(iter(statuses))
+        if status == "excluded":
+            return status
+    return "configured"
 
 
 def _accuracy_projection(
@@ -466,26 +506,18 @@ def _accuracy_projection(
     projected = []
     for binding in bindings:
         binding_id = binding.workload or "not-compared"
-        reason = _unsupported_reason(
-            platform,
-            model=model,
-            task="accuracy",
-            binding=binding_id,
-        )
+        reason = _platform_exclusion_reason(platform, model)
+        status = "excluded" if reason else "configured"
         projected.append(
             {
                 "id": f"accuracy:{model}:{binding_id}",
                 "model": model,
                 "workload": binding.workload,
-                "status": "unsupported" if reason else "configured",
+                "status": status,
                 **({"reason": reason} if reason else {}),
             }
         )
-    status = (
-        "unsupported"
-        if projected and all(item["status"] == "unsupported" for item in projected)
-        else "configured"
-    )
+    status = _projection_status(projected)
     return {"status": status, "bindings": projected}
 
 
@@ -521,26 +553,18 @@ def _perf_projection(
     projected = []
     for case in matched:
         entry_id = str(case["id"])
-        reason = _unsupported_reason(
-            platform,
-            model=model,
-            task="perf",
-            binding=entry_id,
-        )
+        reason = _platform_exclusion_reason(platform, model)
+        status = "excluded" if reason else "configured"
         projected.append(
             {
                 "id": f"perf:{model}:{entry_id}",
                 "model": model,
                 "entry": entry_id,
-                "status": "unsupported" if reason else "configured",
+                "status": status,
                 **({"reason": reason} if reason else {}),
             }
         )
-    status = (
-        "unsupported"
-        if projected and all(item["status"] == "unsupported" for item in projected)
-        else "configured"
-    )
+    status = _projection_status(projected)
     return {"status": status, "bindings": projected}
 
 
@@ -598,8 +622,8 @@ def resolve_plan(
             "configured_binding_count": sum(
                 binding["status"] == "configured" for binding in bindings
             ),
-            "unsupported_binding_count": sum(
-                binding["status"] == "unsupported" for binding in bindings
+            "excluded_binding_count": sum(
+                binding["status"] == "excluded" for binding in bindings
             ),
             "blocker_count": blocker_count,
         },
@@ -631,7 +655,7 @@ def _render(plan: Mapping[str, Any]) -> str:
             "",
             f"Summary: {summary['model_count']} models, "
             f"{summary['binding_count']} bindings, "
-            f"{summary['unsupported_binding_count']} unsupported, "
+            f"{summary['excluded_binding_count']} excluded, "
             f"{summary['blocker_count']} blockers",
         ]
     )
@@ -691,7 +715,7 @@ def _resolve_request(
     perf_cases = perf_matrix._cases(perf_suite)
     perf_exclusions = perf_matrix._excluded_profiles(perf_suite)
     perf_matrix._validate_coverage(perf_cases, perf_exclusions)
-    audit_platform_unsupported(
+    audit_platform_exclusions(
         platform,
         accuracy_catalog=accuracy_catalog,
         perf_cases=perf_cases,
@@ -864,6 +888,75 @@ def _task_bindings(plan: Mapping[str, Any], task: str) -> list[dict[str, Any]]:
     ]
 
 
+def _platform_task_bindings(
+    plan: Mapping[str, Any],
+    task: str,
+) -> list[dict[str, Any]]:
+    return [
+        binding
+        for model in plan["models"]
+        for binding in model["tasks"].get(task, {}).get("bindings", [])
+        if binding["status"] == "excluded"
+    ]
+
+
+def _accuracy_platform_result(binding: Mapping[str, Any]) -> dict[str, Any]:
+    reason = str(binding["reason"])
+    return {
+        "schema_version": "trtmc.validation-result/v2",
+        "model": str(binding["model"]),
+        "workload": str(binding["workload"]),
+        "executor": "platform_exclusion",
+        "execution": {"status": "not_run", "exit_code": None},
+        "comparison": {
+            "status": "not_run",
+            "mode": "platform_exclusion",
+            "primary_metric": None,
+            "metrics": {},
+            "failures": [],
+        },
+        "validation": {"status": "not_compared"},
+        "not_compared_reason": reason,
+        "platform_exclusion": {"reason": reason},
+        "reference_environment": [],
+        "reproduce": {},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _write_accuracy_platform_results(
+    plan: Mapping[str, Any],
+    output: Path,
+) -> list[Path]:
+    written: list[Path] = []
+    for binding in _platform_task_bindings(plan, "accuracy"):
+        workload = str(binding.get("workload", "") or "")
+        if not workload:
+            raise ModelCheckError(
+                f"platform Accuracy binding has no workload: {binding['model']}"
+            )
+        comparison = output / str(binding["model"]) / workload / "comparison.json"
+        if comparison.exists():
+            try:
+                previous = json.loads(comparison.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ModelCheckError(
+                    f"cannot read platform result {comparison}: {exc}"
+                ) from exc
+            if not isinstance(previous.get("platform_exclusion"), Mapping):
+                raise ModelCheckError(
+                    "refusing to replace a previously executed Accuracy result with a "
+                    f"platform exclusion: {binding['model']}={workload}"
+                )
+        comparison.parent.mkdir(parents=True, exist_ok=True)
+        comparison.write_text(
+            json.dumps(_accuracy_platform_result(binding), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        written.append(comparison)
+    return written
+
+
 def _selected_perf_reference_contracts(
     plan: Mapping[str, Any],
     models_dir: Path,
@@ -947,7 +1040,9 @@ def _write_selected_models(plan: Mapping[str, Any], run_root: Path) -> Path:
         {
             str(binding["model"])
             for task in TASKS
-            for binding in _task_bindings(plan, task)
+            for model in plan["models"]
+            for binding in model["tasks"].get(task, {}).get("bindings", [])
+            if binding["status"] in {"configured", "excluded"}
         }
     )
     selection = run_root / "selected-models.txt"
@@ -1249,6 +1344,13 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.dry_run:
         return 0
 
+    accuracy_platform_results = _write_accuracy_platform_results(
+        plan,
+        run_root / "accuracy",
+    )
+    if accuracy_platform_results:
+        trtmc_validate.write_report(run_root / "accuracy")
+
     reference_environment: dict[str, str] = {}
     reference_contracts = _selected_perf_reference_contracts(plan, arguments.models_dir)
     reference_environment.update(
@@ -1265,6 +1367,8 @@ def _run(arguments: argparse.Namespace) -> int:
         )
 
     task_results: dict[str, int] = {}
+    if accuracy_platform_results and not _task_bindings(plan, "accuracy"):
+        task_results["accuracy"] = 0
     runnable = [(task, command) for task, command in execution_commands if command is not None]
     for index, (task, command) in enumerate(runnable, start=1):
         label = _task_label(task)
@@ -1275,7 +1379,11 @@ def _run(arguments: argparse.Namespace) -> int:
             _detailed_command(command, verbose=arguments.verbose),
             cwd=REPOSITORY,
             check=False,
-            env=_task_environment(environment, reference_environment),
+            env=_task_environment(
+                environment,
+                reference_environment,
+                source_revision=arguments.revision,
+            ),
         )
         task_results[task] = completed.returncode
         status = "PASSED" if completed.returncode == 0 else "FAILED"

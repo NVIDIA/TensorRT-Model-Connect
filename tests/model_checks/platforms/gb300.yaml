@@ -8,6 +8,4 @@ execution:
   task_order: [accuracy, perf]
   serial_tasks: false
 
-# Keep only evidence-backed hardware exclusions here. Missing task bindings are
-# configuration errors and must not be represented as hardware exclusions.
-unsupported: []
+excluded_models: []

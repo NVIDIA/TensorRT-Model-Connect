@@ -21,6 +21,14 @@ import types
 from typing import Any, Iterator, Sequence
 
 
+_ATTENTION_BACKEND_ENV = "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"
+_ATTENTION_BACKENDS = frozenset({"flash_attn", "torch_sdpa"})
+_ATTENTION_COMPAT = (
+    Path(__file__).resolve().parents[1]
+    / "tests/e2e/models/lance/e2e_plugins/references/lance_image_attention_compat"
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference-repo", required=True, type=Path)
@@ -176,7 +184,21 @@ def _decord_image_only_stub() -> dict[str, types.ModuleType]:
     return {"decord": decord, "decord.video_reader": video_reader}
 
 
+def _configure_attention_backend() -> None:
+    backend = os.environ.get(_ATTENTION_BACKEND_ENV, "flash_attn").strip()
+    if backend not in _ATTENTION_BACKENDS:
+        raise RuntimeError(
+            "unsupported Lance reference attention backend "
+            f"{backend!r}; expected one of {sorted(_ATTENTION_BACKENDS)}"
+        )
+    if backend == "torch_sdpa":
+        compat = str(_ATTENTION_COMPAT)
+        if compat not in sys.path:
+            sys.path.insert(0, compat)
+
+
 def _load_upstream(reference_repo: Path) -> Any:
+    _configure_attention_backend()
     try:
         import decord  # noqa: F401
     except ImportError:

@@ -23,6 +23,7 @@ OFFICIAL_REPOSITORY = "https://github.com/Wan-Video/Wan2.2.git"
 OFFICIAL_REVISION = "42bf4cfaa384bc21833865abc2f9e6c0e67233dc"
 OFFICIAL_RELATIVE_PATH = "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"
 OFFICIAL_ENTRYPOINT = "wan/textimage2video.py"
+OFFICIAL_SOURCE_ENV = "TRTMC_WAN_REFERENCE_REPO"
 UMT5_SPECIAL_TOKENS = {
     "pad_token": ("<pad>", 0),
     "eos_token": ("</s>", 1),
@@ -87,10 +88,18 @@ def _snapshot_revision(model_ref: str) -> str:
 
 
 def _resolve_official_source(storage_root: str | None = None) -> Path:
-    root_value = storage_root if storage_root is not None else os.environ.get("TRTMC_STORAGE_ROOT")
-    if not root_value:
-        raise RuntimeError("TRTMC_STORAGE_ROOT is required for the pinned official Wan reference")
-    source = Path(root_value) / OFFICIAL_RELATIVE_PATH
+    declared_source = "" if storage_root is not None else os.environ.get(OFFICIAL_SOURCE_ENV, "")
+    if declared_source:
+        source = Path(declared_source)
+    else:
+        root_value = (
+            storage_root if storage_root is not None else os.environ.get("TRTMC_STORAGE_ROOT")
+        )
+        if not root_value:
+            raise RuntimeError(
+                "TRTMC_STORAGE_ROOT is required for the pinned official Wan reference"
+            )
+        source = Path(root_value) / OFFICIAL_RELATIVE_PATH
     entrypoint = source / OFFICIAL_ENTRYPOINT
     if source.is_symlink() or entrypoint.is_symlink() or not entrypoint.is_file():
         raise RuntimeError(

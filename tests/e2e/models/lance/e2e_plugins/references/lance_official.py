@@ -25,8 +25,24 @@ _REFERENCE_RESULT_NAME = "official_reference_result.json"
 _IMAGE_MODEL_ALLOW_PATTERNS = [
     f"{_MODEL_DIRECTORY}/**",
     f"{_VIT_DIRECTORY}/**",
+    "Wan2.2_VAE.pth",
 ]
 _IMAGE_REFERENCE_COMPAT = Path(__file__).with_name("lance_image_compat")
+_IMAGE_REFERENCE_ATTENTION_COMPAT = Path(__file__).with_name(
+    "lance_image_attention_compat"
+)
+_ATTENTION_BACKEND_ENV = "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"
+_ATTENTION_BACKENDS = frozenset({"flash_attn", "torch_sdpa"})
+
+
+def _attention_backend(environment: dict[str, str]) -> str:
+    attention_backend = environment.get(_ATTENTION_BACKEND_ENV, "flash_attn").strip()
+    if attention_backend not in _ATTENTION_BACKENDS:
+        raise RuntimeError(
+            "unsupported Lance reference attention backend "
+            f"{attention_backend!r}; expected one of {sorted(_ATTENTION_BACKENDS)}"
+        )
+    return attention_backend
 
 
 def _image_reference_environment(
@@ -35,12 +51,80 @@ def _image_reference_environment(
     """Expose only the optional imports needed by upstream's image path."""
     environment = dict(os.environ if base is None else base)
     existing = environment.get("PYTHONPATH", "").strip()
+    attention_backend = _attention_backend(environment)
+    attention_compat = (
+        str(_IMAGE_REFERENCE_ATTENTION_COMPAT)
+        if attention_backend == "torch_sdpa"
+        else ""
+    )
     environment["PYTHONPATH"] = os.pathsep.join(
         value
-        for value in (str(_IMAGE_REFERENCE_COMPAT), existing)
+        for value in (attention_compat, str(_IMAGE_REFERENCE_COMPAT), existing)
         if value
     )
     return environment
+
+
+def _image_reference_vit_path(
+    artifact_dir: Path,
+    vit_path: Path,
+    *,
+    attention_backend: str,
+) -> Path:
+    """Create a run-owned VIT view that selects SDPA without editing HF cache."""
+    if attention_backend == "flash_attn":
+        return vit_path
+    if attention_backend != "torch_sdpa":
+        raise RuntimeError(
+            "unsupported Lance reference attention backend "
+            f"{attention_backend!r}; expected one of {sorted(_ATTENTION_BACKENDS)}"
+        )
+
+    source_config = vit_path / "config.json"
+    try:
+        config = json.loads(source_config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Lance VIT checkpoint has no valid config: {source_config}"
+        ) from exc
+    if not isinstance(config, dict):
+        raise RuntimeError(f"Lance VIT config must contain an object: {source_config}")
+
+    overlay = artifact_dir / "official_vit_torch_sdpa"
+    overlay.mkdir(parents=True, exist_ok=True)
+    for source in vit_path.iterdir():
+        if source.name == "config.json":
+            continue
+        destination = overlay / source.name
+        if destination.is_symlink():
+            if destination.resolve() != source.resolve():
+                raise RuntimeError(
+                    f"Lance VIT overlay points at {destination.resolve()}, "
+                    f"expected {source.resolve()}"
+                )
+        elif destination.exists():
+            raise RuntimeError(
+                f"Lance VIT overlay path is not a symlink: {destination}"
+            )
+        else:
+            destination.symlink_to(
+                source.resolve(),
+                target_is_directory=source.is_dir(),
+            )
+
+    config["_attn_implementation"] = "sdpa"
+    overlay_config = overlay / "config.json"
+    if overlay_config.is_symlink() or (
+        overlay_config.exists() and not overlay_config.is_file()
+    ):
+        raise RuntimeError(
+            f"Lance VIT overlay config is not a regular file: {overlay_config}"
+        )
+    overlay_config.write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return overlay
 
 
 def _image_reference_workspace(
@@ -69,6 +153,7 @@ def _image_reference_workspace(
 def _cached_model_root(
     model_id: str,
     *,
+    revision: str,
     local_files_only: bool = True,
 ) -> Path:
     path = Path(model_id)
@@ -81,6 +166,7 @@ def _cached_model_root(
             snapshot_download(
                 model_id,
                 allow_patterns=_IMAGE_MODEL_ALLOW_PATTERNS,
+                revision=revision,
                 local_files_only=local_files_only,
             )
         ).resolve()
@@ -158,6 +244,7 @@ class LanceOfficialReference:
         source = _official_source()
         model_root = _cached_model_root(
             case.hf_id,
+            revision=case.hf_revision,
             local_files_only=ctx.local_files_only,
         )
         model_path = model_root / _MODEL_DIRECTORY
@@ -177,6 +264,12 @@ class LanceOfficialReference:
         request_path = artifact_dir / "lance_x2t_request.json"
         result_dir = artifact_dir / "official_output"
         workspace = _image_reference_workspace(artifact_dir, model_root)
+        environment = _image_reference_environment()
+        reference_vit_path = _image_reference_vit_path(
+            artifact_dir,
+            vit_path,
+            attention_backend=_attention_backend(environment),
+        )
         request_path.write_text(
             json.dumps(
                 {
@@ -195,7 +288,6 @@ class LanceOfficialReference:
             + "\n",
             encoding="utf-8",
         )
-        environment = _image_reference_environment()
         command = [
             "env",
             f"--chdir={workspace}",
@@ -207,7 +299,7 @@ class LanceOfficialReference:
             "--llm_path",
             str(model_path),
             "--vit_path",
-            str(vit_path),
+            str(reference_vit_path),
             "--vit_type",
             "qwen_2_5_vl_original",
             "--llm_qk_norm",

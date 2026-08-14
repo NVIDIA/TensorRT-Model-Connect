@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shlex
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -670,6 +671,134 @@ def test_per_model_hf_cache_hardlinks_seed_and_deletes_only_working_copy(tmp_pat
     )
     assert cleanup["status"] == "deleted"
     assert blob.read_text(encoding="utf-8") == "weights"
+
+
+def test_per_model_hf_cache_accepts_hub_cache_as_seed(tmp_path):
+    seed = tmp_path / "seed-hub"
+    blob = seed / "models--org--model/blobs/content"
+    blob.parent.mkdir(parents=True)
+    blob.write_text("weights", encoding="utf-8")
+    snapshot = seed / "models--org--model/snapshots/revision"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.bin").symlink_to("../../blobs/content")
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--storage-root",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "results"),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--engine-dir",
+            str(tmp_path / "engines"),
+            "--engine-retention",
+            "delete_always",
+            "--hf-cache-mode",
+            "per_model",
+            "--hf-cache-retention",
+            "delete_always",
+            "--hf-cache-seed-dir",
+            str(seed),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+        ]
+    )
+    trtmc_validate._prepare_run_directories(arguments)
+
+    selected, _, _ = trtmc_validate._binding_resource_arguments(
+        arguments,
+        trtmc_validate.Binding("model-a", "suite-a"),
+    )
+
+    linked_blob = selected.hf_cache_dir / "hub/models--org--model/blobs/content"
+    linked_snapshot = (
+        selected.hf_cache_dir / "hub/models--org--model/snapshots/revision/model.bin"
+    )
+    assert linked_blob.stat().st_ino == blob.stat().st_ino
+    assert linked_snapshot.resolve() == linked_blob
+
+
+def test_prepare_hf_on_demand_uses_binding_cache_and_selected_model(
+    tmp_path,
+    monkeypatch,
+):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--prepare-hf-on-demand",
+            "--hf-python",
+            sys.executable,
+            "--output",
+            str(tmp_path / "results"),
+        ]
+    )
+    arguments.hf_cache_dir = tmp_path / "hf-home"
+    arguments.hf_cache_dir.mkdir()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(trtmc_validate.subprocess, "run", run)
+
+    trtmc_validate._prepare_hf_on_demand(
+        trtmc_validate.Binding("model-a", "suite-a"),
+        arguments,
+    )
+
+    command, kwargs = calls[0]
+    assert command[:2] == [sys.executable, str(trtmc_validate.HF_WARM_SCRIPT)]
+    assert command[command.index("--models-file") + 1].endswith(
+        "model-a/suite-a/hf_prepare.models.txt"
+    )
+    assert "--strict" in command
+    assert "--fail-fast" in command
+    assert kwargs["env"]["HF_HOME"] == str(arguments.hf_cache_dir)
+    assert (
+        tmp_path / "results/model-a/suite-a/hf_prepare.models.txt"
+    ).read_text(encoding="utf-8") == "model-a\n"
+
+
+def test_worker_command_propagates_on_demand_hf_preparation(tmp_path):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--prepare-hf-on-demand",
+            "--output",
+            str(tmp_path / "results"),
+        ]
+    )
+
+    command = trtmc_validate._worker_command(
+        trtmc_validate.Binding("model-a", "suite-a"),
+        arguments,
+    )
+
+    assert "--prepare-hf-on-demand" in command
+
+
+def test_worker_command_propagates_hf_reference_device(tmp_path):
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--all",
+            "--hf-device",
+            "cpu",
+            "--hf-device-map",
+            "balanced",
+            "--output",
+            str(tmp_path / "results"),
+        ]
+    )
+
+    command = trtmc_validate._worker_command(
+        trtmc_validate.Binding("model-a", "suite-a"),
+        arguments,
+    )
+
+    assert command[command.index("--hf-device") + 1] == "cpu"
+    assert command[command.index("--hf-device-map") + 1] == "balanced"
 
 
 def test_hf_cache_seed_requires_per_model_mode(tmp_path):
@@ -1970,6 +2099,7 @@ def test_reference_sources_select_model_specific_inputs(
             "revision": "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
             "relative_path": "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384",
             "entrypoint": "wan/textimage2video.py",
+            "environment_variable": "TRTMC_WAN_REFERENCE_REPO",
         },
     )
     lance = trtmc_validate.ensure_reference_sources(
@@ -1995,7 +2125,12 @@ def test_reference_sources_select_model_specific_inputs(
     )
     assert common.elf_reference_repo is None
     assert common.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
-    assert wan22.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
+    assert wan22.environment == {
+        "TRTMC_STORAGE_ROOT": str(tmp_path),
+        "TRTMC_WAN_REFERENCE_REPO": str(
+            tmp_path / "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"
+        ),
+    }
     assert lance.environment == {
         "TRTMC_STORAGE_ROOT": str(tmp_path),
         "TRTMC_LANCE_REFERENCE_REPO": str(tmp_path / "lance/reference/Lance-4baeee086648"),
@@ -2189,6 +2324,7 @@ def test_write_report_links_each_comparison(tmp_path):
         "validation_passed": 1,
         "validation_failed": 0,
         "validation_skipped": 0,
+        "platform_excluded": 0,
         "selected_samples": 100,
     }
     assert report["validation_status"] == "passed"
@@ -3379,6 +3515,43 @@ def test_nvidia_smi_inventory_records_stable_gpu_identity(monkeypatch):
     ]
 
 
+def test_runtime_gpu_identity_falls_back_to_cuda_runtime(monkeypatch, tmp_path):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_query_nvidia_smi_gpus",
+        lambda: (_ for _ in ()).throw(
+            trtmc_validate.ValidationError("nvidia-smi was not found")
+        ),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_query_cuda_runtime_gpus",
+        lambda: [
+            {
+                "cuda_runtime_index": 0,
+                "uuid": "GPU-7d4db97a-e132-503a-816d-a252f371ec4c",
+                "name": "Thor",
+                "pci_bus_id": "0000:00:00.0",
+            }
+        ],
+    )
+
+    path = trtmc_validate.write_run_metadata(tmp_path)
+    metadata = json.loads(path.read_text(encoding="utf-8"))
+
+    assert metadata["gpu_identity_source"] == "cuda-runtime"
+    assert metadata["gpu_devices"] == [
+        {
+            "cuda_logical_index": 0,
+            "cuda_runtime_index": 0,
+            "uuid": "GPU-7d4db97a-e132-503a-816d-a252f371ec4c",
+            "name": "Thor",
+            "pci_bus_id": "0000:00:00.0",
+        }
+    ]
+
+
 def test_run_metadata_rejects_missing_gpu_identity(monkeypatch, tmp_path):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     monkeypatch.setattr(
@@ -3646,6 +3819,8 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
         backend_dir=None,
         model_plugin_dir=None,
         cuda_visible_devices="1",
+        hf_device="cpu",
+        hf_device_map="balanced",
     )
 
     command = trtmc_validate._comparison_command(
@@ -3679,6 +3854,8 @@ def test_comparison_command_uses_validation_entrypoint(tmp_path):
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command
     assert "--local-files-only" in command
+    assert command[command.index("--hf-device") + 1] == "cpu"
+    assert command[command.index("--hf-device-map") + 1] == "balanced"
 
 
 def test_comparison_command_passes_elf_reference_checkout(tmp_path):

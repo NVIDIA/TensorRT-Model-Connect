@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import io
 import json
@@ -25,6 +26,22 @@ from tools import prepare_full_duplex_bench_validation as prepare_fdb
 from tools import trtmc_reference
 from tools.reference import plugin_reference
 from tools.validation import engine as validation_engine
+
+
+def test_native_validation_contexts_preserve_runtime_library_path() -> None:
+    source = Path(validation_engine.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    missing: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "RunContext":
+            continue
+        keywords = {item.arg for item in node.keywords if item.arg}
+        if "binary_path" in keywords and "ld_library_path" not in keywords:
+            missing.append(node.lineno)
+
+    assert missing == []
 
 
 def _write_bundle_config(path: Path, config: dict[str, Any]) -> None:
@@ -2137,6 +2154,70 @@ def test_prepare_model_plugin_dataset_resolves_nested_input_assets(
     assert prompts[0]["eval_index"] == 0
     assert manifest["dataset_kind"] == "model_plugin_json"
     assert manifest["request_count"] == 1
+
+
+def test_run_model_plugin_bundle_preserves_runtime_library_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from tests.e2e_harness.contracts import StageOutput, StageSpec
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    model_manifest = tmp_path / "model.json"
+    model_manifest.write_text("{}\n", encoding="utf-8")
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "model_plugin_json",
+                "task_eval": {"model_manifest": str(model_manifest)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "sample-1"}) + "\n",
+        encoding="utf-8",
+    )
+    case = SimpleNamespace(
+        bundle="model.bundle",
+        task_strategy="custom_strategy",
+        metadata={
+            "model_test_dir": "tests/e2e/models/custom",
+            "validation_manifest_case_name": "custom-case",
+        },
+    )
+    stage = StageSpec(name="full_generation", required=True)
+    seen: list[str] = []
+
+    class Runner:
+        def run_stage(self, _case, _stage, context):
+            seen.append(context.ld_library_path)
+            return StageOutput(stage_name="full_generation", text="answer")
+
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/runtime/trt11:/cuda")
+    monkeypatch.setattr(
+        validation_engine,
+        "select_case",
+        lambda *_args, **_kwargs: (case, stage),
+    )
+    monkeypatch.setattr(validation_engine, "activate_model_plugins", lambda _path: None)
+    monkeypatch.setattr(validation_engine, "get_runner", lambda _strategy: Runner())
+
+    validation_engine.run_model_plugin_bundle(
+        argparse.Namespace(
+            work_dir=str(work_dir),
+            bundle=str(tmp_path / "model.bundle"),
+            trtmc_binary="/build/trtmc",
+            hf_python="/venv/bin/python",
+            model_plugin_dir="/build/models",
+            predictions="bundle_predictions.json",
+            raw_output="bundle_raw.jsonl",
+            log="bundle_run.log",
+        )
+    )
+
+    assert seen == ["/runtime/trt11:/cuda"]
 
 
 def test_compare_model_plugin_prediction_sets_uses_model_comparator(
@@ -5156,13 +5237,14 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
         ),
         encoding="utf-8",
     )
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
     class Result:
         returncode = 0
 
-    def fake_run(cmd, **_kwargs):
+    def fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
+        captured["env"] = kwargs["env"]
         return Result()
 
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
@@ -5208,6 +5290,15 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     assert captured["cmd"][
         captured["cmd"].index("--experts-implementation") + 1
     ] == "batched_mm"
+    assert captured["env"]["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+
+    monkeypatch.setenv(
+        validation_engine.REFERENCE_CUDA_ALLOC_CONF_ENV,
+        "disabled",
+    )
+    validation_engine.run_hf_reference_subprocess(args, model, work_dir)
+
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in captured["env"]
 
 
 @pytest.mark.parametrize(
@@ -6239,11 +6330,19 @@ def test_run_diffusion_bundle_writes_image_artifact_predictions(
         json.dumps({"sample_id": "partiprompts_000000", "prompt": "a red cube"}) + "\n",
         encoding="utf-8",
     )
-    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/runtime/trt11:/cuda")
+    seen: list[tuple[str, str, str, str]] = []
 
     class FakeRunner:
         def run_stage(self, case, _stage, ctx):
-            seen.append((case.inputs["prompt"], ctx.binary_path, case.bundle))
+            seen.append(
+                (
+                    case.inputs["prompt"],
+                    ctx.binary_path,
+                    case.bundle,
+                    ctx.ld_library_path,
+                )
+            )
             frames_dir = work_dir / "fake_trt_frames" / case.name
             frames_dir.mkdir(parents=True)
             (frames_dir / "frame_0000.png").write_bytes(b"png")
@@ -6294,7 +6393,14 @@ def test_run_diffusion_bundle_writes_image_artifact_predictions(
     ))
 
     predictions = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
-    assert seen == [("a red cube", "build/trtmc", "flux-schnell-l0.bundle")]
+    assert seen == [
+        (
+            "a red cube",
+            "build/trtmc",
+            "flux-schnell-l0.bundle",
+            "/runtime/trt11:/cuda",
+        )
+    ]
     assert predictions["responses"][0]["source"] == "bundle"
     assert predictions["responses"][0]["num_frames"] == 1
     assert (work_dir / "bundle_run.log").read_text(encoding="utf-8") == (

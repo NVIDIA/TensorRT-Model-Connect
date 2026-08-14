@@ -28,6 +28,12 @@ MAGPIE_SPEAKER_ENCODER_URL = (
     "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/"
     "pytorch_model.bin"
 )
+NEMOTRON35_OPTIONAL_CTC_STATE_KEYS = frozenset(
+    {
+        "ctc_decoder.decoder_layers.0.bias",
+        "ctc_decoder.decoder_layers.0.weight",
+    }
+)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -361,51 +367,81 @@ def _run_nemotron35_asr(
     target_rate = int(generation.get("sample_rate", 16000) or 16000)
     output_dir = arguments.predictions.parent / "hf_canary_audio"
     responses = []
-    for prompt in prompts:
-        audio, _source = _audio_for_prompt(prompt, target_rate)
-        sample_id = str(prompt.get("sample_id", ""))
-        wav_path = output_dir / _safe_sample_filename(sample_id, ".wav")
-        _write_wav_pcm16(wav_path, audio, target_rate)
-        manifest_path = output_dir / _safe_sample_filename(
-            sample_id,
-            ".manifest.jsonl",
+    original_forward = model.forward
+
+    def forward_with_extended_prompt(*args: Any, **kwargs: Any) -> Any:
+        args, kwargs = _extend_nemotron35_prompt_for_forward(
+            torch,
+            args,
+            kwargs,
         )
-        language = str(
-            prompt.get("language")
-            or generation.get("language")
-            or "auto"
-        )
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "audio_filepath": str(wav_path),
-                    "duration": len(audio) / target_rate,
-                    "text": "",
-                    "lang": language,
-                },
-                ensure_ascii=False,
+        return original_forward(*args, **kwargs)
+
+    model.forward = forward_with_extended_prompt
+    try:
+        for prompt in prompts:
+            audio, _source = _audio_for_prompt(prompt, target_rate)
+            sample_id = str(prompt.get("sample_id", ""))
+            wav_path = output_dir / _safe_sample_filename(sample_id, ".wav")
+            _write_wav_pcm16(wav_path, audio, target_rate)
+            manifest_path = output_dir / _safe_sample_filename(
+                sample_id,
+                ".manifest.jsonl",
             )
-            + "\n",
-            encoding="utf-8",
-        )
-        started = time.perf_counter()
-        transcriptions = model.transcribe(
-            str(manifest_path),
-            batch_size=1,
-            verbose=False,
-        )
-        responses.append(
-            _asr_row(
-                prompt,
-                _transcription_text(transcriptions),
-                (time.perf_counter() - started) * 1000.0,
+            language = str(
+                prompt.get("language")
+                or generation.get("language")
+                or "auto"
             )
-        )
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "audio_filepath": str(wav_path),
+                        "duration": len(audio) / target_rate,
+                        "text": "",
+                        "lang": language,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            started = time.perf_counter()
+            transcriptions = model.transcribe(
+                str(manifest_path),
+                batch_size=1,
+                verbose=False,
+            )
+            responses.append(
+                _asr_row(
+                    prompt,
+                    _transcription_text(transcriptions),
+                    (time.perf_counter() - started) * 1000.0,
+                )
+            )
+    finally:
+        model.forward = original_forward
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return responses
+
+
+def _extend_nemotron35_prompt_for_forward(
+    torch_module: Any,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    prompt = kwargs.get("prompt")
+    if prompt is None or prompt.shape[1] == 0:
+        return args, kwargs
+    updated_kwargs = dict(kwargs)
+    updated_kwargs["prompt"] = torch_module.cat(
+        (prompt, prompt[:, -1:, :]),
+        dim=1,
+    )
+    return args, updated_kwargs
 
 
 def _resolve_nemo_archive(
@@ -453,12 +489,37 @@ def _load_nemotron35_model(
     archive: Path,
 ) -> tuple[Any, Any]:
     import torch
-    from nemo.collections.asr.models import EncDecRNNTBPEModelWithPrompt
+    from nemo.collections.asr.models import (
+        EncDecHybridRNNTCTCBPEModelWithPrompt,
+    )
+    from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
+
+    class Nemotron35SaveRestoreConnector(SaveRestoreConnector):
+        def load_instance_with_state_dict(
+            self,
+            instance: Any,
+            state_dict: Mapping[str, Any],
+            strict: bool,
+        ) -> None:
+            del strict
+            incompatible = instance.load_state_dict(state_dict, strict=False)
+            missing = frozenset(incompatible.missing_keys)
+            unexpected = frozenset(incompatible.unexpected_keys)
+            allowed_missing = NEMOTRON35_OPTIONAL_CTC_STATE_KEYS
+            if missing not in (frozenset(), allowed_missing) or unexpected:
+                raise RuntimeError(
+                    "Nemotron 3.5 ASR archive state_dict mismatch: "
+                    f"missing={sorted(missing)}, "
+                    f"unexpected={sorted(unexpected)}"
+                )
+            instance._set_model_restore_state(is_being_restored=False)
 
     device = torch.device(arguments.device)
-    model = EncDecRNNTBPEModelWithPrompt.restore_from(
+    model = EncDecHybridRNNTCTCBPEModelWithPrompt.restore_from(
         str(archive),
         map_location=device,
+        strict=False,
+        save_restore_connector=Nemotron35SaveRestoreConnector(),
     )
     model.eval()
     if hasattr(model, "to"):
