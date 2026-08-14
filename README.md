@@ -1,10 +1,14 @@
-# TensorRT-Model-Connect
+<div align="center">
 
-> Reference implementations for deploying diverse model families on TensorRT.
-> Build from a supported checkpoint, run through task-oriented C++ APIs, and
-> use the family-owned implementation as a blueprint for your own changes.
+<h1>TensorRT-Model-Connect</h1>
 
-## AI-native quick start
+<h4>A collection of C++ reference implementations for diverse AI models on NVIDIA TensorRT, continuously expanded through an agentic workflow.</h4>
+
+[Documentation](https://nvidia.github.io/TensorRT-Model-Connect/)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Model Support](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[API Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
+
+</div>
+
+## AI Native QuickStart
 
 Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
 prompt:
@@ -19,10 +23,17 @@ exact commands, bundle path, inference output, and any deviation from the
 documentation.
 ```
 
-[Documentation](https://nvidia.github.io/TensorRT-Model-Connect/) |
-[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start) |
-[Model Support](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview) |
-[API Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
+## Build a Deployment Bundle
+
+**This manual workflow starts after TensorRT-Model-Connect is fully set up; it
+is not part of the AI Native QuickStart above.**
+
+If `trtmc` is not installed, start with
+[System Requirements](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/environment-and-repro)
+and [Installation](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/installation).
+Developers compiling the native CLI, backends, or model DSOs should use the
+[Build from Source](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/source-build)
+guide.
 
 Build a deployment bundle from its canonical Hugging Face model ID, then run
 native inference in two commands:
@@ -42,13 +53,6 @@ trtmc run ./qwen3-0.6b.bundle \
   --top-p 0.8 \
   --seed 42
 ```
-
-If `trtmc` is not installed, start with
-[System Requirements](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/environment-and-repro)
-and [Installation](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/installation).
-Developers compiling the native CLI, backends, or model DSOs should use the
-[Build from Source](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/source-build)
-guide.
 
 ## What is TensorRT-Model-Connect?
 **TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
