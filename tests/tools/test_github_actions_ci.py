@@ -562,21 +562,51 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     ]
     assert from_lines[-1] == "FROM ci-base AS ci-runtime"
 
-    x86_dockerfile = (REPO_ROOT / "Dockerfile.x86").read_text(encoding="utf-8")
+    source_dockerfiles = {
+        "aarch64": (REPO_ROOT / "Dockerfile.aarch64").read_text(encoding="utf-8"),
+        "x86_64": (REPO_ROOT / "Dockerfile.x86").read_text(encoding="utf-8"),
+    }
     assert (
-        "ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3"
-        "@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a"
-        in x86_dockerfile
+        "@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541"
+        in source_dockerfiles["aarch64"]
     )
-    assert "FROM ${TENSORRT_IMAGE}" in x86_dockerfile
-    assert "ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu" in x86_dockerfile
-    assert "ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu" in x86_dockerfile
+    assert (
+        "@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a"
+        in source_dockerfiles["x86_64"]
+    )
+    for architecture, source_dockerfile in source_dockerfiles.items():
+        assert "FROM ${TENSORRT_IMAGE}" in source_dockerfile
+        assert "https://download.pytorch.org/whl/cpu" in source_dockerfile
+        assert "torch.version.cuda is None" in source_dockerfile
+        assert "TRTMC_TORCH_CUDA_ARCH_LIST" not in source_dockerfile
+        assert "python-profile-builder" not in source_dockerfile
+        assert "nemo_toolkit" not in source_dockerfile
+        assert "ln -s /usr/bin/cmake ${VIRTUAL_ENV}/bin/cmake" in source_dockerfile
+        assert "RUN cmake --version" in source_dockerfile
+        assert (
+            f"ENV TRT_LIB_DIR=/usr/lib/{architecture}-linux-gnu"
+            in source_dockerfile
+        )
+        assert (
+            f"ENV TRT_INC_DIR=/usr/include/{architecture}-linux-gnu"
+            in source_dockerfile
+        )
     assert "x86_64-linux-gnu" not in dockerfile
+
+    source_build = (
+        REPO_ROOT / "website/docs/getting-started/source-build.md"
+    ).read_text(encoding="utf-8")
+    assert "Dockerfile.aarch64" in source_build
+    assert "trtmc_model_qwen" in source_build
+    assert "trtmc_model_plugins" not in source_build
+    assert "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF" in source_build
+    assert "TRTMC_TORCH_CUDA_ARCH_LIST" not in source_build
 
     ci_docker_build = (REPO_ROOT / "scripts/docker_build_gb300.sh").read_text(
         encoding="utf-8"
     )
     assert '"$REPO_ROOT/Dockerfile"' in ci_docker_build
+    assert "Dockerfile.aarch64" not in ci_docker_build
     assert "Dockerfile.x86" not in ci_docker_build
 
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")

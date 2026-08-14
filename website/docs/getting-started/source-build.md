@@ -1,37 +1,34 @@
 ---
 title: Build from Source
-description: Build the CLI, TensorRT backend, and model DSOs for one selected GPU.
+description: Build the CLI, TensorRT backend, and Qwen DSO for one selected GPU.
 ---
 
-Use this path on Linux x86_64 or aarch64 when building the native CLI and
-runtime from source. Start at the repository root.
+Use this path on Linux x86_64 or aarch64 for the first Qwen inference from
+source. Start at the repository root.
 
 ## 1. Select the GPU and start the container
 
-Change only `GPU`. The commands derive the compute capability used by Docker
-and CMake, then select the matching repository Dockerfile for the host
-architecture.
+Change only `GPU`. The commands derive the SM used by CMake and select the
+matching minimal source Dockerfile for the host architecture.
 
 ```bash
 GPU=0
-CC="$(
+SM="$(
   nvidia-smi -i "$GPU" \
     --query-gpu=compute_cap \
     --format=csv,noheader,nounits |
-  tr -d '[:space:]'
+  tr -d '.[:space:]'
 )"
-SM="${CC/.}"
-IMAGE="trtmc-dev-sm${SM}"
+IMAGE="trtmc-quickstart"
 
 case "$(uname -m)" in
   x86_64) DOCKERFILE=Dockerfile.x86 ;;
-  aarch64) DOCKERFILE=Dockerfile ;;
+  aarch64) DOCKERFILE=Dockerfile.aarch64 ;;
   *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
 docker build \
   -f "$DOCKERFILE" \
-  --build-arg TRTMC_TORCH_CUDA_ARCH_LIST="$CC" \
   -t "$IMAGE" .
 
 SOURCE_DIR="$(git rev-parse --show-toplevel)"
@@ -61,19 +58,21 @@ cmake -S . -B "$TRTMC_BUILD_DIR" -G Ninja \
   -DTRTMC_BUILD_BACKEND_TRT=ON \
   -DTRTMC_BUILD_BACKEND_RTX=OFF \
   -DTRTMC_BUILD_TESTS=OFF \
-  -DTRTMC_BUILD_BENCHMARKS=OFF
+  -DTRTMC_BUILD_BENCHMARKS=OFF \
+  -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF
 
 cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
   trtmc \
   trtmc_backend_trt \
-  trtmc_model_plugins
+  trtmc_model_qwen
 
 export TRTMC_MODEL_PLUGIN_DIR="$TRTMC_BUILD_DIR/models"
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
 
-Continue to [Quick Start](quick-start.md) in the same container shell. Advanced
-backend and focused-target options belong in the
+This path skips CI-only Python profiles and unrelated model DSOs. Continue to
+[Quick Start](quick-start.md) in the same container shell. Full-repository and
+advanced backend options belong in the
 [Build System](../architecture/build-system.md) reference.
 
 {/* Collaborative review anchor. */}

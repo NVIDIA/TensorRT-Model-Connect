@@ -664,12 +664,13 @@ def test_release_performance_config_runs_source_contracts_without_model_fallback
     } == {"unit_tests"}
 
 
-def test_x86_source_container_runs_units_without_model_fallback(
-    tmp_path: Path,
+@pytest.mark.parametrize("dockerfile", ("Dockerfile.aarch64", "Dockerfile.x86"))
+def test_source_container_runs_units_without_model_fallback(
+    tmp_path: Path, dockerfile: str,
 ) -> None:
     repo, base = _make_repo(tmp_path)
-    _write(repo, "Dockerfile.x86", "FROM scratch\n")
-    head = _commit(repo, "add x86 source container")
+    _write(repo, dockerfile, "FROM scratch\n")
+    head = _commit(repo, "add source container")
 
     result = _impact(repo, base, head)
 

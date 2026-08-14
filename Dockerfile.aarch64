@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Minimal x86_64 Qwen Quick Start image. Repository CI does not build this
-# file; source is mounted at runtime and native CUDA targets build in-container.
-ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a
+# Minimal aarch64 Qwen Quick Start image. The repository Dockerfile remains the
+# full CI/development image with every declared Python execution profile.
+ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541
 FROM ${TENSORRT_IMAGE}
 
 ARG PYTORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
@@ -46,8 +46,8 @@ RUN pip install -U pip && \
     pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_CPU_INDEX}" && \
     pip install "setuptools>=80,<82"
 
-ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
-ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu
+ENV TRT_LIB_DIR=/usr/lib/aarch64-linux-gnu
+ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:/usr/local/cuda/lib64"
 
 RUN cmake --version && \

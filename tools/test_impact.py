@@ -1983,12 +1983,12 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=491,
             name="source_container_contract",
-            matcher=_path_equals("Dockerfile.x86"),
+            matcher=_path_in({"Dockerfile.aarch64", "Dockerfile.x86"}),
             resolver=_match_result(
                 "source_container_contract", _no_models, ["tools"], False
             ),
             covered_by=(
-                "TestNoImpact.test_x86_source_dockerfile_triggers_tools_tier",
+                "TestNoImpact.test_source_dockerfiles_trigger_tools_tier",
             ),
         ),
         ClassificationRule(
