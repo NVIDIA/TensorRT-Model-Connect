@@ -2,13 +2,30 @@
 
 <h1>TensorRT-Model-Connect</h1>
 
-<p><strong>A collection of C++ reference implementations for diverse AI models on NVIDIA TensorRT, continuously expanded through an agentic workflow.</strong></p>
+<p><strong>Deploy supported Hugging Face models for end-to-end TensorRT inference in just two commands.</strong></p>
 
 [Documentation](https://nvidia.github.io/TensorRT-Model-Connect/)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Model Support](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[API Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
 
 </div>
 
-## 🤖 AI Native QuickStart
+## Example Code
+
+```bash
+trtmc build Qwen/Qwen3-0.6B -o qwen3-0.6b.bundle
+trtmc run ./qwen3-0.6b.bundle --prompt "What is the capital of France? Answer in one word." --chat-template --no-thinking
+# Generated text: Paris
+```
+
+The same bundle works from
+[C++](https://nvidia.github.io/TensorRT-Model-Connect/api/cpp-api):
+
+```cpp
+auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
+std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
+```
+
+<details>
+<summary><strong>🤖 AI-Native QuickStart</strong></summary>
 
 Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
 prompt:
@@ -23,43 +40,7 @@ exact commands, bundle path, inference output, and any deviation from the
 documentation.
 ```
 
-## 📦 Build a Deployment Bundle
-
-Once your environment is ready, use this workflow to build a deployment bundle
-from a supported Hugging Face model and run native inference.
-
-If `trtmc` is not installed, start with
-[System Requirements](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/environment-and-repro)
-and [Installation](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/installation).
-Developers compiling the native CLI, backends, or model DSOs should use the
-[Build from Source](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/source-build)
-guide.
-
-```bash
-trtmc build Qwen/Qwen3-0.6B \
-  --precision bf16 \
-  --max-cache-length 16384 \
-  --output qwen3-0.6b.bundle
-trtmc run ./qwen3-0.6b.bundle \
-  --prompt "What is the capital of France? Answer in one word." \
-  --chat-template \
-  --no-thinking \
-  --max-new-tokens 64 \
-  --temperature 0.7 \
-  --top-k 20 \
-  --top-p 0.8 \
-  --seed 42
-
-# Generated text: Paris
-```
-
-Native applications can use the same bundle through the
-[C++ API](https://nvidia.github.io/TensorRT-Model-Connect/api/cpp-api):
-
-```cpp
-auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
-std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
-```
+</details>
 
 ## What is TensorRT-Model-Connect?
 **TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
