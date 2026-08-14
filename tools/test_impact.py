@@ -1982,13 +1982,24 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=491,
+            name="source_container_contract",
+            matcher=_path_equals("Dockerfile.x86"),
+            resolver=_match_result(
+                "source_container_contract", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestNoImpact.test_x86_source_dockerfile_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
+            priority=492,
             name="github_ci_config",
             matcher=_path_startswith(".github/"),
             resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=492,
+            priority=493,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,

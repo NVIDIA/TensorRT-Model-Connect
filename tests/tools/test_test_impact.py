@@ -1454,6 +1454,15 @@ class TestNoImpact:
         assert match.models == []
         assert match.unit_tiers == ["tools"]
 
+    def test_x86_source_dockerfile_triggers_tools_tier(self, imap):
+        """The opt-in x86 image runs static contracts without model proofs."""
+        match = test_impact.classify_file("Dockerfile.x86", imap)
+
+        assert match.rule == "source_container_contract"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_test_impact_tool_triggers_tools_tier(self, imap):
         """Changing impact analysis should run tools-tier tests."""
         match = test_impact.classify_file("tools/test_impact.py", imap)

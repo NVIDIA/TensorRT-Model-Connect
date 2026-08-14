@@ -24,7 +24,7 @@ SM="${CC/.}"
 IMAGE="trtmc-dev-sm${SM}"
 
 case "$(uname -m)" in
-  x86_64) DOCKERFILE=website/docs/getting-started/Dockerfile.x86 ;;
+  x86_64) DOCKERFILE=Dockerfile.x86 ;;
   aarch64) DOCKERFILE=Dockerfile ;;
   *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
 esac
