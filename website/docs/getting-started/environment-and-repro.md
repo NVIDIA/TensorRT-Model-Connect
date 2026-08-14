@@ -16,11 +16,24 @@ source-build path.
 
 ## Check the host
 
+All users:
+
 ```bash
 uname -m
-getconf GNU_LIBC_VERSION
 nvidia-smi
+```
+
+Source users also need Docker:
+
+```bash
 docker --version
+```
+
+Wheel users instead check glibc and the Python version matching the wheel:
+
+```bash
+getconf GNU_LIBC_VERSION
+python3.12 --version
 ```
 
 Confirm that:

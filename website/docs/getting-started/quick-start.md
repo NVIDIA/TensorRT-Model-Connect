@@ -37,9 +37,9 @@ trtmc inspect ./qwen3-0.6b.bundle
 trtmc inspect ./qwen3-0.6b.bundle --list-engines
 ```
 
-Confirm that inspection reports the `qwen` family,
-`qwen_decoder_kv_cache` runtime strategy, BF16 precision, the configured cache
-length, and both prefill and decode engine plans.
+For this journey, confirm only the `qwen` family, `qwen_decoder_kv_cache`
+runtime strategy, BF16 precision, the configured cache length, and two listed
+engine plans. Generic fields are not used by this text-generation path.
 
 ## 4. Run Qwen
 
