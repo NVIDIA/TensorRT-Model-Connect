@@ -9,7 +9,7 @@ runtime from source. Start at the repository root.
 ## 1. Select the GPU and start the container
 
 Change only `GPU`. The commands derive the compute capability used by Docker
-and CMake, then select the matching repository image target for the host
+and CMake, then select the matching repository Dockerfile for the host
 architecture.
 
 ```bash
@@ -24,13 +24,13 @@ SM="${CC/.}"
 IMAGE="trtmc-dev-sm${SM}"
 
 case "$(uname -m)" in
-  x86_64) DOCKER_TARGET=x86-dev ;;
-  aarch64) DOCKER_TARGET=ci-runtime ;;
+  x86_64) DOCKERFILE=Dockerfile.x86 ;;
+  aarch64) DOCKERFILE=Dockerfile ;;
   *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
 docker build \
-  --target "$DOCKER_TARGET" \
+  -f "$DOCKERFILE" \
   --build-arg TRTMC_TORCH_CUDA_ARCH_LIST="$CC" \
   -t "$IMAGE" .
 

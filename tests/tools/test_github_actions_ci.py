@@ -561,14 +561,23 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
         line for line in dockerfile.splitlines() if line.startswith("FROM ")
     ]
     assert from_lines[-1] == "FROM ci-base AS ci-runtime"
+
+    x86_dockerfile = (REPO_ROOT / "Dockerfile.x86").read_text(encoding="utf-8")
     assert (
-        "ARG TRTMC_X86_TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3"
+        "ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3"
         "@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a"
-        in dockerfile
+        in x86_dockerfile
     )
-    assert "FROM ${TRTMC_X86_TENSORRT_IMAGE} AS x86-dev" in dockerfile
-    assert "ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu" in dockerfile
-    assert "ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu" in dockerfile
+    assert "FROM ${TENSORRT_IMAGE}" in x86_dockerfile
+    assert "ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu" in x86_dockerfile
+    assert "ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu" in x86_dockerfile
+    assert "x86_64-linux-gnu" not in dockerfile
+
+    ci_docker_build = (REPO_ROOT / "scripts/docker_build_gb300.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '"$REPO_ROOT/Dockerfile"' in ci_docker_build
+    assert "Dockerfile.x86" not in ci_docker_build
 
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dynamic = ["version", "dependencies"]' in pyproject
