@@ -25,8 +25,8 @@ documentation.
 
 ## Build a Deployment Bundle
 
-**This manual workflow starts after TensorRT-Model-Connect is fully set up; it
-is not part of the AI Native QuickStart above.**
+Once your environment is ready, use this workflow to build a deployment bundle
+from a supported Hugging Face model and run native inference.
 
 If `trtmc` is not installed, start with
 [System Requirements](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/environment-and-repro)
@@ -34,9 +34,6 @@ and [Installation](https://nvidia.github.io/TensorRT-Model-Connect/getting-start
 Developers compiling the native CLI, backends, or model DSOs should use the
 [Build from Source](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/source-build)
 guide.
-
-Build a deployment bundle from its canonical Hugging Face model ID, then run
-native inference in two commands:
 
 ```bash
 trtmc build Qwen/Qwen3-0.6B \
