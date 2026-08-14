@@ -9,10 +9,10 @@ fails in the [Quick Start](quick-start.md).
 | Failure | Check first | Next action |
 | --- | --- | --- |
 | `nvidia-smi` or GPU access | Host driver/container runtime | Fix GPU visibility before installing or building. |
-| `trtmc` not found | Active wheel environment or source build path | Run `trtmc version` or `./build/trtmc version` in the same shell. |
+| `trtmc` not found | Active wheel environment or source build path | Run `trtmc version` in the same shell. |
 | Hugging Face 401/403/not found | Exact `hf_id`, network, auth, gated access | Verify the checkpoint and cache; do not substitute a same-family model silently. |
 | CMake cannot find CUDA/TensorRT | Development environment | Return to the supported container or provide the matching headers/libraries. |
-| Build runs out of memory/disk | Full-context model and workspace budget | Free capacity or choose a separately declared smaller configuration. |
+| Build runs out of memory/disk | Configured cache/profile exceeds available memory or supported tactics | Use the documented Quick Start profile or free capacity. |
 | Bundle inspection fails | Incomplete/corrupt output | Rebuild and retain the first builder error. |
 | Native plugin not registered | Model DSO/search path | Confirm the owning runtime DSO and pass `--model-plugin-dir` when needed. |
 | TensorRT or DSO ABI error | Mixed build/runtime cohort | Run with the same compatible environment used to build/package the artifact. |

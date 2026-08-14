@@ -557,6 +557,19 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     assert "TENSORRT_SDK_IMAGE" not in dockerfile
     assert "/opt/tensorrt/python" not in dockerfile
 
+    from_lines = [
+        line for line in dockerfile.splitlines() if line.startswith("FROM ")
+    ]
+    assert from_lines[-1] == "FROM ci-base AS ci-runtime"
+    assert (
+        "ARG TRTMC_X86_TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3"
+        "@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a"
+        in dockerfile
+    )
+    assert "FROM ${TRTMC_X86_TENSORRT_IMAGE} AS x86-dev" in dockerfile
+    assert "ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu" in dockerfile
+    assert "ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu" in dockerfile
+
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dynamic = ["version", "dependencies"]' in pyproject
     assert 'base-version = "0.1.0"' in pyproject

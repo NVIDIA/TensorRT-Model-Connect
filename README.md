@@ -10,7 +10,12 @@ Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
 prompt:
 
 ```text
-/goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new TensorRT-Model-Connect directory in the current workspace. Detect the current GPU compute capability, modify the repository development Docker image, build and start the container, install TensorRT-Model-Connect, and compile the CLI, TensorRT backend, and all native model DSOs only for that SM. Follow the documented Qwen/Qwen3-0.6B quick start exactly: build with --precision bf16 and --max-cache-length 16384, then run with --chat-template, --no-thinking, --temperature 0.7, --top-k 20, --top-p 0.8, --seed 42, and --max-new-tokens 64. Do not commit or push changes. Report the result, every exact command, the inference input and output, and any deviation from the documented quick start.
+/goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new
+TensorRT-Model-Connect directory, read AGENTS.md, select the target GPU by
+following Build from Source, and follow the documented Qwen Quick Start
+exactly. Do not modify source, tests, Dockerfiles, git history, or remote
+state. Report the selected GPU, exact commands, bundle path, inference output,
+and any deviation from the documentation.
 ```
 
 [Documentation](https://nvidia.github.io/TensorRT-Model-Connect/) |
@@ -36,11 +41,6 @@ trtmc run ./qwen3-0.6b.bundle \
   --top-p 0.8 \
   --seed 42
 ```
-
-The explicit 16,384-token KV-cache profile favors quick-start portability.
-Without it, this checkpoint requests its full 40,960-token context, which can
-exceed the native-attention tactics available on some GPU and TensorRT
-combinations.
 
 If `trtmc` is not installed, start with
 [System Requirements](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/environment-and-repro)

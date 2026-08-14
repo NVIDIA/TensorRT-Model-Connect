@@ -123,12 +123,10 @@ the `manylinux_2_39_aarch64` tag. Package validation builds and installs the
 wheel; source tests configure, build, and test the exact source revision
 separately.
 
-To build the release wheel manually, run `python -m build --wheel .` from the
-repository root with the exact `TRTMC_PACKAGE_TENSORRT_VERSION`,
-`WHEEL_PYVER`, `WHEEL_ABI`, `WHEEL_ARCH`, and the `TRTMC_TRT_*` /
-`TRTMC_CUDA_*` paths set. See
-[Installation](../getting-started/installation.md#2-build-the-aarch64-wheel-from-source)
-for the full command.
+Release-wheel production is a maintainer workflow with an exact architecture,
+Python, TensorRT, and auditwheel cohort. Users who need an unpublished wheel or
+an x86_64 environment should [Build from Source](../getting-started/source-build.md)
+instead.
 
 ## Artifacts to recognize
 

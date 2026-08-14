@@ -12,14 +12,6 @@ By the end of this lab, you should be able to classify a bundle as native or
 platform-specialized, identify its family/runtime ownership, and route a load
 failure to the artifact, model DSO, backend, or provider boundary.
 
-Select the CLI before using this page directly:
-
-```bash
-export TRTMC=trtmc
-# Source build inside the development container:
-# export TRTMC=./build/trtmc
-```
-
 The source-ownership checks near the end require a repository checkout; bundle
 inspection itself does not.
 
@@ -77,8 +69,8 @@ are part of the contract.
 ## Use the inspector
 
 ```bash
-$TRTMC inspect Qwen3-0.6B.bundle
-$TRTMC inspect Qwen3-0.6B.bundle --list-engines
+trtmc inspect ./qwen3-0.6b.bundle
+trtmc inspect ./qwen3-0.6b.bundle --list-engines
 ```
 
 The second command is a native-bundle check. `--list-engines` recognizes native
@@ -201,12 +193,12 @@ If `runtime_strategy` is present but runtime creation fails with "No plugin regi
 
 | Check | Command or source |
 | --- | --- |
-| Bundle header parses | `$TRTMC inspect model.bundle` |
+| Bundle header parses | `trtmc inspect model.bundle` |
 | Qwen strategy is declared | `rg -n 'qwen_decoder_kv_cache' src/runtime/models/qwen/MODEL.toml` |
 | Qwen registrar is implemented | `rg -n 'REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST' src/runtime/models/qwen/plugin.cpp` |
 | Runtime DSO was built | `find build/models/qwen -name 'libtrtmc_model_qwen.so' -print` |
-| Native engine sections exist | `$TRTMC inspect model.bundle --list-engines` |
-| Optimized descriptor/artifact section names exist | `$TRTMC inspect model.bundle` |
+| Native engine sections exist | `trtmc inspect model.bundle --list-engines` |
+| Optimized descriptor/artifact section names exist | `trtmc inspect model.bundle` |
 | Exact optimized descriptor identity is valid | Family-owned provider qualification and bundle-contract tests; the current inspector is only a section-presence check. |
 | E2E manifest matches expected contract | `tests/e2e/models/<family>/manifests/<model>.json` |
 

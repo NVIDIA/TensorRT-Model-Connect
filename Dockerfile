@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Repository-wide ARM64 development container. It provides the TensorRT,
-# CUDA, Python, and all declared execution-profile dependencies used to develop
-# and build any TRTMC model supported by the selected target. Project source is
-# mounted at runtime; this image does not contain a model or choose a runtime.
+# The default ARM64 development container provides all declared execution
+# profiles used by CI. The independent x86-dev target below provides the
+# smaller source Quick Start environment without changing that default path.
 
 ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541
+ARG TRTMC_X86_TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a
 FROM ${TENSORRT_IMAGE} AS ci-base
 
 ARG TENSORRT_VERSION=11.1.0.106
@@ -170,6 +170,64 @@ ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 RUN apt-get update && \
     apt-get install -y --no-install-recommends nlohmann-json3-dev && \
     rm -rf /var/lib/apt/lists/*
+
+# Keep x86 source onboarding independent from the ARM64 CI image. Source is
+# mounted at runtime, and the caller supplies the selected GPU capability.
+FROM ${TRTMC_X86_TENSORRT_IMAGE} AS x86-dev
+
+ARG TRTMC_TORCH_CUDA_ARCH_LIST
+ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
+ARG TORCH_VERSION=2.12.0+cu130
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TORCH_CUDA_ARCH_LIST=${TRTMC_TORCH_CUDA_ARCH_LIST}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      git \
+      ninja-build \
+      nlohmann-json3-dev \
+      patchelf \
+      pkg-config \
+      python3.12-dev \
+      python3.12-venv && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3.12 -m venv --system-site-packages ${VIRTUAL_ENV}
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+RUN pip install -U pip && \
+    pip install \
+      "apache-tvm-ffi==0.1.12" \
+      "cuda-python>=13.0.3,<14" \
+      "huggingface_hub>=0.23" \
+      "ml_dtypes>=0.4" \
+      "numpy>=1.24" \
+      "onnx>=1.16" \
+      "onnxscript>=0.2" \
+      "PyYAML>=6.0" \
+      "safetensors>=0.4" \
+      "sentencepiece>=0.1.99" \
+      "transformers==5.2.0" && \
+    pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_CUDA_INDEX}" && \
+    pip install "setuptools>=80,<82"
+
+ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
+ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu
+ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:/usr/local/cuda/lib64"
+
+RUN test -n "${TORCH_CUDA_ARCH_LIST}" && \
+    python3.12 -c \
+      "import onnx, onnxscript, tensorrt, torch, tvm_ffi; assert tensorrt.__version__ == '11.1.0.106'; assert hasattr(tensorrt, 'CausalMaskKind'); assert torch.version.cuda == '13.0'" && \
+    test -f "${TRT_INC_DIR}/NvInferVersion.h" && \
+    test -f "${TRT_LIB_DIR}/libnvinfer.so.11"
+
+WORKDIR /workspace/tensorrt-model-connect
+
+CMD ["bash"]
 
 # Build every family-declared Python execution profile while network access is
 # available. The family-owned lock and verification files are the only package

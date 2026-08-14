@@ -43,7 +43,7 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | Term | Plain meaning | In this project |
 | --- | --- | --- |
 | Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, honors a family-owned native default route when declared, otherwise tries one exact-qualified optimized provider before the native fallback, and writes `.bundle` bundles. |
-| C++ runtime | Request-time execution library and CLI. | `trtmc`, source-built `./build/trtmc`, and `trtmc::load()` load bundles and run task APIs. |
+| C++ runtime | Request-time execution library and CLI. | `trtmc` and `trtmc::load()` load bundles and run task APIs. Source Build adds its CLI to `PATH`. |
 | Family plugin | Python adapter for a model family. | Examples: `qwen`, `llama`, `whisper`, `flux`, `pixart`. It handles config and weights. |
 | Runtime strategy | Model-owned native C++ dispatch key in bundle metadata. | Examples: `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux`, `diffusion_pixart`. Optimized-runtime bundles use `optimized_runtime.json` instead. |
 | Optimized-runtime descriptor | Exact delegated implementation contract in a bundle. | `optimized_runtime.json` binds the implementation/profile and embedded artifact tree; it bypasses native strategy, model-plugin, and backend-DSO selection. |

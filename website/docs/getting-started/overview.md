@@ -3,66 +3,21 @@ title: Getting Started
 description: The shortest supported path from a compatible NVIDIA environment to one verified text inference.
 ---
 
-import Diagram from '@site/src/components/Diagram';
-
-This section has one goal: get you from a new environment to one successful
-NLP/text-generation request through TensorRT-Model-Connect.
-
-Follow the pages in order. Do not start with an advanced model recipe or an
-internal architecture page.
-
-<Diagram
-  src="/img/diagrams/learning/course-map.svg"
-  alt="Seven-stage TensorRT-Model-Connect learning path numbered zero through six and beginning with a first Qwen inference"
-  caption="Getting Started completes Stage 0; the remaining stages reuse that environment and bundle."
-/>
-
-## The path
+Getting Started has one goal: run one Qwen request through
+TensorRT-Model-Connect. Follow these pages in order.
 
 | Step | Page | You are done when |
 | --- | --- | --- |
-| 1 | [Project Overview](project-overview.md) | You understand the checkpoint-to-bundle boundary and whether TRTMC is the right integration path. |
-| 2 | [System Requirements](environment-and-repro.md) | You have selected a supported wheel or source-build path, the GPU is visible, and you understand the first model's resource boundary. |
-| 3 | [Installation](installation.md) | Either `trtmc version` or the source-built CLI version command succeeds in the environment where you will build and run the model. |
-| 4 | [Build from Source](source-build.md) | Optional: you have compiled the CLI, selected backend, and required model DSOs for one target SM. |
-| 5 | [Quick Start](quick-start.md) | You have built and inspected `Qwen3-0.6B.bundle`, then received generated text from the native C++ runtime. |
-| 6 | [Learning Path](../learning-path.md) | You can choose the next tutorial without repeating the setup or first build. |
+| 1 | [System Requirements](environment-and-repro.md) | The GPU is visible and you selected wheel or source. |
+| 2 | [Installation](installation.md) | The installed CLI reports TensorRT support. |
+| 3 | [Build from Source](source-build.md) | Optional: the CLI and native DSOs are built for the selected GPU. |
+| 4 | [Quick Start](quick-start.md) | `./qwen3-0.6b.bundle` is built, inspected, and returns generated text. |
 
-Keep the [Glossary](glossary.md) open when a term is unfamiliar. You do not
-need to memorize it before starting.
+The Quick Start uses a bounded cache profile intended for the first portable
+inference. A successful run proves the selected environment can resolve the
+checkpoint, build a bundle, load the native Qwen runtime, and execute one text
+request. It does not qualify every model or hardware profile on that machine.
 
-## What the first run proves
-
-The Quick Start uses one public Hugging Face checkpoint and the repository's
-model-owned Qwen path:
-
-```text
-Qwen/Qwen3-0.6B
-  -> Python family resolution and TensorRT build
-  -> Qwen3-0.6B.bundle
-  -> native C++ runtime
-  -> deterministic generated text
-```
-
-A successful run proves that this environment can resolve the checkpoint,
-build a bundle, load the matching runtime implementation, and execute a text
-request. It does not prove that every model or hardware profile in the
-inventory is supported on this machine.
-
-## Before you continue
-
-The first build downloads model files unless they are already cached and
-compiles TensorRT engines. It is much slower and more resource-intensive than
-normal application startup.
-
-The default dense Qwen3 path uses the checkpoint's full 40,960-token context.
-Its physical BF16 KV allocation alone is 4.375 GiB; model weights, TensorRT
-plans, build workspace, and runtime allocations require additional memory and
-disk. Use the supported development environment and do not treat 4.375 GiB as
-a total GPU-memory requirement.
-
-If your machine does not match one of the installation paths, stop at
-[System Requirements](environment-and-repro.md). A profile described
-as qualified for another machine is not a general compatibility promise.
+After the first run, continue to [Learning Path](../learning-path.md).
 
 {/* Collaborative review anchor. */}

@@ -38,14 +38,6 @@ module milestone and answer its self-check without copying the prose.
 You do not have to complete every modality. Follow the common foundations
 through text generation, then choose the task labs that match your workload.
 
-Keep one CLI selector in the same shell for the Learning path:
-
-```bash
-export TRTMC=trtmc
-# Source build inside the development container:
-# export TRTMC=./build/trtmc
-```
-
 ## Module 0: Complete the first inference
 
 Read and run these pages in order:
@@ -54,8 +46,8 @@ Read and run these pages in order:
 2. [Installation](getting-started/installation.md)
 3. [Quick Start](getting-started/quick-start.md)
 
-**Milestone:** `trtmc run` (or `./build/trtmc run`) returns generated text from
-`Qwen3-0.6B.bundle`, and `inspect` reports the `qwen` family and
+**Milestone:** `trtmc run` returns generated text from
+`./qwen3-0.6b.bundle`, and `inspect` reports the `qwen` family and
 `qwen_decoder_kv_cache` runtime strategy.
 
 If that milestone does not pass, stay in Getting Started. Architecture,
@@ -82,7 +74,7 @@ and a `.bundle` bundle are different artifacts.
 ## Module 2: Control text generation
 
 Continue with [Text Generation](tutorials/beginner/text-generation.md). Reuse
-`Qwen3-0.6B.bundle` to compare deterministic greedy decoding with sampling
+`./qwen3-0.6b.bundle` to compare greedy decoding with sampling
 controls such as temperature, top-k, top-p, min-p, and a fixed seed.
 
 Use the [CLI Reference](api/cli-reference.md) when you need the exact option

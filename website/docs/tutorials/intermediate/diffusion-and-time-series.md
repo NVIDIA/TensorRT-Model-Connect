@@ -14,14 +14,6 @@ an exact E2E manifest to identify canonical non-text inputs and outputs.
 
 These pipelines still use `IPipeline`, but their task methods and internal loops differ.
 
-Select the CLI before running an example:
-
-```bash
-export TRTMC=trtmc
-# Source build inside the development container:
-# export TRTMC=./build/trtmc
-```
-
 The commands below assume that you completed
 [Installation](../../getting-started/installation.md) and are in a
 TensorRT/CUDA environment with a supported NVIDIA GPU. Model builds download
@@ -37,14 +29,14 @@ or a populated local cache.
 ## FLUX image generation
 
 ```bash
-$TRTMC build black-forest-labs/FLUX.2-dev \
+trtmc build black-forest-labs/FLUX.2-dev \
   -o /tmp/flux2.bundle \
   --precision fp16 \
   --image-height 1024 \
   --image-width 1024 \
   --num-inference-steps 28
 
-$TRTMC generate-video /tmp/flux2.bundle \
+trtmc generate-video /tmp/flux2.bundle \
   --prompt "A photo of a cat sitting on a windowsill at sunset" \
   --output /tmp/flux2-frames \
   --num-steps 28
@@ -89,7 +81,7 @@ same checkpoint, FP16 precision, FP32 text-encoder selector, 256-token cache,
 512-by-512 spatial profile, prompt, and 20 denoising steps.
 
 ```bash
-$TRTMC build PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
+trtmc build PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
   -o /tmp/pixart-sigma-512.bundle \
   --precision fp16 \
   --fp32-layers 0 \
@@ -98,7 +90,7 @@ $TRTMC build PixArt-alpha/PixArt-Sigma-XL-2-1024-MS \
   --image-width 512 \
   --num-inference-steps 20
 
-$TRTMC generate-video /tmp/pixart-sigma-512.bundle \
+trtmc generate-video /tmp/pixart-sigma-512.bundle \
   --prompt "A photo of a cat sitting on a windowsill at sunset" \
   --output /tmp/pixart-sigma-512-frames \
   --num-steps 20
@@ -118,14 +110,14 @@ start from equivalent data.
 ## Wan video generation
 
 ```bash
-$TRTMC build Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
+trtmc build Wan-AI/Wan2.1-T2V-1.3B-Diffusers \
   -o /tmp/wan21.bundle \
   --precision fp16 \
   --video-height 480 \
   --video-width 832 \
   --video-num-frames 81
 
-$TRTMC generate-video /tmp/wan21.bundle \
+trtmc generate-video /tmp/wan21.bundle \
   --prompt "A cinematic shot of clouds moving over mountains" \
   --output /tmp/wan21-frames
 ```
@@ -137,11 +129,24 @@ Video generation adds temporal dimensions. The output is still `ImageResult`, bu
 ## Advanced recipe: Jetson Thor Wan2.2 720p
 
 This is an advanced target-specific example, not an environment smoke test.
-Use the maintained
-[Jetson Thor Wan2.2 example](../../getting-started/quick-start.md#optional-advanced-example-jetson-thor-wan22-720p)
-for the current official TensorRT 11.1.0.106 install, build, and generation
-commands. Keeping one command source prevents this tutorial from drifting from
-the packaged profile.
+Use a release wheel with its `wan` build extra, then build and run the packaged
+profile on the target:
+
+```bash
+trtmc build Wan-AI/Wan2.2-TI2V-5B \
+  --model-revision 921dbaf3f1674a56f47e83fb80a34bac8a8f203e \
+  --fp8 \
+  --output wan22-thor.bundle
+
+trtmc generate-video wan22-thor.bundle \
+  --set wan2_2_ti2v.easycache_enabled=true \
+  --set wan2_2_ti2v.easycache_threshold=1.0 \
+  --set wan2_2_ti2v.easycache_max_consecutive_reuse=4 \
+  --set wan2_2_ti2v.late_cfg_enabled=true \
+  --prompt "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage" \
+  --output wan22-frames \
+  --seed 42
+```
 
 The public source tree does not retain the earlier internal-SDK performance
 receipt as qualification for the official TensorRT release path. A latency,
@@ -160,7 +165,7 @@ name, and input values.
 ### Build the official tiny model
 
 ```bash
-$TRTMC build amazon/chronos-bolt-tiny \
+trtmc build amazon/chronos-bolt-tiny \
   -o /tmp/chronos-bolt-tiny-official.bundle \
   --precision fp32
 ```
@@ -181,7 +186,7 @@ pre-populated profile/cache. A successful build exits with status 0 and creates
 ### Forecast from the manifest input
 
 ```bash
-$TRTMC solve /tmp/chronos-bolt-tiny-official.bundle \
+trtmc solve /tmp/chronos-bolt-tiny-official.bundle \
   --branch-input "100.1,100.15,100.18,100.22,100.21,100.27,100.31,100.35,100.37,100.4,100.44,100.5"
 ```
 

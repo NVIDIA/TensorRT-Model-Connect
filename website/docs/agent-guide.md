@@ -68,14 +68,12 @@ Give a capable coding agent this goal from a clean terminal:
 
 ```text
 /goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new
-directory, read the repository AGENTS.md, set up the documented development
-environment, and follow the end-to-end Qwen quick start exactly. Build
-Qwen/Qwen3-0.6B with --precision bf16 and --max-cache-length 16384, then run it
-with --chat-template, --no-thinking, --temperature 0.7, --top-k 20, --top-p 0.8,
---seed 42, and --max-new-tokens 64. Do not change source, tests, git history,
-or remote state. Report every command, the resulting bundle path, validation
-output, and any deviation from the documented quick start.
+directory, read the repository AGENTS.md, select the target GPU by following
+Build from Source, and follow the documented Qwen Quick Start exactly. Do not
+modify source, tests, Dockerfiles, git history, or remote state. Report the
+selected GPU, exact commands, bundle path, inference output, and every
+deviation from the documentation.
 ```
 
-The agent should follow [Get Started](getting-started/overview.md), not invent
-paths from another machine.
+The agent should use [Build from Source](getting-started/source-build.md) and
+[Quick Start](getting-started/quick-start.md), not invent a parallel setup.
