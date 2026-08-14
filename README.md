@@ -49,6 +49,16 @@ trtmc run ./qwen3-0.6b.bundle \
   --top-k 20 \
   --top-p 0.8 \
   --seed 42
+
+# Generated text: Paris
+```
+
+Native applications can use the same bundle through the
+[C++ API](https://nvidia.github.io/TensorRT-Model-Connect/api/cpp-api):
+
+```cpp
+auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
+std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
 ```
 
 ## What is TensorRT-Model-Connect?
