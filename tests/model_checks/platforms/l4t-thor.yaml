@@ -9,7 +9,7 @@ execution:
   serial_tasks: true
 
 storage:
-  device: /dev/vblkdev2
+  device: /dev/nvme0n1p1
 
 excluded_models:
   - deepseek-v2-lite

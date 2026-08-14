@@ -799,7 +799,7 @@ def test_l4t_perf_environment_deletes_entry_cache_and_bundle() -> None:
 def test_l4t_platform_rejects_unverifiable_data_partition():
     platform = model_checks.load_platform("l4t-thor")
 
-    with pytest.raises(model_checks.ModelCheckError, match="/dev/vblkdev2"):
+    with pytest.raises(model_checks.ModelCheckError, match="/dev/nvme0n1p1"):
         model_checks._require_platform_storage_root(Path("/tmp/run"), platform)
 
 
