@@ -14,8 +14,8 @@ Release wheels currently support aarch64 only. x86_64 wheels are planned; use
 
 ## Install a release wheel
 
-This first-time path uses Python 3.12. Download the aarch64 `py312` `.whl`
-asset from the [latest GitHub release](https://github.com/NVIDIA/TensorRT-Model-Connect/releases/latest).
+This first-time path uses Python 3.12. Download the aarch64 `+trt111` `py312`
+`.whl` asset from the [latest GitHub release](https://github.com/NVIDIA/TensorRT-Model-Connect/releases/latest).
 If no matching wheel is published, use the source path instead.
 
 ```bash
@@ -26,7 +26,7 @@ WHEEL=/path/to/downloaded-wheel.whl
 python -m pip install "$WHEEL"
 ```
 
-Python 3.10 users can instead use the `py310` wheel and corresponding
+Python 3.10 users can instead use the `+trt111` `py310` wheel and corresponding
 `python3.10` commands. Keep this virtual environment active and continue to
 [Quick Start](quick-start.md), where the CLI is checked once.
 
