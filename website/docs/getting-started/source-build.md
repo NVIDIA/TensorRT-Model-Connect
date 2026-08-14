@@ -9,7 +9,7 @@ source. Start at the repository root.
 ## 1. Select the GPU and start the container
 
 Change only `GPU`. The commands derive the SM used by CMake and select the
-matching minimal source Dockerfile for the host architecture.
+matching development Dockerfile. Repository CI continues to use `Dockerfile`.
 
 ```bash
 GPU=0
@@ -22,8 +22,8 @@ SM="$(
 IMAGE="trtmc-quickstart"
 
 case "$(uname -m)" in
-  x86_64) DOCKERFILE=Dockerfile.x86 ;;
-  aarch64) DOCKERFILE=Dockerfile.aarch64 ;;
+  x86_64) DOCKERFILE=Dockerfile.dev.x86 ;;
+  aarch64) DOCKERFILE=Dockerfile.dev.aarch64 ;;
   *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 

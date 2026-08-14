@@ -664,7 +664,9 @@ def test_release_performance_config_runs_source_contracts_without_model_fallback
     } == {"unit_tests"}
 
 
-@pytest.mark.parametrize("dockerfile", ("Dockerfile.aarch64", "Dockerfile.x86"))
+@pytest.mark.parametrize(
+    "dockerfile", ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86")
+)
 def test_source_container_runs_units_without_model_fallback(
     tmp_path: Path, dockerfile: str,
 ) -> None:

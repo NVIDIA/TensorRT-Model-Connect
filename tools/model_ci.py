@@ -150,8 +150,8 @@ BUILDER_UNIT_TEST_INPUT_EXACT = frozenset(
 FULL_UNIT_TEST_INPUT_EXACT = frozenset(
     {
         "benchmarks/performance/release.yaml",
-        "Dockerfile.aarch64",
-        "Dockerfile.x86",
+        "Dockerfile.dev.aarch64",
+        "Dockerfile.dev.x86",
         "tools/ci/README.md",
     }
 )

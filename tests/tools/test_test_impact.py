@@ -1454,7 +1454,9 @@ class TestNoImpact:
         assert match.models == []
         assert match.unit_tiers == ["tools"]
 
-    @pytest.mark.parametrize("path", ("Dockerfile.aarch64", "Dockerfile.x86"))
+    @pytest.mark.parametrize(
+        "path", ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86")
+    )
     def test_source_dockerfiles_trigger_tools_tier(self, imap, path):
         """Opt-in source images run static contracts without model proofs."""
         match = test_impact.classify_file(path, imap)

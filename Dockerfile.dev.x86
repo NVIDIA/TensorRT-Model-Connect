@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Minimal x86_64 Qwen Quick Start image. Repository CI does not build this
-# file; source is mounted at runtime and native CUDA targets build in-container.
+# Minimal x86_64 development image for the Qwen Quick Start. Repository CI uses
+# the root Dockerfile; source is mounted and native CUDA targets build here.
 ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:b82db1abc23750ab0069abc99bbe4ea29138dbdc23ea39861199e2346638b48a
 FROM ${TENSORRT_IMAGE}
 

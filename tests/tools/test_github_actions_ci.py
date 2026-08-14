@@ -563,8 +563,12 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     assert from_lines[-1] == "FROM ci-base AS ci-runtime"
 
     source_dockerfiles = {
-        "aarch64": (REPO_ROOT / "Dockerfile.aarch64").read_text(encoding="utf-8"),
-        "x86_64": (REPO_ROOT / "Dockerfile.x86").read_text(encoding="utf-8"),
+        "aarch64": (REPO_ROOT / "Dockerfile.dev.aarch64").read_text(
+            encoding="utf-8"
+        ),
+        "x86_64": (REPO_ROOT / "Dockerfile.dev.x86").read_text(
+            encoding="utf-8"
+        ),
     }
     assert (
         "@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541"
@@ -596,7 +600,8 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     source_build = (
         REPO_ROOT / "website/docs/getting-started/source-build.md"
     ).read_text(encoding="utf-8")
-    assert "Dockerfile.aarch64" in source_build
+    assert "Dockerfile.dev.aarch64" in source_build
+    assert "Dockerfile.dev.x86" in source_build
     assert "trtmc_model_qwen" in source_build
     assert "trtmc_model_plugins" not in source_build
     assert "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF" in source_build
@@ -606,8 +611,8 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
         encoding="utf-8"
     )
     assert '"$REPO_ROOT/Dockerfile"' in ci_docker_build
-    assert "Dockerfile.aarch64" not in ci_docker_build
-    assert "Dockerfile.x86" not in ci_docker_build
+    assert "Dockerfile.dev.aarch64" not in ci_docker_build
+    assert "Dockerfile.dev.x86" not in ci_docker_build
 
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dynamic = ["version", "dependencies"]' in pyproject

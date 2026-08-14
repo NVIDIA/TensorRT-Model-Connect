@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Minimal aarch64 Qwen Quick Start image. The repository Dockerfile remains the
-# full CI/development image with every declared Python execution profile.
+# Minimal aarch64 development image for the Qwen Quick Start. Repository CI
+# uses the root Dockerfile with every declared Python execution profile.
 ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541
 FROM ${TENSORRT_IMAGE}
 
