@@ -226,10 +226,28 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
     assert "actions/workflows/premerge.yml/dispatches" not in pages
 
 
+def test_only_pages_workflow_creates_deployment_objects() -> None:
+    deployments = []
+    workflows = REPO_ROOT / ".github" / "workflows"
+    for path in sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml"))):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+        for job_name, job in workflow["jobs"].items():
+            environment = job.get("environment")
+            if environment is None:
+                continue
+            if isinstance(environment, str):
+                deployments.append((path.name, job_name, environment))
+            elif environment.get("deployment", True):
+                deployments.append((path.name, job_name, environment["name"]))
+
+    assert deployments == [("pages.yml", "deploy", "github-pages")]
+
+
 def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml"
     ).read_text(encoding="utf-8")
+    workflow_config = yaml.safe_load(workflow)
     authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split(
         "\n  dispatch:", maxsplit=1
     )[0]
@@ -290,7 +308,10 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "always() && github.event_name == 'pull_request_target'" in authorize
 
     assert "needs: authorize" in dispatch
-    assert "environment: ci-dispatch" in dispatch
+    assert workflow_config["jobs"]["dispatch"]["environment"] == {
+        "name": "ci-dispatch",
+        "deployment": False,
+    }
     secret_references = set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", workflow))
     assert secret_references == {
         "TRTMC_CI_DISPATCH_TOKEN",

@@ -115,7 +115,9 @@ jobs:
     name: Internal CI dispatch
     needs: authorize
     runs-on: ubuntu-24.04
-    environment: ci-dispatch
+    environment:
+      name: ci-dispatch
+      deployment: false
     timeout-minutes: 5
     permissions: {}
 
