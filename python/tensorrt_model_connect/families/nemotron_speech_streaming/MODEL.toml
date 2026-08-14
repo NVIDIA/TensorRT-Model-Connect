@@ -4,7 +4,7 @@
 id = "nemotron_speech_streaming"
 plugin = "nemotron_speech_streaming"
 python_profile_specs = [
-  "nemotron_speech_streaming_reference|families/nemotron_speech_streaming/python_profile_requirements/nemotron_speech_streaming_reference.lock.txt|families/nemotron_speech_streaming/python_profile_verify.py|true|false",
+  "nemotron_speech_streaming_reference|families/nemotron_speech_streaming/python_profile_requirements/nemotron_speech_streaming_reference.lock.txt|families/nemotron_speech_streaming/python_profile_verify.py|true|true",
 ]
 default_execution_profiles = [
   "reference|nemotron_speech_streaming_reference",

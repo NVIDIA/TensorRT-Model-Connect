@@ -292,8 +292,8 @@ def test_profile_source_builds_filter_hard_coded_cuda_architectures(
             "arch=compute_90,code=sm_90",
             "-gencode",
             "arch=compute_100,code=sm_100",
-            "-gencode",
-            "arch=compute_110,code=sm_110",
+            "-gencode=arch=compute_90,code=sm_90",
+            "-gencode=arch=compute_110,code=sm_110",
             "input.cu",
         ],
         env=environment,
@@ -448,13 +448,13 @@ def test_reference_common_pins_chat_template_dependencies() -> None:
     assert 'version("MarkupSafe") == "3.0.3"' in profile["verification_script"]
 
 
-def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
+def test_profile_prebuild_policy_controls_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
 
     assert "canary_reference" not in prebuilt
     assert "magpie_tts_reference" not in prebuilt
-    assert "nemotron_speech_streaming_reference" not in prebuilt
+    assert "nemotron_speech_streaming_reference" in prebuilt
     assert "personaplex_full_duplex_evaluator" not in prebuilt
     assert "minimax_h3_reference" not in prebuilt
     assert "reference_common" in prebuilt

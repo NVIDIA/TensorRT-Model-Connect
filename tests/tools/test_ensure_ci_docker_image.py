@@ -252,7 +252,7 @@ module = "plugin"
 aliases = ["demo"]
 prefixes = ["demo"]
 python_profile_specs = [
-  "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
+  "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true|true|families/demo/bootstrap.lock.txt",
 ]
 default_execution_profiles = ["reference|demo"]
 """,
@@ -260,6 +260,9 @@ default_execution_profiles = ["reference|demo"]
     )
     requirements = demo_root / "requirements.lock.txt"
     requirements.write_text("demo-package==1.0.0\n", encoding="utf-8")
+    (demo_root / "bootstrap.lock.txt").write_text(
+        "bootstrap-package==1.0.0\n", encoding="utf-8"
+    )
     (demo_root / "verify.py").write_text("import demo_package\n", encoding="utf-8")
 
     (repo_root / "Dockerfile").write_text(
@@ -501,4 +504,20 @@ def test_profile_fingerprint_changes_for_referenced_profile_asset_content(
     requirements.write_text("demo-package==1.0.1\n", encoding="utf-8")
 
     changed = _resolved_image_for_repo(tmp_path / "asset-change", repo_root)
+    assert changed != baseline
+
+
+def test_profile_fingerprint_changes_for_bootstrap_requirement_content(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    bootstrap = (
+        repo_root
+        / "python/tensorrt_model_connect/families/demo/bootstrap.lock.txt"
+    )
+    bootstrap.write_text("bootstrap-package==1.0.1\n", encoding="utf-8")
+
+    changed = _resolved_image_for_repo(tmp_path / "bootstrap-change", repo_root)
     assert changed != baseline

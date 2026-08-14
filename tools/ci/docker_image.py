@@ -164,7 +164,11 @@ class DockerImageManager:
         for spec in profiles.values():
             if not isinstance(spec, dict):
                 continue
-            for field in ("requirements", "verification_script_file"):
+            for field in (
+                "requirements",
+                "bootstrap_requirements",
+                "verification_script_file",
+            ):
                 value = str(spec.get(field, "") or "").strip()
                 if value:
                     assets.add(package_root / value)

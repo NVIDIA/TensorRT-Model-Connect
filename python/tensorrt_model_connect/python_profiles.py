@@ -451,6 +451,17 @@ while (($#)); do
         shift 2
         continue
     fi
+    if [[ "$1" == -gencode=arch=compute_* ]]; then
+        saw_gencode=1
+        code="${1#-gencode=arch=compute_}"
+        code="${code%%,*}"
+        if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
+            args+=("$1")
+            kept_gencode=1
+        fi
+        shift
+        continue
+    fi
     args+=("$1")
     shift
 done
