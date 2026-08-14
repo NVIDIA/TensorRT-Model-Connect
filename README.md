@@ -10,7 +10,7 @@ Give an AI coding agent with terminal, Docker, and NVIDIA GPU access this
 prompt:
 
 ```text
-/goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new TensorRT-Model-Connect directory in the current workspace. Detect the current GPU compute capability, modify the repository development Docker image, build and start the container, install TensorRT-Model-Connect, compile the CLI, TensorRT backend, and all native model DSOs only for that SM, then build and run an end-to-end Qwen/Qwen3-0.6B smoke test. Do not commit or push changes. Report the result of the test, show exact command, input and output of the inference run.
+/goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new TensorRT-Model-Connect directory in the current workspace. Detect the current GPU compute capability, modify the repository development Docker image, build and start the container, install TensorRT-Model-Connect, and compile the CLI, TensorRT backend, and all native model DSOs only for that SM. Follow the documented Qwen/Qwen3-0.6B quick start exactly: build with --precision bf16 and --max-cache-length 16384, then run with --chat-template, --no-thinking, --temperature 0.7, --top-k 20, --top-p 0.8, --seed 42, and --max-new-tokens 64. Do not commit or push changes. Report the result, every exact command, the inference input and output, and any deviation from the documented quick start.
 ```
 
 [Documentation](https://nvidia.github.io/TensorRT-Model-Connect/) |
@@ -22,12 +22,25 @@ Build a deployment bundle from its canonical Hugging Face model ID, then run
 native inference in two commands:
 
 ```bash
-trtmc build Qwen/Qwen3-0.6B --output qwen3-0.6b.bundle
-trtmc run qwen3-0.6b.bundle \
+trtmc build Qwen/Qwen3-0.6B \
+  --precision bf16 \
+  --max-cache-length 16384 \
+  --output qwen3-0.6b.bundle
+trtmc run ./qwen3-0.6b.bundle \
   --prompt "What is the capital of France? Answer in one word." \
-  --max-new-tokens 10 \
-  --greedy
+  --chat-template \
+  --no-thinking \
+  --max-new-tokens 64 \
+  --temperature 0.7 \
+  --top-k 20 \
+  --top-p 0.8 \
+  --seed 42
 ```
+
+The explicit 16,384-token KV-cache profile favors quick-start portability.
+Without it, this checkpoint requests its full 40,960-token context, which can
+exceed the native-attention tactics available on some GPU and TensorRT
+combinations.
 
 If `trtmc` is not installed, start with
 [System Requirements](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/environment-and-repro)

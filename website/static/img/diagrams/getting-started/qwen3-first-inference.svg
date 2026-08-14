@@ -1,12 +1,12 @@
 <!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
-<svg width="1020" height="239" role="img" aria-labelledby="getting-started-qwen3-first-inference-svg-title getting-started-qwen3-first-inference-svg-description" preserveAspectRatio="xMidYMid meet"
- viewBox="0.00 0.00 1020.00 239.00" xmlns="http://www.w3.org/2000/svg">
+<svg width="982" height="239" role="img" aria-labelledby="getting-started-qwen3-first-inference-svg-title getting-started-qwen3-first-inference-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 982.00 239.00" xmlns="http://www.w3.org/2000/svg">
 <title id="getting-started-qwen3-first-inference-svg-title">Your first Qwen3 inference</title>
-<desc id="getting-started-qwen3-first-inference-svg-description">The verified path builds a Qwen3 bundle, inspects its identity and sections, loads its native runtime strategy, generates deterministic text, and returns a typed result.</desc>
+<desc id="getting-started-qwen3-first-inference-svg-description">The verified path builds a Qwen3 bundle, inspects its identity and sections, loads its native runtime strategy, generates fixed-seed chat text, and returns a typed result.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 217.04)">
-<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-217.04 998.48,-217.04 998.48,21.6 -21.6,21.6"/>
-<text xml:space="preserve" text-anchor="start" x="310.28" y="-167.24" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">Your first Qwen3 inference</text>
-<text xml:space="preserve" text-anchor="start" x="277.2" y="-150.04" font-family="Arial" font-size="16.00" fill="#101828">Build once, inspect the artifact, then prove native execution.</text>
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-217.04 960.36,-217.04 960.36,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="291.22" y="-167.24" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">Your first Qwen3 inference</text>
+<text xml:space="preserve" text-anchor="start" x="258.14" y="-150.04" font-family="Arial" font-size="16.00" fill="#101828">Build once, inspect the artifact, then prove native execution.</text>
 <!-- build -->
 <g id="node1" class="node">
 <title>build</title>
@@ -58,7 +58,7 @@
 <title>generate</title>
 <path fill="#ecfeff" stroke="#0e7490" stroke-width="1.6" d="M778.56,-51.72C778.56,-51.72 624.54,-51.72 624.54,-51.72 618.54,-51.72 612.54,-45.72 612.54,-39.72 612.54,-39.72 612.54,-12 612.54,-12 612.54,-6 618.54,0 624.54,0 624.54,0 778.56,0 778.56,0 784.56,0 790.56,-6 790.56,-12 790.56,-12 790.56,-39.72 790.56,-39.72 790.56,-45.72 784.56,-51.72 778.56,-51.72"/>
 <text xml:space="preserve" text-anchor="start" x="625.5" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">IPipeline::generate</text>
-<text xml:space="preserve" text-anchor="start" x="648.18" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">greedy request</text>
+<text xml:space="preserve" text-anchor="start" x="641.07" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">seeded sampling</text>
 </g>
 <!-- load&#45;&gt;generate -->
 <g id="edge4" class="edge">
@@ -69,15 +69,15 @@
 <!-- result -->
 <g id="node6" class="node">
 <title>result</title>
-<path fill="#f0fdf4" stroke="#15803d" stroke-width="1.6" d="M964.88,-51.72C964.88,-51.72 824.22,-51.72 824.22,-51.72 818.22,-51.72 812.22,-45.72 812.22,-39.72 812.22,-39.72 812.22,-12 812.22,-12 812.22,-6 818.22,0 824.22,0 824.22,0 964.88,0 964.88,0 970.88,0 976.88,-6 976.88,-12 976.88,-12 976.88,-39.72 976.88,-39.72 976.88,-45.72 970.88,-51.72 964.88,-51.72"/>
-<text xml:space="preserve" text-anchor="start" x="851.1" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">TextResult</text>
-<text xml:space="preserve" text-anchor="start" x="825.18" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">deterministic output</text>
+<path fill="#f0fdf4" stroke="#15803d" stroke-width="1.6" d="M926.76,-51.72C926.76,-51.72 824.34,-51.72 824.34,-51.72 818.34,-51.72 812.34,-45.72 812.34,-39.72 812.34,-39.72 812.34,-12 812.34,-12 812.34,-6 818.34,0 824.34,0 824.34,0 926.76,0 926.76,0 932.76,0 938.76,-6 938.76,-12 938.76,-12 938.76,-39.72 938.76,-39.72 938.76,-45.72 932.76,-51.72 926.76,-51.72"/>
+<text xml:space="preserve" text-anchor="start" x="832.1" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">TextResult</text>
+<text xml:space="preserve" text-anchor="start" x="825.3" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">chat response</text>
 </g>
 <!-- generate&#45;&gt;result -->
 <g id="edge5" class="edge">
 <title>generate&#45;&gt;result</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M791.27,-26C791.27,-26 800.32,-26 800.32,-26"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="800.32,-28.8 808.32,-26 800.32,-23.2 800.32,-28.8"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M791.35,-26C791.35,-26 800.23,-26 800.23,-26"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="800.23,-28.8 808.23,-26 800.23,-23.2 800.23,-28.8"/>
 </g>
 </g>
 </svg>

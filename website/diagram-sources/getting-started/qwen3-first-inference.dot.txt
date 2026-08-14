@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 // @title: Your first Qwen3 inference
-// @description: The verified path builds a Qwen3 bundle, inspects its identity and sections, loads its native runtime strategy, generates deterministic text, and returns a typed result.
+// @description: The verified path builds a Qwen3 bundle, inspects its identity and sections, loads its native runtime strategy, generates fixed-seed chat text, and returns a typed result.
 digraph QwenFirstInference {
   graph [
     bgcolor="#fbfcfe",
@@ -33,8 +33,8 @@ digraph QwenFirstInference {
   bundle [fillcolor="#fffbeb", color="#b45309", label=<<B>Qwen3-0.6B.bundle</B><BR/><FONT POINT-SIZE="16">portable bundle</FONT>>];
   inspect [fillcolor="#f5f3ff", color="#7c3aed", label=<<B>Inspect</B><BR/><FONT POINT-SIZE="16">identity · sections · ABI</FONT>>];
   load [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>Load native strategy</B><BR/><FONT POINT-SIZE="16">qwen_decoder_kv_cache</FONT>>];
-  generate [fillcolor="#ecfeff", color="#0e7490", label=<<B>IPipeline::generate</B><BR/><FONT POINT-SIZE="16">greedy request</FONT>>];
-  result [fillcolor="#f0fdf4", color="#15803d", label=<<B>TextResult</B><BR/><FONT POINT-SIZE="16">deterministic output</FONT>>];
+  generate [fillcolor="#ecfeff", color="#0e7490", label=<<B>IPipeline::generate</B><BR/><FONT POINT-SIZE="16">seeded sampling</FONT>>];
+  result [fillcolor="#f0fdf4", color="#15803d", label=<<B>TextResult</B><BR/><FONT POINT-SIZE="16">chat response</FONT>>];
 
   { rank=same; build; bundle; inspect; }
   { rank=same; load; generate; result; }

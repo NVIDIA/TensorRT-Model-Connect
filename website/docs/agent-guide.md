@@ -69,9 +69,12 @@ Give a capable coding agent this goal from a clean terminal:
 ```text
 /goal Clone https://github.com/NVIDIA/TensorRT-Model-Connect.git into a new
 directory, read the repository AGENTS.md, set up the documented development
-environment, and run the end-to-end Qwen smoke test. Do not change source,
-tests, git history, or remote state. Report every command, the exact model ID,
-the resulting bundle path, validation output, and anything you could not run.
+environment, and follow the end-to-end Qwen quick start exactly. Build
+Qwen/Qwen3-0.6B with --precision bf16 and --max-cache-length 16384, then run it
+with --chat-template, --no-thinking, --temperature 0.7, --top-k 20, --top-p 0.8,
+--seed 42, and --max-new-tokens 64. Do not change source, tests, git history,
+or remote state. Report every command, the resulting bundle path, validation
+output, and any deviation from the documented quick start.
 ```
 
 The agent should follow [Get Started](getting-started/overview.md), not invent
