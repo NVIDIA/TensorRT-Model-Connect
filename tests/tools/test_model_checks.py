@@ -298,6 +298,7 @@ def test_execution_environment_preserves_command_name_and_resolves_paths(
             {
                 "schema_version": model_checks.ENVIRONMENT_SCHEMA,
                 "id": "test-platform",
+                "python_dirs": ["${TEST_STORAGE}/runtime/python"],
                 "environment_variables": {"TRTMC_MODEL_FEATURE": "enabled"},
                 "storage": {
                     "root": "${TEST_STORAGE}",
@@ -332,6 +333,7 @@ def test_execution_environment_preserves_command_name_and_resolves_paths(
     )
     assert environment["tasks"]["accuracy"]["runner_python"] == "python3"
     assert Path(environment["tasks"]["perf"]["suite"]).is_absolute()
+    assert environment["python_dirs"] == [str(storage / "runtime/python")]
     assert environment["environment_variables"] == {
         "TRTMC_MODEL_FEATURE": "enabled"
     }
@@ -454,6 +456,26 @@ def test_task_environment_prepends_configured_executable_directories(
     assert environment["PATH"] == f"{cuda_bin}{os.pathsep}/usr/bin:/bin"
 
 
+def test_task_environment_prepends_configured_python_directories(
+    tmp_path,
+    monkeypatch,
+):
+    runtime_python = tmp_path / "runtime/python"
+    runtime_python.mkdir(parents=True)
+    monkeypatch.setenv("PYTHONPATH", "/system/python")
+
+    environment = model_checks._task_environment(
+        {
+            "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+            "python_dirs": [str(runtime_python)],
+        }
+    )
+
+    assert environment["PYTHONPATH"] == (
+        f"{runtime_python}{os.pathsep}/system/python"
+    )
+
+
 def test_task_environment_exports_checked_in_environment_variables(
     tmp_path,
     monkeypatch,
@@ -493,6 +515,18 @@ def test_task_environment_rejects_missing_runtime_library_directory(tmp_path):
             {
                 "storage": {"python_profiles_root": str(tmp_path / "profiles")},
                 "library_dirs": [str(missing)],
+            }
+        )
+
+
+def test_task_environment_rejects_missing_python_directory(tmp_path):
+    missing = tmp_path / "missing/python"
+
+    with pytest.raises(model_checks.ModelCheckError, match=str(missing)):
+        model_checks._task_environment(
+            {
+                "storage": {"python_profiles_root": str(tmp_path / "profiles")},
+                "python_dirs": [str(missing)],
             }
         )
 

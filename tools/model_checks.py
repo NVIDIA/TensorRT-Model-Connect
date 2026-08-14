@@ -270,6 +270,13 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
         raise ModelCheckError(
             "model-check environment executable_dirs must be a list of paths"
         )
+    python_dirs = environment.get("python_dirs", [])
+    if not isinstance(python_dirs, list) or any(
+        not isinstance(path, str) or not path for path in python_dirs
+    ):
+        raise ModelCheckError(
+            "model-check environment python_dirs must be a list of paths"
+        )
     environment_variables = environment.get("environment_variables", {})
     if not isinstance(environment_variables, Mapping) or any(
         not isinstance(name, str)
@@ -344,6 +351,7 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
         "source": str(path),
         "library_dirs": [str(_repo_path(path)) for path in library_dirs],
         "executable_dirs": [str(_repo_path(path)) for path in executable_dirs],
+        "python_dirs": [str(_repo_path(path)) for path in python_dirs],
         "environment_variables": dict(environment_variables),
         "storage": {
             **storage,
@@ -409,6 +417,18 @@ def _task_environment(
         executable_dirs.append(inherited_path)
     if executable_dirs:
         child["PATH"] = os.pathsep.join(executable_dirs)
+    python_dirs = [str(path) for path in environment.get("python_dirs", [])]
+    missing_python_dirs = [path for path in python_dirs if not Path(path).is_dir()]
+    if missing_python_dirs:
+        raise ModelCheckError(
+            "model-check Python runtime directory does not exist: "
+            + ", ".join(missing_python_dirs)
+        )
+    inherited_python_path = child.get("PYTHONPATH", "")
+    if inherited_python_path:
+        python_dirs.append(inherited_python_path)
+    if python_dirs:
+        child["PYTHONPATH"] = os.pathsep.join(python_dirs)
     child.update(
         {
             str(name): str(value)
