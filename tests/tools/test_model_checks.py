@@ -769,56 +769,21 @@ def test_checked_in_environment_selects_lance_reference_attention_backend(
     }
 
 
-def test_l4t_excludes_models_outside_thor_capacity_or_configuration() -> None:
+def test_l4t_excludes_consolidated_not_compared_models() -> None:
     platform = model_checks.load_platform("l4t-thor")
 
     assert platform["excluded_models"] == [
-        "deepseek-ocr",
         "deepseek-v2-lite",
-        "falcon-rw-1b",
-        "falcon3-1b",
         "flux-2-dev",
         "flux-2-dev-fp8",
         "flux-schnell",
-        "gemma-2-2b",
-        "glm-4-9b",
-        "granite-3.1-2b",
         "gpt-oss-20b",
-        "internlm2-1.8b",
-        "internvl3-2b",
-        "internvl3-8b",
-        "lance-3b-x2t-image",
-        "locateanything-3b",
         "minimax-h3-768p",
-        "minitron-4b-depth",
-        "minitron-4b-width",
-        "mistral-7b",
-        "nemotron-h-nano-9b",
-        "nemotron-hindi-4b",
-        "nemotron-labs-diffusion-8b",
-        "nemotron-mini-4b",
-        "nemotron-nano-4b",
-        "olmo2-1b",
-        "personaplex-7b",
-        "phi-moe",
-        "phi3-mini",
-        "phi4-multimodal",
-        "pixart-sigma-1024",
         "qwen-image",
         "qwen-image-2512",
         "qwen-image-edit-2511",
-        "qwen25vl-3b",
-        "qwen3-4b-instruct-2507",
-        "qwen3-moe-30b-a3b",
         "qwen3-omni-30b-a3b-instruct",
-        "qwen35-9b",
-        "riva-translate-4b",
         "sana-wm-bidirectional",
-        "stablelm2-1.6b",
-        "starcoder2-3b",
-        "wan21-t2v-1.3b",
-        "wan22-ti2v-5b",
-        "z-image-turbo",
     ]
 
 
