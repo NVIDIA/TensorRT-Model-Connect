@@ -114,7 +114,9 @@ function CellLines({lines}) {
 function OptimizedRuntimeDispatch({lines}) {
   if (lines.length === 0 || lines[0] === '—') return <>No</>;
   const qualified = lines.some(
-    (line) => line.startsWith('Qualified dispatch tuple:') && !line.endsWith('Coming soon')
+    (line) =>
+      line.startsWith('Qualified TRTMC dispatch target:') &&
+      !line.endsWith('Coming soon')
   );
   const status = qualified ? 'Yes' : 'Coming soon';
   return (

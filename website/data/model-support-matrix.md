@@ -81,10 +81,10 @@ SPDX-License-Identifier: Apache-2.0
 | `Qwen/Qwen-Image-2512` | `qwen-image-2512` | `BF16` | None | — | 🟢 Green |
 | `Qwen/Qwen-Image-Edit-2511` | `qwen-image-edit-2511` | `BF16` | None | — | 🟢 Green |
 | `Qwen/Qwen2.5-VL-3B-Instruct` | `qwen25vl-3b` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Coming soon | 🟢 Green |
-| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp16` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
-| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp8` | `BF16` | `format=fp8`<br />`scale_source=modelopt`<br />`calibration_samples=64` | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
-| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-topp` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
-| `Qwen/Qwen3-4B-Instruct-2507` | `qwen3-4b-instruct-2507` | `FP16` | None | TensorRT Edge-LLM<br />Qualified dispatch tuple: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional tuples: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp16` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional dispatch targets: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-fp8` | `BF16` | `format=fp8`<br />`scale_source=modelopt`<br />`calibration_samples=64` | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional dispatch targets: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-0.6B` | `qwen3-0.6b-topp` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional dispatch targets: Coming soon | 🟢 Green |
+| `Qwen/Qwen3-4B-Instruct-2507` | `qwen3-4b-instruct-2507` | `FP16` | None | TensorRT Edge-LLM<br />Qualified TRTMC dispatch target: Linux x86_64, NVIDIA A100 80GB PCIe (SM80), FP16<br />Additional dispatch targets: Coming soon | 🟢 Green |
 | `Qwen/Qwen3-30B-A3B` | `qwen3-moe-30b-a3b` | `FP16` | None | — | 🟢 Green |
 | `amd-quark/tiny-random-qwen3_moe` | `qwen3-moe-tiny-random` | `FP16` | None | — | 🟢 Green |
 | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | `qwen3-omni-30b-a3b-instruct` | `BF16` | None | — | 🔴 Red |
