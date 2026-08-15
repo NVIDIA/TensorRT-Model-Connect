@@ -36,6 +36,18 @@ def _load_yaml(path: Path) -> dict:
     return value
 
 
+def _body_items_by_id(form: dict) -> dict[str, dict]:
+    return {
+        item["id"]: item
+        for item in form["body"]
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+
+
+def _checkbox_labels(item: dict) -> list[str]:
+    return [option["label"] for option in item["attributes"]["options"]]
+
+
 def test_issue_template_inventory_is_intentional() -> None:
     filenames = {path.name for path in TEMPLATE_DIRECTORY.iterdir() if path.is_file()}
     assert filenames == {*EXPECTED_FORMS, "config.yml"}
@@ -103,3 +115,40 @@ def test_issue_templates_have_no_upstream_placeholders() -> None:
     )
     for forbidden in FORBIDDEN_TEMPLATE_TEXT:
         assert forbidden not in combined
+
+
+def test_issue_forms_preserve_reviewed_intake_contracts() -> None:
+    bug_path = TEMPLATE_DIRECTORY / "bug_report.yml"
+    bug = _load_yaml(bug_path)
+    bug_items = _body_items_by_id(bug)
+    bug_source = bug_path.read_text(encoding="utf-8")
+
+    assert (
+        "https://github.com/NVIDIA/TensorRT-Model-Connect/issues/new"
+        "?template=documentation_request.yml"
+    ) in bug_source
+    assert "compute capability" not in str(
+        bug_items["environment"]["attributes"]
+    ).lower()
+    assert "behavior" not in bug_items
+    for item_id in ("observed_behavior", "expected_behavior"):
+        assert bug_items[item_id]["validations"]["required"] is True
+
+    documentation = _load_yaml(TEMPLATE_DIRECTORY / "documentation_request.yml")
+    documentation_items = _body_items_by_id(documentation)
+    assert "priority" not in documentation_items
+    assert not any(
+        "runtime or hardware checks" in label
+        for label in _checkbox_labels(documentation_items["terms"])
+    )
+
+    feature_path = TEMPLATE_DIRECTORY / "feature_request.yml"
+    feature = _load_yaml(feature_path)
+    feature_items = _body_items_by_id(feature)
+    feature_source = feature_path.read_text(encoding="utf-8")
+    assert "priority" not in feature_items
+    assert "evidence boundary" not in feature_source
+    assert not any(
+        "which claims require" in label
+        for label in _checkbox_labels(feature_items["terms"])
+    )

@@ -12,6 +12,8 @@ body:
       value: |
         Thanks for helping improve TensorRT-Model-Connect. Do not disclose suspected security vulnerabilities here; report them privately through https://www.nvidia.com/en-us/security/report-vulnerability/. Do not include secrets, credentials, private URLs, internal CI logs or artifacts, package coordinates, runner details, personal paths, proprietary logs, or restricted model assets.
 
+        If the implementation appears correct but the documentation is incorrect, unclear, or missing, use the [documentation request form](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/new?template=documentation_request.yml).
+
   - type: dropdown
     id: area
     attributes:
@@ -61,10 +63,10 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: Include the OS, GPU and compute capability, driver, CUDA, TensorRT, container image or package version, and relevant dependency versions.
+      description: Include the OS, GPU, driver, CUDA, TensorRT, container image or package version, and relevant dependency versions.
       placeholder: |
         OS:
-        GPU and compute capability:
+        GPU:
         Driver:
         CUDA:
         TensorRT:
@@ -82,10 +84,18 @@ body:
       required: true
 
   - type: textarea
-    id: behavior
+    id: observed_behavior
     attributes:
-      label: Observed and expected behavior
-      description: Describe what happened, what you expected, and where the behavior differs from documentation or another stated contract.
+      label: Observed behavior
+      description: Describe what happened and where the behavior differs from documentation or another stated contract.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: Describe what you expected to happen.
     validations:
       required: true
 

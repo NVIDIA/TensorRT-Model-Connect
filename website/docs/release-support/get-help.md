@@ -49,8 +49,7 @@ Include the evidence that applies to your request:
 
 - the TensorRT-Model-Connect release, tag, or full commit SHA;
 - installation method and exact container image or package version;
-- operating system, GPU model and compute capability, driver, CUDA, and
-  TensorRT versions;
+- operating system, GPU model, driver, CUDA, and TensorRT versions;
 - exact Hugging Face model ID and revision, or a description of the local
   checkpoint without uploading restricted artifacts;
 - exact commands and relevant configuration, with secrets redacted;

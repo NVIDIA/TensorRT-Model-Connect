@@ -26,8 +26,9 @@ python tools/trtmc_validate.py gpt2-125m
 python tools/trtmc_validate.py --all --dry-run
 ```
 
-Nightly CI calls `engine.py` directly for reviewed ETTh1 preparation and
-evaluation. No validation path invokes a legacy task-eval CLI.
+Nightly CI calls `engine.py` directly for reviewed preparation and evaluation
+of the hourly Electricity Transformer Temperature (`ETTh1`) dataset. No
+validation path invokes a legacy task-eval CLI.
 
 ## Contracts
 

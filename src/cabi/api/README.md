@@ -6,6 +6,9 @@ subset with C linkage, not a C-compatible public header or complete stable C
 ABI: it exposes `trtmc::IPipeline*` and `std::uint64_t`, and it has no exported
 pipeline-destroy function.
 
+Before 1.0, this ABI is not guaranteed to remain stable across
+TensorRT-Model-Connect versions.
+
 Focus areas:
 
 - Pipeline option and handle validation with thread-local error reporting.

@@ -10,7 +10,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for proposing an improvement. Describe the user problem and evidence boundary before prescribing an implementation. Do not disclose suspected security vulnerabilities here; report them privately through https://www.nvidia.com/en-us/security/report-vulnerability/. Do not include secrets, credentials, private URLs, internal CI logs or artifacts, package coordinates, runner details, personal paths, proprietary logs, or restricted model assets.
+        Thanks for proposing an improvement. Describe the problem you are trying to solve, the end goal you want to achieve, and where TensorRT-Model-Connect falls short today before prescribing an implementation. Do not disclose suspected security vulnerabilities here; report them privately through https://www.nvidia.com/en-us/security/report-vulnerability/. Do not include secrets, credentials, private URLs, internal CI logs or artifacts, package coordinates, runner details, personal paths, proprietary logs, or restricted model assets.
 
   - type: dropdown
     id: request_type
@@ -24,23 +24,11 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: priority
-    attributes:
-      label: Priority
-      options:
-        - Blocking a current use case
-        - High
-        - Medium
-        - Low or nice to have
-    validations:
-      required: true
-
   - type: textarea
     id: problem
     attributes:
       label: Problem and use case
-      description: Explain the user problem, who encounters it, and why existing behavior is insufficient.
+      description: Explain the end goal, who encounters the problem, and where TensorRT-Model-Connect falls short today.
     validations:
       required: true
 
@@ -76,8 +64,6 @@ body:
       label: Submission checks
       options:
         - label: I searched open and closed issues and found no duplicate request.
-          required: true
-        - label: I identified which claims require source, hardware, parity, or performance evidence.
           required: true
         - label: I removed secrets, private/internal evidence, personal paths, and restricted artifacts.
           required: true
