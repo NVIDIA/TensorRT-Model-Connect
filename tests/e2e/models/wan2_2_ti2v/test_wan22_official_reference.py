@@ -39,6 +39,11 @@ _NATIVE_ACCEPTANCE = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _isolate_declared_official_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(wan22_official.OFFICIAL_SOURCE_ENV, raising=False)
+
+
 def _write_png(path: Path, width: int, height: int, value: int = 0) -> None:
     def chunk(kind: bytes, payload: bytes) -> bytes:
         return (
