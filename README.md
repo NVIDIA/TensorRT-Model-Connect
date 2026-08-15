@@ -8,7 +8,9 @@
 
 </div>
 
-## Example Code
+<a id="example-code"></a>
+
+## 💻 Example Code
 
 ```bash
 trtmc build Qwen/Qwen3-0.6B -o qwen3-0.6b.bundle
@@ -24,11 +26,15 @@ auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
 std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
 ```
 
-## What is TensorRT-Model-Connect?
+<a id="what-is-tensorrt-model-connect"></a>
+
+## 🔎 What is TensorRT-Model-Connect?
 **TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
 <img width="1318" height="1088" alt="MC-what-it-is" src="https://github.com/user-attachments/assets/85850b96-5a30-4531-bcec-98e00883dedb" />
 
-## Why TensorRT-Model-Connect?
+<a id="why-tensorrt-model-connect"></a>
+
+## 💡 Why TensorRT-Model-Connect?
 
 - Start from a supported Hugging Face or local checkpoint and build TensorRT
   engines without an intermediate ONNX export step.
@@ -49,7 +55,9 @@ TensorRT-Model-Connect is a reference implementation. Users are responsible
 for trusting the checkpoints, bundles, native libraries, and local environment
 they provide when building or running models.
 
-## Getting Started
+<a id="getting-started"></a>
+
+## 🚀 Getting Started
 
 **Recommended Quick Start: AI-Native**
 
@@ -69,6 +77,8 @@ documentation.
 Want to know more? See the
 [Quick Start documentation](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start).
 
+<a id="explore-the-documentation"></a>
+
 ## 📚 Explore the documentation
 
 | Goal | Start here |
@@ -84,14 +94,18 @@ Want to know more? See the
 | Review compatibility, limitations, and lifecycle policy | [Release & Support](https://nvidia.github.io/TensorRT-Model-Connect/release-support/overview) |
 | Give a coding agent repository-specific guidance | [AI & Agent Guide](https://nvidia.github.io/TensorRT-Model-Connect/agent-guide) |
 
-## Supported models
+<a id="supported-models"></a>
+
+## 🧩 Supported models
 
 The [Supported Models](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)
 page is the single source of truth for exact checkpoints, Hugging Face
 architectures, TRTMC profiles, precision, quantization, optimized-runtime
 dispatch, configuration, and qualification evidence.
 
-## Get help and file an issue
+<a id="get-help-and-file-an-issue"></a>
+
+## 🛟 Get help and file an issue
 
 Start with [Get Help and File an Issue](https://nvidia.github.io/TensorRT-Model-Connect/release-support/get-help)
 to choose the right support route and collect the model, environment, command,
@@ -103,7 +117,9 @@ documentation corrections.
 Do not disclose suspected security vulnerabilities in a public issue. Follow
 [SECURITY.md](SECURITY.md) to report them privately to NVIDIA PSIRT.
 
-## Contributing
+<a id="contributing"></a>
+
+## 🤝 Contributing
 
 - Read [CONTRIBUTING.md](CONTRIBUTING.md) before proposing source or model
   integration changes.
