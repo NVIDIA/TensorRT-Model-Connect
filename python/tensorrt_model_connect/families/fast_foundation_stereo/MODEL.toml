@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "fast_foundation_stereo"
+plugin = "fast_foundation_stereo"
+module = "plugin"
+config_adapter = "model_config.py|config_from_dir"
+model_dir_adapter = "prepare_model.py|resolve_model_dir"
+hf_allow_patterns = [
+  "cfg.yaml",
+  "model_best_bp2_serialize.pth",
+]
+hf_required_files = [
+  "nvidia/c-fast-foundationstereo|model_best_bp2_serialize.pth",
+]
+aliases = [
+  "fast-foundation-stereo",
+  "fast_foundation_stereo",
+  "foundation_stereo_lite",
+]
+prefixes = [
+  "fast_foundation_stereo",
+]

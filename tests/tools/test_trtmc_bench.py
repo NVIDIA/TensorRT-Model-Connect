@@ -164,6 +164,7 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
         "chronos-bolt-tiny-official": ("solve", 50, 500),
         "nemotron-embed-vl-1b-v2": ("embed", 50, 500),
         "whisper-tiny-fp16": ("transcribe", 1, 10),
+        "fast-foundation-stereo": ("disparity", 3, 100),
     }
     for model_name, expected in expectations.items():
         case = resolve_case(catalog.resolve(model_name), _bundle(tmp_path, model_name))
@@ -183,6 +184,7 @@ def test_operation_registry_declares_supported_task_semantics() -> None:
         "segment_prompted",
         "classify",
         "detect",
+        "disparity",
         "rerank",
         "encode",
         "embed",
@@ -206,6 +208,7 @@ def test_operation_registry_declares_supported_task_semantics() -> None:
         "embedding": "embed",
         "neural_operator": "solve",
         "speech_to_text": "transcribe",
+        "stereo_disparity": "disparity",
     }
     assert operations["generate_image"].supports_batch is True
     assert operations["generate_image"].per_item_latency.result_name == "seconds_per_image_p50"
@@ -214,6 +217,10 @@ def test_operation_registry_declares_supported_task_semantics() -> None:
         "forecast_elements_per_s",
     ]
     assert operations["transcribe"].rate_metrics[0].inverse_result_name == "realtime_factor"
+    assert [metric.result_name for metric in operations["disparity"].rate_metrics] == [
+        "stereo_pairs_per_s",
+        "disparity_pixels_per_s",
+    ]
 
 
 def test_native_worker_has_a_runner_for_every_advertised_operation() -> None:

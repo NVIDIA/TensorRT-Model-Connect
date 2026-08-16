@@ -33,6 +33,11 @@ MINIMAX_H3_EXCLUSION_REASON = (
     "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
     "into the release performance runner."
 )
+FAST_FOUNDATION_STEREO_EXCLUSION_REASON = (
+    "The exact baseline is owned by the supplied rectified-stereo fixture "
+    "archive and model-local L4 harness; the public release runner does not "
+    "yet provide an equivalent redistributable stereo reference workload."
+)
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
     "canary.transcribe": "nemo-asr",
@@ -259,6 +264,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert len(raw_entries) == 77
     assert len(raw_additional) == 28
     assert excluded_profiles == {
+        "fast-foundation-stereo": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
         "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
     }
     assert all(
@@ -1478,9 +1484,13 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 1,
-        "explicitly_excluded_profiles": 1,
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 2,
+        "explicitly_excluded_profiles": 2,
         "explicit_exclusions": [
+            {
+                "model": "fast-foundation-stereo",
+                "reason": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
+            },
             {
                 "model": "minimax-h3-768p",
                 "reason": MINIMAX_H3_EXCLUSION_REASON,
@@ -1525,7 +1535,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "76 model types" in report
     assert "105 model comparisons" in report
     assert "105 single-process profiles" in report
-    assert "1 explicitly excluded profile" in report
+    assert "2 explicitly excluded profiles" in report
     assert (
         f"{expected_catalog_coverage['excluded_l0_profiles']} duplicate L0 profiles are excluded"
     ) in report

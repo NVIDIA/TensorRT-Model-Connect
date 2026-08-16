@@ -111,6 +111,7 @@ _ENTRYPOINT_PATTERNS = [
 _WEIGHT_PATTERNS = [
     "*.safetensors",
     "*.bin",
+    "*.pth",
     "*.nemo",
     "model.npz",
     "elf_params.npz",
