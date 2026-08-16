@@ -9,12 +9,57 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
 int failures = 0;
+
+class FakeTrtModule final : public trtmc::ITrtModule {
+  public:
+    FakeTrtModule(bool has_disparity, trtmc::DType disparity_dtype,
+                  std::vector<int64_t> disparity_shape)
+        : has_disparity_(has_disparity), disparity_dtype_(disparity_dtype),
+          disparity_shape_(std::move(disparity_shape)) {}
+
+    trtmc::TensorMap forward(const trtmc::TensorMap&) override { return {}; }
+    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
+    void forward_device_async(const trtmc::DeviceTensorMap&) override {}
+    void forward_async(const trtmc::TensorMap&) override {}
+    void sync() override {}
+    cudaStream_t stream() const override { return nullptr; }
+    void enable_cuda_graph() override {}
+    bool cuda_graph_active() const override { return false; }
+    int32_t profile_idx() const override { return 0; }
+    std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
+    std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
+    bool has_input(const std::string&) const override { return false; }
+    bool has_output(const std::string& name) const override {
+        return name == "disp" && has_disparity_;
+    }
+    trtmc::DType tensor_dtype(const std::string&) const override { return disparity_dtype_; }
+    std::vector<int64_t> tensor_shape(const std::string&) const override {
+        return disparity_shape_;
+    }
+    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
+                                             trtmc::ProfileShapeSelector) const override {
+        return {};
+    }
+    int32_t optimization_profile_count() const override { return 1; }
+    void* device_ptr(const std::string&) const override { return nullptr; }
+    void bind_external(const std::string&, void*) override {}
+    bool ok() const override { return true; }
+    void keep_alive(std::shared_ptr<void>) override {}
+
+  private:
+    bool has_disparity_;
+    trtmc::DType disparity_dtype_;
+    std::vector<int64_t> disparity_shape_;
+};
 
 void check(bool condition, const char* name) {
     if (!condition) {
@@ -80,11 +125,38 @@ void test_preprocess_rejects_invalid_input() {
     check(shape_threw, "stereo preprocess rejects wrong shape");
 }
 
+bool pipeline_construction_throws(bool has_disparity, trtmc::DType disparity_dtype,
+                                  std::vector<int64_t> disparity_shape) {
+    auto feature =
+        std::make_unique<FakeTrtModule>(false, trtmc::DType::kFloat32, std::vector<int64_t>{});
+    auto post =
+        std::make_unique<FakeTrtModule>(has_disparity, disparity_dtype, std::move(disparity_shape));
+    try {
+        trtmc::FastFoundationStereoPipeline pipeline(std::move(feature), std::move(post), "test");
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+void test_pipeline_validates_disparity_engine_contract() {
+    const std::vector<int64_t> expected_shape{1, 1, 704, 704};
+    check(!pipeline_construction_throws(true, trtmc::DType::kFloat32, expected_shape),
+          "stereo pipeline accepts exact disparity contract");
+    check(pipeline_construction_throws(false, trtmc::DType::kFloat32, expected_shape),
+          "stereo pipeline rejects missing disparity output");
+    check(pipeline_construction_throws(true, trtmc::DType::kFloat16, expected_shape),
+          "stereo pipeline rejects disparity dtype mismatch");
+    check(pipeline_construction_throws(true, trtmc::DType::kFloat32, {1, 704, 704}),
+          "stereo pipeline rejects disparity shape mismatch");
+}
+
 } // namespace
 
 int main() {
     test_preprocess_matches_rgb_chw_replication_contract();
     test_preprocess_rejects_invalid_input();
+    test_pipeline_validates_disparity_engine_contract();
     if (failures == 0)
         std::cout << "All Fast Foundation Stereo preprocess tests passed\n";
     return failures == 0 ? 0 : 1;

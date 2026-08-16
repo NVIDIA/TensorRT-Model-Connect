@@ -51,7 +51,9 @@ def config_from_dir(model_dir: str | Path) -> dict | None:
         "stereo_cv_groups": 8,
         "stereo_normalize_gwc": True,
         "stereo_post_engine_section": "fast_foundation_stereo_post_engine_plan",
-        "stereo_accuracy_metric": "flattened_cosine_similarity",
+        "stereo_accuracy_metric": "cosine_epe_bad2",
         "stereo_min_cosine": 0.999,
+        "stereo_max_mean_abs_error": 0.5,
+        "stereo_max_bad_2px_fraction": 0.02,
         "requires_tokenizer": False,
     }

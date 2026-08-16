@@ -387,7 +387,7 @@ def _upsample_disparity(
     upsampled_mask = graph.concat((upsampled_mask, stem_2x), 1)
     upsampled_mask = graph.basic_conv(upsampled_mask, model.spx_2_gru.conv2)
     weights = graph.deconv2d(upsampled_mask, model.spx_gru[0])
-    weights = graph.softmax(weights, 1)
+    weights = graph.softmax(graph.cast(weights, graph.trt.float32), 1)
     return graph.cast(_context_upsample(graph, disparity, weights), graph.trt.float32)
 
 
@@ -424,10 +424,15 @@ def add_post_graph(
 
     from .native_plugin_builder import add_gwc_plugin
 
+    # The fused CUDA implementation is intentionally FP16. The family builder
+    # rejects other precision modes so this cast documents the plugin boundary
+    # instead of silently weakening a public FP32 contract.
+    gwc_reference = graph.cast(features[0], graph.trt.float16)
+    gwc_target = graph.cast(right, graph.trt.float16)
     gwc_volume = add_gwc_plugin(
         graph.network,
-        features[0],
-        right,
+        gwc_reference,
+        gwc_target,
         trt_module=graph.trt,
     )
     gwc_volume = graph.cast(gwc_volume, concat_volume.dtype)

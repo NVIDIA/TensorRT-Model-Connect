@@ -113,6 +113,8 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--min-cosine", type=float, default=0.999)
+    parser.add_argument("--max-mean-abs-error", type=float, default=0.5)
+    parser.add_argument("--max-bad-2px-fraction", type=float, default=0.02)
     parser.add_argument("--num-pairs", type=int, default=5)
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--warmup-iters", type=int, default=3)
@@ -126,6 +128,8 @@ def main() -> None:
         raise RuntimeError("CUDA is required for this benchmark")
     if args.num_pairs <= 0 or args.warmup_iters < 0 or args.iters <= 0:
         raise ValueError("num-pairs and iters must be positive; warmup-iters cannot be negative")
+    if args.max_mean_abs_error < 0 or args.max_bad_2px_fraction < 0:
+        raise ValueError("accuracy error thresholds cannot be negative")
     if args.backend == "trt" and (not args.feature_engine or not args.post_engine):
         parser.error("--feature-engine and --post-engine are required for --backend trt")
     if args.backend == "trt-single" and not args.engine:
@@ -318,15 +322,21 @@ def main() -> None:
         pair_cosines = [
             cosine_similarity(actual, expected) for actual, expected in zip(first_output, reference)
         ]
+        absolute_error = np.abs(first_output - reference)
         accuracy = {
             "global_cosine": cosine_similarity(first_output, reference),
             "pair_cosines": pair_cosines,
-            "max_abs_error": float(np.max(np.abs(first_output - reference))),
-            "mean_abs_error": float(np.mean(np.abs(first_output - reference))),
+            "max_abs_error": float(np.max(absolute_error)),
+            "mean_abs_error": float(np.mean(absolute_error)),
+            "bad_2px_fraction": float(np.mean(absolute_error > 2.0)),
         }
-        # The supplied model contract compares the flattened [N, H, W] FP32
-        # disparity output. Pair-wise values are retained as diagnostics.
-        accuracy_passed = accuracy["global_cosine"] >= args.min_cosine
+        # Cosine catches structural drift while endpoint error prevents a
+        # globally rescaled disparity map from passing a scale-invariant gate.
+        accuracy_passed = (
+            accuracy["global_cosine"] >= args.min_cosine
+            and accuracy["mean_abs_error"] <= args.max_mean_abs_error
+            and accuracy["bad_2px_fraction"] <= args.max_bad_2px_fraction
+        )
 
     result = {
         "backend": args.backend,
@@ -351,6 +361,8 @@ def main() -> None:
         "output_file": str(output_path),
         "accuracy": accuracy,
         "minimum_cosine": args.min_cosine,
+        "maximum_mean_abs_error": args.max_mean_abs_error,
+        "maximum_bad_2px_fraction": args.max_bad_2px_fraction,
         "accuracy_passed": accuracy_passed,
     }
     result_path = args.out_dir / "benchmark_result.json"

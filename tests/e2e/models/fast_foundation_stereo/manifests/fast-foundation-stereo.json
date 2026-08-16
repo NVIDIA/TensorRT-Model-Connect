@@ -20,7 +20,7 @@
       "inputs": {
         "pixel_shift": 12
       },
-      "notes": "Fixed 700x700 rectified stereo inference through the native C++ runtime. The pinned official PyTorch model receives the identical deterministic stereo pair; the gate requires shape, finiteness, non-negative disparity, and flattened FP32 cosine similarity >= 0.999."
+      "notes": "Fixed 700x700 rectified stereo inference through the native C++ runtime. The pinned official PyTorch model receives the identical deterministic stereo pair; the gate requires shape, finiteness, non-negative disparity, flattened FP32 cosine similarity >= 0.999, mean endpoint error <= 0.5 px, and bad-2px fraction <= 0.02."
     }
   ]
 }

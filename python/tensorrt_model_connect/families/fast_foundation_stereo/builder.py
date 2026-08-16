@@ -67,12 +67,12 @@ def _load_model(model_root: Path, *, max_disparity: int, valid_iters: int):
 
 
 def _validate_precision(precision: str) -> bool:
-    if precision not in {"fp16", "fp32"}:
+    if precision != "fp16":
         raise ValueError(
-            "Fast Foundation Stereo supports precision='fp16' or precision='fp32'; "
+            "Fast Foundation Stereo's native GWC plugin supports precision='fp16' only; "
             f"got {precision!r}"
         )
-    return precision == "fp16"
+    return True
 
 
 def _create_network(*, verbose: bool) -> tuple[Any, Any, Any]:

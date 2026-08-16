@@ -70,6 +70,12 @@ FastFoundationStereoPipeline::FastFoundationStereoPipeline(std::unique_ptr<ITrtM
     if (feature_->stream() != post_->stream())
         throw std::runtime_error(
             "FastFoundationStereoPipeline: engines must share one CUDA stream");
+    const std::vector<int64_t> expected_shape{1, 1, kEngineHeight, kEngineWidth};
+    if (!post_->has_output("disp") || post_->tensor_dtype("disp") != DType::kFloat32 ||
+        post_->tensor_shape("disp") != expected_shape) {
+        throw std::runtime_error(
+            "FastFoundationStereoPipeline: disparity output contract mismatch");
+    }
 }
 
 void FastFoundationStereoPipeline::bind_post_inputs() {
@@ -78,11 +84,23 @@ void FastFoundationStereoPipeline::bind_post_inputs() {
         "features_left_32", "features_right_04", "stem_2x",
     };
     for (const char* name : names) {
+        if (!feature_->has_output(name) || !post_->has_input(name)) {
+            throw std::runtime_error(
+                std::string("FastFoundationStereoPipeline: invalid feature/post tensor role for ") +
+                name);
+        }
+        const auto feature_shape = feature_->tensor_shape(name);
+        if (feature_shape != post_->tensor_shape(name) ||
+            feature_->tensor_dtype(name) != post_->tensor_dtype(name)) {
+            throw std::runtime_error(
+                std::string("FastFoundationStereoPipeline: feature/post contract mismatch for ") +
+                name);
+        }
         void* pointer = feature_->device_ptr(name);
         if (pointer == nullptr)
             throw std::runtime_error(std::string("FastFoundationStereoPipeline: missing feature ") +
                                      name);
-        post_->bind_external(name, pointer);
+        post_->bind_external(name, pointer, feature_shape);
     }
     post_inputs_bound_ = true;
 }
