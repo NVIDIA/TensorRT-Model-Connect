@@ -14,6 +14,7 @@ sample_limits:
   coco2017_prompted_segmentation: 20
   dpg_bench_diffusion_image: 5
   etth1_time_series_parity: 10
+  fast_foundation_stereo_synthetic_parity: 1
   flores200_en_fr_riva_translation_parity: 10
   gedit_bench_image_edit: 5
   humaneval_code_continuation_parity: 10
@@ -105,6 +106,8 @@ models:
     workloads: [mmlu_continuation_parity]
   falcon3-1b:
     workloads: [mmlu_continuation_parity]
+  fast-foundation-stereo:
+    workloads: [fast_foundation_stereo_synthetic_parity]
   flux-2-dev:
     workloads: [dpg_bench_diffusion_image]
     reference_cache_identity: flux-2-dev-dpg-v2

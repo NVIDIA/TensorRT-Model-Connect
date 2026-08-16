@@ -195,6 +195,7 @@ TASK_TYPE_BY_USER_CONTRACT = {
     "embedding_vector": "Text → Embedding",
     "ranking_order": "Query + Documents → Ranking",
     "diffusion_text_generation": "Text → Text",
+    "stereo_disparity": "Stereo Images → Disparity",
 }
 
 TASK_TYPE_BY_TASK_STRATEGY = {
@@ -211,6 +212,7 @@ TASK_TYPE_BY_TASK_STRATEGY = {
     "encoder_only_nlp": "Text → Embedding",
     "embedding": "Text → Embedding",
     "reranking": "Query + Documents → Ranking",
+    "stereo_disparity": "Stereo Images → Disparity",
 }
 
 
