@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
 from types import SimpleNamespace
 
@@ -30,6 +31,12 @@ from tensorrt_model_connect.families.fast_foundation_stereo.prepare_model import
     configure_official_model_args,
     install_official_io_import_shims,
     resolve_model_dir,
+)
+
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+_FAMILY_SOURCE_DIR = (
+    _REPOSITORY_ROOT / "python/tensorrt_model_connect/families/fast_foundation_stereo"
 )
 
 
@@ -172,19 +179,90 @@ def test_plugin_builds_feature_and_family_owned_post_section(tmp_path: Path, mon
 
     monkeypatch.setattr(builder, "build_feature_engine", feature)
     monkeypatch.setattr(builder, "build_post_engine", post)
+    from tensorrt_model_connect.families.fast_foundation_stereo import native_plugin_builder
+
+    native_plugin = tmp_path / "native-plugin.so"
+    native_plugin.write_bytes(b"native-plugin")
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "ensure_native_plugin",
+        lambda **kwargs: native_plugin,
+    )
     assert plugin.build_engine(config, weights, 1, precision="fp16") == b"feature-plan"
     assert plugin.build_extra_engines(config, weights, 1, precision="fp16") == {
-        "fast_foundation_stereo_post_engine_plan": b"post-plan"
+        "fast_foundation_stereo_post_engine_plan": b"post-plan",
+        "fast_foundation_stereo_native_plugin_so": b"native-plugin",
     }
     assert [call[0] for call in calls] == ["feature", "post"]
     assert all(call[2]["max_disparity"] == 192 for call in calls)
     assert all(call[2]["valid_iters"] == 8 for call in calls)
 
 
-def test_l4_performance_receipt_beats_baseline_and_passes_accuracy() -> None:
-    receipt = json.loads(
-        (Path(__file__).parent / "performance/l4.json").read_text()
+def test_production_family_uses_only_native_tensorrt_network_definition() -> None:
+    sources = sorted(_FAMILY_SOURCE_DIR.rglob("*.py"))
+    assert sources
+    source_by_path = {
+        path.relative_to(_REPOSITORY_ROOT): path.read_text(encoding="utf-8") for path in sources
+    }
+    forbidden = {
+        path: [
+            (line_number, line.strip())
+            for line_number, line in enumerate(text.splitlines(), start=1)
+            if "onnx" in line.casefold()
+        ]
+        for path, text in source_by_path.items()
+    }
+    forbidden = {path: lines for path, lines in forbidden.items() if lines}
+    assert forbidden == {}
+
+    combined = "\n".join(source_by_path.values())
+    assert ".create_network(" in combined
+    native_layer = re.compile(
+        r"\.add_(?:activation|concatenation|constant|convolution_nd|"
+        r"deconvolution_nd|elementwise|grid_sample|matrix_multiply|"
+        r"normalization|plugin_v[23]|resize|shuffle|slice|softmax)\("
     )
+    assert native_layer.search(combined), "no native TensorRT layer construction found"
+
+
+def test_post_engine_consumes_only_feature_engine_outputs() -> None:
+    from tensorrt_model_connect.families.fast_foundation_stereo import builder
+
+    assert builder.POST_INPUT_NAMES == builder.FEATURE_OUTPUT_NAMES
+    assert "gwc_volume" not in builder.POST_INPUT_NAMES
+
+
+def test_performance_tools_do_not_build_framework_side_gwc() -> None:
+    for name in ("benchmark.py", "profile_ncu.py", "trt_runner.py"):
+        source = (Path(__file__).parent / name).read_text(encoding="utf-8")
+        assert "build_gwc_volume" not in source
+        assert "gwc_volume" not in source
+
+
+def test_requested_native_plugin_is_loaded_globally(tmp_path: Path, monkeypatch) -> None:
+    from tests.e2e.models.fast_foundation_stereo import trt_runner
+
+    library = tmp_path / "libstereo_plugin.so"
+    library.write_bytes(b"test")
+    calls = []
+    sentinel = object()
+    monkeypatch.setattr(
+        trt_runner.ctypes,
+        "CDLL",
+        lambda path, mode: calls.append((path, mode)) or sentinel,
+    )
+    trt_runner._PLUGIN_HANDLES.clear()
+
+    loaded = trt_runner.load_native_plugin_libraries([library])
+
+    assert loaded == [str(library.resolve())]
+    assert calls == [(str(library.resolve()), trt_runner.ctypes.RTLD_GLOBAL)]
+    assert trt_runner._PLUGIN_HANDLES == [sentinel]
+    trt_runner._PLUGIN_HANDLES.clear()
+
+
+def test_l4_performance_receipt_beats_baseline_and_passes_accuracy() -> None:
+    receipt = json.loads((Path(__file__).parent / "performance/l4.json").read_text())
     baseline = receipt["recorded_baseline"]
     selected = receipt["selected_tensorrt_sustained_runs"][-1]
     protocol = receipt["protocol"]

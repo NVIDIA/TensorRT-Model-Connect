@@ -1,0 +1,584 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Small, family-owned TensorRT Network Definition helpers.
+
+PyTorch is used only as the checkpoint container.  Every operation below adds
+TensorRT layers directly to an ``INetworkDefinition``; no exported interchange
+graph is created or parsed.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
+import numpy as np
+
+
+class NativeGraph:
+    """Build strongly typed TensorRT graphs from the distilled module tree."""
+
+    def __init__(self, network: Any, trt: Any, *, fp16: bool) -> None:
+        self.network = network
+        self.trt = trt
+        self.fp16 = fp16
+        self.work_np_dtype = np.float16 if fp16 else np.float32
+        self.work_trt_dtype = trt.float16 if fp16 else trt.float32
+
+    @staticmethod
+    def _tuple(value: Any, rank: int) -> tuple[int, ...]:
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+            result = tuple(int(item) for item in value)
+            if len(result) != rank:
+                raise ValueError(f"expected {rank} values, got {result}")
+            return result
+        return (int(value),) * rank
+
+    @staticmethod
+    def _array(value: Any, dtype: np.dtype | None = None) -> np.ndarray:
+        if value is None:
+            raise ValueError("cannot convert None to TensorRT weights")
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().numpy()
+        return np.ascontiguousarray(value, dtype=dtype)
+
+    def _np_dtype_for(self, tensor: Any) -> np.dtype:
+        return np.float16 if tensor.dtype == self.trt.float16 else np.float32
+
+    def constant(
+        self,
+        values: Any,
+        shape: tuple[int, ...] | None = None,
+        *,
+        dtype: np.dtype | None = None,
+        target_dtype: Any | None = None,
+    ) -> Any:
+        array = self._array(values, dtype or np.float32)
+        if shape is None:
+            shape = tuple(array.shape)
+        array = np.ascontiguousarray(array.reshape(shape))
+        output = self.network.add_constant(shape, self.trt.Weights(array)).get_output(0)
+        return self.cast(output, target_dtype) if target_dtype is not None else output
+
+    def scalar(self, value: float, rank: int, *, like: Any) -> Any:
+        shape = (1,) * rank
+        return self.constant(
+            np.full(shape, value, dtype=self._np_dtype_for(like)),
+            shape,
+            dtype=self._np_dtype_for(like),
+            target_dtype=like.dtype,
+        )
+
+    def cast(self, tensor: Any, dtype: Any) -> Any:
+        if dtype is None or tensor.dtype == dtype:
+            return tensor
+        return self.network.add_cast(tensor, dtype).get_output(0)
+
+    def name(self, tensor: Any, name: str) -> Any:
+        tensor.name = name
+        return tensor
+
+    def reshape(self, tensor: Any, shape: tuple[int, ...]) -> Any:
+        layer = self.network.add_shuffle(tensor)
+        layer.reshape_dims = tuple(int(dim) for dim in shape)
+        return layer.get_output(0)
+
+    def transpose(self, tensor: Any, permutation: tuple[int, ...]) -> Any:
+        layer = self.network.add_shuffle(tensor)
+        layer.second_transpose = self.trt.Permutation(permutation)
+        return layer.get_output(0)
+
+    def concat(self, tensors: Iterable[Any], axis: int) -> Any:
+        layer = self.network.add_concatenation(list(tensors))
+        layer.axis = axis
+        return layer.get_output(0)
+
+    def slice(
+        self,
+        tensor: Any,
+        start: tuple[int, ...],
+        shape: tuple[int, ...],
+        stride: tuple[int, ...] | None = None,
+    ) -> Any:
+        stride = stride or (1,) * len(start)
+        return self.network.add_slice(tensor, start, shape, stride).get_output(0)
+
+    def elementwise(self, operation: Any, lhs: Any, rhs: Any) -> Any:
+        if isinstance(operation, str):
+            operation = getattr(self.trt.ElementWiseOperation, operation.upper())
+        return self.network.add_elementwise(lhs, rhs, operation).get_output(0)
+
+    def add(self, lhs: Any, rhs: Any) -> Any:
+        return self.elementwise("SUM", lhs, rhs)
+
+    def sub(self, lhs: Any, rhs: Any) -> Any:
+        return self.elementwise("SUB", lhs, rhs)
+
+    def mul(self, lhs: Any, rhs: Any) -> Any:
+        return self.elementwise("PROD", lhs, rhs)
+
+    def div(self, lhs: Any, rhs: Any) -> Any:
+        return self.elementwise("DIV", lhs, rhs)
+
+    def reduce(self, tensor: Any, operation: Any, axes: Iterable[int], keep_dims: bool) -> Any:
+        if isinstance(operation, str):
+            operation = getattr(self.trt.ReduceOperation, operation.upper())
+        mask = 0
+        for axis in axes:
+            mask |= 1 << (axis % len(tuple(tensor.shape)))
+        return self.network.add_reduce(tensor, operation, mask, keep_dims).get_output(0)
+
+    def reduce_sum(self, tensor: Any, axes: Iterable[int], keep_dims: bool = False) -> Any:
+        return self.reduce(tensor, "SUM", axes, keep_dims)
+
+    def reduce_avg(self, tensor: Any, axes: Iterable[int], keep_dims: bool = False) -> Any:
+        return self.reduce(tensor, "AVG", axes, keep_dims)
+
+    def reduce_max(self, tensor: Any, axes: Iterable[int], keep_dims: bool = False) -> Any:
+        return self.reduce(tensor, "MAX", axes, keep_dims)
+
+    def unary(self, operation: Any, tensor: Any) -> Any:
+        if isinstance(operation, str):
+            operation = getattr(self.trt.UnaryOperation, operation.upper())
+        return self.network.add_unary(tensor, operation).get_output(0)
+
+    def activation(self, tensor: Any, kind: str, *, alpha: float | None = None) -> Any:
+        kind = kind.lower()
+        if kind == "gelu":
+            return self.gelu(tensor)
+        activation = {
+            "relu": self.trt.ActivationType.RELU,
+            "leaky_relu": self.trt.ActivationType.LEAKY_RELU,
+            "sigmoid": self.trt.ActivationType.SIGMOID,
+            "tanh": self.trt.ActivationType.TANH,
+        }[kind]
+        layer = self.network.add_activation(tensor, activation)
+        if alpha is not None:
+            layer.alpha = alpha
+        return layer.get_output(0)
+
+    def gelu(self, tensor: Any) -> Any:
+        # The checkpoint uses torch.nn.GELU(approximate="none").
+        if hasattr(self.trt.ActivationType, "GELU_ERF"):
+            return self.network.add_activation(tensor, self.trt.ActivationType.GELU_ERF).get_output(
+                0
+            )
+        rank = len(tuple(tensor.shape))
+        inv_sqrt_two = self.scalar(1.0 / np.sqrt(2.0), rank, like=tensor)
+        half = self.scalar(0.5, rank, like=tensor)
+        one = self.scalar(1.0, rank, like=tensor)
+        erf = self.unary("ERF", self.mul(tensor, inv_sqrt_two))
+        return self.mul(self.mul(tensor, half), self.add(one, erf))
+
+    def softmax(self, tensor: Any, axis: int) -> Any:
+        layer = self.network.add_softmax(tensor)
+        layer.axes = 1 << (axis % len(tuple(tensor.shape)))
+        return layer.get_output(0)
+
+    def matmul(
+        self,
+        lhs: Any,
+        rhs: Any,
+        *,
+        op_lhs: Any | None = None,
+        op_rhs: Any | None = None,
+    ) -> Any:
+        op_lhs = op_lhs or self.trt.MatrixOperation.NONE
+        op_rhs = op_rhs or self.trt.MatrixOperation.NONE
+        return self.network.add_matrix_multiply(lhs, op_lhs, rhs, op_rhs).get_output(0)
+
+    def linear(self, tensor: Any, module: Any) -> Any:
+        weight = self._array(module.weight, self._np_dtype_for(tensor))
+        out_features, in_features = weight.shape
+        rank = len(tuple(tensor.shape))
+        rhs_shape = (1,) * (rank - 2) + (in_features, out_features)
+        rhs = self.constant(
+            weight.T.reshape(rhs_shape),
+            rhs_shape,
+            dtype=self._np_dtype_for(tensor),
+            target_dtype=tensor.dtype,
+        )
+        output = self.matmul(tensor, rhs)
+        if getattr(module, "bias", None) is not None:
+            bias_shape = (1,) * (rank - 1) + (out_features,)
+            bias = self.constant(
+                self._array(module.bias, self._np_dtype_for(output)).reshape(bias_shape),
+                bias_shape,
+                dtype=self._np_dtype_for(output),
+                target_dtype=output.dtype,
+            )
+            output = self.add(output, bias)
+        return output
+
+    def _convolution(self, tensor: Any, module: Any, *, dimensions: int, deconv: bool) -> Any:
+        weight_dtype = self._np_dtype_for(tensor)
+        weight = self._array(module.weight, weight_dtype)
+        bias = (
+            self._array(module.bias, weight_dtype)
+            if getattr(module, "bias", None) is not None
+            else None
+        )
+        weights = self.trt.Weights(weight)
+        biases = self.trt.Weights(bias) if bias is not None else self.trt.Weights()
+        kernel = self._tuple(module.kernel_size, dimensions)
+        if deconv:
+            layer = self.network.add_deconvolution_nd(
+                tensor, int(module.out_channels), kernel, weights, biases
+            )
+        else:
+            layer = self.network.add_convolution_nd(
+                tensor, int(module.out_channels), kernel, weights, biases
+            )
+        layer.stride_nd = self._tuple(module.stride, dimensions)
+        padding = self._tuple(module.padding, dimensions)
+        dilation = self._tuple(module.dilation, dimensions)
+        if hasattr(layer, "dilation_nd"):
+            layer.dilation_nd = dilation
+        layer.num_groups = int(module.groups)
+        if deconv and hasattr(module, "output_padding"):
+            output_padding = self._tuple(module.output_padding, dimensions)
+            if any(output_padding) and hasattr(layer, "pre_padding"):
+                layer.pre_padding = padding
+                layer.post_padding = tuple(p - o for p, o in zip(padding, output_padding))
+            else:
+                layer.padding_nd = padding
+        else:
+            layer.padding_nd = padding
+        return layer.get_output(0)
+
+    def conv2d(self, tensor: Any, module: Any) -> Any:
+        return self._convolution(tensor, module, dimensions=2, deconv=False)
+
+    def conv3d(self, tensor: Any, module: Any) -> Any:
+        return self._convolution(tensor, module, dimensions=3, deconv=False)
+
+    def deconv2d(self, tensor: Any, module: Any) -> Any:
+        return self._convolution(tensor, module, dimensions=2, deconv=True)
+
+    def deconv3d(self, tensor: Any, module: Any) -> Any:
+        return self._convolution(tensor, module, dimensions=3, deconv=True)
+
+    def batch_norm(self, tensor: Any, module: Any) -> Any:
+        rank = len(tuple(tensor.shape))
+        channels = int(tuple(tensor.shape)[1])
+        fp32 = self.cast(tensor, self.trt.float32)
+        gamma = self._array(module.weight, np.float32)
+        beta = self._array(module.bias, np.float32)
+        mean = self._array(module.running_mean, np.float32)
+        variance = self._array(module.running_var, np.float32)
+        scale = gamma / np.sqrt(variance + float(module.eps))
+        shift = beta - mean * scale
+        shape = (1, channels) + (1,) * (rank - 2)
+        scale_tensor = self.constant(scale.reshape(shape), shape)
+        shift_tensor = self.constant(shift.reshape(shape), shape)
+        output = self.add(self.mul(fp32, scale_tensor), shift_tensor)
+        return self.cast(output, tensor.dtype)
+
+    def instance_norm(self, tensor: Any, module: Any) -> Any:
+        rank = len(tuple(tensor.shape))
+        axes = tuple(range(2, rank))
+        output_dtype = tensor.dtype
+        fp32 = self.cast(tensor, self.trt.float32)
+        mean = self.reduce_avg(fp32, axes, keep_dims=True)
+        centered = self.sub(fp32, mean)
+        variance = self.reduce_avg(self.mul(centered, centered), axes, keep_dims=True)
+        epsilon = self.scalar(float(module.eps), rank, like=variance)
+        inverse = self.unary("RECIP", self.unary("SQRT", self.add(variance, epsilon)))
+        output = self.mul(centered, inverse)
+        if bool(getattr(module, "affine", False)):
+            channels = int(tuple(tensor.shape)[1])
+            shape = (1, channels) + (1,) * (rank - 2)
+            gamma = self.constant(self._array(module.weight, np.float32).reshape(shape), shape)
+            beta = self.constant(self._array(module.bias, np.float32).reshape(shape), shape)
+            output = self.add(self.mul(output, gamma), beta)
+        return self.cast(output, output_dtype)
+
+    def layer_norm(
+        self,
+        tensor: Any,
+        module: Any,
+        *,
+        axes: tuple[int, ...],
+        parameter_axis: int,
+    ) -> Any:
+        rank = len(tuple(tensor.shape))
+        output_dtype = tensor.dtype
+        fp32 = self.cast(tensor, self.trt.float32)
+        width = int(self._array(module.weight).size)
+        parameter_shape = [1] * rank
+        parameter_shape[parameter_axis] = width
+        gamma = self.constant(
+            self._array(module.weight, np.float32).reshape(parameter_shape),
+            tuple(parameter_shape),
+        )
+        beta = self.constant(
+            self._array(module.bias, np.float32).reshape(parameter_shape),
+            tuple(parameter_shape),
+        )
+        axes_mask = sum(1 << (axis % rank) for axis in axes)
+        add_norm = getattr(self.network, "add_normalization_v2", None)
+        if add_norm is None:
+            add_norm = getattr(self.network, "add_normalization", None)
+        if add_norm is not None:
+            layer = add_norm(fp32, gamma, beta, axes_mask)
+            layer.epsilon = float(module.eps)
+            if hasattr(layer, "compute_precision"):
+                layer.compute_precision = self.trt.float32
+            return self.cast(layer.get_output(0), output_dtype)
+        mean = self.reduce_avg(fp32, axes, keep_dims=True)
+        centered = self.sub(fp32, mean)
+        variance = self.reduce_avg(self.mul(centered, centered), axes, keep_dims=True)
+        epsilon = self.scalar(float(module.eps), rank, like=variance)
+        normalized = self.mul(
+            centered,
+            self.unary("RECIP", self.unary("SQRT", self.add(variance, epsilon))),
+        )
+        return self.cast(self.add(self.mul(normalized, gamma), beta), output_dtype)
+
+    def layer_norm_channels(self, tensor: Any, module: Any) -> Any:
+        return self.layer_norm(tensor, module, axes=(1,), parameter_axis=1)
+
+    def layer_norm_last(self, tensor: Any, module: Any) -> Any:
+        rank = len(tuple(tensor.shape))
+        return self.layer_norm(tensor, module, axes=(rank - 1,), parameter_axis=rank - 1)
+
+    def resize(
+        self,
+        tensor: Any,
+        shape: tuple[int, ...],
+        *,
+        mode: str,
+        align_corners: bool = False,
+    ) -> Any:
+        layer = self.network.add_resize(tensor)
+        layer.resize_mode = {
+            "nearest": self.trt.InterpolationMode.NEAREST,
+            "linear": self.trt.InterpolationMode.LINEAR,
+            "bilinear": self.trt.InterpolationMode.LINEAR,
+            "trilinear": self.trt.InterpolationMode.LINEAR,
+        }[mode]
+        if mode != "nearest" and hasattr(layer, "coordinate_transformation"):
+            transformation = (
+                self.trt.ResizeCoordinateTransformation.ALIGN_CORNERS
+                if align_corners
+                else self.trt.ResizeCoordinateTransformation.HALF_PIXEL
+            )
+            layer.coordinate_transformation = transformation
+        layer.shape = tuple(int(dim) for dim in shape)
+        return layer.get_output(0)
+
+    def pool2d(
+        self,
+        tensor: Any,
+        *,
+        kind: str,
+        window: tuple[int, int],
+        stride: tuple[int, int],
+        padding: tuple[int, int] = (0, 0),
+    ) -> Any:
+        pool_type = {
+            "avg": self.trt.PoolingType.AVERAGE,
+            "max": self.trt.PoolingType.MAX,
+        }[kind]
+        layer = self.network.add_pooling_nd(tensor, pool_type, window)
+        layer.stride_nd = stride
+        layer.padding_nd = padding
+        return layer.get_output(0)
+
+    def normalize_l2(self, tensor: Any, axis: int, *, epsilon: float = 1.0e-12) -> Any:
+        rank = len(tuple(tensor.shape))
+        fp32 = self.cast(tensor, self.trt.float32)
+        squared = self.mul(fp32, fp32)
+        norm_squared = self.reduce_sum(squared, (axis,), keep_dims=True)
+        norm = self.unary("SQRT", norm_squared)
+        epsilon_tensor = self.scalar(epsilon, rank, like=norm)
+        denominator = self.elementwise("MAX", norm, epsilon_tensor)
+        return self.div(fp32, denominator)
+
+    def basic_conv(self, tensor: Any, module: Any) -> Any:
+        conv = module.conv
+        dimensions = len(self._tuple(conv.kernel_size, len(conv.kernel_size)))
+        deconv = "Transpose" in conv.__class__.__name__
+        if dimensions == 2:
+            output = self.deconv2d(tensor, conv) if deconv else self.conv2d(tensor, conv)
+        else:
+            output = self.deconv3d(tensor, conv) if deconv else self.conv3d(tensor, conv)
+        bn = getattr(module, "bn", None)
+        if bn is None:
+            bn = getattr(module, "IN", None)
+        if bn is not None and bn.__class__.__name__ != "Identity":
+            if "InstanceNorm" in bn.__class__.__name__:
+                output = self.instance_norm(output, bn)
+            else:
+                output = self.batch_norm(output, bn)
+        relu = getattr(module, "relu", None)
+        if relu is not None and relu.__class__.__name__ != "Identity":
+            if "Leaky" in relu.__class__.__name__:
+                output = self.activation(
+                    output, "leaky_relu", alpha=float(getattr(relu, "negative_slope", 0.01))
+                )
+            else:
+                output = self.activation(output, "relu")
+        return output
+
+    def sequential(self, tensor: Any, module: Any) -> Any:
+        output = tensor
+        for child in module:
+            output = self.module(output, child)
+        return output
+
+    def resnet(self, tensor: Any, module: Any) -> Any:
+        identity = tensor
+        dimensions = len(module.conv1.kernel_size)
+        output = (
+            self.conv2d(tensor, module.conv1)
+            if dimensions == 2
+            else self.conv3d(tensor, module.conv1)
+        )
+        if hasattr(module, "bn1"):
+            bn1 = module.bn1
+            output = (
+                self.instance_norm(output, bn1)
+                if "InstanceNorm" in bn1.__class__.__name__
+                else self.batch_norm(output, bn1)
+            )
+        output = self.activation(output, "relu")
+        output = (
+            self.conv2d(output, module.conv2)
+            if dimensions == 2
+            else self.conv3d(output, module.conv2)
+        )
+        if hasattr(module, "bn2"):
+            bn2 = module.bn2
+            output = (
+                self.instance_norm(output, bn2)
+                if "InstanceNorm" in bn2.__class__.__name__
+                else self.batch_norm(output, bn2)
+            )
+        if getattr(module, "downsample", None) is not None:
+            identity = self.sequential(identity, module.downsample)
+        return self.activation(self.add(output, identity), "relu")
+
+    def conv3d_reduced(self, tensor: Any, module: Any) -> Any:
+        return self.sequential(self.sequential(tensor, module.conv1), module.conv2)
+
+    def feature_attention(self, volume: Any, feature: Any, module: Any) -> Any:
+        attention = self.sequential(feature, module.feat_att)
+        shape = tuple(int(dim) for dim in attention.shape)
+        attention = self.reshape(attention, (shape[0], shape[1], 1, shape[2], shape[3]))
+        return self.mul(volume, self.activation(attention, "sigmoid"))
+
+    def forward_helper(self, tensor: Any, feature: Any, module: Any) -> Any:
+        output = tensor
+        for child in module.layers:
+            if child.__class__.__name__ == "FeatureAtt":
+                output = self.feature_attention(output, feature, child)
+            else:
+                output = self.module(output, child)
+        return output
+
+    def post_forward_helper(
+        self,
+        skip: Any,
+        lower: Any,
+        feature: Any,
+        module: Any,
+    ) -> Any:
+        output = self.sequential(lower, module.upsample)
+        output = self.add(output, skip) if module.op == "sum" else self.concat((output, skip), 1)
+        for child in module.out:
+            if child.__class__.__name__ == "FeatureAtt":
+                output = self.feature_attention(output, feature, child)
+            else:
+                output = self.module(output, child)
+        return output
+
+    def edge_next_encoder(self, tensor: Any, module: Any) -> Any:
+        residual = tensor
+        output = self.conv2d(tensor, module.dwconv)
+        if module.norm.__class__.__name__ != "Identity":
+            if "BatchNorm" in module.norm.__class__.__name__:
+                output = self.batch_norm(output, module.norm)
+            else:
+                output = self.layer_norm_channels(output, module.norm)
+        output = self.transpose(output, (0, 2, 3, 1))
+        output = self.linear(output, module.pwconv1)
+        output = self.gelu(output)
+        output = self.linear(output, module.pwconv2)
+        gamma = getattr(module, "gamma", None)
+        if gamma is not None:
+            channels = int(output.shape[-1])
+            gamma_tensor = self.constant(
+                self._array(gamma, self._np_dtype_for(output)).reshape(1, 1, 1, channels),
+                (1, 1, 1, channels),
+                dtype=self._np_dtype_for(output),
+                target_dtype=output.dtype,
+            )
+            output = self.mul(output, gamma_tensor)
+        output = self.transpose(output, (0, 3, 1, 2))
+        return self.add(residual, output)
+
+    def module(self, tensor: Any, module: Any) -> Any:
+        name = module.__class__.__name__
+        if name == "Identity" or name == "Dropout":
+            return tensor
+        if name in {"Sequential", "ModuleList"}:
+            return self.sequential(tensor, module)
+        if name == "Conv2d":
+            return self.conv2d(tensor, module)
+        if name == "Conv3d":
+            return self.conv3d(tensor, module)
+        if name == "ConvTranspose2d":
+            return self.deconv2d(tensor, module)
+        if name == "ConvTranspose3d":
+            return self.deconv3d(tensor, module)
+        if name in {"BatchNorm2d", "BatchNorm3d", "SyncBatchNorm"}:
+            return self.batch_norm(tensor, module)
+        if name in {"InstanceNorm2d", "InstanceNorm3d"}:
+            return self.instance_norm(tensor, module)
+        if name in {"LayerNorm", "LayerNorm2d"}:
+            return (
+                self.layer_norm_last(tensor, module)
+                if name == "LayerNorm"
+                else self.layer_norm_channels(tensor, module)
+            )
+        if name == "Linear":
+            return self.linear(tensor, module)
+        if name == "ReLU":
+            return self.activation(tensor, "relu")
+        if name == "LeakyReLU":
+            return self.activation(
+                tensor, "leaky_relu", alpha=float(getattr(module, "negative_slope", 0.01))
+            )
+        if name == "GELU":
+            return self.gelu(tensor)
+        if name == "Sigmoid":
+            return self.activation(tensor, "sigmoid")
+        if name == "Tanh":
+            return self.activation(tensor, "tanh")
+        if name in {"BasicConv", "BasicConv_IN"}:
+            return self.basic_conv(tensor, module)
+        if name == "Conv3dNormActReduced":
+            return self.conv3d_reduced(tensor, module)
+        if name in {"ResnetBasicBlock", "ResnetBasicBlock3D"}:
+            return self.resnet(tensor, module)
+        if name == "EdgeNextConvEncoder":
+            return self.edge_next_encoder(tensor, module)
+        if name == "Upsample":
+            shape = tuple(int(dim) for dim in tensor.shape)
+            scale = module.scale_factor
+            if isinstance(scale, tuple):
+                spatial_scale = tuple(float(item) for item in scale)
+            else:
+                spatial_scale = (float(scale),) * (len(shape) - 2)
+            target = shape[:2] + tuple(
+                int(round(dim * factor)) for dim, factor in zip(shape[2:], spatial_scale)
+            )
+            return self.resize(
+                tensor,
+                target,
+                mode=str(module.mode),
+                align_corners=bool(module.align_corners),
+            )
+        raise TypeError(f"unsupported Fast Foundation Stereo module: {name}")

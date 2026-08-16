@@ -17,6 +17,11 @@ import imageio.v2 as imageio
 import numpy as np
 import torch
 
+try:
+    from .trt_runner import SplitTensorRTRunner, load_native_plugin_libraries
+except ImportError:  # Direct execution: python tests/.../benchmark.py
+    from trt_runner import SplitTensorRTRunner, load_native_plugin_libraries
+
 
 def percentile(values: list[float], q: float) -> float:
     return float(np.percentile(np.asarray(values, dtype=np.float64), q))
@@ -96,6 +101,13 @@ def main() -> None:
     parser.add_argument("--feature-engine", type=Path)
     parser.add_argument("--post-engine", type=Path)
     parser.add_argument("--engine", type=Path)
+    parser.add_argument(
+        "--plugin-library",
+        action="append",
+        default=[],
+        type=Path,
+        help="family plugin DSO to load before TensorRT engine deserialization",
+    )
     parser.add_argument("--cuda-graphs", action="store_true")
     parser.add_argument("--input-root", type=Path)
     parser.add_argument("--out-dir", type=Path, required=True)
@@ -122,7 +134,6 @@ def main() -> None:
     model_root = args.model_root.resolve()
     os.chdir(model_root)
     sys.path.insert(0, str(model_root))
-    from core.foundation_stereo import TrtRunner
     from core.utils.utils import InputPadder
     from Utils import AMP_DTYPE
 
@@ -132,12 +143,13 @@ def main() -> None:
     )
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint = model_root / "weights/23-36-37/model_best_bp2_serialize.pth"
     model_init_start = time.perf_counter()
-    checkpoint_model = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    checkpoint_model.args.valid_iters = args.valid_iters
-    checkpoint_model.args.max_disp = args.max_disp
+    loaded_plugin_libraries: list[str] = []
     if args.backend == "torch":
+        checkpoint = model_root / "weights/23-36-37/model_best_bp2_serialize.pth"
+        checkpoint_model = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        checkpoint_model.args.valid_iters = args.valid_iters
+        checkpoint_model.args.max_disp = args.max_disp
         model = checkpoint_model.cuda().eval()
 
         def run_forward(left_tensor, right_tensor):
@@ -151,22 +163,19 @@ def main() -> None:
                 )
 
     elif args.backend == "trt":
-        model = (
-            TrtRunner(
-                checkpoint_model.args,
-                str(args.feature_engine.resolve()),
-                str(args.post_engine.resolve()),
-            )
-            .cuda()
-            .eval()
+        loaded_plugin_libraries = load_native_plugin_libraries(args.plugin_library)
+        model = SplitTensorRTRunner(
+            args.feature_engine.resolve(),
+            args.post_engine.resolve(),
         )
-        del checkpoint_model
 
         def run_forward(left_tensor, right_tensor):
             return model(left_tensor, right_tensor)
 
     else:
         import tensorrt as trt
+
+        loaded_plugin_libraries = load_native_plugin_libraries(args.plugin_library)
 
         class SingleEngineRunner:
             def __init__(self, engine_path: Path):
@@ -331,6 +340,7 @@ def main() -> None:
         "valid_iters": args.valid_iters,
         "max_disp": args.max_disp,
         "cuda_graphs": args.cuda_graphs,
+        "plugin_libraries": loaded_plugin_libraries,
         "model_init_ms": model_init_ms,
         "preprocess_5_pairs": summarize(preprocess_times),
         "infer_5_pairs": summarize(infer_times),
