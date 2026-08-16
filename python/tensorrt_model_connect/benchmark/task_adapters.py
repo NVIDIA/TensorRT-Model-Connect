@@ -690,6 +690,36 @@ def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> CaseRe
     )
 
 
+def _stereo_disparity_request(
+    testcase: Mapping[str, Any], _model_root: Path
+) -> CaseResolution:
+    height, height_source = _testcase_value(testcase, "stereo_height", 700)
+    width, width_source = _testcase_value(testcase, "stereo_width", 700)
+    pixel_shift, shift_source = _testcase_value(testcase, "stereo_pixel_shift", 12)
+    height = int(height)
+    width = int(width)
+    pixel_shift = int(pixel_shift)
+    if height <= 0 or width <= 0:
+        raise BenchmarkError("disparity testcase dimensions must be positive")
+    if pixel_shift < 0 or pixel_shift >= width:
+        raise BenchmarkError("disparity testcase pixel shift must be in [0, width)")
+    return _resolution(
+        {
+            "batch_size": 1,
+            "height": height,
+            "width": width,
+            "pixel_shift": pixel_shift,
+        },
+        {
+            "batch_size": _TASK_DEFAULT,
+            "height": height_source,
+            "width": width_source,
+            "pixel_shift": shift_source,
+        },
+        testcase=testcase,
+    )
+
+
 _TASK_ADAPTERS = (
     TaskAdapter(
         "text_generation_causal",
@@ -792,6 +822,12 @@ _TASK_ADAPTERS = (
         "transcribe",
         MeasurementSpec(warmup=1, iterations=10),
         _transcribe_request,
+    ),
+    TaskAdapter(
+        "stereo_disparity",
+        "disparity",
+        MeasurementSpec(warmup=3, iterations=100),
+        _stereo_disparity_request,
     ),
 )
 

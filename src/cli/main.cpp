@@ -905,6 +905,43 @@ int cmd_segment(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+int cmd_disparity(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.image_path.empty() || args.right_image_path.empty()) {
+        std::cerr << "Error: disparity requires bundle + --image + --right-image\n";
+        return EXIT_FAILURE;
+    }
+
+    const auto left = trtmc::io::read_image(args.image_path);
+    const auto right = trtmc::io::read_image(args.right_image_path);
+    if (left.empty() || right.empty()) {
+        std::cerr << "Error: failed to load stereo images\n";
+        return EXIT_FAILURE;
+    }
+    if (left.height != right.height || left.width != right.width) {
+        std::cerr << "Error: stereo image dimensions must match\n";
+        return EXIT_FAILURE;
+    }
+
+    auto pipeline = load_pipeline(args);
+    const auto result = pipeline->estimate_disparity(left.pixels.data(), right.pixels.data(),
+                                                     left.height, left.width);
+    const std::string out_path = args.output_dir.empty() ? "/tmp/disparity.f32" : args.output_dir;
+    std::ofstream output(out_path, std::ios::binary);
+    if (!output || result.disparity.empty()) {
+        std::cerr << "Error: failed to create disparity output: " << out_path << '\n';
+        return EXIT_FAILURE;
+    }
+    output.write(reinterpret_cast<const char*>(result.disparity.data()),
+                 static_cast<std::streamsize>(result.disparity.size() * sizeof(float)));
+    if (!output) {
+        std::cerr << "Error: failed to write disparity output: " << out_path << '\n';
+        return EXIT_FAILURE;
+    }
+    std::cout << "{\"output\":\"" << out_path << "\",\"height\":" << result.height
+              << ",\"width\":" << result.width << ",\"dtype\":\"float32\"}\n";
+    return EXIT_SUCCESS;
+}
+
 int cmd_classify(const CliArgs& args) {
     if (args.bundle_path.empty() || args.image_path.empty()) {
         std::cerr << "Error: classify requires bundle + --image\n";
@@ -1716,6 +1753,8 @@ int main(int argc, char** argv) {
             return cmd_encode(args);
         if (args.command == "segment")
             return cmd_segment(args);
+        if (args.command == "disparity")
+            return cmd_disparity(args);
         if (args.command == "segment-prompted")
             return cmd_segment_prompted(args);
         if (args.command == "classify")

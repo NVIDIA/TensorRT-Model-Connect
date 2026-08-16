@@ -158,6 +158,12 @@ struct SegmentResult {
     int32_t width{0};
 };
 
+struct StereoDisparityResult {
+    std::vector<float> disparity; // [H, W] non-negative disparity in pixels
+    int32_t height{0};
+    int32_t width{0};
+};
+
 struct PromptedSegmentationResult {
     std::vector<float> masks;      // [num_masks, H, W], logits after postprocess
     std::vector<float> iou_scores; // [num_masks]
@@ -439,6 +445,20 @@ class IPipeline {
         (void)height;
         (void)width;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support segment()");
+    }
+
+    // -- Stereo disparity --
+    // Images are rectified RGB HWC float values in [0, 1], with matching
+    // dimensions. The result preserves the input height and width.
+    virtual StereoDisparityResult estimate_disparity(const float* left_pixels,
+                                                     const float* right_pixels, int32_t height,
+                                                     int32_t width) {
+        (void)left_pixels;
+        (void)right_pixels;
+        (void)height;
+        (void)width;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support estimate_disparity()");
     }
 
     virtual PromptedSegmentationResult segment_prompted(const float* image_pixels,

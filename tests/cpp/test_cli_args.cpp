@@ -184,6 +184,16 @@ void test_extract_features_parses_contract_flags() {
     check(args.output_json == "features.json", "extract-features output json");
 }
 
+void test_disparity_parses_stereo_images() {
+    auto args = parse({"trtmc", "disparity", "bundle.bundle", "--image", "left.png",
+                       "--right-image", "right.png", "--output", "disparity.f32"});
+    check(args.command == "disparity", "disparity command");
+    check(args.bundle_path == "bundle.bundle", "disparity bundle");
+    check(args.image_path == "left.png", "disparity left image");
+    check(args.right_image_path == "right.png", "disparity right image");
+    check(args.output_dir == "disparity.f32", "disparity output");
+}
+
 void test_inspect_and_config_flags() {
     auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--config",
                        "profile.json", "--set", "audio.seed=7"});
@@ -456,6 +466,7 @@ int main() {
     test_diffusion_flags();
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
+    test_disparity_parses_stereo_images();
     test_inspect_and_config_flags();
     test_audio_and_solve_flags();
     test_canary_transcription_flags_and_batch();

@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "fast_foundation_stereo"
+plugin = "fast_foundation_stereo"
+test_manifests = ["manifests/fast-foundation-stereo.json"]
+
+[model_reference_cache]
+repository = "https://github.com/NVlabs/Fast-FoundationStereo.git"
+revision = "a290ba04c1b3ad1ec41a33974a157b2917b624d4"
+relative_path = "fast_foundation_stereo/reference/Fast-FoundationStereo-a290ba04c1b3"
+entrypoint = "core/foundation_stereo.py"
+environment_variable = "TRTMC_FAST_FOUNDATION_STEREO_SOURCE_DIR"
+
+[e2e_defaults.stereo_disparity]
+reference_backend = "fast_foundation_stereo_torch"
+oracle_level = "L1_external_reference"
+stages = [{ name = "full_inference", required = true }]

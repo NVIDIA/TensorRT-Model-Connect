@@ -1715,6 +1715,34 @@ suites:
       lane: local_only
       notes: GB300-only native-reference consistency.
 
+  - id: fast_foundation_stereo_synthetic_parity
+    description: >
+      Numeric disparity consistency on a repo-owned deterministic 700x700
+      rectified stereo pair. The pinned official PyTorch implementation and
+      native TRTMC runtime receive the same RGB tensors and must preserve the
+      model's flattened-FP32 cosine threshold of 0.999.
+    user_contract: stereo_disparity
+    default_model_names: [fast-foundation-stereo]
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/fast_foundation_stereo/validation/fast-foundation-stereo.json
+    selectors:
+      model_names: [fast-foundation-stereo]
+      task_strategies: [stereo_disparity]
+      runtime_strategies: [fast_foundation_stereo_disparity]
+      user_contracts: [stereo_disparity]
+      families: [fast_foundation_stereo]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Single-GPU native-reference consistency. The model-owned threshold
+        sidecar supplies the 0.999 cosine gate without workload overrides.
+
   - id: mmmu_pro_vision_square_plugin_parity
     description: >
       Image-question output consistency on the same five distinct-subject

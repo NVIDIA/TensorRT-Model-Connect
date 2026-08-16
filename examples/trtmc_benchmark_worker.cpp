@@ -858,6 +858,61 @@ Json run_detect(trtmc::IPipeline& pipeline, const Json& request, const TimingCon
     };
 }
 
+std::vector<float> synthetic_stereo_image(int32_t height, int32_t width, int32_t pixel_shift) {
+    std::vector<float> pixels(static_cast<std::size_t>(height) * width * 3);
+    for (int32_t y = 0; y < height; ++y) {
+        for (int32_t x = 0; x < width; ++x) {
+            const int32_t source_x = std::min(x + pixel_shift, width - 1);
+            const auto offset = (static_cast<std::size_t>(y) * width + x) * 3;
+            pixels[offset] = static_cast<float>(source_x % 256) / 255.0F;
+            pixels[offset + 1] = static_cast<float>(y % 256) / 255.0F;
+            pixels[offset + 2] = static_cast<float>((source_x + y) % 256) / 255.0F;
+        }
+    }
+    return pixels;
+}
+
+Json run_disparity(trtmc::IPipeline& pipeline, const Json& request, const TimingConfig& timing) {
+    const int32_t height = optional_value<int32_t>(request, "height", 700);
+    const int32_t width = optional_value<int32_t>(request, "width", 700);
+    const int32_t pixel_shift = optional_value<int32_t>(request, "pixel_shift", 12);
+    if (height <= 0 || width <= 0 || pixel_shift < 0 || pixel_shift >= width) {
+        throw std::runtime_error("invalid synthetic stereo dimensions or pixel shift");
+    }
+    const auto left = synthetic_stereo_image(height, width, 0);
+    const auto right = synthetic_stereo_image(height, width, pixel_shift);
+    trtmc::StereoDisparityResult last;
+    const auto estimate = [&]() {
+        return pipeline.estimate_disparity(left.data(), right.data(), height, width);
+    };
+    for (int index = 0; index < timing.warmup; ++index) {
+        last = estimate();
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < timing.iterations; ++index) {
+        const IterationTimer timer(timing.scope);
+        last = estimate();
+        const double measured_ms = timer.elapsed_ms();
+        observations.push_back({
+            {"iteration", index},
+            {"measured_wall_ms", measured_ms},
+            {"runtime_e2e_wall_ms", measured_ms},
+            {"stereo_pairs", 1},
+            {"disparity_pixels", last.disparity.size()},
+        });
+    }
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"height", last.height},
+             {"width", last.width},
+             {"element_count", last.disparity.size()},
+             {"finite_sum", finite_sum(last.disparity)},
+         }},
+    };
+}
+
 Json run_rerank(trtmc::IPipeline& pipeline, const Json& request, const TimingConfig& timing) {
     const int warmup = timing.warmup;
     const int iterations = timing.iterations;
@@ -1051,6 +1106,7 @@ Json execute(const Json& request) {
         {"classify", run_classify},
         {"extract_features", run_extract_features},
         {"detect", run_detect},
+        {"disparity", run_disparity},
         {"rerank", run_rerank},
         {"encode", run_encode},
         {"embed", run_embed},

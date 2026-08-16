@@ -141,6 +141,13 @@ _OPERATIONS = (
         rate_metrics=(RateMetric("detected_images", "images_per_s"),),
     ),
     OperationSpec(
+        name="disparity",
+        rate_metrics=(
+            RateMetric("stereo_pairs", "stereo_pairs_per_s"),
+            RateMetric("disparity_pixels", "disparity_pixels_per_s"),
+        ),
+    ),
+    OperationSpec(
         name="rerank",
         rate_metrics=(RateMetric("documents", "documents_per_s"),),
     ),

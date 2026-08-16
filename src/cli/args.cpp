@@ -204,6 +204,8 @@ void print_usage() {
            "[--num-images N] [--prompts-file PATH] [--seed s0,s1,...]\n"
            "  trtmc encode          <bundle.bundle> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc segment         <bundle.bundle> --image PATH --output PATH [--hf-python PATH]\n"
+           "  trtmc disparity       <bundle.bundle> --image LEFT --right-image RIGHT "
+           "--output PATH\n"
            "  trtmc segment-prompted <bundle.bundle> --image PATH --output DIR "
            "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]\n"
@@ -275,9 +277,10 @@ CliArgs parse_args(int argc, char** argv) {
     }
 
     static const char* known_cmds[] = {
-        "run",        "inspect", "generate-video",   "segment",        "segment-prompted",
-        "classify",   "detect",  "extract-features", "generate-audio", "serve-audio",
-        "encode",     "embed",   "rerank",           "solve",          "speak",
+        "run",              "inspect",  "generate-video", "segment",
+        "segment-prompted", "disparity", "classify",       "detect",
+        "extract-features", "generate-audio", "serve-audio", "encode",
+        "embed",            "rerank",   "solve",           "speak",
         "transcribe", nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
@@ -486,6 +489,10 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--image" && need_value(arg)) {
             args.image_path = argv[++i];
+            continue;
+        }
+        if (arg == "--right-image" && need_value(arg)) {
+            args.right_image_path = argv[++i];
             continue;
         }
         if (arg == "--lora-adapter" && need_value(arg)) {

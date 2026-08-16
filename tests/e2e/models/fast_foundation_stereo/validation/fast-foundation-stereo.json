@@ -1,0 +1,16 @@
+{
+  "schema_version": "trtmc.model-plugin-validation/v1",
+  "dataset": "Fast-FoundationStereo deterministic rectified pair",
+  "version": "1",
+  "requests": [
+    {
+      "sample_id": "fast-foundation-stereo-shift-12",
+      "testcase": "fast-foundation-stereo",
+      "stage": "full_inference",
+      "category": "synthetic-rectified-stereo",
+      "inputs": {
+        "pixel_shift": 12
+      }
+    }
+  ]
+}
