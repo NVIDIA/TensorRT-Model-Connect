@@ -9,7 +9,9 @@ import ctypes
 import fcntl
 import hashlib
 import os
+import re
 import subprocess
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,7 +22,7 @@ _PLUGIN_ENV = "TRTMC_FAST_FOUNDATION_STEREO_NATIVE_PLUGIN_LIBRARY"
 _BUILD_DIR_ENV = "TRTMC_FAST_FOUNDATION_STEREO_NATIVE_PLUGIN_BUILD_DIR"
 _PLUGIN_NAME = "FastFoundationStereoGwc"
 _PLUGIN_VERSION = "1"
-_PLUGIN_HANDLES: list[Any] = []
+_PLUGIN_HANDLES: dict[Path, Any] = {}
 
 
 def _source_digest(source_dir: Path) -> str:
@@ -32,9 +34,72 @@ def _source_digest(source_dir: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+def _active_tensorrt_cmake_hints() -> list[str]:
+    """Pin the plugin build to the TensorRT ABI loaded by this process."""
+
+    from tensorrt_model_connect import trt_compat
+
+    hints: list[str] = []
+    libraries = list(
+        dict.fromkeys(
+            Path(candidate).resolve()
+            for candidate in trt_compat.loaded_libnvinfer_paths()
+            if Path(candidate).is_file()
+        )
+    )
+    if libraries:
+        active_major = trt_compat.tensorrt_version().split(".", 1)[0]
+        identities = {
+            (
+                library.parent,
+                (
+                    match.group(1)
+                    if (match := re.search(r"\.so\.(\d+)", library.name))
+                    else active_major
+                ),
+            )
+            for library in libraries
+        }
+        if len(identities) > 1:
+            raise RuntimeError(f"Multiple TensorRT runtimes are loaded: {libraries}")
+        library = max(libraries, key=lambda candidate: len(candidate.name))
+        hints.append(f"-DFAST_FOUNDATION_STEREO_TRT_LIBRARY={library}")
+
+    for variable in ("TRTMC_TRT_INCLUDE_DIR", "TRT_INC_DIR"):
+        candidate = os.environ.get(variable)
+        if candidate and (Path(candidate) / "NvInferRuntime.h").is_file():
+            hints.append(f"-DFAST_FOUNDATION_STEREO_TRT_INCLUDE_DIR={Path(candidate).resolve()}")
+            break
+    return hints
+
+
+def _plugin_cache_key(
+    source_dir: Path,
+    cmake_hints: list[str],
+    *,
+    runtime_version: str = "",
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(_source_digest(source_dir).encode("ascii"))
+    for hint in (
+        f"tensorrt={runtime_version}",
+        f"cuda={os.environ.get('CUDA_VERSION', '')}",
+        f"architectures={os.environ.get('CMAKE_CUDA_ARCHITECTURES', '89-real;89-virtual')}",
+        *cmake_hints,
+    ):
+        digest.update(b"\0")
+        digest.update(hint.encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
 @contextmanager
 def _exclusive_build_lock(build_base: Path, source_digest: str) -> Iterator[None]:
-    build_base.mkdir(parents=True, exist_ok=True)
+    if build_base.is_symlink():
+        raise RuntimeError(f"Native plugin build cache cannot be a symlink: {build_base}")
+    build_base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if build_base.stat().st_uid != os.geteuid():
+        raise RuntimeError(f"Native plugin build cache is not owned by this user: {build_base}")
+    build_base.chmod(0o700)
     lock_path = build_base / f".{source_digest}.lock"
     with lock_path.open("a+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -51,23 +116,35 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
             raise FileNotFoundError(f"{_PLUGIN_ENV} does not exist: {path}")
         return path
 
+    from tensorrt_model_connect import trt_compat
+
+    trt_compat.load_module()
     source_dir = Path(__file__).with_name("native_plugins")
+    default_build_base = Path(tempfile.gettempdir()) / (
+        f"trtmc-fast-foundation-stereo-native-plugin-{os.geteuid()}"
+    )
     build_base = Path(
         os.environ.get(
             _BUILD_DIR_ENV,
-            "/tmp/trtmc-fast-foundation-stereo-native-plugin",
+            str(default_build_base),
         )
     ).expanduser()
-    source_digest = _source_digest(source_dir)
+    cmake_hints = _active_tensorrt_cmake_hints()
+    source_digest = _plugin_cache_key(
+        source_dir,
+        cmake_hints,
+        runtime_version=trt_compat.tensorrt_version(),
+    )
     build_dir = build_base / source_digest
     output = build_dir / "libtrtmc_fast_foundation_stereo_native_plugin.so"
-    if output.is_file():
-        return output
+    complete = build_dir / ".complete"
 
     with _exclusive_build_lock(build_base, source_digest):
-        if output.is_file():
+        if output.is_file() and complete.is_file():
             return output
         build_dir.mkdir(parents=True, exist_ok=True)
+        output.unlink(missing_ok=True)
+        complete.unlink(missing_ok=True)
         configure = [
             "cmake",
             "-S",
@@ -75,6 +152,7 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
             "-B",
             str(build_dir),
             "-DCMAKE_BUILD_TYPE=Release",
+            *cmake_hints,
         ]
         build = [
             "cmake",
@@ -103,15 +181,23 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
             ) from exc
         if not output.is_file():
             raise RuntimeError(f"Native plugin build did not produce {output}")
+        complete.write_text("complete\n", encoding="utf-8")
     return output
 
 
 def load_native_plugin(*, verbose: bool = False) -> Path:
     """Load the DSO globally so TensorRT can discover its creator."""
 
-    path = ensure_native_plugin(verbose=verbose)
+    path = ensure_native_plugin(verbose=verbose).resolve()
+    if path in _PLUGIN_HANDLES:
+        return path
+    if _PLUGIN_HANDLES:
+        loaded = ", ".join(str(loaded_path) for loaded_path in _PLUGIN_HANDLES)
+        raise RuntimeError(
+            "A different Fast Foundation Stereo native plugin is already loaded: " + loaded
+        )
     handle = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
-    _PLUGIN_HANDLES.append(handle)
+    _PLUGIN_HANDLES[path] = handle
     return path
 
 

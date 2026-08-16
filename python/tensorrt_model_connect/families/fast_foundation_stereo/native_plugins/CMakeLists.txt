@@ -24,11 +24,21 @@ set(_trt_roots)
 if(DEFINED ENV{TENSORRT_ROOT})
   list(APPEND _trt_roots "$ENV{TENSORRT_ROOT}")
 endif()
+set(_trt_python_prefixes)
 if(DEFINED ENV{CONDA_PREFIX})
-  file(GLOB _trt_python_roots "$ENV{CONDA_PREFIX}/lib/python*/site-packages/tensorrt")
-  file(GLOB _trt_python_lib_dirs "$ENV{CONDA_PREFIX}/lib/python*/site-packages/tensorrt_libs")
-  list(APPEND _trt_roots "$ENV{CONDA_PREFIX}" ${_trt_python_roots})
+  list(APPEND _trt_python_prefixes "$ENV{CONDA_PREFIX}")
 endif()
+if(DEFINED ENV{VIRTUAL_ENV})
+  list(APPEND _trt_python_prefixes "$ENV{VIRTUAL_ENV}")
+endif()
+foreach(_trt_python_prefix IN LISTS _trt_python_prefixes)
+  file(GLOB _trt_python_roots
+    "${_trt_python_prefix}/lib/python*/site-packages/tensorrt")
+  file(GLOB _trt_python_lib_dirs_for_prefix
+    "${_trt_python_prefix}/lib/python*/site-packages/tensorrt_libs")
+  list(APPEND _trt_roots "${_trt_python_prefix}" ${_trt_python_roots})
+  list(APPEND _trt_python_lib_dirs ${_trt_python_lib_dirs_for_prefix})
+endforeach()
 
 find_path(FAST_FOUNDATION_STEREO_TRT_INCLUDE_DIR NvInferRuntime.h
   HINTS ${_trt_roots}

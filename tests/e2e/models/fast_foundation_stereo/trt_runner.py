@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 _PLUGIN_LIBRARY_NAMES = (
     "libtrtmc_fast_foundation_stereo_native_plugin.so",
     "libtrtmc_model_fast_foundation_stereo.so",
-    "libtrtmc_fast_foundation_stereo_gwc_plugin.so",
     "trtmc_model_fast_foundation_stereo.dll",
     "libtrtmc_model_fast_foundation_stereo.dylib",
 )

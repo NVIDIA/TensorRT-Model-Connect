@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "receipt_kind": "l4_performance_and_roofline",
+  "measurement_status": "superseded_by_native_strongly_typed_graph",
+  "superseded_reason": "This receipt measured an earlier weakly typed split graph with framework-side GWC orchestration and must not be used as evidence for the current native TensorRT graph.",
   "measured_at": "2026-08-15 America/Los_Angeles",
   "hardware": {
     "node": "ipp2-2246",
