@@ -133,7 +133,7 @@ void load_native_plugin(const PipelineContext& ctx) {
             (message != nullptr ? message : path));
     }
     dlerror();
-    auto* symbol = dlsym(handle, "fast_foundation_stereo_gwc_plugin_force_link");
+    auto* symbol = dlsym(handle, "fast_foundation_stereo_combined_volume_plugin_force_link");
     const char* message = dlerror();
     if (message != nullptr || symbol == nullptr) {
         dlclose(handle);

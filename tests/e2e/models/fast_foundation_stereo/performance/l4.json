@@ -1,150 +1,407 @@
 {
-  "schema_version": 1,
-  "receipt_kind": "l4_performance_and_roofline",
-  "measurement_status": "superseded_by_native_strongly_typed_graph",
-  "superseded_reason": "This receipt measured an earlier weakly typed split graph with framework-side GWC orchestration and must not be used as evidence for the current native TensorRT graph.",
-  "measured_at": "2026-08-15 America/Los_Angeles",
+  "schema_version": 2,
+  "receipt_kind": "l4_native_tensorrt_performance_and_roofline",
+  "measurement_status": "current_native_l4_latency_and_accuracy_qualified",
+  "measured_at": "2026-08-16T13:59:32-07:00",
+  "qualification": {
+    "latency_beats_recorded_baseline": true,
+    "accuracy_passed": true,
+    "strict_roofline_passed": false,
+    "combined_latency_and_roofline_gate_passed": false
+  },
   "hardware": {
     "node": "ipp2-2246",
     "gpu": "NVIDIA L4",
-    "compute_capability": "8.9",
+    "compute_capability": [8, 9],
     "memory_mib": 23034,
     "power_limit_w": 72,
     "driver": "595.58.03",
-    "tensorrt": "10.8.0.43"
+    "torch_cuda_build": "12.4",
+    "tensorrt": "10.8.0.43",
+    "torch": "2.6.0+cu124"
   },
   "provenance": {
-    "supplied_archive_sha256": "8b8769aeeef47be494bccb0bf6593355da329ed45195a68fb2633154be492e4a",
     "official_source_revision": "a290ba04c1b3ad1ec41a33974a157b2917b624d4",
-    "official_source_archive_sha256": "c11d945db0fb765c0bdf355311f986ab914ad2619133de3a26f84a3ecbddf6c9",
     "checkpoint_hf_revision": "9b446878c81ddb27593036767b29b2859d46103e"
   },
+  "implementation": {
+    "backend": "tensorrt",
+    "network_definition": "native_api",
+    "onnx_used": false,
+    "graph": "split_feature_post",
+    "precision": {
+      "feature": "strongly_typed_fp16_with_required_fp32_tensors",
+      "post": "weakly_typed_fp16_with_required_fp32_tensors"
+    },
+    "builder": {
+      "feature_optimization_level": 5,
+      "feature_auxiliary_streams": 2,
+      "post_optimization_level": 4,
+      "post_auxiliary_streams": 0,
+      "workspace_gib": 8
+    },
+    "native_plugins": [
+      "FastFoundationStereoCombinedVolume",
+      "FastFoundationStereoSpatialAttentionReduce"
+    ]
+  },
   "protocol": {
-    "input_pairs": 5,
+    "pairs_per_iteration": 5,
     "input_shape": [700, 700, 3],
     "engine_shape": [1, 3, 704, 704],
-    "warmup_iterations": 3,
-    "timed_iterations": 100,
+    "start_index": 0,
+    "scale": 1.0,
+    "independent_processes": 5,
+    "warmup_iterations_per_process": 20,
+    "timed_iterations_per_process": 100,
     "valid_iterations": 8,
     "max_disparity": 192,
-    "accuracy_metric": "flattened_fp32_cosine_similarity",
-    "minimum_cosine": 0.999
-  },
-  "recorded_baseline": {
-    "preprocess_5_pairs_mean_ms": 133.45681335777044,
-    "inference_5_pairs_mean_ms": 631.8328293785453,
-    "total_5_pairs_mean_ms": 765.2896427363157
-  },
-  "l4_torch_reproduction": {
-    "preprocess_5_pairs_mean_ms": 79.91516468013288,
-    "inference_5_pairs_mean_ms": 685.3437921198929,
-    "total_5_pairs_mean_ms": 765.2589568000258,
-    "global_cosine": 1.0
-  },
-  "selected_tensorrt_configuration": {
-    "measurement_runtime": "official Python TrtRunner with the official Triton GWC kernel",
-    "native_runtime_boundary": "The C++ runtime uses the separately validated family-owned GWC CUDA kernel below.",
-    "precision": "weakly_typed_fp16_with_required_fp32_tensors",
-    "graph": "split_feature_gwc_post",
-    "builder_optimization_level": 3,
-    "workspace_gib": 8,
-    "maximum_auxiliary_streams": 2,
-    "actual_feature_auxiliary_streams": 2,
-    "actual_post_auxiliary_streams": 2,
     "cuda_graphs": true,
-    "feature_engine_layers": 284,
-    "post_engine_layers": 697
-  },
-  "selected_tensorrt_sustained_runs": [
-    {
-      "preprocess_5_pairs_mean_ms": 77.40514166027424,
-      "inference_5_pairs_mean_ms": 326.32860979989346,
-      "total_5_pairs_mean_ms": 403.7337514601677,
-      "global_cosine": 0.999405287244333,
-      "accuracy_passed": true
-    },
-    {
-      "preprocess_5_pairs_mean_ms": 77.34481210020022,
-      "inference_5_pairs_mean_ms": 323.69157146014913,
-      "total_5_pairs_mean_ms": 401.03638356034935,
-      "global_cosine": 0.999405287244333,
-      "accuracy_passed": true
+    "measurement_scope": {
+      "name": "serial_paired_inference",
+      "description": "5 stereo pairs evaluated serially; inference timing includes output conversion, device-to-host transfer, unpadding, and clipping"
     }
-  ],
-  "improvement_from_recorded_baseline_using_repeat": {
-    "inference_latency_reduction_percent": 48.76942817635419,
-    "inference_throughput_speedup": 1.9519594734221635,
-    "total_latency_reduction_percent": 47.596784123925694,
-    "total_throughput_speedup": 1.908279832224131
   },
-  "roofline_sample": {
+  "accuracy": {
+    "reference": "canonical PyTorch FP32 disparity output",
+    "thresholds": {
+      "minimum_global_cosine": 0.999,
+      "maximum_mean_abs_error_px": 0.5,
+      "maximum_bad_2px_fraction": 0.02
+    },
+    "observed": {
+      "global_cosine": 0.9997698244693872,
+      "pair_cosines": [
+        0.9998443292187026,
+        0.9996316649073147,
+        0.9997375347893219,
+        0.999916658207503,
+        0.9998337731668623
+      ],
+      "maximum_abs_error_px": 27.338485717773438,
+      "mean_abs_error_px": 0.36394786834716797,
+      "bad_2px_fraction": 0.015486938775510203
+    },
+    "identical_output_across_runs": true,
+    "all_runs_passed": true
+  },
+  "latency": {
+    "recorded_baseline": {
+      "inference_5_pairs_mean_ms": 631.8328293785453,
+      "source_receipt": {
+        "repository_commit": "2126d32f8ce4be409a0677a5751de1eec8b7636a",
+        "path": "tests/e2e/models/fast_foundation_stereo/performance/l4.json",
+        "sha256": "c3ebbdec72c8665c2f1f7756f248499aa2415bc4451fe9ab80a5eb4146652bd3",
+        "bytes": 5661,
+        "measurement_status": "superseded_by_native_strongly_typed_graph"
+      }
+    },
+    "sustained_runs": [
+      {
+        "run": 1,
+        "benchmark_receipt": {
+          "sha256": "1aca8d28c644f4fd731f42b37f2b6121dbff301df711c5f5fd294c42d68f8fe2",
+          "bytes": 14655
+        },
+        "output": {
+          "sha256": "e7a4c789d99e50dc777f6e86465e26364b8b8eb39f0a97cc987f5551049bdab5",
+          "bytes": 4086921
+        },
+        "inference_5_pairs": {
+          "count": 100,
+          "mean_ms": 346.0841629290371,
+          "median_ms": 346.2908069923287,
+          "p90_ms": 347.70738279476063,
+          "p95_ms": 348.1195248408767,
+          "p99_ms": 348.8804396598425,
+          "min_ms": 342.73010600009,
+          "max_ms": 349.3857020075666,
+          "stddev_ms": 1.4267658833576273,
+          "coefficient_of_variation": 0.004122598015703419
+        },
+        "accuracy_passed": true
+      },
+      {
+        "run": 2,
+        "benchmark_receipt": {
+          "sha256": "91ee12e94fdfe60cfa652cdec01a90df74a232bd67db96aed9b53b0c446cf0a4",
+          "bytes": 14666
+        },
+        "output": {
+          "sha256": "e7a4c789d99e50dc777f6e86465e26364b8b8eb39f0a97cc987f5551049bdab5",
+          "bytes": 4086921
+        },
+        "inference_5_pairs": {
+          "count": 100,
+          "mean_ms": 346.09042005133233,
+          "median_ms": 346.10065900778864,
+          "p90_ms": 347.724608896533,
+          "p95_ms": 348.155391808541,
+          "p99_ms": 348.9798097597668,
+          "min_ms": 342.0901150093414,
+          "max_ms": 349.4845870009158,
+          "stddev_ms": 1.401616983793829,
+          "coefficient_of_variation": 0.004049857790302143
+        },
+        "accuracy_passed": true
+      },
+      {
+        "run": 3,
+        "benchmark_receipt": {
+          "sha256": "89e2ee53e873a4a19548909d4b3736dc18996bd7e4bd2f9e49de8a84322c37ec",
+          "bytes": 14638
+        },
+        "output": {
+          "sha256": "e7a4c789d99e50dc777f6e86465e26364b8b8eb39f0a97cc987f5551049bdab5",
+          "bytes": 4086921
+        },
+        "inference_5_pairs": {
+          "count": 100,
+          "mean_ms": 347.849774070055,
+          "median_ms": 347.8129464929225,
+          "p90_ms": 349.19851459999336,
+          "p95_ms": 349.41520684442366,
+          "p99_ms": 350.3911907468864,
+          "min_ms": 344.9047449976206,
+          "max_ms": 350.9264589956729,
+          "stddev_ms": 1.0967498881555928,
+          "coefficient_of_variation": 0.0031529412117275476
+        },
+        "accuracy_passed": true
+      },
+      {
+        "run": 4,
+        "benchmark_receipt": {
+          "sha256": "07fd7caa7f1ee7590ce3e2ed82a6bcf3b6532ec57a5a5e0d343956cb62557486",
+          "bytes": 14657
+        },
+        "output": {
+          "sha256": "e7a4c789d99e50dc777f6e86465e26364b8b8eb39f0a97cc987f5551049bdab5",
+          "bytes": 4086921
+        },
+        "inference_5_pairs": {
+          "count": 100,
+          "mean_ms": 347.30803984959493,
+          "median_ms": 347.5798484942061,
+          "p90_ms": 348.6465720081469,
+          "p95_ms": 349.2336766481458,
+          "p99_ms": 349.4528416120738,
+          "min_ms": 343.74587899947073,
+          "max_ms": 349.6545649977634,
+          "stddev_ms": 1.2068884979089867,
+          "coefficient_of_variation": 0.003474980016102251
+        },
+        "accuracy_passed": true
+      },
+      {
+        "run": 5,
+        "benchmark_receipt": {
+          "sha256": "d2a24301aeddbf7a01aed84a7928b5a6da35db7c393e58f882d5df2768552ec3",
+          "bytes": 14668
+        },
+        "output": {
+          "sha256": "e7a4c789d99e50dc777f6e86465e26364b8b8eb39f0a97cc987f5551049bdab5",
+          "bytes": 4086921
+        },
+        "inference_5_pairs": {
+          "count": 100,
+          "mean_ms": 348.7462625192711,
+          "median_ms": 348.76359299960313,
+          "p90_ms": 349.93274469597964,
+          "p95_ms": 350.2770978018816,
+          "p99_ms": 350.68865384033415,
+          "min_ms": 346.9177279912401,
+          "max_ms": 351.19066799234133,
+          "stddev_ms": 0.9290838258181445,
+          "coefficient_of_variation": 0.0026640681941840307
+        },
+        "accuracy_passed": true
+      }
+    ],
+    "aggregate_500_samples": {
+      "definition": "statistics over all 500 timed iteration samples concatenated from five independent processes",
+      "count": 500,
+      "mean_ms": 347.2157318838581,
+      "median_ms": 347.3634585025138,
+      "p90_ms": 349.2318829987198,
+      "p95_ms": 349.59211219320423,
+      "p99_ms": 350.32987473299727,
+      "min_ms": 342.0901150093414,
+      "max_ms": 351.19066799234133,
+      "stddev_ms": 1.601415453554417,
+      "coefficient_of_variation": 0.004612162717587008
+    },
+    "cross_process_run_means": {
+      "definition": "statistics over one 100-iteration mean from each of five independent processes",
+      "count": 5,
+      "mean_ms": 347.2157318838581,
+      "median_ms": 347.30803984959493,
+      "p90_ms": 348.38766713958466,
+      "p95_ms": 348.5669648294279,
+      "p99_ms": 348.7104029813025,
+      "min_ms": 346.0841629290371,
+      "max_ms": 348.7462625192711,
+      "stddev_ms": 1.0295464341437657,
+      "coefficient_of_variation": 0.002965149155419443
+    },
+    "improvement_from_recorded_baseline": {
+      "inference_throughput_speedup": 1.819712562994957,
+      "inference_latency_reduction_percent": 45.04626607873942
+    }
+  },
+  "roofline": {
     "tool": "Nsight Compute 2024.1.1",
-    "scope": "125 stratified post-engine kernel launches at offsets 0, 200, 400, and 600",
-    "sampled_duration_us": 6119.54,
-    "duration_weighted_compute_percent_of_peak": 58.21988569402276,
-    "duration_weighted_memory_percent_of_peak": 55.821482644120316,
-    "maximum_compute_percent_of_peak": 85.41,
-    "maximum_memory_percent_of_peak": 88.05,
-    "launches_at_or_above_80_percent_of_a_ceiling": 10,
-    "compute_limited_launches": 85,
-    "memory_limited_launches": 40,
-    "interpretation": "Dominant tensor-core and pooling/GEMM kernels reach the L4 compute or memory roof. Remaining batch-1 latency is distributed across small launches and reformat kernels; CUDA graphs reduce that launch overhead without changing model outputs."
+    "capture_protocol": {
+      "scope": "exhaustive native feature-and-post eager capture for one canonical stereo pair",
+      "profile_pair": "1783934428009999872.png",
+      "warmup_enqueues": 5,
+      "cuda_graphs": false,
+      "metric_set": "roofline",
+      "nvtx_include": "ffs_full/",
+      "replay_mode": "kernel",
+      "launch_skip": 0,
+      "launch_count": "all",
+      "launch_filters": []
+    },
+    "coverage": {
+      "exhaustive": true,
+      "first_launch_id": 0,
+      "last_launch_id": 802,
+      "launch_count": 803,
+      "gaps": [],
+      "overlaps": [],
+      "incomplete_launches": 0
+    },
+    "metrics": {
+      "sampled_duration_us": 94833.63199999988,
+      "duration_weighted_compute_pct": 57.088453891969515,
+      "duration_weighted_memory_pct": 68.23858625682504,
+      "duration_weighted_limiter_pct": 73.83850925460715,
+      "near_ceiling_threshold_pct": 80.0,
+      "near_ceiling_duration_us": 29376.16000000001,
+      "near_ceiling_duration_fraction": 0.30976521072186763,
+      "compute_limited_launches": 226,
+      "memory_limited_launches": 577,
+      "compute_limited_duration_fraction": 0.3901464830536073,
+      "memory_limited_duration_fraction": 0.6098535169463928,
+      "maximum_compute_pct": 87.1,
+      "maximum_memory_pct": 95.23,
+      "maximum_limiter_pct": 95.23
+    },
+    "strict_gate": {
+      "minimum_duration_weighted_limiter_pct": 80.0,
+      "minimum_near_ceiling_duration_fraction": 0.8,
+      "latency_beats_recorded_baseline": true,
+      "roofline_passed": false,
+      "combined_gate_passed": false
+    },
+    "interpretation": "Some individual kernels approach a compute or memory ceiling, but the complete workload does not pass the strict global 80/80 roofline gate. This receipt does not claim that the workload reached the L4 hardware limit."
   },
-  "stage_gpu_time_ms_per_pair": {
-    "feature": 7.11487,
-    "groupwise_correlation": 1.99087,
-    "post": 56.71301,
-    "sum": 65.81875
-  },
-  "native_gwc_validation": {
-    "input": "deterministic random FP16 feature tensors with shape [1, 224, 176, 176]",
-    "production_math_flags": true,
-    "native_mean_ms": 0.8148294067382813,
-    "official_triton_mean_ms": 1.8557951354980469,
-    "cosine": 0.9999999403953552,
-    "maximum_absolute_error": 0.00048828125,
-    "mean_absolute_error": 2.5104574419287928e-08
-  },
-  "tuning_sweep_short_runs": [
-    {
-      "candidate": "selected_opt3_aux2_cuda_graphs",
-      "inference_5_pairs_mean_ms": 316.6116,
-      "global_cosine": 0.999405287244333
+  "artifacts": {
+    "feature_engine": {
+      "sha256": "ccb1ef9677b777441c4a78afca85f639ca8785308bc008072d76076df812b817",
+      "bytes": 34332444
     },
-    {
-      "candidate": "selected_opt3_aux2_no_cuda_graphs",
-      "inference_5_pairs_mean_ms": 327.27457609871635,
-      "global_cosine": 0.999405287244333
+    "post_engine": {
+      "sha256": "dc73dfa1ab9443f9b485375a8556ce2fe8356c0253f633e1d241573e4bc99cea",
+      "bytes": 33412324
     },
-    {
-      "candidate": "opt3_aux0",
-      "inference_5_pairs_mean_ms": 316.6310241991596,
-      "global_cosine": 0.999393157992395
+    "native_plugin": {
+      "sha256": "b5055037e769ed54e479a5fecfacb16a2aa0eacb67c04fcf8bfa87122b52a5ca",
+      "bytes": 83152
     },
-    {
-      "candidate": "opt3_aux1",
-      "inference_5_pairs_mean_ms": 316.9661971012829,
-      "global_cosine": 0.9994142748701115
+    "checkpoint": {
+      "sha256": "af0658f289ec840b292645f8d5538978f06e8cabaa1fd31e84acc91af268e990",
+      "bytes": 71098210
     },
-    {
-      "candidate": "opt3_aux4",
-      "inference_5_pairs_mean_ms": 326.0402198997326,
-      "global_cosine": 0.999389306161319
+    "accuracy_reference": {
+      "sha256": "998029a0b3089bc31b65aab1a7422a21820e8849337d04dbd82aa613ace74b30",
+      "bytes": 8541958
     },
-    {
-      "candidate": "opt4_aux2",
-      "inference_5_pairs_mean_ms": 322.9438241003663,
-      "global_cosine": 0.9993751414938042
+    "shared_output": {
+      "sha256": "e7a4c789d99e50dc777f6e86465e26364b8b8eb39f0a97cc987f5551049bdab5",
+      "bytes": 4086921
     },
-    {
-      "candidate": "opt3_aux2_full_tiling",
-      "inference_5_pairs_mean_ms": 323.47987109969836,
-      "global_cosine": 0.99938988205566
+    "inputs": [
+      {
+        "name": "1783934428009999872.png",
+        "left_sha256": "86af91c8a59225bbca46eb70daa0924fffe84770cd0b21c2cccd8cd5dfd7a292",
+        "left_bytes": 385501,
+        "right_sha256": "a7b696ba30b8a8afaff043bfce8ddcac13399e39b0e258de132d17c0ef1c5959",
+        "right_bytes": 418763
+      },
+      {
+        "name": "1783934428076000000.png",
+        "left_sha256": "87a217aee7132e659ef8ad80f905e835c15578a0370dd7b1eff532bde87f3cb0",
+        "left_bytes": 393938,
+        "right_sha256": "7c29a50d7115b4402a7f1307ff1fab78dce603a2cf68b8d44d419c7438050289",
+        "right_bytes": 427837
+      },
+      {
+        "name": "1783934428143000064.png",
+        "left_sha256": "23977bbde7440ec84f131bf5fcbed2fa0d35e65b7cb3ff9e3024dcd0966ffa28",
+        "left_bytes": 398491,
+        "right_sha256": "0ea1dc08389dad2f3fa05bd7b2436bad79c001edefb765ba2033ba74dc319737",
+        "right_bytes": 437260
+      },
+      {
+        "name": "1783934428209999872.png",
+        "left_sha256": "f0f3770bdff0eabe80fb943f103f0195ff029d5c8fc7c2d2237c835f7bd8d0ec",
+        "left_bytes": 402810,
+        "right_sha256": "478378f0a3b289fd24acec863e34cf43cbfb980de8f82f0a1ef228f4569ae047",
+        "right_bytes": 437226
+      },
+      {
+        "name": "1783934428276000000.png",
+        "left_sha256": "9a8d8ccf4567a00d871c77a865138392cbac806b262522ede21e702387cbbceb",
+        "left_bytes": 404311,
+        "right_sha256": "4d6b4cb2d239da7deed002826097da0ea9fdc5fe12f7c631cbbd53e0c87000d8",
+        "right_bytes": 441591
+      }
+    ],
+    "tools": {
+      "benchmark": {
+        "sha256": "d854f243bc9ffcb1dc0d9e0be3e2284183a0ee21f30168ebc042e321a5722aab",
+        "bytes": 19005
+      },
+      "runner": {
+        "sha256": "d4c7b1b6420ff0c9c9a2a6d6ceab93d67876edab313a1680d7aac16c00cb8c69",
+        "bytes": 8805
+      },
+      "profiler": {
+        "sha256": "7545deb16347516a66e01d7169fdaf6cfca398c9693f6662a3b391fd0bf52be5",
+        "bytes": 9142
+      },
+      "analyzer": {
+        "sha256": "46ad2a9a9b61fad00e29ba2a1bc96cdb6694f518e592811d7803640f242bb4b6",
+        "bytes": 44863
+      },
+      "python_executable": {
+        "sha256": "cc392c7aba50e573f6d1dfcfa9721c15c3ae893662a5f48a99406bb3422d321e",
+        "bytes": 25381336
+      }
     },
-    {
-      "candidate": "single_engine_opt3",
-      "inference_5_pairs_mean_ms": 530.973,
-      "global_cosine": 0.999404645
+    "roofline_evidence": {
+      "manifest": {
+        "sha256": "c11d8d9ee729cfa943a309a165876b435af2f9e66714c8656cb7702c3266ca9a",
+        "bytes": 3017
+      },
+      "ncu_report": {
+        "sha256": "3782791a0f5c3cda2c79f83b773a8bc76af7fe05e685904c22d6506a8feac969",
+        "bytes": 162369660
+      },
+      "details_export": {
+        "sha256": "61c4bca0debc4204a9c3fb8ca2f57544de22ee8bda41ecebbf5cdd520bb895a5",
+        "bytes": 16747548
+      },
+      "session_export": {
+        "sha256": "7e5cb1a245bbba3d87fa883d39e43d32b1c1a34981ef6a55af703cf964911113",
+        "bytes": 1755
+      },
+      "summary": {
+        "sha256": "072292ed8fc5c70ae24eaa62d6825e8202b50b7834c837685504c6a573dba14d",
+        "bytes": 13452
+      }
     }
-  ]
+  }
 }

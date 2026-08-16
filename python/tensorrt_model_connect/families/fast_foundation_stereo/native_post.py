@@ -12,40 +12,6 @@ import numpy as np
 from .native_graph import NativeGraph
 
 
-def _shifted_volume(graph: NativeGraph, tensor: Any, disparities: int) -> Any:
-    """Stack left-padded horizontal shifts as ``[B,C,D,H,W]``."""
-    batch, channels, height, width = (int(dim) for dim in tensor.shape)
-    shifted = []
-    for disparity in range(disparities):
-        if disparity == 0:
-            current = tensor
-        else:
-            zeros = graph.constant(
-                np.zeros((batch, channels, height, disparity), dtype=graph._np_dtype_for(tensor)),
-                (batch, channels, height, disparity),
-                dtype=graph._np_dtype_for(tensor),
-                target_dtype=tensor.dtype,
-            )
-            tail = graph.slice(
-                tensor,
-                (0, 0, 0, 0),
-                (batch, channels, height, width - disparity),
-            )
-            current = graph.concat((zeros, tail), 3)
-        shifted.append(graph.reshape(current, (batch, channels, 1, height, width)))
-    return graph.concat(shifted, 2)
-
-
-def _concat_volume(graph: NativeGraph, left: Any, right: Any, disparities: int) -> Any:
-    batch, channels, height, width = (int(dim) for dim in left.shape)
-    left_slices = [
-        graph.reshape(left, (batch, channels, 1, height, width)) for _ in range(disparities)
-    ]
-    return graph.concat(
-        (graph.concat(left_slices, 2), _shifted_volume(graph, right, disparities)), 1
-    )
-
-
 def _feature_attention(graph: NativeGraph, volume: Any, feature: Any, module: Any) -> Any:
     return graph.feature_attention(volume, feature, module)
 
@@ -209,8 +175,26 @@ def _channel_attention(graph: NativeGraph, tensor: Any, module: Any) -> Any:
 
 
 def _spatial_attention(graph: NativeGraph, tensor: Any, module: Any) -> Any:
-    average = graph.reduce_avg(tensor, (1,), keep_dims=True)
-    maximum = graph.reduce_max(tensor, (1,), keep_dims=True)
+    input_shape = tuple(int(dim) for dim in tensor.shape)
+    expected_input_shape = (1, 48, 176, 176)
+    if input_shape != expected_input_shape:
+        raise RuntimeError(
+            f"spatial-attention input has shape {input_shape}, expected {expected_input_shape}"
+        )
+    from .native_plugin_builder import add_spatial_attention_reduce_plugin
+
+    average, maximum = add_spatial_attention_reduce_plugin(
+        graph.network,
+        graph.cast(tensor, graph.trt.float16),
+        trt_module=graph.trt,
+    )
+    expected_output_shape = (1, 1, 176, 176)
+    for name, reduced in (("average", average), ("maximum", maximum)):
+        if tuple(int(dim) for dim in reduced.shape) != expected_output_shape:
+            raise RuntimeError(
+                f"spatial-attention {name} output has shape {tuple(reduced.shape)}, "
+                f"expected {expected_output_shape}"
+            )
     attention = graph.conv2d(graph.concat((average, maximum), 1), module.samconv)
     return graph.activation(attention, "sigmoid")
 
@@ -322,8 +306,17 @@ def _motion_encoder(graph: NativeGraph, disparity: Any, correlation: Any, module
 
 
 def _raft_gru(graph: NativeGraph, hidden: Any, x: Any, hx: Any, module: Any) -> Any:
-    update = graph.activation(graph.conv2d(hx, module.convz), "sigmoid")
-    reset = graph.activation(graph.conv2d(hx, module.convr), "sigmoid")
+    batch, channels, height, width = (int(dim) for dim in hidden.shape)
+    gates = graph.stacked_conv2d(hx, (module.convz, module.convr))
+    gate_shape = (batch, channels, height, width)
+    update = graph.activation(
+        graph.slice(gates, (0, 0, 0, 0), gate_shape),
+        "sigmoid",
+    )
+    reset = graph.activation(
+        graph.slice(gates, (0, channels, 0, 0), gate_shape),
+        "sigmoid",
+    )
     proposal_input = graph.concat((graph.mul(reset, hidden), x), 1)
     proposal = graph.activation(graph.conv2d(proposal_input, module.convq), "tanh")
     one = graph.scalar(1.0, len(tuple(update.shape)), like=update)
@@ -420,23 +413,25 @@ def add_post_graph(
 
     left_projected = graph.conv2d(features[0], model.proj_cmb)
     right_projected = graph.conv2d(right, model.proj_cmb)
-    concat_volume = _concat_volume(graph, left_projected, right_projected, disparities)
 
-    from .native_plugin_builder import add_gwc_plugin
+    from .native_plugin_builder import add_combined_volume_plugin
 
-    # The fused CUDA implementation is intentionally FP16. The family builder
-    # rejects other precision modes so this cast documents the plugin boundary
-    # instead of silently weakening a public FP32 contract.
+    # The fused CUDA implementation is intentionally FP16 at its tensor boundary,
+    # while retaining FP32 accumulation for groupwise correlation. The family
+    # builder rejects other precision modes instead of silently weakening a public
+    # FP32 contract.
     gwc_reference = graph.cast(features[0], graph.trt.float16)
     gwc_target = graph.cast(right, graph.trt.float16)
-    gwc_volume = add_gwc_plugin(
+    left_projected = graph.cast(left_projected, graph.trt.float16)
+    right_projected = graph.cast(right_projected, graph.trt.float16)
+    combined = add_combined_volume_plugin(
         graph.network,
         gwc_reference,
         gwc_target,
+        left_projected,
+        right_projected,
         trt_module=graph.trt,
     )
-    gwc_volume = graph.cast(gwc_volume, concat_volume.dtype)
-    combined = graph.concat((gwc_volume, concat_volume), 1)
     combined = graph.module(combined, model.corr_stem)
     if model.corr_feature_att.__class__.__name__ == "ForwardHelper":
         combined = graph.forward_helper(combined, features[0], model.corr_feature_att)

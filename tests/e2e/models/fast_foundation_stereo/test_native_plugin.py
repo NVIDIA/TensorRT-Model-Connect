@@ -128,12 +128,14 @@ def test_native_plugin_load_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     native_plugin_builder._PLUGIN_HANDLES.clear()
 
 
-def test_native_gwc_layer_has_two_feature_inputs_and_one_named_output(monkeypatch) -> None:
+def test_native_combined_volume_layer_has_four_inputs_and_one_named_output(
+    monkeypatch,
+) -> None:
     plugin = object()
 
     class Creator:
         def create_plugin(self, name, fields):
-            assert name == "gwc_volume"
+            assert name == "combined_volume"
             assert fields == []
             return plugin
 
@@ -164,20 +166,80 @@ def test_native_gwc_layer_has_two_feature_inputs_and_one_named_output(monkeypatc
     monkeypatch.setattr(native_plugin_builder, "_plugin_creator", lambda _trt: Creator())
     reference = object()
     target = object()
+    left_projected = object()
+    right_projected = object()
     network = Network()
     trt_module = SimpleNamespace(PluginFieldCollection=lambda fields: fields)
 
-    output = native_plugin_builder.add_gwc_plugin(
+    output = native_plugin_builder.add_combined_volume_plugin(
         network,
         reference,
         target,
+        left_projected,
+        right_projected,
         trt_module=trt_module,
     )
 
-    assert network.inputs == [reference, target]
+    assert network.inputs == [reference, target, left_projected, right_projected]
     assert network.plugin is plugin
-    assert network.layer.name == "gwc_volume"
-    assert output.name == "gwc_volume"
+    assert network.layer.name == "combined_volume"
+    assert output.name == "combined_volume"
+
+
+def test_native_spatial_attention_reduce_layer_has_one_input_and_two_named_outputs(
+    monkeypatch,
+) -> None:
+    plugin = object()
+
+    class Creator:
+        def create_plugin(self, name, fields):
+            assert name == "spatial_attention_reduce"
+            assert fields == []
+            return plugin
+
+    class Output:
+        name = ""
+
+    class Layer:
+        name = ""
+
+        def __init__(self) -> None:
+            self.outputs = (Output(), Output())
+
+        def get_output(self, index: int):
+            return self.outputs[index]
+
+    class Network:
+        def __init__(self) -> None:
+            self.inputs = None
+            self.plugin = None
+            self.layer = Layer()
+
+        def add_plugin_v2(self, inputs, selected_plugin):
+            self.inputs = inputs
+            self.plugin = selected_plugin
+            return self.layer
+
+    def plugin_creator(_trt, plugin_name):
+        assert plugin_name == "FastFoundationStereoSpatialAttentionReduce"
+        return Creator()
+
+    monkeypatch.setattr(native_plugin_builder, "_plugin_creator", plugin_creator)
+    tensor = object()
+    network = Network()
+    trt_module = SimpleNamespace(PluginFieldCollection=lambda fields: fields)
+
+    average, maximum = native_plugin_builder.add_spatial_attention_reduce_plugin(
+        network,
+        tensor,
+        trt_module=trt_module,
+    )
+
+    assert network.inputs == [tensor]
+    assert network.plugin is plugin
+    assert network.layer.name == "spatial_attention_reduce"
+    assert average.name == "spatial_attention_reduce_average"
+    assert maximum.name == "spatial_attention_reduce_maximum"
 
 
 def test_cpp_runtime_loads_embedded_plugin_before_deserializing_post_engine() -> None:
@@ -185,6 +247,11 @@ def test_cpp_runtime_loads_embedded_plugin_before_deserializing_post_engine() ->
     model_dir = repository_root / "src/runtime/models/fast_foundation_stereo"
     plugin_source = (model_dir / "plugin.cpp").read_text(encoding="utf-8")
     pipeline_source = (model_dir / "stereo_pipeline.cpp").read_text(encoding="utf-8")
+    creator_source = (
+        repository_root / "python/tensorrt_model_connect/families/fast_foundation_stereo/"
+        "native_plugins/gwc_plugin_creator.cpp"
+    ).read_text(encoding="utf-8")
+    identity_symbol = "fast_foundation_stereo_combined_volume_plugin_force_link"
 
     assert 'find_section(ctx.bundle, "fast_foundation_stereo_native_plugin_so")' in plugin_source
     assert plugin_source.index("load_native_plugin(ctx)") < plugin_source.index(
@@ -192,6 +259,8 @@ def test_cpp_runtime_loads_embedded_plugin_before_deserializing_post_engine() ->
     )
     assert "launch_fast_foundation_stereo_gwc" not in pipeline_source
     assert 'bind_external("gwc_volume"' not in pipeline_source
+    assert identity_symbol in plugin_source
+    assert identity_symbol in creator_source
     assert not (model_dir / "gwc_kernel.cu").exists()
     assert "feature_->has_output(name)" in pipeline_source
     assert "post_->has_input(name)" in pipeline_source
@@ -202,20 +271,77 @@ def test_cpp_runtime_loads_embedded_plugin_before_deserializing_post_engine() ->
     assert 'post_->tensor_shape("disp") != expected_shape' in pipeline_source
 
 
-def test_gwc_plugin_owns_the_fixed_l4_tensor_contract() -> None:
+def test_combined_volume_plugin_owns_the_fixed_l4_tensor_contract() -> None:
+    repository_root = Path(__file__).resolve().parents[4]
     source = (
-        Path(__file__).resolve().parents[4]
-        / "python/tensorrt_model_connect/families/fast_foundation_stereo/"
+        repository_root / "python/tensorrt_model_connect/families/fast_foundation_stereo/"
         "native_plugins/gwc_plugin.cu"
     ).read_text(encoding="utf-8")
+    header = (
+        repository_root / "python/tensorrt_model_connect/families/fast_foundation_stereo/"
+        "native_plugins/gwc_plugin.h"
+    ).read_text(encoding="utf-8")
+
+    assert native_plugin_builder._PLUGIN_NAME == "FastFoundationStereoCombinedVolume"
+    assert native_plugin_builder._PLUGIN_NAME in header
 
     for contract in (
         "kBatch = 1",
-        "kChannels = 224",
+        "kFeatureChannels = 224",
+        "kProjectedChannels = 12",
         "kGroups = 8",
+        "kCombinedChannels = kGroups + 2 * kProjectedChannels",
         "kHeight = 176",
         "kWidth = 176",
         "kDisparities = 48",
         "kWorkspaceBytes = 2 * kNormElements * sizeof(__half)",
+        "input_count != 4",
+        "projected_width -= disparity",
+        "float dot = 0.0F",
     ):
         assert contract in source
+
+
+def test_spatial_attention_reduce_plugin_owns_fixed_shape_and_precision_contract() -> None:
+    repository_root = Path(__file__).resolve().parents[4]
+    plugin_dir = (
+        repository_root
+        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_plugins"
+    )
+    source = (plugin_dir / "spatial_attention_reduce_plugin.cu").read_text(encoding="utf-8")
+    header = (plugin_dir / "spatial_attention_reduce_plugin.h").read_text(encoding="utf-8")
+    cmake = (plugin_dir / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    plugin_name = "FastFoundationStereoSpatialAttentionReduce"
+    assert native_plugin_builder._SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME == plugin_name
+    assert plugin_name in header
+    assert "spatial_attention_reduce_plugin.cu" in cmake
+    assert "spatial_attention_reduce_plugin_creator.cpp" in cmake
+
+    for contract in (
+        "kBatch = 1",
+        "kChannels = 48",
+        "kHeight = 176",
+        "kWidth = 176",
+        "return 2;",
+        "input_count != 1 || output_count != 2",
+        "position == 0 ? is_exact_input(input_output[position])",
+        "channel * kPixelCount + pixel",
+        "float sum = 0.0F",
+        "sum += value",
+        "fmaxf(largest, value)",
+        "sum / static_cast<float>(kChannels)",
+    ):
+        assert contract in source
+
+
+def test_native_post_materializes_combined_volume_only_in_the_plugin() -> None:
+    source = (
+        Path(__file__).resolve().parents[4]
+        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_post.py"
+    ).read_text(encoding="utf-8")
+
+    assert "add_combined_volume_plugin" in source
+    assert "_concat_volume" not in source
+    assert "_shifted_volume" not in source
+    assert "graph.concat((gwc_volume, concat_volume), 1)" not in source

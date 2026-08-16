@@ -13,10 +13,11 @@
 
 namespace trtmc {
 
-class FastFoundationStereoCombinedVolumePlugin final : public nvinfer1::IPluginV2DynamicExt {
+class FastFoundationStereoSpatialAttentionReducePlugin final
+    : public nvinfer1::IPluginV2DynamicExt {
   public:
-    FastFoundationStereoCombinedVolumePlugin() = default;
-    FastFoundationStereoCombinedVolumePlugin(const void* data, std::size_t length);
+    FastFoundationStereoSpatialAttentionReducePlugin() = default;
+    FastFoundationStereoSpatialAttentionReducePlugin(const void* data, std::size_t length);
 
     char const* getPluginType() const noexcept override;
     char const* getPluginVersion() const noexcept override;
@@ -32,7 +33,7 @@ class FastFoundationStereoCombinedVolumePlugin final : public nvinfer1::IPluginV
     nvinfer1::DataType getOutputDataType(int32_t index, nvinfer1::DataType const* input_types,
                                          int32_t input_count) const noexcept override;
 
-    FastFoundationStereoCombinedVolumePlugin* clone() const noexcept override;
+    FastFoundationStereoSpatialAttentionReducePlugin* clone() const noexcept override;
     nvinfer1::DimsExprs getOutputDimensions(int32_t output_index, nvinfer1::DimsExprs const* inputs,
                                             int32_t input_count,
                                             nvinfer1::IExprBuilder& expr_builder) noexcept override;
@@ -48,7 +49,7 @@ class FastFoundationStereoCombinedVolumePlugin final : public nvinfer1::IPluginV
                     nvinfer1::PluginTensorDesc const* output_desc, void const* const* inputs,
                     void* const* outputs, void* workspace, cudaStream_t stream) noexcept override;
 
-    static constexpr const char* kPLUGIN_NAME = "FastFoundationStereoCombinedVolume";
+    static constexpr const char* kPLUGIN_NAME = "FastFoundationStereoSpatialAttentionReduce";
     static constexpr const char* kPLUGIN_VERSION = "1";
 
   private:

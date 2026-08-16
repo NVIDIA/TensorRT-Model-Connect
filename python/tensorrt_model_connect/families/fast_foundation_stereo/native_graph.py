@@ -11,6 +11,7 @@ graph is created or parsed.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -260,6 +261,57 @@ class NativeGraph:
 
     def conv2d(self, tensor: Any, module: Any) -> Any:
         return self._convolution(tensor, module, dimensions=2, deconv=False)
+
+    def stacked_conv2d(self, tensor: Any, modules: Iterable[Any]) -> Any:
+        """Evaluate compatible convolutions as one wider convolution.
+
+        Stacking output channels is mathematically identical when every
+        convolution consumes the same tensor and shares its spatial
+        hyperparameters.  It lets TensorRT select one wider tactic and avoids
+        rereading the input for several small sibling convolutions.
+        """
+        modules = tuple(modules)
+        if len(modules) < 2:
+            raise ValueError("stacked_conv2d requires at least two convolutions")
+
+        first = modules[0]
+        if int(first.groups) != 1:
+            raise ValueError("stacked_conv2d currently supports ungrouped convolutions only")
+        spatial_attributes = ("kernel_size", "stride", "padding", "dilation")
+        for module in modules[1:]:
+            for attribute in spatial_attributes:
+                if self._tuple(getattr(module, attribute), 2) != self._tuple(
+                    getattr(first, attribute), 2
+                ):
+                    raise ValueError(
+                        f"stacked convolutions have different {attribute}: "
+                        f"{getattr(first, attribute)!r} and {getattr(module, attribute)!r}"
+                    )
+            if int(module.groups) != int(first.groups):
+                raise ValueError("stacked convolutions have different group counts")
+
+        weights = [self._array(module.weight) for module in modules]
+        if any(weight.shape[1:] != weights[0].shape[1:] for weight in weights[1:]):
+            raise ValueError("stacked convolution weight shapes are incompatible")
+        biases = [getattr(module, "bias", None) for module in modules]
+        if any(bias is None for bias in biases) != all(bias is None for bias in biases):
+            raise ValueError("stacked convolutions must either all have biases or all omit them")
+
+        combined = SimpleNamespace(
+            weight=np.concatenate(weights, axis=0),
+            bias=(
+                None
+                if biases[0] is None
+                else np.concatenate([self._array(bias) for bias in biases], axis=0)
+            ),
+            out_channels=sum(int(module.out_channels) for module in modules),
+            kernel_size=first.kernel_size,
+            stride=first.stride,
+            padding=first.padding,
+            dilation=first.dilation,
+            groups=first.groups,
+        )
+        return self.conv2d(tensor, combined)
 
     def conv3d(self, tensor: Any, module: Any) -> Any:
         return self._convolution(tensor, module, dimensions=3, deconv=False)

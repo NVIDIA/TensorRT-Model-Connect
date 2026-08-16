@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -83,13 +84,34 @@ def load_and_prepare(left_path, right_path, scale, device, input_padder):
     return left_tensor, right_tensor, padder, left.shape[:2]
 
 
-def summarize(values: list[float]) -> dict[str, float]:
+def summarize(values: list[float]) -> dict[str, float | int]:
+    array = np.asarray(values, dtype=np.float64)
+    mean = float(np.mean(array))
+    standard_deviation = float(np.std(array))
     return {
-        "mean_ms": float(np.mean(values)),
-        "median_ms": float(np.median(values)),
+        "count": len(values),
+        "mean_ms": mean,
+        "median_ms": float(np.median(array)),
         "p90_ms": percentile(values, 90),
-        "min_ms": float(np.min(values)),
-        "max_ms": float(np.max(values)),
+        "p95_ms": percentile(values, 95),
+        "p99_ms": percentile(values, 99),
+        "min_ms": float(np.min(array)),
+        "max_ms": float(np.max(array)),
+        "stddev_ms": standard_deviation,
+        "coefficient_of_variation": standard_deviation / mean if mean else 0.0,
+    }
+
+
+def artifact(path: Path) -> dict[str, str | int]:
+    resolved = path.resolve()
+    digest = hashlib.sha256()
+    with resolved.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return {
+        "path": str(resolved),
+        "sha256": digest.hexdigest(),
+        "bytes": resolved.stat().st_size,
     }
 
 
@@ -136,14 +158,19 @@ def main() -> None:
         raise RuntimeError("CUDA is required for this benchmark")
     if args.num_pairs <= 0 or args.warmup_iters < 0 or args.iters <= 0:
         raise ValueError("num-pairs and iters must be positive; warmup-iters cannot be negative")
-    if args.max_mean_abs_error < 0 or args.max_bad_2px_fraction < 0:
-        raise ValueError("accuracy error thresholds cannot be negative")
+    if not 0.0 <= args.min_cosine <= 1.0:
+        raise ValueError("minimum cosine must be in [0, 1]")
+    if not np.isfinite(args.max_mean_abs_error) or args.max_mean_abs_error < 0:
+        raise ValueError("maximum mean absolute error must be finite and nonnegative")
+    if not 0.0 <= args.max_bad_2px_fraction <= 1.0:
+        raise ValueError("maximum bad-2px fraction must be in [0, 1]")
     if args.backend == "trt" and (not args.feature_engine or not args.post_engine):
         parser.error("--feature-engine and --post-engine are required for --backend trt")
     if args.backend == "trt-single" and not args.engine:
         parser.error("--engine is required for --backend trt-single")
 
     model_root = args.model_root.resolve()
+    checkpoint = model_root / "weights/23-36-37/model_best_bp2_serialize.pth"
     os.chdir(model_root)
     sys.path.insert(0, str(model_root))
     from core.utils.utils import InputPadder
@@ -158,7 +185,6 @@ def main() -> None:
     model_init_start = time.perf_counter()
     loaded_plugin_libraries: list[str] = []
     if args.backend == "torch":
-        checkpoint = model_root / "weights/23-36-37/model_best_bp2_serialize.pth"
         checkpoint_model = torch.load(checkpoint, map_location="cpu", weights_only=False)
         checkpoint_model.args.valid_iters = args.valid_iters
         checkpoint_model.args.max_disp = args.max_disp
@@ -360,9 +386,21 @@ def main() -> None:
         "cuda_graphs": args.cuda_graphs,
         "plugin_libraries": loaded_plugin_libraries,
         "model_init_ms": model_init_ms,
+        "measurement_scope": {
+            "name": "serial_paired_inference",
+            "description": (
+                f"{args.num_pairs} stereo pairs evaluated serially; inference timing includes "
+                "output conversion, device-to-host transfer, unpadding, and clipping"
+            ),
+        },
         "preprocess_5_pairs": summarize(preprocess_times),
         "infer_5_pairs": summarize(infer_times),
         "total_5_pairs": summarize(total_times),
+        "samples_ms": {
+            "preprocess": preprocess_times,
+            "inference": infer_times,
+            "total": total_times,
+        },
         "preprocess_per_pair_ms": float(np.mean(preprocess_times) / args.num_pairs),
         "infer_per_pair_ms": float(np.mean(infer_times) / args.num_pairs),
         "total_per_pair_ms": float(np.mean(total_times) / args.num_pairs),
@@ -372,7 +410,41 @@ def main() -> None:
         "maximum_mean_abs_error": args.max_mean_abs_error,
         "maximum_bad_2px_fraction": args.max_bad_2px_fraction,
         "accuracy_passed": accuracy_passed,
+        "environment": {
+            "torch": torch.__version__,
+            "tensorrt": (
+                __import__("tensorrt").__version__ if args.backend.startswith("trt") else None
+            ),
+            "cuda_runtime": torch.version.cuda,
+            "gpu_name": torch.cuda.get_device_name(),
+            "gpu_capability": list(torch.cuda.get_device_capability()),
+        },
     }
+    result["artifacts"] = {
+        "inputs": [
+            {
+                "name": name,
+                "left": artifact(left_path),
+                "right": artifact(right_path),
+            }
+            for name, left_path, right_path in pairs
+        ],
+        "output": artifact(output_path),
+        "benchmark_tool": artifact(Path(__file__)),
+        "runner_tool": artifact(Path(__file__).with_name("trt_runner.py")),
+    }
+    if args.reference:
+        result["artifacts"]["accuracy_reference"] = artifact(args.reference)
+    if checkpoint.is_file():
+        result["artifacts"]["checkpoint"] = artifact(checkpoint)
+    if args.backend == "trt":
+        result["artifacts"]["feature_engine"] = artifact(args.feature_engine)
+        result["artifacts"]["post_engine"] = artifact(args.post_engine)
+    elif args.backend == "trt-single":
+        result["artifacts"]["engine"] = artifact(args.engine)
+    result["artifacts"]["plugin_libraries"] = [
+        artifact(Path(path)) for path in loaded_plugin_libraries
+    ]
     result_path = args.out_dir / "benchmark_result.json"
     result_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
