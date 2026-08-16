@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "gwc_plugin.h"
+#include "spatial_attention_reduce_plugin.h"
 
 #include <NvInferRuntime.h>
 #include <cstddef>
@@ -11,14 +11,14 @@
 
 namespace trtmc {
 
-class FastFoundationStereoCombinedVolumeCreator final : public nvinfer1::IPluginCreator {
+class FastFoundationStereoSpatialAttentionReduceCreator final : public nvinfer1::IPluginCreator {
   public:
     char const* getPluginName() const noexcept override {
-        return FastFoundationStereoCombinedVolumePlugin::kPLUGIN_NAME;
+        return FastFoundationStereoSpatialAttentionReducePlugin::kPLUGIN_NAME;
     }
 
     char const* getPluginVersion() const noexcept override {
-        return FastFoundationStereoCombinedVolumePlugin::kPLUGIN_VERSION;
+        return FastFoundationStereoSpatialAttentionReducePlugin::kPLUGIN_VERSION;
     }
 
     nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override { return &fields_; }
@@ -31,14 +31,14 @@ class FastFoundationStereoCombinedVolumeCreator final : public nvinfer1::IPlugin
 
     nvinfer1::IPluginV2* createPlugin(char const*,
                                       nvinfer1::PluginFieldCollection const*) noexcept override {
-        auto* plugin = new FastFoundationStereoCombinedVolumePlugin();
+        auto* plugin = new FastFoundationStereoSpatialAttentionReducePlugin();
         plugin->setPluginNamespace(namespace_.c_str());
         return plugin;
     }
 
     nvinfer1::IPluginV2* deserializePlugin(char const*, void const* data,
                                            std::size_t length) noexcept override {
-        auto* plugin = new FastFoundationStereoCombinedVolumePlugin(data, length);
+        auto* plugin = new FastFoundationStereoSpatialAttentionReducePlugin(data, length);
         plugin->setPluginNamespace(namespace_.c_str());
         return plugin;
     }
@@ -50,7 +50,5 @@ class FastFoundationStereoCombinedVolumeCreator final : public nvinfer1::IPlugin
 
 } // namespace trtmc
 
-static nvinfer1::PluginRegistrar<trtmc::FastFoundationStereoCombinedVolumeCreator>
-    pluginRegistrarFastFoundationStereoCombinedVolume{};
-
-extern "C" void fast_foundation_stereo_combined_volume_plugin_force_link() {}
+static nvinfer1::PluginRegistrar<trtmc::FastFoundationStereoSpatialAttentionReduceCreator>
+    pluginRegistrarFastFoundationStereoSpatialAttentionReduce{};

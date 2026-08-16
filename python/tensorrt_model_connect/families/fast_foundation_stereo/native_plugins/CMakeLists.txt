@@ -66,6 +66,8 @@ endif()
 add_library(trtmc_fast_foundation_stereo_native_plugin SHARED
   gwc_plugin.cu
   gwc_plugin_creator.cpp
+  spatial_attention_reduce_plugin.cu
+  spatial_attention_reduce_plugin_creator.cpp
 )
 target_include_directories(trtmc_fast_foundation_stereo_native_plugin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}

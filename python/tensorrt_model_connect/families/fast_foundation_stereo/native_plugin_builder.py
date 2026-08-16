@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build and register the model-owned TensorRT groupwise-correlation plugin."""
+"""Build and register the model-owned TensorRT combined-volume plugin."""
 
 from __future__ import annotations
 
@@ -20,7 +20,8 @@ from typing import Any
 
 _PLUGIN_ENV = "TRTMC_FAST_FOUNDATION_STEREO_NATIVE_PLUGIN_LIBRARY"
 _BUILD_DIR_ENV = "TRTMC_FAST_FOUNDATION_STEREO_NATIVE_PLUGIN_BUILD_DIR"
-_PLUGIN_NAME = "FastFoundationStereoGwc"
+_PLUGIN_NAME = "FastFoundationStereoCombinedVolume"
+_SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME = "FastFoundationStereoSpatialAttentionReduce"
 _PLUGIN_VERSION = "1"
 _PLUGIN_HANDLES: dict[Path, Any] = {}
 
@@ -201,7 +202,7 @@ def load_native_plugin(*, verbose: bool = False) -> Path:
     return path
 
 
-def _plugin_creator(trt_module: Any) -> Any:
+def _plugin_creator(trt_module: Any, plugin_name: str = _PLUGIN_NAME) -> Any:
     load_native_plugin()
     registry_fn = getattr(trt_module, "get_plugin_registry", None)
     if registry_fn is None:
@@ -211,32 +212,34 @@ def _plugin_creator(trt_module: Any) -> Any:
     get_creator = getattr(registry, "get_plugin_creator", None)
     if get_creator is not None:
         try:
-            creator = get_creator(_PLUGIN_NAME, _PLUGIN_VERSION, "")
+            creator = get_creator(plugin_name, _PLUGIN_VERSION, "")
         except TypeError:
-            creator = get_creator(_PLUGIN_NAME, _PLUGIN_VERSION)
+            creator = get_creator(plugin_name, _PLUGIN_VERSION)
     if creator is None:
         get_creator = getattr(registry, "get_creator", None)
         if get_creator is not None:
             try:
-                creator = get_creator(_PLUGIN_NAME, _PLUGIN_VERSION, "")
+                creator = get_creator(plugin_name, _PLUGIN_VERSION, "")
             except TypeError:
-                creator = get_creator(_PLUGIN_NAME, _PLUGIN_VERSION)
+                creator = get_creator(plugin_name, _PLUGIN_VERSION)
     if creator is None:
         raise RuntimeError(
-            f"TensorRT plugin creator {_PLUGIN_NAME} v{_PLUGIN_VERSION} was not registered"
+            f"TensorRT plugin creator {plugin_name} v{_PLUGIN_VERSION} was not registered"
         )
     return creator
 
 
-def add_gwc_plugin(
+def add_combined_volume_plugin(
     network: Any,
     reference: Any,
     target: Any,
+    left_projected: Any,
+    right_projected: Any,
     *,
     trt_module: Any,
-    name: str = "gwc_volume",
+    name: str = "combined_volume",
 ) -> Any:
-    """Add the fixed L4-tuned GWC plugin to a native TensorRT network."""
+    """Add the fixed-shape fused stereo volume plugin to a TensorRT network."""
 
     add_plugin = getattr(network, "add_plugin_v2", None)
     if add_plugin is None:
@@ -245,14 +248,56 @@ def add_gwc_plugin(
     fields = trt_module.PluginFieldCollection([])
     plugin = creator.create_plugin(name, fields)
     if plugin is None:
-        raise RuntimeError("TensorRT failed to create the Fast Foundation Stereo GWC plugin")
-    layer = add_plugin([reference, target], plugin)
+        raise RuntimeError(
+            "TensorRT failed to create the Fast Foundation Stereo combined-volume plugin"
+        )
+    layer = add_plugin([reference, target, left_projected, right_projected], plugin)
     if layer is None:
-        raise RuntimeError("TensorRT failed to add the Fast Foundation Stereo GWC plugin layer")
+        raise RuntimeError(
+            "TensorRT failed to add the Fast Foundation Stereo combined-volume plugin layer"
+        )
     layer.name = name
     output = layer.get_output(0)
     output.name = name
     return output
 
 
-__all__ = ["add_gwc_plugin", "ensure_native_plugin", "load_native_plugin"]
+def add_spatial_attention_reduce_plugin(
+    network: Any,
+    tensor: Any,
+    *,
+    trt_module: Any,
+    name: str = "spatial_attention_reduce",
+) -> tuple[Any, Any]:
+    """Add the fixed-shape channel mean/max plugin to a TensorRT network."""
+
+    add_plugin = getattr(network, "add_plugin_v2", None)
+    if add_plugin is None:
+        raise RuntimeError("TensorRT network does not support IPluginV2 layers")
+    creator = _plugin_creator(trt_module, _SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME)
+    fields = trt_module.PluginFieldCollection([])
+    plugin = creator.create_plugin(name, fields)
+    if plugin is None:
+        raise RuntimeError(
+            "TensorRT failed to create the Fast Foundation Stereo spatial-attention reduce plugin"
+        )
+    layer = add_plugin([tensor], plugin)
+    if layer is None:
+        raise RuntimeError(
+            "TensorRT failed to add the Fast Foundation Stereo "
+            "spatial-attention reduce plugin layer"
+        )
+    layer.name = name
+    average = layer.get_output(0)
+    maximum = layer.get_output(1)
+    average.name = f"{name}_average"
+    maximum.name = f"{name}_maximum"
+    return average, maximum
+
+
+__all__ = [
+    "add_combined_volume_plugin",
+    "add_spatial_attention_reduce_plugin",
+    "ensure_native_plugin",
+    "load_native_plugin",
+]
