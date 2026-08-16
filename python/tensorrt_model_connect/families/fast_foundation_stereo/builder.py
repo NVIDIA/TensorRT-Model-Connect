@@ -69,19 +69,28 @@ def _load_model(model_root: Path, *, max_disparity: int, valid_iters: int):
 def _validate_precision(precision: str) -> bool:
     if precision != "fp16":
         raise ValueError(
-            "Fast Foundation Stereo's native GWC plugin supports precision='fp16' only; "
+            "Fast Foundation Stereo's native combined-volume plugin supports "
+            "precision='fp16' only; "
             f"got {precision!r}"
         )
     return True
 
 
-def _create_network(*, verbose: bool) -> tuple[Any, Any, Any]:
+def _post_network_strongly_typed(trt: Any) -> bool:
+    """Use weak FP16 only on TensorRT releases that still support it."""
+    return not hasattr(trt.BuilderFlag, "FP16")
+
+
+def _create_network(*, verbose: bool, strongly_typed: bool) -> tuple[Any, Any, Any]:
     from tensorrt_model_connect import trt_compat
 
     trt = trt_compat.get_trt()
     logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    flags = trt_compat.network_creation_flags(explicit_batch=True, strongly_typed=True)
+    flags = trt_compat.network_creation_flags(
+        explicit_batch=True,
+        strongly_typed=strongly_typed,
+    )
     network = builder.create_network(flags)
     if network is None:
         raise RuntimeError("TensorRT failed to create the Fast Foundation Stereo network")
@@ -94,19 +103,33 @@ def _serialize_network(
     network: Any,
     *,
     fp16: bool,
+    strongly_typed: bool,
+    default_optimization_level: int,
+    default_aux_streams: int,
     verbose: bool,
 ) -> bytes:
-    del fp16, verbose
+    del verbose
     config = builder.create_builder_config()
+    if fp16 and not strongly_typed:
+        fp16_flag = getattr(trt.BuilderFlag, "FP16", None)
+        if fp16_flag is None:
+            raise RuntimeError("weakly typed FP16 networks are not supported by this TensorRT")
+        config.set_flag(fp16_flag)
     workspace_gib = int(os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_WORKSPACE_GIB", "8"))
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gib << 30)
     if hasattr(config, "builder_optimization_level"):
         config.builder_optimization_level = int(
-            os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_OPT_LEVEL", "5")
+            os.environ.get(
+                "TRTMC_FAST_FOUNDATION_STEREO_OPT_LEVEL",
+                str(default_optimization_level),
+            )
         )
     if hasattr(config, "max_aux_streams"):
         config.max_aux_streams = int(
-            os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_AUX_STREAMS", "2")
+            os.environ.get(
+                "TRTMC_FAST_FOUNDATION_STEREO_AUX_STREAMS",
+                str(default_aux_streams),
+            )
         )
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -155,7 +178,7 @@ def build_feature_engine(
             max_disparity=max_disparity,
             valid_iters=valid_iters,
         )
-        trt, builder, network = _create_network(verbose=verbose)
+        trt, builder, network = _create_network(verbose=verbose, strongly_typed=True)
         left = network.add_input("left", trt.float32, (1, 3, 704, 704))
         right = network.add_input("right", trt.float32, (1, 3, 704, 704))
         graph = NativeGraph(network, trt, fp16=fp16)
@@ -166,6 +189,9 @@ def build_feature_engine(
             builder,
             network,
             fp16=fp16,
+            strongly_typed=True,
+            default_optimization_level=5,
+            default_aux_streams=2,
             verbose=verbose,
         )
 
@@ -181,6 +207,7 @@ def build_post_engine(
     from .native_graph import NativeGraph
     from .native_post import add_post_graph
     from .native_plugin_builder import load_native_plugin
+    from tensorrt_model_connect import trt_compat
 
     fp16 = _validate_precision(precision)
     model_root = Path(model_dir).resolve()
@@ -191,7 +218,12 @@ def build_post_engine(
             valid_iters=valid_iters,
         )
         load_native_plugin(verbose=verbose)
-        trt, builder, network = _create_network(verbose=verbose)
+        active_trt = trt_compat.get_trt()
+        strongly_typed = _post_network_strongly_typed(active_trt)
+        trt, builder, network = _create_network(
+            verbose=verbose,
+            strongly_typed=strongly_typed,
+        )
         inputs = {}
         for name in POST_INPUT_NAMES:
             dtype = trt.float32 if not fp16 or name == "features_left_32" else trt.float16
@@ -212,5 +244,8 @@ def build_post_engine(
             builder,
             network,
             fp16=fp16,
+            strongly_typed=strongly_typed,
+            default_optimization_level=4,
+            default_aux_streams=0,
             verbose=verbose,
         )
