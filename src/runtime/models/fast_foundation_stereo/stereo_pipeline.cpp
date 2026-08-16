@@ -5,21 +5,12 @@
 
 #include "runtime/models/fast_foundation_stereo/stereo_pipeline.h"
 
-#include "runtime/models/fast_foundation_stereo/gwc_kernel.h"
-
 #include <algorithm>
 #include <cuda_runtime_api.h>
 #include <stdexcept>
 #include <utility>
 
 namespace trtmc {
-
-#if !TRTMC_HAS_CUDA_KERNELS
-cudaError_t launch_fast_foundation_stereo_gwc(const void*, const void*, void*, void*, void*,
-                                              cudaStream_t) {
-    return cudaErrorNotSupported;
-}
-#endif
 
 namespace {
 
@@ -73,18 +64,12 @@ void prepare_fast_foundation_stereo_image(const float* pixels, int32_t height, i
 FastFoundationStereoPipeline::FastFoundationStereoPipeline(std::unique_ptr<ITrtModule> feature,
                                                            std::unique_ptr<ITrtModule> post,
                                                            std::string model_id)
-    : feature_(std::move(feature)), post_(std::move(post)),
-      reference_norm_({1, 8, 176, 176}, DType::kFloat16, feature_ ? feature_->stream() : nullptr),
-      target_norm_({1, 8, 176, 176}, DType::kFloat16, feature_ ? feature_->stream() : nullptr),
-      gwc_({1, 8, 48, 176, 176}, DType::kFloat16, feature_ ? feature_->stream() : nullptr),
-      model_id_(std::move(model_id)) {
+    : feature_(std::move(feature)), post_(std::move(post)), model_id_(std::move(model_id)) {
     if (!feature_ || !feature_->ok() || !post_ || !post_->ok())
         throw std::runtime_error("FastFoundationStereoPipeline: invalid engine module");
     if (feature_->stream() != post_->stream())
         throw std::runtime_error(
             "FastFoundationStereoPipeline: engines must share one CUDA stream");
-    if (!reference_norm_.ok() || !target_norm_.ok() || !gwc_.ok())
-        throw std::runtime_error("FastFoundationStereoPipeline: failed to allocate GWC buffers");
 }
 
 void FastFoundationStereoPipeline::bind_post_inputs() {
@@ -99,7 +84,6 @@ void FastFoundationStereoPipeline::bind_post_inputs() {
                                      name);
         post_->bind_external(name, pointer);
     }
-    post_->bind_external("gwc_volume", gwc_.data());
     post_inputs_bound_ = true;
 }
 
@@ -113,11 +97,6 @@ StereoDisparityResult FastFoundationStereoPipeline::estimate_disparity(const flo
         {{"left", input_tensor(left_input_)}, {"right", input_tensor(right_input_)}});
     if (!post_inputs_bound_)
         bind_post_inputs();
-
-    check_cuda("GWC launch", launch_fast_foundation_stereo_gwc(
-                                 feature_->device_ptr("features_left_04"),
-                                 feature_->device_ptr("features_right_04"), reference_norm_.data(),
-                                 target_norm_.data(), gwc_.data(), feature_->stream()));
     post_->forward_async({});
 
     const auto* disparity = static_cast<const float*>(post_->device_ptr("disp"));

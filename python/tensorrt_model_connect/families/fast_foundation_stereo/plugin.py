@@ -11,6 +11,7 @@ from typing import Protocol
 
 _CHECKPOINT = Path("weights/23-36-37/model_best_bp2_serialize.pth")
 _POST_SECTION = "fast_foundation_stereo_post_engine_plan"
+_NATIVE_PLUGIN_SECTION = "fast_foundation_stereo_native_plugin_so"
 
 
 class ModelConfig(Protocol):
@@ -95,7 +96,9 @@ class FastFoundationStereoPlugin:
     ) -> dict[str, bytes]:
         del max_cache_length, quant_ctx
         from .builder import build_post_engine
+        from .native_plugin_builder import ensure_native_plugin
 
+        native_plugin = ensure_native_plugin(verbose=verbose)
         return {
             _POST_SECTION: build_post_engine(
                 self._model_dir(config, weights),
@@ -103,7 +106,8 @@ class FastFoundationStereoPlugin:
                 max_disparity=int(config.raw.get("stereo_max_disparity", 192)),
                 valid_iters=int(config.raw.get("stereo_valid_iters", 8)),
                 verbose=verbose,
-            )
+            ),
+            _NATIVE_PLUGIN_SECTION: native_plugin.read_bytes(),
         }
 
 
