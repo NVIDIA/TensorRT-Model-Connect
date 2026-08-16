@@ -18,9 +18,17 @@ import numpy as np
 import torch
 
 try:
-    from .trt_runner import SplitTensorRTRunner, load_native_plugin_libraries
+    from .trt_runner import (
+        SplitTensorRTRunner,
+        load_named_disparity_reference,
+        load_native_plugin_libraries,
+    )
 except ImportError:  # Direct execution: python tests/.../benchmark.py
-    from trt_runner import SplitTensorRTRunner, load_native_plugin_libraries
+    from trt_runner import (
+        SplitTensorRTRunner,
+        load_named_disparity_reference,
+        load_native_plugin_libraries,
+    )
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -314,11 +322,11 @@ def main() -> None:
     accuracy = None
     accuracy_passed = None
     if args.reference:
-        reference = np.load(args.reference)["disparity"]
-        if reference.shape != first_output.shape:
-            raise RuntimeError(
-                f"reference shape {reference.shape} != output shape {first_output.shape}"
-            )
+        reference = load_named_disparity_reference(
+            args.reference,
+            [name for name, _, _ in pairs],
+            first_output.shape,
+        )
         pair_cosines = [
             cosine_similarity(actual, expected) for actual, expected in zip(first_output, reference)
         ]
