@@ -75,20 +75,6 @@ def _validate_precision(precision: str) -> bool:
     return precision == "fp16"
 
 
-def _set_fp16_flag_if_supported(config: Any, trt: Any) -> None:
-    """Retain compatibility for weakly typed TensorRT releases.
-
-    The native graph is strongly typed and does not depend on this flag, but
-    setting it on older releases remains harmless and preserves their tactic
-    search policy.
-    """
-
-    builder_flag = getattr(trt, "BuilderFlag", None)
-    fp16_flag = getattr(builder_flag, "FP16", None)
-    if fp16_flag is not None:
-        config.set_flag(fp16_flag)
-
-
 def _create_network(*, verbose: bool) -> tuple[Any, Any, Any]:
     from tensorrt_model_connect import trt_compat
 
@@ -110,12 +96,10 @@ def _serialize_network(
     fp16: bool,
     verbose: bool,
 ) -> bytes:
-    del verbose
+    del fp16, verbose
     config = builder.create_builder_config()
     workspace_gib = int(os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_WORKSPACE_GIB", "8"))
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_gib << 30)
-    if fp16:
-        _set_fp16_flag_if_supported(config, trt)
     if hasattr(config, "builder_optimization_level"):
         config.builder_optimization_level = int(
             os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_OPT_LEVEL", "5")

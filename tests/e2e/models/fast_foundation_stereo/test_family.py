@@ -21,9 +21,6 @@ from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.fast_foundation_stereo import (
     FastFoundationStereoPlugin,
 )
-from tensorrt_model_connect.families.fast_foundation_stereo.builder import (
-    _set_fp16_flag_if_supported,
-)
 from tensorrt_model_connect.families.fast_foundation_stereo.model_config import (
     config_from_dir,
 )
@@ -279,24 +276,6 @@ def test_l4_performance_receipt_beats_baseline_and_passes_accuracy() -> None:
         )
         >= 80.0
     )
-
-
-@pytest.mark.parametrize("exposes_fp16", [False, True])
-def test_fp16_builder_flag_is_optional_across_tensorrt_versions(
-    exposes_fp16: bool,
-) -> None:
-    calls = []
-    builder_flag = SimpleNamespace()
-    if exposes_fp16:
-        builder_flag.FP16 = "fp16"
-    config = SimpleNamespace(set_flag=calls.append)
-
-    _set_fp16_flag_if_supported(
-        config,
-        SimpleNamespace(BuilderFlag=builder_flag),
-    )
-
-    assert calls == (["fp16"] if exposes_fp16 else [])
 
 
 def test_disparity_comparator_gates_global_fp32_cosine() -> None:
