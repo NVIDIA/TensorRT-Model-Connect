@@ -345,6 +345,31 @@ def test_requested_native_plugin_is_loaded_globally(tmp_path: Path, monkeypatch)
     trt_runner._PLUGIN_HANDLES.clear()
 
 
+def test_disparity_reference_is_bound_to_selected_pair_names(tmp_path: Path) -> None:
+    from tests.e2e.models.fast_foundation_stereo.trt_runner import (
+        load_named_disparity_reference,
+    )
+
+    reference = tmp_path / "reference.npz"
+    disparity = np.zeros((2, 4, 4), dtype=np.float32)
+    np.savez(reference, names=np.asarray(["right.png", "left.png"]), disparity=disparity)
+
+    with pytest.raises(RuntimeError, match="do not match selected pairs"):
+        load_named_disparity_reference(
+            reference,
+            ["left.png", "right.png"],
+            disparity.shape,
+        )
+
+    np.savez(reference, names=np.asarray(["left.png", "right.png"]), disparity=disparity)
+    loaded = load_named_disparity_reference(
+        reference,
+        ["left.png", "right.png"],
+        disparity.shape,
+    )
+    np.testing.assert_array_equal(loaded, disparity)
+
+
 def test_legacy_l4_receipt_cannot_claim_current_native_performance() -> None:
     receipt = json.loads((Path(__file__).parent / "performance/l4.json").read_text())
     assert receipt["measurement_status"] == "superseded_by_native_strongly_typed_graph"

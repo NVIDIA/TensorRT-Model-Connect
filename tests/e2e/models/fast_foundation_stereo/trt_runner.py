@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
+import numpy as np
+
 if TYPE_CHECKING:
     import torch
 
@@ -21,6 +23,28 @@ _PLUGIN_LIBRARY_NAMES = (
     "libtrtmc_model_fast_foundation_stereo.dylib",
 )
 _PLUGIN_HANDLES: list[ctypes.CDLL] = []
+
+
+def load_named_disparity_reference(
+    path: Path,
+    expected_names: list[str],
+    expected_shape: tuple[int, ...],
+) -> np.ndarray:
+    """Load a reference only when it names the exact selected stereo pairs."""
+
+    with np.load(path, allow_pickle=False) as archive:
+        missing = {"names", "disparity"} - set(archive.files)
+        if missing:
+            raise RuntimeError(f"reference archive is missing fields: {sorted(missing)}")
+        reference_names = [str(name) for name in archive["names"].tolist()]
+        disparity = archive["disparity"]
+    if reference_names != expected_names:
+        raise RuntimeError(
+            f"reference names {reference_names} do not match selected pairs {expected_names}"
+        )
+    if disparity.shape != expected_shape:
+        raise RuntimeError(f"reference shape {disparity.shape} != output shape {expected_shape}")
+    return disparity
 
 
 def _deduplicate(values: Iterable[str]) -> list[str]:
