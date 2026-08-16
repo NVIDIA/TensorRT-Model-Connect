@@ -6,7 +6,6 @@
 #pragma once
 
 #include "trtmc/pipeline.h"
-#include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
@@ -35,9 +34,6 @@ class FastFoundationStereoPipeline final : public IPipeline {
 
     std::unique_ptr<ITrtModule> feature_;
     std::unique_ptr<ITrtModule> post_;
-    DeviceTensor reference_norm_;
-    DeviceTensor target_norm_;
-    DeviceTensor gwc_;
     std::vector<float> left_input_;
     std::vector<float> right_input_;
     std::vector<float> padded_output_;

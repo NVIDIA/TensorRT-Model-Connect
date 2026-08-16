@@ -12,60 +12,51 @@ from pathlib import Path
 
 import torch
 
+try:
+    from .trt_runner import SplitTensorRTRunner, load_native_plugin_libraries
+except ImportError:  # Direct execution: python tests/.../profile_ncu.py
+    from trt_runner import SplitTensorRTRunner, load_native_plugin_libraries
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("model_root", type=Path)
     parser.add_argument("feature_engine", type=Path)
     parser.add_argument("post_engine", type=Path)
+    parser.add_argument(
+        "--plugin-library",
+        action="append",
+        default=[],
+        type=Path,
+        help="family plugin DSO to load before TensorRT engine deserialization",
+    )
     parser.add_argument("--warmup", type=int, default=3)
     args = parser.parse_args()
 
     root = args.model_root.resolve()
     os.chdir(root)
     sys.path.insert(0, str(root))
-    import tensorrt as trt
-    from core.foundation_stereo import TrtRunner
-    from core.submodule import build_gwc_volume_triton
-
-    checkpoint = root / "weights/23-36-37/model_best_bp2_serialize.pth"
-    checkpoint_model = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    checkpoint_model.args.valid_iters = 8
-    checkpoint_model.args.max_disp = 192
-    model = TrtRunner(checkpoint_model.args, str(args.feature_engine), str(args.post_engine)).cuda()
-    del checkpoint_model
+    load_native_plugin_libraries(args.plugin_library)
+    model = SplitTensorRTRunner(args.feature_engine, args.post_engine)
     left = torch.rand((1, 3, 704, 704), device="cuda") * 255
     right = torch.rand_like(left) * 255
-    input_names = model.get_io_tensor_names(model.post_engine, trt.TensorIOMode.INPUT)
 
     def prepare_inputs():
-        feature = model.run_trt(
-            model.feature_engine,
-            model.feature_context,
-            {"left": left, "right": right},
-        )
-        feature["gwc_volume"] = build_gwc_volume_triton(
-            feature["features_left_04"].half(),
-            feature["features_right_04"].half(),
-            48,
-            8,
-            normalize=True,
-        )
-        return {name: value for name, value in feature.items() if name in input_names}
+        return model.run_feature(left, right)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.inference_mode(), torch.cuda.stream(stream):
         inputs = prepare_inputs()
         for _ in range(args.warmup):
-            model.run_trt(model.post_engine, model.post_context, inputs)
+            model.run_post(inputs)
     torch.cuda.current_stream().wait_stream(stream)
     torch.cuda.synchronize()
 
     with torch.inference_mode(), torch.cuda.stream(stream):
         torch.cuda.nvtx.range_push("ffs_post")
         try:
-            model.run_trt(model.post_engine, model.post_context, inputs)
+            model.run_post(inputs)
             stream.synchronize()
         finally:
             torch.cuda.nvtx.range_pop()
