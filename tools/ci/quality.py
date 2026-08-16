@@ -165,7 +165,11 @@ class SourceQualityChecks:
             check=False,
             capture_output=True,
         )
-        return [line for line in result.stdout.splitlines() if line]
+        return [
+            line
+            for line in result.stdout.splitlines()
+            if line and (self.context.repository / line).is_file()
+        ]
 
 
 class UnitTestRunner:
