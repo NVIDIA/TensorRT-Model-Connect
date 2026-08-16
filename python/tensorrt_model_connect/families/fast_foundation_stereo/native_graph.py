@@ -25,6 +25,9 @@ class NativeGraph:
         self.fp16 = fp16
         self.work_np_dtype = np.float16 if fp16 else np.float32
         self.work_trt_dtype = trt.float16 if fp16 else trt.float32
+        # TensorRT weights refer to their host buffers until engine build.
+        # Retain every converted checkpoint array for the graph's lifetime.
+        self._weight_buffers: list[np.ndarray] = []
 
     @staticmethod
     def _tuple(value: Any, rank: int) -> tuple[int, ...]:
@@ -58,6 +61,7 @@ class NativeGraph:
         if shape is None:
             shape = tuple(array.shape)
         array = np.ascontiguousarray(array.reshape(shape))
+        self._weight_buffers.append(array)
         output = self.network.add_constant(shape, self.trt.Weights(array)).get_output(0)
         return self.cast(output, target_dtype) if target_dtype is not None else output
 
@@ -189,6 +193,7 @@ class NativeGraph:
         return self.network.add_matrix_multiply(lhs, op_lhs, rhs, op_rhs).get_output(0)
 
     def linear(self, tensor: Any, module: Any) -> Any:
+        tensor = self.cast(tensor, self.work_trt_dtype)
         weight = self._array(module.weight, self._np_dtype_for(tensor))
         out_features, in_features = weight.shape
         rank = len(tuple(tensor.shape))
@@ -212,6 +217,7 @@ class NativeGraph:
         return output
 
     def _convolution(self, tensor: Any, module: Any, *, dimensions: int, deconv: bool) -> Any:
+        tensor = self.cast(tensor, self.work_trt_dtype)
         weight_dtype = self._np_dtype_for(tensor)
         weight = self._array(module.weight, weight_dtype)
         bias = (
@@ -219,8 +225,13 @@ class NativeGraph:
             if getattr(module, "bias", None) is not None
             else None
         )
+        self._weight_buffers.append(weight)
         weights = self.trt.Weights(weight)
-        biases = self.trt.Weights(bias) if bias is not None else self.trt.Weights()
+        if bias is not None:
+            self._weight_buffers.append(bias)
+            biases = self.trt.Weights(bias)
+        else:
+            biases = self.trt.Weights()
         kernel = self._tuple(module.kernel_size, dimensions)
         if deconv:
             layer = self.network.add_deconvolution_nd(
@@ -323,8 +334,6 @@ class NativeGraph:
         if add_norm is not None:
             layer = add_norm(fp32, gamma, beta, axes_mask)
             layer.epsilon = float(module.eps)
-            if hasattr(layer, "compute_precision"):
-                layer.compute_precision = self.trt.float32
             return self.cast(layer.get_output(0), output_dtype)
         mean = self.reduce_avg(fp32, axes, keep_dims=True)
         centered = self.sub(fp32, mean)
@@ -413,7 +422,10 @@ class NativeGraph:
             else:
                 output = self.batch_norm(output, bn)
         relu = getattr(module, "relu", None)
-        if relu is not None and relu.__class__.__name__ != "Identity":
+        if isinstance(relu, bool):
+            if relu:
+                output = self.activation(output, "leaky_relu", alpha=0.01)
+        elif relu is not None and relu.__class__.__name__ != "Identity":
             if "Leaky" in relu.__class__.__name__:
                 output = self.activation(
                     output, "leaky_relu", alpha=float(getattr(relu, "negative_slope", 0.01))
@@ -496,7 +508,9 @@ class NativeGraph:
 
     def edge_next_encoder(self, tensor: Any, module: Any) -> Any:
         residual = tensor
-        output = self.conv2d(tensor, module.dwconv)
+        # Conv/Linear are autocast-eligible even when the residual branch was
+        # promoted to FP32 by the preceding layer-scale parameter.
+        output = self.conv2d(self.cast(tensor, self.work_trt_dtype), module.dwconv)
         if module.norm.__class__.__name__ != "Identity":
             if "BatchNorm" in module.norm.__class__.__name__:
                 output = self.batch_norm(output, module.norm)
@@ -510,14 +524,14 @@ class NativeGraph:
         if gamma is not None:
             channels = int(output.shape[-1])
             gamma_tensor = self.constant(
-                self._array(gamma, self._np_dtype_for(output)).reshape(1, 1, 1, channels),
+                self._array(gamma, np.float32).reshape(1, 1, 1, channels),
                 (1, 1, 1, channels),
-                dtype=self._np_dtype_for(output),
-                target_dtype=output.dtype,
+                dtype=np.float32,
+                target_dtype=self.trt.float32,
             )
-            output = self.mul(output, gamma_tensor)
+            output = self.mul(self.cast(output, self.trt.float32), gamma_tensor)
         output = self.transpose(output, (0, 3, 1, 2))
-        return self.add(residual, output)
+        return self.add(self.cast(residual, output.dtype), output)
 
     def module(self, tensor: Any, module: Any) -> Any:
         name = module.__class__.__name__

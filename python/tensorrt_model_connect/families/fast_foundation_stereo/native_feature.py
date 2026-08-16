@@ -220,16 +220,17 @@ def _conv_block(graph: NativeGraph, tensor, block, *, fp16: bool):
 
 
 def _l2_normalize_last(graph: NativeGraph, tensor, *, fp16: bool):
+    del fp16
     trt = _trt(graph)
+    tensor = _cast(graph, tensor, trt.float32)
     squared = _binary(graph, tensor, tensor, trt.ElementWiseOperation.PROD)
     axis = len(tuple(tensor.shape)) - 1
     summed = graph.reduce_sum(squared, (axis,), keep_dims=True)
     norm = graph.unary(trt.UnaryOperation.SQRT, summed)
-    dtype = _work_np_dtype(fp16)
     epsilon = _constant(
         graph,
-        np.asarray([1.0e-12], dtype=dtype),
-        dtype,
+        np.asarray([1.0e-12], dtype=np.float32),
+        np.float32,
         (1,) * len(tuple(tensor.shape)),
     )
     norm = _binary(graph, norm, epsilon, trt.ElementWiseOperation.MAX)
@@ -260,6 +261,10 @@ def _xca(graph: NativeGraph, tensor, module, *, fp16: bool):
     query, key, value = pieces
     query = _l2_normalize_last(graph, query, fp16=fp16)
     key = _l2_normalize_last(graph, key, fp16=fp16)
+    # F.normalize is FP32 under CUDA autocast; the following MatMul is
+    # autocast-eligible and returns to the requested work dtype.
+    query = _cast(graph, query, _work_dtype(graph, fp16))
+    key = _cast(graph, key, _work_dtype(graph, fp16))
     attention = graph.matmul(
         query,
         key,

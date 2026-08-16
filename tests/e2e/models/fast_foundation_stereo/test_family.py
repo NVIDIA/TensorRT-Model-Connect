@@ -35,6 +35,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 _FAMILY_SOURCE_DIR = (
     _REPOSITORY_ROOT / "python/tensorrt_model_connect/families/fast_foundation_stereo"
 )
+_RUNTIME_SOURCE_DIR = _REPOSITORY_ROOT / "src/runtime/models/fast_foundation_stereo"
 
 
 def _model_dir(tmp_path: Path) -> Path:
@@ -61,7 +62,10 @@ def test_config_adapter_claims_only_complete_source_package(tmp_path: Path) -> N
     assert config["runtime_strategy"] == "fast_foundation_stereo_disparity"
     assert config["stereo_engine_height"] == 704
     assert config["stereo_engine_width"] == 704
+    assert config["stereo_accuracy_metric"] == "cosine_epe_bad2"
     assert config["stereo_min_cosine"] == 0.999
+    assert config["stereo_max_mean_abs_error"] == 0.5
+    assert config["stereo_max_bad_2px_fraction"] == 0.02
 
 
 def test_plugin_owns_unique_strategy_and_skips_tokenizer() -> None:
@@ -195,8 +199,22 @@ def test_plugin_builds_feature_and_family_owned_post_section(tmp_path: Path, mon
     assert all(call[2]["valid_iters"] == 8 for call in calls)
 
 
+def test_native_builder_rejects_precision_not_supported_by_gwc_plugin() -> None:
+    from tensorrt_model_connect.families.fast_foundation_stereo import builder
+
+    assert builder._validate_precision("fp16") is True
+    with pytest.raises(ValueError, match="supports precision='fp16' only"):
+        builder._validate_precision("fp32")
+
+
 def test_production_family_uses_only_native_tensorrt_network_definition() -> None:
-    sources = sorted(_FAMILY_SOURCE_DIR.rglob("*.py"))
+    sources = sorted(
+        path
+        for root in (_FAMILY_SOURCE_DIR, _RUNTIME_SOURCE_DIR)
+        for path in root.rglob("*")
+        if path.is_file()
+        and (path.suffix in {".cpp", ".cu", ".h", ".py"} or path.name == "CMakeLists.txt")
+    )
     assert sources
     source_by_path = {
         path.relative_to(_REPOSITORY_ROOT): path.read_text(encoding="utf-8") for path in sources
@@ -212,7 +230,7 @@ def test_production_family_uses_only_native_tensorrt_network_definition() -> Non
     forbidden = {path: lines for path, lines in forbidden.items() if lines}
     assert forbidden == {}
 
-    combined = "\n".join(source_by_path.values())
+    combined = "\n".join(text for path, text in source_by_path.items() if path.suffix == ".py")
     assert ".create_network(" in combined
     native_layer = re.compile(
         r"\.add_(?:activation|concatenation|constant|convolution_nd|"
@@ -227,6 +245,75 @@ def test_post_engine_consumes_only_feature_engine_outputs() -> None:
 
     assert builder.POST_INPUT_NAMES == builder.FEATURE_OUTPUT_NAMES
     assert "gwc_volume" not in builder.POST_INPUT_NAMES
+
+
+def test_native_basic_conv_preserves_distilled_boolean_activation_semantics() -> None:
+    from tensorrt_model_connect.families.fast_foundation_stereo.native_graph import NativeGraph
+
+    class Conv2d:
+        kernel_size = (3, 3)
+
+    class Identity:
+        pass
+
+    graph = object.__new__(NativeGraph)
+    graph.conv2d = lambda _tensor, _module: "conv"
+    graph.activation = lambda tensor, kind, alpha=None: (tensor, kind, alpha)
+
+    disabled = SimpleNamespace(conv=Conv2d(), bn=Identity(), relu=False)
+    enabled = SimpleNamespace(conv=Conv2d(), bn=Identity(), relu=True)
+
+    assert NativeGraph.basic_conv(graph, "input", disabled) == "conv"
+    assert NativeGraph.basic_conv(graph, "input", enabled) == (
+        "conv",
+        "leaky_relu",
+        0.01,
+    )
+
+
+def test_native_graph_retains_weight_buffers_until_engine_build() -> None:
+    from tensorrt_model_connect.families.fast_foundation_stereo.native_graph import NativeGraph
+
+    class Weights:
+        def __init__(self, values=None) -> None:
+            self.values = values
+
+    class Tensor:
+        dtype = "float32"
+        shape = (1, 1, 2, 2)
+
+    class Layer:
+        def __init__(self) -> None:
+            self.output = Tensor()
+
+        def get_output(self, index: int):
+            assert index == 0
+            return self.output
+
+    class Network:
+        def add_constant(self, _shape, _weights):
+            return Layer()
+
+        def add_convolution_nd(self, *_args):
+            return Layer()
+
+    trt = SimpleNamespace(float16="float16", float32="float32", Weights=Weights)
+    graph = NativeGraph(Network(), trt, fp16=False)
+    graph.constant(np.ones((1,), dtype=np.float32))
+    convolution = SimpleNamespace(
+        weight=np.ones((1, 1, 1, 1), dtype=np.float32),
+        bias=np.ones((1,), dtype=np.float32),
+        out_channels=1,
+        kernel_size=(1, 1),
+        stride=(1, 1),
+        padding=(0, 0),
+        dilation=(1, 1),
+        groups=1,
+    )
+    graph.conv2d(Tensor(), convolution)
+
+    assert len(graph._weight_buffers) == 3
+    assert all(buffer.flags.c_contiguous for buffer in graph._weight_buffers)
 
 
 def test_performance_tools_do_not_build_framework_side_gwc() -> None:
@@ -258,27 +345,14 @@ def test_requested_native_plugin_is_loaded_globally(tmp_path: Path, monkeypatch)
     trt_runner._PLUGIN_HANDLES.clear()
 
 
-def test_l4_performance_receipt_beats_baseline_and_passes_accuracy() -> None:
+def test_legacy_l4_receipt_cannot_claim_current_native_performance() -> None:
     receipt = json.loads((Path(__file__).parent / "performance/l4.json").read_text())
-    baseline = receipt["recorded_baseline"]
-    selected = receipt["selected_tensorrt_sustained_runs"][-1]
-    protocol = receipt["protocol"]
-    roofline = receipt["roofline_sample"]
-
-    assert selected["inference_5_pairs_mean_ms"] < baseline["inference_5_pairs_mean_ms"]
-    assert selected["total_5_pairs_mean_ms"] < baseline["total_5_pairs_mean_ms"]
-    assert selected["global_cosine"] >= protocol["minimum_cosine"]
-    assert selected["accuracy_passed"] is True
-    assert (
-        max(
-            roofline["maximum_compute_percent_of_peak"],
-            roofline["maximum_memory_percent_of_peak"],
-        )
-        >= 80.0
-    )
+    assert receipt["measurement_status"] == "superseded_by_native_strongly_typed_graph"
+    assert receipt["selected_tensorrt_configuration"]["precision"].startswith("weakly_typed")
+    assert "must not be used" in receipt["superseded_reason"]
 
 
-def test_disparity_comparator_gates_global_fp32_cosine() -> None:
+def test_disparity_comparator_gates_structure_and_pixel_error() -> None:
     expected = np.arange(16, dtype=np.float32).reshape(4, 4)
     comparator = StereoDisparityComparator()
     threshold = ThresholdProfile(
@@ -286,6 +360,8 @@ def test_disparity_comparator_gates_global_fp32_cosine() -> None:
         metrics={
             "finite_fraction": 1.0,
             "global_cosine": 0.999,
+            "mean_abs_error": 0.5,
+            "bad_2px_fraction": 0.02,
             "nonnegative_fraction": 1.0,
         },
     )
@@ -310,8 +386,18 @@ def test_disparity_comparator_gates_global_fp32_cosine() -> None:
         threshold,
         stage,
     )
+    rescaled = comparator.compare(
+        StageOutput(stage_name=stage.name, data={"disparity": expected * 2.0}),
+        reference,
+        threshold,
+        stage,
+    )
 
     assert passed.passed
     assert passed.metrics["global_cosine"].value == pytest.approx(1.0)
+    assert passed.metrics["mean_abs_error"].value == pytest.approx(0.0)
     assert not failed.passed
     assert not failed.metrics["global_cosine"].passed
+    assert not rescaled.passed
+    assert rescaled.metrics["global_cosine"].passed
+    assert not rescaled.metrics["mean_abs_error"].passed
