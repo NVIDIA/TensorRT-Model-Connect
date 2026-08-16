@@ -1,0 +1,26 @@
+{
+  "name": "fast-foundation-stereo",
+  "hf_id": "nvidia/c-fast-foundationstereo",
+  "hf_revision": "9b446878c81ddb27593036767b29b2859d46103e",
+  "bundle": "fast-foundation-stereo.bundle",
+  "family": "fast_foundation_stereo",
+  "runtime_strategy": "fast_foundation_stereo_disparity",
+  "task_strategy": "stereo_disparity",
+  "precision": "fp16",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "testcases": [
+    {
+      "name": "fast-foundation-stereo",
+      "trace_id": "IT-E2E-FFS-01",
+      "reference_backend": "fast_foundation_stereo_torch",
+      "reference_family": "stereo_disparity",
+      "user_contract": "stereo_disparity",
+      "oracle_level": "L1_external_reference",
+      "ci_tier": "default",
+      "inputs": {
+        "pixel_shift": 12
+      },
+      "notes": "Fixed 700x700 rectified stereo inference through the native C++ runtime. The pinned official PyTorch model receives the identical deterministic stereo pair; the gate requires shape, finiteness, non-negative disparity, and flattened FP32 cosine similarity >= 0.999."
+    }
+  ]
+}

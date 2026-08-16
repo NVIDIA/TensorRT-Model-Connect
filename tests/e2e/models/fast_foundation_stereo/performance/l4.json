@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "receipt_kind": "l4_performance_and_roofline",
+  "measured_at": "2026-08-15 America/Los_Angeles",
+  "hardware": {
+    "node": "ipp2-2246",
+    "gpu": "NVIDIA L4",
+    "compute_capability": "8.9",
+    "memory_mib": 23034,
+    "power_limit_w": 72,
+    "driver": "595.58.03",
+    "tensorrt": "10.8.0.43"
+  },
+  "provenance": {
+    "supplied_archive_sha256": "8b8769aeeef47be494bccb0bf6593355da329ed45195a68fb2633154be492e4a",
+    "official_source_revision": "a290ba04c1b3ad1ec41a33974a157b2917b624d4",
+    "official_source_archive_sha256": "c11d945db0fb765c0bdf355311f986ab914ad2619133de3a26f84a3ecbddf6c9",
+    "checkpoint_hf_revision": "9b446878c81ddb27593036767b29b2859d46103e"
+  },
+  "protocol": {
+    "input_pairs": 5,
+    "input_shape": [700, 700, 3],
+    "engine_shape": [1, 3, 704, 704],
+    "warmup_iterations": 3,
+    "timed_iterations": 100,
+    "valid_iterations": 8,
+    "max_disparity": 192,
+    "accuracy_metric": "flattened_fp32_cosine_similarity",
+    "minimum_cosine": 0.999
+  },
+  "recorded_baseline": {
+    "preprocess_5_pairs_mean_ms": 133.45681335777044,
+    "inference_5_pairs_mean_ms": 631.8328293785453,
+    "total_5_pairs_mean_ms": 765.2896427363157
+  },
+  "l4_torch_reproduction": {
+    "preprocess_5_pairs_mean_ms": 79.91516468013288,
+    "inference_5_pairs_mean_ms": 685.3437921198929,
+    "total_5_pairs_mean_ms": 765.2589568000258,
+    "global_cosine": 1.0
+  },
+  "selected_tensorrt_configuration": {
+    "measurement_runtime": "official Python TrtRunner with the official Triton GWC kernel",
+    "native_runtime_boundary": "The C++ runtime uses the separately validated family-owned GWC CUDA kernel below.",
+    "precision": "weakly_typed_fp16_with_required_fp32_tensors",
+    "graph": "split_feature_gwc_post",
+    "builder_optimization_level": 3,
+    "workspace_gib": 8,
+    "maximum_auxiliary_streams": 2,
+    "actual_feature_auxiliary_streams": 2,
+    "actual_post_auxiliary_streams": 2,
+    "cuda_graphs": true,
+    "feature_engine_layers": 284,
+    "post_engine_layers": 697
+  },
+  "selected_tensorrt_sustained_runs": [
+    {
+      "preprocess_5_pairs_mean_ms": 77.40514166027424,
+      "inference_5_pairs_mean_ms": 326.32860979989346,
+      "total_5_pairs_mean_ms": 403.7337514601677,
+      "global_cosine": 0.999405287244333,
+      "accuracy_passed": true
+    },
+    {
+      "preprocess_5_pairs_mean_ms": 77.34481210020022,
+      "inference_5_pairs_mean_ms": 323.69157146014913,
+      "total_5_pairs_mean_ms": 401.03638356034935,
+      "global_cosine": 0.999405287244333,
+      "accuracy_passed": true
+    }
+  ],
+  "improvement_from_recorded_baseline_using_repeat": {
+    "inference_latency_reduction_percent": 48.76942817635419,
+    "inference_throughput_speedup": 1.9519594734221635,
+    "total_latency_reduction_percent": 47.596784123925694,
+    "total_throughput_speedup": 1.908279832224131
+  },
+  "roofline_sample": {
+    "tool": "Nsight Compute 2024.1.1",
+    "scope": "125 stratified post-engine kernel launches at offsets 0, 200, 400, and 600",
+    "sampled_duration_us": 6119.54,
+    "duration_weighted_compute_percent_of_peak": 58.21988569402276,
+    "duration_weighted_memory_percent_of_peak": 55.821482644120316,
+    "maximum_compute_percent_of_peak": 85.41,
+    "maximum_memory_percent_of_peak": 88.05,
+    "launches_at_or_above_80_percent_of_a_ceiling": 10,
+    "compute_limited_launches": 85,
+    "memory_limited_launches": 40,
+    "interpretation": "Dominant tensor-core and pooling/GEMM kernels reach the L4 compute or memory roof. Remaining batch-1 latency is distributed across small launches and reformat kernels; CUDA graphs reduce that launch overhead without changing model outputs."
+  },
+  "stage_gpu_time_ms_per_pair": {
+    "feature": 7.11487,
+    "groupwise_correlation": 1.99087,
+    "post": 56.71301,
+    "sum": 65.81875
+  },
+  "native_gwc_validation": {
+    "input": "deterministic random FP16 feature tensors with shape [1, 224, 176, 176]",
+    "production_math_flags": true,
+    "native_mean_ms": 0.8148294067382813,
+    "official_triton_mean_ms": 1.8557951354980469,
+    "cosine": 0.9999999403953552,
+    "maximum_absolute_error": 0.00048828125,
+    "mean_absolute_error": 2.5104574419287928e-08
+  },
+  "tuning_sweep_short_runs": [
+    {
+      "candidate": "selected_opt3_aux2_cuda_graphs",
+      "inference_5_pairs_mean_ms": 316.6116,
+      "global_cosine": 0.999405287244333
+    },
+    {
+      "candidate": "selected_opt3_aux2_no_cuda_graphs",
+      "inference_5_pairs_mean_ms": 327.27457609871635,
+      "global_cosine": 0.999405287244333
+    },
+    {
+      "candidate": "opt3_aux0",
+      "inference_5_pairs_mean_ms": 316.6310241991596,
+      "global_cosine": 0.999393157992395
+    },
+    {
+      "candidate": "opt3_aux1",
+      "inference_5_pairs_mean_ms": 316.9661971012829,
+      "global_cosine": 0.9994142748701115
+    },
+    {
+      "candidate": "opt3_aux4",
+      "inference_5_pairs_mean_ms": 326.0402198997326,
+      "global_cosine": 0.999389306161319
+    },
+    {
+      "candidate": "opt4_aux2",
+      "inference_5_pairs_mean_ms": 322.9438241003663,
+      "global_cosine": 0.9993751414938042
+    },
+    {
+      "candidate": "opt3_aux2_full_tiling",
+      "inference_5_pairs_mean_ms": 323.47987109969836,
+      "global_cosine": 0.99938988205566
+    },
+    {
+      "candidate": "single_engine_opt3",
+      "inference_5_pairs_mean_ms": 530.973,
+      "global_cosine": 0.999404645
+    }
+  ]
+}

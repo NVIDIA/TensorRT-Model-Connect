@@ -18,6 +18,11 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
+  - model: fast-foundation-stereo
+    reason: >-
+      The exact baseline is owned by the supplied rectified-stereo fixture
+      archive and model-local L4 harness; the public release runner does not
+      yet provide an equivalent redistributable stereo reference workload.
   - model: minimax-h3-768p
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated

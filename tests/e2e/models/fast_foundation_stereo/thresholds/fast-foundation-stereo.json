@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "finite_fraction": 1.0,
+    "global_cosine": 0.999,
+    "nonnegative_fraction": 1.0
+  }
+}
