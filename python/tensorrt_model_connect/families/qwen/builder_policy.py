@@ -28,22 +28,25 @@ def configure_qwen_builder(
     except ValueError:
         return
 
+    fp16_tail_length: int | None = None
     if major_minor == (11, 0):
-        # TRT 11.0 choice logits are unstable when every up projection is
-        # quantized. Keep only the final eight in FP16; earlier layers remain
-        # FP8 and retain the model's quantized execution path.
+        fp16_tail_length = 8
+    elif (
+        major_minor[0] == 11
+        and major_minor[1] >= 2
+    ):
+        if "TRTMC_BUILDER_OPTIMIZATION_LEVEL" not in os.environ:
+            # TRT 11.2+ can otherwise select numerically unstable FP8 tactics.
+            trt_config.builder_optimization_level = 0
+        fp16_tail_length = 22
+
+    if fp16_tail_length is not None:
+        # Choice logits are unstable when every up projection is quantized.
+        # Keep a version-specific tail in FP16; earlier layers remain FP8 and
+        # preserve the model's quantized execution path.
         exclude_patterns = quant_ctx.profile.exclude_patterns
-        tail_start = max(0, num_hidden_layers - 8)
+        tail_start = max(0, num_hidden_layers - fp16_tail_length)
         for layer_index in range(tail_start, num_hidden_layers):
             pattern = f"layer.{layer_index}.w_up"
             if pattern not in exclude_patterns:
                 exclude_patterns.append(pattern)
-        return
-
-    if (
-        major_minor[0] == 11
-        and major_minor[1] >= 2
-        and "TRTMC_BUILDER_OPTIMIZATION_LEVEL" not in os.environ
-    ):
-        # TRT 11.2+ can otherwise select numerically unstable FP8 tactics.
-        trt_config.builder_optimization_level = 0

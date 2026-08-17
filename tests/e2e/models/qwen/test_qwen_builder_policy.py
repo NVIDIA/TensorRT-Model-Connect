@@ -24,7 +24,9 @@ def test_qwen_fp8_uses_accuracy_stable_builder_level():
         config, quant_context, "11.2.0.113", num_hidden_layers=28)
 
     assert config.builder_optimization_level == 0
-    assert quant_context.profile.exclude_patterns == []
+    assert quant_context.profile.exclude_patterns == [
+        f"layer.{layer_index}.w_up" for layer_index in range(6, 28)
+    ]
 
 
 def test_qwen_fp8_preserves_trt_11_0_builder_level_and_fp16_tail():
@@ -36,14 +38,7 @@ def test_qwen_fp8_preserves_trt_11_0_builder_level_and_fp16_tail():
 
     assert config.builder_optimization_level == 5
     assert quant_context.profile.exclude_patterns == [
-        "layer.20.w_up",
-        "layer.21.w_up",
-        "layer.22.w_up",
-        "layer.23.w_up",
-        "layer.24.w_up",
-        "layer.25.w_up",
-        "layer.26.w_up",
-        "layer.27.w_up",
+        f"layer.{layer_index}.w_up" for layer_index in range(20, 28)
     ]
 
 
