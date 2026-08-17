@@ -133,6 +133,10 @@ _OPERATIONS = (
         rate_metrics=(RateMetric("classified_images", "images_per_s"),),
     ),
     OperationSpec(
+        name="extract_features",
+        rate_metrics=(RateMetric("processed_images", "images_per_s"),),
+    ),
+    OperationSpec(
         name="detect",
         rate_metrics=(RateMetric("detected_images", "images_per_s"),),
     ),

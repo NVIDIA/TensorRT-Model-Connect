@@ -57,6 +57,13 @@ const HF_TASKS = [
     hfUrl: 'https://huggingface.co/tasks/image-classification',
   },
   {
+    slug: 'image-feature-extraction',
+    label: 'Image Feature Extraction',
+    category: 'Computer Vision',
+    description: 'Vision backbones that return global and spatial image representations.',
+    hfUrl: 'https://huggingface.co/tasks/image-feature-extraction',
+  },
+  {
     slug: 'image-segmentation',
     label: 'Image Segmentation',
     category: 'Computer Vision',
@@ -133,6 +140,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   embedding: ['embed'],
   encoder_only_nlp: ['encode'],
   image_classification: ['classify'],
+  image_feature_extraction: ['extract-features'],
   neural_operator: ['solve'],
   omni_multimodal: ['generate-audio'],
   prompted_segmentation: ['segment-prompted'],
@@ -304,6 +312,8 @@ function hfTasksForManifest(manifest) {
       return ['audio-to-audio'];
     case 'image_classification':
       return ['image-classification'];
+    case 'image_feature_extraction':
+      return ['image-feature-extraction'];
     case 'segmentation':
       return ['image-segmentation'];
     case 'prompted_segmentation':
@@ -1049,6 +1059,17 @@ function commandContractForProfile(profile, capability) {
           option('--image <PATH>', 'Required', 'Image input consumed by classify().'),
           option('--benchmark <N>', 'Optional', 'Run N timed classification iterations.'),
           option('--warmup <N>', 'Optional', 'Warm-up iterations before classification timing.'),
+        ],
+        evidence,
+      };
+    case 'image_feature_extraction':
+      return {
+        command: 'extract-features',
+        purpose: 'Return global and spatial feature tensors for an input image.',
+        syntax: 'trtmc extract-features <bundle.bundle> --image <input.png> [--output-json <features.json>]',
+        options: [
+          option('--image <PATH>', 'Required', 'Image input consumed by extract_image_features().'),
+          option('--output-json <PATH>', 'Optional', 'Write feature tensors and shapes as JSON.'),
         ],
         evidence,
       };

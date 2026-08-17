@@ -773,6 +773,42 @@ Json run_classify(trtmc::IPipeline& pipeline, const Json& request, const TimingC
     };
 }
 
+Json run_extract_features(trtmc::IPipeline& pipeline, const Json& request,
+                          const TimingConfig& timing) {
+    const int warmup = timing.warmup;
+    const int iterations = timing.iterations;
+    const auto image = load_request_image(request, "extract_features");
+    trtmc::ImageFeaturesResult last;
+    for (int index = 0; index < warmup; ++index) {
+        last = pipeline.extract_image_features(image.pixels.data(), image.height, image.width);
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const IterationTimer timer(timing.scope);
+        last = pipeline.extract_image_features(image.pixels.data(), image.height, image.width);
+        const double measured_ms = timer.elapsed_ms();
+        observations.push_back({
+            {"iteration", index},
+            {"measured_wall_ms", measured_ms},
+            {"runtime_e2e_wall_ms", measured_ms},
+            {"processed_images", 1},
+            {"feature_elements", last.last_hidden_state.size() + last.pooler_output.size()},
+        });
+    }
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"last_hidden_state_shape", last.last_hidden_state_shape},
+             {"last_hidden_state_elements", last.last_hidden_state.size()},
+             {"last_hidden_state_finite_sum", finite_sum(last.last_hidden_state)},
+             {"pooler_output_shape", last.pooler_output_shape},
+             {"pooler_output_elements", last.pooler_output.size()},
+             {"pooler_output_finite_sum", finite_sum(last.pooler_output)},
+         }},
+    };
+}
+
 std::size_t detection_count(const std::string& payload) {
     const Json parsed = Json::parse(payload, nullptr, false);
     if (parsed.is_array()) {
@@ -1009,6 +1045,7 @@ Json execute(const Json& request) {
         {"segment", run_segment},
         {"segment_prompted", run_segment_prompted},
         {"classify", run_classify},
+        {"extract_features", run_extract_features},
         {"detect", run_detect},
         {"rerank", run_rerank},
         {"encode", run_encode},

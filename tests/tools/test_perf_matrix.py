@@ -38,6 +38,7 @@ TASK_ADAPTERS = {
     "canary.transcribe": "nemo-asr",
     "chronos_bolt.solve": "pytorch-timeseries",
     "deepseek_ocr.generate": "hf-transformers-vlm",
+    "dinov3.extract_features": "hf-transformers-vision",
     "eagle_vlm.embed": "hf-transformers-embedding",
     "eagle_vlm.rerank": "hf-transformers-reranking",
     "flux.generate_image": "hf-diffusers",
@@ -255,9 +256,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     perf_matrix._validate_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 105
-    assert len(raw_entries) == 77
-    assert len(raw_additional) == 28
+    assert len(cases) == 107
+    assert len(raw_entries) == 78
+    assert len(raw_additional) == 29
     assert excluded_profiles == {
         "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
     }
@@ -270,14 +271,14 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(perf_matrix._is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 77
-    assert len({case["family"] for case in cases}) == 76
+    assert len({(case["family"], case["operation"]) for case in cases}) == 78
+    assert len({case["family"] for case in cases}) == 77
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 22,
+        "model_call_wall": 24,
         "public_pipeline_call_wall": 83,
     }
     assert {
@@ -1139,6 +1140,32 @@ def test_media_contract_compares_image_batch_size_to_media_count() -> None:
     assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
 
+def test_image_feature_contract_compares_both_public_output_shapes() -> None:
+    case = {
+        "operation": "extract_features",
+        "baseline": {"output_contract": "image-features-shape"},
+    }
+    candidate = {
+        "output_summary": {
+            "last_hidden_state_shape": [1, 201, 384],
+            "pooler_output_shape": [1, 384],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "last_hidden_state_shape": [1, 201, 384],
+            "pooler_output_shape": [1, 384],
+        }
+    }
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+    reference["output_summary"]["pooler_output_shape"] = [1, 768]
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "image feature output shape differs",
+    )
+
+
 @pytest.mark.parametrize("configuration", ["", "Debug", "RelWithDebInfo"])
 def test_worker_preflight_rejects_non_release_builds(configuration: str) -> None:
     metadata = {
@@ -1462,7 +1489,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 105
+    assert len(rows) == 107
     assert results["environment_config"]["name"] == "test-gb300"
     assert (
         results["environment_config"]["execution"]["minimum_gpu_free_fraction"]
@@ -1522,9 +1549,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     report = (output / "report.html").read_text(encoding="utf-8")
     assert ">gpt2<" in report
     assert "HF eager" in report
-    assert "76 model types" in report
-    assert "105 model comparisons" in report
-    assert "105 single-process profiles" in report
+    assert "77 model types" in report
+    assert "107 model comparisons" in report
+    assert "107 single-process profiles" in report
     assert "1 explicitly excluded profile" in report
     assert (
         f"{expected_catalog_coverage['excluded_l0_profiles']} duplicate L0 profiles are excluded"

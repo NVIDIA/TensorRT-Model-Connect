@@ -95,6 +95,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "segmentation": "segmentation",
     "prompted_segmentation": "segmentation",
     "image_classification": "classification",
+    "image_feature_extraction": "structured",
     "encoder_only_nlp": "numeric",
     "embedding": "numeric",
     "reranking": "reranking",

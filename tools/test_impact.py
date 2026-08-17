@@ -88,6 +88,7 @@ COMPARATOR_TASK_STRATEGY_FALLBACKS: Dict[str, List[str]] = {
 STB_IMAGE_TASK_STRATEGIES = [
     "diffusion_media_generation",
     "image_classification",
+    "image_feature_extraction",
     "object_detection",
     "omni_multimodal",
     "prompted_segmentation",
@@ -1968,20 +1969,33 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=489,
+            name="validation_dataset_config",
+            matcher=_regex_rule(
+                r"tests/validation/datasets/[^/]+\.(?:json|jsonl|ya?ml)$"
+            ),
+            resolver=_match_result(
+                "validation_dataset_config", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_validation_dataset_config_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
+            priority=490,
             name="validation_config",
             matcher=_path_equals("tests/validation/model_workloads.yaml"),
             resolver=_match_result("validation_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_validation_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=490,
+            priority=491,
             name="test_impact_tool",
             matcher=_path_equals("tools/test_impact.py"),
             resolver=_match_result("test_impact_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_test_impact_tool_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=491,
+            priority=492,
             name="source_container_contract",
             matcher=_path_in({"Dockerfile.dev.aarch64", "Dockerfile.dev.x86"}),
             resolver=_match_result(
@@ -1992,14 +2006,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=492,
+            priority=493,
             name="github_ci_config",
             matcher=_path_startswith(".github/"),
             resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=493,
+            priority=494,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,

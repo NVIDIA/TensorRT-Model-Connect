@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "snapshot_date": "2026-08-07",
+  "snapshot_date": "2026-08-17",
   "purpose": "Documentation metadata only; checkpoint qualification remains defined by the README release row and E2E manifest.",
   "checkpoints": [
     {
@@ -561,6 +561,28 @@
       "model_type": "bart",
       "architectures": [
         "BartModel"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "facebook/dinov3-convnext-tiny-pretrain-lvd1689m",
+      "revision": "10d30274b4d445111e2d5bf75ac93bbd94db274b",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "dinov3_convnext",
+      "architectures": [
+        "DINOv3ConvNextModel"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "facebook/dinov3-vits16-pretrain-lvd1689m",
+      "revision": "114c1379950215c8b35dfcd4e90a5c251dde0d32",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "dinov3_vit",
+      "architectures": [
+        "DINOv3ViTModel"
       ],
       "architecture_source": "config.architectures"
     },

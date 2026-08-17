@@ -1,0 +1,15 @@
+{
+  "schema_version": "trtmc.model-plugin-validation/v1",
+  "dataset": "DINOv3 image feature extraction semantic parity",
+  "version": "1",
+  "requests": [
+    {
+      "sample_id": "dinov3-cat-image-features",
+      "stage": "full_inference",
+      "category": "maintainer-supplied-vehicle-photo",
+      "inputs": {
+        "image": "../../e2e/models/dinov3/data/test_img.jpeg"
+      }
+    }
+  ]
+}

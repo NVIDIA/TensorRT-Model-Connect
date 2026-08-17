@@ -58,3 +58,14 @@ def test_task_type_distinguishes_media_requests() -> None:
         )
         == "Image + Text → Image"
     )
+
+
+def test_task_type_labels_image_feature_extraction() -> None:
+    assert (
+        task_type_label(
+            user_contract="representation_parity",
+            task_strategy="image_feature_extraction",
+            operation="extract_features",
+        )
+        == "Image → Features"
+    )

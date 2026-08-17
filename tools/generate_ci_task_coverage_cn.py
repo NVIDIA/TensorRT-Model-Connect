@@ -45,6 +45,7 @@ TASK_ORDER = {
             "embedding",
             "encoder_only_nlp",
             "image_classification",
+            "image_feature_extraction",
             "neural_operator",
             "omni_multimodal",
             "prompted_segmentation",
@@ -197,6 +198,8 @@ def _bucket(record: CaseRecord) -> str:
         return "NLP / Text Ranking or Multimodal Retrieval"
     if task == "image_classification":
         return "Computer Vision / Image Classification"
+    if task == "image_feature_extraction":
+        return "Computer Vision / Image Feature Extraction"
     if task == "segmentation":
         return "Computer Vision / Image Segmentation"
     if task == "prompted_segmentation":

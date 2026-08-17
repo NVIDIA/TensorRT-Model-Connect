@@ -5,7 +5,7 @@ title: Performance Benchmarking
 import Diagram from '@site/src/components/Diagram';
 
 `trtmc-bench` measures public TRTMC pipeline calls across text, vision-language,
-diffusion, audio, segmentation, classification, encoder, reranking,
+diffusion, audio, segmentation, classification, image-feature extraction, encoder, reranking,
 speech-transcription, and neural-operator models. The default path is one
 command:
 
@@ -22,8 +22,8 @@ suite row in a separate Python process, and checks that both sides used the
 same workload and timing boundary.
 
 The checked-in suite at `benchmarks/performance/release.yaml` currently covers
-105 release-relevant, ready, single-process model-profile comparisons across
-76 families and 77 `(family, operation)` contracts. Short `l0` smoke duplicates
+107 release-relevant, ready, single-process model-profile comparisons across
+77 families and 78 `(family, operation)` contracts. Short `l0` smoke duplicates
 are excluded by rule; any other omission must appear in `excluded_profiles`
 with a reason. Validate coverage and all machine prerequisites without
 measuring a model:

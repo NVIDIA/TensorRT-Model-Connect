@@ -44,7 +44,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 106
+    assert len(catalog["models"]) == len(ready_models) == 108
     assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 0
     assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
@@ -63,7 +63,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 106
+    assert len(bindings) == 108
     assert [
         binding.workload for binding in bindings if binding.model == "personaplex-7b"
     ] == ["full_duplex_bench_behavior_parity"]
@@ -188,6 +188,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     }
     assert min(catalog["sample_limits"].values()) >= 1
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
+        "dinov3_image_feature_extraction_parity",
         "minimax_h3_official_profile_parity",
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
@@ -224,7 +225,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 106
+    assert len({model for model, _workload in bindings}) == 108
 
 
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():

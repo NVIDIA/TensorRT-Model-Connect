@@ -286,6 +286,7 @@ class TestClassifyModality:
         expected = {
             "diffusion_text_generation": "diffusion_text",
             "image_classification": "classification",
+            "image_feature_extraction": "structured",
             "neural_operator": "neural_operator",
             "object_detection": "detection",
             "omni_multimodal": "omni",

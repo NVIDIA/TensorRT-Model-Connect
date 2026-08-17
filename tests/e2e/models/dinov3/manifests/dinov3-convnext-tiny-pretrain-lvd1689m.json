@@ -1,0 +1,28 @@
+{
+  "name": "dinov3-convnext-tiny-pretrain-lvd1689m",
+  "hf_id": "facebook/dinov3-convnext-tiny-pretrain-lvd1689m",
+  "hf_revision": "10d30274b4d445111e2d5bf75ac93bbd94db274b",
+  "bundle": "dinov3-convnext-tiny-pretrain-lvd1689m.bundle",
+  "family": "dinov3",
+  "runtime_strategy": "dinov3_image_feature_extraction",
+  "task_strategy": "image_feature_extraction",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "max_cache_length": 1,
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "dinov3-convnext-tiny-pretrain-lvd1689m",
+      "trace_id": "IT-E2E-DINOV3-CONVNEXT-TINY-01",
+      "test_type": "image_feature_extraction",
+      "reference_family": "image_feature_extraction",
+      "user_contract": "representation_parity",
+      "reference_precision": "fp32",
+      "test_image": "data/test_img.jpeg",
+      "num_register_tokens": 0,
+      "gated": true,
+      "core": false,
+      "notes": "Official gated DINOv3 ConvNeXt-Tiny image-feature representative pinned to an immutable Hugging Face revision. The gate compares the pooled pseudo-CLS token and every row-major spatial patch token against AutoImageProcessor plus AutoModel."
+    }
+  ]
+}

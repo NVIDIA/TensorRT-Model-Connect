@@ -701,6 +701,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "exact-token-ids",
         "exact-text",
         "generated-token-count",
+        "image-features-shape",
         "localization",
         "media-shape",
         "normalized-text",
@@ -1920,6 +1921,20 @@ def _output_contract(
         )
         matched = None not in left_shape and left_shape == right_shape
         return matched, "media output shape differs" if not matched else ""
+    if contract == "image-features-shape":
+        left_shape = (
+            left.get("last_hidden_state_shape"),
+            left.get("pooler_output_shape"),
+        )
+        right_shape = (
+            right.get("last_hidden_state_shape"),
+            right.get("pooler_output_shape"),
+        )
+        matched = all(
+            isinstance(value, list) and value for value in left_shape + right_shape
+        )
+        matched = matched and left_shape == right_shape
+        return matched, "image feature output shape differs" if not matched else ""
     if operation == "generate":
         if contract == "generated-token-count":
             left_tokens = left.get("token_ids")

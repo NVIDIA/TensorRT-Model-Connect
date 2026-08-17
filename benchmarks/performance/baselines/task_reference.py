@@ -1781,6 +1781,33 @@ def _load_vision(
                 logits = model(inputs)
             return {"top_class": int(logits.argmax(dim=-1)[0]), **_tensor_summary(logits)}
 
+    elif arguments.family == "dinov3":
+        processor = transformers.AutoImageProcessor.from_pretrained(
+            arguments.model, **processor_kwargs
+        )
+        model = (
+            transformers.AutoModel.from_pretrained(arguments.model, **kwargs)
+            .eval()
+            .to(device)
+        )
+        inputs = _to_device(
+            processor(images=image, return_tensors="pt"),
+            device,
+            next(model.parameters()).dtype,
+        )
+
+        def invoke() -> Mapping[str, Any]:
+            with torch.inference_mode():
+                outputs = model(**inputs)
+            return {
+                "last_hidden_state_shape": _tensor_summary(
+                    outputs.last_hidden_state
+                )["shape"],
+                "pooler_output_shape": _tensor_summary(outputs.pooler_output)[
+                    "shape"
+                ],
+            }
+
     elif arguments.family == "segformer":
         processor = transformers.AutoImageProcessor.from_pretrained(
             arguments.model, **processor_kwargs

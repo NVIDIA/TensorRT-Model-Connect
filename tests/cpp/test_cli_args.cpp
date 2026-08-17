@@ -174,6 +174,16 @@ void test_detect_parses_contract_flags() {
     check(args.conf_threshold > 0.41F && args.conf_threshold < 0.43F, "detect threshold");
 }
 
+void test_extract_features_parses_contract_flags() {
+    auto args = parse({"trtmc", "extract-features", "dinov3.bundle", "--image", "cat.png",
+                       "--output-json", "features.json"});
+    check(!args.parse_error, "extract-features parses cleanly");
+    check(args.command == "extract-features", "extract-features command");
+    check(args.bundle_path == "dinov3.bundle", "extract-features bundle");
+    check(args.image_path == "cat.png", "extract-features image");
+    check(args.output_json == "features.json", "extract-features output json");
+}
+
 void test_inspect_and_config_flags() {
     auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--config",
                        "profile.json", "--set", "audio.seed=7"});
@@ -445,6 +455,7 @@ int main() {
     test_run_parses_common_flags();
     test_diffusion_flags();
     test_detect_parses_contract_flags();
+    test_extract_features_parses_contract_flags();
     test_inspect_and_config_flags();
     test_audio_and_solve_flags();
     test_canary_transcription_flags_and_batch();

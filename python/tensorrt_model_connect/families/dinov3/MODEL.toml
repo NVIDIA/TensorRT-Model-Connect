@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "dinov3"
+plugin = "dinov3"
+module = "plugin"
+aliases = [
+  "dinov3_vit",
+  "dinov3_convnext",
+]
+prefixes = [
+  "dinov3_",
+]

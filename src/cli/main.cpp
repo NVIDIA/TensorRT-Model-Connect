@@ -24,6 +24,7 @@
 //   trtmc generate-video  <bundle.bundle> --prompt "text" --output DIR [--num-steps N]
 //                        [--negative-prompt "text"] [--height N] [--width N]
 //   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
+//   trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]
 //   trtmc detect          <bundle.bundle> --image PATH [--output-json PATH]
 //   trtmc inspect         <bundle.bundle> [--list-engines]
 //   trtmc version
@@ -43,6 +44,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -54,6 +56,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <locale>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -944,6 +947,77 @@ int cmd_classify(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+void write_float_tensor_json(std::ostream& out, const std::vector<int64_t>& shape,
+                             const std::vector<float>& data) {
+    out << "{\"shape\":[";
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (i != 0)
+            out << ',';
+        out << shape[i];
+    }
+    out << "],\"data\":[";
+    for (std::size_t i = 0; i < data.size(); ++i) {
+        if (i != 0)
+            out << ',';
+        const float value = data[i];
+        if (!std::isfinite(value))
+            throw std::runtime_error("Image feature tensor contains a non-finite value");
+        if (value == 0.0F)
+            out << '0';
+        else
+            out << value;
+    }
+    out << "]}";
+}
+
+void write_image_features_json(std::ostream& out, const trtmc::ImageFeaturesResult& result) {
+    out.imbue(std::locale::classic());
+    out << std::defaultfloat << std::setprecision(std::numeric_limits<float>::max_digits10);
+    out << "{\"last_hidden_state\":";
+    write_float_tensor_json(out, result.last_hidden_state_shape, result.last_hidden_state);
+    out << ",\"pooler_output\":";
+    write_float_tensor_json(out, result.pooler_output_shape, result.pooler_output);
+    out << "}\n";
+}
+
+int cmd_extract_features(const CliArgs& args) {
+    if (args.bundle_path.empty() || args.image_path.empty()) {
+        std::cerr << "Error: extract-features requires bundle + --image\n";
+        return EXIT_FAILURE;
+    }
+
+    auto pipeline = load_pipeline(args);
+    auto image = trtmc::io::read_image(args.image_path);
+    if (image.empty()) {
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+        return EXIT_FAILURE;
+    }
+
+    const auto result =
+        pipeline->extract_image_features(image.pixels.data(), image.height, image.width);
+    if (args.output_json.empty()) {
+        write_image_features_json(std::cout, result);
+        return EXIT_SUCCESS;
+    }
+
+    const auto out_path = std::filesystem::path(args.output_json);
+    const auto parent = out_path.parent_path();
+    if (!parent.empty())
+        std::filesystem::create_directories(parent);
+    std::ofstream out(out_path, std::ios::out | std::ios::trunc);
+    if (!out) {
+        std::cerr << "Error: failed to open " << args.output_json << " for writing\n";
+        return EXIT_FAILURE;
+    }
+    write_image_features_json(out, result);
+    if (!out) {
+        std::cerr << "Error: failed to write " << args.output_json << '\n';
+        return EXIT_FAILURE;
+    }
+    std::cout << "Image features saved: " << args.output_json << '\n';
+    return EXIT_SUCCESS;
+}
+
 int cmd_detect(const CliArgs& args) {
     if (args.bundle_path.empty() || args.image_path.empty()) {
         std::cerr << "Error: detect requires bundle + --image\n";
@@ -1640,6 +1714,8 @@ int main(int argc, char** argv) {
             return cmd_segment_prompted(args);
         if (args.command == "classify")
             return cmd_classify(args);
+        if (args.command == "extract-features")
+            return cmd_extract_features(args);
         if (args.command == "detect")
             return cmd_detect(args);
         if (args.command == "generate-audio")

@@ -774,6 +774,21 @@ def test_default_suites_include_media_generation_gap_models() -> None:
 def test_default_suites_include_model_aligned_vision_tasks() -> None:
     suites = validation_engine.load_suites()
 
+    features = validation_engine.suite_by_id(
+        suites, "dinov3_image_feature_extraction_parity"
+    )
+    assert features["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": "tests/validation/datasets/dinov3-image-feature-extraction.json",
+        "input_asset_fields": ["image"],
+    }
+    assert features["scoring"] == {"scorer": "model_plugin_parity"}
+    assert features["gates"] == {"min_sample_pass_rate": 1.0}
+    assert features["default_model_names"] == [
+        "dinov3-convnext-tiny-pretrain-lvd1689m",
+        "dinov3-vits16-pretrain-lvd1689m",
+    ]
+
     classification = validation_engine.suite_by_id(suites, "imagenette_image_classification")
     assert classification["dataset"]["kind"] == "image_classification_json"
     assert classification["scoring"]["task_metric"] == "top1_accuracy"
@@ -792,6 +807,13 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
     assert prompted["default_model_names"] == ["sam-vit-base", "sam3"]
     assert prompted["model_overrides"]["by_family"]["sam"]["prompt_mode"] == "point"
     assert prompted["model_overrides"]["by_family"]["sam3"]["prompt_mode"] == "text"
+
+    selected = validation_engine.selected_models_for_suite(
+        features,
+        validation_engine.load_manifest_records(),
+        single_device_only=True,
+    )
+    assert [model["name"] for model in selected] == features["default_model_names"]
 
 
 def test_default_suites_include_scifact_reranking_parity() -> None:

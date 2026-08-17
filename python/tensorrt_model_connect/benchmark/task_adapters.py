@@ -573,6 +573,13 @@ def _classification_request(testcase: Mapping[str, Any], model_root: Path) -> Ca
     return _resolution(request, sources, testcase=testcase)
 
 
+def _image_feature_extraction_request(
+    testcase: Mapping[str, Any], model_root: Path
+) -> CaseResolution:
+    request, sources = _image_request(testcase, model_root, "extract_features")
+    return _resolution(request, sources, testcase=testcase)
+
+
 def _detection_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
     inputs = testcase.get("inputs", {})
     if not isinstance(inputs, Mapping):
@@ -743,6 +750,12 @@ _TASK_ADAPTERS = (
         "classify",
         MeasurementSpec(warmup=50, iterations=500),
         _classification_request,
+    ),
+    TaskAdapter(
+        "image_feature_extraction",
+        "extract_features",
+        MeasurementSpec(warmup=50, iterations=500),
+        _image_feature_extraction_request,
     ),
     TaskAdapter(
         "object_detection",

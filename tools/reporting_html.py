@@ -205,6 +205,7 @@ TASK_TYPE_BY_TASK_STRATEGY = {
     "speech_to_speech": "Audio → Audio",
     "speech_to_text": "Audio → Text",
     "image_classification": "Image → Class",
+    "image_feature_extraction": "Image → Features",
     "segmentation": "Image → Mask",
     "prompted_segmentation": "Image + Prompt → Mask",
     "neural_operator": "Time Series → Time Series",
@@ -245,6 +246,7 @@ def task_type_label(
 
     return {
         "classify": "Image → Class",
+        "extract_features": "Image → Features",
         "embed": "Text → Embedding",
         "encode": "Text → Embedding",
         "generate_audio": "Text → Audio",

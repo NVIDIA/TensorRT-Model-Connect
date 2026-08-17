@@ -318,5 +318,6 @@ def test_repository_registers_all_current_families() -> None:
 
     families = specialization.family_dirs(repo_root, ())
 
-    assert len(families) == 79
+    assert len(families) == 80
+    assert any(family.name == "dinov3" for family in families)
     assert any(family.name == "minimax_h3" for family in families)

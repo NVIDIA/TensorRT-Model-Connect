@@ -53,6 +53,7 @@
     "segformer_segmentation",
     "sam_prompted_segmentation",
     "sam3_prompted_segmentation",
+    "dinov3_image_feature_extraction",
     "timm_vit_image_classification",
     "whisper_speech_to_text",
     "canary_speech_to_text",
@@ -848,6 +849,17 @@
       "comparator_class": "segmentation.PromptedSegmentationComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sam3_prompted_segmentation'].",
+      "performance_mode": "single_pass"
+    },
+    "dinov3_image_feature_extraction": {
+      "task_strategy": "image_feature_extraction",
+      "cli_commands": [
+        "extract-features"
+      ],
+      "runner_class": "image_feature_extraction.ImageFeatureExtractionRunner",
+      "comparator_class": "image_feature_extraction.ImageFeatureExtractionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['dinov3_image_feature_extraction']; the model-owned E2E comparator gates full semantic tensor parity against Hugging Face.",
       "performance_mode": "single_pass"
     },
     "timm_vit_image_classification": {
