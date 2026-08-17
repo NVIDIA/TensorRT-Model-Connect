@@ -98,13 +98,17 @@ def _write_bundle(
             "inputs": tool.GRAPH_INPUTS[index],
             "outputs": tool.GRAPH_OUTPUTS[index],
             "layers": tool.GRAPH_LAYERS[index],
-            "referenced_checkpoint_tensors": tool.GRAPH_REFERENCED_TENSORS[index],
-            "serialized_bytes": len(plans[index]),
-            "serialized_sha256": _sha(plans[index]),
-            "graph_complete": True,
         }
         if index == 0:
             row.update(tool.IMAGE_GRAPH_LAYER_COUNTS)
+        row.update(
+            {
+                "referenced_checkpoint_tensors": tool.GRAPH_REFERENCED_TENSORS[index],
+                "serialized_bytes": len(plans[index]),
+                "serialized_sha256": _sha(plans[index]),
+                "graph_complete": True,
+            }
+        )
         graph_rows.append(row)
     build_receipt = {
         "schema_version": tool.BUILD_RECEIPT_SCHEMA_VERSION,
@@ -753,7 +757,57 @@ def test_public_record_omits_raw_infrastructure_provenance(tmp_path: Path) -> No
     )
 
 
-@pytest.mark.parametrize("attack", ["duplicate", "noncanonical", "metrics"])
+def test_generator_accepts_cpp_equivalent_float_lexeme(tmp_path: Path) -> None:
+    bundle, q3, regular = _artifacts(tmp_path)
+    original = b'"bbox_score_error":0.001'
+    cpp_spelling = b'"bbox_score_error":0.0010000000000000000'
+    q3_bytes = q3.read_bytes()
+    assert original in q3_bytes
+    q3.write_bytes(q3_bytes.replace(original, cpp_spelling, 1))
+    _rebind_regular_to_q3(q3, regular)
+
+    record_bytes, _ = _generate(tmp_path, bundle, q3, regular)
+
+    assert json.loads(record_bytes)["accuracy_evidence"]["receipt_sha256"] == _sha(q3.read_bytes())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"a":1, "b":2}\n',
+        b'{"a":1,"a":1}\n',
+        b'{"a":01}\n',
+        b'{"a":NaN}\n',
+        b'{"a":1e400}\n',
+        b'{"a":1}\ntrailing',
+    ],
+    ids=[
+        "whitespace",
+        "duplicate-key",
+        "leading-zero",
+        "nan",
+        "overflow-to-infinity",
+        "trailing-bytes",
+    ],
+)
+def test_raw_canonical_json_gate_rejects_malformed_or_noncanonical_bytes(
+    payload: bytes,
+) -> None:
+    with pytest.raises(tool.EvidenceError):
+        tool._parse_json(payload, "test receipt", trailing_newline=True)
+
+
+def test_raw_canonical_json_gate_preserves_valid_number_lexemes() -> None:
+    payload = b'{"a":0.33722800000000003,"b":[-0,1.00,1e+06]}\n'
+
+    value = tool._parse_json(payload, "test receipt", trailing_newline=True)
+
+    assert value == {"a": 0.337228, "b": [0, 1.0, 1_000_000.0]}
+
+
+@pytest.mark.parametrize(
+    "attack", ["duplicate", "noncanonical", "root_key_order", "nested_key_order", "metrics"]
+)
 def test_generator_rejects_receipt_attacks(tmp_path: Path, attack: str) -> None:
     bundle, q3, regular = _artifacts(tmp_path)
     if attack == "duplicate":
@@ -764,6 +818,26 @@ def test_generator_rejects_receipt_attacks(tmp_path: Path, attack: str) -> None:
         )
     elif attack == "noncanonical":
         q3.write_bytes(b" " + q3.read_bytes())
+    elif attack == "root_key_order":
+        q3.write_bytes(
+            q3.read_bytes().replace(
+                b'{"schema_version":2,"family":"sam2"',
+                b'{"family":"sam2","schema_version":2',
+                1,
+            )
+        )
+        _rebind_regular_to_q3(q3, regular)
+    elif attack == "nested_key_order":
+        q3.write_bytes(
+            q3.read_bytes().replace(
+                b'"process_model":{"tensorrt_iattention_v2_image_attention":true,'
+                b'"external_attention_dso_loaded":false',
+                b'"process_model":{"external_attention_dso_loaded":false,'
+                b'"tensorrt_iattention_v2_image_attention":true',
+                1,
+            )
+        )
+        _rebind_regular_to_q3(q3, regular)
     else:
         value = json.loads(q3.read_bytes())
         value["accuracy"]["replays"][1]["frame_iou"][0] = 0.979

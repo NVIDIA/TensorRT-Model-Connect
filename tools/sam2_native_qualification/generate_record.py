@@ -198,6 +198,13 @@ class EvidenceError(RuntimeError):
 
 
 @dataclasses.dataclass(frozen=True)
+class _RawJsonNumber:
+    """A syntactically validated JSON number whose original spelling is retained."""
+
+    lexeme: str
+
+
+@dataclasses.dataclass(frozen=True)
 class Snapshot:
     path: Path
     data: bytes
@@ -323,12 +330,49 @@ def _pairs_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _encode_canonical_raw_json(value: Any) -> str:
+    if isinstance(value, dict):
+        members = (
+            json.dumps(key, ensure_ascii=False, separators=(",", ":"))
+            + ":"
+            + _encode_canonical_raw_json(item)
+            for key, item in value.items()
+        )
+        return "{" + ",".join(members) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(_encode_canonical_raw_json(item) for item in value) + "]"
+    if isinstance(value, _RawJsonNumber):
+        return value.lexeme
+    if value is None or isinstance(value, (bool, str)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    _fail("raw JSON parser produced an unsupported value")
+
+
+def _reject_nonfinite_numbers(value: Any, label: str) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        _fail(f"{label} contains a non-finite number")
+    if isinstance(value, dict):
+        for item in value.values():
+            _reject_nonfinite_numbers(item, label)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_nonfinite_numbers(item, label)
+
+
 def _parse_json(data: bytes, label: str, *, trailing_newline: bool) -> dict[str, Any]:
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         _fail(f"{label} is not UTF-8")
     try:
+        raw_value = json.loads(
+            text,
+            object_pairs_hook=_pairs_no_duplicates,
+            parse_int=_RawJsonNumber,
+            parse_float=_RawJsonNumber,
+            parse_constant=lambda token: _fail(f"{label} contains non-finite number {token}"),
+        )
+        canonical = _encode_canonical_raw_json(raw_value)
         value = json.loads(
             text,
             object_pairs_hook=_pairs_no_duplicates,
@@ -336,11 +380,11 @@ def _parse_json(data: bytes, label: str, *, trailing_newline: bool) -> dict[str,
         )
     except EvidenceError:
         raise
-    except (json.JSONDecodeError, UnicodeError) as error:
+    except (json.JSONDecodeError, RecursionError, UnicodeError, ValueError) as error:
         _fail(f"{label} is invalid JSON: {error}")
+    _reject_nonfinite_numbers(value, label)
     if not isinstance(value, dict):
         _fail(f"{label} root must be an object")
-    canonical = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     if trailing_newline:
         canonical += "\n"
     if canonical.encode("utf-8") != data:
@@ -348,15 +392,17 @@ def _parse_json(data: bytes, label: str, *, trailing_newline: bool) -> dict[str,
     return value
 
 
-def _exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != expected:
+def _exact_keys(value: Any, expected: set[str] | tuple[str, ...], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != set(expected):
         _fail(f"{label} field set drifted")
+    if isinstance(expected, tuple) and tuple(value) != expected:
+        _fail(f"{label} field order drifted")
     return value
 
 
 def _exact_contract(value: Any, expected: Any, label: str) -> None:
     if isinstance(expected, dict):
-        value = _exact_keys(value, set(expected), label)
+        value = _exact_keys(value, tuple(expected), label)
         for key, expected_value in expected.items():
             _exact_contract(value[key], expected_value, f"{label} {key}")
         return
@@ -647,13 +693,17 @@ def _validate_bundle_metadata(bundle: BundleSnapshot) -> None:
             "inputs": GRAPH_INPUTS[index],
             "outputs": GRAPH_OUTPUTS[index],
             "layers": GRAPH_LAYERS[index],
-            "referenced_checkpoint_tensors": GRAPH_REFERENCED_TENSORS[index],
-            "serialized_bytes": bundle.section_size[PLAN_SECTIONS[index]],
-            "serialized_sha256": bundle.section_sha256[PLAN_SECTIONS[index]],
-            "graph_complete": True,
         }
         if index == 0:
             expected.update(IMAGE_GRAPH_LAYER_COUNTS)
+        expected.update(
+            {
+                "referenced_checkpoint_tensors": GRAPH_REFERENCED_TENSORS[index],
+                "serialized_bytes": bundle.section_size[PLAN_SECTIONS[index]],
+                "serialized_sha256": bundle.section_sha256[PLAN_SECTIONS[index]],
+                "graph_complete": True,
+            }
+        )
         _exact_contract(graph, expected, f"build receipt graph {index} binding")
 
 
@@ -976,7 +1026,7 @@ def _validate_receipts(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     q3 = _parse_json(q3_snapshot.data, "Q3 receipt", trailing_newline=True)
     regular = _parse_json(regular_snapshot.data, "regular receipt", trailing_newline=True)
-    q3_keys = {
+    q3_keys = (
         "schema_version",
         "family",
         "workload",
@@ -990,8 +1040,25 @@ def _validate_receipts(
         "runtime",
         "image_attention",
         "accuracy",
-    }
-    regular_keys = q3_keys | {"timing_boundaries", "timing", "delivered_baseline_reference"}
+    )
+    regular_keys = (
+        "schema_version",
+        "family",
+        "workload",
+        "mode",
+        "accuracy_only",
+        "timing_performed",
+        "status",
+        "process_model",
+        "sequence",
+        "timing_boundaries",
+        "assets",
+        "runtime",
+        "image_attention",
+        "accuracy",
+        "timing",
+        "delivered_baseline_reference",
+    )
     _exact_keys(q3, q3_keys, "Q3 receipt")
     _exact_keys(regular, regular_keys, "regular receipt")
     _validate_common_receipt(q3, bundle, "Q3 receipt")
