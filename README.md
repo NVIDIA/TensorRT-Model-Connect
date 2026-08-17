@@ -30,7 +30,7 @@ std::cout << pipeline->generate("What is the capital of France? Answer in one wo
 
 ## 🔎 What is TensorRT-Model-Connect?
 **TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
-<img width="1318" height="1088" alt="MC-what-it-is" src="https://github.com/user-attachments/assets/85850b96-5a30-4531-bcec-98e00883dedb" />
+<img width="1318" height="1088" alt="MC-what-it-is" src="What-is-MC.png" />
 
 <a id="why-tensorrt-model-connect"></a>
 

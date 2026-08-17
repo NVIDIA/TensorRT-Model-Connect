@@ -38,6 +38,14 @@ distributed under the Apache License 2.0 with the rest of the project:
   project source text created for OCR regression testing; SHA-256
   `d27d4e33afb8e820916b19bffc4c94f1f626536cc3375b5fafeee684b0a3b9b3`
 
+## Project overview diagram
+
+The following project overview diagram was supplied by the project maintainer
+for inclusion and redistribution under the Apache License 2.0:
+
+- `What-is-MC.png`; SHA-256
+  `15e97bc498406629d32eb043e474f835ee88ea6ba4d78cd5ea0cd91c0954b2f4`
+
 ## Maintainer voice recording and derived ASR probes
 
 The project maintainer recorded and supplied the original human-voice fixture
