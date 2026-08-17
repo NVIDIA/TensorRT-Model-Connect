@@ -13,20 +13,13 @@ def configure_qwen_builder(
     trt_config: Any,
     quant_ctx: Any | None,
     trt_version: str,
+    num_hidden_layers: int,
 ) -> None:
-    """Select the accuracy-stable tactic search level for Qwen FP8.
-
-    TensorRT 11.2 and later 11.x releases can select numerically unstable FP8
-    tactics for this graph.  Level 0 produces stable logits without adding
-    runtime work.
-    TensorRT 11.0 selects accurate tactics with its default search, so keep
-    that behavior.  Preserve the process-wide compatibility override when a
-    caller intentionally supplies one.
-    """
-    if "TRTMC_BUILDER_OPTIMIZATION_LEVEL" in os.environ:
+    """Apply the accuracy-stable Qwen FP8 policy for the TensorRT release."""
+    quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
+    if getattr(quant_format, "name", None) != "fp8":
         return
 
-    quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
     version_parts = trt_version.split(".", maxsplit=2)
     if len(version_parts) < 2:
         return
@@ -35,9 +28,22 @@ def configure_qwen_builder(
     except ValueError:
         return
 
+    if major_minor == (11, 0):
+        # TRT 11.0 choice logits are unstable when every up projection is
+        # quantized. Keep only the final four in FP16; earlier layers remain
+        # FP8 and retain the model's quantized execution path.
+        exclude_patterns = quant_ctx.profile.exclude_patterns
+        tail_start = max(0, num_hidden_layers - 4)
+        for layer_index in range(tail_start, num_hidden_layers):
+            pattern = f"layer.{layer_index}.w_up"
+            if pattern not in exclude_patterns:
+                exclude_patterns.append(pattern)
+        return
+
     if (
-        getattr(quant_format, "name", None) == "fp8"
-        and major_minor[0] == 11
+        major_minor[0] == 11
         and major_minor[1] >= 2
+        and "TRTMC_BUILDER_OPTIMIZATION_LEVEL" not in os.environ
     ):
+        # TRT 11.2+ can otherwise select numerically unstable FP8 tactics.
         trt_config.builder_optimization_level = 0

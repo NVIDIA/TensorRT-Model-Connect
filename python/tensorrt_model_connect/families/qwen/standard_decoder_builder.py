@@ -187,7 +187,8 @@ def build_standard_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    configure_qwen_builder(trt_config, quant_ctx, trt.__version__)
+    configure_qwen_builder(
+        trt_config, quant_ctx, trt.__version__, config.num_hidden_layers)
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     # Precision configuration
