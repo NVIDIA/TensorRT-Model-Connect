@@ -26,6 +26,12 @@ auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
 std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
 ```
 
+<a id="what-is-tensorrt-model-connect"></a>
+
+## 🔎 What is TensorRT-Model-Connect?
+**TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
+<img width="1318" height="1088" alt="MC-what-it-is" src="What-is-MC.png" />
+
 <a id="choose-the-right-tensorrt-path"></a>
 
 ## 🧭 Choose the right TensorRT path
@@ -35,12 +41,6 @@ std::cout << pipeline->generate("What is the capital of France? Answer in one wo
 - For production LLM/VLM deployment on NVIDIA edge platforms where performance
   is the priority, start directly with
   [TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM).
-
-<a id="what-is-tensorrt-model-connect"></a>
-
-## 🔎 What is TensorRT-Model-Connect?
-**TensorRT Model Connect is an extensive collection of AI Model reference implementations in C++, on top of NVIDIA TensorRT**. Model Connect is powered by an agentic workflow that continuously adds support for upcoming models, drastically reducing integration effort on user side and time until new models become compatible.
-<img width="1318" height="1088" alt="MC-what-it-is" src="What-is-MC.png" />
 
 <a id="why-tensorrt-model-connect"></a>
 
