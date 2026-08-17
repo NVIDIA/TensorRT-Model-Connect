@@ -181,7 +181,7 @@ class QwenTextGenerationPipeline final : public IPipeline {
 
     std::unique_ptr<QwenISampler> make_step_sampler(const QwenSamplingParams& params);
     void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
-                     bool gpu_sampling);
+                     bool gpu_sampling, bool prime_decoder);
     void run_prefill_block(const std::vector<int32_t>& input_ids, bool bidirectional,
                            bool append_kv, std::vector<float>& logits,
                            TrtModule* prefill_override = nullptr);

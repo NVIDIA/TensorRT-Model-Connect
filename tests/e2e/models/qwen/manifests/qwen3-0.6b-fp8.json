@@ -7,6 +7,9 @@
   "task_strategy": "text_generation_causal",
   "user_contract": "text-generation",
   "precision": "fp16",
+  "build_args": {
+    "decoder_engine_layout": "dual_profile"
+  },
   "quantization": {
     "format": "fp8",
     "scale_source": "modelopt",

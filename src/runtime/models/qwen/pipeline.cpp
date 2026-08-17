@@ -577,11 +577,13 @@ void QwenTextGenerationPipeline::prime_decoder_after_batched_prefill(
 }
 
 void QwenTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
-                                             std::vector<float>& logits, bool gpu_sampling) {
+                                             std::vector<float>& logits, bool gpu_sampling,
+                                             bool prime_decoder) {
     // Fast path: batched prefill writes K/V in profile-bounded chunks and
     // exposes last-token logits on the sampler's requested host or device path.
     if (run_prefill_batched(input_ids, logits, gpu_sampling)) {
-        prime_decoder_after_batched_prefill(input_ids);
+        if (prime_decoder)
+            prime_decoder_after_batched_prefill(input_ids);
         state_->mark_prefill_complete();
         return;
     }
@@ -873,7 +875,9 @@ QwenTextGenerationPipeline::TimedGenResult QwenTextGenerationPipeline::generate_
     std::vector<float> logits;
     const bool gpu_sampling = (active_sampler->logits_location() == QwenLogitsLocation::DEVICE);
     const auto t0 = Clock::now();
-    run_prefill(input_ids, logits, gpu_sampling);
+    // A one-token request samples directly from the prefill logits, so it has
+    // no decoder step to prime. Avoid executing a full unused decoder pass.
+    run_prefill(input_ids, logits, gpu_sampling, max_new_tokens > 1);
     const auto t1 = Clock::now();
 
     std::vector<int32_t> output = input_ids;
@@ -1044,6 +1048,10 @@ int32_t QwenTextGenerationPipeline::run_decode_loop(
         if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval, is_eos))
             break;
         if (is_eos)
+            break;
+        // The sampled token is already the final requested output. Do not run
+        // another decoder step to compute logits that no caller will consume.
+        if (step + 1 >= max_new_tokens)
             break;
         if (gpu_sampling)
             run_step_device(result.token_id);

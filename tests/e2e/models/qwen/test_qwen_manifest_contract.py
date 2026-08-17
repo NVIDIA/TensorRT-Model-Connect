@@ -129,6 +129,9 @@ def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
     assert fp8["bundle"] == "qwen3-0.6b-fp8-fp16base.bundle"
     assert fp8["task_eval"]["reference_precision"] == "fp16"
     assert fp8["max_cache_length"] == 256
+    assert fp8_e2e.metadata["build_args"] == {
+        "decoder_engine_layout": "dual_profile",
+    }
     assert fp8_e2e.inputs["prompt"].startswith(
         "The following are multiple choice questions (with answers) "
         "about miscellaneous."
