@@ -547,6 +547,8 @@ def test_geometry_volume_convc1_plugin_owns_fixed_direct_contract() -> None:
     assert (
         library_block
         == """add_library(trtmc_fast_foundation_stereo_native_plugin SHARED
+  full_volume_leaky_plugin.cu
+  full_volume_leaky_plugin_creator.cpp
   geometry_volume_convc1_plugin.cu
   geometry_volume_convc1_plugin_creator.cpp
   gwc_plugin.cu
