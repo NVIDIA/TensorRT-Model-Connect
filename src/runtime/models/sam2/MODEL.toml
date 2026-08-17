@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sam2"
+runtime_library = "libtrtmc_model_sam2.so"
+runtime_plugins = ["plugin.cpp|register_sam2_plugin"]
+runtime_strategies = ["sam2_bbox_video_tracking"]
+# The JPEG decoder is a benchmark/build-time input adapter. Production C API
+# callers provide decoded RGB8 frames, so the runtime DSO does not own libjpeg.
+runtime_excluded_sources = ["sam2_jpeg_decoder.cpp"]
+# Public qualification data is published separately from bundle generation.
+# These fixed names are optional while the production pin allowlist is empty.
+runtime_optional_data_files = [
+  "sam2-l4-trt11.1-contract5-0001.qualification-record.json",
+  "sam2-l4-trt11.1-contract5-0001.qualification-audit.json",
+]
+runtime_tests = [
+  "test_sam2_runtime_registration|test_sam2_runtime_registration.cpp|trtmc_model_sam2|_|_",
+]

@@ -1,0 +1,363 @@
+{
+  "artifact_type": "sam2_exact_workload_golden_evidence",
+  "capture_sha256": "6d75bc98757596ec56da98a999b032294584563901e275f62f66d0d31678dd78",
+  "determinism": {
+    "all_exact": true,
+    "capture_sha256": [
+      "6d75bc98757596ec56da98a999b032294584563901e275f62f66d0d31678dd78",
+      "6d75bc98757596ec56da98a999b032294584563901e275f62f66d0d31678dd78",
+      "6d75bc98757596ec56da98a999b032294584563901e275f62f66d0d31678dd78"
+    ],
+    "replays": [
+      {
+        "exact": true,
+        "frame_masks_exact": [
+          {
+            "exact": true,
+            "frame_index": 0
+          },
+          {
+            "exact": true,
+            "frame_index": 1
+          },
+          {
+            "exact": true,
+            "frame_index": 2
+          },
+          {
+            "exact": true,
+            "frame_index": 3
+          },
+          {
+            "exact": true,
+            "frame_index": 4
+          }
+        ],
+        "frame_zero_bbox_exact": true
+      },
+      {
+        "exact": true,
+        "frame_masks_exact": [
+          {
+            "exact": true,
+            "frame_index": 0
+          },
+          {
+            "exact": true,
+            "frame_index": 1
+          },
+          {
+            "exact": true,
+            "frame_index": 2
+          },
+          {
+            "exact": true,
+            "frame_index": 3
+          },
+          {
+            "exact": true,
+            "frame_index": 4
+          }
+        ],
+        "frame_zero_bbox_exact": true
+      }
+    ],
+    "run_count": 3
+  },
+  "frame_zero_bbox": {
+    "coordinate_format": "xyxy",
+    "frame_index": 0,
+    "label": 1,
+    "model_image_xyxy_1024": [
+      572.0,
+      640.0,
+      652.0,
+      708.0
+    ],
+    "original_image_xyxy": [
+      607.75,
+      800.0,
+      692.75,
+      885.0
+    ],
+    "score": 0.4140625
+  },
+  "frames": [
+    {
+      "foreground_pixels": 3600,
+      "frame_index": 0,
+      "logical_uint8_sha256": "03b13d0841f527e1de8445828babf3c818f15db266209359f2b3f1f764471aa2",
+      "object_ids": [
+        0
+      ]
+    },
+    {
+      "foreground_pixels": 3420,
+      "frame_index": 1,
+      "logical_uint8_sha256": "91ad1876ab6d1ce579b63fd5d02b2e165c71423d501e26bf226addfa4f7191e3",
+      "object_ids": [
+        0
+      ]
+    },
+    {
+      "foreground_pixels": 4071,
+      "frame_index": 2,
+      "logical_uint8_sha256": "f9c4e4e69c1c77b2f10ce9983fea957e7d5724221b070725a7feec4699c6ad2c",
+      "object_ids": [
+        0
+      ]
+    },
+    {
+      "foreground_pixels": 3770,
+      "frame_index": 3,
+      "logical_uint8_sha256": "116f1186181d5828bc1847ac51a1c14fd277c11f1ed5065583fdda567a1d5adc",
+      "object_ids": [
+        0
+      ]
+    },
+    {
+      "foreground_pixels": 3603,
+      "frame_index": 4,
+      "logical_uint8_sha256": "447c5352c62b310dd5547226869971c3f92f10a17a7e176ce8246c22b1a2c213",
+      "object_ids": [
+        0
+      ]
+    }
+  ],
+  "masks": {
+    "binary_threshold": 0.0,
+    "bitorder": "little",
+    "encoding": "numpy_packbits_v1",
+    "logical_dtype": "uint8_binary",
+    "logical_element_count": 6963200,
+    "logical_uint8_sha256": "cf2a8ead5c2526a20d7b075ccfbc45043c9699569add1790e266d07c392faa4a",
+    "packed_bytes": 870400,
+    "packed_sha256": "1c7830b37739e409fbb8dab2b81c31c63b3379e6c10ae9e6b4ca2cc48a656094",
+    "path": "masks.bitpack",
+    "shape": [
+      5,
+      1,
+      1280,
+      1088
+    ]
+  },
+  "producer": "compatible_source_pytorch_bf16",
+  "provenance": {
+    "artifacts_sha256": {
+      "capture_code/tensorrt_model_connect.families.sam2.archive_contract": "f0d169032d21157e015eb7e6912b025c39db20c311c67d64df7567cabec8d07a",
+      "capture_code/tensorrt_model_connect.families.sam2.capture_golden": "5c1929cdf803cfc82012d1ad3529e417d8f798d6c4b99020be18bdb031216eeb",
+      "capture_code/tensorrt_model_connect.families.sam2.golden_evidence.normalized": "2cfae7b9c81708221ee5523c52c9dfb706b64a04d6da9bf25e3cae3879d8b689",
+      "capture_code_raw/tensorrt_model_connect.families.sam2.archive_contract": "f0d169032d21157e015eb7e6912b025c39db20c311c67d64df7567cabec8d07a",
+      "capture_code_raw/tensorrt_model_connect.families.sam2.capture_golden": "5c1929cdf803cfc82012d1ad3529e417d8f798d6c4b99020be18bdb031216eeb",
+      "capture_code_raw/tensorrt_model_connect.families.sam2.golden_evidence": "9218bc4b79e344b2c1daba6e77343d0da47721575e75796cb9ebbcbb1525a8db",
+      "capture_golden.py": "5c1929cdf803cfc82012d1ad3529e417d8f798d6c4b99020be18bdb031216eeb",
+      "decoded_rgb_uint8/000000.jpg": "0bcadde0e5a6f8ba04f79c44f064c5b00d3cd1b250e2f2f3bbf10ef0630a9ce9",
+      "decoded_rgb_uint8/000001.jpg": "0abfd57f9e3886a8c3068bf6bcc353b26d1e3a8a43819a80dfeb00f309b24ec3",
+      "decoded_rgb_uint8/000002.jpg": "9166cc263c3edb262065fa3b98ee062cbf6d781dd656bae13def7f4141b7d025",
+      "decoded_rgb_uint8/000003.jpg": "77525faadfc8a607e4e1556135887caaddd0b64d7cd677fcf47c38ecf9e25a4f",
+      "decoded_rgb_uint8/000004.jpg": "cb0801b490ba13dfb6d36aeef06b049ff67ff11864ef62ccd858a0096d97c6af",
+      "delivery/SHA256SUMS": "130a7d860e70aea795c95139dd0ba3b02f16681978c664d77a3f0924d1b4a819",
+      "delivery/checkpoint/sam2.1_hiera_small_with_bbox_head.pt": "89fd676560809c8504411b574cea305c86db1f65bda790ec7fe16cedc6c6ff73",
+      "delivery/config/sam2.1_hiera_s_with_bbox_head.yaml": "59488bb78c7cc48aaaebd966ea9d054014f683459d062b7a959a4aa501342656",
+      "delivery/inputs/000000.jpg": "8a398f40747d5053cfc0d47d45090f2070a10afa4722e7d5b827a6ad0825a5aa",
+      "delivery/inputs/000001.jpg": "2871555bca47da7473762ca87314b17bd55d100a0f982f78d6449080ff86856f",
+      "delivery/inputs/000002.jpg": "5594181db7dd1c5da3ce05b945f74e66a5d8d098d71a7cb9e5e43834a393bbe2",
+      "delivery/inputs/000003.jpg": "c3abc03371458939d09faf331749c2a87cc6fc91128eaab3901b179adb096a35",
+      "delivery/inputs/000004.jpg": "3d8ea6042c82e7b340277c00666c4c2cefbae5de265ef06a71fe964905ed720b",
+      "resized_1024_rgb_uint8/000000.jpg": "bfc4b87e211b8437ede1b2244fe4c4bd0565afa7b05514d42305c7a2c2b1c275",
+      "resized_1024_rgb_uint8/000001.jpg": "a1ac93ad5fe41f2109245b25d7068097f7d09f26e0592a4375d12bbfa81e44bb",
+      "resized_1024_rgb_uint8/000002.jpg": "4c3da2fcc6a9c154036fad6742cd8bef9dc89a6abf7dd37cd6d9026ebb3b2676",
+      "resized_1024_rgb_uint8/000003.jpg": "663996af0514e10932c035aedf81191c4e2420c726be930bd0c9809241a3f238",
+      "resized_1024_rgb_uint8/000004.jpg": "bc35d5119f83ac8e169c42f68fd00117ae3bdcbfcf3ed33c45da677b60aa8bfc",
+      "source/SOURCE_COMMIT": "c1b076ee331baf07545fa2b9c7cc7db9fa45ba3cfad2e71838d26efd51e3f5e4",
+      "source/sam2/configs/sam2.1/trtmc_delivery_bbox_59488bb78c7c.yaml": "59488bb78c7cc48aaaebd966ea9d054014f683459d062b7a959a4aa501342656"
+    },
+    "capture_tool_sha256": "5c1929cdf803cfc82012d1ad3529e417d8f798d6c4b99020be18bdb031216eeb",
+    "checkpoint_sha256": "89fd676560809c8504411b574cea305c86db1f65bda790ec7fe16cedc6c6ff73",
+    "config_sha256": "59488bb78c7cc48aaaebd966ea9d054014f683459d062b7a959a4aa501342656",
+    "environment": {
+      "antlr4_python3_runtime": "4.9.3",
+      "apply_postprocessing": true,
+      "async_loading_frames": true,
+      "autocast": "cuda bfloat16",
+      "capture_input_isolation": "private_read_only_verified_snapshot_v1",
+      "capture_runs": 3,
+      "config_name": "configs/sam2.1/trtmc_delivery_bbox_59488bb78c7c.yaml",
+      "controlled_site_packages": "/workspace/ref-work/.venv/lib/python3.12/site-packages",
+      "cuda_capability": [
+        8,
+        9
+      ],
+      "cuda_driver": "595.58.03",
+      "cudnn_benchmark": false,
+      "cudnn_deterministic": false,
+      "cudnn_version": 90701,
+      "dependency_origins": {
+        "antlr4": "/workspace/ref-work/.venv/lib/python3.12/site-packages/antlr4/__init__.py",
+        "hydra": "/workspace/ref-work/.venv/lib/python3.12/site-packages/hydra/__init__.py",
+        "iopath": "/workspace/ref-work/.venv/lib/python3.12/site-packages/iopath/__init__.py",
+        "numpy": "/workspace/ref-work/.venv/lib/python3.12/site-packages/numpy/__init__.py",
+        "omegaconf": "/workspace/ref-work/.venv/lib/python3.12/site-packages/omegaconf/__init__.py",
+        "pillow": "/workspace/ref-work/.venv/lib/python3.12/site-packages/PIL/__init__.py",
+        "portalocker": "/workspace/ref-work/.venv/lib/python3.12/site-packages/portalocker/__init__.py",
+        "pyyaml": "/workspace/ref-work/.venv/lib/python3.12/site-packages/yaml/__init__.py",
+        "torch": "/workspace/ref-work/.venv/lib/python3.12/site-packages/torch/__init__.py",
+        "torchvision": "/workspace/ref-work/.venv/lib/python3.12/site-packages/torchvision/__init__.py",
+        "tqdm": "/workspace/ref-work/.venv/lib/python3.12/site-packages/tqdm/__init__.py"
+      },
+      "deterministic_algorithms": false,
+      "gpu": "NVIDIA L4",
+      "hydra_core": "1.3.2",
+      "input_images_decoded_rgb_uint8_sha256": {
+        "000000.jpg": "0bcadde0e5a6f8ba04f79c44f064c5b00d3cd1b250e2f2f3bbf10ef0630a9ce9",
+        "000001.jpg": "0abfd57f9e3886a8c3068bf6bcc353b26d1e3a8a43819a80dfeb00f309b24ec3",
+        "000002.jpg": "9166cc263c3edb262065fa3b98ee062cbf6d781dd656bae13def7f4141b7d025",
+        "000003.jpg": "77525faadfc8a607e4e1556135887caaddd0b64d7cd677fcf47c38ecf9e25a4f",
+        "000004.jpg": "cb0801b490ba13dfb6d36aeef06b049ff67ff11864ef62ccd858a0096d97c6af"
+      },
+      "input_images_resized_1024_rgb_uint8_sha256": {
+        "000000.jpg": "bfc4b87e211b8437ede1b2244fe4c4bd0565afa7b05514d42305c7a2c2b1c275",
+        "000001.jpg": "a1ac93ad5fe41f2109245b25d7068097f7d09f26e0592a4375d12bbfa81e44bb",
+        "000002.jpg": "4c3da2fcc6a9c154036fad6742cd8bef9dc89a6abf7dd37cd6d9026ebb3b2676",
+        "000003.jpg": "663996af0514e10932c035aedf81191c4e2420c726be930bd0c9809241a3f238",
+        "000004.jpg": "bc35d5119f83ac8e169c42f68fd00117ae3bdcbfcf3ed33c45da677b60aa8bfc"
+      },
+      "iopath": "0.1.10",
+      "libjpeg_turbo": "3.1.4.1",
+      "numpy": "2.5.2",
+      "omegaconf": "2.3.1",
+      "pillow": "12.3.0",
+      "pillow_jpeg_codec": "6.2",
+      "portalocker": "4.1.0",
+      "python": "3.12.3",
+      "python_isolated": true,
+      "python_no_site": true,
+      "python_no_user_site": true,
+      "python_safe_path": true,
+      "pyyaml": "6.0.3",
+      "sam2_optional_extension_present": false,
+      "tf32_cudnn": true,
+      "tf32_matmul": true,
+      "torch": "2.7.1+cu128",
+      "torch_cuda": "12.8",
+      "torchvision": "0.22.1+cu128",
+      "tqdm": "4.67.1",
+      "venv_pyvenv_cfg_sha256": "16529e11b2fe1e50d7bca13c16b18bdd5ff478ae2db7750e483aba6e3733d858",
+      "video_res_logits_dtypes": [
+        [
+          "torch.float32",
+          "torch.float32",
+          "torch.float32",
+          "torch.float32",
+          "torch.float32"
+        ],
+        [
+          "torch.float32",
+          "torch.float32",
+          "torch.float32",
+          "torch.float32",
+          "torch.float32"
+        ],
+        [
+          "torch.float32",
+          "torch.float32",
+          "torch.float32",
+          "torch.float32",
+          "torch.float32"
+        ]
+      ]
+    },
+    "image_files_sha256": {
+      "000000.jpg": "8a398f40747d5053cfc0d47d45090f2070a10afa4722e7d5b827a6ad0825a5aa",
+      "000001.jpg": "2871555bca47da7473762ca87314b17bd55d100a0f982f78d6449080ff86856f",
+      "000002.jpg": "5594181db7dd1c5da3ce05b945f74e66a5d8d098d71a7cb9e5e43834a393bbe2",
+      "000003.jpg": "c3abc03371458939d09faf331749c2a87cc6fc91128eaab3901b179adb096a35",
+      "000004.jpg": "3d8ea6042c82e7b340277c00666c4c2cefbae5de265ef06a71fe964905ed720b"
+    },
+    "source_commit": "2b90b9f5ceec907a1c18123530e92e794ad901a4",
+    "source_files_sha256": {
+      "sam2/__init__.py": "b87ca1e95cd54b81766e8c74acf0e937952639529e40d2b4088693286f49419e",
+      "sam2/automatic_mask_generator.py": "66df266dbe14412305ae3398f0ec1bb21b303a93216b102d767e6c4ee5d4c3d7",
+      "sam2/benchmark.py": "9b7a3506b88842ec09031fb7cd0fc1d3fed82e137ce06dbca10495e6c180dda9",
+      "sam2/build_sam.py": "856d64d71e44407401297b551884fb4cd1aba8082de0ff5fc60fac3dd42f094d",
+      "sam2/modeling/__init__.py": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+      "sam2/modeling/backbones/__init__.py": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+      "sam2/modeling/backbones/bbox_head.py": "6e61cb2b5196de883bc537675437f5a787c5a1f7f0b5be6a87b81e3549775672",
+      "sam2/modeling/backbones/hieradet.py": "03785581ca304d0451ae0df7a08ee0bf1e1dbe66fad285066e6b9ffc0d88d64f",
+      "sam2/modeling/backbones/image_encoder.py": "de721c53be342d03a8958e62d37867a1eb0e759cd1add9cf95b78db7595111e1",
+      "sam2/modeling/backbones/utils.py": "c8ed6228b28dd5a7b0b08111b71263dfbf1542d47a0a444cd0728ddb3d5287e5",
+      "sam2/modeling/memory_attention.py": "07358cb7f58ec3788e88ff4e6415f8a9d628a3963529d6e2c915494a5347c8e2",
+      "sam2/modeling/memory_encoder.py": "73f7089ae5fdacdfcaaf3deca1ca6d9f84d89e7deb9cf97589622a9ef17ba42f",
+      "sam2/modeling/position_encoding.py": "b51404718c0d38f381293c8e5e00a15d129651b7f09b1158002d8974a30967b5",
+      "sam2/modeling/sam/__init__.py": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+      "sam2/modeling/sam/mask_decoder.py": "ca3523c58365574faddf1bfb54f374e4b4beba05127185ea2b17d22b916e099a",
+      "sam2/modeling/sam/prompt_encoder.py": "4965ccb4a4504aa4d7246b2ad66ffeacd2626415c86a261dc1c65ffd8ae1d40d",
+      "sam2/modeling/sam/transformer.py": "cda19052331e775190ce8b1159efcb828a4632d931a6d8bd4d47109f121782f1",
+      "sam2/modeling/sam2_base.py": "69a46b44e8625f509791352bd09beaafe589cd7d872721384e63d37f9fdc6e41",
+      "sam2/modeling/sam2_utils.py": "e35bbf13bc2e544a0272cd3f9539af38a752676ac3cd744be31cd8220afee804",
+      "sam2/sam2_image_predictor.py": "f13e5f9d94e5c8d9d2c3622dab20c8f334c089ef2ee5ea8e199da7d332b029ba",
+      "sam2/sam2_video_predictor.py": "ed7d81cd3595125b206cb91a52c2243c141f1df4e7ce2d567e7eca8ede896be6",
+      "sam2/sam2_video_predictor_legacy.py": "e0c054112f21bfa63620f2026c8bb2e0f4e284b138d09426a08d39f2e882c3f2",
+      "sam2/utils/__init__.py": "34bd8069c54764e7b8d73a78905dbe6467140a2f73170875128f6ca4d8cdd0aa",
+      "sam2/utils/act_ckpt_utils.py": "3ea2eef843dd933560475d6caadb6b658297e17aee1e846294646b250d552b70",
+      "sam2/utils/amg.py": "b7b33090e2af72e04dbb815c8f32aff41a4ed1abf9668f62b59f1bdd640ca5d8",
+      "sam2/utils/csp_layer.py": "6303552e820a41ea5ca5d228df5951eb88e7be11338434c0965f6a0e2b281f0d",
+      "sam2/utils/misc.py": "2e2de67378bce862ec721916b56ffacee1caa502ad2c49ddc4e7287595a74612",
+      "sam2/utils/transforms.py": "ba3a64f4600c62f209206a6df3b40e3fcf133edae32fad658831bb0c2a6d1146"
+    },
+    "source_overlay_declared_commit": "79ab25d6bd5535bcb748de9f3b90e16b1a24e58d"
+  },
+  "qualification": {
+    "reason": "requires_checked_in_exact_manifest_sha256_pin",
+    "status": "authoritative_reference_candidate"
+  },
+  "schema_version": 1,
+  "workload": {
+    "frame_indices": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "mask_materialization": {
+      "comparison": "greater_than",
+      "source": "propagate_in_video.video_res_logits",
+      "source_shape": [
+        5,
+        1,
+        1280,
+        1088
+      ],
+      "threshold": 0.0,
+      "upstream_resize_contract": {
+        "align_corners": false,
+        "resize_mode": "bilinear",
+        "resize_size_hw": [
+          1280,
+          1088
+        ],
+        "source": "per_frame_pred_mask_logits",
+        "source_shape": [
+          1,
+          1,
+          256,
+          256
+        ]
+      }
+    },
+    "model_image_shape_hw": [
+      1024,
+      1024
+    ],
+    "original_image_shape_hw": [
+      1280,
+      1088
+    ],
+    "post_nms_detection_count": 1,
+    "selected_object_count": 1,
+    "selected_object_ids": [
+      0
+    ]
+  }
+}

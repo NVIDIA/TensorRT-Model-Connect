@@ -84,6 +84,9 @@ struct PipelineContext {
     // namespace via ctx.runtime_config->get<T>("ns", "field"). The bundle
     // the pointer refers to is owned by the factory and outlives create().
     const ::trtmc::config::ConfigBundle* runtime_config{nullptr};
+    // Caller-supplied external qualification evidence. This is intentionally
+    // not derived from bundle contents or a neighboring sidecar file.
+    std::string qualification_record_path;
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry

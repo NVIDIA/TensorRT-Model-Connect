@@ -541,6 +541,10 @@ struct LoadOptions {
     std::vector<std::string> set_tokens;                // --set ns.field=value (repeatable)
     std::vector<std::string> backend_search_paths;      // Extra directories for backend DSOs
     std::vector<std::string> model_plugin_search_paths; // Extra dirs for libtrtmc_model_*.so
+    // Explicit external qualification evidence for runtimes that require a
+    // separately pinned admission record. Empty means no record was supplied;
+    // model plugins must fail closed rather than infer a sidecar path.
+    std::string qualification_record_path;
 };
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",

@@ -5,14 +5,65 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from ..config import ModelConfig
 from ..checkpoint_mapper import WeightDict
 
 if TYPE_CHECKING:
+    from ..parallel_config import ParallelConfig
     from ..quantization.context import QuantContext
     from ..quantization.adapters import CalibrationAdapter
+
+
+@dataclass(frozen=True)
+class CompleteBundleBuildRequest:
+    """Complete, frozen hand-off to a family-owned bundle builder.
+
+    Values reflect the native builder request after generic type validation,
+    without silently translating model-specific options. Implementations must
+    explicitly accept or reject every option they do not support. The hook
+    owns the complete artifact: it must create ``output_path`` without
+    following links or replacing an existing directory entry, and return only
+    after the final bundle has been durably published. Hook-created outputs are
+    preserved for diagnosis if shared validation subsequently rejects them.
+    """
+
+    model_dir: Path
+    output_path: Path
+    config: ModelConfig
+    max_cache_length: int | None
+    decoder_engine_layout: str
+    dynamic_kv_cache: bool
+    dynamic_kv_profile_rows_override: tuple[int, ...] | None
+    precision: str | None
+    fp32_layers: tuple[int, ...]
+    quantize: str | None
+    quant_scales: str | None
+    quant_calibration_samples: int
+    verbose: bool
+    kernel_artifacts: tuple[tuple[str, str], ...]
+    rtx: bool
+    fp8_scales: object
+    save_fp8_scales: str | None
+    triattention_stats_path: str | None
+    triattention_kv_budget: int | None
+    triattention_divide_length: int
+    triattention_recent_window: int
+    triattention_score_aggregation: str
+    triattention_count_prompt_tokens: bool
+    triattention_protect_prefill: bool
+    triattention_disable_mlr: bool
+    triattention_disable_trig: bool
+    family_build_options: Mapping[str, object]
+    parallel_config: ParallelConfig
+    diffusion_overrides: Mapping[str, object]
+    build_timing_path: str | None
+    max_batch_size: int
+    source_model_id_or_path: str | None
+    source_revision: str | None
 
 
 class FamilyPlugin(Protocol):
@@ -41,6 +92,10 @@ class FamilyPlugin(Protocol):
             shared builder packages its bytes instead of the checkpoint's
             tokenizer.json so a family can preserve the tokenizer behavior
             exposed by the HF runtime wrapper without mutating the HF cache.
+        build_complete_bundle: Optional callable for families whose native
+            builder owns a multi-plan, fully authenticated bundle. The family
+            must also declare the ``complete_bundle_builder`` capability in
+            MODEL.toml so the hook can be selected before TensorRT is imported.
     """
 
     name: str
@@ -64,6 +119,15 @@ class FamilyPlugin(Protocol):
     ) -> bytes:
         """Build TRT engine plan bytes."""
         ...
+
+    def build_complete_bundle(self, request: CompleteBundleBuildRequest) -> None:
+        """Create a complete bundle directly at the exclusive output path.
+
+        This optional hook is selected only for families that declare the
+        ``complete_bundle_builder`` capability. Implementations must validate
+        unsupported request options instead of ignoring them.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # Optional: Quantization support

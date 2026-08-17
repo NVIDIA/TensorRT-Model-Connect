@@ -5,9 +5,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 package builds
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from conan import ConanFile
 from conan.errors import ConanException
@@ -31,6 +37,10 @@ _ADAPTER_PACKAGE_EXCLUDES = (
     "**/tests/**",
 )
 
+_SAM2_NATIVE_BUILDER_PACKAGE_ENV = "TRTMC_CONAN_ENABLE_SAM2_NATIVE_BUILDER"
+_SAM2_NATIVE_BUILDER_FILENAME = "sam2_native_builder"
+_RUNTIME_MODEL_DATA_COMPONENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+
 
 def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Path, Path], ...]:
     """Locate model-owned adapter source trees without interpreting their contents."""
@@ -53,6 +63,64 @@ def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Pa
             )
         adapters.append((family, adapter, builder, runtime))
     return tuple(adapters)
+
+
+def _runtime_optional_data_files(
+    source_folder: str | Path,
+) -> tuple[tuple[str, PurePosixPath, Path], ...]:
+    """Return safe model-owned data paths declared by runtime manifests."""
+
+    runtime_root = Path(source_folder) / "src" / "runtime" / "models"
+    declarations: list[tuple[str, PurePosixPath, Path]] = []
+    if not runtime_root.is_dir():
+        return ()
+    for manifest in sorted(runtime_root.glob("*/MODEL.toml")):
+        model = manifest.parent.name
+        try:
+            raw = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+            raise ConanException(f"cannot read runtime model manifest {manifest}: {exc}") from exc
+        values = raw.get("runtime_optional_data_files", [])
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ConanException(
+                f"runtime_optional_data_files in {manifest} must be a list of strings"
+            )
+        seen: set[str] = set()
+        for value in values:
+            relative = PurePosixPath(value)
+            if (
+                not value
+                or "\\" in value
+                or relative.is_absolute()
+                or relative.as_posix() != value
+                or any(
+                    _RUNTIME_MODEL_DATA_COMPONENT_RE.fullmatch(part) is None
+                    for part in relative.parts
+                )
+            ):
+                raise ConanException(
+                    f"runtime_optional_data_files in {manifest} contains an unsafe relative path: "
+                    f"{value!r}"
+                )
+            if value in seen:
+                raise ConanException(
+                    f"runtime_optional_data_files in {manifest} contains a duplicate: {value!r}"
+                )
+            seen.add(value)
+            source_path = manifest.parent.joinpath(*relative.parts)
+            resolved_model = manifest.parent.resolve()
+            resolved_source = source_path.resolve()
+            if not resolved_source.is_relative_to(resolved_model):
+                raise ConanException(
+                    f"runtime_optional_data_files in {manifest} escapes its model directory: "
+                    f"{value!r}"
+                )
+            if source_path.exists() and not source_path.is_file():
+                raise ConanException(
+                    f"declared runtime model data is not a regular file: {source_path}"
+                )
+            declarations.append((model, relative, source_path))
+    return tuple(declarations)
 
 
 def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, package: Path) -> None:
@@ -187,6 +255,9 @@ class TensorRTModelConnectConan(ConanFile):
         toolchain.cache_variables["TRTMC_DISTRIBUTABLE_BUILD"] = _env_flag(
             "TRTMC_DISTRIBUTABLE_BUILD"
         )
+        toolchain.cache_variables["TRTMC_BUILD_SAM2_NATIVE_BUILDER"] = _env_flag(
+            _SAM2_NATIVE_BUILDER_PACKAGE_ENV
+        )
 
         for name in (
             "TRTMC_TRT_INCLUDE_DIR",
@@ -262,6 +333,22 @@ class TensorRTModelConnectConan(ConanFile):
                 keep_path=False,
             )
 
+        sam2_native_builder: Path | None = None
+        if _env_flag(_SAM2_NATIVE_BUILDER_PACKAGE_ENV):
+            copy(
+                self,
+                _SAM2_NATIVE_BUILDER_FILENAME,
+                src=self.build_folder,
+                dst=str(package_bin),
+                keep_path=False,
+            )
+            sam2_native_builder = package_bin / _SAM2_NATIVE_BUILDER_FILENAME
+            if not sam2_native_builder.is_file():
+                raise ConanException(
+                    "opt-in SAM2 native builder was not staged into the wheel package: "
+                    f"{sam2_native_builder}"
+                )
+
         # Each model family owns its build adapter and matching runtime source.
         # They remain inert package data until that family selects the adapter;
         # no downstream runtime is built or linked while packaging Model Connect.
@@ -284,6 +371,26 @@ class TensorRTModelConnectConan(ConanFile):
                 excludes=_ADAPTER_PACKAGE_EXCLUDES,
             )
 
+        for model, relative, source_path in _runtime_optional_data_files(self.source_folder):
+            if not source_path.is_file():
+                continue
+            destination = package_module / "model_data" / model
+            if relative.parent != PurePosixPath("."):
+                destination = destination.joinpath(*relative.parent.parts)
+            copy(
+                self,
+                source_path.name,
+                src=str(source_path.parent),
+                dst=str(destination),
+                keep_path=False,
+            )
+            packaged_data = destination / source_path.name
+            if not packaged_data.is_file():
+                raise ConanException(
+                    "declared runtime model data was not staged into the wheel package: "
+                    f"{packaged_data}"
+                )
+
         private_sdk = package_module / "runtime_provider" / "_sdk" / "include"
         copy(
             self,
@@ -299,6 +406,19 @@ class TensorRTModelConnectConan(ConanFile):
             dst=str(private_sdk / "trtmc"),
             keep_path=False,
         )
+        copy(
+            self,
+            "sam2_video.h",
+            src=str(Path(self.source_folder) / "include" / "trtmc" / "models"),
+            dst=str(private_sdk / "trtmc" / "models"),
+            keep_path=False,
+        )
+        sam2_public_header = private_sdk / "trtmc" / "models" / "sam2_video.h"
+        if not sam2_public_header.is_file():
+            raise ConanException(
+                "SAM2 public C ABI header was not staged into the wheel private SDK: "
+                f"{sam2_public_header}"
+            )
 
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"
@@ -328,6 +448,11 @@ class TensorRTModelConnectConan(ConanFile):
 
         for executable in (native, installed_script, benchmark_worker):
             _set_wheel_runpath(executable, "$ORIGIN")
+        if sam2_native_builder is not None:
+            _set_wheel_runpath(
+                sam2_native_builder,
+                "$ORIGIN:$ORIGIN/../../tensorrt_libs:/usr/local/cuda/lib64",
+            )
         for core in (*package_cores, *script_cores):
             _set_wheel_runpath(core, "$ORIGIN:/usr/local/cuda/lib64")
         for backend in backends:
@@ -338,6 +463,9 @@ class TensorRTModelConnectConan(ConanFile):
         for model_plugin in model_plugins:
             _set_wheel_runpath(model_plugin, "$ORIGIN:/usr/local/cuda/lib64")
 
-        for executable in (native, installed_script, benchmark_worker, benchmark_script):
+        executables = [native, installed_script, benchmark_worker, benchmark_script]
+        if sam2_native_builder is not None:
+            executables.append(sam2_native_builder)
+        for executable in executables:
             mode = executable.stat().st_mode
             executable.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

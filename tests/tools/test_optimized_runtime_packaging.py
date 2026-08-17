@@ -133,13 +133,25 @@ def _fake_native_build(build: Path) -> None:
         path.write_bytes(relative.encode())
 
 
-def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
+def _package(
+    recipe_module,
+    source: Path,
+    tmp_path: Path,
+    *,
+    include_sam2_header: bool = True,
+    runpaths: list[tuple[Path, str]] | None = None,
+) -> Path:
     build = tmp_path / "build"
     package = tmp_path / "package"
     _fake_native_build(build)
     benchmark_script = source / "scripts/trtmc-bench"
     benchmark_script.parent.mkdir(parents=True, exist_ok=True)
     benchmark_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    if include_sam2_header:
+        sam2_header = source / "include/trtmc/models/sam2_video.h"
+        sam2_header.parent.mkdir(parents=True, exist_ok=True)
+        if not sam2_header.exists():
+            sam2_header.write_text("// SAM2 public C ABI fixture\n", encoding="utf-8")
     catalog_family = source / "tests/e2e/models/example"
     (catalog_family / "manifests").mkdir(parents=True)
     (catalog_family / "MODEL.toml").write_text(
@@ -167,11 +179,190 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     try:
         # This source-staging fixture uses text placeholders instead of ELF
         # build outputs. RUNPATH behavior has its own focused assertion below.
-        recipe_module._set_wheel_runpath = lambda _path, _runpath: None
+        if runpaths is None:
+            recipe_module._set_wheel_runpath = lambda _path, _runpath: None
+        else:
+            recipe_module._set_wheel_runpath = lambda path, runpath: runpaths.append(
+                (Path(path), runpath)
+            )
         recipe.package()
     finally:
         recipe_module._set_wheel_runpath = set_runpath
     return package / "tensorrt_model_connect"
+
+
+def test_sam2_native_builder_package_opt_in_controls_cmake_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TRTMC_CONAN_ENABLE_SAM2_NATIVE_BUILDER", raising=False)
+    recipe_module = _load_conan_recipe(monkeypatch)
+    generated: list[dict[str, object]] = []
+
+    class RecordingDeps:
+        def __init__(self, _recipe) -> None:
+            pass
+
+        def generate(self) -> None:
+            pass
+
+    class RecordingToolchain:
+        def __init__(self, _recipe) -> None:
+            self.cache_variables: dict[str, object] = {}
+
+        def generate(self) -> None:
+            generated.append(dict(self.cache_variables))
+
+    monkeypatch.setattr(recipe_module, "CMakeDeps", RecordingDeps)
+    monkeypatch.setattr(recipe_module, "CMakeToolchain", RecordingToolchain)
+    recipe = recipe_module.TensorRTModelConnectConan()
+
+    recipe.generate()
+    monkeypatch.setenv("TRTMC_CONAN_ENABLE_SAM2_NATIVE_BUILDER", "1")
+    recipe.generate()
+
+    assert [item["TRTMC_BUILD_SAM2_NATIVE_BUILDER"] for item in generated] == [False, True]
+
+
+def test_package_keeps_sam2_native_builder_out_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    source = tmp_path / "source"
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "sam2_native_builder").write_bytes(b"builder")
+
+    module = _package(recipe_module, source, tmp_path)
+
+    assert not (module / "bin/sam2_native_builder").exists()
+
+
+def test_package_stages_only_the_opt_in_sam2_native_builder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRTMC_CONAN_ENABLE_SAM2_NATIVE_BUILDER", "true")
+    recipe_module = _load_conan_recipe(monkeypatch)
+    source = tmp_path / "source"
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "sam2_native_builder").write_bytes(b"builder")
+    (build / "sam2_native_benchmark").write_bytes(b"benchmark")
+    runpaths: list[tuple[Path, str]] = []
+
+    module = _package(recipe_module, source, tmp_path, runpaths=runpaths)
+
+    packaged_builder = module / "bin/sam2_native_builder"
+    assert packaged_builder.read_bytes() == b"builder"
+    assert packaged_builder.stat().st_mode & 0o111 == 0o111
+    assert not (module / "bin/sam2_native_benchmark").exists()
+    assert (
+        packaged_builder,
+        "$ORIGIN:$ORIGIN/../../tensorrt_libs:/usr/local/cuda/lib64",
+    ) in runpaths
+
+
+def test_package_rejects_a_missing_opt_in_sam2_native_builder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRTMC_CONAN_ENABLE_SAM2_NATIVE_BUILDER", "yes")
+    recipe_module = _load_conan_recipe(monkeypatch)
+
+    with pytest.raises(
+        recipe_module.ConanException,
+        match="opt-in SAM2 native builder was not staged",
+    ):
+        _package(recipe_module, tmp_path / "source", tmp_path)
+
+
+def test_package_fails_closed_when_sam2_public_header_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+
+    with pytest.raises(
+        recipe_module.ConanException,
+        match="SAM2 public C ABI header was not staged",
+    ):
+        _package(
+            recipe_module,
+            tmp_path / "source",
+            tmp_path,
+            include_sam2_header=False,
+        )
+
+
+def test_package_stages_only_declared_existing_runtime_model_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    source = tmp_path / "source"
+    runtime = source / "src/runtime/models/model_a"
+    runtime.mkdir(parents=True)
+    (runtime / "MODEL.toml").write_text(
+        'id = "model_a"\n'
+        'runtime_optional_data_files = ["publication/release-metadata.json", '
+        '"publication/not-published-yet.json"]\n',
+        encoding="utf-8",
+    )
+    published = runtime / "publication/release-metadata.json"
+    published.parent.mkdir()
+    published.write_text('{"public":true}\n', encoding="utf-8")
+    (runtime / "undeclared.bundle").write_bytes(b"must not be packaged")
+
+    module = _package(recipe_module, source, tmp_path)
+
+    model_data = module / "model_data/model_a"
+    assert (model_data / "publication/release-metadata.json").read_bytes() == (
+        published.read_bytes()
+    )
+    assert not (model_data / "publication/not-published-yet.json").exists()
+    assert not (model_data / "undeclared.bundle").exists()
+
+
+def test_repository_predeclares_only_the_public_sam2_qualification_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    declarations = recipe_module._runtime_optional_data_files(REPOSITORY_ROOT)
+
+    assert [
+        (model, relative.as_posix(), source.relative_to(REPOSITORY_ROOT).as_posix())
+        for model, relative, source in declarations
+    ] == [
+        (
+            "sam2",
+            "sam2-l4-trt11.1-contract5-0001.qualification-record.json",
+            "src/runtime/models/sam2/sam2-l4-trt11.1-contract5-0001.qualification-record.json",
+        ),
+        (
+            "sam2",
+            "sam2-l4-trt11.1-contract5-0001.qualification-audit.json",
+            "src/runtime/models/sam2/sam2-l4-trt11.1-contract5-0001.qualification-audit.json",
+        ),
+    ]
+    assert all(relative.suffix != ".bundle" for _, relative, _ in declarations)
+
+
+def test_package_rejects_unsafe_runtime_model_data_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    source = tmp_path / "source"
+    runtime = source / "src/runtime/models/model_a"
+    runtime.mkdir(parents=True)
+    (runtime / "MODEL.toml").write_text(
+        'id = "model_a"\nruntime_optional_data_files = ["../record.json"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(recipe_module.ConanException, match="unsafe relative path"):
+        _package(recipe_module, source, tmp_path)
 
 
 def test_wheel_runpath_rewrite_invokes_patchelf(
@@ -182,7 +373,9 @@ def test_wheel_runpath_rewrite_invokes_patchelf(
     binary = tmp_path / "libtrtmc_core.so"
     binary.write_bytes(b"ELF fixture")
     calls = []
-    monkeypatch.setattr(recipe_module.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(
+        recipe_module.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
 
     recipe_module._set_wheel_runpath(binary, "$ORIGIN:/usr/local/cuda/lib64")
 
@@ -254,6 +447,7 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     sdk = module / "runtime_provider" / "_sdk" / "include"
     assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
     assert (sdk / "trtmc" / "pipeline.h").is_file()
+    assert (sdk / "trtmc" / "models" / "sam2_video.h").is_file()
     assert (module / "bin" / "trtmc").is_file()
     assert (module / "bin" / "trtmc_benchmark_worker").is_file()
     benchmark_script = module.parent / "tensorrt_model_connect-0.1.0.data/scripts/trtmc-bench"

@@ -49,6 +49,9 @@ option(TRTMC_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
 option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
 option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
+option(TRTMC_BUILD_SAM2_NATIVE_BUILDER
+       "Build the unqualified pure-C++ SAM2 native-attention builder and diagnostic benchmark"
+       OFF)
 option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
 option(TRTMC_DISTRIBUTABLE_BUILD
        "Build distributable artifacts without embedding source/build paths" OFF)
@@ -183,6 +186,11 @@ endif()
 set(_trtmc_can_build_trt_backend FALSE)
 if(TRTMC_ENABLE_TRT AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_TRT_LIBRARY)
   set(_trtmc_can_build_trt_backend TRUE)
+endif()
+
+if(TRTMC_BUILD_SAM2_NATIVE_BUILDER)
+  include(cmake/sam2_native.cmake)
+  trtmc_add_sam2_native_builder()
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
@@ -450,6 +458,13 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   else()
     set(_trtmc_model_cuda_sources)
   endif()
+  foreach(_trtmc_excluded_source
+      IN LISTS TRTMC_MODEL_${_trtmc_model_var}_EXCLUDED_SOURCES)
+    list(REMOVE_ITEM _trtmc_model_sources
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_excluded_source}")
+    list(REMOVE_ITEM _trtmc_model_cuda_sources
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_excluded_source}")
+  endforeach()
   foreach(_trtmc_suppressed_source
       IN LISTS TRTMC_MODEL_${_trtmc_model_var}_GNU_WARNING_SUPPRESSED_SOURCES)
     set_source_files_properties(
@@ -506,6 +521,23 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   install(TARGETS trtmc_model_${_trtmc_model}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
   )
+  foreach(_trtmc_model_data_file
+      IN LISTS TRTMC_MODEL_${_trtmc_model_var}_OPTIONAL_DATA_FILES)
+    get_filename_component(_trtmc_model_data_subdirectory
+      "${_trtmc_model_data_file}" DIRECTORY)
+    set(_trtmc_model_data_destination
+      "${CMAKE_INSTALL_DATADIR}/trtmc/model_data/${_trtmc_model}")
+    if(_trtmc_model_data_subdirectory)
+      string(APPEND _trtmc_model_data_destination
+        "/${_trtmc_model_data_subdirectory}")
+    endif()
+    install(FILES
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_model_data_file}"
+      DESTINATION "${_trtmc_model_data_destination}"
+      COMPONENT trtmc_model_data
+      OPTIONAL
+    )
+  endforeach()
 endforeach()
 
 # Build the TVM-FFI TensorRT plugin as a standalone shared library.
@@ -769,10 +801,11 @@ set_target_properties(trtmc_test_optimized_embedding PROPERTIES
 #   trtmc_add_test(test_name REQUIRES_TRT)  -- also links TensorRT test deps
 #   trtmc_add_test(test_name MODEL_OWNED)    -- excludes it from platform units
 #   trtmc_add_test(test_name REQUIRES_GPU)   -- excludes it from CPU platform units
+#   trtmc_add_test(test_name NO_CTEST)       -- compile coverage only
 function(trtmc_add_test TEST_NAME)
   cmake_parse_arguments(
     ARG
-    "NO_SRC_INCLUDE;REQUIRES_TRT;REQUIRES_GPU;MODEL_OWNED"
+    "NO_SRC_INCLUDE;REQUIRES_TRT;REQUIRES_GPU;MODEL_OWNED;NO_CTEST"
     "SOURCE"
     "EXTRA_INCLUDES"
     ${ARGN}
@@ -811,14 +844,16 @@ function(trtmc_add_test TEST_NAME)
   else()
     target_compile_definitions(${TEST_NAME} PRIVATE TRTMC_HAS_TRT=0)
   endif()
-  add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
-  if(ARG_MODEL_OWNED)
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS "model")
-  elseif(ARG_REQUIRES_GPU)
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS "gpu")
-  else()
-    add_dependencies(trtmc_platform_cpp_tests ${TEST_NAME})
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS "platform")
+  if(NOT ARG_NO_CTEST)
+    add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+    if(ARG_MODEL_OWNED)
+      set_tests_properties(${TEST_NAME} PROPERTIES LABELS "model")
+    elseif(ARG_REQUIRES_GPU)
+      set_tests_properties(${TEST_NAME} PROPERTIES LABELS "gpu")
+    else()
+      add_dependencies(trtmc_platform_cpp_tests ${TEST_NAME})
+      set_tests_properties(${TEST_NAME} PROPERTIES LABELS "platform")
+    endif()
   endif()
 endfunction()
 
@@ -876,6 +911,12 @@ function(trtmc_add_model_manifest_tests)
 endfunction()
 
 # --- Tests ---
+
+# SAM2 tests remain model-owned. Runtime registration is declared separately
+# by the family manifest; exact delivered-input diagnostics stay compile-only
+# until their explicit qualification fixtures are configured.
+include(cmake/sam2_tests.cmake)
+trtmc_add_sam2_tests()
 
 # Bundle / format
 trtmc_add_test(test_bundle_format)
@@ -1015,7 +1056,7 @@ endif()
 # TVM-FFI plugin V2 (self-contained test with IPluginV2DynamicExt)
 trtmc_add_test(test_tvm_ffi_plugin_v2 NO_SRC_INCLUDE REQUIRES_TRT REQUIRES_GPU)
 
-# TVM-FFI module loader (loads a CUDA FlashInfer .so when configured)
+# TVM-FFI module loader (loads a configured CUDA module)
 trtmc_add_test(test_tvm_ffi_module_loader REQUIRES_TRT REQUIRES_GPU)
 if(TARGET test_tvm_ffi_module_loader AND _trtmc_has_tvm_ffi)
   target_include_directories(test_tvm_ffi_module_loader SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
@@ -1054,6 +1095,11 @@ endif()
 install(DIRECTORY include/trtmc/
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/trtmc
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+install(FILES include/trtmc/models/sam2_video.h
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/trtmc/models
+  COMPONENT sam2_public_api_development
+  EXCLUDE_FROM_ALL
 )
 
 # Install CLI executable

@@ -8,7 +8,10 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
 import re
+import stat
+import struct
 import sys
 import tempfile
 import time
@@ -35,6 +38,7 @@ from .families import (
     resolve_family_model_dir,
     resolve_nemo_archive_model_dir,
 )
+from .families.base import CompleteBundleBuildRequest
 from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 from . import trt_compat
@@ -884,6 +888,399 @@ def _prepare_tokenizer_special_frame(
     return _detect_tokenizer_special_frame(model_dir)
 
 
+_COMPLETE_BUNDLE_CAPABILITY = "complete_bundle_builder"
+_MAX_COMPLETE_BUNDLE_HEADER_SIZE = 100 * 1024 * 1024
+
+
+def _resolve_complete_bundle_entrypoint(
+    model_dir: Path,
+) -> tuple[object, ModelConfig] | None:
+    """Resolve only an explicitly opted-in pre-TensorRT family hook.
+
+    Loading arbitrary plugins here would regress TensorRT-RTX selection because
+    several legacy plugin modules import TensorRT eagerly.  The metadata
+    capability is therefore a required, fail-closed opt-in for this early path.
+    """
+
+    index_path = model_dir / "model_index.json"
+    if index_path.is_file():
+        pipeline_config = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(pipeline_config, dict):
+            raise ValueError(f"Diffusion model index must be a JSON object: {index_path}")
+        pipeline_class = str(pipeline_config.get("_class_name", "") or "")
+        family_id = _resolve_diffusion_family_id(pipeline_class)
+        if not family_id or not family_has_capability(family_id, _COMPLETE_BUNDLE_CAPABILITY):
+            return None
+        plugin = find_diffusion_plugin(pipeline_class) or find_plugin(pipeline_class.lower())
+        if plugin is None:
+            raise ValueError(
+                f"Family {family_id!r} declares {_COMPLETE_BUNDLE_CAPABILITY!r} "
+                "but its plugin could not be loaded"
+            )
+        config = ModelConfig(
+            model_type=str(getattr(plugin, "name", family_id) or family_id),
+            raw=dict(pipeline_config),
+        )
+        return plugin, config
+
+    config = ModelConfig.from_dir(model_dir)
+    if not family_has_capability(config, _COMPLETE_BUNDLE_CAPABILITY):
+        return None
+    plugin = find_plugin(config)
+    if plugin is None:
+        raise ValueError(
+            f"Family for model_type={config.model_type!r} declares "
+            f"{_COMPLETE_BUNDLE_CAPABILITY!r} but its plugin could not be loaded"
+        )
+    return plugin, config
+
+
+def _complete_bundle_hook(plugin):
+    """Return a statically declared hook without triggering dynamic mocks."""
+
+    try:
+        static_hook = inspect.getattr_static(plugin, "build_complete_bundle")
+    except AttributeError as exc:
+        raise TypeError(
+            f"Plugin {getattr(plugin, 'name', type(plugin).__name__)!r} declares "
+            f"{_COMPLETE_BUNDLE_CAPABILITY!r} but does not implement "
+            "build_complete_bundle()"
+        ) from exc
+    hook = getattr(plugin, "build_complete_bundle")
+    if not callable(static_hook) or not callable(hook):
+        raise TypeError(
+            f"Plugin {getattr(plugin, 'name', type(plugin).__name__)!r} "
+            "build_complete_bundle attribute must be callable"
+        )
+    return hook
+
+
+def _require_complete_bundle_output_absent(output_path: Path) -> None:
+    """Fail before the hook can replace any existing directory entry."""
+
+    if not output_path.name:
+        raise ValueError("Complete bundle output path must name a file")
+    try:
+        output_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(f"Complete bundle output path already exists: {output_path}")
+    try:
+        parent_stat = output_path.parent.stat()
+    except OSError as exc:
+        raise ValueError(
+            f"Complete bundle output directory is unavailable: {output_path.parent}: {exc}"
+        ) from exc
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise ValueError(f"Complete bundle output parent is not a directory: {output_path.parent}")
+
+
+def _read_exact_file_descriptor(descriptor: int, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = os.read(descriptor, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _strict_complete_bundle_json_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_complete_bundle_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON value {value!r} is not allowed")
+
+
+def _validate_complete_bundle_sections(
+    header: dict[str, object],
+    *,
+    payload_size: int,
+    output_path: Path,
+) -> None:
+    """Validate section metadata against the size of the same opened file."""
+
+    sections = header.get("sections")
+    if not isinstance(sections, dict) or not sections:
+        raise ValueError(
+            f"Complete bundle hook output sections must be a non-empty JSON object: {output_path}"
+        )
+
+    ranges: list[tuple[int, int, str]] = []
+    for section_name, metadata in sections.items():
+        if not isinstance(section_name, str) or not section_name:
+            raise ValueError(
+                f"Complete bundle hook output has an invalid section name: {output_path}"
+            )
+        if not isinstance(metadata, dict):
+            raise ValueError(
+                "Complete bundle hook output section metadata must be a JSON "
+                f"object: {section_name!r}"
+            )
+        offset = metadata.get("offset")
+        size = metadata.get("size")
+        if type(offset) is not int or type(size) is not int:
+            raise ValueError(
+                "Complete bundle hook output section offset/size must be "
+                f"integers: {section_name!r}"
+            )
+        if offset < 0 or size < 0 or offset > payload_size - size:
+            raise ValueError(
+                f"Complete bundle hook output section is outside its payload: {section_name!r}"
+            )
+        if size:
+            ranges.append((offset, offset + size, section_name))
+
+    previous_end = 0
+    for offset, end, section_name in sorted(ranges):
+        if offset < previous_end:
+            raise ValueError(
+                f"Complete bundle hook output sections overlap at {section_name!r}: {output_path}"
+            )
+        previous_end = end
+
+
+def _verify_complete_bundle(
+    output_path: Path,
+    *,
+    expected_family: str,
+    expected_runtime_strategy: str,
+) -> dict:
+    """Verify the hook produced a regular, minimally valid owned bundle.
+
+    Invalid hook-created artifacts are deliberately preserved for diagnosis;
+    the verifier never deletes or rewrites them. Existing destinations are
+    rejected before the hook runs and are therefore never touched.
+    """
+
+    try:
+        path_stat = output_path.lstat()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"Complete bundle hook did not create {output_path}") from exc
+    if not stat.S_ISREG(path_stat.st_mode):
+        raise ValueError(f"Complete bundle hook output is not a regular file: {output_path}")
+    if path_stat.st_nlink != 1:
+        raise ValueError(
+            "Complete bundle hook output was not published exclusively "
+            f"(link count {path_stat.st_nlink}): {output_path}"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(output_path, flags)
+    except OSError as exc:
+        raise ValueError(
+            f"Complete bundle hook output cannot be opened without following links: "
+            f"{output_path}: {exc}"
+        ) from exc
+    try:
+        opened_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or opened_stat.st_dev != path_stat.st_dev
+            or opened_stat.st_ino != path_stat.st_ino
+            or opened_stat.st_nlink != 1
+        ):
+            raise ValueError(
+                f"Complete bundle hook output changed during validation: {output_path}"
+            )
+        prefix = _read_exact_file_descriptor(descriptor, 16)
+        if len(prefix) != 16 or prefix[:8] != b"BUNDLE\x01\x00":
+            raise ValueError(
+                f"Complete bundle hook output has invalid bundle magic/header: {output_path}"
+            )
+        header_size = struct.unpack("<Q", prefix[8:])[0]
+        if (
+            header_size < 2
+            or header_size > _MAX_COMPLETE_BUNDLE_HEADER_SIZE
+            or header_size > opened_stat.st_size - 16
+        ):
+            raise ValueError(
+                f"Complete bundle hook output has invalid header size {header_size}: {output_path}"
+            )
+        header_bytes = _read_exact_file_descriptor(descriptor, header_size)
+        if len(header_bytes) != header_size:
+            raise ValueError(f"Complete bundle hook output has a truncated header: {output_path}")
+        try:
+            header = json.loads(
+                header_bytes.decode("utf-8"),
+                object_pairs_hook=_strict_complete_bundle_json_object,
+                parse_constant=_reject_nonfinite_complete_bundle_json,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError(
+                f"Complete bundle hook output has invalid JSON header: {output_path}: {exc}"
+            ) from exc
+        if not isinstance(header, dict):
+            raise ValueError(
+                f"Complete bundle hook output header must be a JSON object: {output_path}"
+            )
+        if header.get("family") != expected_family:
+            raise ValueError(
+                "Complete bundle hook output family mismatch: "
+                f"expected {expected_family!r}, got {header.get('family')!r}"
+            )
+        if header.get("runtime_strategy") != expected_runtime_strategy:
+            raise ValueError(
+                "Complete bundle hook output runtime_strategy mismatch: "
+                f"expected {expected_runtime_strategy!r}, "
+                f"got {header.get('runtime_strategy')!r}"
+            )
+        _validate_complete_bundle_sections(
+            header,
+            payload_size=opened_stat.st_size - 16 - header_size,
+            output_path=output_path,
+        )
+        after_stat = os.fstat(descriptor)
+        if (
+            after_stat.st_dev != opened_stat.st_dev
+            or after_stat.st_ino != opened_stat.st_ino
+            or after_stat.st_mode != opened_stat.st_mode
+            or after_stat.st_size != opened_stat.st_size
+            or after_stat.st_mtime_ns != opened_stat.st_mtime_ns
+            or after_stat.st_ctime_ns != opened_stat.st_ctime_ns
+            or after_stat.st_nlink != 1
+        ):
+            raise ValueError(
+                f"Complete bundle hook output changed during validation: {output_path}"
+            )
+        try:
+            published_stat = output_path.lstat()
+        except OSError as exc:
+            raise ValueError(
+                f"Complete bundle hook output changed during validation: {output_path}"
+            ) from exc
+        if (
+            not stat.S_ISREG(published_stat.st_mode)
+            or published_stat.st_dev != after_stat.st_dev
+            or published_stat.st_ino != after_stat.st_ino
+            or published_stat.st_mode != after_stat.st_mode
+            or published_stat.st_size != after_stat.st_size
+            or published_stat.st_mtime_ns != after_stat.st_mtime_ns
+            or published_stat.st_ctime_ns != after_stat.st_ctime_ns
+            or published_stat.st_nlink != 1
+        ):
+            raise ValueError(
+                f"Complete bundle hook output changed during validation: {output_path}"
+            )
+        return header
+    finally:
+        os.close(descriptor)
+
+
+def _run_complete_bundle_hook(
+    plugin,
+    config: ModelConfig,
+    *,
+    model_dir_path: Path,
+    output_path: str,
+    max_cache_length: int | None,
+    decoder_engine_layout: str,
+    dynamic_kv_cache: bool,
+    dynamic_kv_profile_rows_override: list[int] | None,
+    precision: str | None,
+    fp32_layers: list[int] | None,
+    quantize: str | None,
+    quant_scales: str | None,
+    quant_calibration_samples: int,
+    verbose: bool,
+    kernel_artifacts: list[tuple[str, str]] | None,
+    rtx: bool,
+    triattention_stats_path: str | None,
+    triattention_kv_budget: int | None,
+    triattention_divide_length: int,
+    triattention_recent_window: int,
+    triattention_score_aggregation: str,
+    triattention_count_prompt_tokens: bool,
+    triattention_protect_prefill: bool,
+    triattention_disable_mlr: bool,
+    triattention_disable_trig: bool,
+    family_build_options: dict | None,
+    parallel_config: ParallelConfig,
+    diffusion_overrides: dict | None,
+    build_timing_path: str | None,
+    max_batch_size: int,
+    tokenizer_source_model_id_or_path: str | None,
+    tokenizer_source_revision: str | None,
+) -> None:
+    """Invoke and validate an opted-in family-owned complete bundle builder."""
+
+    family = getattr(plugin, "name", None)
+    runtime_strategy = getattr(plugin, "runtime_strategy", None)
+    if not isinstance(family, str) or not family:
+        raise TypeError("Complete bundle plugin must declare a non-empty name")
+    if not isinstance(runtime_strategy, str) or not runtime_strategy:
+        raise TypeError(
+            f"Complete bundle plugin {family!r} must declare a non-empty runtime_strategy"
+        )
+
+    destination = Path(output_path)
+    _require_complete_bundle_output_absent(destination)
+    request = CompleteBundleBuildRequest(
+        model_dir=model_dir_path,
+        output_path=destination,
+        config=config,
+        max_cache_length=max_cache_length,
+        decoder_engine_layout=decoder_engine_layout,
+        dynamic_kv_cache=dynamic_kv_cache,
+        dynamic_kv_profile_rows_override=(
+            tuple(dynamic_kv_profile_rows_override)
+            if dynamic_kv_profile_rows_override is not None
+            else None
+        ),
+        precision=precision,
+        fp32_layers=tuple(fp32_layers or ()),
+        quantize=quantize,
+        quant_scales=quant_scales,
+        quant_calibration_samples=quant_calibration_samples,
+        verbose=verbose,
+        kernel_artifacts=tuple(kernel_artifacts or ()),
+        rtx=rtx,
+        fp8_scales=getattr(build_bundle, "_fp8_scales", None),
+        save_fp8_scales=getattr(build_bundle, "_save_fp8_scales", None),
+        triattention_stats_path=triattention_stats_path,
+        triattention_kv_budget=triattention_kv_budget,
+        triattention_divide_length=triattention_divide_length,
+        triattention_recent_window=triattention_recent_window,
+        triattention_score_aggregation=triattention_score_aggregation,
+        triattention_count_prompt_tokens=triattention_count_prompt_tokens,
+        triattention_protect_prefill=triattention_protect_prefill,
+        triattention_disable_mlr=triattention_disable_mlr,
+        triattention_disable_trig=triattention_disable_trig,
+        family_build_options=dict(family_build_options or {}),
+        parallel_config=parallel_config,
+        diffusion_overrides=dict(diffusion_overrides or {}),
+        build_timing_path=build_timing_path,
+        max_batch_size=max_batch_size,
+        source_model_id_or_path=tokenizer_source_model_id_or_path,
+        source_revision=tokenizer_source_revision,
+    )
+    hook = _complete_bundle_hook(plugin)
+    result = hook(request)
+    if result is not None:
+        raise TypeError(
+            f"Plugin {family!r}.build_complete_bundle() must return None, "
+            f"got {type(result).__name__}"
+        )
+    _verify_complete_bundle(
+        destination,
+        expected_family=family,
+        expected_runtime_strategy=runtime_strategy,
+    )
+    print(f"[trtmc build] Bundle saved: {destination}", file=sys.stderr)
+
+
 @enforce_single_full_bundle_build
 def build_bundle(
     model_dir: str,
@@ -935,8 +1332,49 @@ def build_bundle(
         raise ValueError(
             "decoder_engine_layout must be 'split' or 'dual_profile', "
             f"got {decoder_engine_layout!r}")
-    _setup_trt_import(rtx)
     parallel = normalize_parallel_config(parallel_config)
+    model_dir_path = Path(model_dir)
+
+    complete_bundle_entrypoint = _resolve_complete_bundle_entrypoint(model_dir_path)
+    if complete_bundle_entrypoint is not None:
+        complete_bundle_plugin, complete_bundle_config = complete_bundle_entrypoint
+        _run_complete_bundle_hook(
+            complete_bundle_plugin,
+            complete_bundle_config,
+            model_dir_path=model_dir_path,
+            output_path=output_path,
+            max_cache_length=max_cache_length,
+            decoder_engine_layout=decoder_engine_layout,
+            dynamic_kv_cache=dynamic_kv_cache,
+            dynamic_kv_profile_rows_override=dynamic_kv_profile_rows_override,
+            precision=precision,
+            fp32_layers=fp32_layers,
+            quantize=quantize,
+            quant_scales=quant_scales,
+            quant_calibration_samples=quant_calibration_samples,
+            verbose=verbose,
+            kernel_artifacts=kernel_artifacts,
+            rtx=rtx,
+            triattention_stats_path=triattention_stats_path,
+            triattention_kv_budget=triattention_kv_budget,
+            triattention_divide_length=triattention_divide_length,
+            triattention_recent_window=triattention_recent_window,
+            triattention_score_aggregation=triattention_score_aggregation,
+            triattention_count_prompt_tokens=triattention_count_prompt_tokens,
+            triattention_protect_prefill=triattention_protect_prefill,
+            triattention_disable_mlr=triattention_disable_mlr,
+            triattention_disable_trig=triattention_disable_trig,
+            family_build_options=family_build_options,
+            parallel_config=parallel,
+            diffusion_overrides=diffusion_overrides,
+            build_timing_path=build_timing_path,
+            max_batch_size=max_batch_size,
+            tokenizer_source_model_id_or_path=tokenizer_source_model_id_or_path,
+            tokenizer_source_revision=tokenizer_source_revision,
+        )
+        return
+
+    _setup_trt_import(rtx)
     try:
         print(
             f"[trtmc build] Builder TensorRT resolved: {trt_compat.resolved_summary()}",
@@ -947,7 +1385,6 @@ def build_bundle(
             "TensorRT Python bindings are required for raw TRT builds. "
             "Install a matching tensorrt package in the active Python environment."
         ) from exc
-    model_dir_path = Path(model_dir)
     t0 = time.monotonic()
     build_timing = _new_build_timing(build_timing_path)
     build_timing["model_dir"] = str(model_dir_path)

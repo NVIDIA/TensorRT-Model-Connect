@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sam2"
+plugin = "sam2"
+module = "plugin"
+config_adapter = "model_config.py|config_from_dir"
+capabilities = ["complete_bundle_builder", "production_runtime_unpinned"]
+aliases = [
+  "sam2",
+  "sam2_video_tracking",
+  "sam2_bbox_video_tracking",
+]
+prefixes = [
+  "sam2",
+]

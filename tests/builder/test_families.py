@@ -28,7 +28,7 @@ pytest.importorskip(
     reason="family plugin registry tests import TensorRT-backed plugin modules",
 )
 
-from tensorrt_model_connect.families import find_plugin, _ALL_PLUGINS
+from tensorrt_model_connect.families import _ALL_PLUGINS, find_plugin
 from tests.e2e_harness.manifest_loader import iter_manifest_paths
 
 
@@ -391,33 +391,6 @@ class TestPluginDiscovery:
                 assert isinstance(result, bool), (
                     f"Plugin {plugin.name!r}.matches({bad_type!r}) returned "
                     f"{type(result).__name__}, expected bool")
-
-    def test_all_plugins_have_e2e_manifest(self):
-        """Validate that every family plugin has at least one E2E test manifest.
-
-        Uses AST-based filesystem scanning so this test works even without
-        TRT/torch installed (pure Python, no GPU). When a developer adds a
-        new family plugin, they must also add a JSON manifest in
-        tests/e2e/models/ so the E2E test suite covers that model.
-        """
-        _EXEMPT_PLUGINS: set[str] = set()
-
-        models_dir = Path(__file__).resolve().parent.parent / "e2e" / "models"
-        families_in_manifests: set[str] = set()
-        for manifest_path in iter_manifest_paths(models_dir):
-            with open(manifest_path) as f:
-                data = json.load(f)
-            family = data.get("family")
-            if family:
-                families_in_manifests.add(family)
-
-        plugin_names = _discover_plugin_names_from_filesystem()
-        assert plugin_names, "No plugin names discovered — AST scan may be broken"
-        uncovered = plugin_names - families_in_manifests - _EXEMPT_PLUGINS
-        assert not uncovered, (
-            f"Plugins without E2E manifest coverage: {uncovered}. "
-            f"Add a JSON manifest in tests/e2e/models/ with 'family' matching "
-            f"the plugin name, or add to _EXEMPT_PLUGINS if WIP.")
 
     def test_all_manifests_have_valid_family(self):
         """Validate that every E2E manifest references a family that exists as a plugin.

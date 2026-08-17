@@ -27,6 +27,8 @@ function(_trtmc_model_manifest_list manifest_text key output_var)
   endif()
 endfunction()
 
+include("${CMAKE_CURRENT_LIST_DIR}/trtmc_model_data.cmake")
+
 file(GLOB TRTMC_RUNTIME_MODEL_MANIFESTS CONFIGURE_DEPENDS
   "${PROJECT_SOURCE_DIR}/src/runtime/models/*/MODEL.toml")
 if(NOT TRTMC_RUNTIME_MODEL_MANIFESTS)
@@ -100,6 +102,30 @@ foreach(_trtmc_model_manifest IN LISTS TRTMC_RUNTIME_MODEL_MANIFESTS)
     endif()
     list(APPEND TRTMC_MODEL_${_trtmc_model_var}_PLUGINS "${_trtmc_source}|${_trtmc_symbol}")
   endforeach()
+
+  _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "runtime_excluded_sources"
+    _trtmc_runtime_excluded_sources)
+  foreach(_trtmc_excluded_source IN LISTS _trtmc_runtime_excluded_sources)
+    if(NOT _trtmc_excluded_source MATCHES "^[A-Za-z0-9_.-]+\\.(cpp|cu)$")
+      message(FATAL_ERROR
+        "Invalid runtime_excluded_sources entry '${_trtmc_excluded_source}' in "
+        "${_trtmc_model_manifest}")
+    endif()
+    if(NOT EXISTS
+       "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_excluded_source}")
+      message(FATAL_ERROR
+        "Excluded runtime source does not exist: ${_trtmc_excluded_source}")
+    endif()
+    list(APPEND TRTMC_MODEL_${_trtmc_model_var}_EXCLUDED_SOURCES "${_trtmc_excluded_source}")
+  endforeach()
+
+  _trtmc_model_manifest_safe_relative_path_list(
+    "${_trtmc_model_manifest_text}"
+    "runtime_optional_data_files"
+    "${_trtmc_model_manifest}"
+    _trtmc_runtime_optional_data_files)
+  set(TRTMC_MODEL_${_trtmc_model_var}_OPTIONAL_DATA_FILES
+    ${_trtmc_runtime_optional_data_files})
 
   _trtmc_model_manifest_list("${_trtmc_model_manifest_text}" "runtime_config_schemas"
     _trtmc_runtime_config_schemas)
