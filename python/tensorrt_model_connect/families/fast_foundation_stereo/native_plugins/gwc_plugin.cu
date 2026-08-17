@@ -21,6 +21,9 @@ constexpr int32_t kChannelsPerGroup = kFeatureChannels / kGroups;
 constexpr int32_t kHeight = 176;
 constexpr int32_t kWidth = 176;
 constexpr int32_t kDisparities = 48;
+constexpr int32_t kOutputXTile = 16;
+constexpr int32_t kOutputXTiles = (kWidth + kOutputXTile - 1) / kOutputXTile;
+constexpr int32_t kOutputThreads = kCombinedChannels * kOutputXTile;
 constexpr std::size_t kNormElements = static_cast<std::size_t>(kBatch) * kGroups * kHeight * kWidth;
 constexpr std::size_t kWorkspaceBytes = 2 * kNormElements * sizeof(__half);
 
@@ -42,63 +45,82 @@ __global__ void group_norm_kernel(const __half* input, __half* norm) {
     norm[index] = __float2half_rn(sqrtf(sum));
 }
 
-__global__ void combined_volume_kernel(const __half* reference, const __half* target,
-                                       const __half* left_projected, const __half* right_projected,
-                                       const __half* reference_norm, const __half* target_norm,
-                                       __half* output) {
-    const int32_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    constexpr int32_t count = kCombinedChannels * kDisparities * kHeight * kWidth;
-    if (index >= count)
-        return;
+__global__ void combined_volume_dhwc8_kernel(const __half* reference, const __half* target,
+                                             const __half* left_projected,
+                                             const __half* right_projected,
+                                             const __half* reference_norm,
+                                             const __half* target_norm, __half* output) {
+    // Compute along X so reads from the NCHW inputs remain coalesced, then
+    // transpose through shared memory so the kDHWC8 output writes are also
+    // coalesced. The extra column removes shared-memory bank conflicts during
+    // the channel-minor store phase.
+    __shared__ __half output_tile[kCombinedChannels][kOutputXTile + 1];
 
-    int32_t remaining = index;
-    const int32_t width_index = remaining % kWidth;
-    remaining /= kWidth;
-    const int32_t height_index = remaining % kHeight;
-    remaining /= kHeight;
-    const int32_t disparity = remaining % kDisparities;
-    const int32_t output_channel = remaining / kDisparities;
+    int32_t remaining_block = blockIdx.x;
+    const int32_t tile_index = remaining_block % kOutputXTiles;
+    remaining_block /= kOutputXTiles;
+    const int32_t height_index = remaining_block % kHeight;
+    const int32_t disparity = remaining_block / kHeight;
+    const int32_t output_channel = threadIdx.x / kOutputXTile;
+    const int32_t tile_width = threadIdx.x % kOutputXTile;
+    const int32_t width_index = tile_index * kOutputXTile + tile_width;
 
-    if (output_channel >= kGroups) {
-        int32_t projected_channel = output_channel - kGroups;
-        const __half* projected = left_projected;
-        int32_t projected_width = width_index;
-        if (projected_channel >= kProjectedChannels) {
-            projected_channel -= kProjectedChannels;
-            projected = right_projected;
-            projected_width -= disparity;
+    __half value = __float2half_rn(0.0F);
+    if (width_index < kWidth) {
+        if (output_channel >= kGroups) {
+            int32_t projected_channel = output_channel - kGroups;
+            const __half* projected = left_projected;
+            int32_t projected_width = width_index;
+            if (projected_channel >= kProjectedChannels) {
+                projected_channel -= kProjectedChannels;
+                projected = right_projected;
+                projected_width -= disparity;
+            }
+            if (projected_width >= 0) {
+                const int32_t projected_index =
+                    (projected_channel * kHeight + height_index) * kWidth + projected_width;
+                value = projected[projected_index];
+            }
+        } else {
+            const int32_t group = output_channel;
+            const int32_t target_width = width_index - disparity;
+            if (target_width >= 0) {
+                float dot = 0.0F;
+                for (int32_t channel = 0; channel < kChannelsPerGroup; ++channel) {
+                    const int32_t channel_index = group * kChannelsPerGroup + channel;
+                    const int32_t reference_index =
+                        (channel_index * kHeight + height_index) * kWidth + width_index;
+                    const int32_t target_index =
+                        (channel_index * kHeight + height_index) * kWidth + target_width;
+                    dot += __half2float(reference[reference_index]) *
+                           __half2float(target[target_index]);
+                }
+                const int32_t reference_norm_index =
+                    (group * kHeight + height_index) * kWidth + width_index;
+                const int32_t target_norm_index =
+                    (group * kHeight + height_index) * kWidth + target_width;
+                const float denominator = __half2float(reference_norm[reference_norm_index]) *
+                                              __half2float(target_norm[target_norm_index]) +
+                                          1.0e-5F;
+                value = __float2half_rn(dot / denominator);
+            }
         }
-        if (projected_width < 0) {
-            output[index] = __float2half_rn(0.0F);
-            return;
-        }
-        const int32_t projected_index =
-            (projected_channel * kHeight + height_index) * kWidth + projected_width;
-        output[index] = projected[projected_index];
-        return;
     }
+    output_tile[output_channel][tile_width] = value;
+    __syncthreads();
 
-    const int32_t group = output_channel;
-    const int32_t target_width = width_index - disparity;
-    if (target_width < 0) {
-        output[index] = __float2half_rn(0.0F);
-        return;
+    // TensorRT's kDHWC8 format stores the vectorized channel dimension minor.
+    // kCombinedChannels is exactly divisible by eight, so there is no padding.
+    const int32_t store_width = threadIdx.x / kCombinedChannels;
+    const int32_t store_channel = threadIdx.x % kCombinedChannels;
+    const int32_t global_store_width = tile_index * kOutputXTile + store_width;
+    if (global_store_width < kWidth) {
+        const int32_t output_index =
+            ((disparity * kHeight + height_index) * kWidth + global_store_width) *
+                kCombinedChannels +
+            store_channel;
+        output[output_index] = output_tile[store_channel][store_width];
     }
-    float dot = 0.0F;
-    for (int32_t channel = 0; channel < kChannelsPerGroup; ++channel) {
-        const int32_t channel_index = group * kChannelsPerGroup + channel;
-        const int32_t reference_index =
-            (channel_index * kHeight + height_index) * kWidth + width_index;
-        const int32_t target_index =
-            (channel_index * kHeight + height_index) * kWidth + target_width;
-        dot += __half2float(reference[reference_index]) * __half2float(target[target_index]);
-    }
-    const int32_t reference_norm_index = (group * kHeight + height_index) * kWidth + width_index;
-    const int32_t target_norm_index = (group * kHeight + height_index) * kWidth + target_width;
-    const float denominator = __half2float(reference_norm[reference_norm_index]) *
-                                  __half2float(target_norm[target_norm_index]) +
-                              1.0e-5F;
-    output[index] = __float2half_rn(dot / denominator);
 }
 
 bool is_exact_input(nvinfer1::PluginTensorDesc const& desc, int32_t channels) noexcept {
@@ -110,7 +132,7 @@ bool is_exact_input(nvinfer1::PluginTensorDesc const& desc, int32_t channels) no
 
 bool is_exact_output(nvinfer1::PluginTensorDesc const& desc) noexcept {
     return desc.type == nvinfer1::DataType::kHALF &&
-           desc.format == nvinfer1::TensorFormat::kLINEAR && desc.dims.nbDims == 5 &&
+           desc.format == nvinfer1::TensorFormat::kDHWC8 && desc.dims.nbDims == 5 &&
            desc.dims.d[0] == kBatch && desc.dims.d[1] == kCombinedChannels &&
            desc.dims.d[2] == kDisparities && desc.dims.d[3] == kHeight && desc.dims.d[4] == kWidth;
 }
@@ -223,7 +245,6 @@ FastFoundationStereoCombinedVolumePlugin::enqueue(nvinfer1::PluginTensorDesc con
     auto* reference_norm = static_cast<__half*>(workspace);
     auto* target_norm = reference_norm + kNormElements;
     constexpr int32_t threads = 256;
-    constexpr int32_t output_elements = kCombinedChannels * kDisparities * kHeight * kWidth;
     group_norm_kernel<<<(static_cast<int32_t>(kNormElements) + threads - 1) / threads, threads, 0,
                         stream>>>(static_cast<const __half*>(inputs[0]), reference_norm);
     if (cudaGetLastError() != cudaSuccess)
@@ -232,7 +253,8 @@ FastFoundationStereoCombinedVolumePlugin::enqueue(nvinfer1::PluginTensorDesc con
                         stream>>>(static_cast<const __half*>(inputs[1]), target_norm);
     if (cudaGetLastError() != cudaSuccess)
         return -1;
-    combined_volume_kernel<<<(output_elements + threads - 1) / threads, threads, 0, stream>>>(
+    combined_volume_dhwc8_kernel<<<kDisparities * kHeight * kOutputXTiles, kOutputThreads, 0,
+                                   stream>>>(
         static_cast<const __half*>(inputs[0]), static_cast<const __half*>(inputs[1]),
         static_cast<const __half*>(inputs[2]), static_cast<const __half*>(inputs[3]),
         reference_norm, target_norm, static_cast<__half*>(outputs[0]));
