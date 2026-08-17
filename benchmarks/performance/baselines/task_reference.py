@@ -1199,6 +1199,69 @@ def _load_reranking(
     return Session(invoke, _resolved_revision(arguments, model), "transformers")
 
 
+_PIXART_TRTMC_MIXED_PRECISION = "pixart_fp16_dit_fp32_t5"
+
+
+def _diffusion_component_precision_contract(
+    arguments: argparse.Namespace,
+    options: Mapping[str, Any],
+) -> str:
+    contract = str(options.get("component_precision_contract", "") or "")
+    if not contract:
+        return ""
+    if contract != _PIXART_TRTMC_MIXED_PRECISION:
+        raise ValueError(f"unsupported diffusion component precision contract: {contract}")
+    if arguments.family != "pixart" or arguments.precision != "fp16":
+        raise ValueError(
+            f"{contract} requires family=pixart and precision=fp16"
+        )
+    return contract
+
+
+def _cast_floating_tensors(value: Any, dtype: Any, torch_module: Any) -> Any:
+    if isinstance(value, torch_module.Tensor):
+        return value.to(dtype=dtype) if value.is_floating_point() else value
+    if isinstance(value, tuple):
+        return tuple(
+            _cast_floating_tensors(item, dtype, torch_module) for item in value
+        )
+    if isinstance(value, list):
+        return [
+            _cast_floating_tensors(item, dtype, torch_module) for item in value
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _cast_floating_tensors(item, dtype, torch_module)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _configure_diffusion_component_precision(
+    pipeline: Any,
+    arguments: argparse.Namespace,
+    options: Mapping[str, Any],
+    torch_module: Any,
+) -> None:
+    contract = _diffusion_component_precision_contract(arguments, options)
+    if not contract:
+        return
+
+    def fp16_transformer_inputs(_module: Any, args: Any, kwargs: Any) -> Any:
+        return (
+            _cast_floating_tensors(args, torch_module.float16, torch_module),
+            _cast_floating_tensors(kwargs, torch_module.float16, torch_module),
+        )
+
+    def fp32_transformer_output(_module: Any, _args: Any, output: Any) -> Any:
+        return _cast_floating_tensors(output, torch_module.float32, torch_module)
+
+    pipeline.transformer.register_forward_pre_hook(
+        fp16_transformer_inputs, with_kwargs=True
+    )
+    pipeline.transformer.register_forward_hook(fp32_transformer_output)
+
+
 def _diffusion_pipeline(
     arguments: argparse.Namespace,
     torch_module: Any,
@@ -1248,6 +1311,23 @@ def _diffusion_pipeline(
             continue
         try:
             load_options: dict[str, Any] = {}
+            component_contract = _diffusion_component_precision_contract(
+                arguments, options
+            )
+            if component_contract == _PIXART_TRTMC_MIXED_PRECISION:
+                from transformers import T5EncoderModel
+
+                load_options["text_encoder"] = T5EncoderModel.from_pretrained(
+                    model_source,
+                    subfolder="text_encoder",
+                    torch_dtype=torch_module.float32,
+                    **(
+                        {"revision": requested_revision}
+                        if requested_revision and model_source == model_id
+                        else {}
+                    ),
+                    local_files_only=arguments.local_files_only,
+                )
             if arguments.family == "wan2_2_ti2v":
                 vae_class = getattr(diffusers, "AutoencoderKLWan", None)
                 if vae_class is None:
@@ -1292,6 +1372,7 @@ def _load_diffusers(
     from PIL import Image
 
     pipeline = _diffusion_pipeline(arguments, torch, options)
+    _configure_diffusion_component_precision(pipeline, arguments, options, torch)
     if bool(options.get("cpu_offload", False)) and hasattr(pipeline, "enable_model_cpu_offload"):
         pipeline.enable_model_cpu_offload()
     else:

@@ -663,6 +663,10 @@ entries:
       reference_backend: hf_diffusers
       timing_scope: task-pipeline-call-wall
       output_contract: media-shape
+      adapter_options:
+        # Match the Accuracy/TRTMC component contract: FP32 T5 encoder,
+        # FP16 DiT inputs, and FP32 DiT outputs/scheduler bindings.
+        component_precision_contract: pixart_fp16_dit_fp32_t5
   - id: qwen.generate
     family: qwen
     operation: generate

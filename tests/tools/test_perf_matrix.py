@@ -1765,6 +1765,10 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
     assert rows["deepseek_ocr.generate"]["baseline"]["output_contract"] == "ocr-text"
     assert rows["locateanything.generate"]["baseline"]["output_contract"] == "localization"
     assert rows["qwen_vl.generate"]["baseline"]["output_contract"] == "normalized-text"
+    assert rows["pixart.generate_image"]["baseline"]["adapter_options"] == {
+        "component_precision_contract": "pixart_fp16_dit_fp32_t5"
+    }
+    assert "adapter_options" not in rows["flux.generate_image"]["baseline"]
     assert not any(row["baseline"]["runner"] == "unsupported" for row in rows.values())
     assert {
         case_id: row["baseline"].get("adapter")
@@ -2698,6 +2702,92 @@ def test_wan22_diffusers_adapter_uses_pinned_conversion_and_fp32_vae(
     assert captured["pipeline_kwargs"]["torch_dtype"] == "bf16"
     assert captured["pipeline_kwargs"]["revision"] == "diffusers-revision"
     assert isinstance(captured["pipeline_kwargs"]["vae"], FakeVae)
+
+
+def test_pixart_diffusers_adapter_matches_trtmc_component_precision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    captured: dict[str, object] = {}
+
+    class FakeTextEncoder:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(text_encoder_model=model, text_encoder_kwargs=kwargs)
+            return cls()
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(pipeline_model=model, pipeline_kwargs=kwargs)
+            return cls()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "diffusers",
+        Namespace(PixArtSigmaPipeline=FakePipeline, DiffusionPipeline=FakePipeline),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        Namespace(T5EncoderModel=FakeTextEncoder),
+    )
+    arguments = Namespace(
+        family="pixart",
+        local_files_only=False,
+        model="PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
+        precision="fp16",
+        revision="snapshot",
+        trust_remote_code=False,
+    )
+    torch_module = Namespace(float16="fp16", float32="fp32", bfloat16="bf16")
+    options = {"component_precision_contract": "pixart_fp16_dit_fp32_t5"}
+
+    runner["_diffusion_pipeline"](arguments, torch_module, options)
+
+    assert captured["text_encoder_model"] == arguments.model
+    assert captured["text_encoder_kwargs"] == {
+        "subfolder": "text_encoder",
+        "torch_dtype": "fp32",
+        "revision": "snapshot",
+        "local_files_only": False,
+    }
+    assert captured["pipeline_model"] == arguments.model
+    assert captured["pipeline_kwargs"]["torch_dtype"] == "fp16"
+    assert isinstance(captured["pipeline_kwargs"]["text_encoder"], FakeTextEncoder)
+
+
+def test_pixart_component_precision_registers_fp16_input_and_fp32_output_hooks() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+
+    class FakeTransformer:
+        def __init__(self) -> None:
+            self.pre_hook = None
+            self.post_hook = None
+            self.with_kwargs = False
+
+        def register_forward_pre_hook(self, hook, *, with_kwargs=False):
+            self.pre_hook = hook
+            self.with_kwargs = with_kwargs
+
+        def register_forward_hook(self, hook):
+            self.post_hook = hook
+
+    transformer = FakeTransformer()
+    pipeline = Namespace(transformer=transformer)
+    arguments = Namespace(family="pixart", precision="fp16")
+    torch_module = Namespace(float16="fp16", float32="fp32", Tensor=object)
+
+    runner["_configure_diffusion_component_precision"](
+        pipeline,
+        arguments,
+        {"component_precision_contract": "pixart_fp16_dit_fp32_t5"},
+        torch_module,
+    )
+
+    assert transformer.with_kwargs is True
+    assert callable(transformer.pre_hook)
+    assert callable(transformer.post_hook)
 
 
 def test_cached_snapshot_path_keeps_snapshot_parent_for_symlinked_marker(
