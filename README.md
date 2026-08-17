@@ -34,13 +34,15 @@ std::cout << pipeline->generate("What is the capital of France? Answer in one wo
 
 <a id="choose-the-right-tensorrt-path"></a>
 
-## 🧭 Choose the right TensorRT path
+## 🧭 Choose the right abstraction layer
 
 - Use TensorRT-Model-Connect to explore models quickly and evaluate broad
   model coverage.
 - For production LLM/VLM deployment on NVIDIA edge platforms where performance
   is the priority, start directly with
   [TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM).
+
+<img width="1609" height="977" alt="TensorRT abstraction layers from Model Connect through Edge-LLM to TensorRT" src="TRT-Stack.png" />
 
 <a id="why-tensorrt-model-connect"></a>
 
