@@ -52,6 +52,37 @@ float bf16_to_fp32(HalfBits value) {
     return result;
 }
 
+bool round_to_nearest_even(uint32_t remainder, uint32_t halfway, uint32_t rounded) {
+    return remainder > halfway || (remainder == halfway && (rounded & 1U) != 0U);
+}
+
+HalfBits fp32_subnormal_to_fp16(uint32_t sign, uint32_t mantissa, int32_t exponent) {
+    if (exponent < -10)
+        return static_cast<HalfBits>(sign);
+    const uint32_t normalized = mantissa | 0x00800000U;
+    const uint32_t shift = static_cast<uint32_t>(14 - exponent);
+    uint32_t rounded = normalized >> shift;
+    const uint32_t remainder = normalized & ((1U << shift) - 1U);
+    const uint32_t halfway = 1U << (shift - 1U);
+    if (round_to_nearest_even(remainder, halfway, rounded))
+        ++rounded;
+    return static_cast<HalfBits>(sign | rounded);
+}
+
+HalfBits fp32_normal_to_fp16(uint32_t sign, uint32_t mantissa, int32_t exponent) {
+    uint32_t rounded = mantissa >> 13U;
+    const uint32_t remainder = mantissa & 0x1FFFU;
+    if (!round_to_nearest_even(remainder, 0x1000U, rounded))
+        return static_cast<HalfBits>(sign | (static_cast<uint32_t>(exponent) << 10U) | rounded);
+
+    ++rounded;
+    if (rounded != 0x0400U)
+        return static_cast<HalfBits>(sign | (static_cast<uint32_t>(exponent) << 10U) | rounded);
+    if (exponent + 1 >= 31)
+        return static_cast<HalfBits>(sign | 0x7C00U);
+    return static_cast<HalfBits>(sign | (static_cast<uint32_t>(exponent + 1) << 10U));
+}
+
 HalfBits fp32_to_fp16(float value) {
     uint32_t bits = 0;
     std::memcpy(&bits, &value, sizeof(bits));
@@ -64,31 +95,9 @@ HalfBits fp32_to_fp16(float value) {
     const int32_t exponent = static_cast<int32_t>(exponent_bits) - 127 + 15;
     if (exponent >= 31)
         return static_cast<HalfBits>(sign | 0x7C00U);
-    if (exponent <= 0) {
-        if (exponent < -10)
-            return static_cast<HalfBits>(sign);
-        const uint32_t normalized = mantissa | 0x00800000U;
-        const uint32_t shift = static_cast<uint32_t>(14 - exponent);
-        uint32_t rounded = normalized >> shift;
-        const uint32_t remainder = normalized & ((1U << shift) - 1U);
-        const uint32_t halfway = 1U << (shift - 1U);
-        if (remainder > halfway || (remainder == halfway && (rounded & 1U) != 0U))
-            ++rounded;
-        return static_cast<HalfBits>(sign | rounded);
-    }
-
-    uint32_t rounded = mantissa >> 13U;
-    const uint32_t remainder = mantissa & 0x1FFFU;
-    if (remainder > 0x1000U || (remainder == 0x1000U && (rounded & 1U) != 0U)) {
-        ++rounded;
-        if (rounded == 0x0400U) {
-            rounded = 0;
-            if (exponent + 1 >= 31)
-                return static_cast<HalfBits>(sign | 0x7C00U);
-            return static_cast<HalfBits>(sign | (static_cast<uint32_t>(exponent + 1) << 10U));
-        }
-    }
-    return static_cast<HalfBits>(sign | (static_cast<uint32_t>(exponent) << 10U) | rounded);
+    if (exponent <= 0)
+        return fp32_subnormal_to_fp16(sign, mantissa, exponent);
+    return fp32_normal_to_fp16(sign, mantissa, exponent);
 }
 
 HalfBits fp32_to_bf16(float value) {

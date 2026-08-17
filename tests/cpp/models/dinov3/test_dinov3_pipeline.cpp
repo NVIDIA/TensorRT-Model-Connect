@@ -159,6 +159,25 @@ void test_pipeline_converts_fp16_engine_io() {
           "DINOv3 FP16 pooler conversion");
 }
 
+void test_pipeline_fp16_input_conversion_preserves_ieee_edges() {
+    const auto convert = [](const std::vector<float>& image) {
+        auto module = std::make_unique<FakeDinov3Module>(true, trtmc::DType::kFloat16);
+        auto* module_ptr = module.get();
+        trtmc::Dinov3ImageFeaturePipeline pipeline(std::move(module), identity_config());
+        (void)pipeline.extract_image_features(image.data(), 1, 1);
+        return module_ptr->input_half_values;
+    };
+
+    check(convert({65504.0F, 6.103515625e-5F, 5.96046448e-8F}) ==
+              std::vector<uint16_t>({0x7BFFU, 0x0400U, 0x0001U}),
+          "DINOv3 FP16 finite boundary conversion");
+    check(convert({2.98023224e-8F, 1.00048828125F, 1.0009765625F}) ==
+              std::vector<uint16_t>({0x0000U, 0x3C00U, 0x3C01U}),
+          "DINOv3 FP16 ties-to-even conversion");
+    check(convert({-0.0F, -1.0F, 1.0e10F}) == std::vector<uint16_t>({0x8000U, 0xBC00U, 0x7C00U}),
+          "DINOv3 FP16 sign and overflow conversion");
+}
+
 void test_pipeline_rejects_invalid_module() {
     bool threw = false;
     try {
@@ -175,6 +194,7 @@ int main() {
     test_pipeline_returns_both_named_outputs_with_shapes();
     test_pipeline_requires_pooler_output();
     test_pipeline_converts_fp16_engine_io();
+    test_pipeline_fp16_input_conversion_preserves_ieee_edges();
     test_pipeline_rejects_invalid_module();
 
     if (g_failures != 0) {
