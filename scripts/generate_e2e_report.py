@@ -718,7 +718,7 @@ def _render_metrics_table(stages: Dict[str, Any]) -> str:
             icon = "&#10003;" if passed else "&#10007;"
             icon_cls = "pass-icon" if passed else "fail-icon"
             row_cls = "metric-pass" if passed else "metric-fail"
-            thr_str = f"{threshold}" if threshold is not None else "&mdash;"
+            thr_str = _format_value(threshold) if threshold is not None else "&mdash;"
             rows.append(
                 f"<tr class='{row_cls}'>"
                 f"<td>{_esc(stage_name)}</td>"
@@ -2425,6 +2425,9 @@ def render_model_section(
         body_parts.append(render_omni_model(result, project_dir))
     elif modality == "structured":
         body_parts.append(_render_structured_stage_comparison(result))
+        body_parts.append(_render_metrics_table(result.get("stages", {})))
+        body_parts.append(_render_repro_commands(result.get("repro_commands", {})))
+        body_parts.append(_render_timing_sections(result))
     else:
         body_parts.append(render_generic_model(result))
 
@@ -2449,8 +2452,9 @@ def _key_metric(result: Dict[str, Any]) -> str:
             )
 
     stages = result.get("stages", {})
-    # Priority: logit_cosine_p5, token_agreement_rate, miou, psnr, mel_distance
+    # Priority: representation cosine, logits/tokens, task metrics, media metrics
     priority = [
+        "full_cosine",
         "logit_cosine_p5",
         "token_agreement_rate",
         "miou",

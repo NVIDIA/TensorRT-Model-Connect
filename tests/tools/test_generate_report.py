@@ -1113,6 +1113,63 @@ class TestRenderGenericModel:
 
 
 class TestAdditionalStrategyRenderers:
+    def test_image_features_show_semantic_metrics_timing_and_repro(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="image_feature_extraction",
+            family="dinov3",
+            metrics={
+                "full_cosine": {
+                    "value": 0.9999,
+                    "threshold": 0.999,
+                    "operator": ">=",
+                    "passed": True,
+                },
+                "relative_frobenius": {
+                    "value": 0.003,
+                    "threshold": 0.01,
+                    "operator": "<=",
+                    "passed": True,
+                },
+            },
+            detailed_timing={
+                "weights_loading_s": 1.0,
+                "trt_compile_s": 2.0,
+                "trt_engine_execute_s": 0.01,
+                "comparison_s": 0.02,
+            },
+            repro_commands={
+                "TRT": "trtmc extract-features model.bundle --image input.jpeg",
+            },
+            stage_outputs={
+                "trt_full_inference": {
+                    "stage_name": "full_inference",
+                    "data": {
+                        "last_hidden_state": {"shape": [1, 201, 384], "data": [0.1, 0.2]},
+                        "pooler_output": {"shape": [1, 384], "data": [0.1, 0.2]},
+                    },
+                    "metadata": {},
+                },
+                "ref_full_inference": {
+                    "stage_name": "full_inference",
+                    "data": {
+                        "last_hidden_state": {"shape": [1, 201, 384], "data": [0.1, 0.2]},
+                        "pooler_output": {"shape": [1, 384], "data": [0.1, 0.2]},
+                    },
+                    "metadata": {},
+                },
+            },
+        )
+
+        rendered = mod.render_model_section(result, project_dir=None)
+
+        assert "Stage: full_inference" in rendered
+        assert "full_cosine" in rendered
+        assert "0.9990" in rendered
+        assert "Reproduction Commands" in rendered
+        assert "trtmc extract-features" in rendered
+        assert "Detailed Timing" in rendered
+
     def test_diffusion_text_uses_paired_text_renderer(self):
         mod = _import_report()
         result = _make_result(
@@ -2420,6 +2477,22 @@ class TestDashboardHelpers:
         r = _make_result()
         r["stages"] = {}
         assert mod._key_metric(r) == ""
+
+    def test_key_metric_prefers_image_feature_cosine(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="image_feature_extraction",
+            metrics={
+                "full_cosine": {
+                    "value": 0.9999,
+                    "threshold": 0.999,
+                    "operator": ">=",
+                    "passed": True,
+                },
+            },
+        )
+
+        assert mod._key_metric(result) == "full_cosine=0.9999"
 
     def test_total_time(self):
         mod = _import_report()
