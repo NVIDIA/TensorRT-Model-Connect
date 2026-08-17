@@ -123,6 +123,7 @@ def _load_cache_helpers() -> dict:
         "_WEIGHT_PATTERNS": [
             "*.safetensors",
             "*.bin",
+            "*.pth",
             "*.nemo",
             "model.npz",
             "elf_params.npz",
@@ -312,6 +313,16 @@ def test_orbax_checkpoint_counts_as_complete_snapshot(tmp_path: Path) -> None:
     checkpoint.mkdir(parents=True)
     (snapshot / "ELF-B-de-en.yml").write_text("model: elf\n")
     (checkpoint / "manifest.ocdbt").write_bytes(b"checkpoint")
+
+    assert helpers["_snapshot_has_required_files"](snapshot)
+
+
+def test_pytorch_pth_checkpoint_counts_as_complete_snapshot(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "cfg.yaml").write_text("valid_iters: 8\n")
+    (snapshot / "model_best_bp2_serialize.pth").write_bytes(b"checkpoint")
 
     assert helpers["_snapshot_has_required_files"](snapshot)
 

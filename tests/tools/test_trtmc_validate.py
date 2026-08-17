@@ -44,7 +44,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 106
+    assert len(catalog["models"]) == len(ready_models) == 107
     assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 0
     assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
@@ -63,7 +63,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 106
+    assert len(bindings) == 107
     assert [
         binding.workload for binding in bindings if binding.model == "personaplex-7b"
     ] == ["full_duplex_bench_behavior_parity"]
@@ -188,6 +188,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     }
     assert min(catalog["sample_limits"].values()) >= 1
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
+        "fast_foundation_stereo_synthetic_parity",
         "minimax_h3_official_profile_parity",
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
@@ -224,7 +225,45 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 106
+    assert len({model for model, _workload in bindings}) == 107
+
+
+def test_fast_foundation_stereo_catalog_uses_numeric_model_plugin_parity() -> None:
+    catalog = trtmc_validate.load_catalog()
+    suite = next(
+        value
+        for value in validation_catalog.load_suites()
+        if value["id"] == "fast_foundation_stereo_synthetic_parity"
+    )
+    model = next(
+        value
+        for value in validation_catalog.load_manifest_records(
+            trtmc_validate.DEFAULT_MODELS
+        )
+        if value["name"] == "fast-foundation-stereo"
+    )
+
+    assert catalog["models"]["fast-foundation-stereo"] == {
+        "workloads": ["fast_foundation_stereo_synthetic_parity"],
+    }
+    assert validation_catalog.suite_match_reason(suite, model) == (
+        True,
+        "selected",
+    )
+    assert suite["scoring"] == {"scorer": "model_plugin_parity"}
+    assert suite["gates"] == {"min_sample_pass_rate": 1.0}
+
+    dataset_path = trtmc_validate.REPO_ROOT / suite["dataset"]["default_path"]
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    assert dataset["requests"] == [
+        {
+            "sample_id": "fast-foundation-stereo-shift-12",
+            "testcase": "fast-foundation-stereo",
+            "stage": "full_inference",
+            "category": "synthetic-rectified-stereo",
+            "inputs": {"pixel_shift": 12},
+        }
+    ]
 
 
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
