@@ -26,6 +26,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
+from .builder_policy import configure_qwen_builder
 from .config import ModelConfig
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .utils import const_in_work_dtype
@@ -186,6 +187,7 @@ def build_standard_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    configure_qwen_builder(trt_config, quant_ctx)
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     # Precision configuration

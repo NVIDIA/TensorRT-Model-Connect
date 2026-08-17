@@ -51,6 +51,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
+from .builder_policy import configure_qwen_builder
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -306,6 +307,7 @@ def build_dual_profile_tp_decoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
+    configure_qwen_builder(trt_config, quant_ctx)
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     if precision == "fp16":
