@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 import struct
 import sys
 from pathlib import Path
@@ -286,7 +287,7 @@ class TestClassifyModality:
         expected = {
             "diffusion_text_generation": "diffusion_text",
             "image_classification": "classification",
-            "image_feature_extraction": "structured",
+            "image_feature_extraction": "image_features",
             "neural_operator": "neural_operator",
             "object_detection": "detection",
             "omni_multimodal": "omni",
@@ -1113,12 +1114,32 @@ class TestRenderGenericModel:
 
 
 class TestAdditionalStrategyRenderers:
-    def test_image_features_show_semantic_metrics_timing_and_repro(self):
+    def test_image_features_are_human_comparable_and_bounded(self, tmp_path):
         mod = _import_report()
+        image = tmp_path / "input.png"
+        _make_tiny_png(image)
+        shape = [1, 201, 2]
+        reference_values = [((index % 19) - 9) / 10.0 for index in range(402)]
+        trt_values = [
+            value + ((index % 7) - 3) * 0.0001
+            for index, value in enumerate(reference_values)
+        ]
         result = _make_result(
             task_strategy="image_feature_extraction",
             family="dinov3",
             metrics={
+                "shape_match": {
+                    "value": 1.0,
+                    "threshold": 1.0,
+                    "operator": "==",
+                    "passed": True,
+                },
+                "register_count_match": {
+                    "value": 1.0,
+                    "threshold": 1.0,
+                    "operator": "==",
+                    "passed": True,
+                },
                 "full_cosine": {
                     "value": 0.9999,
                     "threshold": 0.999,
@@ -1129,6 +1150,12 @@ class TestAdditionalStrategyRenderers:
                     "value": 0.003,
                     "threshold": 0.01,
                     "operator": "<=",
+                    "passed": True,
+                },
+                "p01_patch_cosine": {
+                    "value": 0.9998,
+                    "threshold": 0.995,
+                    "operator": ">=",
                     "passed": True,
                 },
             },
@@ -1145,31 +1172,365 @@ class TestAdditionalStrategyRenderers:
                 "trt_full_inference": {
                     "stage_name": "full_inference",
                     "data": {
-                        "last_hidden_state": {"shape": [1, 201, 384], "data": [0.1, 0.2]},
-                        "pooler_output": {"shape": [1, 384], "data": [0.1, 0.2]},
+                        "last_hidden_state": {"shape": shape, "data": trt_values},
+                        "pooler_output": {"shape": [1, 2], "data": trt_values[:2]},
+                        "num_register_tokens": 4,
                     },
                     "metadata": {},
                 },
                 "ref_full_inference": {
                     "stage_name": "full_inference",
                     "data": {
-                        "last_hidden_state": {"shape": [1, 201, 384], "data": [0.1, 0.2]},
-                        "pooler_output": {"shape": [1, 384], "data": [0.1, 0.2]},
+                        "last_hidden_state": {"shape": shape, "data": reference_values},
+                        "pooler_output": {
+                            "shape": [1, 2],
+                            "data": reference_values[:2],
+                        },
+                        "num_register_tokens": 4,
                     },
                     "metadata": {},
                 },
             },
         )
+        result["case_config"]["inputs"]["image"] = "input.png"
 
-        rendered = mod.render_model_section(result, project_dir=None)
+        rendered = mod.render_model_section(result, project_dir=tmp_path)
 
-        assert "Stage: full_inference" in rendered
+        assert rendered.index("Feature Parity Overview") < rendered.index(
+            "Raw structured outputs (bounded preview)"
+        )
+        assert "data:image/png;base64," in rendered
+        assert "[1 \u00d7 201 \u00d7 2]" in rendered
+        assert "[1 \u00d7 2]" in rendered
+        assert "CLS tokens" in rendered
+        assert "Register tokens" in rendered
+        assert "Prefix tokens" in rendered
+        assert "Patch tokens" in rendered
+        assert "14 \u00d7 14" in rendered
+        assert "Exact invariants" in rendered
+        assert "shape_match exact invariant PASS" in rendered
         assert "full_cosine" in rendered
         assert "0.999900" in rendered
-        assert "0.9990" in rendered
+        assert "0.999000" in rendered
+        assert "Margin +0.000900" in rendered
+        assert "Margin +0.007000" in rendered
+        assert 'role="meter"' in rendered
+        assert (
+            'aria-label="full_cosine: value 0.999900 &gt;= threshold 0.999000; '
+            "margin +0.000900; recorded state PASS; 10.00 percent of allowed error used"
+        ) in rendered
+        assert "10.00% of allowed error used" in rendered
+        assert "30.00% of allowed error used" in rendered
+        assert "TensorRT versus reference scatter" in rendered
+        assert rendered.count('<circle class="feature-scatter-point') == 240
+        assert 'data-sample-count="240"' in rendered
+        assert 'data-total-pairs="402"' in rendered
+        assert "240 bounded paired values from 402 full-tensor elements" in rendered
+        assert "largest absolute deltas plus a uniform sample" in rendered
+        assert "Five largest paired element deltas" in rendered
+        assert rendered.count('class="feature-heatmap-cell"') == 196
+        assert 'role="img"' in rendered
+        assert "14 by 14 patch-token cosine error-budget heatmap" in rendered
+        assert 'data-grid-rows="14"' in rendered
+        assert 'data-grid-cols="14"' in rendered
+        assert 'data-scale-threshold="0.995000000"' in rendered
+        assert 'data-patch-index="0"' in rendered
+        assert "relative L2 error" in rendered
+        assert "Observed range:" in rendered
+        assert "Worst observed patch" in rendered
+        assert "0% ideal" in rendered
+        assert "100% limit" in rendered
+        assert "percentile gate applies to the aggregate p01 metric" in rendered
+        assert "Row (1-based)" in rendered
+        assert "Column (1-based)" in rendered
+        raw_tag = '<details class="feature-raw-details">'
+        assert raw_tag in rendered
+        assert raw_tag.replace(">", " open>") not in rendered
+        assert "&lt;... 378 more values&gt;" in rendered
         assert "Reproduction Commands" in rendered
         assert "trtmc extract-features" in rendered
         assert "Detailed Timing" in rendered
+
+    def test_image_feature_failure_is_explicit_without_changing_criteria(self):
+        mod = _import_report()
+        result = _make_result(
+            status="fail",
+            task_strategy="image_feature_extraction",
+            metrics={
+                "shape_match": {
+                    "value": 0.0,
+                    "threshold": 1.0,
+                    "operator": "==",
+                    "passed": False,
+                },
+                "full_cosine": {
+                    "value": 0.98,
+                    "threshold": 0.999,
+                    "operator": ">=",
+                    "passed": False,
+                },
+            },
+            stage_outputs={},
+        )
+
+        rendered = mod.render_image_feature_model(result, project_dir=None)
+
+        assert "shape_match exact invariant FAIL" in rendered
+        assert "feature-criterion-fail" in rendered
+        assert "0.980000" in rendered
+        assert "0.999000" in rendered
+        assert "Margin -0.019000" in rendered
+        assert "shortfall" in rendered
+        assert "scatter unavailable" in rendered
+        assert "heatmap unavailable" in rendered
+
+    def test_image_feature_malformed_tensor_falls_back_to_collapsed_raw(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="image_feature_extraction",
+            metrics={
+                "full_cosine": {
+                    "value": 0.9999,
+                    "threshold": 0.999,
+                    "operator": ">=",
+                    "passed": True,
+                },
+            },
+            detailed_timing={"comparison_s": 0.01},
+            repro_commands={"TRT": "trtmc extract-features model.bundle --image input.png"},
+            stage_outputs={
+                "trt_full_inference": {
+                    "data": {
+                        "last_hidden_state": {"shape": [1, 5, 2], "data": [0.1]},
+                        "pooler_output": {"shape": [1, 2], "data": [0.1, 0.2]},
+                        "num_register_tokens": 0,
+                    },
+                },
+                "ref_full_inference": {
+                    "data": {
+                        "last_hidden_state": {
+                            "shape": [1, 5, 2],
+                            "data": [0.1] * 10,
+                        },
+                        "pooler_output": {"shape": [1, 2], "data": [0.1, 0.2]},
+                        "num_register_tokens": 0,
+                    },
+                },
+            },
+        )
+
+        rendered = mod.render_image_feature_model(result, project_dir=None)
+
+        assert "Feature Parity Overview" in rendered
+        assert "Paired full-tensor scatter unavailable" in rendered
+        assert "Patch cosine heatmap unavailable" in rendered
+        assert 'class="feature-scatter-point"' not in rendered
+        assert 'class="feature-heatmap-cell"' not in rendered
+        assert '<details class="feature-raw-details">' in rendered
+        assert "All recorded metrics" in rendered
+        assert "Reproduction Commands" in rendered
+        assert "Detailed Timing" in rendered
+
+    def test_scatter_includes_unsampled_outlier_and_uses_all_pair_extrema(self):
+        mod = _import_report()
+        total = 1000
+        reference_values = [index / 1000.0 for index in range(total)]
+        trt_values = list(reference_values)
+        naive_uniform = set(mod._sample_pair_indices(total, mod._MAX_FEATURE_SCATTER_POINTS))
+        outlier_index = next(index for index in range(100, total) if index not in naive_uniform)
+        trt_values[outlier_index] += 5.0
+        finite_indices = list(range(total))
+        selected, _ = mod._bounded_pair_indices(
+            trt_values,
+            reference_values,
+            finite_indices,
+            mod._MAX_FEATURE_SCATTER_POINTS,
+        )
+        axis_extreme_index = next(
+            index for index in range(20, total) if index not in selected
+        )
+        reference_values[axis_extreme_index] = 100.0
+        trt_values[axis_extreme_index] = 100.0
+        trt_tensor = {"shape": [1, 250, 4], "values": trt_values}
+        ref_tensor = {"shape": [1, 250, 4], "values": reference_values}
+
+        rendered, error = mod._render_feature_scatter(trt_tensor, ref_tensor)
+
+        assert error is None
+        assert outlier_index not in naive_uniform
+        assert (
+            f'class="feature-scatter-point feature-scatter-worst" '
+            f'data-flat-index="{outlier_index}"'
+        ) in rendered
+        assert f'data-flat-index="{axis_extreme_index}"' not in rendered
+        assert 'data-axis-max="100"' in rendered
+        assert rendered.count("<circle class=\"feature-scatter-point") <= 240
+        assert "Absolute delta" in rendered
+        assert "token, and channel indices are zero-based" in rendered
+
+    def test_metric_pass_state_rejects_strings_and_flags_inconsistency(self):
+        mod = _import_report()
+        invalid = _make_result(
+            task_strategy="image_feature_extraction",
+            metrics={
+                "shape_match": {
+                    "value": 0.0,
+                    "threshold": 1.0,
+                    "operator": "==",
+                    "passed": "false",
+                },
+                "full_cosine": {
+                    "value": 0.9,
+                    "threshold": 0.999,
+                    "operator": ">=",
+                    "passed": "false",
+                },
+            },
+            stage_outputs={},
+        )
+
+        invalid_html = mod.render_image_feature_model(invalid, project_dir=None)
+        metrics_html = mod._render_metrics_table(invalid["stages"])
+
+        assert "shape_match exact invariant INVALID" in invalid_html
+        assert "feature-criterion-unknown" in invalid_html
+        assert "INVALID recorded pass state" in invalid_html
+        assert "Verdict is not inferred from the numeric equation" in invalid_html
+        assert "INVALID" in metrics_html
+
+        inconsistent = _make_result(
+            task_strategy="image_feature_extraction",
+            metrics={
+                "full_cosine": {
+                    "value": 0.9,
+                    "threshold": 0.999,
+                    "operator": ">=",
+                    "passed": True,
+                },
+            },
+            stage_outputs={},
+        )
+        inconsistent_html = mod.render_image_feature_model(
+            inconsistent, project_dir=None
+        )
+
+        assert "feature-metric-inconsistent" in inconsistent_html
+        assert "Recorded <strong>PASS</strong> is inconsistent" in inconsistent_html
+        assert "numeric equation, which is not satisfied" in inconsistent_html
+        assert "recorded verdict remains the displayed source of truth" in inconsistent_html
+
+    def test_image_feature_nonfinite_and_extreme_values_are_safe(self):
+        mod = _import_report()
+        nonfinite = _make_result(
+            task_strategy="image_feature_extraction",
+            metrics={
+                "p01_patch_cosine": {
+                    "value": 0.9,
+                    "threshold": 0.8,
+                    "operator": ">=",
+                    "passed": True,
+                },
+            },
+            stage_outputs={
+                prefix + "_full_inference": {
+                    "data": {
+                        "last_hidden_state": {
+                            "shape": [1, 5, 1],
+                            "data": [float("nan"), 0.0, 0.0, 0.0, 0.0],
+                        },
+                        "pooler_output": {"shape": [1, 1], "data": [0.0]},
+                        "num_register_tokens": 0,
+                    }
+                }
+                for prefix in ("trt", "ref")
+            },
+        )
+        nonfinite_html = mod.render_image_feature_model(nonfinite, project_dir=None)
+
+        assert "contains a non-finite numeric value" in nonfinite_html
+        assert 'class="feature-scatter-point' not in nonfinite_html
+        assert 'class="feature-heatmap-cell"' not in nonfinite_html
+
+        ref_values = [1e308, -1e308, 1e308, 1e308, -1e308] * 2
+        trt_values = [-1e308, 1e308, 1e308, 1e308, -1e308] * 2
+        extreme = _make_result(
+            task_strategy="image_feature_extraction",
+            metrics={
+                "p01_patch_cosine": {
+                    "value": 0.5,
+                    "threshold": 0.0,
+                    "operator": ">=",
+                    "passed": True,
+                },
+            },
+            stage_outputs={
+                "trt_full_inference": {
+                    "data": {
+                        "last_hidden_state": {"shape": [1, 5, 2], "data": trt_values},
+                        "pooler_output": {"shape": [1, 2], "data": trt_values[:2]},
+                        "num_register_tokens": 0,
+                    }
+                },
+                "ref_full_inference": {
+                    "data": {
+                        "last_hidden_state": {"shape": [1, 5, 2], "data": ref_values},
+                        "pooler_output": {"shape": [1, 2], "data": ref_values[:2]},
+                        "num_register_tokens": 0,
+                    }
+                },
+            },
+        )
+        extreme_html = mod.render_image_feature_model(extreme, project_dir=None)
+
+        assert '<circle class="feature-scatter-point' in extreme_html
+        assert 'class="feature-heatmap-cell"' in extreme_html
+        assert "exceeds float range" in extreme_html
+        assert not re.search(
+            r'(?:cx|cy|x1|x2|y1|y2|data-[^=]+)="[^"]*(?:nan|inf)',
+            extreme_html.lower(),
+        )
+
+    def test_convnext_feature_topology_renders_seven_by_seven_heatmap(self):
+        mod = _import_report()
+        shape = [1, 50, 2]
+        ref_values = [float(index % 17 + 1) for index in range(100)]
+        trt_values = [value + 0.0001 for value in ref_values]
+        result = _make_result(
+            task_strategy="image_feature_extraction",
+            family="dinov3",
+            metrics={
+                "p01_patch_cosine": {
+                    "value": 0.9999,
+                    "threshold": 0.995,
+                    "operator": ">=",
+                    "passed": True,
+                },
+            },
+            stage_outputs={
+                prefix + "_full_inference": {
+                    "data": {
+                        "last_hidden_state": {
+                            "shape": shape,
+                            "data": trt_values if prefix == "trt" else ref_values,
+                        },
+                        "pooler_output": {
+                            "shape": [1, 2],
+                            "data": (trt_values if prefix == "trt" else ref_values)[:2],
+                        },
+                        "num_register_tokens": 0,
+                    }
+                }
+                for prefix in ("trt", "ref")
+            },
+        )
+
+        rendered = mod.render_image_feature_model(result, project_dir=None)
+
+        assert "Patch tokens</span><strong>49" in rendered
+        assert "Patch grid</span><strong>7 \u00d7 7" in rendered
+        assert 'data-grid-rows="7"' in rendered
+        assert 'data-grid-cols="7"' in rendered
+        assert rendered.count('class="feature-heatmap-cell"') == 49
 
     def test_diffusion_text_uses_paired_text_renderer(self):
         mod = _import_report()
@@ -2242,6 +2603,23 @@ class TestEvidenceCompleteness:
         assert "alpha-small" in rendered
         assert "All required user-facing evidence is embedded" in rendered
 
+    def test_batched_isolation_proof_details_are_collapsed_by_default(self):
+        mod = _import_report()
+        context = {
+            "model": "dinov3",
+            "outcome": "passed",
+            "passed": True,
+            "gpu_id": "2",
+            "runtime_library": "libtrtmc_model_dinov3.so",
+            "selection": {"e2e_cases": [{"name": "dinov3-vits16-timm-l0"}]},
+        }
+
+        rendered = mod.render_proof_batch_section([context])
+
+        assert "Isolated Model Proofs" in rendered
+        assert '<details class="proof-model-details">' in rendered
+        assert '<details class="proof-model-details" open>' not in rendered
+
     def test_successful_proof_context_requires_complete_isolation_metadata(self):
         mod = _import_report()
         steps = {
@@ -2493,16 +2871,22 @@ class TestDashboardHelpers:
             },
         )
 
-        assert mod._key_metric(result) == "full_cosine=0.999900"
+        assert mod._key_metric(result) == "full_cosine=0.999900 >= 0.999000"
 
     def test_key_metric_does_not_round_high_cosine_to_one(self):
         mod = _import_report()
         result = _make_result(
             task_strategy="image_feature_extraction",
-            metrics={"full_cosine": {"value": 0.9999683077024887}},
+            metrics={
+                "full_cosine": {
+                    "value": 0.9999683077024887,
+                    "threshold": 0.999,
+                    "operator": ">=",
+                }
+            },
         )
 
-        assert mod._key_metric(result) == "full_cosine=0.999968"
+        assert mod._key_metric(result) == "full_cosine=0.999968 >= 0.999000"
 
     def test_total_time(self):
         mod = _import_report()

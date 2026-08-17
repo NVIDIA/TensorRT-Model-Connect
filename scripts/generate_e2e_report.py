@@ -23,6 +23,7 @@ import argparse
 import base64
 import html
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -46,6 +47,12 @@ _MAX_EMBED_BYTES = 10 * 1024 * 1024
 
 # Number of evenly-spaced frames to embed for diffusion models.
 _MAX_DIFFUSION_FRAMES = 6
+
+# Image-feature plots stay compact even when a model emits a large activation
+# tensor.  The report visualizes a deterministic sample and derived per-token
+# similarities; it never serializes the complete tensors into the HTML.
+_MAX_FEATURE_SCATTER_POINTS = 240
+_MAX_FEATURE_HEATMAP_TOKENS = 1024
 
 _TRTMC_TIMING_RE = re.compile(
     r"^\[trtmc\.timing\]\s+"
@@ -95,7 +102,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "segmentation": "segmentation",
     "prompted_segmentation": "segmentation",
     "image_classification": "classification",
-    "image_feature_extraction": "structured",
+    "image_feature_extraction": "image_features",
     "encoder_only_nlp": "numeric",
     "embedding": "numeric",
     "reranking": "reranking",
@@ -697,6 +704,18 @@ def _resolve_frame_paths(
 # ---------------------------------------------------------------------------
 
 
+def _metric_recorded_state(metric: Dict[str, Any]) -> Tuple[str, str]:
+    """Return the literal recorded pass state without truthiness coercion."""
+    if "passed" not in metric:
+        return "UNKNOWN", "unknown"
+    passed = metric.get("passed")
+    if passed is True:
+        return "PASS", "pass"
+    if passed is False:
+        return "FAIL", "fail"
+    return "INVALID", "unknown"
+
+
 def _render_metrics_table(stages: Dict[str, Any]) -> str:
     """Render a table of all metrics across all stages."""
     rows: List[str] = []
@@ -707,17 +726,17 @@ def _render_metrics_table(stages: Dict[str, Any]) -> str:
                 value = m.get("value", "")
                 threshold = m.get("threshold")
                 operator = m.get("operator", "")
-                passed = m.get("passed", True)
+                state, state_class = _metric_recorded_state(m)
                 note = m.get("note", "")
             else:
                 value = m
                 threshold = None
                 operator = ""
-                passed = True
+                state, state_class = "UNKNOWN", "unknown"
                 note = ""
-            icon = "&#10003;" if passed else "&#10007;"
-            icon_cls = "pass-icon" if passed else "fail-icon"
-            row_cls = "metric-pass" if passed else "metric-fail"
+            icon = {"pass": "&#10003;", "fail": "&#10007;"}.get(state_class, "?")
+            icon_cls = f"{state_class}-icon"
+            row_cls = f"metric-{state_class}"
             thr_str = _format_value(threshold) if threshold is not None else "&mdash;"
             rows.append(
                 f"<tr class='{row_cls}'>"
@@ -726,7 +745,7 @@ def _render_metrics_table(stages: Dict[str, Any]) -> str:
                 f"<td>{_format_metric_value(metric_name, value)}</td>"
                 f"<td>{thr_str}</td>"
                 f"<td>{_esc(operator)}</td>"
-                f"<td class='{icon_cls}'>{icon}</td>"
+                f"<td class='{icon_cls}'>{icon} {_esc(state)}</td>"
                 f"<td>{_esc(note)}</td>"
                 f"</tr>"
             )
@@ -1527,6 +1546,862 @@ def _render_structured_stage_comparison(result: Dict[str, Any]) -> str:
         ))
     if not parts:
         return '<p class="missing">No serialized stage outputs were recorded.</p>'
+    return "\n".join(parts)
+
+
+def _feature_stage_pair(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Return the primary paired stage used by image-feature extraction."""
+    pairs = _stage_pairs(result)
+    if "full_inference" in pairs:
+        return pairs["full_inference"]
+    for pair in pairs.values():
+        if pair.get("trt") or pair.get("ref"):
+            return pair
+    return {}
+
+
+def _declared_tensor_shape(stage: Optional[Dict[str, Any]], name: str) -> Optional[List[int]]:
+    data = (stage or {}).get("data")
+    payload = data.get(name) if isinstance(data, dict) else None
+    shape = payload.get("shape") if isinstance(payload, dict) else None
+    if (
+        not isinstance(shape, list)
+        or not shape
+        or not all(isinstance(dim, int) and not isinstance(dim, bool) and dim > 0 for dim in shape)
+    ):
+        return None
+    return shape
+
+
+def _feature_tensor(
+    stage: Optional[Dict[str, Any]], name: str
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate and flatten one feature tensor without leaking it into HTML."""
+    shape = _declared_tensor_shape(stage, name)
+    if shape is None:
+        return None, f"{name} has no valid positive-integer shape"
+    data = (stage or {}).get("data")
+    payload = data.get(name) if isinstance(data, dict) else None
+    raw_values = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(raw_values, list):
+        return None, f"{name} has no numeric data list"
+
+    values: List[float] = []
+    stack: List[Any] = [raw_values]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, list):
+            stack.extend(reversed(current))
+            continue
+        if isinstance(current, bool) or not isinstance(current, (int, float)):
+            return None, f"{name} contains a non-numeric value"
+        try:
+            number = float(current)
+        except (OverflowError, ValueError):
+            return None, f"{name} contains a value outside the supported numeric range"
+        if not math.isfinite(number):
+            return None, f"{name} contains a non-finite numeric value"
+        values.append(number)
+
+    expected = math.prod(shape)
+    if len(values) != expected:
+        return None, (
+            f"{name} has {len(values):,} values but shape {_shape_text(shape)} "
+            f"requires {expected:,}"
+        )
+    return {"shape": shape, "values": values}, None
+
+
+def _feature_register_count(stage: Optional[Dict[str, Any]]) -> Optional[int]:
+    data = (stage or {}).get("data")
+    value = data.get("num_register_tokens") if isinstance(data, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _shape_text(shape: Optional[List[int]]) -> str:
+    if shape is None:
+        return "Unavailable"
+    return "[" + " \u00d7 ".join(str(dim) for dim in shape) + "]"
+
+
+def _derive_feature_topology(
+    trt_shape: Optional[List[int]],
+    ref_shape: Optional[List[int]],
+    trt_registers: Optional[int],
+    ref_registers: Optional[int],
+) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
+    if trt_shape is None or ref_shape is None:
+        return None, "Topology unavailable because one or both hidden-state shapes are invalid."
+    if trt_shape != ref_shape:
+        return None, (
+            "Topology unavailable because TRT and reference hidden-state shapes differ: "
+            f"{_shape_text(trt_shape)} versus {_shape_text(ref_shape)}."
+        )
+    if len(trt_shape) != 3:
+        return None, (
+            "Topology unavailable because last_hidden_state is not a rank-3 "
+            f"[batch, tokens, width] tensor: {_shape_text(trt_shape)}."
+        )
+    if trt_registers is None or ref_registers is None:
+        return None, "Topology unavailable because a register-token count is missing or invalid."
+    if trt_registers != ref_registers:
+        return None, (
+            "Topology unavailable because TRT and reference register-token counts differ: "
+            f"{trt_registers} versus {ref_registers}."
+        )
+
+    batch, token_count, width = trt_shape
+    prefix_tokens = 1 + trt_registers
+    patch_tokens = token_count - prefix_tokens
+    if patch_tokens <= 0:
+        return None, (
+            f"Topology unavailable because {token_count} tokens do not leave a patch token "
+            f"after {prefix_tokens} prefix tokens."
+        )
+    grid = math.isqrt(patch_tokens)
+    return {
+        "batch": batch,
+        "token_count": token_count,
+        "width": width,
+        "cls_tokens": 1,
+        "register_tokens": trt_registers,
+        "prefix_tokens": prefix_tokens,
+        "patch_tokens": patch_tokens,
+        "grid": grid if grid * grid == patch_tokens else 0,
+    }, None
+
+
+def _render_feature_shapes_and_topology(
+    pair: Dict[str, Dict[str, Any]],
+) -> Tuple[str, Optional[Dict[str, int]], Optional[str]]:
+    trt_stage = pair.get("trt")
+    ref_stage = pair.get("ref")
+    trt_hidden_shape = _declared_tensor_shape(trt_stage, "last_hidden_state")
+    ref_hidden_shape = _declared_tensor_shape(ref_stage, "last_hidden_state")
+    trt_pooler_shape = _declared_tensor_shape(trt_stage, "pooler_output")
+    ref_pooler_shape = _declared_tensor_shape(ref_stage, "pooler_output")
+    trt_registers = _feature_register_count(trt_stage)
+    ref_registers = _feature_register_count(ref_stage)
+    topology, topology_error = _derive_feature_topology(
+        trt_hidden_shape,
+        ref_hidden_shape,
+        trt_registers,
+        ref_registers,
+    )
+
+    rows = []
+    for label, hidden_shape, pooler_shape, registers in (
+        ("TensorRT", trt_hidden_shape, trt_pooler_shape, trt_registers),
+        ("Reference", ref_hidden_shape, ref_pooler_shape, ref_registers),
+    ):
+        rows.append(
+            "<tr>"
+            f"<th scope=\"row\">{label}</th>"
+            f"<td><code>{_esc(_shape_text(hidden_shape))}</code></td>"
+            f"<td><code>{_esc(_shape_text(pooler_shape))}</code></td>"
+            f"<td>{registers if registers is not None else '&mdash;'}</td>"
+            "</tr>"
+        )
+    parts = [
+        '<table class="feature-shape-table">',
+        '<caption>Tensor shapes emitted by each implementation</caption>',
+        "<thead><tr><th>Implementation</th><th>Last hidden state</th>"
+        "<th>Pooler output</th><th>Register tokens</th></tr></thead>",
+        "<tbody>" + "".join(rows) + "</tbody></table>",
+    ]
+    if topology is not None:
+        grid_text = (
+            f"{topology['grid']} \u00d7 {topology['grid']}"
+            if topology["grid"]
+            else "Not square"
+        )
+        groups = (
+            ("Batch", topology["batch"]),
+            ("Embedding width", topology["width"]),
+            ("CLS tokens", topology["cls_tokens"]),
+            ("Register tokens", topology["register_tokens"]),
+            ("Prefix tokens", topology["prefix_tokens"]),
+            ("Patch tokens", topology["patch_tokens"]),
+            ("Patch grid", grid_text),
+        )
+        chips = "".join(
+            '<li class="feature-topology-chip">'
+            f'<span class="feature-chip-label">{_esc(label)}</span>'
+            f'<strong>{_esc(value)}</strong></li>'
+            for label, value in groups
+        )
+        parts.append(
+            '<ul class="feature-topology" aria-label="Derived feature token topology">'
+            f"{chips}</ul>"
+        )
+    else:
+        parts.append(f'<p class="feature-viz-unavailable">{_esc(topology_error)}</p>')
+    return "\n".join(parts), topology, topology_error
+
+
+def _feature_metric_entries(result: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    entries: List[Tuple[str, str, Dict[str, Any]]] = []
+    for stage_name, stage in (result.get("stages") or {}).items():
+        metrics = stage.get("metrics") if isinstance(stage, dict) else None
+        if not isinstance(metrics, dict):
+            continue
+        for name, metric in metrics.items():
+            if isinstance(metric, dict):
+                entries.append((str(stage_name), str(name), metric))
+    return entries
+
+
+def _feature_metric_threshold(result: Dict[str, Any], metric_name: str) -> Optional[float]:
+    for _, name, metric in _feature_metric_entries(result):
+        if name == metric_name:
+            return _metric_float(metric.get("threshold"))
+    return None
+
+
+def _metric_float(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _metric_equation_result(
+    value: Optional[float], threshold: Optional[float], operator: str
+) -> Optional[bool]:
+    if value is None or threshold is None:
+        return None
+    if operator == ">=":
+        return value >= threshold
+    if operator == "<=":
+        return value <= threshold
+    if operator == "==":
+        return value == threshold
+    return None
+
+
+def _metric_consistency_warning(
+    metric: Dict[str, Any],
+    value: Optional[float],
+    threshold: Optional[float],
+    operator: str,
+) -> str:
+    state, _ = _metric_recorded_state(metric)
+    if state == "INVALID":
+        return (
+            '<p class="feature-metric-warning" role="alert">INVALID recorded pass state: '
+            '<code>passed</code> must be a JSON boolean. Verdict is not inferred from the '
+            "numeric equation.</p>"
+        )
+    if state == "UNKNOWN":
+        return (
+            '<p class="feature-metric-warning" role="status">UNKNOWN recorded pass state: '
+            "the metric has no explicit boolean verdict.</p>"
+        )
+    equation_result = _metric_equation_result(value, threshold, operator)
+    recorded_result = state == "PASS"
+    if equation_result is not None and equation_result != recorded_result:
+        equation_label = "satisfied" if equation_result else "not satisfied"
+        return (
+            '<p class="feature-metric-warning" role="alert">Recorded '
+            f"<strong>{state}</strong> is inconsistent with the numeric equation, which is "
+            f"{equation_label}. The recorded verdict remains the displayed source of truth.</p>"
+        )
+    return ""
+
+
+def _render_feature_invariants(result: Dict[str, Any]) -> str:
+    items = []
+    for stage_name, name, metric in _feature_metric_entries(result):
+        if metric.get("operator") != "==":
+            continue
+        value = metric.get("value")
+        threshold = metric.get("threshold")
+        state, state_class = _metric_recorded_state(metric)
+        value_number = _metric_float(value)
+        threshold_number = _metric_float(threshold)
+        warning = _metric_consistency_warning(
+            metric, value_number, threshold_number, "=="
+        )
+        inconsistent_class = " feature-metric-inconsistent" if warning else ""
+        items.append(
+            f'<li class="feature-invariant-chip feature-invariant-{state_class}'
+            f'{inconsistent_class}" '
+            f'aria-label="{_esc(name)} exact invariant {state}">'
+            f'<span class="feature-invariant-state">{state}</span>'
+            f'<strong>{_esc(name)}</strong>'
+            f'<span>{_format_metric_value(name, value)} == '
+            f'{_format_metric_value(name, threshold)}</span>'
+            f'<small>{_esc(stage_name)}</small>{warning}</li>'
+        )
+    if not items:
+        return '<p class="feature-viz-unavailable">No exact invariant metrics were recorded.</p>'
+    return (
+        '<section class="feature-invariants" aria-label="Exact invariants">'
+        "<h4>Exact invariants</h4>"
+        '<ul aria-label="Exact invariant results">' + "".join(items) + "</ul></section>"
+    )
+
+
+def _feature_budget_usage(
+    name: str, value: float, threshold: float, operator: str
+) -> Optional[float]:
+    """Return percent of the allowed distance from an ideal value."""
+    if operator == ">=" and "cosine" in name and threshold < 1.0:
+        usage = max(0.0, 100.0 * ((1.0 - value) / (1.0 - threshold)))
+    elif operator == "<=" and value >= 0.0 and threshold > 0.0:
+        usage = 100.0 * (value / threshold)
+    else:
+        return None
+    return usage if math.isfinite(usage) else None
+
+
+def _render_feature_metric_bars(result: Dict[str, Any]) -> str:
+    bars = []
+    for stage_name, name, metric in _feature_metric_entries(result):
+        operator = str(metric.get("operator") or "")
+        if operator not in {">=", "<="}:
+            continue
+        value = _metric_float(metric.get("value"))
+        threshold = _metric_float(metric.get("threshold"))
+        if value is None or threshold is None:
+            continue
+        margin = value - threshold if operator == ">=" else threshold - value
+        margin = margin if math.isfinite(margin) else None
+        state, state_class = _metric_recorded_state(metric)
+        budget_usage = _feature_budget_usage(name, value, threshold, operator)
+        warning = _metric_consistency_warning(metric, value, threshold, operator)
+        inconsistent_class = " feature-metric-inconsistent" if warning else ""
+        margin_label = (
+            "headroom" if margin is not None and margin >= 0.0 else "shortfall"
+        )
+        margin_text = f"{margin:+.6f}" if margin is not None else "not representable"
+        value_text = _format_metric_value(name, value)
+        threshold_text = _format_metric_value(name, threshold)
+        aria = (
+            f"{name}: value {value_text} {operator} threshold {threshold_text}; "
+            f"margin {margin_text}; recorded state {state}"
+        )
+        if budget_usage is None:
+            budget_html = (
+                '<p class="feature-budget-unavailable">No normalized error-budget scale '
+                "applies; use the printed criterion.</p>"
+            )
+        else:
+            budget_position = min(100.0, max(0.0, budget_usage))
+            budget_aria = f"{aria}; {budget_usage:.2f} percent of allowed error used"
+            budget_html = (
+                f'<div class="feature-budget-bar" role="meter" '
+                f'aria-label="{_esc(budget_aria)}" aria-valuemin="0" '
+                f'aria-valuemax="100" aria-valuenow="{budget_position:.3f}" '
+                f'style="--feature-value:{budget_position:.3f}%">'
+                '<span class="feature-budget-fill"></span>'
+                '<span class="feature-threshold-marker" aria-hidden="true"></span>'
+                '<span class="feature-value-marker" aria-hidden="true"></span></div>'
+                '<p class="feature-budget-label">'
+                f'<strong>{budget_usage:.2f}% of allowed error used</strong>'
+                "<span>0% ideal &middot; 100% limit</span></p>"
+            )
+        bars.append(
+            f'<article class="feature-criterion feature-criterion-{state_class}'
+            f'{inconsistent_class}">'
+            '<header><div>'
+            f'<strong>{_esc(name)}</strong><small>{_esc(stage_name)}</small></div>'
+            f'<span class="feature-criterion-state">{state}</span></header>'
+            f'<p class="feature-criterion-equation"><data value="{value}">{value_text}</data> '
+            f'<span>{_esc(operator)}</span> '
+            f'<data value="{threshold}">{threshold_text}</data></p>'
+            f"{budget_html}"
+            f'<p class="feature-margin"><strong>Margin {margin_text}</strong> '
+            f'({margin_label}; {_esc(operator)} criterion)</p>{warning}</article>'
+        )
+    if not bars:
+        return '<p class="feature-viz-unavailable">No thresholded numeric metrics were recorded.</p>'
+    return (
+        '<section class="feature-criteria" aria-label="Threshold and error budgets">'
+        "<h4>Threshold and error budgets</h4>"
+        '<p class="feature-scale-note">Bars normalize comparable error budgets: 0% is the '
+        "ideal value and 100% is the configured limit. The printed value, operator, threshold, "
+        "and margin remain authoritative.</p>"
+        '<div class="feature-criteria-grid">' + "".join(bars) + "</div></section>"
+    )
+
+
+def _sample_pair_indices(length: int, maximum: int) -> List[int]:
+    if length <= 0:
+        return []
+    if length <= maximum:
+        return list(range(length))
+    return [round(index * (length - 1) / (maximum - 1)) for index in range(maximum)]
+
+
+def _finite_abs_delta(left: float, right: float) -> Optional[float]:
+    delta = abs(left - right)
+    return delta if math.isfinite(delta) else None
+
+
+def _worst_pair_indices(
+    trt_values: List[float], ref_values: List[float], indices: List[int], count: int
+) -> List[int]:
+    def sort_key(index: int) -> Tuple[float, int]:
+        delta = _finite_abs_delta(trt_values[index], ref_values[index])
+        return (-(delta if delta is not None else sys.float_info.max), index)
+
+    return sorted(indices, key=sort_key)[:count]
+
+
+def _bounded_pair_indices(
+    trt_values: List[float],
+    ref_values: List[float],
+    finite_indices: List[int],
+    maximum: int,
+) -> Tuple[List[int], List[int]]:
+    worst = _worst_pair_indices(trt_values, ref_values, finite_indices, min(5, maximum))
+    if len(finite_indices) <= maximum:
+        return finite_indices, worst
+    worst_set = set(worst)
+    uniform_candidates = [index for index in finite_indices if index not in worst_set]
+    uniform_count = maximum - len(worst)
+    uniform_offsets = _sample_pair_indices(len(uniform_candidates), uniform_count)
+    selected = worst + [uniform_candidates[offset] for offset in uniform_offsets]
+    return sorted(set(selected)), worst
+
+
+def _axis_ratio(value: float, low: float, high: float) -> float:
+    if high == low:
+        return 0.5
+    direct_span = high - low
+    if math.isfinite(direct_span) and direct_span > 0.0:
+        ratio = (value - low) / direct_span
+    else:
+        scale = max(abs(low), abs(high), 1.0)
+        scaled_low = low / scale
+        scaled_span = high / scale - scaled_low
+        ratio = (value / scale - scaled_low) / scaled_span if scaled_span > 0.0 else 0.5
+    if not math.isfinite(ratio):
+        return 0.5
+    return min(1.0, max(0.0, ratio))
+
+
+def _feature_flat_coordinates(index: int, shape: List[int]) -> Tuple[str, str]:
+    if len(shape) != 3:
+        return "&mdash;", "&mdash;"
+    _, tokens, width = shape
+    batch = index // (tokens * width)
+    token = (index // width) % tokens
+    channel = index % width
+    return f"batch {batch}, token {token}", str(channel)
+
+
+def _render_feature_worst_table(
+    trt_tensor: Dict[str, Any], ref_tensor: Dict[str, Any], worst_indices: List[int]
+) -> str:
+    rows = []
+    trt_values = trt_tensor["values"]
+    ref_values = ref_tensor["values"]
+    for index in worst_indices:
+        token, channel = _feature_flat_coordinates(index, trt_tensor["shape"])
+        delta = _finite_abs_delta(trt_values[index], ref_values[index])
+        delta_text = f"{delta:.7g}" if delta is not None else "exceeds float range"
+        rows.append(
+            "<tr>"
+            f"<td>{index}</td><td>{token}</td><td>{channel}</td>"
+            f"<td>{ref_values[index]:.7g}</td><td>{trt_values[index]:.7g}</td>"
+            f"<td>{delta_text}</td></tr>"
+        )
+    return (
+        '<table class="feature-worst-table">'
+        '<caption>Five largest paired element deltas; flat, token, and channel indices '
+        "are zero-based.</caption>"
+        "<thead><tr><th>Flat index</th><th>Token</th><th>Channel</th>"
+        "<th>Reference</th><th>TensorRT</th><th>Absolute delta</th></tr></thead>"
+        "<tbody>" + "".join(rows) + "</tbody></table>"
+    )
+
+
+def _render_feature_scatter(
+    trt_tensor: Optional[Dict[str, Any]],
+    ref_tensor: Optional[Dict[str, Any]],
+) -> Tuple[str, Optional[str]]:
+    if trt_tensor is None or ref_tensor is None:
+        return "", "Paired full-tensor scatter unavailable because a tensor payload is invalid."
+    if trt_tensor["shape"] != ref_tensor["shape"]:
+        return "", "Paired full-tensor scatter unavailable because tensor shapes differ."
+
+    trt_values = trt_tensor["values"]
+    ref_values = ref_tensor["values"]
+    finite_indices = [
+        index
+        for index, (trt_value, ref_value) in enumerate(zip(trt_values, ref_values))
+        if math.isfinite(trt_value) and math.isfinite(ref_value)
+    ]
+    if not finite_indices:
+        return "", "Paired full-tensor scatter unavailable because no finite value pairs exist."
+    indices, worst_indices = _bounded_pair_indices(
+        trt_values,
+        ref_values,
+        finite_indices,
+        _MAX_FEATURE_SCATTER_POINTS,
+    )
+    worst_set = set(worst_indices)
+
+    values = [
+        value
+        for index in finite_indices
+        for value in (trt_values[index], ref_values[index])
+    ]
+    low, high = min(values), max(values)
+    width, height, pad = 620.0, 390.0, 48.0
+
+    def x_position(value: float) -> float:
+        return pad + _axis_ratio(value, low, high) * (width - 2.0 * pad)
+
+    def y_position(value: float) -> float:
+        return height - pad - _axis_ratio(value, low, high) * (height - 2.0 * pad)
+
+    points = []
+    for index in indices:
+        trt_value = trt_values[index]
+        ref_value = ref_values[index]
+        label = f"flat index {index}: reference {ref_value:.7g}, TRT {trt_value:.7g}"
+        point_class = "feature-scatter-point"
+        if index in worst_set:
+            point_class += " feature-scatter-worst"
+        points.append(
+            f'<circle class="{point_class}" data-flat-index="{index}" '
+            f'cx="{x_position(ref_value):.2f}" cy="{y_position(trt_value):.2f}" '
+            f'r="2.6" aria-label="{_esc(label)}">'
+            f"<title>{_esc(label)}</title></circle>"
+        )
+    sampled_count = len(indices)
+    total_count = len(trt_values)
+    if sampled_count == total_count:
+        sample_label = f"All {total_count:,} paired full-tensor values"
+    else:
+        sample_label = (
+            f"{sampled_count} bounded paired values from {total_count:,} full-tensor "
+            f"elements: {len(worst_indices)} largest absolute deltas plus a uniform sample"
+        )
+    if len(finite_indices) != total_count:
+        sample_label += f" ({len(finite_indices):,} finite pairs available)"
+    aria = (
+        f"TensorRT versus reference scatter; {sample_label}; "
+        "reference on x axis and TensorRT on y axis"
+    )
+    svg = (
+        '<figure class="feature-scatter">'
+        f'<svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        f'aria-label="{_esc(aria)}" data-sample-count="{sampled_count}" '
+        f'data-total-pairs="{total_count}" data-axis-min="{low:.17g}" '
+        f'data-axis-max="{high:.17g}">'
+        f"<title>{_esc(aria)}</title>"
+        '<rect x="0" y="0" width="620" height="390" fill="#ffffff" />'
+        f'<line class="feature-scatter-diagonal" x1="{pad}" y1="{height - pad}" '
+        f'x2="{width - pad}" y2="{pad}" />'
+        f'<line class="feature-scatter-axis" x1="{pad}" y1="{height - pad}" '
+        f'x2="{width - pad}" y2="{height - pad}" />'
+        f'<line class="feature-scatter-axis" x1="{pad}" y1="{pad}" '
+        f'x2="{pad}" y2="{height - pad}" />'
+        + "".join(points)
+        + f'<text x="{width / 2:.1f}" y="{height - 8:.1f}" text-anchor="middle">'
+        "Reference value</text>"
+        f'<text x="14" y="{height / 2:.1f}" text-anchor="middle" '
+        f'transform="rotate(-90 14 {height / 2:.1f})">TensorRT value</text>'
+        "</svg>"
+        f"<figcaption><strong>{_esc(sample_label)}.</strong> "
+        "Points on the dashed diagonal are exact matches; hover a point for its flat "
+        f"index and paired values. Shared axes use extrema from all {len(finite_indices):,} "
+        "finite pairs.</figcaption>"
+        f"{_render_feature_worst_table(trt_tensor, ref_tensor, worst_indices)}</figure>"
+    )
+    return svg, None
+
+
+def _cosine_pair(lhs: List[float], rhs: List[float]) -> Optional[float]:
+    if not lhs or len(lhs) != len(rhs):
+        return None
+    if not all(math.isfinite(value) for value in lhs + rhs):
+        return None
+    left_scale = max(abs(value) for value in lhs)
+    right_scale = max(abs(value) for value in rhs)
+    if left_scale == 0.0 or right_scale == 0.0:
+        return 1.0 if lhs == rhs else 0.0
+    scaled_left = [value / left_scale for value in lhs]
+    scaled_right = [value / right_scale for value in rhs]
+    dot = sum(left * right for left, right in zip(scaled_left, scaled_right))
+    left_norm = math.sqrt(sum(value * value for value in scaled_left))
+    right_norm = math.sqrt(sum(value * value for value in scaled_right))
+    denominator = left_norm * right_norm
+    if denominator == 0.0 or not math.isfinite(denominator):
+        return None
+    cosine = dot / denominator
+    if not math.isfinite(cosine):
+        return None
+    return min(1.0, max(-1.0, cosine))
+
+
+def _stable_relative_l2(lhs: List[float], rhs: List[float]) -> Optional[float]:
+    scale = max((abs(value) for value in lhs + rhs), default=0.0)
+    if scale == 0.0:
+        return 0.0
+    scaled_lhs = [value / scale for value in lhs]
+    scaled_rhs = [value / scale for value in rhs]
+    error_norm = math.sqrt(
+        sum((left - right) ** 2 for left, right in zip(scaled_lhs, scaled_rhs))
+    )
+    reference_norm = math.sqrt(sum(value * value for value in scaled_rhs))
+    if reference_norm == 0.0:
+        return 0.0 if error_norm == 0.0 else None
+    ratio = error_norm / reference_norm
+    return ratio if math.isfinite(ratio) else None
+
+
+def _heatmap_budget_color(budget_usage: float) -> str:
+    ratio = min(1.0, max(0.0, budget_usage / 100.0))
+    stops = (
+        (0.00, (29, 78, 216)),
+        (0.25, (147, 197, 253)),
+        (0.50, (253, 230, 138)),
+        (0.75, (251, 146, 60)),
+        (1.00, (220, 38, 38)),
+    )
+    lower_position, lower_color = stops[0]
+    upper_position, upper_color = stops[-1]
+    for position, color in stops[1:]:
+        if ratio <= position:
+            upper_position, upper_color = position, color
+            break
+        lower_position, lower_color = position, color
+    span = upper_position - lower_position or 1.0
+    local_ratio = (ratio - lower_position) / span
+    rgb = tuple(
+        round(first + local_ratio * (second - first))
+        for first, second in zip(lower_color, upper_color)
+    )
+    return f"rgb({rgb[0]} {rgb[1]} {rgb[2]})"
+
+
+def _render_patch_cosine_heatmap(
+    trt_tensor: Optional[Dict[str, Any]],
+    ref_tensor: Optional[Dict[str, Any]],
+    topology: Optional[Dict[str, int]],
+    patch_threshold: Optional[float],
+) -> Tuple[str, Optional[str]]:
+    if trt_tensor is None or ref_tensor is None or topology is None:
+        return "", "Patch cosine heatmap unavailable because tensor topology is invalid."
+    if trt_tensor["shape"] != ref_tensor["shape"]:
+        return "", "Patch cosine heatmap unavailable because tensor shapes differ."
+    if topology["batch"] != 1:
+        return "", (
+            "Patch cosine heatmap unavailable because a single spatial map requires batch size 1; "
+            f"observed {topology['batch']}."
+        )
+    grid = topology["grid"]
+    if grid <= 0:
+        return "", (
+            f"Patch cosine heatmap unavailable because {topology['patch_tokens']} patch tokens "
+            "do not form a square grid."
+        )
+    if topology["patch_tokens"] > _MAX_FEATURE_HEATMAP_TOKENS:
+        return "", (
+            f"Patch cosine heatmap omitted because {topology['patch_tokens']} patches exceed the "
+            f"bounded {_MAX_FEATURE_HEATMAP_TOKENS}-cell report limit."
+        )
+    if patch_threshold is None or not -1.0 <= patch_threshold < 1.0:
+        return "", (
+            "Patch cosine heatmap unavailable because the recorded p01_patch_cosine "
+            "threshold is missing or invalid."
+        )
+
+    width = topology["width"]
+    patch_start = topology["prefix_tokens"]
+    trt_values = trt_tensor["values"]
+    ref_values = ref_tensor["values"]
+    cosines: List[float] = []
+    relative_errors: List[Optional[float]] = []
+    budgets: List[float] = []
+    for patch_index in range(topology["patch_tokens"]):
+        start = (patch_start + patch_index) * width
+        end = start + width
+        trt_patch = trt_values[start:end]
+        ref_patch = ref_values[start:end]
+        cosine = _cosine_pair(trt_patch, ref_patch)
+        if cosine is None:
+            return "", (
+                "Patch cosine heatmap unavailable because at least one patch has invalid or "
+                "non-finite values."
+            )
+        cosines.append(cosine)
+        relative_errors.append(_stable_relative_l2(trt_patch, ref_patch))
+        budget = 100.0 * (1.0 - cosine) / (1.0 - patch_threshold)
+        if not math.isfinite(budget):
+            return "", "Patch cosine heatmap unavailable because its budget scale overflowed."
+        budgets.append(max(0.0, budget))
+
+    observed_low, observed_high = min(cosines), max(cosines)
+    worst_index = min(range(len(cosines)), key=cosines.__getitem__)
+    worst_row, worst_column = divmod(worst_index, grid)
+    cell, gap = 22, 2
+    extent = grid * (cell + gap)
+    cells = []
+    for patch_index, cosine in enumerate(cosines):
+        row, column = divmod(patch_index, grid)
+        relative_error = relative_errors[patch_index]
+        relative_label = (
+            f"{relative_error:.6f}" if relative_error is not None else "unavailable"
+        )
+        label = (
+            f"Patch {patch_index}, row {row + 1}, column {column + 1}, "
+            f"cosine {cosine:.6f}, {budgets[patch_index]:.2f} percent of p01 error "
+            f"budget, relative L2 error {relative_label}; row and column are 1-based"
+        )
+        relative_attribute = (
+            f' data-relative-l2="{relative_error:.9f}"'
+            if relative_error is not None
+            else ""
+        )
+        cells.append(
+            f'<rect class="feature-heatmap-cell" x="{column * (cell + gap) + 1}" '
+            f'y="{row * (cell + gap) + 1}" width="{cell}" height="{cell}" rx="2" '
+            f'fill="{_heatmap_budget_color(budgets[patch_index])}" '
+            f'data-patch-index="{patch_index}" data-cosine="{cosine:.9f}" '
+            f'data-budget-used="{budgets[patch_index]:.6f}"{relative_attribute} '
+            f'aria-label="{_esc(label)}"><title>{_esc(label)}</title></rect>'
+        )
+    aria = (
+        f"{grid} by {grid} patch-token cosine error-budget heatmap relative to recorded "
+        f"p01 threshold {patch_threshold:.6f}; observed cosine range "
+        f"{observed_low:.6f} to {observed_high:.6f}; rows and columns are 1-based"
+    )
+    worst_patch_rows = []
+    for patch_index in sorted(
+        range(len(cosines)), key=lambda index: (cosines[index], index)
+    )[:5]:
+        row, column = divmod(patch_index, grid)
+        relative_error = relative_errors[patch_index]
+        relative_text = (
+            f"{relative_error:.6f}" if relative_error is not None else "Unavailable"
+        )
+        worst_patch_rows.append(
+            "<tr>"
+            f"<td>{patch_index}</td><td>{row + 1}</td><td>{column + 1}</td>"
+            f"<td>{cosines[patch_index]:.6f}</td>"
+            f"<td>{budgets[patch_index]:.2f}%</td><td>{relative_text}</td></tr>"
+        )
+    worst_patch_table = (
+        '<table class="feature-worst-table feature-worst-patches">'
+        '<caption>Five lowest-cosine spatial patches; row and column are 1-based.</caption>'
+        "<thead><tr><th>Patch index</th><th>Row (1-based)</th><th>Column (1-based)</th>"
+        "<th>Cosine</th><th>Budget used</th><th>Relative L2</th></tr></thead><tbody>"
+        + "".join(worst_patch_rows)
+        + "</tbody></table>"
+    )
+    return (
+        '<figure class="feature-heatmap">'
+        f'<svg class="feature-heatmap-svg" viewBox="0 0 {extent} {extent}" '
+        f'role="img" aria-label="{_esc(aria)}" data-grid-rows="{grid}" '
+        f'data-grid-cols="{grid}" data-scale-threshold="{patch_threshold:.9f}">'
+        f"<title>{_esc(aria)}</title>"
+        '<desc>Each square is one row-major spatial patch. Color uses a fixed error-budget '
+        "scale from zero percent ideal to one hundred percent at the recorded p01 limit.</desc>"
+        + "".join(cells)
+        + "</svg>"
+        '<div class="feature-heatmap-legend" role="img" '
+        f'aria-label="Patch cosine error-budget legend: 0 percent ideal, 50 percent, '
+        f'100 percent at p01 threshold {patch_threshold:.6f}">'
+        '<span class="feature-heatmap-gradient" aria-hidden="true"></span>'
+        '<span>0% ideal</span><span>50%</span><span>100% limit</span></div>'
+        '<figcaption><strong>Patch-token cosine by spatial position.</strong> '
+        f'Observed range: <data>{observed_low:.6f}</data> to '
+        f'<data>{observed_high:.6f}</data>. Worst observed patch: index {worst_index} '
+        f'(row {worst_row + 1}, column {worst_column + 1}; 1-based), cosine '
+        f'{cosines[worst_index]:.6f}. '
+        '<span class="feature-heatmap-note">Color uses the recorded p01_patch_cosine '
+        f'threshold {_format_metric_value("p01_patch_cosine", patch_threshold)}: '
+        'budget = (1 - patch cosine) / (1 - threshold). The percentile gate applies to '
+        "the aggregate p01 metric, not to each individual patch cell.</span></figcaption>"
+        f"{worst_patch_table}</figure>"
+    ), None
+
+
+def _render_collapsed_feature_raw(result: Dict[str, Any]) -> str:
+    return (
+        '<details class="feature-raw-details">'
+        '<summary>Raw structured outputs (bounded preview)</summary>'
+        '<div class="feature-raw-body">'
+        f"{_render_structured_stage_comparison(result)}"
+        "</div></details>"
+    )
+
+
+def render_image_feature_model(
+    result: Dict[str, Any], project_dir: Optional[Path]
+) -> str:
+    """Render human-comparable image-feature parity evidence."""
+    cc = result.get("case_config") or {}
+    inputs = cc.get("inputs") or {}
+    image_ref = _input_ref(inputs, ("image", "test_image", "image_path", "input_image"))
+    image_path = _resolve_input_media(image_ref, project_dir)
+    pair = _feature_stage_pair(result)
+    shape_html, topology, topology_error = _render_feature_shapes_and_topology(pair)
+
+    trt_tensor, trt_error = _feature_tensor(pair.get("trt"), "last_hidden_state")
+    ref_tensor, ref_error = _feature_tensor(pair.get("ref"), "last_hidden_state")
+    scatter, scatter_error = _render_feature_scatter(trt_tensor, ref_tensor)
+    patch_threshold = _feature_metric_threshold(result, "p01_patch_cosine")
+    heatmap, heatmap_error = _render_patch_cosine_heatmap(
+        trt_tensor,
+        ref_tensor,
+        topology,
+        patch_threshold,
+    )
+
+    parts = [
+        '<section class="feature-parity-overview" aria-label="Feature parity overview">',
+        "<h4>Feature Parity Overview</h4>",
+        '<div class="feature-overview-grid">',
+    ]
+    if image_path is not None:
+        parts.append(_render_image_card("Input Image", image_path))
+    elif image_ref:
+        parts.append(_render_image_card("Input Image", None))
+    else:
+        parts.append(
+            '<div class="media-card missing-media"><h4>Input Image</h4>'
+            '<p class="missing">No input image was declared.</p></div>'
+        )
+    parts.append(f'<div class="feature-topology-panel"><h4>Tensor topology</h4>{shape_html}</div>')
+    parts.append("</div></section>")
+    parts.append(_render_feature_invariants(result))
+    parts.append(_render_feature_metric_bars(result))
+
+    parts.append('<section class="feature-visual-comparison" aria-label="TensorRT vs reference">')
+    parts.append("<h4>TensorRT vs reference</h4>")
+    if scatter:
+        parts.append(scatter)
+    else:
+        reason = trt_error or ref_error or scatter_error or topology_error
+        if reason and not reason.startswith("Paired full-tensor scatter unavailable"):
+            reason = f"Paired full-tensor scatter unavailable: {reason}."
+        parts.append(f'<p class="feature-viz-unavailable">{_esc(reason)}</p>')
+    if heatmap:
+        parts.append(heatmap)
+    else:
+        reason = trt_error or ref_error or heatmap_error or topology_error
+        if reason and not reason.startswith("Patch cosine heatmap unavailable"):
+            reason = f"Patch cosine heatmap unavailable: {reason}."
+        parts.append(f'<p class="feature-viz-unavailable">{_esc(reason)}</p>')
+    parts.append("</section>")
+
+    parts.append("<h4>All recorded metrics</h4>")
+    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(_render_repro_commands(result.get("repro_commands", {})))
+    parts.append(_render_timing_sections(result))
+    parts.append(_render_collapsed_feature_raw(result))
     return "\n".join(parts)
 
 
@@ -2430,6 +3305,8 @@ def render_model_section(
         body_parts.append(render_neural_operator_model(result))
     elif modality == "omni":
         body_parts.append(render_omni_model(result, project_dir))
+    elif modality == "image_features":
+        body_parts.append(render_image_feature_model(result, project_dir))
     elif modality == "structured":
         body_parts.append(_render_structured_stage_comparison(result))
         body_parts.append(_render_metrics_table(result.get("stages", {})))
@@ -2477,7 +3354,15 @@ def _key_metric(result: Dict[str, Any]) -> str:
             if key in metrics:
                 m = metrics[key]
                 val = m.get("value", m) if isinstance(m, dict) else m
-                return f"{key}={_format_metric_value(key, val)}"
+                summary = f"{key}={_format_metric_value(key, val)}"
+                if key == "full_cosine" and isinstance(m, dict):
+                    operator = str(m.get("operator") or "")
+                    threshold = m.get("threshold")
+                    if operator and threshold is not None:
+                        summary += (
+                            f" {operator} {_format_metric_value(key, threshold)}"
+                        )
+                return summary
     return ""
 
 
@@ -3508,7 +4393,7 @@ def render_proof_batch_section(contexts: List[Dict[str, Any]]) -> str:
             "</tr>"
         )
         details.append(
-            '<details class="proof-model-details" open>'
+            '<details class="proof-model-details">'
             f"<summary><strong>{_esc(model)}</strong> &mdash; "
             f"{_badge(outcome)}</summary>"
             f"{render_proof_section(context)}"
