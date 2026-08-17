@@ -26,6 +26,16 @@ auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
 std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
 ```
 
+<a id="choose-the-right-tensorrt-path"></a>
+
+## 🧭 Choose the right TensorRT path
+
+- Use TensorRT-Model-Connect to explore models quickly and evaluate broad
+  model coverage.
+- For production LLM/VLM deployment on NVIDIA edge platforms where performance
+  is the priority, start directly with
+  [TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM).
+
 <a id="what-is-tensorrt-model-connect"></a>
 
 ## 🔎 What is TensorRT-Model-Connect?

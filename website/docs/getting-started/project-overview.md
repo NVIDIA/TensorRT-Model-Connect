@@ -41,15 +41,23 @@ task APIs such as `generate()`, `transcribe()`, `generate_image()`, `embed()`,
 or `solve()` instead of maintaining conversion stages and model-specific
 application glue.
 
-## Where it fits in the TensorRT ecosystem
+<a id="where-it-fits-in-the-tensorrt-ecosystem"></a>
 
-Choose the import path that matches the model boundary you already own. Each
-path targets TensorRT execution, but the development and deployment interfaces
-are different.
+## Choose the right TensorRT path
+
+TensorRT-Model-Connect is the broad, accessible path for initial model
+exploration, not a blanket recommendation for every production deployment. Use
+TensorRT-Model-Connect to explore models quickly and evaluate broad model
+coverage. For production LLM/VLM deployment on NVIDIA edge platforms where
+performance is the priority, start directly with
+[TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM).
+
+Other TensorRT paths serve different starting points and deployment goals:
 
 | Starting point | Interface | When to use it |
 | --- | --- | --- |
 | Hugging Face or local checkpoint | **TensorRT-Model-Connect** | Start from a model-family reference implementation, build a `.bundle` for native C++ task inference, and customize the implementation as needed. |
+| Production LLM/VLM deployment on NVIDIA edge platforms | **[TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM)** | Start here when deployment performance is the priority. |
 | PyTorch model | **Torch-TensorRT** | Keep the model in the PyTorch ecosystem while compiling its execution with TensorRT. |
 | Portable framework interchange | **ONNX** | Use an exchange format when portability across originating frameworks is the primary requirement. |
 
