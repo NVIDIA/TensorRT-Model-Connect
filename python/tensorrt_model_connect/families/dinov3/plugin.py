@@ -33,15 +33,75 @@ from .checkpoint_mapper import (
 trt = trt_compat.get_trt()
 
 
+_TIMM_DINOV3_VIT_ARCHITECTURE = "vit_small_patch16_dinov3_qkvb"
+_TIMM_DINOV3_VIT_CONFIG = {
+    "model_type": "dinov3_vit",
+    "architectures": ["DINOv3ViTModel"],
+    "image_size": 224,
+    "patch_size": 16,
+    "num_channels": 3,
+    "hidden_size": 384,
+    "intermediate_size": 1536,
+    "num_hidden_layers": 12,
+    "num_attention_heads": 6,
+    "num_key_value_heads": 6,
+    "hidden_act": "gelu",
+    "layer_norm_eps": 1.0e-5,
+    "rope_theta": 100.0,
+    "num_register_tokens": 4,
+    "query_bias": True,
+    "key_bias": False,
+    "value_bias": True,
+    "proj_bias": True,
+    "mlp_bias": True,
+    "use_gated_mlp": False,
+}
+
+
 class ModelConfig(Protocol):
     """Structural subset supplied by the repository's model-config loader."""
 
     model_type: str
+    architectures: list[str]
     raw: dict
     hidden_size: int
+    intermediate_size: int
     num_hidden_layers: int
     num_attention_heads: int
     num_key_value_heads: int
+    rms_norm_eps: float
+    rope_theta: float
+    hidden_act: str
+
+
+def _is_timm_dinov3_vit_config(config: ModelConfig) -> bool:
+    model_type = str(getattr(config, "model_type", "") or "").lower()
+    architecture = str(config.raw.get("architecture", "") or "").lower()
+    return _TIMM_DINOV3_VIT_ARCHITECTURE in {model_type, architecture}
+
+
+def _normalize_timm_dinov3_vit_config(config: ModelConfig) -> None:
+    """Expand the exact public timm mirror config into the HF ViT contract."""
+    if not _is_timm_dinov3_vit_config(config):
+        return
+
+    config.model_type = "dinov3_vit"
+    config.architectures = ["DINOv3ViTModel"]
+    config.hidden_size = 384
+    config.intermediate_size = 1536
+    config.num_hidden_layers = 12
+    config.num_attention_heads = 6
+    config.num_key_value_heads = 6
+    config.rms_norm_eps = 1.0e-5
+    config.rope_theta = 100.0
+    config.hidden_act = "gelu"
+    config.raw.update(
+        {
+            **_TIMM_DINOV3_VIT_CONFIG,
+            "architectures": list(_TIMM_DINOV3_VIT_CONFIG["architectures"]),
+        }
+    )
+    config.raw["_dinov3_checkpoint_layout"] = "timm"
 
 
 def _pair(value, *, field: str) -> tuple[int, int]:
@@ -112,12 +172,108 @@ def _optional_layer_bias(
     return None
 
 
+def _is_timm_vit_checkpoint(readers) -> bool:
+    return all(
+        has_tensor(readers, name)
+        for name in (
+            "cls_token",
+            "reg_token",
+            "patch_embed.proj.weight",
+            "blocks.0.attn.qkv.weight",
+        )
+    )
+
+
+def _load_timm_vit_weights(readers, cfg: dict, precision: str) -> WeightDict:
+    """Map the public timm DINOv3 ViT layout to the existing HF graph ABI."""
+    weights = WeightDict()
+    for logical, checkpoint_name in (
+        ("cls_token", "cls_token"),
+        ("register_tokens", "reg_token"),
+        ("patch.weight", "patch_embed.proj.weight"),
+        ("patch.bias", "patch_embed.proj.bias"),
+        ("norm.weight", "norm.weight"),
+        ("norm.bias", "norm.bias"),
+    ):
+        weights[logical] = as_weight(load_tensor(readers, checkpoint_name), precision)
+
+    hidden_size = cfg["hidden_size"]
+    for layer in range(cfg["num_hidden_layers"]):
+        source_prefix = f"blocks.{layer}"
+        target_prefix = f"layer.{layer}"
+        for target_suffix, source_suffix in (
+            ("norm1.weight", "norm1.weight"),
+            ("norm1.bias", "norm1.bias"),
+            ("layer_scale1.lambda1", "gamma_1"),
+            ("norm2.weight", "norm2.weight"),
+            ("norm2.bias", "norm2.bias"),
+            ("layer_scale2.lambda1", "gamma_2"),
+        ):
+            weights[f"{target_prefix}.{target_suffix}"] = as_weight(
+                load_tensor(readers, f"{source_prefix}.{source_suffix}"), precision
+            )
+
+        qkv_name = f"{source_prefix}.attn.qkv.weight"
+        qkv = load_tensor(readers, qkv_name)
+        expected_shape = (3 * hidden_size, hidden_size)
+        if tuple(qkv.shape) != expected_shape:
+            raise ValueError(f"Expected {qkv_name} shape {expected_shape}, got {qkv.shape}")
+        for projection, value in zip(
+            ("q_proj", "k_proj", "v_proj"), np.split(qkv, 3, axis=0), strict=True
+        ):
+            weights[f"{target_prefix}.attention.{projection}.weight"] = transpose_linear(
+                value, qkv_name, precision
+            )
+
+        weights[f"{target_prefix}.attention.q_proj.bias"] = as_weight(
+            load_tensor(readers, f"{source_prefix}.attn.q_bias"), precision
+        )
+        weights[f"{target_prefix}.attention.v_proj.bias"] = as_weight(
+            load_tensor(readers, f"{source_prefix}.attn.v_bias"), precision
+        )
+        weights[f"{target_prefix}.attention.o_proj.weight"] = transpose_linear(
+            load_tensor(readers, f"{source_prefix}.attn.proj.weight"),
+            f"{source_prefix}.attn.proj.weight",
+            precision,
+        )
+        weights[f"{target_prefix}.attention.o_proj.bias"] = as_weight(
+            load_tensor(readers, f"{source_prefix}.attn.proj.bias"), precision
+        )
+
+        for projection, source_projection in (
+            ("up_proj", "fc1"),
+            ("down_proj", "fc2"),
+        ):
+            source = f"{source_prefix}.mlp.{source_projection}"
+            weights[f"{target_prefix}.mlp.{projection}.weight"] = transpose_linear(
+                load_tensor(readers, f"{source}.weight"),
+                f"{source}.weight",
+                precision,
+            )
+            weights[f"{target_prefix}.mlp.{projection}.bias"] = as_weight(
+                load_tensor(readers, f"{source}.bias"), precision
+            )
+    return weights
+
+
 def load_vit_weights(
     model_dir: str, config: ModelConfig, *, precision: str
 ) -> WeightDict:
     readers = open_checkpoint(model_dir)
     cfg = resolve_vit_config(config.raw)
     config.raw["_dinov3_config"] = cfg
+
+    if _is_timm_vit_checkpoint(readers):
+        weights = _load_timm_vit_weights(readers, cfg, precision)
+        register_shape = tuple(weights["register_tokens"].shape)
+        expected_register_shape = (1, cfg["num_register_tokens"], cfg["hidden_size"])
+        if register_shape != expected_register_shape:
+            raise ValueError(
+                "DINOv3 register token shape mismatch: "
+                f"checkpoint={register_shape}, config={expected_register_shape}"
+            )
+        return weights
+
     weights = WeightDict()
 
     for logical, checkpoint_name in (
@@ -485,7 +641,11 @@ class Dinov3Plugin:
         return 1
 
     def matches(self, model_type: str) -> bool:
-        return (model_type or "").lower() in {"dinov3_vit", "dinov3_convnext"}
+        return (model_type or "").lower() in {
+            "dinov3_vit",
+            "dinov3_convnext",
+            _TIMM_DINOV3_VIT_ARCHITECTURE,
+        }
 
     def load_weights(
         self,
@@ -495,6 +655,7 @@ class Dinov3Plugin:
         precision: str = "fp32",
     ) -> WeightDict:
         target_dtype(precision)  # validate before opening a large checkpoint
+        _normalize_timm_dinov3_vit_config(config)
         if config.model_type == "dinov3_vit":
             return load_vit_weights(model_dir, config, precision=precision)
         if config.model_type == "dinov3_convnext":
@@ -524,6 +685,7 @@ class Dinov3Plugin:
         parallel_config=None,
     ) -> bytes:
         del max_cache_length
+        _normalize_timm_dinov3_vit_config(config)
         if quant_ctx is not None:
             raise ValueError("DINOv3 native image encoders do not support quantization yet")
         if parallel_config is not None and getattr(parallel_config, "enabled", False):
@@ -541,6 +703,7 @@ class Dinov3Plugin:
         raise ValueError(f"Unsupported DINOv3 model_type: {config.model_type!r}")
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
+        _normalize_timm_dinov3_vit_config(config)
         if config.model_type == "dinov3_vit":
             cfg = config.raw.get("_dinov3_config") or resolve_vit_config(config.raw)
             hidden_size = cfg["hidden_size"]
@@ -576,6 +739,27 @@ class Dinov3Plugin:
             "interpolation": "bilinear",
             "do_center_crop": False,
         }
+        if config.model_type == "dinov3_vit":
+            overrides.update(
+                {
+                    "image_size": image_h if image_h == image_w else [image_h, image_w],
+                    "patch_size": cfg["patch_size"],
+                    "intermediate_size": cfg["intermediate_size"],
+                    "num_hidden_layers": cfg["num_hidden_layers"],
+                    "num_attention_heads": cfg["num_attention_heads"],
+                    "num_key_value_heads": cfg["num_attention_heads"],
+                    "hidden_act": cfg["hidden_act"],
+                    "layer_norm_eps": cfg["layer_norm_eps"],
+                    "rope_theta": cfg["rope_theta"],
+                    "num_register_tokens": cfg["num_register_tokens"],
+                    "query_bias": cfg["query_bias"],
+                    "key_bias": cfg["key_bias"],
+                    "value_bias": cfg["value_bias"],
+                    "proj_bias": cfg["proj_bias"],
+                    "mlp_bias": cfg["mlp_bias"],
+                    "use_gated_mlp": cfg["use_gated_mlp"],
+                }
+            )
         if config.model_type == "dinov3_convnext":
             overrides.update(metadata)
             overrides["runtime_strategy"] = self.runtime_strategy

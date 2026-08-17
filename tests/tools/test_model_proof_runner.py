@@ -596,6 +596,23 @@ def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
     assert "model_reference_cache" not in selection
 
 
+def test_dinov3_premerge_uses_public_mirror_and_nightly_keeps_officials(
+    tmp_path: Path,
+) -> None:
+    premerge = _run_test_selection(tmp_path, "dinov3", "premerge")
+    nightly = _run_test_selection(tmp_path, "dinov3", "nightly")
+
+    assert [case["name"] for case in premerge["e2e_cases"]] == [
+        "dinov3-vits16-timm-l0"
+    ]
+    assert premerge["e2e_cases"][0]["ci_tier"] == "l0_only"
+    assert {case["name"] for case in nightly["e2e_cases"]} == {
+        "dinov3-convnext-tiny-pretrain-lvd1689m",
+        "dinov3-vits16-pretrain-lvd1689m",
+    }
+    assert all(case["ci_tier"] == "nightly_only" for case in nightly["e2e_cases"])
+
+
 @pytest.mark.parametrize(
     ("family", "smoke_case", "regression_case"),
     (

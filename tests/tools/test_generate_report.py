@@ -1165,6 +1165,7 @@ class TestAdditionalStrategyRenderers:
 
         assert "Stage: full_inference" in rendered
         assert "full_cosine" in rendered
+        assert "0.999900" in rendered
         assert "0.9990" in rendered
         assert "Reproduction Commands" in rendered
         assert "trtmc extract-features" in rendered
@@ -2492,7 +2493,16 @@ class TestDashboardHelpers:
             },
         )
 
-        assert mod._key_metric(result) == "full_cosine=0.9999"
+        assert mod._key_metric(result) == "full_cosine=0.999900"
+
+    def test_key_metric_does_not_round_high_cosine_to_one(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="image_feature_extraction",
+            metrics={"full_cosine": {"value": 0.9999683077024887}},
+        )
+
+        assert mod._key_metric(result) == "full_cosine=0.999968"
 
     def test_total_time(self):
         mod = _import_report()

@@ -153,6 +153,7 @@ class HfTransformersReference:
             "stderr": stderr,
             "hf_id": case.hf_id,
             "hf_revision": case.hf_revision,
+            "reference_backend": case.reference_backend,
         }
         if stderr_path:
             metadata["stderr_log"] = stderr_path

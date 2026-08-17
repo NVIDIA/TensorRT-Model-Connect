@@ -16,6 +16,7 @@ from safetensors.numpy import save_file
 trt = pytest.importorskip("tensorrt", reason="TensorRT is required for DINOv3 builders")
 
 from tensorrt_model_connect.config import ModelConfig  # noqa: E402
+from tensorrt_model_connect.families import find_plugin, resolve_family_id  # noqa: E402
 from tensorrt_model_connect.families.dinov3.plugin import (  # noqa: E402
     build_vit_engine,
     load_vit_weights,
@@ -104,6 +105,65 @@ def _write_tiny_vit(
     return config, tensors
 
 
+def _write_tiny_timm_vit(root: Path) -> tuple[dict, dict[str, np.ndarray]]:
+    hidden = 8
+    intermediate = 16
+    registers = 2
+    patch_size = 16
+    config = {
+        "model_type": "dinov3_vit",
+        "image_size": 32,
+        "patch_size": patch_size,
+        "hidden_size": hidden,
+        "intermediate_size": intermediate,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "hidden_act": "gelu",
+        "layer_norm_eps": 1.0e-5,
+        "rope_theta": 100.0,
+        "num_register_tokens": registers,
+        "query_bias": True,
+        "key_bias": False,
+        "value_bias": True,
+        "proj_bias": True,
+        "mlp_bias": True,
+        "use_gated_mlp": False,
+    }
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+    def values(*shape: int, start: int = 0) -> np.ndarray:
+        size = int(np.prod(shape))
+        return np.arange(start, start + size, dtype=np.float32).reshape(shape)
+
+    prefix = "blocks.0"
+    tensors = {
+        "cls_token": values(1, 1, hidden),
+        "reg_token": values(1, registers, hidden, start=10),
+        "patch_embed.proj.weight": values(hidden, 3, patch_size, patch_size),
+        "patch_embed.proj.bias": values(hidden),
+        "norm.weight": values(hidden, start=1),
+        "norm.bias": values(hidden, start=2),
+        f"{prefix}.norm1.weight": values(hidden, start=3),
+        f"{prefix}.norm1.bias": values(hidden, start=4),
+        f"{prefix}.gamma_1": values(hidden, start=5),
+        f"{prefix}.norm2.weight": values(hidden, start=6),
+        f"{prefix}.norm2.bias": values(hidden, start=7),
+        f"{prefix}.gamma_2": values(hidden, start=8),
+        f"{prefix}.attn.qkv.weight": values(3 * hidden, hidden, start=100),
+        f"{prefix}.attn.q_bias": values(hidden, start=200),
+        f"{prefix}.attn.v_bias": values(hidden, start=300),
+        f"{prefix}.attn.proj.weight": values(hidden, hidden, start=400),
+        f"{prefix}.attn.proj.bias": values(hidden, start=500),
+        f"{prefix}.mlp.fc1.weight": values(intermediate, hidden, start=600),
+        f"{prefix}.mlp.fc1.bias": values(intermediate, start=700),
+        f"{prefix}.mlp.fc2.weight": values(hidden, intermediate, start=800),
+        f"{prefix}.mlp.fc2.bias": values(hidden, start=900),
+    }
+    save_file(tensors, str(root / "model.safetensors"), metadata={"format": "pt"})
+    return config, tensors
+
+
 @pytest.mark.parametrize("layer_prefix", ["layer", "model.layer"])
 @pytest.mark.parametrize("use_gated_mlp", [False, True])
 def test_vit_loader_accepts_hf_namespaces_and_mlp_variants(
@@ -128,6 +188,115 @@ def test_vit_loader_accepts_hf_namespaces_and_mlp_variants(
     assert weights["layer.0.mlp.down_proj.weight"].shape == (16, 8)
     assert ("layer.0.mlp.gate_proj.weight" in weights) is use_gated_mlp
     assert all(value.dtype == np.float16 for value in weights.values())
+
+
+def test_vit_loader_maps_timm_dinov3_qkvb_checkpoint(tmp_path: Path) -> None:
+    _, checkpoint = _write_tiny_timm_vit(tmp_path)
+    config = ModelConfig.from_dir(tmp_path)
+
+    weights = load_vit_weights(str(tmp_path), config, precision="fp32")
+
+    np.testing.assert_array_equal(weights["cls_token"], checkpoint["cls_token"])
+    np.testing.assert_array_equal(weights["register_tokens"], checkpoint["reg_token"])
+    qkv = checkpoint["blocks.0.attn.qkv.weight"]
+    query, key, value = np.split(qkv, 3, axis=0)
+    np.testing.assert_array_equal(weights["layer.0.attention.q_proj.weight"], query.T)
+    np.testing.assert_array_equal(weights["layer.0.attention.k_proj.weight"], key.T)
+    np.testing.assert_array_equal(weights["layer.0.attention.v_proj.weight"], value.T)
+    np.testing.assert_array_equal(
+        weights["layer.0.attention.q_proj.bias"], checkpoint["blocks.0.attn.q_bias"]
+    )
+    np.testing.assert_array_equal(
+        weights["layer.0.attention.v_proj.bias"], checkpoint["blocks.0.attn.v_bias"]
+    )
+    assert "layer.0.attention.k_proj.bias" not in weights
+    np.testing.assert_array_equal(
+        weights["layer.0.attention.o_proj.weight"],
+        checkpoint["blocks.0.attn.proj.weight"].T,
+    )
+    np.testing.assert_array_equal(
+        weights["layer.0.mlp.up_proj.weight"],
+        checkpoint["blocks.0.mlp.fc1.weight"].T,
+    )
+    np.testing.assert_array_equal(
+        weights["layer.0.mlp.down_proj.weight"],
+        checkpoint["blocks.0.mlp.fc2.weight"].T,
+    )
+    np.testing.assert_array_equal(
+        weights["layer.0.layer_scale1.lambda1"], checkpoint["blocks.0.gamma_1"]
+    )
+    np.testing.assert_array_equal(
+        weights["layer.0.layer_scale2.lambda1"], checkpoint["blocks.0.gamma_2"]
+    )
+
+
+def test_timm_dinov3_qkvb_config_normalizes_before_metadata(tmp_path: Path) -> None:
+    sparse = {
+        "architecture": "vit_small_patch16_dinov3_qkvb",
+        "num_classes": 0,
+        "num_features": 384,
+        "global_pool": "avg",
+        "pretrained_cfg": {"input_size": [3, 256, 256]},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(sparse), encoding="utf-8")
+    config = ModelConfig.from_dir(tmp_path)
+
+    assert resolve_family_id(config) == "dinov3"
+    assert find_plugin(config) is plugin
+    assert plugin.matches(config.model_type)
+    assert not plugin.matches("vit_small_patch16_dinov3_qkvb_classifier")
+    metadata = plugin.get_bundle_config_overrides(config)
+
+    expected = {
+        "model_type": "dinov3_vit",
+        "architectures": ["DINOv3ViTModel"],
+        "image_size": 224,
+        "patch_size": 16,
+        "num_channels": 3,
+        "hidden_size": 384,
+        "intermediate_size": 1536,
+        "num_hidden_layers": 12,
+        "num_attention_heads": 6,
+        "num_key_value_heads": 6,
+        "hidden_act": "gelu",
+        "layer_norm_eps": 1.0e-5,
+        "rope_theta": 100.0,
+        "num_register_tokens": 4,
+        "query_bias": True,
+        "key_bias": False,
+        "value_bias": True,
+        "proj_bias": True,
+        "mlp_bias": True,
+        "use_gated_mlp": False,
+    }
+    assert config.model_type == "dinov3_vit"
+    assert config.architectures == ["DINOv3ViTModel"]
+    assert {key: config.raw[key] for key in expected} == expected
+    assert config.hidden_size == 384
+    assert config.intermediate_size == 1536
+    assert config.num_hidden_layers == 12
+    assert config.num_attention_heads == 6
+    assert config.num_key_value_heads == 6
+    assert metadata["model_type"] == "dinov3_vit"
+    assert metadata["dinov3_architecture"] == "vit"
+    assert metadata["sequence_length"] == 201
+    assert metadata["image_size"] == 224
+    assert metadata["intermediate_size"] == 1536
+    assert metadata["num_hidden_layers"] == 12
+    assert metadata["num_attention_heads"] == 6
+
+
+def test_real_tensorrt_timm_mapped_vit_build(tmp_path: Path) -> None:
+    _write_tiny_timm_vit(tmp_path)
+    config = ModelConfig.from_dir(tmp_path)
+    weights = load_vit_weights(str(tmp_path), config, precision="fp16")
+
+    plan = build_vit_engine(config, weights, precision="fp16", verbose=False)
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+
+    assert engine is not None
+    assert tuple(engine.get_tensor_shape("last_hidden_state")) == (1, 7, 8)
+    assert tuple(engine.get_tensor_shape("pooler_output")) == (1, 8)
 
 
 def test_vit_config_and_bundle_metadata_preserve_hf_contract(tmp_path: Path) -> None:

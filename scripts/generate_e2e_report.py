@@ -723,7 +723,7 @@ def _render_metrics_table(stages: Dict[str, Any]) -> str:
                 f"<tr class='{row_cls}'>"
                 f"<td>{_esc(stage_name)}</td>"
                 f"<td>{_esc(metric_name)}</td>"
-                f"<td>{_format_value(value)}</td>"
+                f"<td>{_format_metric_value(metric_name, value)}</td>"
                 f"<td>{thr_str}</td>"
                 f"<td>{_esc(operator)}</td>"
                 f"<td class='{icon_cls}'>{icon}</td>"
@@ -747,6 +747,13 @@ def _format_value(v: Any) -> str:
             return f"{v:.2e}"
         return f"{v:.4f}"
     return _esc(v)
+
+
+def _format_metric_value(metric_name: str, value: Any) -> str:
+    """Keep high-cosine parity evidence from rounding to a misleading 1.0000."""
+    if isinstance(value, float) and "cosine" in metric_name:
+        return f"{value:.6f}"
+    return _format_value(value)
 
 
 # ---------------------------------------------------------------------------
@@ -2470,7 +2477,7 @@ def _key_metric(result: Dict[str, Any]) -> str:
             if key in metrics:
                 m = metrics[key]
                 val = m.get("value", m) if isinstance(m, dict) else m
-                return f"{key}={_format_value(val)}"
+                return f"{key}={_format_metric_value(key, val)}"
     return ""
 
 

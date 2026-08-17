@@ -21,6 +21,9 @@
       "test_image": "data/test_img.jpeg",
       "num_register_tokens": 4,
       "gated": true,
+      "ci_tier": "nightly_only",
+      "l0_replacement": "dinov3-vits16-timm-l0",
+      "l0_replacement_reason": "The official Meta repository is approval-gated; PR CI uses the public timm mirror of the same ViT-S/16 weights and architecture while Nightly retains the pinned official checkpoint.",
       "core": false,
       "notes": "Official gated DINOv3 ViT-S/16 image-feature representative pinned to an immutable Hugging Face revision. The gate compares every hidden-state element semantically, including CLS, four register tokens, and all patch tokens, against AutoImageProcessor plus AutoModel."
     }

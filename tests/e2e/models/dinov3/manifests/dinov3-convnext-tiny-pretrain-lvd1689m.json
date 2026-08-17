@@ -21,6 +21,9 @@
       "test_image": "data/test_img.jpeg",
       "num_register_tokens": 0,
       "gated": true,
+      "ci_tier": "nightly_only",
+      "l0_replacement": "dinov3-vits16-timm-l0",
+      "l0_replacement_reason": "The official Meta repository is approval-gated; PR CI uses the public full-scale DINOv3 ViT-S/16 mirror as the family semantic proof while Nightly retains both pinned official architectures.",
       "core": false,
       "notes": "Official gated DINOv3 ConvNeXt-Tiny image-feature representative pinned to an immutable Hugging Face revision. The gate compares the pooled pseudo-CLS token and every row-major spatial patch token against AutoImageProcessor plus AutoModel."
     }

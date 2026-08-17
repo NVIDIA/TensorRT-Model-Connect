@@ -41,6 +41,11 @@ _MODELS = {
         0,
     ),
 }
+_PUBLIC_L0 = (
+    "dinov3-vits16-timm-l0",
+    "timm/vit_small_patch16_dinov3_qkvb.lvd1689m",
+    "2c7705788ac282557562465d6443606664a55f05",
+)
 _THRESHOLDS = {
     "full_cosine": 0.999,
     "cls_cosine": 0.999,
@@ -93,6 +98,8 @@ def test_official_gated_manifests_pin_revisions_and_auth_preflight() -> None:
         assert raw["hf_id"] == hf_id
         assert raw["hf_revision"] == revision
         assert raw["testcases"][0]["gated"] is True
+        assert raw["testcases"][0]["ci_tier"] == "nightly_only"
+        assert raw["testcases"][0]["l0_replacement"] == _PUBLIC_L0[0]
         assert raw["testcases"][0]["num_register_tokens"] == register_count
         assert case.hf_id == hf_id
         assert case.hf_revision == revision
@@ -118,12 +125,39 @@ def test_official_gated_manifests_pin_revisions_and_auth_preflight() -> None:
         assert Path(case.inputs["image"]).is_file()
 
 
+def test_public_timm_l0_is_secretless_full_scale_premerge_parity() -> None:
+    name, hf_id, revision = _PUBLIC_L0
+    manifest_path = _MODEL_DIR / "manifests" / f"{name}.json"
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    case = load_model_manifest(manifest_path).build_case
+
+    assert raw["hf_id"] == hf_id
+    assert raw["hf_revision"] == revision
+    assert raw["testcases"][0]["ci_tier"] == "l0_only"
+    assert "gated" not in raw["testcases"][0]
+    assert case.hf_id == hf_id
+    assert case.hf_revision == revision
+    assert case.metadata["checkpoint_layout"] == "timm_dinov3_vit"
+    assert case.reference_backend == "timm_dinov3"
+    assert case.metadata["num_register_tokens"] == 4
+    assert case.threshold_overrides == _THRESHOLDS
+    preflight_kinds = [req.kind for req in case.preflight]
+    assert preflight_kinds.count("binary_exists") == 1
+    assert preflight_kinds.count("asset_exists") == 1
+    assert not any(req.kind == "hf_auth_token_present" for req in case.preflight)
+    assert any(
+        req.kind == "python_module_available" and req.args.get("module") == "timm"
+        for req in case.preflight
+    )
+    assert Path(case.inputs["image"]).is_file()
+
+
 def test_owned_image_and_threshold_contracts_are_exact() -> None:
     owned_image = _MODEL_DIR / "data" / "test_img.jpeg"
     source_image = _REPO_ROOT / "tests" / "e2e" / "models" / "timm_vit" / "data" / "test_img.jpeg"
     assert owned_image.read_bytes() == source_image.read_bytes()
 
-    for name in _MODELS:
+    for name in (*_MODELS, _PUBLIC_L0[0]):
         threshold_path = _MODEL_DIR / "thresholds" / f"{name}.json"
         raw = json.loads(threshold_path.read_text(encoding="utf-8"))
         assert raw["threshold_overrides"] == _THRESHOLDS
@@ -133,6 +167,7 @@ def test_model_owned_plugins_register_complete_feature_path() -> None:
     activate_model_plugins(_MODEL_DIR)
     assert get_runner("image_feature_extraction") is not None
     assert get_reference("hf_transformers") is not None
+    assert get_reference("timm_dinov3") is not None
     assert get_comparator("image_feature_extraction") is not None
     assert get_repro_command_provider("dinov3") is not None
     assert get_contract_plugin("image_feature_extraction") is not None
@@ -283,8 +318,16 @@ def test_runtime_strategy_matrix_routes_native_extract_features() -> None:
     reference_text = (_MODEL_DIR / "e2e_plugins" / "references" / "hf_transformers.py").read_text(
         encoding="utf-8"
     )
+    timm_reference_text = (
+        _MODEL_DIR / "e2e_plugins" / "references" / "timm_dinov3.py"
+    ).read_text(encoding="utf-8")
     assert '"extract-features"' in runner_text
     assert '"--output-json"' in runner_text
     assert "AutoImageProcessor" in reference_text
     assert "AutoModel" in reference_text
+    assert "timm.create_model" in timm_reference_text
+    assert '_TIMM_REFERENCE_VERSION = "1.0.28"' in timm_reference_text
+    assert "timm.__version__" in timm_reference_text
+    assert "model.forward_features" in timm_reference_text
+    assert 'pooled = hidden[:, 0, :].contiguous()' in timm_reference_text
     assert "case.hf_revision" in reference_text

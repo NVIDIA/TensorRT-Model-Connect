@@ -7,6 +7,7 @@ module = "plugin"
 aliases = [
   "dinov3_vit",
   "dinov3_convnext",
+  "vit_small_patch16_dinov3_qkvb",
 ]
 prefixes = [
   "dinov3_",
