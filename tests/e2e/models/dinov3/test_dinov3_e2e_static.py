@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -46,6 +47,7 @@ _PUBLIC_L0 = (
     "timm/vit_small_patch16_dinov3_qkvb.lvd1689m",
     "2c7705788ac282557562465d6443606664a55f05",
 )
+_OWNED_IMAGE_SHA256 = "d68cb42a55f79e51f71b78cf7d726f01c80a0e2dab8674da6f68361cce004cbc"
 _THRESHOLDS = {
     "full_cosine": 0.999,
     "cls_cosine": 0.999,
@@ -154,8 +156,7 @@ def test_public_timm_l0_is_secretless_full_scale_premerge_parity() -> None:
 
 def test_owned_image_and_threshold_contracts_are_exact() -> None:
     owned_image = _MODEL_DIR / "data" / "test_img.jpeg"
-    source_image = _REPO_ROOT / "tests" / "e2e" / "models" / "timm_vit" / "data" / "test_img.jpeg"
-    assert owned_image.read_bytes() == source_image.read_bytes()
+    assert hashlib.sha256(owned_image.read_bytes()).hexdigest() == _OWNED_IMAGE_SHA256
 
     for name in (*_MODELS, _PUBLIC_L0[0]):
         threshold_path = _MODEL_DIR / "thresholds" / f"{name}.json"
