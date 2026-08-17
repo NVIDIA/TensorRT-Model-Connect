@@ -36,6 +36,10 @@ def test_qwen_fp8_preserves_trt_11_0_builder_level_and_fp16_tail():
 
     assert config.builder_optimization_level == 5
     assert quant_context.profile.exclude_patterns == [
+        "layer.20.w_up",
+        "layer.21.w_up",
+        "layer.22.w_up",
+        "layer.23.w_up",
         "layer.24.w_up",
         "layer.25.w_up",
         "layer.26.w_up",

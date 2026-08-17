@@ -30,10 +30,10 @@ def configure_qwen_builder(
 
     if major_minor == (11, 0):
         # TRT 11.0 choice logits are unstable when every up projection is
-        # quantized. Keep only the final four in FP16; earlier layers remain
+        # quantized. Keep only the final eight in FP16; earlier layers remain
         # FP8 and retain the model's quantized execution path.
         exclude_patterns = quant_ctx.profile.exclude_patterns
-        tail_start = max(0, num_hidden_layers - 4)
+        tail_start = max(0, num_hidden_layers - 8)
         for layer_index in range(tail_start, num_hidden_layers):
             pattern = f"layer.{layer_index}.w_up"
             if pattern not in exclude_patterns:
