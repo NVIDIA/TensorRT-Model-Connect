@@ -12,6 +12,7 @@ from that module tree; only the fixed Fourier coordinates are generated here.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,15 @@ FEATURE_OUTPUT_NAMES = (
     "features_right_04",
     "stem_2x",
 )
+
+_DECODER_FP16_PRECONCAT_88_ENV = "TRTMC_FAST_FOUNDATION_STEREO_DECODER_FP16_PRECONCAT_88"
+_DECODER_FP16_PRECONCAT_176_ENV = "TRTMC_FAST_FOUNDATION_STEREO_DECODER_FP16_PRECONCAT_176"
+_DECODER_SCOPES = ("deconv32_16", "deconv16_8", "deconv8_4")
+_FEATURE_INTERNAL_BATCH = 2
+_DECODER_FP16_PRECONCAT_88_SCOPE = "deconv16_8"
+_DECODER_FP16_PRECONCAT_88_TAIL = (96, 88, 88)
+_DECODER_FP16_PRECONCAT_176_SCOPE = "deconv8_4"
+_DECODER_FP16_PRECONCAT_176_TAIL = (48, 176, 176)
 
 
 def _network(graph: NativeGraph):
@@ -172,6 +182,154 @@ def _instance_norm_2d(graph: NativeGraph, tensor, module, *, fp16: bool):
     return graph.instance_norm(tensor, module)
 
 
+def _use_decoder_fp16_preconcat(
+    *,
+    decoder_scope: str,
+    target_scope: str,
+    environment: str,
+) -> bool:
+    """Gate an FP16 pre-concat candidate by explicit decoder identity."""
+
+    if decoder_scope not in _DECODER_SCOPES:
+        raise RuntimeError(f"decoder scope must be one of {_DECODER_SCOPES}, got {decoder_scope!r}")
+    return decoder_scope == target_scope and os.environ.get(environment, "1") == "1"
+
+
+def _use_decoder_fp16_preconcat_88(*, decoder_scope: str) -> bool:
+    """Gate the 88x88 concat candidate by explicit decoder identity."""
+
+    return _use_decoder_fp16_preconcat(
+        decoder_scope=decoder_scope,
+        target_scope=_DECODER_FP16_PRECONCAT_88_SCOPE,
+        environment=_DECODER_FP16_PRECONCAT_88_ENV,
+    )
+
+
+def _use_decoder_fp16_preconcat_176(*, decoder_scope: str) -> bool:
+    """Gate the 176x176 concat candidate by explicit decoder identity."""
+
+    return _use_decoder_fp16_preconcat(
+        decoder_scope=decoder_scope,
+        target_scope=_DECODER_FP16_PRECONCAT_176_SCOPE,
+        environment=_DECODER_FP16_PRECONCAT_176_ENV,
+    )
+
+
+def _validate_decoder_fp16_preconcat_skip(
+    graph: NativeGraph,
+    skip,
+    *,
+    fp16: bool,
+    spatial_size: int,
+    expected_tail: tuple[int, int, int],
+) -> int:
+    """Validate known skip metadata before adding any decoder layers."""
+
+    if not fp16:
+        raise RuntimeError(
+            f"decoder FP16 pre-concat {spatial_size} requires the FP16 feature graph"
+        )
+    shape = tuple(int(dimension) for dimension in skip.shape)
+    expected_shape = (_FEATURE_INTERNAL_BATCH, *expected_tail)
+    if shape != expected_shape:
+        raise RuntimeError(
+            f"decoder FP16 pre-concat {spatial_size} skip shape must be "
+            f"{expected_shape}, got {shape}"
+        )
+    expected_dtype = _trt(graph).float32
+    if skip.dtype != expected_dtype:
+        raise RuntimeError(
+            f"decoder FP16 pre-concat {spatial_size} skip dtype must be "
+            f"TensorRT float32, got {skip.dtype!r}"
+        )
+    return shape[0]
+
+
+def _validate_decoder_fp16_preconcat_branch(
+    graph: NativeGraph,
+    branch,
+    *,
+    internal_batch: int,
+    spatial_size: int,
+    expected_tail: tuple[int, int, int],
+) -> None:
+    """Validate the completed branch before adding the candidate concat."""
+
+    shape = tuple(int(dimension) for dimension in branch.shape)
+    expected_shape = (internal_batch, *expected_tail)
+    if shape != expected_shape:
+        raise RuntimeError(
+            f"decoder FP16 pre-concat {spatial_size} branch shape must be "
+            f"{expected_shape}, got {shape}"
+        )
+    expected_dtype = _trt(graph).float16
+    if branch.dtype != expected_dtype:
+        raise RuntimeError(
+            f"decoder FP16 pre-concat {spatial_size} branch dtype must be TensorRT float16, "
+            f"got {branch.dtype!r}"
+        )
+
+
+def _validate_decoder_fp16_preconcat_88_skip(
+    graph: NativeGraph,
+    skip,
+    *,
+    fp16: bool,
+) -> int:
+    return _validate_decoder_fp16_preconcat_skip(
+        graph,
+        skip,
+        fp16=fp16,
+        spatial_size=88,
+        expected_tail=_DECODER_FP16_PRECONCAT_88_TAIL,
+    )
+
+
+def _validate_decoder_fp16_preconcat_88_branch(
+    graph: NativeGraph,
+    branch,
+    *,
+    internal_batch: int,
+) -> None:
+    _validate_decoder_fp16_preconcat_branch(
+        graph,
+        branch,
+        internal_batch=internal_batch,
+        spatial_size=88,
+        expected_tail=_DECODER_FP16_PRECONCAT_88_TAIL,
+    )
+
+
+def _validate_decoder_fp16_preconcat_176_skip(
+    graph: NativeGraph,
+    skip,
+    *,
+    fp16: bool,
+) -> int:
+    return _validate_decoder_fp16_preconcat_skip(
+        graph,
+        skip,
+        fp16=fp16,
+        spatial_size=176,
+        expected_tail=_DECODER_FP16_PRECONCAT_176_TAIL,
+    )
+
+
+def _validate_decoder_fp16_preconcat_176_branch(
+    graph: NativeGraph,
+    branch,
+    *,
+    internal_batch: int,
+) -> None:
+    _validate_decoder_fp16_preconcat_branch(
+        graph,
+        branch,
+        internal_batch=internal_batch,
+        spatial_size=176,
+        expected_tail=_DECODER_FP16_PRECONCAT_176_TAIL,
+    )
+
+
 def _activation(graph: NativeGraph, tensor, kind: str, *, alpha: float = 0.01):
     return graph.activation(tensor, kind, alpha=float(alpha) if kind == "leaky_relu" else None)
 
@@ -195,7 +353,13 @@ def _channel_scale_nhwc(graph: NativeGraph, tensor, scale, *, force_fp32: bool):
     return _binary(graph, tensor, scale_tensor, trt.ElementWiseOperation.PROD)
 
 
-def _conv_block(graph: NativeGraph, tensor, block, *, fp16: bool):
+def _conv_block(
+    graph: NativeGraph,
+    tensor,
+    block,
+    *,
+    fp16: bool,
+):
     """timm EdgeNeXt ConvBlock in evaluation mode."""
 
     trt = _trt(graph)
@@ -412,7 +576,13 @@ def _edge_next(graph: NativeGraph, feature, tensor, *, fp16: bool):
     return outputs
 
 
-def _resnet_instance_block(graph: NativeGraph, tensor, block, *, fp16: bool):
+def _resnet_instance_block(
+    graph: NativeGraph,
+    tensor,
+    block,
+    *,
+    fp16: bool,
+):
     """Serialized decoder ResnetBasicBlock (its residual add is in-place)."""
 
     trt = _trt(graph)
@@ -429,7 +599,23 @@ def _resnet_instance_block(graph: NativeGraph, tensor, block, *, fp16: bool):
     return _activation(graph, tensor, "relu")
 
 
-def _decoder_block(graph: NativeGraph, tensor, skip, block, *, fp16: bool):
+def _decoder_block(
+    graph: NativeGraph,
+    tensor,
+    skip,
+    block,
+    *,
+    decoder_scope: str,
+    fp16: bool,
+):
+    use_fp16_preconcat_88 = _use_decoder_fp16_preconcat_88(decoder_scope=decoder_scope)
+    use_fp16_preconcat_176 = _use_decoder_fp16_preconcat_176(decoder_scope=decoder_scope)
+    internal_batch = None
+    if use_fp16_preconcat_88:
+        internal_batch = _validate_decoder_fp16_preconcat_88_skip(graph, skip, fp16=fp16)
+    elif use_fp16_preconcat_176:
+        internal_batch = _validate_decoder_fp16_preconcat_176_skip(graph, skip, fp16=fp16)
+
     tensor = _deconv2d(graph, tensor, block.conv1.conv, fp16=fp16)
     tensor = _instance_norm_2d(graph, tensor, block.conv1.IN, fp16=fp16)
     tensor = _activation(
@@ -438,14 +624,45 @@ def _decoder_block(graph: NativeGraph, tensor, skip, block, *, fp16: bool):
         "leaky_relu",
         alpha=float(getattr(block.conv1.relu, "negative_slope", 0.01)),
     )
-    # cat promotes to float32 because the EdgeNeXt skip is float32.
-    concat_dtype = skip.dtype
-    tensor = _concat(
+    if use_fp16_preconcat_88 or use_fp16_preconcat_176:
+        if internal_batch is None:
+            raise AssertionError("enabled decoder pre-concat must validate its internal batch")
+        if use_fp16_preconcat_88:
+            _validate_decoder_fp16_preconcat_88_branch(
+                graph,
+                tensor,
+                internal_batch=internal_batch,
+            )
+        else:
+            _validate_decoder_fp16_preconcat_176_branch(
+                graph,
+                tensor,
+                internal_batch=internal_batch,
+            )
+        # This is the exact FP16 boundary already imposed by the following
+        # convolution and residual path, moved before concat:
+        # cast(concat(cast(branch_fp16, fp32), skip_fp32), fp16)
+        # == concat(branch_fp16, cast(skip_fp32, fp16)).  The next convolution
+        # input and its FP16 residual identity therefore remain bitwise equal.
+        tensor = _concat(
+            graph,
+            [tensor, _cast(graph, skip, _trt(graph).float16)],
+            axis=1,
+        )
+    else:
+        # cat promotes to float32 because the EdgeNeXt skip is float32.
+        concat_dtype = skip.dtype
+        tensor = _concat(
+            graph,
+            [_cast(graph, tensor, concat_dtype), skip],
+            axis=1,
+        )
+    return _resnet_instance_block(
         graph,
-        [_cast(graph, tensor, concat_dtype), skip],
-        axis=1,
+        tensor,
+        block.conv2,
+        fp16=fp16,
     )
-    return _resnet_instance_block(graph, tensor, block.conv2, fp16=fp16)
 
 
 def _stem_2x(graph: NativeGraph, stem, tensor, *, fp16: bool):
@@ -522,9 +739,30 @@ def add_feature_graph(
     )
 
     x04, x08, x16, x32 = _edge_next(graph, model.feature, stereo_batch, fp16=fp16)
-    x16_decoded = _decoder_block(graph, x32, x16, model.feature.deconv32_16, fp16=fp16)
-    x08_decoded = _decoder_block(graph, x16_decoded, x08, model.feature.deconv16_8, fp16=fp16)
-    x04_decoded = _decoder_block(graph, x08_decoded, x04, model.feature.deconv8_4, fp16=fp16)
+    x16_decoded = _decoder_block(
+        graph,
+        x32,
+        x16,
+        model.feature.deconv32_16,
+        decoder_scope="deconv32_16",
+        fp16=fp16,
+    )
+    x08_decoded = _decoder_block(
+        graph,
+        x16_decoded,
+        x08,
+        model.feature.deconv16_8,
+        decoder_scope="deconv16_8",
+        fp16=fp16,
+    )
+    x04_decoded = _decoder_block(
+        graph,
+        x08_decoded,
+        x04,
+        model.feature.deconv8_4,
+        decoder_scope="deconv8_4",
+        fp16=fp16,
+    )
     x04_decoded = _conv2d(graph, x04_decoded, model.feature.conv4, fp16=fp16)
     stem_2x = _stem_2x(
         graph,
