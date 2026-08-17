@@ -574,8 +574,8 @@ void validateReceiptTarget(const Json& receipt, const Json& header) {
     const auto& build = requireObject(receipt, "build", "build receipt");
     requireExactKeys(build,
                      {"created_at_utc", "workspace_bytes", "network_mode", "tf32_enabled",
-                      "plan_profiling_verbosity", "tensorrt_version", "tensorrt_abi",
-                      "cuda_runtime_version", "cuda_driver_version", "gpu"},
+                      "builder_optimization_level", "plan_profiling_verbosity", "tensorrt_version",
+                      "tensorrt_abi", "cuda_runtime_version", "cuda_driver_version", "gpu"},
                      "build receipt build facts");
     const auto created_at = requireString(build, "created_at_utc", "build receipt build facts");
     if (!isCanonicalUtcTimestamp(created_at) ||
@@ -587,6 +587,8 @@ void validateReceiptTarget(const Json& receipt, const Json& header) {
     requireStringValue(build, "network_mode", "strongly_typed", "build receipt build facts");
     if (requireBool(build, "tf32_enabled", "build receipt build facts"))
         fail("SAM2 build receipt enabled TF32");
+    requireIntValue(build, "builder_optimization_level", kBuilderOptimizationLevel,
+                    "build receipt build facts");
     requireStringValue(build, "plan_profiling_verbosity", kPlanProfilingVerbosity,
                        "build receipt build facts");
     requireStringValue(build, "tensorrt_version", kTargetTensorRtVersion,
@@ -736,7 +738,7 @@ void validateReceipt(const Json& receipt, const Json& header, const Authenticate
                      {"schema_version", "family", "model_id", "qualification", "assets", "build",
                       "image_attention", "graphs"},
                      "build receipt");
-    requireIntValue(receipt, "schema_version", 1, "build receipt");
+    requireIntValue(receipt, "schema_version", kBuildReceiptSchemaVersion, "build receipt");
     requireStringValue(receipt, "family", kFamily, "build receipt");
     requireStringValue(receipt, "model_id", kModelId, "build receipt");
     validateReceiptQualification(receipt, config_qualification);

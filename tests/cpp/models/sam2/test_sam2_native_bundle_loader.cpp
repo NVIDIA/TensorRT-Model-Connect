@@ -130,6 +130,9 @@ struct ArtifactOptions {
     bool extra_attention_field{false};
     bool wrong_image_layer_type_facts{false};
     bool wrong_plan_profiling_verbosity{false};
+    bool legacy_build_receipt_schema{false};
+    bool omit_builder_optimization_level{false};
+    bool wrong_builder_optimization_level{false};
     bool omit_receipt{false};
     bool append_trailing_byte{false};
     std::string header_model_id{std::string(kModelId)};
@@ -177,7 +180,8 @@ Json makeReceipt(const ArtifactOptions& options, const std::array<std::vector<ch
     const bool receipt_qualified =
         options.receipt_qualification_override ? options.receipt_qualified : options.qualified;
     Json result;
-    result["schema_version"] = 1;
+    result["schema_version"] =
+        options.legacy_build_receipt_schema ? 1 : trtmc::sam2::kBuildReceiptSchemaVersion;
     result["family"] = "sam2";
     result["model_id"] = kModelId;
     result["qualification"] = {
@@ -197,6 +201,9 @@ Json makeReceipt(const ArtifactOptions& options, const std::array<std::vector<ch
         {"workspace_bytes", UINT64_C(8589934592)},
         {"network_mode", "strongly_typed"},
         {"tf32_enabled", false},
+        {"builder_optimization_level", options.wrong_builder_optimization_level
+                                           ? trtmc::sam2::kBuilderOptimizationLevel + 1
+                                           : trtmc::sam2::kBuilderOptimizationLevel},
         {"plan_profiling_verbosity",
          options.wrong_plan_profiling_verbosity ? "layer_names_only" : "detailed"},
         {"tensorrt_version", options.trt_version},
@@ -209,6 +216,8 @@ Json makeReceipt(const ArtifactOptions& options, const std::array<std::vector<ch
           {"compute_capability", options.compute_capability},
           {"global_memory_bytes", UINT64_C(24146608128)}}},
     };
+    if (options.omit_builder_optimization_level)
+        result["build"].erase("builder_optimization_level");
     if (!options.omit_image_attention) {
         result["image_attention"] = {
             {"implementation",
@@ -941,6 +950,46 @@ int main() {
         },
         "plan_profiling_verbosity", "non-detailed plan profiling verbosity was accepted");
     check(calls.empty(), "factory ran for non-detailed plan profiling verbosity");
+
+    calls.clear();
+    ArtifactOptions legacy_build_receipt_schema;
+    legacy_build_receipt_schema.legacy_build_receipt_schema = true;
+    const auto legacy_build_receipt_schema_path = writeArtifact(
+        directory / "legacy-build-receipt-schema.bundle", legacy_build_receipt_schema);
+    checkThrows<trtmc::sam2::NativeBundleLoadError>(
+        [&] {
+            (void)trtmc::sam2::loadDiagnosticNativeVideoEngineSetFromBundle(
+                legacy_build_receipt_schema_path.string(), runtimeTarget(), makeFactory(calls));
+        },
+        "schema_version", "legacy v1 build receipt was accepted");
+    check(calls.empty(), "factory ran for a legacy v1 build receipt");
+
+    ArtifactOptions missing_builder_optimization_level;
+    missing_builder_optimization_level.omit_builder_optimization_level = true;
+    const auto missing_builder_optimization_level_path =
+        writeArtifact(directory / "missing-builder-optimization-level.bundle",
+                      missing_builder_optimization_level);
+    checkThrows<trtmc::sam2::NativeBundleLoadError>(
+        [&] {
+            (void)trtmc::sam2::loadDiagnosticNativeVideoEngineSetFromBundle(
+                missing_builder_optimization_level_path.string(), runtimeTarget(),
+                makeFactory(calls));
+        },
+        "field set drifted", "build receipt without builder optimization level was accepted");
+    check(calls.empty(), "factory ran for a missing builder optimization level");
+
+    ArtifactOptions wrong_builder_optimization_level;
+    wrong_builder_optimization_level.wrong_builder_optimization_level = true;
+    const auto wrong_builder_optimization_level_path = writeArtifact(
+        directory / "wrong-builder-optimization-level.bundle", wrong_builder_optimization_level);
+    checkThrows<trtmc::sam2::NativeBundleLoadError>(
+        [&] {
+            (void)trtmc::sam2::loadDiagnosticNativeVideoEngineSetFromBundle(
+                wrong_builder_optimization_level_path.string(), runtimeTarget(),
+                makeFactory(calls));
+        },
+        "builder_optimization_level", "wrong builder optimization level was accepted");
+    check(calls.empty(), "factory ran for a wrong builder optimization level");
 
     ArtifactOptions qualification_disagreement;
     qualification_disagreement.receipt_qualification_override = true;

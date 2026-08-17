@@ -270,7 +270,8 @@ std::string makeSam2BuildReceipt(const Sam2EngineBuildOptions& options,
     std::ostringstream output;
     output.imbue(std::locale::classic());
     const std::string_view embedded_config = sam2EmbeddedConfigJson();
-    output << "{\"schema_version\":1,\"family\":\"sam2\",\"model_id\":\"" << kSam2ModelId
+    output << "{\"schema_version\":" << trtmc::sam2::kBuildReceiptSchemaVersion
+           << ",\"family\":\"sam2\",\"model_id\":\"" << kSam2ModelId
            << "\",\"qualification\":{\"state\":\"unqualified\""
               ",\"runtime_eligible\":false,\"golden_parity_verified\":false},\"assets\":{"
               "\"checkpoint_sha256\":\""
@@ -281,7 +282,8 @@ std::string makeSam2BuildReceipt(const Sam2EngineBuildOptions& options,
            << "\"},\"build\":{\"created_at_utc\":\"" << escapeJson(options.created_at_utc)
            << "\",\"workspace_bytes\":" << options.workspace_bytes
            << ",\"network_mode\":\"strongly_typed\",\"tf32_enabled\":false"
-              ",\"plan_profiling_verbosity\":\""
+              ",\"builder_optimization_level\":"
+           << trtmc::sam2::kBuilderOptimizationLevel << ",\"plan_profiling_verbosity\":\""
            << escapeJson(compilation.plan_profiling_verbosity) << "\",\"tensorrt_version\":\""
            << escapeJson(runtime.tensorrt_version) << "\",\"tensorrt_abi\":\""
            << escapeJson(runtime.tensorrt_abi) << "\",\"cuda_runtime_version\":\""

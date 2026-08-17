@@ -107,7 +107,7 @@ def _write_bundle(
             row.update(tool.IMAGE_GRAPH_LAYER_COUNTS)
         graph_rows.append(row)
     build_receipt = {
-        "schema_version": 1,
+        "schema_version": tool.BUILD_RECEIPT_SCHEMA_VERSION,
         "family": tool.FAMILY,
         "model_id": tool.MODEL_ID,
         "qualification": {
@@ -126,6 +126,7 @@ def _write_bundle(
             "workspace_bytes": 1,
             "network_mode": "strongly_typed",
             "tf32_enabled": False,
+            "builder_optimization_level": tool.BUILDER_OPTIMIZATION_LEVEL,
             "plan_profiling_verbosity": "detailed",
             "tensorrt_version": tool.TENSORRT_VERSION,
             "tensorrt_abi": tool.TENSORRT_ABI,
@@ -936,6 +937,32 @@ def test_generator_rejects_build_graph_schema_mutations(tmp_path: Path, mutation
     bundle_facts = _write_bundle(bundle_path, mutate_build_receipt=mutate)
     q3, regular = _write_receipts(tmp_path, bundle_facts)
     with pytest.raises(tool.EvidenceError, match="build receipt graph"):
+        _generate(tmp_path, bundle_path, q3, regular)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("legacy_schema", "build receipt schema version"),
+        ("missing_level", "build facts field set drifted"),
+        ("wrong_level", "builder optimization level drifted"),
+    ],
+)
+def test_generator_rejects_build_reproducibility_mutations(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    def mutate(receipt: dict[str, Any]) -> None:
+        if mutation == "legacy_schema":
+            receipt["schema_version"] = 1
+        elif mutation == "missing_level":
+            receipt["build"].pop("builder_optimization_level")
+        else:
+            receipt["build"]["builder_optimization_level"] = tool.BUILDER_OPTIMIZATION_LEVEL + 1
+
+    bundle_path = tmp_path / "model.bundle"
+    bundle_facts = _write_bundle(bundle_path, mutate_build_receipt=mutate)
+    q3, regular = _write_receipts(tmp_path, bundle_facts)
+    with pytest.raises(tool.EvidenceError, match=message):
         _generate(tmp_path, bundle_path, q3, regular)
 
 

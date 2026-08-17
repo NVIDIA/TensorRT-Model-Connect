@@ -279,6 +279,10 @@ void testReceiptAndAssembly(const std::filesystem::path& directory) {
     const std::string first = trtmc::sam2::native::makeSam2BuildReceipt(options, compilation);
     const std::string second = trtmc::sam2::native::makeSam2BuildReceipt(options, compilation);
     check(first == second, "receipt generation is deterministic for identical facts");
+    constexpr std::string_view receipt_prefix = "{\"schema_version\":2,";
+    check(trtmc::sam2::kBuildReceiptSchemaVersion == 2 && first.size() >= receipt_prefix.size() &&
+              first.compare(0, receipt_prefix.size(), receipt_prefix) == 0,
+          "receipt uses only the mandatory v2 schema");
     check(first.find("\"state\":\"unqualified\"") != std::string::npos, "receipt is unqualified");
     check(first.find("\"runtime_eligible\":false") != std::string::npos,
           "receipt is runtime-ineligible");
@@ -286,6 +290,9 @@ void testReceiptAndAssembly(const std::filesystem::path& directory) {
           "receipt does not claim golden parity");
     check(first.find("\"tf32_enabled\":false") != std::string::npos,
           "receipt records disabled TF32");
+    check(trtmc::sam2::kBuilderOptimizationLevel == 3 &&
+              countOccurrences(first, "\"builder_optimization_level\":3") == 1U,
+          "receipt records exact TensorRT builder optimization level 3");
     check(first.find("\"plan_profiling_verbosity\":\"detailed\"") != std::string::npos,
           "receipt records detailed plan profiling verbosity");
     check(first.find("\"tensorrt_version\":\"" + std::string(trtmc::sam2::kTargetTensorRtVersion) +

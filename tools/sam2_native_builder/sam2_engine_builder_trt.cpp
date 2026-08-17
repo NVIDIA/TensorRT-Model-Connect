@@ -127,12 +127,16 @@ std::vector<std::uint8_t> serializeNetwork(nvinfer1::IBuilder& builder,
     TrtPtr<nvinfer1::IBuilderConfig> config(builder.createBuilderConfig());
     if (!config)
         throw Sam2EngineBuildError("TensorRT failed to create a SAM2 builder configuration");
+    config->setBuilderOptimizationLevel(trtmc::sam2::kBuilderOptimizationLevel);
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE,
                                static_cast<std::size_t>(workspace_bytes));
     config->clearFlag(nvinfer1::BuilderFlag::kTF32);
     config->setProfilingVerbosity(nvinfer1::ProfilingVerbosity::kDETAILED);
     if (config->getFlag(nvinfer1::BuilderFlag::kTF32))
         throw Sam2EngineBuildError("TensorRT did not disable TF32 for SAM2");
+    if (config->getBuilderOptimizationLevel() != trtmc::sam2::kBuilderOptimizationLevel) {
+        throw Sam2EngineBuildError("TensorRT did not retain SAM2 builder optimization level 3");
+    }
     if (config->getProfilingVerbosity() != nvinfer1::ProfilingVerbosity::kDETAILED) {
         throw Sam2EngineBuildError(
             "TensorRT did not retain detailed SAM2 plan profiling verbosity");

@@ -671,7 +671,8 @@ benchmark::RuntimeFacts inspectRuntime(std::int32_t device) {
 benchmark::ImageAttentionFacts parseBuildReceipt(std::string_view bytes,
                                                  const benchmark::RuntimeFacts& runtime) {
     const auto receipt = Json::parse(bytes.begin(), bytes.end());
-    if (receipt.at("schema_version").get<std::int32_t>() != 1 ||
+    if (receipt.at("schema_version").get<std::int32_t>() !=
+            trtmc::sam2::kBuildReceiptSchemaVersion ||
         receipt.at("family").get<std::string>() != "sam2")
         fail("native build receipt identity drifted");
     const auto& assets = receipt.at("assets");
@@ -694,6 +695,8 @@ benchmark::ImageAttentionFacts parseBuildReceipt(std::string_view bytes,
             runtime.global_memory_bytes ||
         build.at("network_mode").get<std::string>() != "strongly_typed" ||
         build.at("tf32_enabled").get<bool>() ||
+        build.at("builder_optimization_level").get<std::int32_t>() !=
+            trtmc::sam2::kBuilderOptimizationLevel ||
         build.at("plan_profiling_verbosity").get<std::string>() !=
             trtmc::sam2::kPlanProfilingVerbosity) {
         fail("native build receipt runtime does not match benchmark runtime");

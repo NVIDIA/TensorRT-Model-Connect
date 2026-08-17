@@ -44,6 +44,8 @@ GPU_NAME = "NVIDIA L4"
 COMPUTE_CAPABILITY = "8.9"
 TENSORRT_VERSION = "11.1.0.106"
 TENSORRT_ABI = "11.1"
+BUILD_RECEIPT_SCHEMA_VERSION = 2
+BUILDER_OPTIMIZATION_LEVEL = 3
 CHECKPOINT_SHA256 = "89fd676560809c8504411b574cea305c86db1f65bda790ec7fe16cedc6c6ff73"
 CONFIG_SHA256 = "59488bb78c7cc48aaaebd966ea9d054014f683459d062b7a959a4aa501342656"
 GOLDEN_MANIFEST_SHA256 = "c25251ee27da05afd75adc3c6869cbc2944b80c05c5d6e703b6ebbbba697a4f0"
@@ -550,7 +552,9 @@ def _validate_bundle_metadata(bundle: BundleSnapshot) -> None:
         },
         "build receipt",
     )
-    _exact_contract(receipt["schema_version"], 1, "build receipt schema version")
+    _exact_contract(
+        receipt["schema_version"], BUILD_RECEIPT_SCHEMA_VERSION, "build receipt schema version"
+    )
     _exact_contract(receipt["family"], FAMILY, "build receipt family")
     _exact_contract(receipt["model_id"], MODEL_ID, "build receipt model ID")
     _exact_contract(
@@ -579,6 +583,7 @@ def _validate_bundle_metadata(bundle: BundleSnapshot) -> None:
             "workspace_bytes",
             "network_mode",
             "tf32_enabled",
+            "builder_optimization_level",
             "plan_profiling_verbosity",
             "tensorrt_version",
             "tensorrt_abi",
@@ -587,6 +592,11 @@ def _validate_bundle_metadata(bundle: BundleSnapshot) -> None:
             "gpu",
         },
         "build facts",
+    )
+    _exact_contract(
+        build["builder_optimization_level"],
+        BUILDER_OPTIMIZATION_LEVEL,
+        "builder optimization level",
     )
     if (
         build["created_at_utc"] != bundle.header["created_at"]
