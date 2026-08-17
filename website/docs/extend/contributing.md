@@ -9,23 +9,27 @@ lowest meaningful layer before requesting broader CI.
 
 The repository-root
 [CONTRIBUTING.md](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/CONTRIBUTING.md)
-is authoritative for licensing and Developer Certificate of Origin
-requirements. This page adds the project-specific development and pull-request
-workflow.
+is authoritative for the external contribution workflow, licensing, and
+Developer Certificate of Origin requirements. This page adds project-specific
+development and validation detail.
 
-## 1. Prepare a clean branch
+## 1. Fork the repository and prepare a clean branch
 
-Use the canonical GitHub repository and start from its current `main`:
+External development happens in a personal fork. Use GitHub's **Fork** button
+on the canonical repository, then clone your fork, add the NVIDIA repository as
+`upstream`, and start from its current `main`:
 
 ```bash
-git clone https://github.com/NVIDIA/TensorRT-Model-Connect.git
+git clone https://github.com/YOUR-GITHUB-USERNAME/TensorRT-Model-Connect.git
 cd TensorRT-Model-Connect
-git switch -c docs/improve-getting-started origin/main
+git remote add upstream https://github.com/NVIDIA/TensorRT-Model-Connect.git
+git fetch upstream
+git switch -c docs/improve-getting-started upstream/main
 ```
 
-If your established clone names the canonical remote `github`, substitute
-`github/main`. Do not push directly to `main`, and preserve unrelated local
-work.
+In this layout, `origin` is your writable fork and `upstream` is the canonical
+repository. Do not develop on either repository's `main`, and preserve
+unrelated local work.
 
 For source changes, use the development environment described in
 [System Requirements](../getting-started/environment-and-repro.md).
@@ -87,10 +91,18 @@ npm --prefix website run build
 Do not weaken an acceptance threshold to make a change pass. If a test is
 wrong, explain the evidence and request maintainer review.
 
-## 5. Open the pull request
+## 5. Push to your fork and open the pull request
 
-Push the short-lived branch and open a pull request targeting `main`. The pull
-request should record:
+Sync with current upstream, push the short-lived branch to your fork, and open a
+pull request targeting `NVIDIA/TensorRT-Model-Connect:main`:
+
+```bash
+git fetch upstream
+git rebase upstream/main
+git push --set-upstream origin docs/improve-getting-started
+```
+
+The pull request should record:
 
 - exact scope and non-goals;
 - exact base and tested head revisions;
@@ -103,17 +115,23 @@ performance, and release qualification are different evidence tiers.
 
 ## 6. Coordinate repository CI
 
-The repository premerge workflow is one-shot and label-driven. After verifying
-the PR's `headRefOid`, an authorized collaborator applies `run-internal-ci`.
+The repository premerge workflow is one-shot and label-driven. Pushing a branch
+or creating a pull request alone does not start the gate. After local checks
+pass and the pull request is ready, add this comment:
+
+```text
+@yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
+```
+
+The maintainer verifies the PR's `headRefOid` and applies `run-internal-ci`.
 The trusted bridge consumes that label, captures the immutable PR head SHA, and
-dispatches private premerge validation for that exact revision. Pushing a
-branch or creating a PR alone does not start the gate.
+dispatches private premerge validation for that exact revision.
 
 Wait for the `trtmc/premerge/required` status on the same head SHA to complete
-successfully. If the head changes intentionally, verify the new SHA before
-requesting one new run. Fork contributors must coordinate the label with a
-maintainer who has repository `maintain` or `admin` permission. Private CI
-repository details,
-runner information, logs, artifacts, and URLs are not public documentation.
+successfully. If the head changes intentionally, finish the update and local
+validation before mentioning `@yifeif-nv` once to request a new run. Only a
+maintainer with repository `maintain` or `admin` permission can authorize the
+trigger. Private CI repository details, runner information, logs, artifacts,
+and URLs are not public documentation.
 
 {/* Collaborative review anchor: batch 2. */}

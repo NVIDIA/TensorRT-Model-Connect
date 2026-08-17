@@ -1,9 +1,180 @@
 # Contributing to TensorRT-Model-Connect
 
-Thank you for your interest in contributing. Please open an issue or pull request
-against the GitHub repository and follow the repository's development and testing
-guidance. Contributions accepted into this project are licensed under the Apache
-License 2.0 unless explicitly stated otherwise.
+Thank you for your interest in contributing. External contributors should do all
+development in a personal fork and submit changes to
+[`NVIDIA/TensorRT-Model-Connect`](https://github.com/NVIDIA/TensorRT-Model-Connect)
+through a pull request. Do not work directly on the upstream `main` branch.
+
+The [Contributor Quickstart](website/docs/extend/contributing.md) and the
+[Developer Guide](website/docs/developer-guide/overview.md) provide additional
+project-specific design, testing, and ownership guidance.
+
+## Development workflow
+
+### 1. Fork and clone the repository
+
+Use GitHub's **Fork** button to create
+`https://github.com/YOUR-GITHUB-USERNAME/TensorRT-Model-Connect`, then clone
+your fork and add the NVIDIA repository as `upstream`:
+
+```bash
+git clone https://github.com/YOUR-GITHUB-USERNAME/TensorRT-Model-Connect.git
+cd TensorRT-Model-Connect
+git remote add upstream https://github.com/NVIDIA/TensorRT-Model-Connect.git
+git fetch upstream
+```
+
+In this layout, `origin` is your writable fork and `upstream` is the canonical
+repository. Keep these roles separate.
+
+### 2. Create a focused branch from current upstream `main`
+
+Create a short-lived topic branch for each contribution. Do not develop on your
+fork's `main`, because it may be behind upstream:
+
+```bash
+git switch -c docs/improve-contributing upstream/main
+```
+
+Use a concise branch name that describes one purpose, such as
+`fix/qwen-tokenizer` or `docs/model-validation`.
+
+### 3. Find the narrowest owner
+
+Before editing, identify the component that owns the behavior. Model-specific
+semantics should normally remain in that model family's directory; shared
+infrastructure should contain only genuinely model-independent contracts. Start
+with the relevant guide:
+
+- [Add a Model Family](website/docs/extend/add-model-family.md)
+- [Add an Optimized Runtime Implementation](website/docs/extend/add-optimized-runtime.md)
+- [Add a Runtime Strategy](website/docs/extend/add-runtime-strategy.md)
+- [Add a Config Schema](website/docs/extend/add-config-schema.md)
+- [Validate a Model Contribution](website/docs/extend/model-validation.md)
+
+Open an issue before investing in a large, cross-cutting, or user-visible design
+when the intended ownership or approach is not already clear.
+
+### 4. Make a reviewable change and validate it locally
+
+Keep each pull request focused on one problem. Add or update focused tests when
+behavior changes, and update documentation when users or developers will observe
+the change.
+
+Start with repository consistency checks:
+
+```bash
+PYTHONPATH=python:. python3 tools/model_ci.py validate
+PYTHONPATH=python:. python3 tools/test_impact.py --validate
+git diff --check
+```
+
+Then run the smallest meaningful tests for the code you changed. Model work also
+needs the declared model, runtime, hardware, and comparison evidence. For
+documentation changes, run:
+
+```bash
+python3 tools/check_doc_file_references.py --strict website/docs
+npm --prefix website ci
+npm --prefix website run build
+```
+
+Do not weaken a test, oracle, or acceptance threshold to make a change pass. If
+you believe a test is incorrect, explain the evidence in the pull request and
+ask a maintainer to review it.
+
+### 5. Commit with a clear message and DCO sign-off
+
+Repository history uses short, imperative, Conventional Commit-style subjects,
+for example:
+
+```text
+docs(contributing): clarify external workflow
+fix(qwen): preserve tokenizer contract
+test(ci): cover fork pull requests
+```
+
+Sign off every commit as described in [Signing Your Work](#signing-your-work):
+
+```bash
+git commit --signoff -m "docs(contributing): clarify external workflow"
+```
+
+### 6. Sync your branch and push it to your fork
+
+Before opening the pull request, incorporate the current upstream `main` and
+rerun the affected checks:
+
+```bash
+git fetch upstream
+git rebase upstream/main
+git push --set-upstream origin docs/improve-contributing
+```
+
+If you rebase a branch that you already pushed, never use an unguarded force
+push. Use `git push --force-with-lease`, and coordinate before rewriting a
+branch that other people are using.
+
+### 7. Open a pull request against upstream `main`
+
+Open the pull request from your fork branch to
+`NVIDIA/TensorRT-Model-Connect:main`. Include:
+
+- the problem, scope, and important non-goals;
+- a linked issue or design discussion when applicable;
+- exact validation commands and their results;
+- the model revision, artifacts, environment, and hardware for GPU claims; and
+- tests or paths that were not run, plus any remaining risk.
+
+Compilation, unit tests, inference, model parity, target-hardware execution,
+performance, and release qualification are separate evidence levels. Claim only
+what the recorded validation proves.
+
+### 8. Ask a maintainer to trigger CI
+
+Opening a pull request or pushing to your fork does **not** start the protected
+premerge suite. After your local checks pass and the pull request is ready for
+CI, mention the repository maintainer in a pull-request comment:
+
+```text
+@yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
+```
+
+The maintainer verifies the pull-request head and applies the one-shot
+`run-internal-ci` label. Only collaborators with repository `maintain` or
+`admin` permission can authorize that trigger.
+
+Wait for `trtmc/premerge/required` to pass on the exact pull-request head SHA.
+If you push another commit, the previous result no longer validates the current
+head; finish the update, rerun local checks, and mention `@yifeif-nv` once to
+request a new CI run. Private runner details, logs, artifacts, and URLs are not
+part of the public contribution interface.
+
+### 9. Respond to review and keep evidence current
+
+Address review feedback on the same topic branch and sign off every new commit.
+Keep the pull request current with upstream when requested. Any head change
+requires fresh validation and a fresh maintainer-triggered CI result before the
+pull request can merge. Maintainers merge accepted changes according to the
+repository ruleset.
+
+## Established development practices
+
+The repository's development history consistently favors these practices:
+
+- keep commits and pull requests single-purpose and easy to review;
+- use an imperative Conventional Commit-style subject with a useful scope;
+- keep model-owned behavior and its tests close to the model owner;
+- pair behavior changes with focused regression coverage;
+- record exact commands, revisions, artifacts, hardware, and untested paths;
+- preserve copyright, license, attribution, and third-party provenance; and
+- treat CI success as evidence for the exact tested revision, not for later
+  commits or unexecuted configurations.
+
+## Licensing and attribution
+
+Contributions accepted into this project are licensed under the Apache License
+2.0 unless explicitly stated otherwise.
 
 Preserve all existing copyright, license, and attribution notices. If a
 contribution incorporates or is derived from third-party material, identify its
@@ -15,19 +186,27 @@ The DCO sign-off requirement is enforced prospectively for commits introduced
 by pull requests and protected-branch updates after its adoption. Existing Git
 history is not rewritten.
 
-#### Signing Your Work
+## Signing Your Work
 
-* We require that all contributors "sign-off" on their commits. This certifies that the contribution is your original work, or you have rights to submit it under the same license, or a compatible license.
-  * Any contribution which contains commits that are not Signed-Off will not be accepted.
-* To sign off on a commit you simply use the `--signoff` (or `-s`) option when committing your changes:
+- We require all contributors to sign off their commits. This certifies that
+  the contribution is your original work, that you have the right to submit it
+  under the same license, or that it uses a compatible license.
+  - Contributions containing commits without a `Signed-off-by` line are not
+    accepted.
+- To sign off a commit, use the `--signoff` (or `-s`) option:
+
   ```bash
-  $ git commit -s -m "Add cool feature."
+  git commit --signoff -m "docs(contributing): clarify external workflow"
   ```
-  This will append the following to your commit message:
+
+  This appends a line like this to the commit message:
+
   ```
   Signed-off-by: Your Name <your@email.com>
   ```
-* Full text of the DCO (https://developercertificate.org/):
+- The full text of the [Developer Certificate of
+  Origin](https://developercertificate.org/) follows:
+
   ```
     Developer Certificate of Origin
     Version 1.1
