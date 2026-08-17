@@ -1276,6 +1276,7 @@ def test_cost_aggregation_limits_folding_to_conv1_up_and_post8(monkeypatch) -> N
         fold_remaining_safe_batch_norm=False,
         post8_sum_plugin=False,
         post8_sum_tile_positions=32,
+        full_volume_leaky_plugin=False,
     ):
         post_calls.append(
             (
@@ -1285,6 +1286,7 @@ def test_cost_aggregation_limits_folding_to_conv1_up_and_post8(monkeypatch) -> N
                 fold_remaining_safe_batch_norm,
                 post8_sum_plugin,
                 post8_sum_tile_positions,
+                full_volume_leaky_plugin,
                 skip,
                 lower,
                 feature,

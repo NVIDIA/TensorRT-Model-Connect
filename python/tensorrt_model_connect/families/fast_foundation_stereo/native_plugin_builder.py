@@ -26,6 +26,7 @@ _PLUGIN_NAME = "FastFoundationStereoCombinedVolume"
 _GEOMETRY_VOLUME_CONVC1_PLUGIN_NAME = "FastFoundationStereoGeometryVolumeConvc1"
 _SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME = "FastFoundationStereoSpatialAttentionReduce"
 _POST8_SUM_PLUGIN_NAME = "FastFoundationStereoPost8Sum"
+_FULL_VOLUME_LEAKY_PLUGIN_NAME = "FastFoundationStereoFullVolumeLeaky"
 _POST8_SUM_TILE_POSITIONS = (32, 64, 128, 256)
 _DEFAULT_PLUGIN_VERSION = "1"
 _PLUGIN_VERSIONS = {_PLUGIN_NAME: "2"}
@@ -443,8 +444,39 @@ def add_post8_sum_plugin(
     return output
 
 
+def add_full_volume_leaky_plugin(
+    network: Any,
+    tensor: Any,
+    *,
+    trt_module: Any,
+    name: str,
+) -> Any:
+    """Replace one exact FP16 DHWC8 full-volume LeakyReLU with its V3 kernel."""
+
+    add_plugin = getattr(network, "add_plugin_v3", None)
+    if add_plugin is None:
+        raise RuntimeError("TensorRT network does not support IPluginV3 layers")
+    creator = _plugin_v3_creator(trt_module, _FULL_VOLUME_LEAKY_PLUGIN_NAME)
+    fields = trt_module.PluginFieldCollection([])
+    plugin = creator.create_plugin(name, fields, trt_module.TensorRTPhase.BUILD)
+    if plugin is None:
+        raise RuntimeError(
+            "TensorRT failed to create the Fast Foundation Stereo full-volume Leaky plugin"
+        )
+    layer = add_plugin([tensor], [], plugin)
+    if layer is None:
+        raise RuntimeError(
+            "TensorRT failed to add the Fast Foundation Stereo full-volume Leaky plugin layer"
+        )
+    layer.name = name
+    output = layer.get_output(0)
+    output.name = name
+    return output
+
+
 __all__ = [
     "add_combined_volume_plugin",
+    "add_full_volume_leaky_plugin",
     "add_geometry_volume_convc1_plugin",
     "add_post8_sum_plugin",
     "add_spatial_attention_reduce_plugin",

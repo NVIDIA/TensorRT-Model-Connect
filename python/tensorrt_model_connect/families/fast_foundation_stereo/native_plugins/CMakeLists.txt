@@ -114,6 +114,8 @@ if(NOT _trt_detected_version STREQUAL FAST_FOUNDATION_STEREO_TRT_EXPECTED_VERSIO
 endif()
 
 add_library(trtmc_fast_foundation_stereo_native_plugin SHARED
+  full_volume_leaky_plugin.cu
+  full_volume_leaky_plugin_creator.cpp
   geometry_volume_convc1_plugin.cu
   geometry_volume_convc1_plugin_creator.cpp
   gwc_plugin.cu

@@ -33,6 +33,10 @@ def _post8_sum_plugin_enabled() -> bool:
     return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_POST8_SUM_PLUGIN", "1") == "1"
 
 
+def _full_volume_leaky_all3_plugin_enabled() -> bool:
+    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_FULL_VOLUME_LEAKY_ALL3_PLUGIN", "1") == "1"
+
+
 def _disp_head_nchw_pointwise_enabled() -> bool:
     return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_NCHW_POINTWISE", "1") == "1"
 
@@ -61,6 +65,183 @@ def _post8_sum_tile_positions() -> int:
 
 def _feature_attention(graph: NativeGraph, volume: Any, feature: Any, module: Any) -> Any:
     return graph.feature_attention(volume, feature, module)
+
+
+_FULL_VOLUME_LEAKY_SHAPE = (1, 28, 48, 176, 176)
+_FULL_VOLUME_LEAKY_SPECS = {
+    "corr_feature_att.layers.0": (
+        "Conv3d",
+        32,
+        28,
+        (3, 3, 3),
+        (1, 1, 1),
+        (1, 1, 1),
+        (1, 1, 1),
+        1,
+        (0, 0, 0),
+    ),
+    "cost_agg.conv1_up": (
+        "ConvTranspose3d",
+        56,
+        28,
+        (4, 4, 4),
+        (2, 2, 2),
+        (1, 1, 1),
+        (1, 1, 1),
+        1,
+        (0, 0, 0),
+    ),
+    "cost_agg.post8_to_4.out.0": (
+        "Conv3d",
+        28,
+        28,
+        (3, 3, 3),
+        (1, 1, 1),
+        (1, 1, 1),
+        (1, 1, 1),
+        1,
+        (0, 0, 0),
+    ),
+}
+
+
+def _optional_tuple(instance: Any, name: str) -> tuple[int, ...] | None:
+    value = getattr(instance, name, None)
+    return None if value is None else tuple(int(item) for item in value)
+
+
+def _require_full_volume_leaky_basic_conv(module: Any, path: str) -> None:
+    convolution = getattr(module, "conv", None)
+    batch_norm = getattr(module, "bn", None)
+    actual = (
+        convolution.__class__.__name__ if convolution is not None else "NoneType",
+        getattr(convolution, "in_channels", None),
+        getattr(convolution, "out_channels", None),
+        _optional_tuple(convolution, "kernel_size"),
+        _optional_tuple(convolution, "stride"),
+        _optional_tuple(convolution, "padding"),
+        _optional_tuple(convolution, "dilation"),
+        getattr(convolution, "groups", None),
+        _optional_tuple(convolution, "output_padding"),
+    )
+    expected = _FULL_VOLUME_LEAKY_SPECS[path]
+    common = (
+        module.__class__.__name__,
+        getattr(module, "use_bn", None),
+        getattr(module, "relu", None),
+        batch_norm.__class__.__name__ if batch_norm is not None else "NoneType",
+        getattr(batch_norm, "num_features", None),
+        getattr(convolution, "bias", None) is not None,
+    )
+    expected_common = ("BasicConv", True, True, "SyncBatchNorm", 28, False)
+    if actual != expected or common != expected_common:
+        raise RuntimeError(
+            "full-volume Leaky ALL3 plugin requires the distilled BasicConv topology; "
+            f"{path} is {(common, actual)!r}, expected {(expected_common, expected)!r}"
+        )
+
+
+def _require_full_volume_leaky_all3_topology(model: Any) -> None:
+    corr_helper = model.corr_feature_att
+    corr_layers = tuple(corr_helper.layers)
+    corr_topology = (
+        corr_helper.__class__.__name__,
+        tuple(child.__class__.__name__ for child in corr_layers),
+    )
+    expected_corr = ("ForwardHelper", ("BasicConv", "BasicConv", "FeatureAtt"))
+    if corr_topology != expected_corr:
+        raise RuntimeError(
+            "full-volume Leaky ALL3 plugin requires the distilled corr_feature_att topology; "
+            f"got {corr_topology!r}, expected {expected_corr!r}"
+        )
+
+    post8 = model.cost_agg.post8_to_4
+    post8_topology = (
+        post8.__class__.__name__,
+        getattr(post8, "op", None),
+        tuple(child.__class__.__name__ for child in post8.upsample),
+        tuple(child.__class__.__name__ for child in post8.out),
+    )
+    expected_post8 = (
+        "PostForwardHelper",
+        "sum",
+        ("BasicConv", "CostVolumeDisparityAttention", "Upsample"),
+        ("BasicConv", "ResnetBasicBlock3D"),
+    )
+    if post8_topology != expected_post8:
+        raise RuntimeError(
+            "full-volume Leaky ALL3 plugin requires the distilled post8_to_4 topology; "
+            f"got {post8_topology!r}, expected {expected_post8!r}"
+        )
+
+    targets = (
+        (corr_layers[0], "corr_feature_att.layers.0"),
+        (model.cost_agg.conv1_up, "cost_agg.conv1_up"),
+        (tuple(post8.out)[0], "cost_agg.post8_to_4.out.0"),
+    )
+    for module, path in targets:
+        _require_full_volume_leaky_basic_conv(module, path)
+
+
+def _full_volume_leaky_plugin_output(
+    graph: NativeGraph,
+    tensor: Any,
+    *,
+    name: str,
+) -> Any:
+    shape = tuple(int(dimension) for dimension in tensor.shape)
+    if shape != _FULL_VOLUME_LEAKY_SHAPE or tensor.dtype != graph.trt.float16:
+        raise RuntimeError(
+            "full-volume Leaky ALL3 plugin requires FP16 logical shape "
+            f"{_FULL_VOLUME_LEAKY_SHAPE!r}; got {shape!r}/{tensor.dtype!r}"
+        )
+
+    from .native_plugin_builder import add_full_volume_leaky_plugin
+
+    return add_full_volume_leaky_plugin(
+        graph.network,
+        tensor,
+        trt_module=graph.trt,
+        name=name,
+    )
+
+
+def _folded_basic_conv_full_volume_leaky(
+    graph: NativeGraph,
+    tensor: Any,
+    module: Any,
+    *,
+    path: str,
+    name: str,
+) -> Any:
+    _require_full_volume_leaky_basic_conv(module, path)
+    convolution = module.conv
+    output = graph._convolution_batch_norm(
+        tensor,
+        convolution,
+        module.bn,
+        dimensions=3,
+        deconv="Transpose" in convolution.__class__.__name__,
+    )
+    return _full_volume_leaky_plugin_output(graph, output, name=name)
+
+
+def _folded_corr_feature_att_with_full_volume_leaky(
+    graph: NativeGraph,
+    tensor: Any,
+    feature: Any,
+    module: Any,
+) -> Any:
+    layers = tuple(module.layers)
+    output = _folded_basic_conv_full_volume_leaky(
+        graph,
+        tensor,
+        layers[0],
+        path="corr_feature_att.layers.0",
+        name="corr_feature_att_layers_0_leaky",
+    )
+    output = graph.basic_conv(output, layers[1], fold_batch_norm=True)
+    return graph.feature_attention(output, feature, layers[2])
 
 
 def _folded_feature_att_8_forward_helper(
@@ -405,6 +586,7 @@ def _post_forward_helper(
     fold_remaining_safe_batch_norm: bool = False,
     post8_sum_plugin: bool = False,
     post8_sum_tile_positions: int = 32,
+    full_volume_leaky_plugin: bool = False,
 ) -> Any:
     upsample = tuple(module.upsample)
     out = tuple(module.out)
@@ -481,6 +663,14 @@ def _post_forward_helper(
         child_name = child.__class__.__name__
         if child_name == "FeatureAtt":
             output = _feature_attention(graph, output, feature, child)
+        elif full_volume_leaky_plugin and index == 0 and child_name == "BasicConv":
+            output = _folded_basic_conv_full_volume_leaky(
+                graph,
+                output,
+                child,
+                path="cost_agg.post8_to_4.out.0",
+                name="cost_agg_post8_to_4_out_0_leaky",
+            )
         elif (fold_batch_norm or (fold_post16_to_8_batch_norm and index == 0)) and (
             child_name == "BasicConv"
         ):
@@ -510,6 +700,7 @@ def _cost_aggregation(
     fold_remaining_safe_batch_norm: bool = False,
     post8_sum_plugin: bool = False,
     post8_sum_tile_positions: int = 32,
+    full_volume_leaky_all3_plugin: bool = False,
 ) -> Any:
     # The serialized distilled checkpoint replaces several constructor modules
     # with ForwardHelper/PostForwardHelper instances.  Follow the live module
@@ -577,10 +768,20 @@ def _cost_aggregation(
             fold_post16_to_8_batch_norm=fold_post16_to_8_batch_norm,
         )
 
-    output = graph.basic_conv(
-        conv1,
-        module.conv1_up,
-        fold_batch_norm=fold_full_volume_batch_norm,
+    output = (
+        _folded_basic_conv_full_volume_leaky(
+            graph,
+            conv1,
+            module.conv1_up,
+            path="cost_agg.conv1_up",
+            name="cost_agg_conv1_up_leaky",
+        )
+        if full_volume_leaky_all3_plugin
+        else graph.basic_conv(
+            conv1,
+            module.conv1_up,
+            fold_batch_norm=fold_full_volume_batch_norm,
+        )
     )
     if module.post8_to_4 is None:
         patch = graph.sequential(volume, module.conv_patch)
@@ -598,6 +799,7 @@ def _cost_aggregation(
             fold_batch_norm=fold_full_volume_batch_norm,
             post8_sum_plugin=post8_sum_plugin,
             post8_sum_tile_positions=post8_sum_tile_positions,
+            full_volume_leaky_plugin=full_volume_leaky_all3_plugin,
         )
     return output
 
@@ -1149,6 +1351,7 @@ def add_post_graph(
     fold_remaining_safe_batch_norm = _remaining_safe_conv_bn_folding_enabled()
     post8_sum_plugin = _post8_sum_plugin_enabled()
     post8_sum_tile_positions = _post8_sum_tile_positions() if post8_sum_plugin else 32
+    full_volume_leaky_all3_plugin = _full_volume_leaky_all3_plugin_enabled()
     disp_head_nchw_pointwise = _disp_head_nchw_pointwise_enabled()
     disp_head_fold_gamma = _disp_head_fold_gamma_enabled()
     disp_head_second_gelu_tanh = _disp_head_second_gelu_tanh_enabled()
@@ -1162,6 +1365,13 @@ def add_post_graph(
             "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_SECOND_GELU_TANH=1 requires "
             "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_NCHW_POINTWISE=1"
         )
+    if full_volume_leaky_all3_plugin:
+        if not fold_full_volume_batch_norm:
+            raise RuntimeError(
+                "TRTMC_FAST_FOUNDATION_STEREO_FULL_VOLUME_LEAKY_ALL3_PLUGIN=1 requires "
+                "TRTMC_FAST_FOUNDATION_STEREO_FOLD_FULL_VOLUME_BN=1"
+            )
+        _require_full_volume_leaky_all3_topology(model)
     features = tuple(
         graph.cast(inputs[name], graph.work_trt_dtype)
         for name in (
@@ -1196,7 +1406,14 @@ def add_post_graph(
         trt_module=graph.trt,
     )
     combined_volume = graph.module(combined_volume, model.corr_stem)
-    if model.corr_feature_att.__class__.__name__ == "ForwardHelper":
+    if full_volume_leaky_all3_plugin:
+        combined_volume = _folded_corr_feature_att_with_full_volume_leaky(
+            graph,
+            combined_volume,
+            features[0],
+            model.corr_feature_att,
+        )
+    elif model.corr_feature_att.__class__.__name__ == "ForwardHelper":
         combined_volume = graph.forward_helper(
             combined_volume,
             features[0],
@@ -1220,6 +1437,7 @@ def add_post_graph(
         fold_remaining_safe_batch_norm=fold_remaining_safe_batch_norm,
         post8_sum_plugin=post8_sum_plugin,
         post8_sum_tile_positions=post8_sum_tile_positions,
+        full_volume_leaky_all3_plugin=full_volume_leaky_all3_plugin,
     )
 
     if model.classifier.__class__.__name__ == "ForwardHelper":
