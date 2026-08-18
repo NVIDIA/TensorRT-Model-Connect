@@ -779,7 +779,7 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
     )
     assert features["dataset"] == {
         "kind": "model_plugin_json",
-        "default_path": "tests/validation/datasets/dinov3-image-feature-extraction.json",
+        "default_path": "tests/e2e/models/dinov3/data/validation.json",
         "input_asset_fields": ["image"],
     }
     assert features["scoring"] == {"scorer": "model_plugin_parity"}

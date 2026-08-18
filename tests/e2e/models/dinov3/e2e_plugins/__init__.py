@@ -6,6 +6,26 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+
+
+def image_input(case) -> str:
+    return str(
+        case.inputs.get("image")
+        or case.inputs.get("test_image")
+        or case.inputs.get("image_path")
+        or ""
+    )
+
+
+def resolve_image_path(case, roots: tuple[Path, ...], error: str) -> str:
+    image = image_input(case)
+    if not image:
+        raise ValueError(error)
+    path = Path(image)
+    if path.is_absolute():
+        return str(path)
+    return str(next((root / path for root in roots if (root / path).is_file()), path))
 
 
 def case_artifact_dir(artifacts_dir: str, case_name: str) -> str:

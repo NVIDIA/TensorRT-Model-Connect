@@ -22,12 +22,10 @@ from __future__ import annotations
 import argparse
 import base64
 import html
+import importlib.util
 import json
-import math
 import re
-import struct
 import sys
-import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
@@ -49,14 +47,6 @@ _MAX_EMBED_BYTES = 10 * 1024 * 1024
 
 # Number of evenly-spaced frames to embed for diffusion models.
 _MAX_DIFFUSION_FRAMES = 6
-
-# Image-feature maps stay compact even when a model emits a large activation
-# tensor. The report embeds only small derived RGB maps, never the full tensor.
-_MAX_FEATURE_HEATMAP_TOKENS = 1024
-_MAX_FEATURE_MAP_VALUES = 4 * 1024 * 1024
-_FEATURE_QUERY_COUNT = 8
-_FEATURE_QUERY_DELTA_LIMIT = 0.01
-_FEATURE_MIN_SIMILARITY_SPAN = 0.05
 
 _TRTMC_TIMING_RE = re.compile(
     r"^\[trtmc\.timing\]\s+"
@@ -106,7 +96,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "segmentation": "segmentation",
     "prompted_segmentation": "segmentation",
     "image_classification": "classification",
-    "image_feature_extraction": "image_features",
+    "image_feature_extraction": "generic",
     "encoder_only_nlp": "numeric",
     "embedding": "numeric",
     "reranking": "reranking",
@@ -712,10 +702,9 @@ def _metric_recorded_state(metric: Dict[str, Any]) -> Tuple[str, str]:
     """Return the literal recorded pass state without truthiness coercion."""
     if "passed" not in metric:
         return "UNKNOWN", "unknown"
-    passed = metric.get("passed")
-    if passed is True:
+    if metric["passed"] is True:
         return "PASS", "pass"
-    if passed is False:
+    if metric["passed"] is False:
         return "FAIL", "fail"
     return "INVALID", "unknown"
 
@@ -773,7 +762,6 @@ def _format_value(v: Any) -> str:
 
 
 def _format_metric_value(metric_name: str, value: Any) -> str:
-    """Keep high-cosine parity evidence from rounding to a misleading 1.0000."""
     if isinstance(value, float) and "cosine" in metric_name:
         return f"{value:.6f}"
     return _format_value(value)
@@ -1550,830 +1538,6 @@ def _render_structured_stage_comparison(result: Dict[str, Any]) -> str:
         ))
     if not parts:
         return '<p class="missing">No serialized stage outputs were recorded.</p>'
-    return "\n".join(parts)
-
-
-def _feature_stage_pair(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Return the primary paired stage used by image-feature extraction."""
-    pairs = _stage_pairs(result)
-    if "full_inference" in pairs:
-        return pairs["full_inference"]
-    for pair in pairs.values():
-        if pair.get("trt") or pair.get("ref"):
-            return pair
-    return {}
-
-
-def _declared_tensor_shape(stage: Optional[Dict[str, Any]], name: str) -> Optional[List[int]]:
-    data = (stage or {}).get("data")
-    payload = data.get(name) if isinstance(data, dict) else None
-    shape = payload.get("shape") if isinstance(payload, dict) else None
-    if (
-        not isinstance(shape, list)
-        or not shape
-        or not all(isinstance(dim, int) and not isinstance(dim, bool) and dim > 0 for dim in shape)
-    ):
-        return None
-    return shape
-
-
-def _feature_tensor(
-    stage: Optional[Dict[str, Any]], name: str
-) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Validate and flatten one feature tensor without leaking it into HTML."""
-    shape = _declared_tensor_shape(stage, name)
-    if shape is None:
-        return None, f"{name} has no valid positive-integer shape"
-    data = (stage or {}).get("data")
-    payload = data.get(name) if isinstance(data, dict) else None
-    raw_values = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(raw_values, list):
-        return None, f"{name} has no numeric data list"
-
-    values: List[float] = []
-    stack: List[Any] = [raw_values]
-    while stack:
-        current = stack.pop()
-        if isinstance(current, list):
-            stack.extend(reversed(current))
-            continue
-        if isinstance(current, bool) or not isinstance(current, (int, float)):
-            return None, f"{name} contains a non-numeric value"
-        try:
-            number = float(current)
-        except (OverflowError, ValueError):
-            return None, f"{name} contains a value outside the supported numeric range"
-        if not math.isfinite(number):
-            return None, f"{name} contains a non-finite numeric value"
-        values.append(number)
-
-    expected = math.prod(shape)
-    if len(values) != expected:
-        return None, (
-            f"{name} has {len(values):,} values but shape {_shape_text(shape)} "
-            f"requires {expected:,}"
-        )
-    return {"shape": shape, "values": values}, None
-
-
-def _feature_register_count(stage: Optional[Dict[str, Any]]) -> Optional[int]:
-    data = (stage or {}).get("data")
-    value = data.get("num_register_tokens") if isinstance(data, dict) else None
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-        return value
-    return None
-
-
-def _shape_text(shape: Optional[List[int]]) -> str:
-    if shape is None:
-        return "Unavailable"
-    return "[" + " \u00d7 ".join(str(dim) for dim in shape) + "]"
-
-
-def _derive_feature_topology(
-    trt_shape: Optional[List[int]],
-    ref_shape: Optional[List[int]],
-    trt_registers: Optional[int],
-    ref_registers: Optional[int],
-) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
-    if trt_shape is None or ref_shape is None:
-        return None, "Topology unavailable because one or both hidden-state shapes are invalid."
-    if trt_shape != ref_shape:
-        return None, (
-            "Topology unavailable because TRT and reference hidden-state shapes differ: "
-            f"{_shape_text(trt_shape)} versus {_shape_text(ref_shape)}."
-        )
-    if len(trt_shape) != 3:
-        return None, (
-            "Topology unavailable because last_hidden_state is not a rank-3 "
-            f"[batch, tokens, width] tensor: {_shape_text(trt_shape)}."
-        )
-    if trt_registers is None or ref_registers is None:
-        return None, "Topology unavailable because a register-token count is missing or invalid."
-    if trt_registers != ref_registers:
-        return None, (
-            "Topology unavailable because TRT and reference register-token counts differ: "
-            f"{trt_registers} versus {ref_registers}."
-        )
-
-    batch, token_count, width = trt_shape
-    prefix_tokens = 1 + trt_registers
-    patch_tokens = token_count - prefix_tokens
-    if patch_tokens <= 0:
-        return None, (
-            f"Topology unavailable because {token_count} tokens do not leave a patch token "
-            f"after {prefix_tokens} prefix tokens."
-        )
-    grid = math.isqrt(patch_tokens)
-    return {
-        "batch": batch,
-        "token_count": token_count,
-        "width": width,
-        "cls_tokens": 1,
-        "register_tokens": trt_registers,
-        "prefix_tokens": prefix_tokens,
-        "patch_tokens": patch_tokens,
-        "grid": grid if grid * grid == patch_tokens else 0,
-    }, None
-
-
-def _render_feature_shapes_and_topology(
-    pair: Dict[str, Dict[str, Any]],
-) -> Tuple[str, Optional[Dict[str, int]], Optional[str]]:
-    trt_stage = pair.get("trt")
-    ref_stage = pair.get("ref")
-    trt_hidden_shape = _declared_tensor_shape(trt_stage, "last_hidden_state")
-    ref_hidden_shape = _declared_tensor_shape(ref_stage, "last_hidden_state")
-    trt_pooler_shape = _declared_tensor_shape(trt_stage, "pooler_output")
-    ref_pooler_shape = _declared_tensor_shape(ref_stage, "pooler_output")
-    trt_registers = _feature_register_count(trt_stage)
-    ref_registers = _feature_register_count(ref_stage)
-    topology, topology_error = _derive_feature_topology(
-        trt_hidden_shape,
-        ref_hidden_shape,
-        trt_registers,
-        ref_registers,
-    )
-
-    rows = []
-    for label, hidden_shape, pooler_shape, registers in (
-        ("TensorRT", trt_hidden_shape, trt_pooler_shape, trt_registers),
-        ("Reference", ref_hidden_shape, ref_pooler_shape, ref_registers),
-    ):
-        rows.append(
-            "<tr>"
-            f"<th scope=\"row\">{label}</th>"
-            f"<td><code>{_esc(_shape_text(hidden_shape))}</code></td>"
-            f"<td><code>{_esc(_shape_text(pooler_shape))}</code></td>"
-            f"<td>{registers if registers is not None else '&mdash;'}</td>"
-            "</tr>"
-        )
-    parts = [
-        '<table class="feature-shape-table">',
-        '<caption>Tensor shapes emitted by each implementation</caption>',
-        "<thead><tr><th>Implementation</th><th>Last hidden state</th>"
-        "<th>Pooler output</th><th>Register tokens</th></tr></thead>",
-        "<tbody>" + "".join(rows) + "</tbody></table>",
-    ]
-    if topology is not None:
-        grid_text = (
-            f"{topology['grid']} \u00d7 {topology['grid']}"
-            if topology["grid"]
-            else "Not square"
-        )
-        groups = (
-            ("Batch", topology["batch"]),
-            ("Embedding width", topology["width"]),
-            ("CLS tokens", topology["cls_tokens"]),
-            ("Register tokens", topology["register_tokens"]),
-            ("Prefix tokens", topology["prefix_tokens"]),
-            ("Patch tokens", topology["patch_tokens"]),
-            ("Patch grid", grid_text),
-        )
-        chips = "".join(
-            '<li class="feature-topology-chip">'
-            f'<span class="feature-chip-label">{_esc(label)}</span>'
-            f'<strong>{_esc(value)}</strong></li>'
-            for label, value in groups
-        )
-        parts.append(
-            '<ul class="feature-topology" aria-label="Derived feature token topology">'
-            f"{chips}</ul>"
-        )
-    else:
-        parts.append(f'<p class="feature-viz-unavailable">{_esc(topology_error)}</p>')
-    return "\n".join(parts), topology, topology_error
-
-
-def _feature_metric_entries(result: Dict[str, Any]) -> List[Tuple[str, str, Dict[str, Any]]]:
-    entries: List[Tuple[str, str, Dict[str, Any]]] = []
-    for stage_name, stage in (result.get("stages") or {}).items():
-        metrics = stage.get("metrics") if isinstance(stage, dict) else None
-        if not isinstance(metrics, dict):
-            continue
-        for name, metric in metrics.items():
-            if isinstance(metric, dict):
-                entries.append((str(stage_name), str(name), metric))
-    return entries
-
-
-def _metric_float(value: Any) -> Optional[float]:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        number = float(value)
-    except (OverflowError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def _metric_equation_result(
-    value: Optional[float], threshold: Optional[float], operator: str
-) -> Optional[bool]:
-    if value is None or threshold is None:
-        return None
-    if operator == ">=":
-        return value >= threshold
-    if operator == "<=":
-        return value <= threshold
-    if operator == "==":
-        return value == threshold
-    return None
-
-
-def _metric_consistency_warning(
-    metric: Dict[str, Any],
-    value: Optional[float],
-    threshold: Optional[float],
-    operator: str,
-) -> str:
-    state, _ = _metric_recorded_state(metric)
-    if state == "INVALID":
-        return (
-            '<p class="feature-metric-warning" role="alert">INVALID recorded pass state: '
-            '<code>passed</code> must be a JSON boolean. Verdict is not inferred from the '
-            "numeric equation.</p>"
-        )
-    if state == "UNKNOWN":
-        return (
-            '<p class="feature-metric-warning" role="status">UNKNOWN recorded pass state: '
-            "the metric has no explicit boolean verdict.</p>"
-        )
-    equation_result = _metric_equation_result(value, threshold, operator)
-    recorded_result = state == "PASS"
-    if equation_result is not None and equation_result != recorded_result:
-        equation_label = "satisfied" if equation_result else "not satisfied"
-        return (
-            '<p class="feature-metric-warning" role="alert">Recorded '
-            f"<strong>{state}</strong> is inconsistent with the numeric equation, which is "
-            f"{equation_label}. The recorded verdict remains the displayed source of truth.</p>"
-        )
-    return ""
-
-
-def _render_feature_invariants(result: Dict[str, Any]) -> str:
-    items = []
-    for stage_name, name, metric in _feature_metric_entries(result):
-        if metric.get("operator") != "==":
-            continue
-        value = metric.get("value")
-        threshold = metric.get("threshold")
-        state, state_class = _metric_recorded_state(metric)
-        value_number = _metric_float(value)
-        threshold_number = _metric_float(threshold)
-        warning = _metric_consistency_warning(
-            metric, value_number, threshold_number, "=="
-        )
-        inconsistent_class = " feature-metric-inconsistent" if warning else ""
-        items.append(
-            f'<li class="feature-invariant-chip feature-invariant-{state_class}'
-            f'{inconsistent_class}" '
-            f'aria-label="{_esc(name)} exact invariant {state}">'
-            f'<span class="feature-invariant-state">{state}</span>'
-            f'<strong>{_esc(name)}</strong>'
-            f'<span>{_format_metric_value(name, value)} == '
-            f'{_format_metric_value(name, threshold)}</span>'
-            f'<small>{_esc(stage_name)}</small>{warning}</li>'
-        )
-    if not items:
-        return '<p class="feature-viz-unavailable">No exact invariant metrics were recorded.</p>'
-    return (
-        '<section class="feature-invariants" aria-label="Exact invariants">'
-        "<h4>Exact invariants</h4>"
-        '<ul aria-label="Exact invariant results">' + "".join(items) + "</ul></section>"
-    )
-
-
-def _feature_budget_usage(
-    name: str, value: float, threshold: float, operator: str
-) -> Optional[float]:
-    """Return percent of the allowed distance from an ideal value."""
-    if operator == ">=" and "cosine" in name and threshold < 1.0:
-        usage = max(0.0, 100.0 * ((1.0 - value) / (1.0 - threshold)))
-    elif operator == "<=" and value >= 0.0 and threshold > 0.0:
-        usage = 100.0 * (value / threshold)
-    else:
-        return None
-    return usage if math.isfinite(usage) else None
-
-
-def _render_feature_metric_bars(result: Dict[str, Any]) -> str:
-    bars = []
-    for stage_name, name, metric in _feature_metric_entries(result):
-        operator = str(metric.get("operator") or "")
-        if operator not in {">=", "<="}:
-            continue
-        value = _metric_float(metric.get("value"))
-        threshold = _metric_float(metric.get("threshold"))
-        if value is None or threshold is None:
-            continue
-        margin = value - threshold if operator == ">=" else threshold - value
-        margin = margin if math.isfinite(margin) else None
-        state, state_class = _metric_recorded_state(metric)
-        budget_usage = _feature_budget_usage(name, value, threshold, operator)
-        warning = _metric_consistency_warning(metric, value, threshold, operator)
-        inconsistent_class = " feature-metric-inconsistent" if warning else ""
-        margin_label = (
-            "headroom" if margin is not None and margin >= 0.0 else "shortfall"
-        )
-        margin_text = f"{margin:+.6f}" if margin is not None else "not representable"
-        value_text = _format_metric_value(name, value)
-        threshold_text = _format_metric_value(name, threshold)
-        aria = (
-            f"{name}: value {value_text} {operator} threshold {threshold_text}; "
-            f"margin {margin_text}; recorded state {state}"
-        )
-        if budget_usage is None:
-            budget_html = (
-                '<p class="feature-budget-unavailable">No normalized error-budget scale '
-                "applies; use the printed criterion.</p>"
-            )
-        else:
-            budget_position = min(100.0, max(0.0, budget_usage))
-            budget_aria = f"{aria}; {budget_usage:.2f} percent of allowed error used"
-            budget_html = (
-                f'<div class="feature-budget-bar" role="meter" '
-                f'aria-label="{_esc(budget_aria)}" aria-valuemin="0" '
-                f'aria-valuemax="100" aria-valuenow="{budget_position:.3f}" '
-                f'style="--feature-value:{budget_position:.3f}%">'
-                '<span class="feature-budget-fill"></span>'
-                '<span class="feature-threshold-marker" aria-hidden="true"></span>'
-                '<span class="feature-value-marker" aria-hidden="true"></span></div>'
-                '<p class="feature-budget-label">'
-                f'<strong>{budget_usage:.2f}% of allowed error used</strong>'
-                "<span>0% ideal &middot; 100% limit</span></p>"
-            )
-        bars.append(
-            f'<article class="feature-criterion feature-criterion-{state_class}'
-            f'{inconsistent_class}">'
-            '<header><div>'
-            f'<strong>{_esc(name)}</strong><small>{_esc(stage_name)}</small></div>'
-            f'<span class="feature-criterion-state">{state}</span></header>'
-            f'<p class="feature-criterion-equation"><data value="{value}">{value_text}</data> '
-            f'<span>{_esc(operator)}</span> '
-            f'<data value="{threshold}">{threshold_text}</data></p>'
-            f"{budget_html}"
-            f'<p class="feature-margin"><strong>Margin {margin_text}</strong> '
-            f'({margin_label}; {_esc(operator)} criterion)</p>{warning}</article>'
-        )
-    if not bars:
-        return '<p class="feature-viz-unavailable">No thresholded numeric metrics were recorded.</p>'
-    return (
-        '<section class="feature-criteria" aria-label="Threshold and error budgets">'
-        "<h4>Threshold and error budgets</h4>"
-        '<p class="feature-scale-note">Bars normalize comparable error budgets: 0% is the '
-        "ideal value and 100% is the configured limit. The printed value, operator, threshold, "
-        "and margin remain authoritative.</p>"
-        '<div class="feature-criteria-grid">' + "".join(bars) + "</div></section>"
-    )
-
-
-def _cosine_pair(lhs: List[float], rhs: List[float]) -> Optional[float]:
-    if not lhs or len(lhs) != len(rhs):
-        return None
-    if not all(math.isfinite(value) for value in lhs + rhs):
-        return None
-    left_scale = max(abs(value) for value in lhs)
-    right_scale = max(abs(value) for value in rhs)
-    if left_scale == 0.0 or right_scale == 0.0:
-        return 1.0 if lhs == rhs else 0.0
-    scaled_left = [value / left_scale for value in lhs]
-    scaled_right = [value / right_scale for value in rhs]
-    dot = sum(left * right for left, right in zip(scaled_left, scaled_right))
-    left_norm = math.sqrt(sum(value * value for value in scaled_left))
-    right_norm = math.sqrt(sum(value * value for value in scaled_right))
-    denominator = left_norm * right_norm
-    if denominator == 0.0 or not math.isfinite(denominator):
-        return None
-    cosine = dot / denominator
-    if not math.isfinite(cosine):
-        return None
-    return min(1.0, max(-1.0, cosine))
-
-
-def _unit_vector(values: List[float]) -> Optional[List[float]]:
-    scale = max((abs(value) for value in values), default=0.0)
-    if scale == 0.0 or not math.isfinite(scale):
-        return None
-    scaled = [value / scale for value in values]
-    norm = math.sqrt(math.fsum(value * value for value in scaled))
-    if norm == 0.0 or not math.isfinite(norm):
-        return None
-    return [value / norm for value in scaled]
-
-
-def _feature_patch_vectors(
-    tensor: Optional[Dict[str, Any]], topology: Optional[Dict[str, int]]
-) -> Tuple[Optional[List[List[float]]], Optional[str]]:
-    if tensor is None or topology is None:
-        return None, "Query-patch maps require valid tensors and topology."
-    if topology["batch"] != 1:
-        return None, (
-            "Query-patch maps require batch size 1; "
-            f"observed {topology['batch']}."
-        )
-    if topology["grid"] <= 0:
-        return None, (
-            f"Query-patch maps require a square patch grid; observed "
-            f"{topology['patch_tokens']} patch tokens."
-        )
-    if topology["patch_tokens"] > _MAX_FEATURE_HEATMAP_TOKENS:
-        return None, (
-            f"Query-patch maps are bounded to {_MAX_FEATURE_HEATMAP_TOKENS} patches; "
-            f"observed {topology['patch_tokens']}."
-        )
-    feature_values = topology["patch_tokens"] * topology["width"]
-    if feature_values > _MAX_FEATURE_MAP_VALUES:
-        return None, (
-            f"Query-patch maps are bounded to {_MAX_FEATURE_MAP_VALUES:,} spatial "
-            f"feature values; observed {feature_values:,}."
-        )
-
-    width = topology["width"]
-    start_token = topology["prefix_tokens"]
-    values = tensor["values"]
-    patches: List[List[float]] = []
-    for patch_index in range(topology["patch_tokens"]):
-        start = (start_token + patch_index) * width
-        unit = _unit_vector(values[start : start + width])
-        if unit is None:
-            return None, (
-                "Query-patch maps require non-zero finite feature vectors; "
-                f"patch {patch_index} is invalid."
-            )
-        patches.append(unit)
-    return patches, None
-
-
-def _feature_query_indices(grid: int) -> List[int]:
-    """Select a deterministic eight-query spatial lattice."""
-    if grid <= 0:
-        return []
-    if grid < 3:
-        return list(range(min(grid * grid, _FEATURE_QUERY_COUNT)))
-    anchors = [min(grid - 1, grid * quarter // 4) for quarter in (1, 2, 3)]
-    center = (anchors[1], anchors[1])
-    positions = [
-        (row, column)
-        for row in anchors
-        for column in anchors
-        if (row, column) != center
-    ]
-    return [row * grid + column for row, column in positions]
-
-
-def _dot_unit_vectors(lhs: List[float], rhs: List[float]) -> float:
-    value = math.fsum(left * right for left, right in zip(lhs, rhs))
-    return min(1.0, max(-1.0, value))
-
-
-def _interpolate_palette(
-    ratio: float, stops: Tuple[Tuple[float, Tuple[int, int, int]], ...]
-) -> Tuple[int, int, int]:
-    ratio = min(1.0, max(0.0, ratio))
-    low_position, low_color = stops[0]
-    high_position, high_color = stops[-1]
-    for position, color in stops[1:]:
-        if ratio <= position:
-            high_position, high_color = position, color
-            break
-        low_position, low_color = position, color
-    span = high_position - low_position or 1.0
-    local = (ratio - low_position) / span
-    return tuple(
-        round(low + local * (high - low))
-        for low, high in zip(low_color, high_color)
-    )
-
-
-def _feature_similarity_rgb(value: float, low: float, high: float) -> Tuple[int, int, int]:
-    span = high - low
-    ratio = (value - low) / span if span > 0.0 else 1.0
-    viridis = (
-        (0.000, (68, 1, 84)),
-        (0.125, (71, 44, 122)),
-        (0.250, (59, 82, 139)),
-        (0.375, (44, 114, 142)),
-        (0.500, (33, 145, 140)),
-        (0.625, (40, 174, 128)),
-        (0.750, (94, 201, 98)),
-        (0.875, (173, 220, 48)),
-        (1.000, (253, 231, 37)),
-    )
-    return _interpolate_palette(ratio, viridis)
-
-
-def _feature_delta_rgb(value: float) -> Tuple[int, int, int]:
-    ratio = value / _FEATURE_QUERY_DELTA_LIMIT
-    magma = (
-        (0.00, (0, 0, 4)),
-        (0.25, (81, 18, 124)),
-        (0.50, (183, 55, 121)),
-        (0.75, (252, 137, 97)),
-        (1.00, (252, 253, 191)),
-    )
-    return _interpolate_palette(ratio, magma)
-
-
-def _png_chunk(kind: bytes, payload: bytes) -> bytes:
-    checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
-    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
-
-
-def _rgb_png_data_uri(grid: int, pixels: List[Tuple[int, int, int]]) -> str:
-    if grid <= 0 or len(pixels) != grid * grid:
-        raise ValueError("RGB heatmap dimensions do not match the pixel payload")
-    rows = bytearray()
-    for row in range(grid):
-        rows.append(0)
-        for pixel in pixels[row * grid : (row + 1) * grid]:
-            rows.extend(pixel)
-    header = struct.pack(">IIBBBBB", grid, grid, 8, 2, 0, 0, 0)
-    png = (
-        b"\x89PNG\r\n\x1a\n"
-        + _png_chunk(b"IHDR", header)
-        + _png_chunk(b"IDAT", zlib.compress(bytes(rows), level=9))
-        + _png_chunk(b"IEND", b"")
-    )
-    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
-
-
-def _render_feature_query_marker(
-    label: str, row: int, column: int, grid: int, *, compact: bool = False
-) -> str:
-    x_percent = 100.0 * (column + 0.5) / grid
-    y_percent = 100.0 * (row + 0.5) / grid
-    compact_class = " feature-query-marker-compact" if compact else ""
-    aria = f"{label}, patch row {row + 1}, column {column + 1}"
-    return (
-        f'<span class="feature-query-marker{compact_class}" '
-        f'style="--feature-query-x:{x_percent:.6f}%;'
-        f'--feature-query-y:{y_percent:.6f}%" aria-label="{_esc(aria)}">'
-        f'<span aria-hidden="true">{_esc(label)}</span></span>'
-    )
-
-
-def _render_feature_query_input(
-    image_path: Optional[Path], query_indices: List[int], grid: int
-) -> str:
-    uri = None
-    if image_path is not None:
-        uri = encode_file_base64(image_path, _mime_for_ext(image_path.suffix))
-    if uri is None:
-        image_html = '<p class="missing">Model input image is unavailable.</p>'
-    else:
-        image_html = (
-            f'<img src="{uri}" class="feature-query-input-image" '
-            'alt="Model input with numbered query patch markers" />'
-        )
-    markers = []
-    for ordinal, query_index in enumerate(query_indices, start=1):
-        row, column = divmod(query_index, grid)
-        markers.append(_render_feature_query_marker(f"Q{ordinal}", row, column, grid))
-    filename = (
-        f' <span class="media-filename">{_esc(image_path.name)}</span>'
-        if image_path is not None
-        else ""
-    )
-    return (
-        '<figure class="feature-query-input">'
-        '<div class="feature-query-input-frame" '
-        f'style="--feature-grid:{grid}">{image_html}{"".join(markers)}</div>'
-        '<figcaption><strong>Model-space input view.</strong> The source image is shown '
-        f'as a square to match the {grid} × {grid} feature grid. Numbered markers are '
-        f'{len(query_indices)} deterministic spatial queries.{filename}</figcaption></figure>'
-    )
-
-
-def _render_feature_map_image(
-    title: str,
-    uri: str,
-    *,
-    label: str,
-    query_index: int,
-    grid: int,
-    scale_low: float,
-    scale_high: float,
-    map_kind: str,
-) -> str:
-    row, column = divmod(query_index, grid)
-    alt = (
-        f"{title} for {label}, query patch row {row + 1}, column {column + 1}; "
-        f"color scale {scale_low:.6f} to {scale_high:.6f}"
-    )
-    return (
-        f'<figure class="feature-query-map feature-query-map-{_esc(map_kind)}" '
-        f'data-query-index="{query_index}" data-grid-rows="{grid}" '
-        f'data-grid-cols="{grid}" data-scale-min="{scale_low:.9f}" '
-        f'data-scale-max="{scale_high:.9f}">'
-        f'<h6>{_esc(title)}</h6><div class="feature-query-map-frame" '
-        f'style="--feature-grid:{grid}">'
-        f'<img src="{uri}" alt="{_esc(alt)}" />'
-        f'{_render_feature_query_marker("", row, column, grid, compact=True)}'
-        "</div></figure>"
-    )
-
-
-def _render_query_patch_maps(
-    trt_tensor: Optional[Dict[str, Any]],
-    ref_tensor: Optional[Dict[str, Any]],
-    topology: Optional[Dict[str, int]],
-    image_path: Optional[Path],
-) -> Tuple[str, Optional[str]]:
-    if trt_tensor is None or ref_tensor is None or topology is None:
-        return "", "DINO-style query-patch maps require valid paired feature tensors."
-    if trt_tensor["shape"] != ref_tensor["shape"]:
-        return "", "DINO-style query-patch maps require matching tensor shapes."
-    ref_patches, ref_error = _feature_patch_vectors(ref_tensor, topology)
-    trt_patches, trt_error = _feature_patch_vectors(trt_tensor, topology)
-    if ref_patches is None or trt_patches is None:
-        return "", ref_error or trt_error
-
-    grid = topology["grid"]
-    query_indices = _feature_query_indices(grid)
-    cards = []
-    all_deltas: List[float] = []
-    for ordinal, query_index in enumerate(query_indices, start=1):
-        label = f"Q{ordinal}"
-        row, column = divmod(query_index, grid)
-        query = ref_patches[query_index]
-        ref_map = [_dot_unit_vectors(query, patch) for patch in ref_patches]
-        trt_map = [_dot_unit_vectors(query, patch) for patch in trt_patches]
-        deltas = [abs(trt - ref) for trt, ref in zip(trt_map, ref_map)]
-        all_deltas.extend(deltas)
-        scale_low, scale_high = min(ref_map), 1.0
-        scale_mode = "reference"
-        if scale_high - scale_low < _FEATURE_MIN_SIMILARITY_SPAN:
-            scale_low = -1.0
-            scale_mode = "theoretical-fallback"
-        ref_uri = _rgb_png_data_uri(
-            grid,
-            [_feature_similarity_rgb(value, scale_low, scale_high) for value in ref_map],
-        )
-        trt_uri = _rgb_png_data_uri(
-            grid,
-            [_feature_similarity_rgb(value, scale_low, scale_high) for value in trt_map],
-        )
-        delta_uri = _rgb_png_data_uri(
-            grid, [_feature_delta_rgb(value) for value in deltas]
-        )
-        query_parity = _dot_unit_vectors(query, trt_patches[query_index])
-        mean_delta = math.fsum(deltas) / len(deltas)
-        max_delta = max(deltas)
-        clamped = sum(
-            value < scale_low or value > scale_high for value in trt_map
-        )
-        clamp_note = (
-            f" · {clamped} TRT cells clipped to Reference scale"
-            if clamped
-            else ""
-        )
-        fallback_note = (
-            " · degenerate Reference range; using theoretical [-1, 1] scale"
-            if scale_mode == "theoretical-fallback"
-            else ""
-        )
-        cards.append(
-            '<article class="feature-query-card" '
-            f'data-query-index="{query_index}" data-query-row="{row}" '
-            f'data-query-column="{column}" data-query-source="reference" '
-            f'data-scale-mode="{scale_mode}" '
-            f'data-query-feature-cosine="{query_parity:.9f}" '
-            f'data-mean-map-delta="{mean_delta:.9f}" '
-            f'data-max-map-delta="{max_delta:.9f}">'
-            f'<header><h5>{label} · patch row {row + 1}, column {column + 1}</h5>'
-            '<p>One Reference query embedding is shared by both target maps.</p></header>'
-            '<div class="feature-query-map-grid">'
-            + _render_feature_map_image(
-                "Reference similarity",
-                ref_uri,
-                label=label,
-                query_index=query_index,
-                grid=grid,
-                scale_low=scale_low,
-                scale_high=scale_high,
-                map_kind="reference",
-            )
-            + _render_feature_map_image(
-                "TensorRT similarity",
-                trt_uri,
-                label=label,
-                query_index=query_index,
-                grid=grid,
-                scale_low=scale_low,
-                scale_high=scale_high,
-                map_kind="trt",
-            )
-            + _render_feature_map_image(
-                "Absolute map delta",
-                delta_uri,
-                label=label,
-                query_index=query_index,
-                grid=grid,
-                scale_low=0.0,
-                scale_high=_FEATURE_QUERY_DELTA_LIMIT,
-                map_kind="delta",
-            )
-            + "</div>"
-            '<div class="feature-query-legends">'
-            '<div><span class="feature-similarity-gradient" aria-hidden="true"></span>'
-            f'<span>{scale_low:.4f}</span><span>cosine</span><span>1.0000</span></div>'
-            '<div><span class="feature-delta-gradient" aria-hidden="true"></span>'
-            f'<span>0</span><span>|Δ cosine|</span><span>≥ {_FEATURE_QUERY_DELTA_LIMIT:.3f}</span>'
-            "</div></div>"
-            '<p class="feature-query-stats">'
-            f'Query feature cosine: <strong>{query_parity:.6f}</strong> · '
-            f'Mean map |Δ|: <strong>{mean_delta:.6f}</strong> · '
-            f'Max map |Δ|: <strong>{max_delta:.6f}</strong>'
-            f'{clamp_note}{fallback_note}</p></article>'
-        )
-
-    max_delta = max(all_deltas, default=0.0)
-    return (
-        '<section class="feature-query-comparison" '
-        'aria-label="DINO-style query patch similarity maps">'
-        '<header class="feature-query-heading"><div>'
-        '<p class="feature-eyebrow">Dense feature visualization</p>'
-        '<h4>DINO-style query-patch similarity maps</h4>'
-        '<p>Selecting a patch asks which other image regions have a similar feature. '
-        'Reference and TensorRT use the same spatial query and the exact same Reference '
-        'query embedding, so matching colors are directly comparable. CLS and register '
-        'tokens are excluded; only the row-major spatial patch grid is visualized.</p></div>'
-        f'<div class="feature-query-summary"><strong>{len(query_indices)} queries</strong>'
-        f'<span>{grid} × {grid} patches</span>'
-        f'<span>Max shown map |Δ| {max_delta:.6f}</span></div></header>'
-        '<div class="feature-query-intro">'
-        f'{_render_feature_query_input(image_path, query_indices, grid)}'
-        '<aside><h5>How to read these maps</h5><ol>'
-        '<li>Find a numbered red query marker on the input.</li>'
-        '<li>Compare the Reference and TensorRT color patterns in the same row.</li>'
-        '<li>Use the absolute-delta map to locate differences. Black is identical; '
-        f'the fixed upper scale is {_FEATURE_QUERY_DELTA_LIMIT:.3f} cosine.</li>'
-        '</ol><p>Each Reference/TensorRT pair shares a Reference-derived color scale; '
-        'different query rows may use different printed minima. Delta colors are a fixed '
-        'diagnostic scale, not a pass/fail threshold. These eight probes are not exhaustive; '
-        'the full-tensor numerical criteria remain authoritative.</p>'
-        '<p>The eight queries use a deterministic 3 × 3 spatial lattice with the '
-        'center omitted, mirroring the concept of the DINOv3 overview without claiming '
-        'its exact official coordinates or palette.</p></aside></div>'
-        '<div class="feature-query-card-grid">' + "".join(cards) + "</div></section>"
-    ), None
-
-
-def _render_collapsed_feature_raw(result: Dict[str, Any]) -> str:
-    return (
-        '<details class="feature-raw-details">'
-        '<summary>Raw structured outputs (bounded preview)</summary>'
-        '<div class="feature-raw-body">'
-        f"{_render_structured_stage_comparison(result)}"
-        "</div></details>"
-    )
-
-
-def render_image_feature_model(
-    result: Dict[str, Any], project_dir: Optional[Path]
-) -> str:
-    """Render human-comparable image-feature parity evidence."""
-    cc = result.get("case_config") or {}
-    inputs = cc.get("inputs") or {}
-    image_ref = _input_ref(inputs, ("image", "test_image", "image_path", "input_image"))
-    image_path = _resolve_input_media(image_ref, project_dir)
-    pair = _feature_stage_pair(result)
-    shape_html, topology, topology_error = _render_feature_shapes_and_topology(pair)
-
-    trt_tensor, trt_error = _feature_tensor(pair.get("trt"), "last_hidden_state")
-    ref_tensor, ref_error = _feature_tensor(pair.get("ref"), "last_hidden_state")
-    query_maps, query_error = _render_query_patch_maps(
-        trt_tensor,
-        ref_tensor,
-        topology,
-        image_path,
-    )
-
-    parts = []
-    if query_maps:
-        parts.append(query_maps)
-    else:
-        reason = trt_error or ref_error or query_error or topology_error
-        parts.append(
-            '<p class="feature-viz-unavailable"><strong>DINO-style query-patch maps '
-            f'unavailable:</strong> {_esc(reason)}</p>'
-        )
-
-    parts.append(
-        '<details class="feature-diagnostics"><summary>Numerical parity evidence</summary>'
-        '<div class="feature-diagnostics-body">'
-        '<section class="feature-parity-overview" aria-label="Feature tensor topology">'
-        f'<h4>Tensor topology</h4>{shape_html}</section>'
-        f'{_render_feature_invariants(result)}'
-        f'{_render_feature_metric_bars(result)}'
-        '<h4>All recorded metrics</h4>'
-        f'{_render_metrics_table(result.get("stages", {}))}'
-        "</div></details>"
-    )
-    parts.append(_render_repro_commands(result.get("repro_commands", {})))
-    parts.append(_render_timing_sections(result))
-    parts.append(_render_collapsed_feature_raw(result))
     return "\n".join(parts)
 
 
@@ -3206,6 +2370,38 @@ def _render_oracle_context(result: Dict[str, Any]) -> str:
     )
 
 
+def _render_model_owned_evidence(
+    result: Dict[str, Any], project_dir: Optional[Path]
+) -> Optional[str]:
+    """Load an optional renderer owned by the result's model family."""
+    if project_dir is None:
+        return None
+    family = str((result.get("case_config") or {}).get("family") or "")
+    if re.fullmatch(r"[a-z0-9_]+", family) is None:
+        return None
+    renderer_path = _path_within(
+        project_dir / "tests" / "e2e" / "models" / family / "e2e_plugins" / "report.py",
+        project_dir,
+    )
+    if renderer_path is None:
+        return None
+    spec = importlib.util.spec_from_file_location(f"trtmc_report_{family}", renderer_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Cannot load model-owned report renderer: {renderer_path}")
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        rendered = module.render(result, project_dir=project_dir)
+    except Exception as error:
+        return (
+            '<p class="missing">Model-owned visualization unavailable: '
+            f"{_esc(type(error).__name__)}: {_esc(error)}</p>"
+        )
+    if not isinstance(rendered, str) or not rendered:
+        return '<p class="missing">Model-owned visualization returned no HTML.</p>'
+    return rendered
+
+
 def render_model_section(
     result: Dict[str, Any],
     project_dir: Optional[Path],
@@ -3254,8 +2450,24 @@ def render_model_section(
             f'<p class="failure-info">Failure type: <strong>{_esc(failure_type)}</strong></p>'
         )
 
-    # Dispatch to modality renderer
-    if modality == "text":
+    # A family-owned renderer can add specialized human evidence without
+    # growing this shared modality switch.
+    owned_evidence = _render_model_owned_evidence(result, project_dir)
+    if owned_evidence is not None:
+        body_parts.append(owned_evidence)
+        try:
+            numeric_evidence = render_generic_model(result)
+        except Exception as error:
+            numeric_evidence = (
+                '<p class="missing">Numerical evidence unavailable: '
+                f"{_esc(type(error).__name__)}: {_esc(error)}</p>"
+            )
+        body_parts.append(
+            '<details class="model-owned-diagnostics"><summary>Numerical evidence</summary>'
+            f'<div class="model-owned-diagnostics-body">{numeric_evidence}</div>'
+            "</details>"
+        )
+    elif modality == "text":
         body_parts.append(render_text_model(result))
     elif modality == "diffusion_text":
         body_parts.append(render_diffusion_text_model(result))
@@ -3277,13 +2489,8 @@ def render_model_section(
         body_parts.append(render_neural_operator_model(result))
     elif modality == "omni":
         body_parts.append(render_omni_model(result, project_dir))
-    elif modality == "image_features":
-        body_parts.append(render_image_feature_model(result, project_dir))
     elif modality == "structured":
         body_parts.append(_render_structured_stage_comparison(result))
-        body_parts.append(_render_metrics_table(result.get("stages", {})))
-        body_parts.append(_render_repro_commands(result.get("repro_commands", {})))
-        body_parts.append(_render_timing_sections(result))
     else:
         body_parts.append(render_generic_model(result))
 
@@ -3326,15 +2533,9 @@ def _key_metric(result: Dict[str, Any]) -> str:
             if key in metrics:
                 m = metrics[key]
                 val = m.get("value", m) if isinstance(m, dict) else m
-                summary = f"{key}={_format_metric_value(key, val)}"
-                if key == "full_cosine" and isinstance(m, dict):
-                    operator = str(m.get("operator") or "")
-                    threshold = m.get("threshold")
-                    if operator and threshold is not None:
-                        summary += (
-                            f" {operator} {_format_metric_value(key, threshold)}"
-                        )
-                return summary
+                if key == "full_cosine" and isinstance(val, float):
+                    return f"{key}={val:.6f}"
+                return f"{key}={_format_value(val)}"
     return ""
 
 

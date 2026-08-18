@@ -150,26 +150,24 @@ def resolve_vit_config(raw: dict) -> dict:
     }
 
 
-def _required_layer(readers, layer: int, suffix: str, precision: str) -> np.ndarray:
+def _layer_weight(
+    readers, layer: int, suffix: str, precision: str, *, transpose: bool = False
+) -> np.ndarray:
     name = layer_key(readers, layer, suffix)
-    return as_weight(load_tensor(readers, name), precision)
-
-
-def _linear_layer(readers, layer: int, suffix: str, precision: str) -> np.ndarray:
-    name = layer_key(readers, layer, suffix)
-    return transpose_linear(load_tensor(readers, name), name, precision)
+    value = load_tensor(readers, name)
+    return transpose_linear(value, name, precision) if transpose else as_weight(value, precision)
 
 
 def _optional_layer_bias(
     readers, layer: int, suffix: str, *, enabled: bool, precision: str
 ) -> np.ndarray | None:
-    candidates = (f"model.layer.{layer}.{suffix}", f"layer.{layer}.{suffix}")
-    for name in candidates:
-        if has_tensor(readers, name):
-            return as_weight(load_tensor(readers, name), precision)
-    if enabled:
-        raise KeyError("Tensor not found; tried: " + ", ".join(candidates))
-    return None
+    try:
+        name = layer_key(readers, layer, suffix)
+    except KeyError:
+        if enabled:
+            raise
+        return None
+    return as_weight(load_tensor(readers, name), precision)
 
 
 def _is_timm_vit_checkpoint(readers) -> bool:
@@ -201,6 +199,16 @@ def _load_timm_vit_weights(readers, cfg: dict, precision: str) -> WeightDict:
     for layer in range(cfg["num_hidden_layers"]):
         source_prefix = f"blocks.{layer}"
         target_prefix = f"layer.{layer}"
+
+        def store(logical: str, source: str, *, transpose=False):
+            name = f"{source_prefix}.{source}"
+            value = load_tensor(readers, name)
+            weights[f"{target_prefix}.{logical}"] = (
+                transpose_linear(value, name, precision)
+                if transpose
+                else as_weight(value, precision)
+            )
+
         for target_suffix, source_suffix in (
             ("norm1.weight", "norm1.weight"),
             ("norm1.bias", "norm1.bias"),
@@ -209,9 +217,7 @@ def _load_timm_vit_weights(readers, cfg: dict, precision: str) -> WeightDict:
             ("norm2.bias", "norm2.bias"),
             ("layer_scale2.lambda1", "gamma_2"),
         ):
-            weights[f"{target_prefix}.{target_suffix}"] = as_weight(
-                load_tensor(readers, f"{source_prefix}.{source_suffix}"), precision
-            )
+            store(target_suffix, source_suffix)
 
         qkv_name = f"{source_prefix}.attn.qkv.weight"
         qkv = load_tensor(readers, qkv_name)
@@ -225,35 +231,27 @@ def _load_timm_vit_weights(readers, cfg: dict, precision: str) -> WeightDict:
                 value, qkv_name, precision
             )
 
-        weights[f"{target_prefix}.attention.q_proj.bias"] = as_weight(
-            load_tensor(readers, f"{source_prefix}.attn.q_bias"), precision
-        )
-        weights[f"{target_prefix}.attention.v_proj.bias"] = as_weight(
-            load_tensor(readers, f"{source_prefix}.attn.v_bias"), precision
-        )
-        weights[f"{target_prefix}.attention.o_proj.weight"] = transpose_linear(
-            load_tensor(readers, f"{source_prefix}.attn.proj.weight"),
-            f"{source_prefix}.attn.proj.weight",
-            precision,
-        )
-        weights[f"{target_prefix}.attention.o_proj.bias"] = as_weight(
-            load_tensor(readers, f"{source_prefix}.attn.proj.bias"), precision
-        )
+        store("attention.q_proj.bias", "attn.q_bias")
+        store("attention.v_proj.bias", "attn.v_bias")
+        store("attention.o_proj.weight", "attn.proj.weight", transpose=True)
+        store("attention.o_proj.bias", "attn.proj.bias")
 
         for projection, source_projection in (
             ("up_proj", "fc1"),
             ("down_proj", "fc2"),
         ):
-            source = f"{source_prefix}.mlp.{source_projection}"
-            weights[f"{target_prefix}.mlp.{projection}.weight"] = transpose_linear(
-                load_tensor(readers, f"{source}.weight"),
-                f"{source}.weight",
-                precision,
-            )
-            weights[f"{target_prefix}.mlp.{projection}.bias"] = as_weight(
-                load_tensor(readers, f"{source}.bias"), precision
-            )
+            store(f"mlp.{projection}.weight", f"mlp.{source_projection}.weight", transpose=True)
+            store(f"mlp.{projection}.bias", f"mlp.{source_projection}.bias")
     return weights
+
+
+def _validate_register_tokens(weights: WeightDict, cfg: dict) -> None:
+    checkpoint = tuple(weights["register_tokens"].shape)
+    expected = (1, cfg["num_register_tokens"], cfg["hidden_size"])
+    if checkpoint != expected:
+        raise ValueError(
+            f"DINOv3 register token shape mismatch: checkpoint={checkpoint}, config={expected}"
+        )
 
 
 def load_vit_weights(
@@ -265,13 +263,7 @@ def load_vit_weights(
 
     if _is_timm_vit_checkpoint(readers):
         weights = _load_timm_vit_weights(readers, cfg, precision)
-        register_shape = tuple(weights["register_tokens"].shape)
-        expected_register_shape = (1, cfg["num_register_tokens"], cfg["hidden_size"])
-        if register_shape != expected_register_shape:
-            raise ValueError(
-                "DINOv3 register token shape mismatch: "
-                f"checkpoint={register_shape}, config={expected_register_shape}"
-            )
+        _validate_register_tokens(weights, cfg)
         return weights
 
     weights = WeightDict()
@@ -286,13 +278,7 @@ def load_vit_weights(
     ):
         weights[logical] = as_weight(load_tensor(readers, checkpoint_name), precision)
 
-    register_shape = tuple(weights["register_tokens"].shape)
-    expected_register_shape = (1, cfg["num_register_tokens"], cfg["hidden_size"])
-    if register_shape != expected_register_shape:
-        raise ValueError(
-            "DINOv3 register token shape mismatch: "
-            f"checkpoint={register_shape}, config={expected_register_shape}"
-        )
+    _validate_register_tokens(weights, cfg)
 
     for layer in range(cfg["num_hidden_layers"]):
         prefix = f"layer.{layer}"
@@ -304,14 +290,14 @@ def load_vit_weights(
             "norm2.bias",
             "layer_scale2.lambda1",
         ):
-            weights[f"{prefix}.{suffix}"] = _required_layer(
+            weights[f"{prefix}.{suffix}"] = _layer_weight(
                 readers, layer, suffix, precision
             )
 
         for projection in ("q_proj", "k_proj", "v_proj", "o_proj"):
             suffix = f"attention.{projection}.weight"
-            weights[f"{prefix}.{suffix}"] = _linear_layer(
-                readers, layer, suffix, precision
+            weights[f"{prefix}.{suffix}"] = _layer_weight(
+                readers, layer, suffix, precision, transpose=True
             )
         for projection, enabled in (
             ("q_proj", cfg["query_bias"]),
@@ -331,8 +317,8 @@ def load_vit_weights(
             mlp_projections.insert(0, "gate_proj")
         for projection in mlp_projections:
             suffix = f"mlp.{projection}.weight"
-            weights[f"{prefix}.{suffix}"] = _linear_layer(
-                readers, layer, suffix, precision
+            weights[f"{prefix}.{suffix}"] = _layer_weight(
+                readers, layer, suffix, precision, transpose=True
             )
             bias_suffix = f"mlp.{projection}.bias"
             bias = _optional_layer_bias(
@@ -348,28 +334,8 @@ def load_vit_weights(
 
 
 def _work_types(precision: str) -> tuple[np.dtype, trt.DataType]:
-    if precision == "fp32":
-        return np.dtype(np.float32), trt.float32
-    if precision == "fp16":
-        return np.dtype(np.float16), trt.float16
-    raise ValueError(f"Unsupported DINOv3 precision: {precision}")
-
-
-def _new_network(verbose: bool):
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(
-        trt_compat.network_creation_flags(strongly_typed=True, explicit_batch=True)
-    )
-    builder_config = builder.create_builder_config()
-    builder_config.avg_timing_iterations = 8
-    builder_config.max_aux_streams = 0
-    builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
-    return builder, network, builder_config
-
-
-def _with_bias(network, tensor, weights, key: str, dtype: np.dtype):
-    return graph_ops.add_bias(network, tensor, weights.get(key), dtype)
+    dtype = target_dtype(precision)
+    return dtype, trt.float16 if dtype == np.dtype(np.float16) else trt.float32
 
 
 def build_vit_engine(
@@ -381,7 +347,7 @@ def build_vit_engine(
 ) -> bytes:
     cfg = config.raw.get("_dinov3_config") or resolve_vit_config(config.raw)
     work_dtype, work_trt_dtype = _work_types(precision)
-    builder, network, builder_config = _new_network(verbose)
+    builder, network, builder_config = graph_ops.new_network(verbose)
 
     image_h = cfg["image_h"]
     image_w = cfg["image_w"]
@@ -418,9 +384,12 @@ def build_vit_engine(
         trt.Weights(np.ascontiguousarray(weights["patch.bias"], dtype=work_dtype)),
     )
     patch.stride_nd = (patch_size, patch_size)
-    patch_tokens = network.add_shuffle(patch.get_output(0))
-    patch_tokens.first_transpose = (0, 2, 3, 1)
-    patch_tokens.reshape_dims = (1, num_patches, hidden_size)
+    patch_tokens = graph_ops.shuffle(
+        network,
+        patch.get_output(0),
+        first_transpose=(0, 2, 3, 1),
+        reshape_dims=(1, num_patches, hidden_size),
+    )
 
     cls = graph_ops.constant(
         network, weights["cls_token"], (1, 1, hidden_size), work_dtype
@@ -435,170 +404,96 @@ def build_vit_engine(
             work_dtype,
         )
         pieces.append(graph_ops.cast(network, registers, work_trt_dtype))
-    pieces.append(patch_tokens.get_output(0))
+    pieces.append(patch_tokens)
     concat = network.add_concatenation(pieces)
     concat.axis = 1
     hidden = concat.get_output(0)
 
     def to_heads(tensor):
-        shuffle = network.add_shuffle(tensor)
-        shuffle.reshape_dims = (1, sequence_length, num_heads, head_dim)
-        shuffle.second_transpose = (0, 2, 1, 3)
-        return shuffle.get_output(0)
+        return graph_ops.shuffle(
+            network,
+            tensor,
+            reshape_dims=(1, sequence_length, num_heads, head_dim),
+            second_transpose=(0, 2, 1, 3),
+        )
 
     for layer in range(num_layers):
         prefix = f"layer.{layer}"
-        residual = hidden
-        normalized = graph_ops.layer_norm(
-            network,
-            hidden,
-            hidden_size,
-            weights[f"{prefix}.norm1.weight"],
-            weights[f"{prefix}.norm1.bias"],
-            cfg["layer_norm_eps"],
-            work_dtype,
-        )
-        projections = {}
-        for short, projection in (("q", "q_proj"), ("k", "k_proj"), ("v", "v_proj")):
-            value = graph_ops.linear(
+
+        def project(group: str, name: str, tensor):
+            return graph_ops.linear_with_bias(
+                network, tensor, weights, f"{prefix}.{group}.{name}", work_dtype
+            )
+
+        def normalize(name: str, tensor):
+            key = f"{prefix}.{name}"
+            return graph_ops.layer_norm(
                 network,
-                normalized,
-                weights[f"{prefix}.attention.{projection}.weight"],
+                tensor,
+                hidden_size,
+                weights[f"{key}.weight"],
+                weights[f"{key}.bias"],
+                cfg["layer_norm_eps"],
                 work_dtype,
             )
-            value = _with_bias(
-                network,
-                value,
-                weights,
-                f"{prefix}.attention.{projection}.bias",
-                work_dtype,
+
+        def add_residual(residual, tensor, scale: str):
+            return graph_ops.add_scaled_residual(
+                network, residual, tensor, weights[f"{prefix}.{scale}"], work_dtype
             )
-            projections[short] = to_heads(value)
-        q = graph_ops.apply_patch_rope(
-            network,
-            projections["q"],
-            num_heads=num_heads,
-            num_prefix_tokens=num_prefix,
-            grid_h=grid_h,
-            grid_w=grid_w,
-            head_dim=head_dim,
-            theta=cfg["rope_theta"],
-            dtype=work_dtype,
-        )
-        k = graph_ops.apply_patch_rope(
-            network,
-            projections["k"],
-            num_heads=num_heads,
-            num_prefix_tokens=num_prefix,
-            grid_h=grid_h,
-            grid_w=grid_w,
-            head_dim=head_dim,
-            theta=cfg["rope_theta"],
-            dtype=work_dtype,
-        )
-        context = graph_ops.attention(
-            network, q, k, projections["v"], head_dim, work_dtype
-        )
-        merged = network.add_shuffle(context)
-        merged.first_transpose = (0, 2, 1, 3)
-        merged.reshape_dims = (1, sequence_length, hidden_size)
-        attention_out = graph_ops.linear(
-            network,
-            merged.get_output(0),
-            weights[f"{prefix}.attention.o_proj.weight"],
-            work_dtype,
-        )
-        attention_out = _with_bias(
-            network,
-            attention_out,
-            weights,
-            f"{prefix}.attention.o_proj.bias",
-            work_dtype,
-        )
-        attention_out = graph_ops.multiply_last_dim(
-            network,
-            attention_out,
-            weights[f"{prefix}.layer_scale1.lambda1"],
-            work_dtype,
-        )
-        hidden = network.add_elementwise(
-            residual, attention_out, trt.ElementWiseOperation.SUM
-        ).get_output(0)
 
         residual = hidden
-        normalized = graph_ops.layer_norm(
+        normalized = normalize("norm1", hidden)
+        projections = {}
+        for short, projection in (("q", "q_proj"), ("k", "k_proj"), ("v", "v_proj")):
+            projections[short] = to_heads(project("attention", projection, normalized))
+        for name in ("q", "k"):
+            projections[name] = graph_ops.apply_patch_rope(
+                network,
+                projections[name],
+                num_heads=num_heads,
+                num_prefix_tokens=num_prefix,
+                grid_h=grid_h,
+                grid_w=grid_w,
+                head_dim=head_dim,
+                theta=cfg["rope_theta"],
+                dtype=work_dtype,
+            )
+        context = graph_ops.attention(
             network,
-            hidden,
-            hidden_size,
-            weights[f"{prefix}.norm2.weight"],
-            weights[f"{prefix}.norm2.bias"],
-            cfg["layer_norm_eps"],
+            projections["q"],
+            projections["k"],
+            projections["v"],
+            head_dim,
             work_dtype,
         )
+        merged = graph_ops.shuffle(
+            network,
+            context,
+            first_transpose=(0, 2, 1, 3),
+            reshape_dims=(1, sequence_length, hidden_size),
+        )
+        attention_out = project("attention", "o_proj", merged)
+        hidden = add_residual(residual, attention_out, "layer_scale1.lambda1")
+
+        residual = hidden
+        normalized = normalize("norm2", hidden)
         if cfg["use_gated_mlp"]:
-            gate = graph_ops.linear(
-                network,
-                normalized,
-                weights[f"{prefix}.mlp.gate_proj.weight"],
-                work_dtype,
-            )
-            gate = _with_bias(
-                network,
-                gate,
-                weights,
-                f"{prefix}.mlp.gate_proj.bias",
-                work_dtype,
-            )
+            gate = project("mlp", "gate_proj", normalized)
             gate = graph_ops.activation(
                 network, gate, cfg["hidden_act"], work_dtype
             )
-            up = graph_ops.linear(
-                network,
-                normalized,
-                weights[f"{prefix}.mlp.up_proj.weight"],
-                work_dtype,
-            )
-            up = _with_bias(
-                network, up, weights, f"{prefix}.mlp.up_proj.bias", work_dtype
-            )
+            up = project("mlp", "up_proj", normalized)
             activated = network.add_elementwise(
                 gate, up, trt.ElementWiseOperation.PROD
             ).get_output(0)
         else:
-            activated = graph_ops.linear(
-                network,
-                normalized,
-                weights[f"{prefix}.mlp.up_proj.weight"],
-                work_dtype,
-            )
-            activated = _with_bias(
-                network,
-                activated,
-                weights,
-                f"{prefix}.mlp.up_proj.bias",
-                work_dtype,
-            )
+            activated = project("mlp", "up_proj", normalized)
             activated = graph_ops.activation(
                 network, activated, cfg["hidden_act"], work_dtype
             )
-        mlp = graph_ops.linear(
-            network,
-            activated,
-            weights[f"{prefix}.mlp.down_proj.weight"],
-            work_dtype,
-        )
-        mlp = _with_bias(
-            network, mlp, weights, f"{prefix}.mlp.down_proj.bias", work_dtype
-        )
-        mlp = graph_ops.multiply_last_dim(
-            network,
-            mlp,
-            weights[f"{prefix}.layer_scale2.lambda1"],
-            work_dtype,
-        )
-        hidden = network.add_elementwise(
-            residual, mlp, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+        mlp = project("mlp", "down_proj", activated)
+        hidden = add_residual(residual, mlp, "layer_scale2.lambda1")
 
     hidden = graph_ops.layer_norm(
         network,
@@ -613,15 +508,10 @@ def build_vit_engine(
     last_hidden_state.name = "last_hidden_state"
     network.mark_output(last_hidden_state)
 
-    pooled = network.add_slice(
-        last_hidden_state,
-        (0, 0, 0),
-        (1, 1, hidden_size),
-        (1, 1, 1),
-    ).get_output(0)
-    pooled_shuffle = network.add_shuffle(pooled)
-    pooled_shuffle.reshape_dims = (1, hidden_size)
-    pooled = pooled_shuffle.get_output(0)
+    pooled = graph_ops.slice_tensor(
+        network, last_hidden_state, (0, 0, 0), (1, 1, hidden_size)
+    )
+    pooled = graph_ops.shuffle(network, pooled, reshape_dims=(1, hidden_size))
     pooled.name = "pooler_output"
     network.mark_output(pooled)
 
@@ -715,18 +605,36 @@ class Dinov3Plugin:
             )
             image_h, image_w = cfg["image_h"], cfg["image_w"]
             architecture = "vit"
+            specific = {
+                "image_size": image_h if image_h == image_w else [image_h, image_w],
+                "patch_size": cfg["patch_size"],
+                "intermediate_size": cfg["intermediate_size"],
+                "num_hidden_layers": cfg["num_hidden_layers"],
+                "num_attention_heads": cfg["num_attention_heads"],
+                "num_key_value_heads": cfg["num_attention_heads"],
+                "hidden_act": cfg["hidden_act"],
+                "layer_norm_eps": cfg["layer_norm_eps"],
+                "rope_theta": cfg["rope_theta"],
+                "num_register_tokens": cfg["num_register_tokens"],
+                "query_bias": cfg["query_bias"],
+                "key_bias": cfg["key_bias"],
+                "value_bias": cfg["value_bias"],
+                "proj_bias": cfg["proj_bias"],
+                "mlp_bias": cfg["mlp_bias"],
+                "use_gated_mlp": cfg["use_gated_mlp"],
+            }
         elif config.model_type == "dinov3_convnext":
             from .convnext_builder import convnext_bundle_metadata, resolve_convnext_config
 
             cfg = resolve_convnext_config(config)
-            metadata = convnext_bundle_metadata(config)
+            specific = convnext_bundle_metadata(config)
             hidden_size = cfg["hidden_sizes"][-1]
             image_h, image_w = cfg["image_h"], cfg["image_w"]
-            sequence_length = metadata["num_feature_tokens"]
+            sequence_length = specific["num_feature_tokens"]
             architecture = "convnext"
         else:
             raise ValueError(f"Unsupported DINOv3 model_type: {config.model_type!r}")
-        overrides = {
+        return {
             "model_type": config.model_type,
             "runtime_strategy": self.runtime_strategy,
             "dinov3_architecture": architecture,
@@ -738,34 +646,8 @@ class Dinov3Plugin:
             "image_std": [0.229, 0.224, 0.225],
             "interpolation": "bilinear",
             "do_center_crop": False,
+            **specific,
         }
-        if config.model_type == "dinov3_vit":
-            overrides.update(
-                {
-                    "image_size": image_h if image_h == image_w else [image_h, image_w],
-                    "patch_size": cfg["patch_size"],
-                    "intermediate_size": cfg["intermediate_size"],
-                    "num_hidden_layers": cfg["num_hidden_layers"],
-                    "num_attention_heads": cfg["num_attention_heads"],
-                    "num_key_value_heads": cfg["num_attention_heads"],
-                    "hidden_act": cfg["hidden_act"],
-                    "layer_norm_eps": cfg["layer_norm_eps"],
-                    "rope_theta": cfg["rope_theta"],
-                    "num_register_tokens": cfg["num_register_tokens"],
-                    "query_bias": cfg["query_bias"],
-                    "key_bias": cfg["key_bias"],
-                    "value_bias": cfg["value_bias"],
-                    "proj_bias": cfg["proj_bias"],
-                    "mlp_bias": cfg["mlp_bias"],
-                    "use_gated_mlp": cfg["use_gated_mlp"],
-                }
-            )
-        if config.model_type == "dinov3_convnext":
-            overrides.update(metadata)
-            overrides["runtime_strategy"] = self.runtime_strategy
-            overrides["dinov3_architecture"] = architecture
-            overrides["sequence_length"] = sequence_length
-        return overrides
 
 
 plugin = Dinov3Plugin()

@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
-from .comparators.image_feature_extraction import ImageFeatureExtractionComparator
-from .contracts import E2ECase, StageOutput, StageSpec, ThresholdProfile
+from tests.e2e_harness.contracts import E2ECase, StageOutput, StageSpec, ThresholdProfile
+
+from . import comparator as comparator_module
 
 
 class Dinov3RepresentationParityContract:
@@ -29,7 +30,7 @@ class Dinov3RepresentationParityContract:
             name=trt_output.stage_name or ref_output.stage_name or "full_inference",
             required=True,
         )
-        return ImageFeatureExtractionComparator().compare(
+        return comparator_module.comparator.compare(
             trt_output,
             ref_output,
             threshold,

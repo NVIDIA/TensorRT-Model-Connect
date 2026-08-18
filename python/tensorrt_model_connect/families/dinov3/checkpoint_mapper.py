@@ -86,23 +86,23 @@ def load_tensor(readers: _Readers, name: str) -> np.ndarray:
     return np.asarray(value)
 
 
-def load_first(readers: _Readers, *names: str) -> np.ndarray:
+def _first_key(readers: _Readers, names: tuple[str, ...]) -> str:
     for name in names:
         if has_tensor(readers, name):
-            return load_tensor(readers, name)
+            return name
     raise KeyError("Tensor not found; tried: " + ", ".join(names))
+
+
+def load_first(readers: _Readers, *names: str) -> np.ndarray:
+    return load_tensor(readers, _first_key(readers, names))
 
 
 def layer_key(readers: _Readers, layer: int, suffix: str) -> str:
     """Resolve the legacy or current HF encoder-layer prefix."""
-    candidates = (
-        f"model.layer.{layer}.{suffix}",
-        f"layer.{layer}.{suffix}",
+    return _first_key(
+        readers,
+        (f"model.layer.{layer}.{suffix}", f"layer.{layer}.{suffix}"),
     )
-    for name in candidates:
-        if has_tensor(readers, name):
-            return name
-    raise KeyError("Tensor not found; tried: " + ", ".join(candidates))
 
 
 def target_dtype(precision: str) -> np.dtype:

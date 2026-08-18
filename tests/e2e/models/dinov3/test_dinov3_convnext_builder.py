@@ -227,11 +227,12 @@ class _FakeGraphOps:
         self.events.append("layer_norm")
         return tensor
 
-    def linear(self, _network, tensor, *_args):
-        self.events.append("linear")
+    def shuffle(self, _network, tensor, **_kwargs):
+        self.events.append("shuffle")
         return tensor
 
-    def add_bias(self, _network, tensor, *_args):
+    def linear_with_bias(self, _network, tensor, *_args):
+        self.events.append("linear")
         self.events.append("bias")
         return tensor
 

@@ -17,6 +17,8 @@ from typing import Any
 
 import numpy as np
 
+from tensorrt_model_connect import trt_compat
+
 from .checkpoint_mapper import (
     WeightDict,
     as_weight,
@@ -158,51 +160,45 @@ def load_convnext_weights(
     hidden_sizes = cfg["hidden_sizes"]
     depths = cfg["depths"]
 
+    def store(logical: str, checkpoint: str, shape: tuple[int, ...], *, transpose=False):
+        value = _expect_shape(_load_hf_tensor(readers, checkpoint), shape, checkpoint)
+        weights[logical] = (
+            transpose_linear(value, checkpoint, precision)
+            if transpose
+            else as_weight(value, precision)
+        )
+
     for stage_idx, (channels, depth) in enumerate(zip(hidden_sizes, depths, strict=True)):
         in_channels = cfg["num_channels"] if stage_idx == 0 else hidden_sizes[stage_idx - 1]
         conv_index = 0 if stage_idx == 0 else 1
         norm_index = 1 if stage_idx == 0 else 0
         kernel = 4 if stage_idx == 0 else 2
         base = f"stages.{stage_idx}.downsample_layers"
-
-        conv_weight_name = f"{base}.{conv_index}.weight"
-        conv_bias_name = f"{base}.{conv_index}.bias"
-        norm_weight_name = f"{base}.{norm_index}.weight"
-        norm_bias_name = f"{base}.{norm_index}.bias"
+        key = f"stage.{stage_idx}"
         norm_channels = channels if stage_idx == 0 else in_channels
-        weights[f"stage.{stage_idx}.downsample.weight"] = as_weight(
-            _expect_shape(
-                _load_hf_tensor(readers, conv_weight_name),
-                (channels, in_channels, kernel, kernel),
-                conv_weight_name,
-            ),
-            precision,
+        store(
+            f"{key}.downsample.weight",
+            f"{base}.{conv_index}.weight",
+            (channels, in_channels, kernel, kernel),
         )
-        weights[f"stage.{stage_idx}.downsample.bias"] = as_weight(
-            _expect_shape(_load_hf_tensor(readers, conv_bias_name), (channels,), conv_bias_name),
-            precision,
+        store(
+            f"{key}.downsample.bias", f"{base}.{conv_index}.bias", (channels,)
         )
-        weights[f"stage.{stage_idx}.downsample_norm.weight"] = as_weight(
-            _expect_shape(
-                _load_hf_tensor(readers, norm_weight_name),
-                (norm_channels,),
-                norm_weight_name,
-            ),
-            precision,
+        store(
+            f"{key}.downsample_norm.weight",
+            f"{base}.{norm_index}.weight",
+            (norm_channels,),
         )
-        weights[f"stage.{stage_idx}.downsample_norm.bias"] = as_weight(
-            _expect_shape(
-                _load_hf_tensor(readers, norm_bias_name),
-                (norm_channels,),
-                norm_bias_name,
-            ),
-            precision,
+        store(
+            f"{key}.downsample_norm.bias",
+            f"{base}.{norm_index}.bias",
+            (norm_channels,),
         )
 
         for block_idx in range(depth):
             hf_base = f"stages.{stage_idx}.layers.{block_idx}"
-            key_base = f"stage.{stage_idx}.block.{block_idx}"
-            tensor_specs = (
+            key_base = f"{key}.block.{block_idx}"
+            for suffix, expected, logical_suffix, transpose in (
                 ("depthwise_conv.weight", (channels, 1, 7, 7), "depthwise.weight", False),
                 ("depthwise_conv.bias", (channels,), "depthwise.bias", False),
                 ("layer_norm.weight", (channels,), "norm.weight", False),
@@ -212,23 +208,17 @@ def load_convnext_weights(
                 ("pointwise_conv2.weight", (channels, 4 * channels), "pointwise2.weight", True),
                 ("pointwise_conv2.bias", (channels,), "pointwise2.bias", False),
                 ("gamma", (channels,), "gamma", False),
-            )
-            for suffix, expected, logical_suffix, transpose in tensor_specs:
-                hf_name = f"{hf_base}.{suffix}"
-                value = _expect_shape(_load_hf_tensor(readers, hf_name), expected, hf_name)
-                weights[f"{key_base}.{logical_suffix}"] = (
-                    transpose_linear(value, hf_name, precision)
-                    if transpose
-                    else as_weight(value, precision)
+            ):
+                store(
+                    f"{key_base}.{logical_suffix}",
+                    f"{hf_base}.{suffix}",
+                    expected,
+                    transpose=transpose,
                 )
 
     final_channels = hidden_sizes[-1]
     for suffix in ("weight", "bias"):
-        hf_name = f"layer_norm.{suffix}"
-        weights[f"final_norm.{suffix}"] = as_weight(
-            _expect_shape(_load_hf_tensor(readers, hf_name), (final_channels,), hf_name),
-            precision,
-        )
+        store(f"final_norm.{suffix}", f"layer_norm.{suffix}", (final_channels,))
     return weights
 
 
@@ -263,8 +253,6 @@ def _add_conv2d(
     padding: int = 0,
     groups: int = 1,
 ):
-    from tensorrt_model_connect import trt_compat
-
     trt = trt_compat.get_trt()
     layer = network.add_convolution_nd(
         tensor,
@@ -282,22 +270,19 @@ def _add_conv2d(
 
 
 def _nchw_layer_norm(network, tensor, channels: int, weight, bias, eps, dtype, graph_ops):
-    from tensorrt_model_connect import trt_compat
-
     trt = trt_compat.get_trt()
-    to_nhwc = network.add_shuffle(tensor)
-    to_nhwc.first_transpose = trt.Permutation([0, 2, 3, 1])
-    normalized = graph_ops.layer_norm(
-        network, to_nhwc.get_output(0), channels, weight, bias, eps, dtype
+    tensor = graph_ops.shuffle(
+        network, tensor, first_transpose=trt.Permutation([0, 2, 3, 1])
     )
-    to_nchw = network.add_shuffle(normalized)
-    to_nchw.first_transpose = trt.Permutation([0, 3, 1, 2])
-    return to_nchw.get_output(0)
+    normalized = graph_ops.layer_norm(
+        network, tensor, channels, weight, bias, eps, dtype
+    )
+    return graph_ops.shuffle(
+        network, normalized, first_transpose=trt.Permutation([0, 3, 1, 2])
+    )
 
 
 def _add_block(network, tensor, weights, prefix, channels, cfg, dtype, graph_ops):
-    from tensorrt_model_connect import trt_compat
-
     trt = trt_compat.get_trt()
     residual = tensor
     hidden = _add_conv2d(
@@ -311,28 +296,28 @@ def _add_block(network, tensor, weights, prefix, channels, cfg, dtype, graph_ops
         padding=3,
         groups=channels,
     )
-    to_nhwc = network.add_shuffle(hidden)
-    to_nhwc.first_transpose = trt.Permutation([0, 2, 3, 1])
+    hidden = graph_ops.shuffle(
+        network, hidden, first_transpose=trt.Permutation([0, 2, 3, 1])
+    )
     hidden = graph_ops.layer_norm(
         network,
-        to_nhwc.get_output(0),
+        hidden,
         channels,
         weights[f"{prefix}.norm.weight"],
         weights[f"{prefix}.norm.bias"],
         cfg["layer_norm_eps"],
         dtype,
     )
-    hidden = graph_ops.linear(network, hidden, weights[f"{prefix}.pointwise1.weight"], dtype)
-    hidden = graph_ops.add_bias(network, hidden, weights[f"{prefix}.pointwise1.bias"], dtype)
+    hidden = graph_ops.linear_with_bias(network, hidden, weights, f"{prefix}.pointwise1", dtype)
     hidden = graph_ops.activation(network, hidden, cfg["hidden_act"], dtype)
-    hidden = graph_ops.linear(network, hidden, weights[f"{prefix}.pointwise2.weight"], dtype)
-    hidden = graph_ops.add_bias(network, hidden, weights[f"{prefix}.pointwise2.bias"], dtype)
+    hidden = graph_ops.linear_with_bias(network, hidden, weights, f"{prefix}.pointwise2", dtype)
     hidden = graph_ops.multiply_last_dim(network, hidden, weights[f"{prefix}.gamma"], dtype)
-    to_nchw = network.add_shuffle(hidden)
-    to_nchw.first_transpose = trt.Permutation([0, 3, 1, 2])
+    hidden = graph_ops.shuffle(
+        network, hidden, first_transpose=trt.Permutation([0, 3, 1, 2])
+    )
     # DropPath is an identity during eval, matching Hugging Face model.eval().
     return network.add_elementwise(
-        residual, to_nchw.get_output(0), trt.ElementWiseOperation.SUM
+        residual, hidden, trt.ElementWiseOperation.SUM
     ).get_output(0)
 
 
@@ -344,25 +329,13 @@ def build_convnext_engine(
     verbose: bool = False,
 ) -> bytes:
     """Build a batch-1 DINOv3 ConvNeXt feature extractor with TensorRT APIs."""
-    from tensorrt_model_connect import trt_compat
     from . import graph_ops
 
     trt = trt_compat.get_trt()
     cfg = resolve_convnext_config(config_or_raw)
     work_np_dtype = target_dtype(precision)
     work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
-    if precision not in {"fp16", "fp32"}:
-        raise ValueError(f"Unsupported DINOv3 ConvNeXt precision: {precision}")
-
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(
-        trt_compat.network_creation_flags(strongly_typed=True, explicit_batch=True)
-    )
-    builder_config = builder.create_builder_config()
-    builder_config.avg_timing_iterations = 8
-    builder_config.max_aux_streams = 0
-    builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    builder, network, builder_config = graph_ops.new_network(verbose)
 
     pixel_values = network.add_input(
         "pixel_values",
@@ -438,13 +411,15 @@ def build_convnext_engine(
         (1 << 2) | (1 << 3),
         False,
     ).get_output(0)
-    pooled_row = network.add_shuffle(pooled)
-    pooled_row.reshape_dims = (1, 1, final_channels)
+    pooled_row = graph_ops.shuffle(network, pooled, reshape_dims=(1, 1, final_channels))
 
-    patch_rows = network.add_shuffle(hidden)
-    patch_rows.first_transpose = trt.Permutation([0, 2, 3, 1])
-    patch_rows.reshape_dims = (1, num_patches, final_channels)
-    tokens = network.add_concatenation([pooled_row.get_output(0), patch_rows.get_output(0)])
+    patch_rows = graph_ops.shuffle(
+        network,
+        hidden,
+        first_transpose=trt.Permutation([0, 2, 3, 1]),
+        reshape_dims=(1, num_patches, final_channels),
+    )
+    tokens = network.add_concatenation([pooled_row, patch_rows])
     tokens.axis = 1
     last_hidden_state = graph_ops.layer_norm(
         network,
@@ -455,17 +430,15 @@ def build_convnext_engine(
         cfg["layer_norm_eps"],
         work_np_dtype,
     )
-    pooler_output = network.add_slice(
-        last_hidden_state,
-        (0, 0, 0),
-        (1, 1, final_channels),
-        (1, 1, 1),
-    ).get_output(0)
-    pooled_flat = network.add_shuffle(pooler_output)
-    pooled_flat.reshape_dims = (1, final_channels)
+    pooler_output = graph_ops.slice_tensor(
+        network, last_hidden_state, (0, 0, 0), (1, 1, final_channels)
+    )
+    pooler_output = graph_ops.shuffle(
+        network, pooler_output, reshape_dims=(1, final_channels)
+    )
 
     last_hidden_state = graph_ops.cast(network, last_hidden_state, trt.float32)
-    pooler_output = graph_ops.cast(network, pooled_flat.get_output(0), trt.float32)
+    pooler_output = graph_ops.cast(network, pooler_output, trt.float32)
     last_hidden_state.name = "last_hidden_state"
     pooler_output.name = "pooler_output"
     network.mark_output(last_hidden_state)

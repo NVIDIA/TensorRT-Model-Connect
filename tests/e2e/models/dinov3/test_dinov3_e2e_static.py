@@ -12,11 +12,9 @@ from pathlib import Path
 
 import numpy as np
 
-from tests.e2e.models.dinov3.e2e_plugins.comparators.image_feature_extraction import (
-    ImageFeatureExtractionComparator,
-)
-from tests.e2e.models.dinov3.e2e_plugins.repro import Dinov3ReproCommandProvider
-from tests.e2e.models.dinov3.e2e_plugins.runners import image_feature_extraction as runner_module
+from tests.e2e.models.dinov3.e2e_plugins.comparator import ImageFeatureExtractionComparator
+from tests.e2e.models.dinov3.e2e_plugins import runner as runner_module
+from tests.e2e.models.dinov3.e2e_plugins.runner import Dinov3ReproCommandProvider
 from tests.e2e_harness.contracts import RunContext, StageOutput, StageSpec, ThresholdProfile
 from tests.e2e_harness.manifest_loader import load_model_manifest
 from tests.e2e_harness.registry import (
@@ -154,14 +152,9 @@ def test_public_timm_l0_is_secretless_full_scale_premerge_parity() -> None:
     assert Path(case.inputs["image"]).is_file()
 
 
-def test_owned_image_and_threshold_contracts_are_exact() -> None:
+def test_owned_image_is_exact() -> None:
     owned_image = _MODEL_DIR / "data" / "test_img.jpeg"
     assert hashlib.sha256(owned_image.read_bytes()).hexdigest() == _OWNED_IMAGE_SHA256
-
-    for name in (*_MODELS, _PUBLIC_L0[0]):
-        threshold_path = _MODEL_DIR / "thresholds" / f"{name}.json"
-        raw = json.loads(threshold_path.read_text(encoding="utf-8"))
-        assert raw["threshold_overrides"] == _THRESHOLDS
 
 
 def test_model_owned_plugins_register_complete_feature_path() -> None:
@@ -313,22 +306,15 @@ def test_runtime_strategy_matrix_routes_native_extract_features() -> None:
     assert entry["runner_class"].endswith("ImageFeatureExtractionRunner")
     assert entry["comparator_class"].endswith("ImageFeatureExtractionComparator")
 
-    runner_text = (
-        _MODEL_DIR / "e2e_plugins" / "runners" / "image_feature_extraction.py"
-    ).read_text(encoding="utf-8")
-    reference_text = (_MODEL_DIR / "e2e_plugins" / "references" / "hf_transformers.py").read_text(
-        encoding="utf-8"
-    )
-    timm_reference_text = (
-        _MODEL_DIR / "e2e_plugins" / "references" / "timm_dinov3.py"
-    ).read_text(encoding="utf-8")
+    runner_text = (_MODEL_DIR / "e2e_plugins" / "runner.py").read_text(encoding="utf-8")
+    reference_text = (_MODEL_DIR / "e2e_plugins" / "reference.py").read_text(encoding="utf-8")
     assert '"extract-features"' in runner_text
     assert '"--output-json"' in runner_text
     assert "AutoImageProcessor" in reference_text
     assert "AutoModel" in reference_text
-    assert "timm.create_model" in timm_reference_text
-    assert '_TIMM_REFERENCE_VERSION = "1.0.28"' in timm_reference_text
-    assert "timm.__version__" in timm_reference_text
-    assert "model.forward_features" in timm_reference_text
-    assert 'pooled = hidden[:, 0, :].contiguous()' in timm_reference_text
+    assert "timm.create_model" in reference_text
+    assert '_TIMM_REFERENCE_VERSION = "1.0.28"' in reference_text
+    assert "timm.__version__" in reference_text
+    assert "model.forward_features" in reference_text
+    assert "pooled = hidden[:, 0, :]" in reference_text
     assert "case.hf_revision" in reference_text

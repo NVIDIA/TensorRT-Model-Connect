@@ -1809,18 +1809,6 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
-    def test_validation_dataset_config_triggers_tools_tier(self, imap):
-        """Checked-in validation datasets select the validation tools tier."""
-        match = test_impact.classify_file(
-            "tests/validation/datasets/dinov3-image-feature-extraction.json",
-            imap,
-        )
-
-        assert match.rule == "validation_dataset_config"
-        assert match.models == []
-        assert match.unit_tiers == ["tools"]
-        assert match.rebuild_cpp is False
-
     def test_validation_reference_requirements_trigger_tools_tier(self, imap):
         """The shared HF validation environment only affects tools-tier tests."""
         match = test_impact.classify_file(
