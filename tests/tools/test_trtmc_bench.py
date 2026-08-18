@@ -1390,6 +1390,51 @@ def test_cli_auto_builds_missing_bundle_then_reuses_cache(
     assert cached["builder_tensorrt_version"]
 
 
+def test_cli_emits_structured_bundle_build_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    worker = _worker(tmp_path)
+    cache = tmp_path / "cache"
+
+    def fail_build(
+        command: list[str], _environment: dict[str, str], _timeout_s: int
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, -11, "builder stdout\n", "segfault\n")
+
+    monkeypatch.setenv("TRTMC_BENCH_BUILD_PLATFORM", "test-sm80")
+    monkeypatch.setattr(BundleBuilder, "_execute", staticmethod(fail_build))
+
+    with pytest.raises(SystemExit, match="2"):
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle-cache",
+                str(cache),
+                "--worker",
+                str(worker),
+                "-o",
+                str(tmp_path / "result"),
+            ]
+        )
+
+    marker = next(
+        line.split("=", 1)[1]
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("TRTMC_DIAGNOSTIC_JSON=")
+    )
+    diagnostic = json.loads(marker)
+    assert diagnostic["stage"] == "build"
+    assert diagnostic["domain"] == "harness/unknown"
+    assert diagnostic["code"] == "bundle_build_failed"
+    artifacts = {item["label"]: Path(item["path"]) for item in diagnostic["artifacts"]}
+    assert artifacts["Bundle build stdout"].read_text(encoding="utf-8") == "builder stdout\n"
+    assert artifacts["Bundle build stderr"].read_text(encoding="utf-8") == "segfault\n"
+
+
 def test_cli_rebuilds_stale_managed_bundle_found_by_bundle_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

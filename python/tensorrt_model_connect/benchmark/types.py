@@ -12,8 +12,44 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+COMMAND_DIAGNOSTIC_SCHEMA = "trtmc.command-diagnostic/v1"
+COMMAND_DIAGNOSTIC_PREFIX = "TRTMC_DIAGNOSTIC_JSON="
+
+
 class BenchmarkError(RuntimeError):
     """A benchmark request cannot be resolved or executed safely."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: str | None = None,
+        domain: str | None = None,
+        code: str | None = None,
+        artifacts: tuple[tuple[str, Path], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.domain = domain
+        self.code = code
+        self.artifacts = artifacts
+
+    def command_diagnostic(self) -> dict[str, Any] | None:
+        """Return stable failure evidence for a supervising command runner."""
+
+        if not self.stage or not self.domain or not self.code:
+            return None
+        return {
+            "schema_version": COMMAND_DIAGNOSTIC_SCHEMA,
+            "stage": self.stage,
+            "domain": self.domain,
+            "code": self.code,
+            "artifacts": [
+                {"label": label, "path": str(path)}
+                for label, path in self.artifacts
+                if path.is_file()
+            ],
+        }
 
 
 @dataclass(frozen=True)

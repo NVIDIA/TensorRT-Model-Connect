@@ -39,7 +39,11 @@ for source_root in (REPOSITORY, PYTHON_SOURCE):
 
 from benchmarks.performance.baselines.timing_contracts import timing_contract  # noqa: E402
 from tensorrt_model_connect.benchmark.catalog import ManifestCatalog  # noqa: E402
-from tensorrt_model_connect.benchmark.types import BenchmarkError  # noqa: E402
+from tensorrt_model_connect.benchmark.types import (  # noqa: E402
+    COMMAND_DIAGNOSTIC_PREFIX,
+    COMMAND_DIAGNOSTIC_SCHEMA,
+    BenchmarkError,
+)
 from tensorrt_model_connect.benchmark.worker import (  # noqa: E402
     find_worker,
     worker_metadata,
@@ -1685,7 +1689,7 @@ def _run_command(
         stdout = ""
         stderr = str(exc)
     elapsed = time.monotonic() - started
-    return {
+    result = {
         "argv": list(argv),
         "rendered": shlex.join(argv),
         "cwd": str(REPOSITORY),
@@ -1704,6 +1708,38 @@ def _run_command(
         "stdout_tail": stdout[-16000:],
         "stderr_tail": stderr[-16000:],
     }
+    diagnostic = _command_diagnostic(stderr)
+    if diagnostic is not None:
+        result["diagnostic"] = diagnostic
+    return result
+
+
+def _command_diagnostic(stderr: str) -> dict[str, Any] | None:
+    """Read the stable benchmark diagnostic marker without parsing prose."""
+
+    for line in reversed(stderr.splitlines()):
+        if not line.startswith(COMMAND_DIAGNOSTIC_PREFIX):
+            continue
+        try:
+            value = json.loads(line[len(COMMAND_DIAGNOSTIC_PREFIX) :])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(value, dict) or value.get("schema_version") != COMMAND_DIAGNOSTIC_SCHEMA:
+            return None
+        if not all(str(value.get(name, "")).strip() for name in ("stage", "domain", "code")):
+            return None
+        artifacts = value.get("artifacts", [])
+        if not isinstance(artifacts, list):
+            return None
+        if any(
+            not isinstance(item, Mapping)
+            or not str(item.get("label", "")).strip()
+            or not str(item.get("path", "")).strip()
+            for item in artifacts
+        ):
+            return None
+        return deepcopy(value)
+    return None
 
 
 def _materialize_command_logs(
@@ -1722,6 +1758,25 @@ def _materialize_command_logs(
         command[f"{stream}_log"] = href
         side_label = "TRTMC" if side == "trtmc" else "Reference"
         links.append({"label": f"{side_label} {stream}", "href": href})
+    diagnostic = command.get("diagnostic")
+    if isinstance(diagnostic, MutableMapping):
+        materialized = []
+        artifacts = diagnostic.get("artifacts", [])
+        artifacts = artifacts if isinstance(artifacts, list) else []
+        for index, artifact in enumerate(artifacts, start=1):
+            if not isinstance(artifact, Mapping):
+                continue
+            source = Path(str(artifact.get("path", "")))
+            label = str(artifact.get("label", "") or f"Diagnostic {index}")
+            if not source.is_file():
+                continue
+            suffix = "".join(source.suffixes) or ".log"
+            path = directory / f"{side}.{_slug(label)}{suffix}"
+            shutil.copyfile(source, path)
+            record = {"label": label, "href": path.relative_to(output).as_posix()}
+            materialized.append(record)
+            links.append(record)
+        diagnostic["artifacts"] = materialized
     return links
 
 
@@ -2298,6 +2353,18 @@ def _run_supported_case(
         if command["exit_code"] != 0:
             row["status"] = "failed"
             row["reason"] = f"{side} command failed with rc={command['exit_code']}"
+            diagnostic = command.get("diagnostic", {})
+            diagnostic = diagnostic if isinstance(diagnostic, Mapping) else {}
+            row["failure_stage"] = str(
+                diagnostic.get("stage")
+                or ("candidate" if side == "trtmc" else "reference")
+            )
+            row["failure_domain"] = str(
+                diagnostic.get("domain") or "harness/unknown"
+            )
+            row["failure_code"] = str(
+                diagnostic.get("code") or "execution_failure"
+            )
             return
     candidate = _candidate_result(candidate_dir, digest)
     candidate["precision"] = str(resolved["model"]["precision"])
@@ -2498,7 +2565,20 @@ def _perf_precision(row: Mapping[str, Any]) -> dict[str, str]:
         or baseline.get("precision")
         or contract.get("precision")
     )
-    trtmc = candidate.get("precision") or model.get("precision")
+    base_precision = candidate.get("precision") or model.get("precision")
+    build = model.get("build", {})
+    build = build if isinstance(build, Mapping) else {}
+    quantization = build.get("quantization", {})
+    quantization = quantization if isinstance(quantization, Mapping) else {}
+    quantization_format = str(quantization.get("format", "") or "").lower()
+    if quantization_format and quantization_format not in {"none", "false"}:
+        trtmc = (
+            f"{quantization_format} ({str(base_precision).lower()} base)"
+            if base_precision
+            else quantization_format
+        )
+    else:
+        trtmc = base_precision
     return {
         "reference": str(reference).lower() if reference else "Not recorded",
         "candidate": str(trtmc).lower() if trtmc else "Not recorded",
@@ -2544,8 +2624,8 @@ def _perf_issue(row: Mapping[str, Any], result: str | None) -> dict[str, str] | 
     return {
         "priority": "P1",
         "stage": str(row.get("failure_stage", "candidate")),
-        "domain": "harness/unknown",
-        "code": "execution_failure",
+        "domain": str(row.get("failure_domain", "harness/unknown")),
+        "code": str(row.get("failure_code", "execution_failure")),
         "message": reason,
     }
 

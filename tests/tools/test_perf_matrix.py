@@ -1464,6 +1464,95 @@ def test_public_perf_result_with_unknown_precision_has_no_performance_light() ->
     assert public["latency"] == {"reference_ms": None, "candidate_ms": None}
 
 
+def test_public_perf_result_surfaces_quantized_candidate_precision() -> None:
+    row = {
+        "id": "qwen.generate@qwen3-0.6b-fp8",
+        "status": "green",
+        "resolved_settings": {
+            "baseline_precision": "fp16",
+            "model": {
+                "precision": "fp16",
+                "build": {"quantization": {"format": "fp8"}},
+            },
+            "output_contract": "exact-token-ids",
+        },
+        "candidate": {"precision": "fp16", "samples_ms": [5.0]},
+        "baseline": {"precision": "fp16", "samples_ms": [16.0]},
+        "comparison": {},
+    }
+
+    public = perf_matrix._public_perf_result(row)
+
+    assert public["precision"] == {
+        "reference": "fp16",
+        "candidate": "fp8 (fp16 base)",
+    }
+
+
+def test_command_diagnostic_materializes_nested_build_logs(tmp_path: Path) -> None:
+    build_stderr = tmp_path / "bundle-cache" / "build.stderr.log"
+    build_stderr.parent.mkdir()
+    build_stderr.write_text("builder crashed\n", encoding="utf-8")
+    diagnostic = {
+        "schema_version": "trtmc.command-diagnostic/v1",
+        "stage": "build",
+        "domain": "harness/unknown",
+        "code": "bundle_build_failed",
+        "artifacts": [
+            {"label": "Bundle build stderr", "path": str(build_stderr)}
+        ],
+    }
+    command = {
+        "stdout": "",
+        "stderr": (
+            "bundle build failed\n"
+            f"TRTMC_DIAGNOSTIC_JSON={json.dumps(diagnostic, separators=(',', ':'))}\n"
+        ),
+    }
+
+    parsed = perf_matrix._command_diagnostic(command["stderr"])
+    command["diagnostic"] = parsed
+    links = perf_matrix._materialize_command_logs(
+        tmp_path / "report",
+        "gpt2.generate",
+        "trtmc",
+        command,
+    )
+
+    nested = next(item for item in links if item["label"] == "Bundle build stderr")
+    published = tmp_path / "report" / nested["href"]
+    assert published.read_text(encoding="utf-8") == "builder crashed\n"
+    assert not published.is_symlink()
+    assert command["diagnostic"] == {
+        "schema_version": "trtmc.command-diagnostic/v1",
+        "stage": "build",
+        "domain": "harness/unknown",
+        "code": "bundle_build_failed",
+        "artifacts": [nested],
+    }
+
+
+def test_perf_issue_uses_structured_command_failure() -> None:
+    issue = perf_matrix._perf_issue(
+        {
+            "status": "failed",
+            "reason": "trtmc command failed with rc=2",
+            "failure_stage": "build",
+            "failure_domain": "harness/unknown",
+            "failure_code": "bundle_build_failed",
+        },
+        "white",
+    )
+
+    assert issue == {
+        "priority": "P1",
+        "stage": "build",
+        "domain": "harness/unknown",
+        "code": "bundle_build_failed",
+        "message": "trtmc command failed with rc=2",
+    }
+
+
 def test_cleanup_warning_does_not_replace_a_valid_performance_result() -> None:
     row = {
         "status": "green",

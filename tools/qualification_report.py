@@ -114,8 +114,13 @@ def _validate_artifact_href(output: Path, href: Any) -> None:
         raise QualificationReportError(
             f"report artifact href must be relative to the report root: {href!r}"
         )
-    if not (output / relative).is_file():
+    artifact = output / relative
+    if not artifact.is_file():
         raise QualificationReportError(f"report artifact does not exist: {href!r}")
+    if artifact.is_symlink():
+        raise QualificationReportError(
+            f"report artifact must be a self-contained regular file: {href!r}"
+        )
 
 
 def _materialize_missing_failure_log(

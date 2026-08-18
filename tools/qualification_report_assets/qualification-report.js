@@ -100,6 +100,14 @@
     return add(el("div", ""), add(el("div", "precision-side"), el("span", "", "Reference"), el("strong", "", value.reference || "Not recorded")), add(el("div", "precision-side"), el("span", "", "TRTMC"), el("strong", "", value.candidate || "Not recorded")));
   }
 
+  function samples(row) {
+    const planned = Number.isInteger(row.samples?.planned) ? row.samples.planned : null;
+    const evaluated = Number.isInteger(row.samples?.evaluated) ? row.samples.evaluated : null;
+    if (planned === null && evaluated === null) return el("span", "unavailable", "—");
+    if (planned !== null && evaluated !== null && planned !== evaluated) return el("span", "sample-count", `${evaluated} / ${planned}`);
+    return el("span", "sample-count", evaluated ?? planned);
+  }
+
   function metricLine(label, value) {
     return add(el("div", "metric"), el("span", "", label), el("strong", "", value));
   }
@@ -204,7 +212,7 @@
 
   function table(rows, report, compact = false) {
     const kind = report.report_kind;
-    const labels = compact ? ["Result", "Model / task", kind === "accuracy" ? "Accuracy / fidelity" : "Output validation", "Metrics", "Logs", kind === "accuracy" ? "Vanilla reproduction" : "Commands"] : kind === "accuracy" ? ["Model / task", "Compute precision", "Accuracy / fidelity", "Result", "Metrics", "Logs", "Vanilla reproduction", "Commands"] : ["Model / task", "Compute precision", "Output validation", "Reference latency", "TRTMC latency", "Result", "Metrics", "Logs", "Commands"];
+    const labels = compact ? (kind === "accuracy" ? ["Result", "Model / task", "Samples", "Accuracy / fidelity", "Metrics", "Logs", "Vanilla reproduction"] : ["Result", "Model / task", "Output validation", "Metrics", "Logs", "Commands"]) : kind === "accuracy" ? ["Model / task", "Samples", "Compute precision", "Accuracy / fidelity", "Result", "Metrics", "Logs", "Vanilla reproduction", "Commands"] : ["Model / task", "Compute precision", "Output validation", "Reference latency", "TRTMC latency", "Result", "Metrics", "Logs", "Commands"];
     const wrap = el("div", `table-wrap${compact ? " failures" : ""}`);
     const value = el("table", compact ? "" : "register-table");
     const head = el("thead"); const headRow = el("tr"); labels.forEach((label) => headRow.append(el("th", "", label))); head.append(headRow);
@@ -212,8 +220,8 @@
     rows.forEach((row) => {
       const tr = el("tr"); tr.dataset.result = row.result || row.state;
       let cells;
-      if (compact) cells = [resultCell(row), modelTask(row), kind === "accuracy" ? accuracyFacts(row) : outputValidation(row), metrics(row, kind), logs(row), kind === "accuracy" ? vanilla(row) : commands(row)];
-      else if (kind === "accuracy") cells = [modelTask(row), precision(row), accuracyFacts(row), resultCell(row), metrics(row, kind), logs(row), vanilla(row), commands(row)];
+      if (compact) cells = kind === "accuracy" ? [resultCell(row), modelTask(row), samples(row), accuracyFacts(row), metrics(row, kind), logs(row), vanilla(row)] : [resultCell(row), modelTask(row), outputValidation(row), metrics(row, kind), logs(row), commands(row)];
+      else if (kind === "accuracy") cells = [modelTask(row), samples(row), precision(row), accuracyFacts(row), resultCell(row), metrics(row, kind), logs(row), vanilla(row), commands(row)];
       else cells = [modelTask(row), precision(row), outputValidation(row), el("span", "timing", row.latency?.reference_ms == null ? "—" : `${number(row.latency.reference_ms)} ms`), el("span", "timing", row.latency?.candidate_ms == null ? "—" : `${number(row.latency.candidate_ms)} ms`), resultCell(row), metrics(row, kind), logs(row), commands(row)];
       cells.forEach((cell) => add(tr, add(el("td", ""), cell))); body.append(tr);
     });

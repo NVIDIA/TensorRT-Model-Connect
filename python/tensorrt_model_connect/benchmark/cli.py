@@ -20,7 +20,11 @@ from .builder import BundleBuilder
 from .catalog import ManifestCatalog, expand_sweeps, find_bundle, resolve_case
 from .report import generate_collection_report
 from .service import BenchmarkService, default_output_dir
-from .types import BenchmarkError, ResolvedCase
+from .types import (
+    COMMAND_DIAGNOSTIC_PREFIX,
+    BenchmarkError,
+    ResolvedCase,
+)
 from .worker import find_worker, worker_backend_abi
 
 
@@ -98,6 +102,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "report":
             return _report(arguments)
     except BenchmarkError as exc:
+        diagnostic = exc.command_diagnostic()
+        if diagnostic is not None:
+            print(
+                COMMAND_DIAGNOSTIC_PREFIX
+                + json.dumps(diagnostic, separators=(",", ":"), sort_keys=True),
+                file=sys.stderr,
+            )
         parser.error(str(exc))
     return 2
 

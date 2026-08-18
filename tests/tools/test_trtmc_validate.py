@@ -2454,7 +2454,11 @@ def test_report_infers_task_type_for_legacy_standard_result(tmp_path):
     assert result["task_strategy"] == "text_to_audio"
     assert result["task_type"] == "Text → Audio"
     assert result["user_contract"] == "tts_audio"
+    assert result["samples"] == {"planned": 3, "evaluated": 3}
     assert "bark-large" not in html_path.read_text(encoding="utf-8")
+    assert "Samples" in (
+        tmp_path / "assets" / "qualification-report.js"
+    ).read_text(encoding="utf-8")
 
 
 def test_accuracy_traffic_light_statuses_are_mutually_exclusive():
@@ -2583,10 +2587,118 @@ def test_accuracy_report_publishes_direct_relative_log_links(tmp_path: Path) -> 
     assert row["result"] == "white"
     assert row["issue"]["stage"] == "candidate"
     assert row["debug"]["logs"] == [
-        {"label": "execution.log", "href": "model-a/suite-a/execution.log"},
-        {"label": "worker.log", "href": "model-a/suite-a/worker.log"},
+        {
+            "label": "execution.log",
+            "href": "artifacts/cases/model-a/suite-a/logs/execution.log",
+        },
+        {
+            "label": "worker.log",
+            "href": "artifacts/cases/model-a/suite-a/logs/worker.log",
+        },
     ]
     assert all((tmp_path / item["href"]).is_file() for item in row["debug"]["logs"])
+
+
+def test_accuracy_report_materializes_symlinked_logs_inside_report(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "accuracy"
+    case_dir = output / "model-a" / "suite-a"
+    case_dir.mkdir(parents=True)
+    reference_log = tmp_path / "reference-cache" / "hf_native_run.log"
+    reference_log.parent.mkdir()
+    reference_log.write_text("reference output\n", encoding="utf-8")
+    (case_dir / "hf_native_run.log").symlink_to(reference_log)
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "suite-a",
+                "execution": {"status": "completed", "exit_code": 0},
+                "comparison": {
+                    "status": "agreement",
+                    "mode": "test",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "passed"},
+                "precision_contract": {
+                    "trtmc_base_precision": "fp16",
+                    "reference_precision": "fp16",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, _, report = trtmc_validate.write_report(output)
+
+    log = next(
+        item
+        for item in report["results"][0]["debug"]["logs"]
+        if item["label"] == "hf_native_run.log"
+    )
+    published = output / log["href"]
+    assert published.read_text(encoding="utf-8") == "reference output\n"
+    assert not published.is_symlink()
+
+
+def test_run_binding_records_missing_default_dataset_as_preflight_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "model-a",
+            "suite-a",
+            "--output",
+            str(tmp_path / "results"),
+            "--dataset-root",
+            str(tmp_path / "datasets"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--limit",
+            "50",
+        ]
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "ensure_environments",
+        lambda *_args, **_kwargs: pytest.fail(
+            "missing datasets must fail before reference environment preparation"
+        ),
+    )
+
+    result = trtmc_validate.run_binding(
+        trtmc_validate.Binding("model-a", "suite-a"),
+        arguments=arguments,
+        task_models={
+            "model-a": {
+                "family": "albert",
+                "task_strategy": "encoder_only_nlp",
+                "execution_profiles": {},
+            }
+        },
+        suites={
+            "suite-a": {
+                "id": "suite-a",
+                "dataset": {"default_path": "/mnt/data/missing/data.jsonl"},
+            }
+        },
+    )
+
+    assert result["execution"] == {
+        "status": "error",
+        "exit_code": 1,
+        "retryable": False,
+    }
+    assert result["failure_stage"] == "preflight"
+    assert result["failure_domain"] == "data-artifact"
+    assert result["failure_code"] == "dataset_missing"
+    assert result["reproduce"]["dataset"]["sample_limit"] == 50
+    assert result["reproduce"]["dataset"]["prepared_input_count"] == 0
+    assert "missing/data.jsonl" in result["raw_result"]["error"]
 
 
 def test_diffusion_report_flattens_nested_reference_metrics():

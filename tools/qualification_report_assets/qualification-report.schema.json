@@ -87,6 +87,14 @@
             "enum": ["green", "yellow", "red", "white", null]
           },
           "precision": {"type": "object"},
+          "samples": {
+            "type": "object",
+            "required": ["planned", "evaluated"],
+            "properties": {
+              "planned": {"type": ["integer", "null"], "minimum": 0},
+              "evaluated": {"type": ["integer", "null"], "minimum": 0}
+            }
+          },
           "issue": {"type": ["object", "null"]},
           "debug": {"type": "object"}
         },

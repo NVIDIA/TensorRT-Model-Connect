@@ -1770,6 +1770,82 @@ def run_binding(
     workload = _required_workload(binding)
     case_dir = _case_directory(Path(arguments.output), binding)
     case_dir.mkdir(parents=True, exist_ok=True)
+    dataset_command = shlex.join([sys.executable, *sys.argv])
+    suite = suites[workload]
+    task_type, user_contract = _suite_task_metadata(suite)
+    model = task_models[binding.model]
+    task_strategy = str(model.get("task_strategy", "") or "")
+    dataset = (
+        Path(arguments.dataset)
+        if arguments.dataset
+        else _dataset_path(suite, arguments.dataset_root)
+    )
+    if arguments.dataset is None and not dataset.is_file():
+        message = f"dataset does not exist: {dataset}"
+        execution_log = case_dir / "execution.log"
+        execution_log.write_text(
+            f"Accuracy preflight failed\n{message}\n",
+            encoding="utf-8",
+        )
+        result = _normalize_result(
+            {
+                "model": binding.model,
+                "workload": workload,
+                "family": str(model.get("family", "") or ""),
+                "operation": _operation_for_task_strategy(task_strategy),
+                "task_strategy": task_strategy,
+                "task_type": task_type,
+                "user_contract": user_contract,
+                "executor": "dataset_preflight",
+                "execution": {
+                    "status": "error",
+                    "exit_code": 1,
+                    "retryable": False,
+                },
+                "comparison": {
+                    "status": "not_run",
+                    "mode": "",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "failed"},
+                "failure_stage": "preflight",
+                "failure_domain": "data-artifact",
+                "failure_code": "dataset_missing",
+                "reference_environment": [],
+                "reproduce": {
+                    "dataset": {
+                        "command": dataset_command,
+                        "sample_limit": int(arguments.limit or 0),
+                        "prepared_input_count": 0,
+                    },
+                    "hf": [],
+                    "trtmc": [],
+                },
+                "raw_result": {
+                    "status": "failed",
+                    "error_type": "DatasetNotFoundError",
+                    "error": message,
+                },
+                "raw_result_path": "",
+                "disagreements": {
+                    "count": 0,
+                    "path": "disagreements.jsonl",
+                    "inline_limit": trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT,
+                    "reference_vanilla_available": False,
+                    "trtmc_vanilla_available": False,
+                },
+                "execution_log": str(execution_log),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        (case_dir / "disagreements.jsonl").write_text("", encoding="utf-8")
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return result
     profiles = _binding_profiles(
         binding,
         task_models=task_models,
@@ -1789,17 +1865,6 @@ def run_binding(
     process_env = _source_environment()
     process_env.update(environment.overrides)
     process_env.update(reference_sources.environment)
-    dataset_command = shlex.join([sys.executable, *sys.argv])
-
-    suite = suites[workload]
-    task_type, user_contract = _suite_task_metadata(suite)
-    model = task_models[binding.model]
-    task_strategy = str(model.get("task_strategy", "") or "")
-    dataset = (
-        Path(arguments.dataset)
-        if arguments.dataset
-        else _dataset_path(suite, arguments.dataset_root)
-    )
     command = _comparison_command(
         binding,
         case_dir=case_dir,
@@ -2910,9 +2975,15 @@ def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
         worker_failure = result.get("executor") == "model_worker"
         return {
             "priority": "P1",
-            "stage": "compare" if worker_failure else "candidate",
-            "domain": "harness/unknown",
-            "code": "worker_no_result" if worker_failure else "execution_error",
+            "stage": str(
+                result.get("failure_stage")
+                or ("compare" if worker_failure else "candidate")
+            ),
+            "domain": str(result.get("failure_domain") or "harness/unknown"),
+            "code": str(
+                result.get("failure_code")
+                or ("worker_no_result" if worker_failure else "execution_error")
+            ),
             "message": str(
                 execution.get("last_error")
                 or raw_result.get("error")
@@ -2944,13 +3015,44 @@ def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
     }
 
 
+def _materialize_accuracy_report_artifact(
+    output: Path,
+    case_dir: Path,
+    path: Path,
+    *,
+    category: str,
+) -> str:
+    relative_case = case_dir.relative_to(output)
+    relative_artifact = path.relative_to(case_dir)
+    destination = (
+        output
+        / "artifacts"
+        / "cases"
+        / relative_case
+        / category
+        / relative_artifact
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(path, destination)
+    return destination.relative_to(output).as_posix()
+
+
 def _report_log_links(output: Path, case_dir: Path) -> list[dict[str, str]]:
     links = []
     for path in sorted(case_dir.rglob("*.log")):
         if not path.is_file():
             continue
-        relative = path.relative_to(output).as_posix()
-        links.append({"label": path.relative_to(case_dir).as_posix(), "href": relative})
+        links.append(
+            {
+                "label": path.relative_to(case_dir).as_posix(),
+                "href": _materialize_accuracy_report_artifact(
+                    output,
+                    case_dir,
+                    path,
+                    category="logs",
+                ),
+            }
+        )
     return links
 
 
@@ -2978,10 +3080,43 @@ def _report_command_artifacts(
         artifacts.append(
             {
                 "label": name,
-                "href": path.relative_to(output).as_posix(),
+                "href": _materialize_accuracy_report_artifact(
+                    output,
+                    case_dir,
+                    path,
+                    category="commands",
+                ),
             }
         )
     return artifacts
+
+
+def _accuracy_samples(result: Mapping[str, Any]) -> dict[str, int | None]:
+    reproduce = result.get("reproduce", {})
+    reproduce = reproduce if isinstance(reproduce, Mapping) else {}
+    dataset = reproduce.get("dataset", {})
+    dataset = dataset if isinstance(dataset, Mapping) else {}
+    comparison = result.get("comparison", {})
+    comparison = comparison if isinstance(comparison, Mapping) else {}
+    metrics = comparison.get("metrics", {})
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+
+    def nonnegative(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
+    planned = nonnegative(dataset.get("sample_limit"))
+    if planned == 0:
+        planned = None
+    evaluated = nonnegative(dataset.get("prepared_input_count"))
+    if evaluated is None:
+        evaluated = nonnegative(metrics.get("valid_count"))
+    if evaluated is None:
+        evaluated = nonnegative(metrics.get("sample_count"))
+    return {"planned": planned, "evaluated": evaluated}
 
 
 def _public_accuracy_result(
@@ -2996,6 +3131,7 @@ def _public_accuracy_result(
             "state": "terminal",
             "result": _traffic_light_status(result),
             "precision": _accuracy_precision(result),
+            "samples": _accuracy_samples(result),
             "issue": _accuracy_issue(result),
             "debug": {
                 "result": path.relative_to(output).as_posix(),
@@ -4223,9 +4359,12 @@ def _run_supervised_binding_with_retries(
         revalidation_budget.record_worker_result(result)
         execution = result.get("execution", {})
         execution_error = isinstance(execution, Mapping) and execution.get("status") == "error"
+        retryable = not (
+            isinstance(execution, Mapping) and execution.get("retryable") is False
+        )
         archived = (
             _archive_failed_attempt(case_dir, attempt)
-            if execution_error and attempt < arguments.model_attempts
+            if execution_error and retryable and attempt < arguments.model_attempts
             else {}
         )
         attempt_result = _attempt_record(
@@ -4234,7 +4373,7 @@ def _run_supervised_binding_with_retries(
             archived=archived,
         )
         attempts.append(attempt_result)
-        if not execution_error or attempt == arguments.model_attempts:
+        if not execution_error or not retryable or attempt == arguments.model_attempts:
             break
         print(
             f"  Attempt {attempt}/{arguments.model_attempts}: FAILED",

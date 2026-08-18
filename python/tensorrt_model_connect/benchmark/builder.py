@@ -214,11 +214,23 @@ class BundleBuilder:
             _remove_temporary(temporary)
             raise BenchmarkError(
                 f"bundle build for {plan.model.name} timed out after {plan.timeout_s}s; "
-                f"see {stderr_log}"
+                f"see {stderr_log}",
+                stage="build",
+                domain="harness/unknown",
+                code="bundle_build_timeout",
+                artifacts=(
+                    ("Bundle build stdout", stdout_log),
+                    ("Bundle build stderr", stderr_log),
+                ),
             ) from exc
         except OSError as exc:
             _remove_temporary(temporary)
-            raise BenchmarkError(f"cannot start bundle build for {plan.model.name}: {exc}") from exc
+            raise BenchmarkError(
+                f"cannot start bundle build for {plan.model.name}: {exc}",
+                stage="build",
+                domain="harness/unknown",
+                code="bundle_build_start_failed",
+            ) from exc
         elapsed = time.monotonic() - started
         _write_text(stdout_log, completed.stdout)
         _write_text(stderr_log, completed.stderr)
@@ -226,7 +238,14 @@ class BundleBuilder:
             _remove_temporary(temporary)
             raise BenchmarkError(
                 f"bundle build for {plan.model.name} failed with exit code "
-                f"{completed.returncode}; see {stderr_log}"
+                f"{completed.returncode}; see {stderr_log}",
+                stage="build",
+                domain="harness/unknown",
+                code="bundle_build_failed",
+                artifacts=(
+                    ("Bundle build stdout", stdout_log),
+                    ("Bundle build stderr", stderr_log),
+                ),
             )
         os.replace(temporary, plan.bundle)
         record = BundlePreparation(
