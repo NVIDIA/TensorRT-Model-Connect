@@ -95,6 +95,16 @@
               "evaluated": {"type": ["integer", "null"], "minimum": 0}
             }
           },
+          "sample_differences": {
+            "type": "object",
+            "required": ["count", "classification", "href", "preview"],
+            "properties": {
+              "count": {"type": "integer", "minimum": 0},
+              "classification": {"enum": ["failed_samples", "sample_differences"]},
+              "href": {"type": ["string", "null"]},
+              "preview": {"type": "array"}
+            }
+          },
           "issue": {"type": ["object", "null"]},
           "debug": {"type": "object"}
         },

@@ -3185,8 +3185,29 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
     assert (case_dir / records[0]["artifacts"]["trtmc_input"]).read_text(
         encoding="utf-8"
     ) == json.dumps(prompt, ensure_ascii=False) + "\n"
+    public_differences = report["results"][0]["sample_differences"]
+    assert public_differences["count"] == 1
+    assert public_differences["classification"] == "failed_samples"
+    assert public_differences["preview"][0]["sample_id"] == "sample-7"
+    assert public_differences["preview"][0]["reason"] == "comparison_threshold"
+    assert public_differences["preview"][0]["reference_result"]["output_text"] == (
+        "reference answer"
+    )
+    assert public_differences["preview"][0]["trtmc_result"]["output_text"] == (
+        "TRTMC answer"
+    )
+    assert public_differences["preview"][0]["reproduce"]["reference"].startswith(
+        "/profiles/reference/bin/python"
+    )
+    assert (tmp_path / public_differences["href"]).is_file()
     rendered = html_path.read_text(encoding="utf-8")
     assert "reference answer" not in rendered
+    frontend = (tmp_path / "assets" / "qualification-report.js").read_text(
+        encoding="utf-8"
+    )
+    assert "sampleDifferences" in frontend
+    assert "results and vanilla commands" in frontend
+    assert "sameMetricValue" in frontend
     assert report["results"][0]["result"] == "red"
     for wrapper in (
         "validation/engine.py",

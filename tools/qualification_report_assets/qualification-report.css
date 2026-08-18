@@ -56,6 +56,10 @@ tr[data-result="white"] { background: #f0f2ef; } tr[data-result="red"] { backgro
 .timing { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .log-links { display: grid; gap: 4px; min-width: 110px; }.log-links a { width: fit-content; font-size: 12px; font-weight: 650; white-space: nowrap; }
 .command-artifact { display: block; width: fit-content; margin-top: 5px; font-size: 12px; font-weight: 650; }
+.reproduction { display: grid; gap: 7px; min-width: 180px; }
+.sample-differences .evidence-body { min-width: min(900px,78vw); }
+.sample-differences details.evidence { margin: 8px 0; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.difference-artifact { display: block; width: fit-content; margin-top: 8px; font-size: 12px; font-weight: 650; }
 .unavailable { color: var(--muted); font-size: 12px; }
 details.evidence { min-width: 90px; }.evidence-body { min-width: min(760px,72vw); padding-top: 7px; }
 .evidence-body h4 { margin: 12px 0 4px; }

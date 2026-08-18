@@ -3119,6 +3119,82 @@ def _accuracy_samples(result: Mapping[str, Any]) -> dict[str, int | None]:
     return {"planned": planned, "evaluated": evaluated}
 
 
+_SAMPLE_DIFFERENCE_RAW_KEYS = {
+    "generated_token_ids",
+    "generated_token_max_score_ids",
+    "input_token_ids",
+}
+
+
+def _compact_sample_difference(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        compact = {
+            str(name): _compact_sample_difference(item)
+            for name, item in value.items()
+            if name not in _SAMPLE_DIFFERENCE_RAW_KEYS and name != "artifacts"
+        }
+        artifacts = value.get("artifacts")
+        if isinstance(artifacts, Mapping) and artifacts.get("media"):
+            compact["artifacts"] = {
+                "media": _compact_sample_difference(artifacts["media"])
+            }
+        return compact
+    if isinstance(value, list):
+        return [_compact_sample_difference(item) for item in value]
+    return value
+
+
+def _public_sample_differences(
+    output: Path,
+    case_dir: Path,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    metadata = result.get("disagreements", {})
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    try:
+        count = max(0, int(metadata.get("count", 0) or 0))
+        limit = max(
+            0,
+            int(
+                metadata.get(
+                    "inline_limit",
+                    trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT,
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        count = 0
+        limit = 0
+    comparison = result.get("comparison", {})
+    failed = isinstance(comparison, Mapping) and comparison.get("status") == "disagreement"
+    public = {
+        "count": count,
+        "classification": "failed_samples" if failed else "sample_differences",
+        "href": None,
+        "preview": [],
+    }
+    if count <= 0:
+        return public
+    artifact_name = str(metadata.get("path", "disagreements.jsonl"))
+    artifact = case_dir / artifact_name
+    if not artifact.is_file():
+        return public
+    public["href"] = _materialize_accuracy_report_artifact(
+        output,
+        case_dir,
+        artifact,
+        category="differences",
+    )
+    public["preview"] = [
+        _compact_sample_difference(record)
+        for record in trtmc_disagreements.load_disagreement_preview(
+            artifact,
+            limit=limit,
+        )
+    ]
+    return public
+
+
 def _public_accuracy_result(
     output: Path,
     path: Path,
@@ -3132,6 +3208,11 @@ def _public_accuracy_result(
             "result": _traffic_light_status(result),
             "precision": _accuracy_precision(result),
             "samples": _accuracy_samples(result),
+            "sample_differences": _public_sample_differences(
+                output,
+                path.parent,
+                result,
+            ),
             "issue": _accuracy_issue(result),
             "debug": {
                 "result": path.relative_to(output).as_posix(),

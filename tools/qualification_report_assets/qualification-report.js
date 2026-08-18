@@ -125,16 +125,28 @@
     return percent(value);
   }
 
+  function sameMetricValue(left, right) {
+    if (!Number.isFinite(Number(left)) || !Number.isFinite(Number(right))) return false;
+    return Math.abs(Number(left) - Number(right)) <= 1e-12;
+  }
+
   function accuracyFacts(row) {
     if (row.result === "white") return el("span", "unavailable", "—");
     const comparison = row.comparison || {};
     const metrics = comparison.metrics || {};
     const value = el("div");
     const displayed = new Set();
-    [["prediction_agreement_rate", "Agreement"], ["correctness_agreement_rate", "Correctness agreement"]].forEach(([key, label]) => { if (metrics[key] !== undefined) { value.append(metricLine(label, agreement(metrics[key], metrics))); displayed.add(key); } });
+    const displayedValues = [];
+    [["prediction_agreement_rate", "Agreement"], ["correctness_agreement_rate", "Correctness agreement"]].forEach(([key, label]) => { if (metrics[key] !== undefined) { value.append(metricLine(label, agreement(metrics[key], metrics))); displayed.add(key); displayedValues.push(metrics[key]); } });
     [["hf_accuracy", "Reference accuracy"], ["bundle_accuracy", "TRTMC accuracy"]].forEach(([key, label]) => { if (metrics[key] !== undefined) { value.append(metricLine(label, percent(metrics[key]))); displayed.add(key); } });
     if (metrics.accuracy_delta_bundle_minus_hf !== undefined) { value.append(metricLine("Accuracy delta", percent(metrics.accuracy_delta_bundle_minus_hf, true))); displayed.add("accuracy_delta_bundle_minus_hf"); }
-    if (comparison.primary_metric && !displayed.has(comparison.primary_metric.name)) value.prepend(metricLine(comparison.primary_metric.name, number(comparison.primary_metric.value, 4)));
+    if (comparison.primary_metric && !displayed.has(comparison.primary_metric.name) && !displayedValues.some((item) => sameMetricValue(item, comparison.primary_metric.value))) value.prepend(metricLine(comparison.primary_metric.name, number(comparison.primary_metric.value, 4)));
+    const differenceCount = Number(row.sample_differences?.count || 0);
+    if (differenceCount > 0) {
+      const evaluated = Number.isInteger(row.samples?.evaluated) ? row.samples.evaluated : null;
+      const label = row.sample_differences.classification === "failed_samples" ? "Failed samples" : "Sample differences";
+      value.append(metricLine(label, evaluated === null ? differenceCount : `${differenceCount} / ${evaluated}`));
+    }
     return value.childElementCount ? value : el("span", "unavailable", "See Metrics");
   }
 
@@ -185,11 +197,44 @@
     return [label, `$ ${command}`];
   }
 
+  function sampleDifferences(row) {
+    const differences = row.sample_differences || {};
+    const count = Number(differences.count || 0);
+    if (count <= 0) return null;
+    const noun = differences.classification === "failed_samples" ? "failed samples" : "sample differences";
+    const control = el("details", "evidence sample-differences");
+    control.append(el("summary", "", `${count} ${noun} · results and vanilla commands`));
+    const body = el("div", "evidence-body");
+    (differences.preview || []).forEach((record) => {
+      const reason = String(record.reason || "comparison mismatch").replaceAll("_", " ");
+      const records = [
+        ["Input", record.input || {}],
+        ["Reference result", record.reference_result || {}],
+        ["TRTMC result", record.trtmc_result || {}],
+        ["Comparison", record.comparison || {}],
+        commandBlock("Reference vanilla command", record.reproduce?.reference),
+        commandBlock("TRTMC vanilla command", record.reproduce?.trtmc),
+      ].filter(Boolean);
+      body.append(details(`${record.sample_id || "unknown sample"} · ${reason}`, records));
+    });
+    if (differences.href) {
+      const link = el("a", "difference-artifact", "Open complete disagreements.jsonl");
+      link.href = differences.href; link.target = "_blank"; link.rel = "noopener"; body.append(link);
+    }
+    control.append(body);
+    return control;
+  }
+
   function vanilla(row) {
     const reproduce = row.reproduce || {};
     const dataset = reproduce.dataset || {};
     const records = [commandBlock(dataset.prepared_input_count === undefined ? "Dataset slice" : `Dataset slice (${dataset.prepared_input_count} samples)`, dataset.command), commandBlock("Reference sample", (reproduce.hf || [])[0]), commandBlock("TRTMC sample", (reproduce.trtmc || [])[0])].filter(Boolean);
-    return records.length ? details(`Dataset · Reference ${(reproduce.commands_shown || {}).hf || 0}/${(reproduce.command_count || {}).hf || 0} · TRTMC ${(reproduce.commands_shown || {}).trtmc || 0}/${(reproduce.command_count || {}).trtmc || 0}`, records) : el("span", "unavailable", "Unavailable");
+    const value = el("div", "reproduction");
+    const differences = sampleDifferences(row);
+    if (differences) value.append(differences);
+    if (records.length) value.append(details(`Dataset · Reference ${(reproduce.commands_shown || {}).hf || 0}/${(reproduce.command_count || {}).hf || 0} · TRTMC ${(reproduce.commands_shown || {}).trtmc || 0}/${(reproduce.command_count || {}).trtmc || 0}`, records));
+    if (!value.childElementCount) value.append(el("span", "unavailable", "Unavailable"));
+    return value;
   }
 
   function commands(row) {

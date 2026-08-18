@@ -198,6 +198,9 @@ def _validate_public_results(output: Path, results: Sequence[dict[str, Any]]) ->
                         f"case debug.{collection} entries must contain href"
                     )
                 _validate_artifact_href(output, record["href"])
+        sample_differences = row.get("sample_differences")
+        if isinstance(sample_differences, Mapping) and sample_differences.get("href"):
+            _validate_artifact_href(output, sample_differences["href"])
 
 
 def _html_shell(title: str) -> str:
