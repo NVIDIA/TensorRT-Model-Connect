@@ -3,10 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "post8_sum_plugin.h"
+#include "plugins.h"
 
 #include <cstddef>
-#include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_runtime_api.h>
 #include <new>
@@ -19,13 +18,10 @@ using Plugin = FastFoundationStereoPost8SumPlugin;
 constexpr int32_t kLogicalElements =
     Plugin::kBatch * Plugin::kDisparities * Plugin::kHeight * Plugin::kWidth;
 constexpr int32_t kThreads = 256;
+constexpr int32_t kTilePositions = 32;
 
 static_assert(Plugin::kChannels == 28);
 static_assert(Plugin::kChannelPitch == 32);
-
-bool is_supported_tile_positions(int32_t value) noexcept {
-    return value == 32 || value == 64 || value == 128 || value == 256;
-}
 
 bool has_exact_dims(nvinfer1::Dims const& dims) noexcept {
     return dims.nbDims == 5 && dims.d[0] == Plugin::kBatch && dims.d[1] == Plugin::kChannels &&
@@ -51,25 +47,22 @@ bool is_exact_dynamic_dhwc8_desc(nvinfer1::DynamicPluginTensorDesc const& desc) 
     return is_exact_dhwc8_desc(desc.desc) && has_exact_dims(desc.min) && has_exact_dims(desc.max);
 }
 
-// Each CTA transposes a 28xTilePositions NCDHW tile into a bank-conflict-free
+// Each CTA transposes a 28x32 NCDHW tile into a bank-conflict-free
 // position-major tile.  The second half of the CTA then performs contiguous
 // DHWC8 reads and writes while preserving the original FP32-add/FP16-round
 // boundary.  The four padded lanes are explicitly initialized on every tile.
-template <int32_t TilePositions>
 __global__ __launch_bounds__(kThreads) void post8_sum_linear_to_dhwc8_kernel(__half const* linear,
                                                                              __half const* skip,
                                                                              __half* output) {
-    constexpr int32_t tile_elements = TilePositions * Plugin::kChannelPitch;
-    static_assert(TilePositions == 32 || TilePositions == 64 || TilePositions == 128 ||
-                  TilePositions == 256);
+    constexpr int32_t tile_elements = kTilePositions * Plugin::kChannelPitch;
     static_assert(tile_elements % kThreads == 0);
-    __shared__ __half transposed[TilePositions][Plugin::kChannelPitch + 1];
+    __shared__ __half transposed[kTilePositions][Plugin::kChannelPitch + 1];
 
-    int32_t const tile_start = static_cast<int32_t>(blockIdx.x) * TilePositions;
+    int32_t const tile_start = static_cast<int32_t>(blockIdx.x) * kTilePositions;
     for (int32_t index = static_cast<int32_t>(threadIdx.x); index < tile_elements;
          index += kThreads) {
-        int32_t const channel = index / TilePositions;
-        int32_t const local_position = index % TilePositions;
+        int32_t const channel = index / kTilePositions;
+        int32_t const local_position = index % kTilePositions;
         int32_t const position = tile_start + local_position;
         __half value = __float2half_rn(0.0F);
         if (channel < Plugin::kChannels && position < kLogicalElements) {
@@ -98,12 +91,10 @@ __global__ __launch_bounds__(kThreads) void post8_sum_linear_to_dhwc8_kernel(__h
     }
 }
 
-template <int32_t TilePositions>
 cudaError_t launch_post8_sum(__half const* linear, __half const* skip, __half* output,
                              cudaStream_t stream) noexcept {
-    constexpr int32_t blocks = (kLogicalElements + TilePositions - 1) / TilePositions;
-    post8_sum_linear_to_dhwc8_kernel<TilePositions>
-        <<<blocks, kThreads, 0, stream>>>(linear, skip, output);
+    constexpr int32_t blocks = (kLogicalElements + kTilePositions - 1) / kTilePositions;
+    post8_sum_linear_to_dhwc8_kernel<<<blocks, kThreads, 0, stream>>>(linear, skip, output);
     return cudaPeekAtLastError();
 }
 
@@ -111,35 +102,16 @@ cudaError_t launch_post8_sum(__half const* linear, __half const* skip, __half* o
 
 FastFoundationStereoPost8SumPlugin::FastFoundationStereoPost8SumPlugin(
     nvinfer1::PluginFieldCollection const& fields) noexcept
-    : valid_(parseFields(fields)) {
-    refreshSerializationField();
+    : valid_(fields.nbFields == 0) {
+    serialization_collection_.nbFields = 0;
+    serialization_collection_.fields = nullptr;
 }
 
 FastFoundationStereoPost8SumPlugin::FastFoundationStereoPost8SumPlugin(
     FastFoundationStereoPost8SumPlugin const& other) noexcept
-    : tile_positions_(other.tile_positions_), valid_(other.valid_) {
-    refreshSerializationField();
-}
-
-bool FastFoundationStereoPost8SumPlugin::parseFields(
-    nvinfer1::PluginFieldCollection const& fields) noexcept {
-    if (fields.nbFields != 1 || fields.fields == nullptr)
-        return false;
-    nvinfer1::PluginField const& field = fields.fields[0];
-    if (field.name == nullptr || std::strcmp(field.name, "tile_positions") != 0 ||
-        field.data == nullptr || field.type != nvinfer1::PluginFieldType::kINT32 ||
-        field.length != 1) {
-        return false;
-    }
-    tile_positions_ = *static_cast<int32_t const*>(field.data);
-    return is_supported_tile_positions(tile_positions_);
-}
-
-void FastFoundationStereoPost8SumPlugin::refreshSerializationField() noexcept {
-    serialization_field_ = nvinfer1::PluginField{"tile_positions", &tile_positions_,
-                                                 nvinfer1::PluginFieldType::kINT32, 1};
-    serialization_collection_.nbFields = 1;
-    serialization_collection_.fields = &serialization_field_;
+    : valid_(other.valid_) {
+    serialization_collection_.nbFields = 0;
+    serialization_collection_.fields = nullptr;
 }
 
 nvinfer1::IPluginCapability* FastFoundationStereoPost8SumPlugin::getCapabilityInterface(
@@ -234,41 +206,13 @@ std::size_t FastFoundationStereoPost8SumPlugin::getWorkspaceSize(
 }
 
 char const* FastFoundationStereoPost8SumPlugin::getTimingCacheID() noexcept {
-    switch (tile_positions_) {
-    case 32:
-        return "post8-sum-28x48x176x176-linear-dhwc8-fp16-tile32-v1";
-    case 64:
-        return "post8-sum-28x48x176x176-linear-dhwc8-fp16-tile64-v1";
-    case 128:
-        return "post8-sum-28x48x176x176-linear-dhwc8-fp16-tile128-v1";
-    case 256:
-        return "post8-sum-28x48x176x176-linear-dhwc8-fp16-tile256-v1";
-    default:
-        return nullptr;
-    }
+    return "post8-sum-28x48x176x176-linear-dhwc8-fp16-tile32-v1";
 }
 
 char const* FastFoundationStereoPost8SumPlugin::getMetadataString() noexcept {
-    switch (tile_positions_) {
-    case 32:
-        return "input0=NCDHW:1x28x48x176x176:linear;input1=NCDHW:1x28x48x176x176:DHWC8;"
-               "output=NCDHW:1x28x48x176x176:DHWC8;pitch=32;tile=32;"
-               "sum=half(fp32(half(linear))+fp32(half(skip)));tail=zero";
-    case 64:
-        return "input0=NCDHW:1x28x48x176x176:linear;input1=NCDHW:1x28x48x176x176:DHWC8;"
-               "output=NCDHW:1x28x48x176x176:DHWC8;pitch=32;tile=64;"
-               "sum=half(fp32(half(linear))+fp32(half(skip)));tail=zero";
-    case 128:
-        return "input0=NCDHW:1x28x48x176x176:linear;input1=NCDHW:1x28x48x176x176:DHWC8;"
-               "output=NCDHW:1x28x48x176x176:DHWC8;pitch=32;tile=128;"
-               "sum=half(fp32(half(linear))+fp32(half(skip)));tail=zero";
-    case 256:
-        return "input0=NCDHW:1x28x48x176x176:linear;input1=NCDHW:1x28x48x176x176:DHWC8;"
-               "output=NCDHW:1x28x48x176x176:DHWC8;pitch=32;tile=256;"
-               "sum=half(fp32(half(linear))+fp32(half(skip)));tail=zero";
-    default:
-        return nullptr;
-    }
+    return "input0=NCDHW:1x28x48x176x176:linear;input1=NCDHW:1x28x48x176x176:DHWC8;"
+           "output=NCDHW:1x28x48x176x176:DHWC8;pitch=32;tile=32;"
+           "sum=half(fp32(half(linear))+fp32(half(skip)));tail=zero";
 }
 
 int32_t FastFoundationStereoPost8SumPlugin::onShapeChange(nvinfer1::PluginTensorDesc const* inputs,
@@ -296,23 +240,7 @@ int32_t FastFoundationStereoPost8SumPlugin::enqueue(nvinfer1::PluginTensorDesc c
     auto const* linear = static_cast<__half const*>(inputs[0]);
     auto const* skip = static_cast<__half const*>(inputs[1]);
     auto* output = static_cast<__half*>(outputs[0]);
-    cudaError_t result = cudaErrorInvalidValue;
-    switch (tile_positions_) {
-    case 32:
-        result = launch_post8_sum<32>(linear, skip, output, stream);
-        break;
-    case 64:
-        result = launch_post8_sum<64>(linear, skip, output, stream);
-        break;
-    case 128:
-        result = launch_post8_sum<128>(linear, skip, output, stream);
-        break;
-    case 256:
-        result = launch_post8_sum<256>(linear, skip, output, stream);
-        break;
-    default:
-        return 1;
-    }
+    cudaError_t const result = launch_post8_sum(linear, skip, output, stream);
     return result == cudaSuccess ? 0 : 1;
 }
 
@@ -323,7 +251,6 @@ FastFoundationStereoPost8SumPlugin::attachToContext(nvinfer1::IPluginResourceCon
 
 nvinfer1::PluginFieldCollection const*
 FastFoundationStereoPost8SumPlugin::getFieldsToSerialize() noexcept {
-    refreshSerializationField();
     return valid_ ? &serialization_collection_ : nullptr;
 }
 

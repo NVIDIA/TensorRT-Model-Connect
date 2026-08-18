@@ -11,12 +11,9 @@ import pytest
 @dataclass(frozen=True)
 class _DecoderCase:
     label: str
-    env: str
-    gate: str
     scope: str
     input_shape: tuple[int, ...]
     target_shape: tuple[int, ...]
-    other_scopes: tuple[tuple[str, tuple[int, ...]], ...]
     numeric_shape: tuple[int, ...]
     seed: int
 
@@ -29,27 +26,22 @@ class _DecoderCase:
 _CASES = (
     _DecoderCase(
         label="88",
-        env="TRTMC_FAST_FOUNDATION_STEREO_DECODER_FP16_PRECONCAT_88",
-        gate="_use_decoder_fp16_preconcat_88",
         scope="deconv16_8",
         input_shape=(2, 320, 44, 44),
         target_shape=(2, 96, 88, 88),
-        other_scopes=(("deconv32_16", (2, 160, 44, 44)), ("deconv8_4", (2, 48, 176, 176))),
         numeric_shape=(2, 96, 5, 7),
         seed=88,
     ),
     _DecoderCase(
         label="176",
-        env="TRTMC_FAST_FOUNDATION_STEREO_DECODER_FP16_PRECONCAT_176",
-        gate="_use_decoder_fp16_preconcat_176",
         scope="deconv8_4",
         input_shape=(2, 192, 88, 88),
         target_shape=(2, 48, 176, 176),
-        other_scopes=(("deconv32_16", (2, 160, 44, 44)), ("deconv16_8", (2, 96, 88, 88))),
         numeric_shape=(2, 48, 7, 9),
         seed=176,
     ),
 )
+_DEFAULT_SCOPE = object()
 
 
 class _Tensor:
@@ -74,9 +66,7 @@ def _run_decoder(
     monkeypatch,
     case: _DecoderCase,
     *,
-    enabled: bool,
-    other_enabled: bool = False,
-    scope: str | None = None,
+    scope: str | None | object = _DEFAULT_SCOPE,
     fp16: bool = True,
     branch_shape: tuple[int, ...] | None = None,
     branch_dtype: str = "fp16",
@@ -86,9 +76,6 @@ def _run_decoder(
 ):
     from tensorrt_model_connect.families.fast_foundation_stereo import native_feature
 
-    for candidate in _CASES:
-        selected = enabled if candidate.label == case.label else other_enabled
-        monkeypatch.setenv(candidate.env, "1" if selected else "0")
     branch_shape = case.target_shape if branch_shape is None else branch_shape
     skip_shape = case.target_shape if skip_shape is None else skip_shape
     events = []
@@ -144,115 +131,61 @@ def _run_decoder(
         _Tensor("input", case.input_shape, "fp16" if fp16 else "fp32"),
         _Tensor("skip", skip_shape, skip_dtype),
         _decoder_block(),
-        decoder_scope=case.scope if scope is None else scope,
+        decoder_scope=case.scope if scope is _DEFAULT_SCOPE else scope,
         fp16=fp16,
     )
     return events, output
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
-def test_decoder_gate_defaults_on_for_only_its_scope(monkeypatch, case: _DecoderCase) -> None:
-    from tensorrt_model_connect.families.fast_foundation_stereo import native_feature
-
-    scopes = ("deconv32_16", "deconv16_8", "deconv8_4")
-    for candidate in _CASES:
-        monkeypatch.delenv(candidate.env, raising=False)
-    gate = getattr(native_feature, case.gate)
-    assert [gate(decoder_scope=scope) for scope in scopes] == [
-        scope == case.scope for scope in scopes
-    ]
-
-    monkeypatch.setenv(case.env, "0")
-    assert not gate(decoder_scope=case.scope)
-    other = next(candidate for candidate in _CASES if candidate.label != case.label)
-    assert getattr(native_feature, other.gate)(decoder_scope=other.scope)
-
-
-@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
 @pytest.mark.parametrize("scope", ("", "decoder", "owned.extra", None))
-def test_decoder_gate_rejects_unknown_scope(case: _DecoderCase, scope: str | None) -> None:
-    from tensorrt_model_connect.families.fast_foundation_stereo import native_feature
-
+def test_decoder_rejects_unknown_scope_before_layers(
+    monkeypatch,
+    case: _DecoderCase,
+    scope: str | None,
+) -> None:
     invalid = f"{case.scope}.extra" if scope == "owned.extra" else scope
     with pytest.raises(RuntimeError, match="decoder scope must be one of"):
-        getattr(native_feature, case.gate)(decoder_scope=invalid)
+        _run_decoder(monkeypatch, case, scope=invalid)
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
-def test_decoder_gate_moves_exactly_one_cast_before_concat(monkeypatch, case: _DecoderCase) -> None:
-    events, output = _run_decoder(monkeypatch, case, enabled=True)
+def test_decoder_default_winner_trace(monkeypatch, case: _DecoderCase) -> None:
+    events, output = _run_decoder(monkeypatch, case)
 
-    assert [event for event in events if event[0] == "cast"] == [
-        ("cast", "skip", case.target_shape, "fp32", "fp16")
-    ]
-    assert [event for event in events if event[0] == "concat"] == [
-        ("concat", (case.target_shape, case.target_shape), ("fp16", "fp16"), 1)
-    ]
-    assert [event for event in events if event[0] == "next-residual"] == [
-        ("next-residual", case.concat_shape, "fp16", "residual-block", True)
+    assert events == [
+        ("deconv", case.input_shape, "fp16", "deconvolution", True),
+        ("norm", case.target_shape, "fp16", "instance-norm", True),
+        ("activation", case.target_shape, "fp16", "leaky_relu", 0.01),
+        ("cast", "skip", case.target_shape, "fp32", "fp16"),
+        ("concat", (case.target_shape, case.target_shape), ("fp16", "fp16"), 1),
+        ("next-residual", case.concat_shape, "fp16", "residual-block", True),
     ]
     assert (output.shape, output.dtype) == (case.concat_shape, "fp16")
 
 
-@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
-def test_decoder_gate_off_keeps_legacy_promotion(monkeypatch, case: _DecoderCase) -> None:
-    events, output = _run_decoder(monkeypatch, case, enabled=False)
-
+def test_decoder_44_scope_keeps_checkpoint_dtype_promotion(monkeypatch) -> None:
+    shape = (2, 160, 44, 44)
+    events, output = _run_decoder(
+        monkeypatch,
+        _CASES[0],
+        scope="deconv32_16",
+        branch_shape=shape,
+        skip_shape=shape,
+    )
     assert [event for event in events if event[0] == "cast"] == [
-        ("cast", "branch", case.target_shape, "fp16", "fp32")
+        ("cast", "branch", shape, "fp16", "fp32")
     ]
     assert [event for event in events if event[0] == "concat"] == [
-        ("concat", (case.target_shape, case.target_shape), ("fp32", "fp32"), 1)
+        ("concat", (shape, shape), ("fp32", "fp32"), 1)
     ]
-    assert (output.shape, output.dtype) == (case.concat_shape, "fp32")
+    assert (output.shape, output.dtype) == ((2, 320, 44, 44), "fp32")
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
-def test_decoder_gate_does_not_touch_other_scopes(monkeypatch, case: _DecoderCase) -> None:
-    for scope, shape in case.other_scopes:
-        enabled_events, enabled_output = _run_decoder(
-            monkeypatch,
-            case,
-            enabled=True,
-            scope=scope,
-            branch_shape=shape,
-            skip_shape=shape,
-        )
-        disabled_events, disabled_output = _run_decoder(
-            monkeypatch,
-            case,
-            enabled=False,
-            scope=scope,
-            branch_shape=shape,
-            skip_shape=shape,
-        )
-        assert enabled_events == disabled_events
-        assert (enabled_output.shape, enabled_output.dtype) == (
-            disabled_output.shape,
-            disabled_output.dtype,
-        )
-
-
-def test_decoder_gates_compose_without_interference(monkeypatch) -> None:
-    for case in _CASES:
-        events, output = _run_decoder(
-            monkeypatch,
-            case,
-            enabled=True,
-            other_enabled=True,
-        )
-        assert [event for event in events if event[0] == "cast"] == [
-            ("cast", "skip", case.target_shape, "fp32", "fp16")
-        ]
-        assert (output.shape, output.dtype) == (case.concat_shape, "fp16")
-
-
-@pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
-def test_decoder_gate_rejects_non_fp16_before_layers(monkeypatch, case: _DecoderCase) -> None:
+def test_decoder_rejects_non_fp16_before_layers(monkeypatch, case: _DecoderCase) -> None:
     from tensorrt_model_connect.families.fast_foundation_stereo import native_feature
 
-    for candidate in _CASES:
-        monkeypatch.setenv(candidate.env, "1" if candidate.label == case.label else "0")
     monkeypatch.setattr(
         native_feature,
         "_deconv2d",
@@ -271,15 +204,13 @@ def test_decoder_gate_rejects_non_fp16_before_layers(monkeypatch, case: _Decoder
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
 @pytest.mark.parametrize("drift", ("shape", "dtype"))
-def test_decoder_gate_rejects_skip_drift_before_layers(
+def test_decoder_rejects_skip_drift_before_layers(
     monkeypatch,
     case: _DecoderCase,
     drift: str,
 ) -> None:
     from tensorrt_model_connect.families.fast_foundation_stereo import native_feature
 
-    for candidate in _CASES:
-        monkeypatch.setenv(candidate.env, "1" if candidate.label == case.label else "0")
     monkeypatch.setattr(
         native_feature,
         "_deconv2d",
@@ -303,7 +234,7 @@ def test_decoder_gate_rejects_skip_drift_before_layers(
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
 @pytest.mark.parametrize("drift", ("shape", "dtype"))
-def test_decoder_gate_rejects_branch_drift_before_concat(
+def test_decoder_rejects_branch_drift_before_concat(
     monkeypatch,
     case: _DecoderCase,
     drift: str,
@@ -313,7 +244,6 @@ def test_decoder_gate_rejects_branch_drift_before_concat(
         _run_decoder(
             monkeypatch,
             case,
-            enabled=True,
             branch_shape=bad_shape if drift == "shape" else case.target_shape,
             branch_dtype="fp32" if drift == "dtype" else "fp16",
             fail_on_concat=True,
@@ -321,7 +251,7 @@ def test_decoder_gate_rejects_branch_drift_before_concat(
 
 
 @pytest.mark.parametrize("case", _CASES, ids=lambda case: case.label)
-def test_decoder_gate_is_exact_at_next_fp16_boundary(case: _DecoderCase) -> None:
+def test_decoder_is_exact_at_next_fp16_boundary(case: _DecoderCase) -> None:
     generator = np.random.default_rng(case.seed)
     branch = generator.normal(size=case.numeric_shape).astype(np.float16)
     skip = generator.normal(size=case.numeric_shape).astype(np.float32)

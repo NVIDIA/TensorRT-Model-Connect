@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "full_volume_leaky_plugin.h"
+#include "plugins.h"
 
 #include <cstddef>
 #include <cuda_fp16.h>

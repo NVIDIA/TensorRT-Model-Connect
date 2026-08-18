@@ -218,8 +218,10 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     source = tmp_path / "source"
     builder = source / "python/tensorrt_model_connect/families/model_a/runtime_a"
     runtime = source / "src/runtime/models/model_a/runtime_a"
+    native_plugins = source / "src/runtime/models/model_a/native_plugins"
     builder.mkdir(parents=True)
     runtime.mkdir(parents=True)
+    native_plugins.mkdir()
     (builder / "IMPLEMENTATION.toml").write_text("not valid TOML [", encoding="utf-8")
     (builder / "adapter.py").write_text("# adapter\n", encoding="utf-8")
     profile = builder / "profiles" / "profile.toml"
@@ -230,6 +232,8 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     dependency.write_bytes(b"must remain lazy")
     (runtime / "CMakeLists.txt").write_text("# runtime\n", encoding="utf-8")
     (runtime / "adapter.cpp").write_text("// runtime\n", encoding="utf-8")
+    (native_plugins / "CMakeLists.txt").write_text("# plugin\n", encoding="utf-8")
+    (native_plugins / "plugin.cu").write_text("// kernel\n", encoding="utf-8")
     for relative in (
         "src/runtime/providers/optimized_runtime_factory.h",
         "include/trtmc/pipeline.h",
@@ -251,6 +255,10 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
         "runtime/adapter.cpp",
     }
     assert (packaged / "IMPLEMENTATION.toml").read_text(encoding="utf-8") == "not valid TOML ["
+    assert {path.name for path in (module / "families/model_a/native_plugins").iterdir()} == {
+        "CMakeLists.txt",
+        "plugin.cu",
+    }
     sdk = module / "runtime_provider" / "_sdk" / "include"
     assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
     assert (sdk / "trtmc" / "pipeline.h").is_file()

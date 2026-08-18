@@ -55,6 +55,7 @@ packages = ["python/tensorrt_model_connect"]
 [tool.conan-py-build.sdist]
 include = [
     "python",
+    "src/runtime/models/fast_foundation_stereo/native_plugins",
     "third_party",
 ]
 exclude = [

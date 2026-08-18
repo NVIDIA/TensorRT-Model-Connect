@@ -17,9 +17,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
-
 _PLUGIN_ENV = "TRTMC_FAST_FOUNDATION_STEREO_NATIVE_PLUGIN_LIBRARY"
 _BUILD_DIR_ENV = "TRTMC_FAST_FOUNDATION_STEREO_NATIVE_PLUGIN_BUILD_DIR"
 _PLUGIN_NAME = "FastFoundationStereoCombinedVolume"
@@ -27,7 +24,6 @@ _GEOMETRY_VOLUME_CONVC1_PLUGIN_NAME = "FastFoundationStereoGeometryVolumeConvc1"
 _SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME = "FastFoundationStereoSpatialAttentionReduce"
 _POST8_SUM_PLUGIN_NAME = "FastFoundationStereoPost8Sum"
 _FULL_VOLUME_LEAKY_PLUGIN_NAME = "FastFoundationStereoFullVolumeLeaky"
-_POST8_SUM_TILE_POSITIONS = (32, 64, 128, 256)
 _DEFAULT_PLUGIN_VERSION = "1"
 _PLUGIN_VERSIONS = {_PLUGIN_NAME: "2"}
 _DEFAULT_CUDA_ARCHITECTURES = "89-real;89-virtual"
@@ -121,6 +117,7 @@ def _plugin_cache_key(
     digest = hashlib.sha256()
     digest.update(_source_digest(source_dir).encode("ascii"))
     for hint in (
+        "source-layout=runtime-model-v2",
         f"tensorrt={runtime_version}",
         f"cuda={os.environ.get('CUDA_VERSION', '')}",
         f"architectures={cuda_architectures}",
@@ -159,6 +156,11 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
 
     trt_compat.load_module()
     source_dir = Path(__file__).with_name("native_plugins")
+    if not source_dir.is_dir():
+        source_dir = (
+            Path(__file__).resolve().parents[4]
+            / "src/runtime/models/fast_foundation_stereo/native_plugins"
+        )
     default_build_base = Path(tempfile.gettempdir()) / (
         f"trtmc-fast-foundation-stereo-native-plugin-{os.geteuid()}"
     )
@@ -243,55 +245,85 @@ def load_native_plugin(*, verbose: bool = False) -> Path:
     return path
 
 
-def _plugin_creator(trt_module: Any, plugin_name: str = _PLUGIN_NAME) -> Any:
+def _resolve_plugin_creator(trt_module: Any, plugin_name: str, *, v3_only: bool) -> Any:
     load_native_plugin()
     plugin_version = _plugin_version(plugin_name)
     registry_fn = getattr(trt_module, "get_plugin_registry", None)
     if registry_fn is None:
         raise RuntimeError("TensorRT does not expose a plugin registry")
     registry = registry_fn()
-    creator = None
-    get_creator = getattr(registry, "get_plugin_creator", None)
-    if get_creator is not None:
+    methods = ("get_creator",) if v3_only else ("get_plugin_creator", "get_creator")
+    for method in methods:
+        get_creator = getattr(registry, method, None)
+        if get_creator is None:
+            continue
         try:
             creator = get_creator(plugin_name, plugin_version, "")
         except TypeError:
             creator = get_creator(plugin_name, plugin_version)
-    if creator is None:
-        get_creator = getattr(registry, "get_creator", None)
-        if get_creator is not None:
-            try:
-                creator = get_creator(plugin_name, plugin_version, "")
-            except TypeError:
-                creator = get_creator(plugin_name, plugin_version)
-    if creator is None:
-        raise RuntimeError(
-            f"TensorRT plugin creator {plugin_name} v{plugin_version} was not registered"
-        )
-    return creator
+        if creator is not None:
+            return creator
+    kind = "V3 plugin creator" if v3_only else "plugin creator"
+    raise RuntimeError(f"TensorRT {kind} {plugin_name} v{plugin_version} was not registered")
+
+
+def _plugin_creator(trt_module: Any, plugin_name: str = _PLUGIN_NAME) -> Any:
+    return _resolve_plugin_creator(trt_module, plugin_name, v3_only=False)
 
 
 def _plugin_v3_creator(trt_module: Any, plugin_name: str) -> Any:
     """Resolve a V3 creator without probing the V2-only registry API first."""
 
-    load_native_plugin()
-    plugin_version = _plugin_version(plugin_name)
-    registry_fn = getattr(trt_module, "get_plugin_registry", None)
-    if registry_fn is None:
-        raise RuntimeError("TensorRT does not expose a plugin registry")
-    registry = registry_fn()
-    get_creator = getattr(registry, "get_creator", None)
-    if get_creator is None:
-        raise RuntimeError("TensorRT plugin registry does not expose V3 creators")
-    try:
-        creator = get_creator(plugin_name, plugin_version, "")
-    except TypeError:
-        creator = get_creator(plugin_name, plugin_version)
-    if creator is None:
-        raise RuntimeError(
-            f"TensorRT V3 plugin creator {plugin_name} v{plugin_version} was not registered"
-        )
-    return creator
+    return _resolve_plugin_creator(trt_module, plugin_name, v3_only=True)
+
+
+def _named_plugin_outputs(layer: Any, name: str, output_names: tuple[str, ...]) -> tuple[Any, ...]:
+    if layer is None:
+        raise RuntimeError(f"TensorRT failed to add the {name} plugin layer")
+    layer.name = name
+    outputs = tuple(layer.get_output(index) for index in range(len(output_names)))
+    for output, output_name in zip(outputs, output_names, strict=True):
+        output.name = output_name
+    return outputs
+
+
+def _add_v2_plugin(
+    network: Any,
+    inputs: list[Any],
+    *,
+    trt_module: Any,
+    plugin_name: str,
+    name: str,
+    fields: Any,
+    output_names: tuple[str, ...],
+) -> tuple[Any, ...]:
+    add_plugin = getattr(network, "add_plugin_v2", None)
+    if add_plugin is None:
+        raise RuntimeError("TensorRT network does not support IPluginV2 layers")
+    plugin = _plugin_creator(trt_module, plugin_name).create_plugin(name, fields)
+    if plugin is None:
+        raise RuntimeError(f"TensorRT failed to create the {name} plugin")
+    return _named_plugin_outputs(add_plugin(inputs, plugin), name, output_names)
+
+
+def _add_v3_plugin(
+    network: Any,
+    inputs: list[Any],
+    *,
+    trt_module: Any,
+    plugin_name: str,
+    name: str,
+    fields: Any,
+    output_names: tuple[str, ...],
+) -> tuple[Any, ...]:
+    add_plugin = getattr(network, "add_plugin_v3", None)
+    if add_plugin is None:
+        raise RuntimeError("TensorRT network does not support IPluginV3 layers")
+    creator = _plugin_v3_creator(trt_module, plugin_name)
+    plugin = creator.create_plugin(name, fields, trt_module.TensorRTPhase.BUILD)
+    if plugin is None:
+        raise RuntimeError(f"TensorRT failed to create the {name} plugin")
+    return _named_plugin_outputs(add_plugin(inputs, [], plugin), name, output_names)
 
 
 def add_combined_volume_plugin(
@@ -306,25 +338,16 @@ def add_combined_volume_plugin(
 ) -> Any:
     """Add the fixed-shape fused stereo volume plugin to a TensorRT network."""
 
-    add_plugin = getattr(network, "add_plugin_v2", None)
-    if add_plugin is None:
-        raise RuntimeError("TensorRT network does not support IPluginV2 layers")
-    creator = _plugin_creator(trt_module)
     fields = trt_module.PluginFieldCollection([])
-    plugin = creator.create_plugin(name, fields)
-    if plugin is None:
-        raise RuntimeError(
-            "TensorRT failed to create the Fast Foundation Stereo combined-volume plugin"
-        )
-    layer = add_plugin([reference, target, left_projected, right_projected], plugin)
-    if layer is None:
-        raise RuntimeError(
-            "TensorRT failed to add the Fast Foundation Stereo combined-volume plugin layer"
-        )
-    layer.name = name
-    output = layer.get_output(0)
-    output.name = name
-    return output
+    return _add_v2_plugin(
+        network,
+        [reference, target, left_projected, right_projected],
+        trt_module=trt_module,
+        plugin_name=_PLUGIN_NAME,
+        name=name,
+        fields=fields,
+        output_names=(name,),
+    )[0]
 
 
 def add_geometry_volume_convc1_plugin(
@@ -341,30 +364,16 @@ def add_geometry_volume_convc1_plugin(
 ) -> Any:
     """Fuse direct DHWC8 volume sampling with the first motion convolution."""
 
-    add_plugin = getattr(network, "add_plugin_v2", None)
-    if add_plugin is None:
-        raise RuntimeError("TensorRT network does not support IPluginV2 layers")
-    creator = _plugin_creator(trt_module, _GEOMETRY_VOLUME_CONVC1_PLUGIN_NAME)
     fields = trt_module.PluginFieldCollection([])
-    plugin = creator.create_plugin(name, fields)
-    if plugin is None:
-        raise RuntimeError(
-            "TensorRT failed to create the Fast Foundation Stereo "
-            "direct-volume geometry-convc1 plugin"
-        )
-    layer = add_plugin(
+    return _add_v2_plugin(
+        network,
         [disparity, volume, correlation0, correlation1, packed_weight, packed_bias],
-        plugin,
-    )
-    if layer is None:
-        raise RuntimeError(
-            "TensorRT failed to add the Fast Foundation Stereo "
-            "direct-volume geometry-convc1 plugin layer"
-        )
-    layer.name = name
-    output = layer.get_output(0)
-    output.name = name
-    return output
+        trt_module=trt_module,
+        plugin_name=_GEOMETRY_VOLUME_CONVC1_PLUGIN_NAME,
+        name=name,
+        fields=fields,
+        output_names=(name,),
+    )[0]
 
 
 def add_spatial_attention_reduce_plugin(
@@ -376,27 +385,16 @@ def add_spatial_attention_reduce_plugin(
 ) -> tuple[Any, Any]:
     """Add the fixed-shape channel mean/max plugin to a TensorRT network."""
 
-    add_plugin = getattr(network, "add_plugin_v2", None)
-    if add_plugin is None:
-        raise RuntimeError("TensorRT network does not support IPluginV2 layers")
-    creator = _plugin_creator(trt_module, _SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME)
     fields = trt_module.PluginFieldCollection([])
-    plugin = creator.create_plugin(name, fields)
-    if plugin is None:
-        raise RuntimeError(
-            "TensorRT failed to create the Fast Foundation Stereo spatial-attention reduce plugin"
-        )
-    layer = add_plugin([tensor], plugin)
-    if layer is None:
-        raise RuntimeError(
-            "TensorRT failed to add the Fast Foundation Stereo "
-            "spatial-attention reduce plugin layer"
-        )
-    layer.name = name
-    average = layer.get_output(0)
-    maximum = layer.get_output(1)
-    average.name = f"{name}_average"
-    maximum.name = f"{name}_maximum"
+    average, maximum = _add_v2_plugin(
+        network,
+        [tensor],
+        trt_module=trt_module,
+        plugin_name=_SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME,
+        name=name,
+        fields=fields,
+        output_names=(f"{name}_average", f"{name}_maximum"),
+    )
     return average, maximum
 
 
@@ -407,41 +405,19 @@ def add_post8_sum_plugin(
     *,
     trt_module: Any,
     name: str = "post8_to_4_sum",
-    tile_positions: int = 32,
 ) -> Any:
     """Transpose the fixed post8 LINEAR tensor and add its DHWC8 skip."""
 
-    if type(tile_positions) is not int or tile_positions not in _POST8_SUM_TILE_POSITIONS:
-        raise ValueError(
-            "post8 sum tile_positions must be one of "
-            f"{_POST8_SUM_TILE_POSITIONS}, got {tile_positions!r}"
-        )
-    add_plugin = getattr(network, "add_plugin_v3", None)
-    if add_plugin is None:
-        raise RuntimeError("TensorRT network does not support IPluginV3 layers")
-    creator = _plugin_v3_creator(trt_module, _POST8_SUM_PLUGIN_NAME)
-    tile_field = np.asarray([tile_positions], dtype=np.int32)
-    fields = trt_module.PluginFieldCollection(
-        [
-            trt_module.PluginField(
-                "tile_positions",
-                tile_field,
-                trt_module.PluginFieldType.INT32,
-            )
-        ]
-    )
-    plugin = creator.create_plugin(name, fields, trt_module.TensorRTPhase.BUILD)
-    if plugin is None:
-        raise RuntimeError("TensorRT failed to create the Fast Foundation Stereo post8 sum plugin")
-    layer = add_plugin([linear, skip], [], plugin)
-    if layer is None:
-        raise RuntimeError(
-            "TensorRT failed to add the Fast Foundation Stereo post8 sum plugin layer"
-        )
-    layer.name = name
-    output = layer.get_output(0)
-    output.name = name
-    return output
+    fields = trt_module.PluginFieldCollection([])
+    return _add_v3_plugin(
+        network,
+        [linear, skip],
+        trt_module=trt_module,
+        plugin_name=_POST8_SUM_PLUGIN_NAME,
+        name=name,
+        fields=fields,
+        output_names=(name,),
+    )[0]
 
 
 def add_full_volume_leaky_plugin(
@@ -453,25 +429,16 @@ def add_full_volume_leaky_plugin(
 ) -> Any:
     """Replace one exact FP16 DHWC8 full-volume LeakyReLU with its V3 kernel."""
 
-    add_plugin = getattr(network, "add_plugin_v3", None)
-    if add_plugin is None:
-        raise RuntimeError("TensorRT network does not support IPluginV3 layers")
-    creator = _plugin_v3_creator(trt_module, _FULL_VOLUME_LEAKY_PLUGIN_NAME)
     fields = trt_module.PluginFieldCollection([])
-    plugin = creator.create_plugin(name, fields, trt_module.TensorRTPhase.BUILD)
-    if plugin is None:
-        raise RuntimeError(
-            "TensorRT failed to create the Fast Foundation Stereo full-volume Leaky plugin"
-        )
-    layer = add_plugin([tensor], [], plugin)
-    if layer is None:
-        raise RuntimeError(
-            "TensorRT failed to add the Fast Foundation Stereo full-volume Leaky plugin layer"
-        )
-    layer.name = name
-    output = layer.get_output(0)
-    output.name = name
-    return output
+    return _add_v3_plugin(
+        network,
+        [tensor],
+        trt_module=trt_module,
+        plugin_name=_FULL_VOLUME_LEAKY_PLUGIN_NAME,
+        name=name,
+        fields=fields,
+        output_names=(name,),
+    )[0]
 
 
 __all__ = [

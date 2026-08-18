@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "spatial_attention_reduce_plugin.h"
+#include "plugins.h"
 
 #include <cfloat>
 #include <cmath>

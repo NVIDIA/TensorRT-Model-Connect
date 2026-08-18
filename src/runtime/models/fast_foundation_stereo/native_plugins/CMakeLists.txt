@@ -115,15 +115,11 @@ endif()
 
 add_library(trtmc_fast_foundation_stereo_native_plugin SHARED
   full_volume_leaky_plugin.cu
-  full_volume_leaky_plugin_creator.cpp
   geometry_volume_convc1_plugin.cu
-  geometry_volume_convc1_plugin_creator.cpp
   gwc_plugin.cu
-  gwc_plugin_creator.cpp
+  plugin_creators.cpp
   post8_sum_plugin.cu
-  post8_sum_plugin_creator.cpp
   spatial_attention_reduce_plugin.cu
-  spatial_attention_reduce_plugin_creator.cpp
 )
 target_include_directories(trtmc_fast_foundation_stereo_native_plugin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}

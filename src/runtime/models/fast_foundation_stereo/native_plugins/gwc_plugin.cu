@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "gwc_plugin.h"
+#include "plugins.h"
 
 #include <cmath>
 #include <cuda_fp16.h>

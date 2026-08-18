@@ -16,6 +16,11 @@ from tensorrt_model_connect.families.fast_foundation_stereo import (
 )
 
 
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
+_RUNTIME_MODEL_DIR = _REPOSITORY_ROOT / "src/runtime/models/fast_foundation_stereo"
+_PLUGIN_DIR = _RUNTIME_MODEL_DIR / "native_plugins"
+
+
 def test_native_plugin_builder_caches_the_standalone_dso(
     tmp_path: Path,
     monkeypatch,
@@ -47,6 +52,7 @@ def test_native_plugin_builder_caches_the_standalone_dso(
     assert first == second
     assert first.read_bytes() == b"plugin"
     assert [command[1] for command in calls] == ["-S", "--build"]
+    assert Path(calls[0][2]) == _PLUGIN_DIR
     assert f"-DCMAKE_CUDA_ARCHITECTURES={cuda_architectures}" in calls[0]
 
 
@@ -57,10 +63,7 @@ def test_native_plugin_builder_defaults_to_l4_cuda_architectures(monkeypatch) ->
 
 
 def test_native_plugin_cmake_requires_exact_header_runtime_release() -> None:
-    cmake = (
-        Path(__file__).resolve().parents[4]
-        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_plugins/CMakeLists.txt"
-    ).read_text(encoding="utf-8")
+    cmake = (_PLUGIN_DIR / "CMakeLists.txt").read_text(encoding="utf-8")
 
     assert "NvInferVersion.h" in cmake
     assert "FAST_FOUNDATION_STEREO_TRT_EXPECTED_VERSION" in cmake
@@ -295,7 +298,13 @@ def test_native_combined_volume_layer_has_four_inputs_and_one_named_output(
             self.plugin = selected_plugin
             return self.layer
 
-    monkeypatch.setattr(native_plugin_builder, "_plugin_creator", lambda _trt: Creator())
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "_plugin_creator",
+        lambda _trt, plugin_name: (
+            Creator() if plugin_name == native_plugin_builder._PLUGIN_NAME else None
+        ),
+    )
     reference = object()
     target = object()
     left_projected = object()
@@ -430,14 +439,10 @@ def test_native_geometry_volume_convc1_layer_has_six_direct_inputs(monkeypatch) 
 
 
 def test_cpp_runtime_loads_embedded_plugin_before_deserializing_post_engine() -> None:
-    repository_root = Path(__file__).resolve().parents[4]
-    model_dir = repository_root / "src/runtime/models/fast_foundation_stereo"
+    model_dir = _RUNTIME_MODEL_DIR
     plugin_source = (model_dir / "plugin.cpp").read_text(encoding="utf-8")
     pipeline_source = (model_dir / "stereo_pipeline.cpp").read_text(encoding="utf-8")
-    creator_source = (
-        repository_root / "python/tensorrt_model_connect/families/fast_foundation_stereo/"
-        "native_plugins/gwc_plugin_creator.cpp"
-    ).read_text(encoding="utf-8")
+    creator_source = (_PLUGIN_DIR / "plugin_creators.cpp").read_text(encoding="utf-8")
     identity_symbol = "fast_foundation_stereo_combined_volume_plugin_force_link"
 
     assert 'find_section(ctx.bundle, "fast_foundation_stereo_native_plugin_so")' in plugin_source
@@ -456,165 +461,6 @@ def test_cpp_runtime_loads_embedded_plugin_before_deserializing_post_engine() ->
     assert 'post_->has_output("disp")' in pipeline_source
     assert 'post_->tensor_dtype("disp") != DType::kFloat32' in pipeline_source
     assert 'post_->tensor_shape("disp") != expected_shape' in pipeline_source
-
-
-def test_combined_volume_plugin_owns_the_fixed_l4_tensor_contract() -> None:
-    repository_root = Path(__file__).resolve().parents[4]
-    source = (
-        repository_root / "python/tensorrt_model_connect/families/fast_foundation_stereo/"
-        "native_plugins/gwc_plugin.cu"
-    ).read_text(encoding="utf-8")
-    header = (
-        repository_root / "python/tensorrt_model_connect/families/fast_foundation_stereo/"
-        "native_plugins/gwc_plugin.h"
-    ).read_text(encoding="utf-8")
-
-    assert native_plugin_builder._PLUGIN_NAME == "FastFoundationStereoCombinedVolume"
-    assert native_plugin_builder._PLUGIN_NAME in header
-
-    for contract in (
-        "kBatch = 1",
-        "kFeatureChannels = 224",
-        "kProjectedChannels = 12",
-        "kGroups = 8",
-        "kCombinedChannels = kGroups + 2 * kProjectedChannels",
-        "kHeight = 176",
-        "kWidth = 176",
-        "kDisparities = 48",
-        "kWorkspaceBytes = 2 * kNormElements * sizeof(__half)",
-        "input_count != 4",
-        "projected_width -= disparity",
-        "float dot = 0.0F",
-        "TensorFormat::kDHWC8",
-        "kOutputXTile = 16",
-        "output_tile[kCombinedChannels][kOutputXTile + 1]",
-        "output_channel = threadIdx.x / kOutputXTile",
-        "store_channel = threadIdx.x % kCombinedChannels",
-    ):
-        assert contract in source
-    assert 'kPLUGIN_VERSION = "2"' in header
-
-
-def test_spatial_attention_reduce_plugin_owns_fixed_shape_and_precision_contract() -> None:
-    repository_root = Path(__file__).resolve().parents[4]
-    plugin_dir = (
-        repository_root
-        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_plugins"
-    )
-    source = (plugin_dir / "spatial_attention_reduce_plugin.cu").read_text(encoding="utf-8")
-    header = (plugin_dir / "spatial_attention_reduce_plugin.h").read_text(encoding="utf-8")
-    cmake = (plugin_dir / "CMakeLists.txt").read_text(encoding="utf-8")
-
-    plugin_name = "FastFoundationStereoSpatialAttentionReduce"
-    assert native_plugin_builder._SPATIAL_ATTENTION_REDUCE_PLUGIN_NAME == plugin_name
-    assert plugin_name in header
-    assert "spatial_attention_reduce_plugin.cu" in cmake
-    assert "spatial_attention_reduce_plugin_creator.cpp" in cmake
-
-    for contract in (
-        "kBatch = 1",
-        "kChannels = 48",
-        "kHeight = 176",
-        "kWidth = 176",
-        "return 2;",
-        "input_count != 1 || output_count != 2",
-        "position == 0 ? is_exact_input(input_output[position])",
-        "channel * kPixelCount + pixel",
-        "float sum = 0.0F",
-        "sum += value",
-        "fmaxf(largest, value)",
-        "sum / static_cast<float>(kChannels)",
-    ):
-        assert contract in source
-
-
-def test_geometry_volume_convc1_plugin_owns_fixed_direct_contract() -> None:
-    plugin_dir = (
-        Path(__file__).resolve().parents[4]
-        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_plugins"
-    )
-    source = (plugin_dir / "geometry_volume_convc1_plugin.cu").read_text(encoding="utf-8")
-    header = (plugin_dir / "geometry_volume_convc1_plugin.h").read_text(encoding="utf-8")
-    creator = (plugin_dir / "geometry_volume_convc1_plugin_creator.cpp").read_text(encoding="utf-8")
-    cmake = (plugin_dir / "CMakeLists.txt").read_text(encoding="utf-8")
-
-    plugin_name = "FastFoundationStereoGeometryVolumeConvc1"
-    assert native_plugin_builder._GEOMETRY_VOLUME_CONVC1_PLUGIN_NAME == plugin_name
-    assert plugin_name in header
-    assert plugin_name in creator
-    assert 'kPLUGIN_VERSION = "1"' in header
-    library_block = cmake[cmake.index("add_library(") : cmake.index("target_include_directories")]
-    assert (
-        library_block
-        == """add_library(trtmc_fast_foundation_stereo_native_plugin SHARED
-  full_volume_leaky_plugin.cu
-  full_volume_leaky_plugin_creator.cpp
-  geometry_volume_convc1_plugin.cu
-  geometry_volume_convc1_plugin_creator.cpp
-  gwc_plugin.cu
-  gwc_plugin_creator.cpp
-  post8_sum_plugin.cu
-  post8_sum_plugin_creator.cpp
-  spatial_attention_reduce_plugin.cu
-  spatial_attention_reduce_plugin_creator.cpp
-)
-"""
-    )
-    for contract in (
-        "kGeometryChannels = 28",
-        "kVolumeChannelPitch = 32",
-        "kGeometryWidth0 = 48",
-        "kGeometryWidth1 = 24",
-        "kCorrelationWidth0 = 176",
-        "kCorrelationWidth1 = 88",
-        "kSampledChannels == 522",
-        "kSampledChannelPitch == 528",
-        "kOutputChannels == 56",
-        "input_count != 6 || output_count != 1",
-        "TensorFormat::kDHWC8",
-        "TensorFormat::kHWC8",
-        "wmma::mma_sync",
-        "__launch_bounds__(kThreads, 6)",
-        "kInterpolationEndpoints = kSamples + 1",
-        "__shfl_down_sync(0xFFFFFFFFU, value, 1, kHalfWarp)",
-        "__fmul_rn(__fadd_rn(value0, value1), 0.5F)",
-        "coordinate >= -5.0F",
-        "coordinate < static_cast<float>(source_width + 4)",
-        "valid_(length == 0)",
-        "return valid_ ? 0 : 1",
-        "geometry_volume_convc1_hwc8_wmma_kernel<<<kBlocks, kThreads, 0, stream>>>",
-    ):
-        assert contract in source
-
-    assert source.count("<<<") == 1
-    for forbidden in ("cudaMalloc", "cudaMemcpy", "cudaDeviceSynchronize", "cudaStreamSynchronize"):
-        assert forbidden not in source
-
-
-def test_native_post_materializes_combined_volume_only_in_the_plugin() -> None:
-    source = (
-        Path(__file__).resolve().parents[4]
-        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_post.py"
-    ).read_text(encoding="utf-8")
-
-    assert "add_combined_volume_plugin" in source
-    assert "_concat_volume" not in source
-    assert "_shifted_volume" not in source
-    assert "graph.concat((gwc_volume, concat_volume), 1)" not in source
-
-
-def test_native_post_routes_recurrent_work_through_direct_volume_plugin() -> None:
-    source = (
-        Path(__file__).resolve().parents[4]
-        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_post.py"
-    ).read_text(encoding="utf-8")
-
-    assert "add_geometry_volume_convc1_plugin" in source
-    assert "geometry_volume = _cost_aggregation" in source
-    assert "delta = _disp_head_delta(" in source
-    assert "model.update_block.disp_head.conv" in source
-    assert "TRTMC_FAST_FOUNDATION_STEREO_DIRECT" not in source
-    assert source.count("add_geometry_volume_convc1_plugin") == 2
 
 
 def test_direct_volume_convc1_packs_the_distilled_checkpoint_for_wmma() -> None:

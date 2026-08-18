@@ -220,6 +220,10 @@ class TensorRTModelConnectConan(ConanFile):
             / "scripts"
         )
         _stage_benchmark_catalog(self, self.source_folder, package_module)
+        runtime_models = Path(self.source_folder) / "src/runtime/models"
+        for source in sorted(runtime_models.glob("*/native_plugins")):
+            destination = package_module / "families" / source.parent.name / "native_plugins"
+            copy(self, "*", src=str(source), dst=str(destination))
         copy(self, "trtmc", src=self.build_folder, dst=str(package_bin), keep_path=False)
         copy(self, "trtmc", src=self.build_folder, dst=str(wheel_data_scripts), keep_path=False)
         copy(

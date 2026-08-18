@@ -12,7 +12,6 @@ from that module tree; only the fixed Fourier coordinates are generated here.
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 import numpy as np
@@ -29,8 +28,6 @@ FEATURE_OUTPUT_NAMES = (
     "stem_2x",
 )
 
-_DECODER_FP16_PRECONCAT_88_ENV = "TRTMC_FAST_FOUNDATION_STEREO_DECODER_FP16_PRECONCAT_88"
-_DECODER_FP16_PRECONCAT_176_ENV = "TRTMC_FAST_FOUNDATION_STEREO_DECODER_FP16_PRECONCAT_176"
 _DECODER_SCOPES = ("deconv32_16", "deconv16_8", "deconv8_4")
 _FEATURE_INTERNAL_BATCH = 2
 _DECODER_FP16_PRECONCAT_88_SCOPE = "deconv16_8"
@@ -176,39 +173,6 @@ def _layer_norm_2d(graph: NativeGraph, tensor, module):
 def _instance_norm_2d(graph: NativeGraph, tensor, module, *, fp16: bool):
     del fp16
     return graph.instance_norm(tensor, module)
-
-
-def _use_decoder_fp16_preconcat(
-    *,
-    decoder_scope: str,
-    target_scope: str,
-    environment: str,
-) -> bool:
-    """Gate an FP16 pre-concat candidate by explicit decoder identity."""
-
-    if decoder_scope not in _DECODER_SCOPES:
-        raise RuntimeError(f"decoder scope must be one of {_DECODER_SCOPES}, got {decoder_scope!r}")
-    return decoder_scope == target_scope and os.environ.get(environment, "1") == "1"
-
-
-def _use_decoder_fp16_preconcat_88(*, decoder_scope: str) -> bool:
-    """Gate the 88x88 concat candidate by explicit decoder identity."""
-
-    return _use_decoder_fp16_preconcat(
-        decoder_scope=decoder_scope,
-        target_scope=_DECODER_FP16_PRECONCAT_88_SCOPE,
-        environment=_DECODER_FP16_PRECONCAT_88_ENV,
-    )
-
-
-def _use_decoder_fp16_preconcat_176(*, decoder_scope: str) -> bool:
-    """Gate the 176x176 concat candidate by explicit decoder identity."""
-
-    return _use_decoder_fp16_preconcat(
-        decoder_scope=decoder_scope,
-        target_scope=_DECODER_FP16_PRECONCAT_176_SCOPE,
-        environment=_DECODER_FP16_PRECONCAT_176_ENV,
-    )
 
 
 def _validate_decoder_fp16_preconcat_skip(
@@ -604,12 +568,12 @@ def _decoder_block(
     decoder_scope: str,
     fp16: bool,
 ):
-    use_fp16_preconcat_88 = _use_decoder_fp16_preconcat_88(decoder_scope=decoder_scope)
-    use_fp16_preconcat_176 = _use_decoder_fp16_preconcat_176(decoder_scope=decoder_scope)
+    if decoder_scope not in _DECODER_SCOPES:
+        raise RuntimeError(f"decoder scope must be one of {_DECODER_SCOPES}, got {decoder_scope!r}")
     internal_batch = None
-    if use_fp16_preconcat_88:
+    if decoder_scope == _DECODER_FP16_PRECONCAT_88_SCOPE:
         internal_batch = _validate_decoder_fp16_preconcat_88_skip(graph, skip, fp16=fp16)
-    elif use_fp16_preconcat_176:
+    elif decoder_scope == _DECODER_FP16_PRECONCAT_176_SCOPE:
         internal_batch = _validate_decoder_fp16_preconcat_176_skip(graph, skip, fp16=fp16)
 
     tensor = _deconv2d(graph, tensor, block.conv1.conv, fp16=fp16)
@@ -620,10 +584,8 @@ def _decoder_block(
         "leaky_relu",
         alpha=float(getattr(block.conv1.relu, "negative_slope", 0.01)),
     )
-    if use_fp16_preconcat_88 or use_fp16_preconcat_176:
-        if internal_batch is None:
-            raise AssertionError("enabled decoder pre-concat must validate its internal batch")
-        if use_fp16_preconcat_88:
+    if internal_batch is not None:
+        if decoder_scope == _DECODER_FP16_PRECONCAT_88_SCOPE:
             _validate_decoder_fp16_preconcat_88_branch(
                 graph,
                 tensor,

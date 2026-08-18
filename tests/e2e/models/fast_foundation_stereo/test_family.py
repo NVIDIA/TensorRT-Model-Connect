@@ -358,45 +358,6 @@ def test_native_basic_conv_preserves_distilled_boolean_activation_semantics() ->
     )
 
 
-@pytest.mark.parametrize(
-    ("helper_name", "variable"),
-    (
-        (
-            "_full_volume_conv_bn_folding_enabled",
-            "TRTMC_FAST_FOUNDATION_STEREO_FOLD_FULL_VOLUME_BN",
-        ),
-        (
-            "_post16_to_8_conv_bn_folding_enabled",
-            "TRTMC_FAST_FOUNDATION_STEREO_FOLD_POST16_TO_8_BN",
-        ),
-        (
-            "_feature_att_8_conv_bn_folding_enabled",
-            "TRTMC_FAST_FOUNDATION_STEREO_FOLD_FEATURE_ATT_8_BN",
-        ),
-        (
-            "_remaining_safe_conv_bn_folding_enabled",
-            "TRTMC_FAST_FOUNDATION_STEREO_FOLD_REMAINING_SAFE_BN",
-        ),
-    ),
-)
-def test_conv_bn_folding_is_default_on_with_explicit_fallback(
-    monkeypatch,
-    helper_name: str,
-    variable: str,
-) -> None:
-    from tensorrt_model_connect.families.fast_foundation_stereo import native_post
-
-    enabled = getattr(native_post, helper_name)
-    monkeypatch.delenv(variable, raising=False)
-    assert enabled()
-
-    monkeypatch.setenv(variable, "1")
-    assert enabled()
-
-    monkeypatch.setenv(variable, "0")
-    assert not enabled()
-
-
 @pytest.mark.parametrize("work_dtype", [np.float16, np.float32])
 def test_conv_bn_folding_quantizes_first_without_mutating_source(work_dtype) -> None:
     from tensorrt_model_connect.families.fast_foundation_stereo.native_graph import NativeGraph
@@ -729,52 +690,6 @@ def test_feature_att_8_folding_rejects_non_forward_helper() -> None:
         )
 
 
-def test_post_forward_helper_folds_basic_conv_and_resnet_only_after_skip_add() -> None:
-    from tensorrt_model_connect.families.fast_foundation_stereo.native_post import (
-        _post_forward_helper,
-    )
-
-    BasicConv = type("BasicConv", (), {})
-    ResnetBasicBlock3D = type("ResnetBasicBlock3D", (), {})
-    basic = BasicConv()
-    resnet = ResnetBasicBlock3D()
-    calls = []
-
-    class Graph:
-        @staticmethod
-        def add(lhs, rhs):
-            return "skip-add", lhs, rhs
-
-        @staticmethod
-        def basic_conv(tensor, module, *, fold_batch_norm=False):
-            calls.append(("basic_conv", tensor, module, fold_batch_norm))
-            return "basic-output"
-
-        @staticmethod
-        def resnet(tensor, module, *, fold_batch_norm=False):
-            calls.append(("resnet", tensor, module, fold_batch_norm))
-            return "resnet-output"
-
-        @staticmethod
-        def module(*_args):
-            pytest.fail("folded post helper must not use generic module routing")
-
-    output = _post_forward_helper(
-        Graph(),
-        "skip",
-        "lower",
-        "feature",
-        SimpleNamespace(upsample=(), op="sum", out=(basic, resnet)),
-        fold_batch_norm=True,
-    )
-
-    assert output == "resnet-output"
-    assert calls == [
-        ("basic_conv", ("skip-add", "lower", "skip"), basic, True),
-        ("resnet", "basic-output", resnet, True),
-    ]
-
-
 def test_folded_conv3d_norm_act_reduced_keeps_both_relu_boundaries() -> None:
     from tensorrt_model_connect.families.fast_foundation_stereo.native_graph import NativeGraph
 
@@ -937,7 +852,7 @@ def test_post16_to_8_folds_exact_four_bn_paths_without_moving_relu_boundaries() 
             op="sum",
             out=(out_conv, feature_attention, out_reduced),
         ),
-        fold_post16_to_8_batch_norm=True,
+        stage="post16_to_8",
     )
 
     assert output == "reduced-output"
@@ -1143,7 +1058,7 @@ def test_remaining_safe_folding_covers_exact_14_pairs_and_preserves_checkpoint()
         "lower",
         "feature",
         post,
-        fold_remaining_safe_batch_norm=True,
+        stage="post32_to_16",
     )
     post_events = events[post_start:]
     context_outputs = _folded_remaining_safe_context(graph, "feature04", context)
@@ -1227,46 +1142,21 @@ def test_remaining_safe_folding_rejects_all_audited_topology_drift() -> None:
             "lower",
             "feature",
             post,
-            fold_remaining_safe_batch_norm=True,
+            stage="post32_to_16",
         )
 
 
-def test_cost_aggregation_limits_folding_to_conv1_up_and_post8(monkeypatch) -> None:
+def test_cost_aggregation_uses_fixed_default_winner_routes(monkeypatch) -> None:
     from tensorrt_model_connect.families.fast_foundation_stereo import native_post
 
     FeatureAtt = type("FeatureAtt", (), {})
     post_calls = []
     remaining_calls = []
+    full_volume_calls = []
 
-    def post_forward_helper(
-        _graph,
-        skip,
-        lower,
-        feature,
-        module,
-        *,
-        fold_batch_norm=False,
-        fold_post16_to_8_batch_norm=False,
-        fold_remaining_safe_batch_norm=False,
-        post8_sum_plugin=False,
-        post8_sum_tile_positions=32,
-        full_volume_leaky_plugin=False,
-    ):
-        post_calls.append(
-            (
-                module,
-                fold_batch_norm,
-                fold_post16_to_8_batch_norm,
-                fold_remaining_safe_batch_norm,
-                post8_sum_plugin,
-                post8_sum_tile_positions,
-                full_volume_leaky_plugin,
-                skip,
-                lower,
-                feature,
-            )
-        )
-        return f"post-{module}"
+    def post_forward_helper(_graph, skip, lower, feature, module, *, stage):
+        post_calls.append((module, stage, skip, lower, feature))
+        return f"post-{stage}"
 
     monkeypatch.setattr(native_post, "_post_forward_helper", post_forward_helper)
     monkeypatch.setattr(
@@ -1284,11 +1174,15 @@ def test_cost_aggregation_limits_folding_to_conv1_up_and_post8(monkeypatch) -> N
             remaining_calls.append(("conv3", tensor, conv3)) or "folded-conv3"
         ),
     )
+    monkeypatch.setattr(
+        native_post,
+        "_folded_basic_conv_full_volume_leaky",
+        lambda _graph, tensor, module, *, path, name: (
+            full_volume_calls.append((tensor, module, path, name)) or "full-volume"
+        ),
+    )
 
     class Graph:
-        def __init__(self) -> None:
-            self.basic_calls = []
-
         @staticmethod
         def module(tensor, module):
             return f"module-{module}({tensor})"
@@ -1297,20 +1191,11 @@ def test_cost_aggregation_limits_folding_to_conv1_up_and_post8(monkeypatch) -> N
         def feature_attention(volume, feature, _module):
             return f"attention({volume},{feature})"
 
-        @staticmethod
-        def sequential(tensor, module):
-            return f"sequential-{module}({tensor})"
-
-        def basic_conv(self, tensor, module, *, fold_batch_norm=False):
-            self.basic_calls.append((module, fold_batch_norm, tensor))
-            return f"basic-{module}({tensor})"
-
-    graph = Graph()
     module = SimpleNamespace(
         conv1="conv1",
         feature_att_8=FeatureAtt(),
         conv2="conv2",
-        feature_att_16=FeatureAtt(),
+        feature_att_16="feature_att_16",
         conv3="conv3",
         feature_att_32=FeatureAtt(),
         post32_to_16="post32",
@@ -1320,85 +1205,32 @@ def test_cost_aggregation_limits_folding_to_conv1_up_and_post8(monkeypatch) -> N
     )
 
     native_post._cost_aggregation(
-        graph,
+        Graph(),
         "volume",
         ("feature4", "feature8", "feature16", "feature32"),
         module,
-        fold_full_volume_batch_norm=True,
-    )
-
-    assert [call[:2] for call in graph.basic_calls] == [("conv1_up", True)]
-    assert [
-        (module, full, post16, remaining) for module, full, post16, remaining, *_rest in post_calls
-    ] == [
-        ("post32", False, False, False),
-        ("post16", False, False, False),
-        ("post8", True, False, False),
-    ]
-
-    graph.basic_calls.clear()
-    post_calls.clear()
-    native_post._cost_aggregation(
-        graph,
-        "volume",
-        ("feature4", "feature8", "feature16", "feature32"),
-        module,
-        fold_post16_to_8_batch_norm=True,
-    )
-
-    assert [call[:2] for call in graph.basic_calls] == [("conv1_up", False)]
-    assert [
-        (module, full, post16, remaining) for module, full, post16, remaining, *_rest in post_calls
-    ] == [
-        ("post32", False, False, False),
-        ("post16", False, True, False),
-        ("post8", False, False, False),
-    ]
-
-    graph.basic_calls.clear()
-    post_calls.clear()
-    native_post._cost_aggregation(
-        graph,
-        "volume",
-        ("feature4", "feature8", "feature16", "feature32"),
-        module,
-        post8_sum_plugin=True,
-        post8_sum_tile_positions=128,
-    )
-
-    assert [
-        (module, plugin, tile)
-        for module, _full, _post16, _remaining, plugin, tile, *_rest in post_calls
-    ] == [
-        ("post32", False, 32),
-        ("post16", False, 32),
-        ("post8", True, 128),
-    ]
-
-    graph.basic_calls.clear()
-    post_calls.clear()
-    native_post._cost_aggregation(
-        graph,
-        "volume",
-        ("feature4", "feature8", "feature16", "feature32"),
-        module,
-        fold_remaining_safe_batch_norm=True,
     )
 
     assert remaining_calls == [
         (
             "feature_att_16",
             "module-conv2(attention(module-conv1(volume),feature8))",
-            module.feature_att_16,
+            "feature_att_16",
         ),
         ("conv3", "folded-feature-att-16", "conv3"),
     ]
-    assert [
-        (module, full, post16, remaining) for module, full, post16, remaining, *_rest in post_calls
-    ] == [
-        ("post32", False, False, True),
-        ("post16", False, False, False),
-        ("post8", False, False, False),
+    assert [(module, stage) for module, stage, *_rest in post_calls] == [
+        ("post32", "post32_to_16"),
+        ("post16", "post16_to_8"),
+        ("post8", "post8_to_4"),
+    ]
+    assert full_volume_calls == [
+        (
+            "post-post16_to_8",
+            "conv1_up",
+            "cost_agg.conv1_up",
+            "cost_agg_conv1_up_leaky",
+        )
     ]
 
 

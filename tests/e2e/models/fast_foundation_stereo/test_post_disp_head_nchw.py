@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,11 +10,6 @@ import pytest
 
 from tensorrt_model_connect.families.fast_foundation_stereo import native_post
 from tensorrt_model_connect.families.fast_foundation_stereo.native_graph import NativeGraph
-
-
-_ENV = "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_NCHW_POINTWISE"
-_FOLD_ENV = "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_FOLD_GAMMA"
-_TANH_ENV = "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_SECOND_GELU_TANH"
 
 
 class _Tensor:
@@ -82,64 +76,7 @@ def _disp_head():
     return module
 
 
-def test_disp_head_nchw_gate_defaults_on_and_requires_exact_one(monkeypatch) -> None:
-    monkeypatch.delenv(_ENV, raising=False)
-    assert native_post._disp_head_nchw_pointwise_enabled()
-    for value in ("0", "true"):
-        monkeypatch.setenv(_ENV, value)
-        assert not native_post._disp_head_nchw_pointwise_enabled()
-    monkeypatch.setenv(_ENV, "1")
-    assert native_post._disp_head_nchw_pointwise_enabled()
-
-
-def test_disp_head_gamma_fold_gate_defaults_on_and_requires_exact_one(monkeypatch) -> None:
-    monkeypatch.delenv(_FOLD_ENV, raising=False)
-    assert native_post._disp_head_fold_gamma_enabled()
-    for value in ("0", "true"):
-        monkeypatch.setenv(_FOLD_ENV, value)
-        assert not native_post._disp_head_fold_gamma_enabled()
-    monkeypatch.setenv(_FOLD_ENV, "1")
-    assert native_post._disp_head_fold_gamma_enabled()
-
-
-def test_disp_head_second_gelu_tanh_gate_defaults_on_and_requires_exact_one(monkeypatch) -> None:
-    monkeypatch.delenv(_TANH_ENV, raising=False)
-    assert native_post._disp_head_second_gelu_tanh_enabled()
-    for value in ("0", "true"):
-        monkeypatch.setenv(_TANH_ENV, value)
-        assert not native_post._disp_head_second_gelu_tanh_enabled()
-    monkeypatch.setenv(_TANH_ENV, "1")
-    assert native_post._disp_head_second_gelu_tanh_enabled()
-
-
-def test_disp_head_gamma_fold_requires_nchw_gate_before_graph_layers(monkeypatch) -> None:
-    monkeypatch.setenv(_FOLD_ENV, "1")
-    monkeypatch.setenv(_ENV, "0")
-    with pytest.raises(RuntimeError, match="requires.*DISP_HEAD_NCHW_POINTWISE=1"):
-        native_post.add_post_graph(
-            object(),
-            object(),
-            {},
-            max_disparity=192,
-            valid_iters=8,
-        )
-
-
-def test_disp_head_second_gelu_tanh_requires_nchw_gate_before_graph_layers(monkeypatch) -> None:
-    monkeypatch.setenv(_FOLD_ENV, "0")
-    monkeypatch.setenv(_TANH_ENV, "1")
-    monkeypatch.setenv(_ENV, "0")
-    with pytest.raises(RuntimeError, match="requires.*DISP_HEAD_NCHW_POINTWISE=1"):
-        native_post.add_post_graph(
-            object(),
-            object(),
-            {},
-            max_disparity=192,
-            valid_iters=8,
-        )
-
-
-def test_disp_head_nchw_routes_only_two_scoped_encoders() -> None:
+def test_disp_head_nchw_routes_fixed_winner_through_two_scoped_encoders() -> None:
     module = _disp_head()
 
     class _Graph:
@@ -147,10 +84,6 @@ def test_disp_head_nchw_routes_only_two_scoped_encoders() -> None:
             self.trt = SimpleNamespace(float16="fp16", float32="fp32")
             self.work_trt_dtype = "fp16"
             self.events = []
-
-        def sequential(self, tensor, target):
-            self.events.append(("sequential", tensor, target))
-            return "legacy"
 
         def module(self, tensor, layer):
             self.events.append(("module", layer.__class__.__name__))
@@ -180,34 +113,13 @@ def test_disp_head_nchw_routes_only_two_scoped_encoders() -> None:
 
     graph = _Graph()
     hidden = _Tensor((1, 60, 176, 176), "fp16")
-    assert native_post._disp_head_delta(graph, hidden, module, nchw_pointwise=False) == "legacy"
-    assert graph.events == [("sequential", hidden, module)]
-
-    graph.events.clear()
-    output = native_post._disp_head_delta(graph, hidden, module, nchw_pointwise=True)
+    output = native_post._disp_head_delta(graph, hidden, module)
     assert output.shape == (1, 1, 176, 176)
     assert graph.events == [
         ("module", "Conv2d"),
         ("module", "ReLU"),
-        ("edge", 212, True, False, "none"),
-        ("edge", 244, True, False, "none"),
-        ("module", "Conv2d"),
-    ]
-
-    graph.events.clear()
-    output = native_post._disp_head_delta(
-        graph,
-        hidden,
-        module,
-        nchw_pointwise=True,
-        second_gelu_tanh=True,
-    )
-    assert output.shape == (1, 1, 176, 176)
-    assert graph.events == [
-        ("module", "Conv2d"),
-        ("module", "ReLU"),
-        ("edge", 212, True, False, "none"),
-        ("edge", 244, True, False, "tanh"),
+        ("edge", 212, True, True, "none"),
+        ("edge", 244, True, True, "tanh"),
         ("module", "Conv2d"),
     ]
 
@@ -237,20 +149,15 @@ def test_disp_head_gamma_fold_routes_exactly_sixteen_static_block_calls() -> Non
         ):
             assert nchw_pointwise
             assert fold_gamma
-            assert gelu_approximate == "none"
+            expected_gelu = "tanh" if block.pwconv1.out_features == 244 else "none"
+            assert gelu_approximate == expected_gelu
             self.folded_widths.append(block.pwconv1.out_features)
             return _Tensor((1, 36, 176, 176), "fp32")
 
     graph = _Graph()
     hidden = _Tensor((1, 60, 176, 176), "fp16")
     for _ in range(8):
-        native_post._disp_head_delta(
-            graph,
-            hidden,
-            module,
-            nchw_pointwise=True,
-            fold_gamma=True,
-        )
+        native_post._disp_head_delta(graph, hidden, module)
     assert graph.folded_widths == [212, 244] * 8
 
 
@@ -263,7 +170,6 @@ def test_disp_head_nchw_rejects_topology_drift_before_layers() -> None:
             graph,
             _Tensor((1, 60, 176, 176), "fp16"),
             module,
-            nchw_pointwise=True,
         )
     assert graph.events == []
 
@@ -490,14 +396,3 @@ def test_edge_next_encoder_gamma_fold_rejects_invalid_scope_before_layers(
             nchw_pointwise=nchw_pointwise,
             fold_gamma=True,
         )
-
-
-def test_disp_head_nchw_is_native_only() -> None:
-    family = Path(native_post.__file__).resolve().parent
-    source = (
-        (family / "native_post.py").read_text(encoding="utf-8")
-        + (family / "native_graph.py").read_text(encoding="utf-8")
-    ).lower()
-    assert "disp_head_nchw_pointwise" in source
-    assert "disp_head_fold_gamma" in source
-    assert "onnx" not in source

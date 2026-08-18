@@ -5,62 +5,11 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import numpy as np
 
 from .native_graph import NativeGraph
-
-
-def _full_volume_conv_bn_folding_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_FOLD_FULL_VOLUME_BN", "1") == "1"
-
-
-def _post16_to_8_conv_bn_folding_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_FOLD_POST16_TO_8_BN", "1") == "1"
-
-
-def _feature_att_8_conv_bn_folding_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_FOLD_FEATURE_ATT_8_BN", "1") == "1"
-
-
-def _remaining_safe_conv_bn_folding_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_FOLD_REMAINING_SAFE_BN", "1") == "1"
-
-
-def _post8_sum_plugin_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_POST8_SUM_PLUGIN", "1") == "1"
-
-
-def _full_volume_leaky_all3_plugin_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_FULL_VOLUME_LEAKY_ALL3_PLUGIN", "1") == "1"
-
-
-def _disp_head_nchw_pointwise_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_NCHW_POINTWISE", "1") == "1"
-
-
-def _disp_head_fold_gamma_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_FOLD_GAMMA", "1") == "1"
-
-
-def _disp_head_second_gelu_tanh_enabled() -> bool:
-    return os.environ.get("TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_SECOND_GELU_TANH", "1") == "1"
-
-
-def _post8_sum_tile_positions() -> int:
-    variable = "TRTMC_FAST_FOUNDATION_STEREO_POST8_SUM_TILE_POSITIONS"
-    raw_value = os.environ.get(variable, "32")
-    try:
-        value = int(raw_value)
-    except ValueError as error:
-        raise RuntimeError(
-            f"{variable} must be one of (32, 64, 128, 256), got {raw_value!r}"
-        ) from error
-    if value not in (32, 64, 128, 256):
-        raise RuntimeError(f"{variable} must be one of (32, 64, 128, 256), got {raw_value!r}")
-    return value
 
 
 _FULL_VOLUME_LEAKY_SHAPE = (1, 28, 48, 176, 176)
@@ -542,8 +491,6 @@ def _post8_sum_plugin_output(
     graph: NativeGraph,
     linear: Any,
     skip: Any,
-    *,
-    tile_positions: int,
 ) -> Any:
     expected_shape = (1, 28, 48, 176, 176)
     linear_shape = tuple(int(dimension) for dimension in linear.shape)
@@ -566,7 +513,6 @@ def _post8_sum_plugin_output(
         linear,
         skip,
         trt_module=graph.trt,
-        tile_positions=tile_positions,
     )
 
 
@@ -577,18 +523,15 @@ def _post_forward_helper(
     feature: Any,
     module: Any,
     *,
-    fold_batch_norm: bool = False,
-    fold_post16_to_8_batch_norm: bool = False,
-    fold_remaining_safe_batch_norm: bool = False,
-    post8_sum_plugin: bool = False,
-    post8_sum_tile_positions: int = 32,
-    full_volume_leaky_plugin: bool = False,
+    stage: str,
 ) -> Any:
+    if stage not in {"post32_to_16", "post16_to_8", "post8_to_4"}:
+        raise ValueError(f"unknown post helper stage {stage!r}")
     upsample = tuple(module.upsample)
     out = tuple(module.out)
-    if post8_sum_plugin:
+    if stage == "post8_to_4":
         _require_post8_sum_plugin_topology(module, upsample, out)
-    if fold_post16_to_8_batch_norm:
+    if stage == "post16_to_8":
         expected = (
             ("upsample.0", upsample, 0, "BasicConv"),
             ("out.0", out, 0, "BasicConv"),
@@ -601,7 +544,7 @@ def _post_forward_helper(
                     "post16_to_8 Conv-BN folding requires the distilled topology; "
                     f"{path} is {actual!r}, expected {class_name!r}"
                 )
-    if fold_remaining_safe_batch_norm:
+    if stage == "post32_to_16":
         module_name = module.__class__.__name__
         upsample_topology = tuple(child.__class__.__name__ for child in upsample)
         out_topology = tuple(child.__class__.__name__ for child in out)
@@ -640,17 +583,12 @@ def _post_forward_helper(
     for index, child in enumerate(upsample):
         if child.__class__.__name__ == "CostVolumeDisparityAttention":
             output = _cost_attention(graph, output, child)
-        elif fold_post16_to_8_batch_norm and index == 0 and child.__class__.__name__ == "BasicConv":
+        elif stage == "post16_to_8" and index == 0 and child.__class__.__name__ == "BasicConv":
             output = graph.basic_conv(output, child, fold_batch_norm=True)
         else:
             output = graph.module(output, child)
-    if post8_sum_plugin:
-        output = _post8_sum_plugin_output(
-            graph,
-            output,
-            skip,
-            tile_positions=post8_sum_tile_positions,
-        )
+    if stage == "post8_to_4":
+        output = _post8_sum_plugin_output(graph, output, skip)
     elif module.op == "sum":
         output = graph.add(output, skip)
     else:
@@ -659,7 +597,7 @@ def _post_forward_helper(
         child_name = child.__class__.__name__
         if child_name == "FeatureAtt":
             output = graph.feature_attention(output, feature, child)
-        elif full_volume_leaky_plugin and index == 0 and child_name == "BasicConv":
+        elif stage == "post8_to_4" and index == 0 and child_name == "BasicConv":
             output = _folded_basic_conv_full_volume_leaky(
                 graph,
                 output,
@@ -667,17 +605,17 @@ def _post_forward_helper(
                 path="cost_agg.post8_to_4.out.0",
                 name="cost_agg_post8_to_4_out_0_leaky",
             )
-        elif (fold_batch_norm or (fold_post16_to_8_batch_norm and index == 0)) and (
-            child_name == "BasicConv"
-        ):
+        elif stage == "post8_to_4" and child_name == "BasicConv":
             output = graph.basic_conv(output, child, fold_batch_norm=True)
-        elif fold_batch_norm and child_name == "ResnetBasicBlock3D":
+        elif stage == "post8_to_4" and child_name == "ResnetBasicBlock3D":
             output = graph.resnet(output, child, fold_batch_norm=True)
-        elif fold_post16_to_8_batch_norm and index == 2 and child_name == "Conv3dNormActReduced":
-            output = graph.conv3d_reduced(output, child, fold_batch_norm=True)
-        elif fold_remaining_safe_batch_norm and index in (1, 3) and child_name == "BasicConv":
+        elif stage == "post16_to_8" and index == 0 and child_name == "BasicConv":
             output = graph.basic_conv(output, child, fold_batch_norm=True)
-        elif fold_remaining_safe_batch_norm and index == 2 and child_name == "Conv3dNormActReduced":
+        elif stage == "post16_to_8" and index == 2 and child_name == "Conv3dNormActReduced":
+            output = graph.conv3d_reduced(output, child, fold_batch_norm=True)
+        elif stage == "post32_to_16" and index in (1, 3) and child_name == "BasicConv":
+            output = graph.basic_conv(output, child, fold_batch_norm=True)
+        elif stage == "post32_to_16" and index == 2 and child_name == "Conv3dNormActReduced":
             output = graph.conv3d_reduced(output, child, fold_batch_norm=True)
         else:
             output = graph.module(output, child)
@@ -689,49 +627,29 @@ def _cost_aggregation(
     volume: Any,
     features: tuple[Any, Any, Any, Any],
     module: Any,
-    *,
-    fold_full_volume_batch_norm: bool = False,
-    fold_post16_to_8_batch_norm: bool = False,
-    fold_feature_att_8_batch_norm: bool = False,
-    fold_remaining_safe_batch_norm: bool = False,
-    post8_sum_plugin: bool = False,
-    post8_sum_tile_positions: int = 32,
-    full_volume_leaky_all3_plugin: bool = False,
 ) -> Any:
     # The serialized distilled checkpoint replaces several constructor modules
     # with ForwardHelper/PostForwardHelper instances.  Follow the live module
     # objects rather than reconstructing the unpruned source topology.
     conv1 = graph.module(volume, module.conv1)
     if module.feature_att_8.__class__.__name__ == "ForwardHelper":
-        if fold_feature_att_8_batch_norm:
-            conv1 = _folded_feature_att_8_forward_helper(
-                graph,
-                conv1,
-                features[1],
-                module.feature_att_8,
-            )
-        else:
-            conv1 = graph.forward_helper(conv1, features[1], module.feature_att_8)
+        conv1 = _folded_feature_att_8_forward_helper(
+            graph,
+            conv1,
+            features[1],
+            module.feature_att_8,
+        )
     else:
         conv1 = graph.feature_attention(conv1, features[1], module.feature_att_8)
 
     conv2 = graph.module(conv1, module.conv2)
-    if fold_remaining_safe_batch_norm:
-        conv2 = _folded_remaining_safe_feature_att_16(
-            graph,
-            conv2,
-            module.feature_att_16,
-        )
-    elif module.feature_att_16.__class__.__name__ == "ForwardHelper":
-        conv2 = graph.forward_helper(conv2, features[2], module.feature_att_16)
-    else:
-        conv2 = graph.feature_attention(conv2, features[2], module.feature_att_16)
-
-    conv3 = (
-        _folded_remaining_safe_conv3(graph, conv2, module.conv3)
-        if fold_remaining_safe_batch_norm
-        else graph.sequential(conv2, module.conv3)
+    conv2 = _folded_remaining_safe_feature_att_16(
+        graph,
+        conv2,
+        module.feature_att_16,
     )
+
+    conv3 = _folded_remaining_safe_conv3(graph, conv2, module.conv3)
     conv3 = graph.feature_attention(conv3, features[3], module.feature_att_32)
 
     if module.post32_to_16 is None:
@@ -746,7 +664,7 @@ def _cost_aggregation(
             conv3,
             features[2],
             module.post32_to_16,
-            fold_remaining_safe_batch_norm=fold_remaining_safe_batch_norm,
+            stage="post32_to_16",
         )
 
     if module.post16_to_8 is None:
@@ -761,23 +679,15 @@ def _cost_aggregation(
             conv2,
             features[1],
             module.post16_to_8,
-            fold_post16_to_8_batch_norm=fold_post16_to_8_batch_norm,
+            stage="post16_to_8",
         )
 
-    output = (
-        _folded_basic_conv_full_volume_leaky(
-            graph,
-            conv1,
-            module.conv1_up,
-            path="cost_agg.conv1_up",
-            name="cost_agg_conv1_up_leaky",
-        )
-        if full_volume_leaky_all3_plugin
-        else graph.basic_conv(
-            conv1,
-            module.conv1_up,
-            fold_batch_norm=fold_full_volume_batch_norm,
-        )
+    output = _folded_basic_conv_full_volume_leaky(
+        graph,
+        conv1,
+        module.conv1_up,
+        path="cost_agg.conv1_up",
+        name="cost_agg_conv1_up_leaky",
     )
     if module.post8_to_4 is None:
         patch = graph.sequential(volume, module.conv_patch)
@@ -792,10 +702,7 @@ def _cost_aggregation(
             output,
             features[0],
             module.post8_to_4,
-            fold_batch_norm=fold_full_volume_batch_norm,
-            post8_sum_plugin=post8_sum_plugin,
-            post8_sum_tile_positions=post8_sum_tile_positions,
-            full_volume_leaky_plugin=full_volume_leaky_all3_plugin,
+            stage="post8_to_4",
         )
     return output
 
@@ -1182,18 +1089,7 @@ def _disp_head_delta(
     graph: NativeGraph,
     hidden: Any,
     module: Any,
-    *,
-    nchw_pointwise: bool,
-    fold_gamma: bool = False,
-    second_gelu_tanh: bool = False,
 ) -> Any:
-    if fold_gamma and not nchw_pointwise:
-        raise RuntimeError("DispHead gamma folding requires NCHW pointwise lowering")
-    if second_gelu_tanh and not nchw_pointwise:
-        raise RuntimeError("DispHead second GELU_TANH requires NCHW pointwise lowering")
-    if not nchw_pointwise:
-        return graph.sequential(hidden, module)
-
     layers = _disp_head_nchw_pointwise_layers(module)
     if graph.work_trt_dtype != graph.trt.float16:
         raise RuntimeError("DispHead NCHW pointwise requires an FP16 TensorRT graph")
@@ -1223,8 +1119,8 @@ def _disp_head_delta(
             output,
             block,
             nchw_pointwise=True,
-            fold_gamma=fold_gamma,
-            gelu_approximate="tanh" if second_gelu_tanh and block_index == 1 else "none",
+            fold_gamma=True,
+            gelu_approximate="tanh" if block_index == 1 else "none",
         )
         if tuple(int(dimension) for dimension in output.shape) != expected_block_shape:
             raise RuntimeError(
@@ -1341,33 +1237,7 @@ def add_post_graph(
     if valid_iters != 8:
         raise ValueError("Fast Foundation Stereo native graph is specialized for valid_iters=8")
     disparities = max_disparity // 4
-    fold_full_volume_batch_norm = _full_volume_conv_bn_folding_enabled()
-    fold_post16_to_8_batch_norm = _post16_to_8_conv_bn_folding_enabled()
-    fold_feature_att_8_batch_norm = _feature_att_8_conv_bn_folding_enabled()
-    fold_remaining_safe_batch_norm = _remaining_safe_conv_bn_folding_enabled()
-    post8_sum_plugin = _post8_sum_plugin_enabled()
-    post8_sum_tile_positions = _post8_sum_tile_positions() if post8_sum_plugin else 32
-    full_volume_leaky_all3_plugin = _full_volume_leaky_all3_plugin_enabled()
-    disp_head_nchw_pointwise = _disp_head_nchw_pointwise_enabled()
-    disp_head_fold_gamma = _disp_head_fold_gamma_enabled()
-    disp_head_second_gelu_tanh = _disp_head_second_gelu_tanh_enabled()
-    if disp_head_fold_gamma and not disp_head_nchw_pointwise:
-        raise RuntimeError(
-            "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_FOLD_GAMMA=1 requires "
-            "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_NCHW_POINTWISE=1"
-        )
-    if disp_head_second_gelu_tanh and not disp_head_nchw_pointwise:
-        raise RuntimeError(
-            "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_SECOND_GELU_TANH=1 requires "
-            "TRTMC_FAST_FOUNDATION_STEREO_DISP_HEAD_NCHW_POINTWISE=1"
-        )
-    if full_volume_leaky_all3_plugin:
-        if not fold_full_volume_batch_norm:
-            raise RuntimeError(
-                "TRTMC_FAST_FOUNDATION_STEREO_FULL_VOLUME_LEAKY_ALL3_PLUGIN=1 requires "
-                "TRTMC_FAST_FOUNDATION_STEREO_FOLD_FULL_VOLUME_BN=1"
-            )
-        _require_full_volume_leaky_all3_topology(model)
+    _require_full_volume_leaky_all3_topology(model)
     features = tuple(
         graph.cast(inputs[name], graph.work_trt_dtype)
         for name in (
@@ -1402,24 +1272,12 @@ def add_post_graph(
         trt_module=graph.trt,
     )
     combined_volume = graph.module(combined_volume, model.corr_stem)
-    if full_volume_leaky_all3_plugin:
-        combined_volume = _folded_corr_feature_att_with_full_volume_leaky(
-            graph,
-            combined_volume,
-            features[0],
-            model.corr_feature_att,
-        )
-    elif model.corr_feature_att.__class__.__name__ == "ForwardHelper":
-        combined_volume = graph.forward_helper(
-            combined_volume,
-            features[0],
-            model.corr_feature_att,
-            fold_batch_norm=fold_full_volume_batch_norm,
-        )
-    else:
-        combined_volume = graph.feature_attention(
-            combined_volume, features[0], model.corr_feature_att
-        )
+    combined_volume = _folded_corr_feature_att_with_full_volume_leaky(
+        graph,
+        combined_volume,
+        features[0],
+        model.corr_feature_att,
+    )
     # This 28-channel post-cost-aggregation tensor, not the 32-channel GWC
     # output above, is the direct recurrent plugin's DHWC8 volume input.
     geometry_volume = _cost_aggregation(
@@ -1427,13 +1285,6 @@ def add_post_graph(
         combined_volume,
         features,
         model.cost_agg,
-        fold_full_volume_batch_norm=fold_full_volume_batch_norm,
-        fold_post16_to_8_batch_norm=fold_post16_to_8_batch_norm,
-        fold_feature_att_8_batch_norm=fold_feature_att_8_batch_norm,
-        fold_remaining_safe_batch_norm=fold_remaining_safe_batch_norm,
-        post8_sum_plugin=post8_sum_plugin,
-        post8_sum_tile_positions=post8_sum_tile_positions,
-        full_volume_leaky_all3_plugin=full_volume_leaky_all3_plugin,
     )
 
     if model.classifier.__class__.__name__ == "ForwardHelper":
@@ -1442,11 +1293,7 @@ def add_post_graph(
         logits = graph.sequential(geometry_volume, model.classifier)
     disparity = _disparity_regression(graph, logits, disparities)
 
-    context = (
-        _folded_remaining_safe_context(graph, features[0], model.cnet.conv04)
-        if fold_remaining_safe_batch_norm
-        else [graph.basic_conv(features[0], layer) for layer in model.cnet.conv04]
-    )
+    context = _folded_remaining_safe_context(graph, features[0], model.cnet.conv04)
     hidden = graph.activation(context[0], "tanh")
     inp = graph.activation(context[1], "relu")
     inp = graph.mul(inp, _channel_attention(graph, inp, model.cam))
@@ -1486,14 +1333,7 @@ def add_post_graph(
             gru_input,
             model.update_block.gru04,
         )
-        delta = _disp_head_delta(
-            graph,
-            hidden,
-            model.update_block.disp_head.conv,
-            nchw_pointwise=disp_head_nchw_pointwise,
-            fold_gamma=disp_head_fold_gamma,
-            second_gelu_tanh=disp_head_second_gelu_tanh,
-        )
+        delta = _disp_head_delta(graph, hidden, model.update_block.disp_head.conv)
         disparity = graph.add(disparity, graph.cast(delta, graph.trt.float32))
         if iteration == valid_iters - 1:
             mask_feature = graph.sequential(hidden, model.update_block.mask)

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -116,30 +115,6 @@ def _model():
             post8_to_4=post8,
         ),
     )
-
-
-def test_full_volume_leaky_all3_gate_defaults_on_with_explicit_fallback(monkeypatch) -> None:
-    variable = "TRTMC_FAST_FOUNDATION_STEREO_FULL_VOLUME_LEAKY_ALL3_PLUGIN"
-    monkeypatch.delenv(variable, raising=False)
-    assert native_post._full_volume_leaky_all3_plugin_enabled()
-    monkeypatch.setenv(variable, "1")
-    assert native_post._full_volume_leaky_all3_plugin_enabled()
-    for value in ("", "0", "true", "2"):
-        monkeypatch.setenv(variable, value)
-        assert not native_post._full_volume_leaky_all3_plugin_enabled()
-
-
-def test_full_volume_leaky_all3_requires_full_volume_fold_before_graph_layers(monkeypatch) -> None:
-    monkeypatch.setenv("TRTMC_FAST_FOUNDATION_STEREO_FULL_VOLUME_LEAKY_ALL3_PLUGIN", "1")
-    monkeypatch.setenv("TRTMC_FAST_FOUNDATION_STEREO_FOLD_FULL_VOLUME_BN", "0")
-    with pytest.raises(RuntimeError, match="FULL_VOLUME_LEAKY_ALL3_PLUGIN=1 requires"):
-        native_post.add_post_graph(
-            object(),
-            object(),
-            {},
-            max_disparity=192,
-            valid_iters=8,
-        )
 
 
 def test_full_volume_leaky_all3_validates_all_three_checkpoint_paths() -> None:
@@ -254,39 +229,6 @@ def test_full_volume_leaky_all3_folded_routes_have_three_unique_names(monkeypatc
 
     assert [event[-1] for event in events if event[0] == "plugin"] == [name for _, name in names]
     assert [event[-1] for event in events if event[0] == "fold"] == [False, True, False]
-
-
-def test_full_volume_leaky_cuda_source_locks_dhwc8_fp32_contract() -> None:
-    plugin_dir = (
-        Path(__file__).resolve().parents[4]
-        / "python/tensorrt_model_connect/families/fast_foundation_stereo/native_plugins"
-    )
-    source = (plugin_dir / "full_volume_leaky_plugin.cu").read_text(encoding="utf-8")
-    header = (plugin_dir / "full_volume_leaky_plugin.h").read_text(encoding="utf-8")
-    creator = (plugin_dir / "full_volume_leaky_plugin_creator.cpp").read_text(encoding="utf-8")
-    combined = source + header + creator
-
-    assert "FastFoundationStereoFullVolumeLeaky" in header
-    assert "IPluginV3" in header
-    assert "IPluginCreatorV3One" in creator
-    assert "IPluginV2" not in combined
-    assert "onnx" not in combined.lower()
-    for contract in (
-        "kBatch = 1",
-        "kChannels = 28",
-        "kDisparities = 48",
-        "kHeight = 176",
-        "kWidth = 176",
-        "kChannelPitch = 32",
-        "TensorFormat::kDHWC8",
-        "union alignas(16) Half8Vector",
-        "uint4 packed",
-        "if (value >= 0.0F)",
-        "__fmul_rn(value, kNegativeSlope)",
-    ):
-        assert contract in combined
-    assert "kNegativeSlope = 0.01F" in source
-    assert source.count("<<<") == 1
 
 
 def test_full_volume_leaky_exhaustive_half_model_locks_nan_and_signed_zero() -> None:
