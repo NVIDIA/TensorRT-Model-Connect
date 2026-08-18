@@ -150,6 +150,14 @@ single_decoder_context(std::unique_ptr<TrtModule> decoder) {
     return decoders;
 }
 
+GemmaTextGenConfig normalize_eos_token_ids(GemmaTextGenConfig config) {
+    if (config.id_eos_ids.empty() && config.id_eos >= 0)
+        config.id_eos_ids.push_back(config.id_eos);
+    if (!config.id_eos_ids.empty())
+        config.id_eos = config.id_eos_ids.front();
+    return config;
+}
+
 std::string normalize_generation_mode(std::string mode) {
     std::transform(mode.begin(), mode.end(), mode.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -291,8 +299,8 @@ GemmaTextGenerationPipeline::GemmaTextGenerationPipeline(
     std::shared_ptr<void> distributed_owner)
     : distributed_owner_(std::move(distributed_owner)), decoders_(std::move(decoders)),
       prefill_(std::move(prefill)), linear_spec_lora_prefill_(std::move(linear_spec_lora_prefill)),
-      state_(std::move(state)), config_(std::move(config)), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      state_(std::move(state)), config_(normalize_eos_token_ids(std::move(config))),
+      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)), logits_output_name_(config_.logits_output_name) {
     if (decoders_.empty()) {
         throw std::runtime_error("GemmaTextGenerationPipeline: no decoder modules");
@@ -350,9 +358,7 @@ TextResult GemmaTextGenerationPipeline::generate(const std::string& prompt,
 
     auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-
-    auto sp = gemma_sampling_params_from_config(cfg, eos);
+    auto sp = gemma_sampling_params_from_config(cfg, config_.id_eos_ids);
     last_setup_ms_ = 0.0;
     auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
 
@@ -372,8 +378,7 @@ GemmaTextGenerationPipeline::GenerationResult
 GemmaTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
                                           const GenerateConfig& cfg) {
     int32_t max_new = cfg.max_new_tokens; // honour exact value (0 = no generation)
-    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    auto sp = gemma_sampling_params_from_config(cfg, eos);
+    auto sp = gemma_sampling_params_from_config(cfg, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp, cfg).token_ids};
 }
 
@@ -468,34 +473,11 @@ bool GemmaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
     return true;
 }
 
-void GemmaTextGenerationPipeline::prime_decoder_after_batched_prefill(
-    const std::vector<int32_t>& input_ids) {
-    if (input_ids.empty())
-        return;
-
-    TrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
-        return;
-
-    int32_t token_id = input_ids.back();
-    TensorMap inputs;
-    Tensor token_tensor;
-    token_tensor.data = &token_id;
-    token_tensor.shape = {1};
-    token_tensor.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = token_tensor;
-
-    state_->prepare_step(inputs);
-    decoder.forward_async(inputs);
-    decoder.sync();
-}
-
 void GemmaTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                               std::vector<float>& logits, bool gpu_sampling) {
     // Fast path: batched prefill engine writes K/V for the whole prompt in
     // one forward and returns last-token logits on host.
     if (!gpu_sampling && run_prefill_batched(input_ids, logits)) {
-        prime_decoder_after_batched_prefill(input_ids);
         state_->mark_prefill_complete();
         return;
     }
@@ -676,7 +658,7 @@ bool GemmaTextGenerationPipeline::append_tokens_until_eos(const std::vector<int3
                                                           const GemmaSamplingParams& params) const {
     for (int32_t token : tokens) {
         output.push_back(token);
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
+        if (gemma_is_eos_token(params, token))
             return true;
     }
     return false;
@@ -746,7 +728,7 @@ bool GemmaTextGenerationPipeline::append_linear_spec_tokens(
         const int32_t token = ar_tokens[static_cast<std::size_t>(i)];
         output.push_back(token);
         ++generated;
-        if (params.eos_token_id >= 0 && token == params.eos_token_id)
+        if (gemma_is_eos_token(params, token))
             return true;
     }
     return false;
@@ -876,7 +858,7 @@ GemmaTextGenerationPipeline::generate_linear_spec_from_ids(const std::vector<int
 
     std::vector<int32_t> output = input_ids;
     output.push_back(next_token);
-    if (params.eos_token_id >= 0 && next_token == params.eos_token_id) {
+    if (gemma_is_eos_token(params, next_token)) {
         return TimedGenResult{std::move(output),
                               std::chrono::duration<double, std::milli>(t1 - t0).count(), 0.0};
     }
@@ -956,6 +938,10 @@ int32_t GemmaTextGenerationPipeline::run_decode_loop(
                                   result.is_eos))
             break;
         if (result.is_eos)
+            break;
+        // The sampled token is already the final requested output. Do not
+        // execute a decoder step whose logits cannot be consumed.
+        if (step + 1 >= max_new_tokens)
             break;
         if (gpu_sampling)
             run_step_device(result.token_id);

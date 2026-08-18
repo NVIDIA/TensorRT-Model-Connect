@@ -524,6 +524,7 @@ class DecoderPlugin final : public IPipelinePlugin {
         tgc.vocab_size = ctx.config.vocab_size;
         tgc.id_bos = ctx.config.id_bos;
         tgc.id_eos = ctx.config.id_eos;
+        tgc.id_eos_ids = ctx.config.id_eos_ids;
         tgc.has_position_input = first_dec.module->has_input(io.position_id);
         tgc.token_id_name = io.token_id;
         tgc.logits_output_name = io.logits;
