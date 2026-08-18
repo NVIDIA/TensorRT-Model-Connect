@@ -23,8 +23,8 @@ constexpr int32_t kTilePositions = 32;
 static_assert(Plugin::kChannels == 28);
 static_assert(Plugin::kChannelPitch == 32);
 
-bool has_exact_dims(nvinfer1::Dims const& dims) noexcept {
-    return dims.nbDims == 5 && dims.d[0] == Plugin::kBatch && dims.d[1] == Plugin::kChannels &&
+bool has_exact_dims(nvinfer1::Dims const& dims, int32_t channels = Plugin::kChannels) noexcept {
+    return dims.nbDims == 5 && dims.d[0] == Plugin::kBatch && dims.d[1] == channels &&
            dims.d[2] == Plugin::kDisparities && dims.d[3] == Plugin::kHeight &&
            dims.d[4] == Plugin::kWidth;
 }
@@ -45,6 +45,13 @@ bool is_exact_dynamic_linear_desc(nvinfer1::DynamicPluginTensorDesc const& desc)
 
 bool is_exact_dynamic_dhwc8_desc(nvinfer1::DynamicPluginTensorDesc const& desc) noexcept {
     return is_exact_dhwc8_desc(desc.desc) && has_exact_dims(desc.min) && has_exact_dims(desc.max);
+}
+
+// TensorRT 11 exposes DHWC8 runtime dimensions with C padded to the physical pitch.
+bool is_exact_runtime_dhwc8_desc(nvinfer1::PluginTensorDesc const& desc) noexcept {
+    return desc.type == nvinfer1::DataType::kHALF &&
+           desc.format == nvinfer1::TensorFormat::kDHWC8 &&
+           (has_exact_dims(desc.dims) || has_exact_dims(desc.dims, Plugin::kChannelPitch));
 }
 
 // Each CTA transposes a 28x32 NCDHW tile into a bank-conflict-free
@@ -221,7 +228,7 @@ int32_t FastFoundationStereoPost8SumPlugin::onShapeChange(nvinfer1::PluginTensor
                                                           int32_t output_count) noexcept {
     return valid_ && inputs != nullptr && outputs != nullptr && input_count == 2 &&
                    output_count == 1 && is_exact_linear_desc(inputs[0]) &&
-                   is_exact_dhwc8_desc(inputs[1]) && is_exact_dhwc8_desc(outputs[0])
+                   is_exact_runtime_dhwc8_desc(inputs[1]) && is_exact_runtime_dhwc8_desc(outputs[0])
                ? 0
                : 1;
 }
@@ -233,7 +240,8 @@ int32_t FastFoundationStereoPost8SumPlugin::enqueue(nvinfer1::PluginTensorDesc c
     if (!valid_ || input_desc == nullptr || output_desc == nullptr || inputs == nullptr ||
         outputs == nullptr || inputs[0] == nullptr || inputs[1] == nullptr ||
         outputs[0] == nullptr || !is_exact_linear_desc(input_desc[0]) ||
-        !is_exact_dhwc8_desc(input_desc[1]) || !is_exact_dhwc8_desc(output_desc[0])) {
+        !is_exact_runtime_dhwc8_desc(input_desc[1]) ||
+        !is_exact_runtime_dhwc8_desc(output_desc[0])) {
         return 1;
     }
 

@@ -66,8 +66,8 @@ __global__ __launch_bounds__(kThreads) void full_volume_leaky_hwc8_kernel(__half
     output_vectors[vector_index] = values.packed;
 }
 
-bool has_exact_dims(nvinfer1::Dims const& dims) noexcept {
-    return dims.nbDims == 5 && dims.d[0] == Plugin::kBatch && dims.d[1] == Plugin::kChannels &&
+bool has_exact_dims(nvinfer1::Dims const& dims, int32_t channels = Plugin::kChannels) noexcept {
+    return dims.nbDims == 5 && dims.d[0] == Plugin::kBatch && dims.d[1] == channels &&
            dims.d[2] == Plugin::kDisparities && dims.d[3] == Plugin::kHeight &&
            dims.d[4] == Plugin::kWidth;
 }
@@ -79,6 +79,13 @@ bool is_exact_desc(nvinfer1::PluginTensorDesc const& desc) noexcept {
 
 bool is_exact_dynamic_desc(nvinfer1::DynamicPluginTensorDesc const& desc) noexcept {
     return is_exact_desc(desc.desc) && has_exact_dims(desc.min) && has_exact_dims(desc.max);
+}
+
+// TensorRT 11 exposes DHWC8 runtime dimensions with C padded to the physical pitch.
+bool is_exact_runtime_desc(nvinfer1::PluginTensorDesc const& desc) noexcept {
+    return desc.type == nvinfer1::DataType::kHALF &&
+           desc.format == nvinfer1::TensorFormat::kDHWC8 &&
+           (has_exact_dims(desc.dims) || has_exact_dims(desc.dims, Plugin::kChannelPitch));
 }
 
 } // namespace
@@ -201,7 +208,8 @@ int32_t FastFoundationStereoFullVolumeLeakyPlugin::onShapeChange(
     nvinfer1::PluginTensorDesc const* inputs, int32_t input_count,
     nvinfer1::PluginTensorDesc const* outputs, int32_t output_count) noexcept {
     return valid_ && inputs != nullptr && outputs != nullptr && input_count == 1 &&
-                   output_count == 1 && is_exact_desc(inputs[0]) && is_exact_desc(outputs[0])
+                   output_count == 1 && is_exact_runtime_desc(inputs[0]) &&
+                   is_exact_runtime_desc(outputs[0])
                ? 0
                : 1;
 }
@@ -211,7 +219,7 @@ int32_t FastFoundationStereoFullVolumeLeakyPlugin::enqueue(
     void const* const* inputs, void* const* outputs, void*, cudaStream_t stream) noexcept {
     if (!valid_ || input_desc == nullptr || output_desc == nullptr || inputs == nullptr ||
         outputs == nullptr || inputs[0] == nullptr || outputs[0] == nullptr ||
-        !is_exact_desc(input_desc[0]) || !is_exact_desc(output_desc[0])) {
+        !is_exact_runtime_desc(input_desc[0]) || !is_exact_runtime_desc(output_desc[0])) {
         return 1;
     }
 
