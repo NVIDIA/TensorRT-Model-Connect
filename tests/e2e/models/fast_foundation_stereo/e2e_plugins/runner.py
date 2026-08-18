@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .contracts import E2ECase, RunContext, StageOutput, StageSpec
+from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 
 def _write_stereo_inputs(directory: Path, *, pixel_shift: int) -> tuple[Path, Path]:

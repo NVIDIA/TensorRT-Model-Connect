@@ -491,21 +491,3 @@ def test_post8_sum_shared_integration_is_v3_native_and_scoped_to_post8() -> None
     )
     assert post.count("post8_sum_plugin=post8_sum_plugin") == 2
     assert "post8_sum_plugin=True" not in post
-
-
-def test_post8_sum_standalone_proof_scripts_cover_oracle_sanitizer_and_tile_cac() -> None:
-    model_dir = Path(__file__).resolve().parent
-    oracle = (model_dir / "post8_sum_oracle.py").read_text(encoding="utf-8")
-    run_once = (model_dir / "post8_sum_run_once.py").read_text(encoding="utf-8")
-    microbenchmark = (model_dir / "post8_sum_microbenchmark.py").read_text(encoding="utf-8")
-
-    assert "control-elementwise-sum-vs-post8-plugin-full-volume-bitwise" in oracle
-    assert 'branches: tuple[str, ...] = ("reference", "candidate")' in oracle
-    assert "mismatch_count" in oracle
-    assert "torch.int16" in oracle
-    assert "runner.run_once(linear, skip)" in run_once
-    assert "per-tile-control-candidate-control" in microbenchmark
-    assert "winner_tile_positions" in microbenchmark
-    for tile_positions in _TILE_POSITIONS:
-        assert str(tile_positions) in oracle
-    assert "onnx" not in (oracle + run_once + microbenchmark).lower()

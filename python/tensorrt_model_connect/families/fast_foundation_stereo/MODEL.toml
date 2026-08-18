@@ -4,7 +4,7 @@
 id = "fast_foundation_stereo"
 plugin = "fast_foundation_stereo"
 module = "plugin"
-config_adapter = "model_config.py|config_from_dir"
+config_adapter = "plugin.py|config_from_dir"
 model_dir_adapter = "prepare_model.py|resolve_model_dir"
 hf_allow_patterns = [
   "cfg.yaml",

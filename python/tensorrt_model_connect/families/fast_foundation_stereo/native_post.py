@@ -63,10 +63,6 @@ def _post8_sum_tile_positions() -> int:
     return value
 
 
-def _feature_attention(graph: NativeGraph, volume: Any, feature: Any, module: Any) -> Any:
-    return graph.feature_attention(volume, feature, module)
-
-
 _FULL_VOLUME_LEAKY_SHAPE = (1, 28, 48, 176, 176)
 _FULL_VOLUME_LEAKY_SPECS = {
     "corr_feature_att.layers.0": (
@@ -662,7 +658,7 @@ def _post_forward_helper(
     for index, child in enumerate(out):
         child_name = child.__class__.__name__
         if child_name == "FeatureAtt":
-            output = _feature_attention(graph, output, feature, child)
+            output = graph.feature_attention(output, feature, child)
         elif full_volume_leaky_plugin and index == 0 and child_name == "BasicConv":
             output = _folded_basic_conv_full_volume_leaky(
                 graph,
@@ -717,7 +713,7 @@ def _cost_aggregation(
         else:
             conv1 = graph.forward_helper(conv1, features[1], module.feature_att_8)
     else:
-        conv1 = _feature_attention(graph, conv1, features[1], module.feature_att_8)
+        conv1 = graph.feature_attention(conv1, features[1], module.feature_att_8)
 
     conv2 = graph.module(conv1, module.conv2)
     if fold_remaining_safe_batch_norm:
@@ -729,20 +725,20 @@ def _cost_aggregation(
     elif module.feature_att_16.__class__.__name__ == "ForwardHelper":
         conv2 = graph.forward_helper(conv2, features[2], module.feature_att_16)
     else:
-        conv2 = _feature_attention(graph, conv2, features[2], module.feature_att_16)
+        conv2 = graph.feature_attention(conv2, features[2], module.feature_att_16)
 
     conv3 = (
         _folded_remaining_safe_conv3(graph, conv2, module.conv3)
         if fold_remaining_safe_batch_norm
         else graph.sequential(conv2, module.conv3)
     )
-    conv3 = _feature_attention(graph, conv3, features[3], module.feature_att_32)
+    conv3 = graph.feature_attention(conv3, features[3], module.feature_att_32)
 
     if module.post32_to_16 is None:
         conv3_up = graph.basic_conv(conv3, module.conv3_up)
         conv2 = graph.concat((conv3_up, conv2), 1)
         conv2 = graph.sequential(conv2, module.agg_0)
-        conv2 = _feature_attention(graph, conv2, features[2], module.feature_att_up_16)
+        conv2 = graph.feature_attention(conv2, features[2], module.feature_att_up_16)
     else:
         conv2 = _post_forward_helper(
             graph,
@@ -757,7 +753,7 @@ def _cost_aggregation(
         conv2_up = graph.basic_conv(conv2, module.conv2_up)
         conv1 = graph.concat((conv2_up, conv1), 1)
         conv1 = graph.sequential(conv1, module.agg_1)
-        conv1 = _feature_attention(graph, conv1, features[1], module.feature_att_up_8)
+        conv1 = graph.feature_attention(conv1, features[1], module.feature_att_up_8)
     else:
         conv1 = _post_forward_helper(
             graph,
@@ -1421,8 +1417,8 @@ def add_post_graph(
             fold_batch_norm=fold_full_volume_batch_norm,
         )
     else:
-        combined_volume = _feature_attention(
-            graph, combined_volume, features[0], model.corr_feature_att
+        combined_volume = graph.feature_attention(
+            combined_volume, features[0], model.corr_feature_att
         )
     # This 28-channel post-cost-aggregation tensor, not the 32-channel GWC
     # output above, is the direct recurrent plugin's DHWC8 volume input.

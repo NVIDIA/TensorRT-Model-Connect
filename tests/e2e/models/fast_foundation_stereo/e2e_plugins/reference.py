@@ -16,7 +16,7 @@ from tensorrt_model_connect.families.fast_foundation_stereo.prepare_model import
     resolve_model_dir,
 )
 
-from .contracts import E2ECase, RunContext, StageOutput, StageSpec
+from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 
 def _checkpoint_snapshot(case: E2ECase, *, local_files_only: bool) -> Path:

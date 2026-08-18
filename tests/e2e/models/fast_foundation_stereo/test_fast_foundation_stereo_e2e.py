@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
+
+from tools.validation import catalog as validation_catalog
 
 _RUNNER_PATH = Path(__file__).with_name("runner.py")
 _SPEC = importlib.util.spec_from_file_location(
@@ -30,3 +33,25 @@ def pytest_generate_tests(metafunc):
 
 def test_model_e2e(case_name: str, request) -> None:
     _runner.run_model_e2e(case_name, request)
+
+
+def test_validation_contract_uses_model_plugin_parity() -> None:
+    suite = next(
+        item
+        for item in validation_catalog.load_suites()
+        if item["id"] == "fast_foundation_stereo_synthetic_parity"
+    )
+    requests = json.loads(
+        (Path(__file__).with_name("validation") / "fast-foundation-stereo.json").read_text(
+            encoding="utf-8"
+        )
+    )["requests"]
+    assert (suite["scoring"], suite["gates"], requests) == (
+        {"scorer": "model_plugin_parity"},
+        {"min_sample_pass_rate": 1.0},
+        json.loads(
+            '[{"sample_id":"fast-foundation-stereo-shift-12",'
+            '"testcase":"fast-foundation-stereo","stage":"full_inference",'
+            '"category":"synthetic-rectified-stereo","inputs":{"pixel_shift":12}}]'
+        ),
+    )

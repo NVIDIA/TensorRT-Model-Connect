@@ -277,11 +277,10 @@ CliArgs parse_args(int argc, char** argv) {
     }
 
     static const char* known_cmds[] = {
-        "run",              "inspect",  "generate-video", "segment",
-        "segment-prompted", "disparity", "classify",       "detect",
-        "extract-features", "generate-audio", "serve-audio", "encode",
-        "embed",            "rerank",   "solve",           "speak",
-        "transcribe", nullptr};
+        "run",         "inspect",    "generate-video", "segment",          "segment-prompted",
+        "disparity",   "classify",   "detect",         "extract-features", "generate-audio",
+        "serve-audio", "encode",     "embed",          "rerank",           "solve",
+        "speak",       "transcribe", nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
         if (args.command == *p) {

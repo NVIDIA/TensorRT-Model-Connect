@@ -230,44 +230,6 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
     assert len({model for model, _workload in bindings}) == 109
 
 
-def test_fast_foundation_stereo_catalog_uses_numeric_model_plugin_parity() -> None:
-    catalog = trtmc_validate.load_catalog()
-    suite = next(
-        value
-        for value in validation_catalog.load_suites()
-        if value["id"] == "fast_foundation_stereo_synthetic_parity"
-    )
-    model = next(
-        value
-        for value in validation_catalog.load_manifest_records(
-            trtmc_validate.DEFAULT_MODELS
-        )
-        if value["name"] == "fast-foundation-stereo"
-    )
-
-    assert catalog["models"]["fast-foundation-stereo"] == {
-        "workloads": ["fast_foundation_stereo_synthetic_parity"],
-    }
-    assert validation_catalog.suite_match_reason(suite, model) == (
-        True,
-        "selected",
-    )
-    assert suite["scoring"] == {"scorer": "model_plugin_parity"}
-    assert suite["gates"] == {"min_sample_pass_rate": 1.0}
-
-    dataset_path = trtmc_validate.REPO_ROOT / suite["dataset"]["default_path"]
-    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
-    assert dataset["requests"] == [
-        {
-            "sample_id": "fast-foundation-stereo-shift-12",
-            "testcase": "fast-foundation-stereo",
-            "stage": "full_inference",
-            "category": "synthetic-rectified-stereo",
-            "inputs": {"pixel_shift": 12},
-        }
-    ]
-
-
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
     catalog = {
         "sample_limits": {

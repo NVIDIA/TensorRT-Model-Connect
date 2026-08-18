@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .contracts import (
+from tests.e2e_harness.contracts import (
     CompareResult,
     MetricResult,
     StageOutput,

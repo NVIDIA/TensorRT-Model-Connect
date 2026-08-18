@@ -56,10 +56,6 @@ def _work_dtype(graph: NativeGraph, fp16: bool):
     return _trt(graph).float16 if fp16 else _trt(graph).float32
 
 
-def _work_np_dtype(fp16: bool):
-    return np.float16 if fp16 else np.float32
-
-
 def _array(value: Any, dtype: np.dtype) -> np.ndarray:
     """Copy a torch parameter/buffer to a contiguous NumPy weight."""
 
@@ -528,7 +524,7 @@ def _split_transpose_block(graph: NativeGraph, tensor, block, *, fp16: bool):
             width=width,
             hidden_dim=int(block.pos_embd.hidden_dim),
         )
-        position = _constant(graph, coordinates, _work_np_dtype(fp16))
+        position = _constant(graph, coordinates, np.float16 if fp16 else np.float32)
         position = _conv2d(graph, position, block.pos_embd.token_projection, fp16=fp16)
         position = _reshape(graph, position, (batch, channels, height * width))
         position = _transpose(graph, position, (0, 2, 1))

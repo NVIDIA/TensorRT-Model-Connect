@@ -41,8 +41,6 @@ wan = ["torch>=2.0"]
 fast-foundation-stereo = [
     "torch>=2.6",
     "timm>=1.0",
-    "imageio>=2.31",
-    "opencv-python-headless>=4.8",
 ]
 chronos = ["chronos-forecasting>=2.2.2"]
 # clip: required by tests/e2e/models/flux/e2e_plugins/comparators/clip_metrics.py for

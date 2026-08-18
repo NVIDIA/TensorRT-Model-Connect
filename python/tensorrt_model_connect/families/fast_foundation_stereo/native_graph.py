@@ -80,10 +80,6 @@ class NativeGraph:
             return tensor
         return self.network.add_cast(tensor, dtype).get_output(0)
 
-    def name(self, tensor: Any, name: str) -> Any:
-        tensor.name = name
-        return tensor
-
     def reshape(self, tensor: Any, shape: tuple[int, ...]) -> Any:
         layer = self.network.add_shuffle(tensor)
         layer.reshape_dims = tuple(int(dim) for dim in shape)
@@ -532,54 +528,6 @@ class NativeGraph:
             output = self.add(self.mul(output, gamma), beta)
         return self.cast(output, output_dtype)
 
-    def instance_norm_2d_normalization(
-        self,
-        tensor: Any,
-        *,
-        channels: int,
-        epsilon: float,
-        spatial_shape: tuple[int, int],
-    ) -> Any:
-        """Express one affine-free InstanceNorm2d with INormalizationLayer."""
-
-        shape = tuple(int(value) for value in tensor.shape)
-        expected_tail = (int(channels), *tuple(int(value) for value in spatial_shape))
-        if len(shape) != 4 or shape[1:] != expected_tail:
-            raise RuntimeError(
-                "native InstanceNorm2d requires NCHW shape "
-                f"[N, {expected_tail[0]}, {expected_tail[1]}, {expected_tail[2]}], got {shape}"
-            )
-        if tensor.dtype != self.trt.float16:
-            raise RuntimeError(
-                f"native InstanceNorm2d requires an FP16 input/output boundary, got {tensor.dtype}"
-            )
-
-        fp32 = self.cast(tensor, self.trt.float32)
-        parameter_shape = (1, int(channels), 1, 1)
-        scale = self.constant(
-            np.ones(parameter_shape, dtype=np.float32),
-            parameter_shape,
-            dtype=np.float32,
-            target_dtype=self.trt.float32,
-        )
-        shift = self.constant(
-            np.zeros(parameter_shape, dtype=np.float32),
-            parameter_shape,
-            dtype=np.float32,
-            target_dtype=self.trt.float32,
-        )
-        add_normalization = getattr(self.network, "add_normalization_v2", None)
-        if add_normalization is None:
-            add_normalization = getattr(self.network, "add_normalization", None)
-        if add_normalization is None:
-            raise RuntimeError("TensorRT INormalizationLayer is required for native InstanceNorm2d")
-        # Axes 2 and 3 are the 2-D spatial dimensions.  One group per channel
-        # makes TensorRT group normalization exactly InstanceNorm2d here.
-        layer = add_normalization(fp32, scale, shift, (1 << 2) | (1 << 3))
-        layer.num_groups = int(channels)
-        layer.epsilon = float(epsilon)
-        return self.cast(layer.get_output(0), self.trt.float16)
-
     def layer_norm(
         self,
         tensor: Any,
@@ -845,22 +793,6 @@ class NativeGraph:
                 output = self.feature_attention(output, feature, child)
             elif fold_batch_norm and child.__class__.__name__ == "BasicConv":
                 output = self.basic_conv(output, child, fold_batch_norm=True)
-            else:
-                output = self.module(output, child)
-        return output
-
-    def post_forward_helper(
-        self,
-        skip: Any,
-        lower: Any,
-        feature: Any,
-        module: Any,
-    ) -> Any:
-        output = self.sequential(lower, module.upsample)
-        output = self.add(output, skip) if module.op == "sum" else self.concat((output, skip), 1)
-        for child in module.out:
-            if child.__class__.__name__ == "FeatureAtt":
-                output = self.feature_attention(output, feature, child)
             else:
                 output = self.module(output, child)
         return output
