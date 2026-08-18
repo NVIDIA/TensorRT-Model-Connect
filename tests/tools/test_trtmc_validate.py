@@ -513,7 +513,8 @@ def test_binding_scoped_engines_are_isolated_across_suites_and_deleted_on_pass(
     ]
     engine_directories = []
 
-    def run_worker(binding, *, arguments, catalog):
+    def run_worker(binding, *, arguments, catalog, on_retry=None):
+        del on_retry
         engine_directories.append(arguments.engine_dir)
         artifact = arguments.engine_dir / "model-a.bundle"
         assert not artifact.exists()
@@ -1042,7 +1043,7 @@ def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(
     assert evidence["commands"]["worker"]["rendered"]
     assert (output / evidence["logs"][0]["href"]).is_file()
     live = json.loads((output / "report.json").read_text(encoding="utf-8"))
-    assert live["results"][0]["progress"] == {"stage": "candidate", "attempt": 1}
+    assert live["results"][0]["progress"] == {"stage": "compare", "attempt": 1}
     assert live["results"][0]["commands"]["worker"]["rendered"]
 
     arguments.resume_existing = True
@@ -1080,6 +1081,103 @@ def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(
         (1, "interrupted"),
         (2, "completed"),
     ]
+
+
+def test_accuracy_adapter_records_each_worker_retry_and_reference_stage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "results"
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--binding",
+            "model-a=suite-a",
+            "--output",
+            str(output),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--engine-retention",
+            "retain",
+            "--hf-cache-retention",
+            "retain",
+            "--model-attempts",
+            "2",
+            "--model-retry-delay-seconds",
+            "0",
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "suite-a")
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trtmc_validate, "finalize_run_metadata", lambda *args: None)
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+    monkeypatch.setattr(trtmc_validate, "_check_free_space", lambda *args: 100.0)
+
+    def fail_reference(binding, *, arguments, catalog, attempt):
+        case_dir = trtmc_validate._case_directory(arguments.output, binding)
+        case_dir.mkdir(parents=True, exist_ok=True)
+        worker_log = trtmc_validate._worker_log_path(
+            case_dir,
+            case_attempt=arguments.case_attempt,
+            worker_attempt=attempt,
+        )
+        worker_log.write_text("ReferenceExecutionError: reference crashed\n", encoding="utf-8")
+        result = trtmc_validate._normalize_result(
+            {
+                "model": binding.model,
+                "workload": binding.workload,
+                "executor": "trtmc_compare",
+                "execution": {"status": "error", "exit_code": 1, "retryable": True},
+                "comparison": {
+                    "status": "not_run",
+                    "mode": "",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "failed"},
+                "raw_result": {
+                    "status": "failed",
+                    "error_type": "ReferenceExecutionError",
+                    "error": "HF reference subprocess failed rc=-11",
+                },
+                "worker_log": str(worker_log),
+            }
+        )
+        (case_dir / "comparison.json").write_text(
+            json.dumps(result),
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", fail_reference)
+
+    assert trtmc_validate._run_all_bindings(
+        [binding],
+        arguments=arguments,
+        catalog={"sample_limits": {"suite-a": 1}},
+    ) == 1
+
+    receipt = trtmc_validate.ExecutionLedger.load(
+        output,
+        task_kind="accuracy",
+    ).receipt("model-a::suite-a")
+    assert receipt["result"] == "white"
+    assert receipt["stage"] == "reference"
+    assert [
+        (attempt["attempt"], attempt["state"], attempt["stage"])
+        for attempt in receipt["attempts"]
+    ] == [
+        (1, "failed", "reference"),
+        (2, "failed", "reference"),
+    ]
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report["results"][0]["progress"] == {
+        "stage": "reference",
+        "attempt": 2,
+    }
+    assert report["results"][0]["issue"]["stage"] == "reference"
 
 
 def test_resume_existing_rejects_different_source_revision(tmp_path, monkeypatch):
@@ -1454,7 +1552,8 @@ def test_all_supervisor_applies_model_failure_policy(
     }
     attempted = []
 
-    def run_worker(binding, *, arguments, catalog):
+    def run_worker(binding, *, arguments, catalog, on_retry=None):
+        del on_retry
         attempted.append(binding.model)
         status = "failed" if binding.model == "model-a" else "passed"
         return {

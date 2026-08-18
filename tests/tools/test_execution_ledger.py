@@ -99,6 +99,29 @@ def test_resume_marks_running_attempt_interrupted_before_retry(tmp_path, stage) 
     assert reopened.begin("model-a::task-a", stage="candidate") == 2
 
 
+def test_retry_closes_only_the_active_attempt_before_starting_the_next(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    ledger.begin("model-a::task-a", stage="reference")
+
+    ledger.retry(
+        "model-a::task-a",
+        attempt_outcome="failed",
+        evidence={"return_code": 1, "retryable": True},
+    )
+
+    pending = ledger.receipt("model-a::task-a")
+    assert pending["state"] == "pending"
+    assert pending["stage"] is None
+    assert pending["active_attempt"] is None
+    assert pending["attempts"][0]["state"] == "failed"
+    assert pending["attempts"][0]["stage"] == "reference"
+    assert pending["attempts"][0]["evidence"] == {
+        "return_code": 1,
+        "retryable": True,
+    }
+    assert ledger.begin("model-a::task-a", stage="reference") == 2
+
+
 def test_open_rejects_campaign_identity_or_inventory_drift(tmp_path) -> None:
     _ledger(tmp_path)
 

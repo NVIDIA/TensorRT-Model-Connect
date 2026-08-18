@@ -6,6 +6,7 @@ id: auto-thor
 
 environment_variables:
   TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND: torch_sdpa
+  TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF: disable
 
 storage:
   root: ${TRTMC_CHECK_STORAGE_ROOT}

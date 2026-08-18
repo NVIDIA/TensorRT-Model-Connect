@@ -5323,6 +5323,97 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     assert "PYTORCH_CUDA_ALLOC_CONF" not in captured["env"]
 
 
+def test_eval_model_worker_honors_reference_allocator_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    suite = {"id": "suite-a"}
+    model = {
+        "name": "model-a",
+        "hf_id": "org/model-a",
+        "bundle": "model-a.bundle",
+    }
+    args = argparse.Namespace(
+        work_root=str(tmp_path / "work"),
+        engine_dir=str(tmp_path / "engines"),
+        bundle=None,
+    )
+    result_path = tmp_path / "work" / "suite-a" / "model-a" / "eval_worker_result.json"
+    captured: dict[str, str] = {}
+
+    class Result:
+        returncode = 0
+
+    def fake_run(_cmd, **kwargs):
+        captured.update(kwargs["env"])
+        result_path.write_text(
+            json.dumps({"status": "passed"}),
+            encoding="utf-8",
+        )
+        return Result()
+
+    monkeypatch.setenv(
+        validation_engine.REFERENCE_CUDA_ALLOC_CONF_ENV,
+        "disable",
+    )
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+    monkeypatch.setattr(validation_engine, "gpu_memory_used_mib", lambda: [])
+    monkeypatch.setattr(
+        validation_engine,
+        "gpu_memory_back_to_baseline",
+        lambda **_kwargs: (None, []),
+    )
+
+    validation_engine.run_eval_model_worker(suite=suite, model=model, args=args)
+
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in captured
+
+
+def test_hf_reference_failure_has_a_structured_error_type(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    args = argparse.Namespace(
+        hf_python=sys.executable,
+        reference_cache_dir=str(tmp_path / "references"),
+        reference_cache_identity="",
+        hf_dtype="fp16",
+        hf_device="cuda",
+        hf_device_map="",
+        hf_attn_impl="",
+        trust_remote_code=False,
+        local_files_only=True,
+        do_sample=False,
+        apply_chat_template=False,
+        max_new_tokens=None,
+        temperature=None,
+        top_k=None,
+        top_p=None,
+        min_p=None,
+        seed=None,
+    )
+
+    monkeypatch.setattr(
+        validation_engine.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=-11),
+    )
+
+    with pytest.raises(
+        validation_engine.ReferenceExecutionError,
+        match="rc=-11",
+    ):
+        validation_engine.run_hf_reference_subprocess(
+            args,
+            {"hf_id": "org/model", "name": "model-a"},
+            work_dir,
+        )
+
+
 @pytest.mark.parametrize(
     ("precision", "expected"),
     [

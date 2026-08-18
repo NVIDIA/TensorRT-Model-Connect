@@ -254,6 +254,34 @@ class ExecutionLedger:
         receipt["updated_at"] = finished_at
         self._write_receipt(case_id, receipt)
 
+    def retry(
+        self,
+        case_id: str,
+        *,
+        attempt_outcome: str = "failed",
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Close one failed attempt while leaving its case eligible to run again."""
+
+        if attempt_outcome not in {"failed", "timed_out"}:
+            raise ExecutionLedgerError(
+                f"retry attempt must be failed or timed_out: {attempt_outcome!r}"
+            )
+        receipt = self.receipt(case_id)
+        if receipt["state"] != "running":
+            raise ExecutionLedgerError(f"case {case_id!r} is not running")
+        finished_at = _now()
+        receipt["attempts"][-1]["state"] = attempt_outcome
+        receipt["attempts"][-1]["finished_at"] = finished_at
+        receipt["attempts"][-1]["evidence"].update(
+            deepcopy(dict(evidence or {}))
+        )
+        receipt["state"] = "pending"
+        receipt["stage"] = None
+        receipt["active_attempt"] = None
+        receipt["updated_at"] = finished_at
+        self._write_receipt(case_id, receipt)
+
     def recover_interrupted(self) -> list[str]:
         recovered: list[str] = []
         for case in self.cases():

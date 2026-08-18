@@ -94,6 +94,28 @@ _DIFFUSION_SAMPLE_INPUT_FIELDS = frozenset(
 )
 
 
+class ReferenceExecutionError(RuntimeError):
+    """The reference backend failed before producing comparable output."""
+
+
+def _reference_process_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.setdefault("TOKENIZERS_PARALLELISM", "false")
+    allocator_conf = environment.get(REFERENCE_CUDA_ALLOC_CONF_ENV)
+    if allocator_conf is None:
+        environment.setdefault(
+            "PYTORCH_CUDA_ALLOC_CONF",
+            "expandable_segments:True",
+        )
+    elif allocator_conf.strip().lower() in {"disable", "disabled", "none"}:
+        environment.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+    elif allocator_conf.strip():
+        environment["PYTORCH_CUDA_ALLOC_CONF"] = allocator_conf.strip()
+    else:
+        raise RuntimeError(f"{REFERENCE_CUDA_ALLOC_CONF_ENV} cannot be empty")
+    return environment
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -9991,17 +10013,7 @@ def run_hf_reference_subprocess(
         if value is not None:
             cmd.extend([flag, str(value)])
     log_path = work_dir / "hf_run.log"
-    env = os.environ.copy()
-    env.setdefault("TOKENIZERS_PARALLELISM", "false")
-    allocator_conf = os.environ.get(REFERENCE_CUDA_ALLOC_CONF_ENV)
-    if allocator_conf is None:
-        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    elif allocator_conf.strip().lower() in {"disable", "disabled", "none"}:
-        env.pop("PYTORCH_CUDA_ALLOC_CONF", None)
-    elif allocator_conf.strip():
-        env["PYTORCH_CUDA_ALLOC_CONF"] = allocator_conf.strip()
-    else:
-        raise RuntimeError(f"{REFERENCE_CUDA_ALLOC_CONF_ENV} cannot be empty")
+    env = _reference_process_environment()
     with log_path.open("w", encoding="utf-8") as log_f:
         log_f.write(f"$ {shlex.join(cmd)}\n")
         log_f.flush()
@@ -10009,7 +10021,7 @@ def run_hf_reference_subprocess(
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
         )
     if proc.returncode != 0:
-        raise RuntimeError(
+        raise ReferenceExecutionError(
             f"HF reference subprocess failed for {model['name']} rc={proc.returncode}; see {log_path}"
         )
 
@@ -12924,9 +12936,7 @@ def run_eval_model_worker(
         "--request",
         str(request_path),
     ]
-    env = os.environ.copy()
-    env.setdefault("TOKENIZERS_PARALLELISM", "false")
-    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    env = _reference_process_environment()
     with log_path.open("w", encoding="utf-8") as log_f:
         proc = subprocess.run(
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env

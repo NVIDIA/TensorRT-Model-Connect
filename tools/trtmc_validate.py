@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 import uuid as uuidlib
 
 import yaml
@@ -2978,10 +2978,7 @@ def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
         worker_failure = result.get("executor") == "model_worker"
         return {
             "priority": "P1",
-            "stage": str(
-                result.get("failure_stage")
-                or ("compare" if worker_failure else "candidate")
-            ),
+            "stage": _accuracy_failure_stage(result),
             "domain": str(result.get("failure_domain") or "harness/unknown"),
             "code": str(
                 result.get("failure_code")
@@ -3016,6 +3013,30 @@ def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
             or "comparison evidence is incomplete"
         ),
     }
+
+
+def _accuracy_failure_stage(result: Mapping[str, Any]) -> str:
+    explicit = str(result.get("failure_stage", "") or "").strip()
+    if explicit:
+        return explicit
+    raw_result = result.get("raw_result", {})
+    raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+    error_type = str(raw_result.get("error_type", "") or "")
+    error = str(raw_result.get("error", "") or "")
+    if error_type == "ReferenceExecutionError" or "HF reference subprocess failed" in error:
+        return "reference"
+    if result.get("executor") == "dataset_preflight":
+        return "preflight"
+    if result.get("executor") == "model_worker":
+        return "compare"
+    return "candidate"
+
+
+def _accuracy_result_stage(result: Mapping[str, Any]) -> str:
+    execution = result.get("execution", {})
+    if isinstance(execution, Mapping) and execution.get("status") == "error":
+        return _accuracy_failure_stage(result)
+    return "compare"
 
 
 def _materialize_accuracy_report_artifact(
@@ -4208,6 +4229,55 @@ def _worker_environment(arguments: argparse.Namespace) -> dict[str, str]:
     return environment
 
 
+def _accuracy_worker_attempt_evidence(
+    binding: Binding,
+    arguments: argparse.Namespace,
+    *,
+    worker_attempt: int,
+) -> dict[str, Any]:
+    case_dir = _case_directory(arguments.output, binding)
+    worker_log = _worker_log_path(
+        case_dir,
+        case_attempt=int(getattr(arguments, "case_attempt", 1)),
+        worker_attempt=worker_attempt,
+    )
+    worker_log.parent.mkdir(parents=True, exist_ok=True)
+    worker_log.touch(exist_ok=True)
+    worker_command = _worker_command(binding, arguments)
+    worker_environment = _worker_environment(arguments)
+    return {
+        "commands": {
+            "worker": {
+                "argv": worker_command,
+                "rendered": shlex.join(worker_command),
+                "cwd": str(REPO_ROOT),
+            }
+        },
+        "logs": [
+            {
+                "label": (
+                    f"Accuracy worker case attempt "
+                    f"{getattr(arguments, 'case_attempt', 1)}, "
+                    f"worker attempt {worker_attempt}"
+                ),
+                "href": worker_log.relative_to(arguments.output).as_posix(),
+            }
+        ],
+        "environment": {
+            name: worker_environment[name]
+            for name in (
+                "CUDA_VISIBLE_DEVICES",
+                "HF_HOME",
+                "LD_LIBRARY_PATH",
+                "PYTHONPATH",
+                "PYTORCH_CUDA_ALLOC_CONF",
+                "TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF",
+            )
+            if worker_environment.get(name)
+        },
+    }
+
+
 def _prepare_hf_on_demand(
     binding: Binding,
     arguments: argparse.Namespace,
@@ -4514,6 +4584,7 @@ def _run_supervised_binding_with_retries(
     *,
     arguments: argparse.Namespace,
     catalog: Mapping[str, Any],
+    on_retry: Callable[[int, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     case_dir = _case_directory(arguments.output, binding)
     revalidation_budget = _reused_bundle_revalidation_budget(arguments)
@@ -4547,8 +4618,11 @@ def _run_supervised_binding_with_retries(
             archived=archived,
         )
         attempts.append(attempt_result)
-        if not execution_error or not retryable or attempt == arguments.model_attempts:
+        will_retry = execution_error and retryable and attempt < arguments.model_attempts
+        if not will_retry:
             break
+        if on_retry is not None:
+            on_retry(attempt, result)
         print(
             f"  Attempt {attempt}/{arguments.model_attempts}: FAILED",
             flush=True,
@@ -4767,44 +4841,14 @@ def _run_all_bindings(
             continue
         case_attempt = len(receipt["attempts"]) + 1
         binding_arguments.case_attempt = case_attempt
-        case_dir = _case_directory(arguments.output, binding)
-        worker_log = _worker_log_path(
-            case_dir,
-            case_attempt=case_attempt,
-            worker_attempt=1,
-        )
-        worker_log.parent.mkdir(parents=True, exist_ok=True)
-        worker_log.touch(exist_ok=True)
-        worker_command = _worker_command(binding, binding_arguments)
-        worker_environment = _worker_environment(binding_arguments)
         ledger.begin(
             case_id,
             stage="preflight",
-            evidence={
-                "commands": {
-                    "worker": {
-                        "argv": worker_command,
-                        "rendered": shlex.join(worker_command),
-                        "cwd": str(REPO_ROOT),
-                    }
-                },
-                "logs": [
-                    {
-                        "label": f"Accuracy worker case attempt {case_attempt}",
-                        "href": worker_log.relative_to(arguments.output).as_posix(),
-                    }
-                ],
-                "environment": {
-                    name: worker_environment[name]
-                    for name in (
-                        "CUDA_VISIBLE_DEVICES",
-                        "HF_HOME",
-                        "LD_LIBRARY_PATH",
-                        "PYTHONPATH",
-                    )
-                    if worker_environment.get(name)
-                },
-            },
+            evidence=_accuracy_worker_attempt_evidence(
+                binding,
+                binding_arguments,
+                worker_attempt=1,
+            ),
         )
         write_report(arguments.output)
         result = (
@@ -4814,17 +4858,49 @@ def _run_all_bindings(
         )
         if result is None:
             free_gib = _check_free_space(arguments, binding)
-            ledger.update_stage(case_id, "candidate")
+            ledger.update_stage(case_id, "compare")
             write_report(arguments.output)
             print(
                 f"\nStarting worker: {binding.model} / {binding.workload} / "
                 f"{sample_note} / {free_gib:.1f} GiB free",
                 flush=True,
             )
+
+            def record_retry(
+                worker_attempt: int,
+                attempt_result: Mapping[str, Any],
+            ) -> None:
+                stage = _accuracy_result_stage(attempt_result)
+                execution = attempt_result.get("execution", {})
+                execution = execution if isinstance(execution, Mapping) else {}
+                raw_result = attempt_result.get("raw_result", {})
+                raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+                timed_out = raw_result.get("error_type") == "WorkerTimeoutError"
+                ledger.update_stage(case_id, stage)
+                ledger.retry(
+                    case_id,
+                    attempt_outcome="timed_out" if timed_out else "failed",
+                    evidence={
+                        "return_code": execution.get("exit_code"),
+                        "retryable": True,
+                    },
+                )
+                ledger.begin(
+                    case_id,
+                    stage="compare",
+                    evidence=_accuracy_worker_attempt_evidence(
+                        binding,
+                        binding_arguments,
+                        worker_attempt=worker_attempt + 1,
+                    ),
+                )
+                write_report(arguments.output)
+
             result = _run_supervised_binding_with_retries(
                 binding,
                 arguments=binding_arguments,
                 catalog=catalog,
+                on_retry=record_retry,
             )
         else:
             print(
@@ -4863,7 +4939,7 @@ def _run_all_bindings(
             json.dumps(result, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        ledger.update_stage(case_id, "compare")
+        ledger.update_stage(case_id, _accuracy_result_stage(result))
         normalized = _normalize_result(result)
         light = _traffic_light_status(normalized)
         raw_result = normalized.get("raw_result", {})

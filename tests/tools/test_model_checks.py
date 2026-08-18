@@ -720,25 +720,35 @@ def test_l4t_environment_selects_qualified_tensorrt_libraries() -> None:
 
 
 @pytest.mark.parametrize(
-    ("platform", "attention_backend"),
+    ("platform", "expected_environment"),
     [
-        ("l4t-thor", "torch_sdpa"),
-        ("gb300", "torch_sdpa"),
-        ("auto-thor", "torch_sdpa"),
+        (
+            "l4t-thor",
+            {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"},
+        ),
+        (
+            "gb300",
+            {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"},
+        ),
+        (
+            "auto-thor",
+            {
+                "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa",
+                "TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF": "disable",
+            },
+        ),
     ],
 )
 def test_checked_in_environment_selects_lance_reference_attention_backend(
     platform,
-    attention_backend,
+    expected_environment,
 ) -> None:
     environment = model_checks._read_yaml(
         model_checks.DEFAULT_ENVIRONMENT_ROOT / f"{platform}.yaml",
         "model-check environment",
     )
 
-    assert environment["environment_variables"] == {
-        "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": attention_backend
-    }
+    assert environment["environment_variables"] == expected_environment
 
 
 def test_l4t_excludes_consolidated_not_compared_models() -> None:
