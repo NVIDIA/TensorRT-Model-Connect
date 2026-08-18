@@ -173,16 +173,6 @@ struct ClassificationResult {
     float top_score{0.0F};
 };
 
-// Full outputs from a standalone image-feature-extraction model. Shapes use
-// the engine's row-major tensor dimensions and data is always returned as
-// float32, including when the engine exposes FP16 or BF16 outputs.
-struct ImageFeaturesResult {
-    std::vector<float> last_hidden_state;
-    std::vector<int64_t> last_hidden_state_shape;
-    std::vector<float> pooler_output;
-    std::vector<int64_t> pooler_output_shape;
-};
-
 struct TextEmbedding {
     std::vector<float> data;
     std::vector<int64_t> shape;
@@ -485,18 +475,6 @@ class IPipeline {
         (void)height;
         (void)width;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support classify()");
-    }
-
-    // -- Image feature extraction --
-    // Image pixels are RGB HWC float values in [0, 1]. The owning model family
-    // applies its bundle-defined resize, normalization, and NCHW transform.
-    virtual ImageFeaturesResult extract_image_features(const float* pixels, int32_t height,
-                                                       int32_t width) {
-        (void)pixels;
-        (void)height;
-        (void)width;
-        throw std::runtime_error(std::string(pipeline_type()) +
-                                 " does not support extract_image_features()");
     }
 
     // -- Encoder-only hidden states --

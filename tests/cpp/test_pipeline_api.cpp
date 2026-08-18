@@ -250,15 +250,6 @@ static void test_ipipeline_default_virtuals() {
     }
     check(threw, "default segment throws");
 
-    // Default image feature extraction should throw
-    threw = false;
-    try {
-        pipeline.extract_image_features(nullptr, 0, 0);
-    } catch (const std::runtime_error&) {
-        threw = true;
-    }
-    check(threw, "default extract_image_features throws");
-
     // Default encode should throw
     threw = false;
     try {

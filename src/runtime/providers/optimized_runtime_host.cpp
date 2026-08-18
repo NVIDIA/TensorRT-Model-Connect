@@ -855,11 +855,11 @@ void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
         factory.create == nullptr) {
         throw std::runtime_error("Optimized-runtime DSO has an invalid factory v1 table");
     }
-    if (factory.pipeline_abi_version != internal::kCurrentOptimizedRuntimePipelineAbiVersion) {
+    if (factory.pipeline_abi_version != internal::kOptimizedRuntimePipelineAbiVersionV1) {
         throw std::runtime_error(
             "Optimized-runtime IPipeline ABI version mismatch for implementation '" +
             descriptor.implementation_id + "': expected " +
-            std::to_string(internal::kCurrentOptimizedRuntimePipelineAbiVersion) + ", got " +
+            std::to_string(internal::kOptimizedRuntimePipelineAbiVersionV1) + ", got " +
             std::to_string(factory.pipeline_abi_version));
     }
     if (!toolchain_abi_matches(factory.toolchain_abi,

@@ -34,6 +34,7 @@
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
+#include "trtmc/image_features.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/pipeline_plugin_loader.h"
 #include "trtmc/trtmc_io.hpp"
@@ -993,8 +994,13 @@ int cmd_extract_features(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
+    auto* extractor = dynamic_cast<trtmc::IImageFeatureExtractor*>(pipeline.get());
+    if (extractor == nullptr) {
+        std::cerr << "Error: loaded pipeline does not support image feature extraction\n";
+        return EXIT_FAILURE;
+    }
     const auto result =
-        pipeline->extract_image_features(image.pixels.data(), image.height, image.width);
+        extractor->extract_image_features(image.pixels.data(), image.height, image.width);
     if (args.output_json.empty()) {
         write_image_features_json(std::cout, result);
         return EXIT_SUCCESS;

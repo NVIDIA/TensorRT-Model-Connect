@@ -221,6 +221,7 @@ add_library(trtmc_core SHARED
   src/runtime/providers/optimized_runtime_host.cpp
   src/runtime/core/distributed_runtime.cpp
   src/runtime/core/device_tensor.cpp
+  src/runtime/core/image_features.cpp
   src/runtime/core/measurement.cpp
   src/runtime/core/pipeline_pool.cpp
   src/runtime/core/stb_impl.cpp

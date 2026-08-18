@@ -88,6 +88,12 @@ class FakeDinov3Module final : public trtmc::ITrtModule {
     std::vector<float> pooler_{7.0F, 8.0F};
 };
 
+class PlainPipeline final : public trtmc::IPipeline {
+  public:
+    const char* model_id() const override { return "plain"; }
+    const char* pipeline_type() const override { return "PlainPipeline"; }
+};
+
 trtmc::Dinov3PreprocessConfig identity_config() {
     trtmc::Dinov3PreprocessConfig config;
     config.input_image_h = 1;
@@ -102,8 +108,12 @@ void test_pipeline_returns_both_named_outputs_with_shapes() {
     auto* module_ptr = module.get();
     trtmc::Dinov3ImageFeaturePipeline pipeline(std::move(module), identity_config(),
                                                "facebook/dinov3-vits16-pretrain-lvd1689m");
+    auto* extractor = dynamic_cast<trtmc::IImageFeatureExtractor*>(&pipeline);
+    check(extractor != nullptr, "DINOv3 exposes the image-feature capability");
+    if (extractor == nullptr)
+        return;
     const std::vector<float> image{0.25F, 0.5F, 0.75F};
-    const auto result = pipeline.extract_image_features(image.data(), 1, 1);
+    const auto result = extractor->extract_image_features(image.data(), 1, 1);
 
     check(result.last_hidden_state_shape == std::vector<int64_t>({1, 3, 2}),
           "DINOv3 last_hidden_state shape");
@@ -133,6 +143,13 @@ void test_pipeline_requires_pooler_output() {
     check(threw, "DINOv3 missing pooler_output rejected");
 }
 
+void test_image_feature_capability_is_opt_in() {
+    PlainPipeline pipeline;
+    trtmc::IPipeline* base = &pipeline;
+    check(dynamic_cast<trtmc::IImageFeatureExtractor*>(base) == nullptr,
+          "ordinary pipelines do not expose image-feature extraction");
+}
+
 void test_pipeline_rejects_invalid_module() {
     bool threw = false;
     try {
@@ -148,6 +165,7 @@ void test_pipeline_rejects_invalid_module() {
 int main() {
     test_pipeline_returns_both_named_outputs_with_shapes();
     test_pipeline_requires_pooler_output();
+    test_image_feature_capability_is_opt_in();
     test_pipeline_rejects_invalid_module();
 
     if (g_failures != 0) {

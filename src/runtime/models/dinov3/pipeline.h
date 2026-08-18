@@ -6,6 +6,7 @@
 #pragma once
 
 #include "runtime/models/dinov3/image_preprocess.h"
+#include "trtmc/image_features.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 
@@ -15,7 +16,7 @@
 
 namespace trtmc {
 
-class Dinov3ImageFeaturePipeline final : public IPipeline {
+class Dinov3ImageFeaturePipeline final : public IPipeline, public IImageFeatureExtractor {
   public:
     explicit Dinov3ImageFeaturePipeline(std::unique_ptr<TrtModule> model,
                                         Dinov3PreprocessConfig preprocess_config = {},

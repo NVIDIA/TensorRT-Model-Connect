@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "trtmc/image_features.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/measurement.h"
 #include "trtmc/trtmc_io.hpp"
@@ -778,14 +779,17 @@ Json run_extract_features(trtmc::IPipeline& pipeline, const Json& request,
     const int warmup = timing.warmup;
     const int iterations = timing.iterations;
     const auto image = load_request_image(request, "extract_features");
+    auto* extractor = dynamic_cast<trtmc::IImageFeatureExtractor*>(&pipeline);
+    if (extractor == nullptr)
+        throw std::runtime_error("pipeline does not support image feature extraction");
     trtmc::ImageFeaturesResult last;
     for (int index = 0; index < warmup; ++index) {
-        last = pipeline.extract_image_features(image.pixels.data(), image.height, image.width);
+        last = extractor->extract_image_features(image.pixels.data(), image.height, image.width);
     }
     Json observations = Json::array();
     for (int index = 0; index < iterations; ++index) {
         const IterationTimer timer(timing.scope);
-        last = pipeline.extract_image_features(image.pixels.data(), image.height, image.width);
+        last = extractor->extract_image_features(image.pixels.data(), image.height, image.width);
         const double measured_ms = timer.elapsed_ms();
         observations.push_back({
             {"iteration", index},

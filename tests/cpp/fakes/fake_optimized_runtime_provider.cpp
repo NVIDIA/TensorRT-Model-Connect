@@ -21,7 +21,7 @@
 
 #ifndef TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION
 #define TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION                                                  \
-    trtmc::internal::kCurrentOptimizedRuntimePipelineAbiVersion
+    trtmc::internal::kOptimizedRuntimePipelineAbiVersionV1
 #endif
 
 namespace {
