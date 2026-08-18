@@ -1729,7 +1729,12 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/execution_ledger.py",
             "tools/perf_matrix.py",
+            "tools/qualification_report.py",
+            "tools/qualification_report_assets/qualification-report.css",
+            "tools/qualification_report_assets/qualification-report.js",
+            "tools/qualification_report_assets/qualification-report.schema.json",
             "tools/reporting_html.py",
         ],
     )

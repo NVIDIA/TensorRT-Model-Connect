@@ -1904,7 +1904,12 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="report_generation_tool",
             matcher=_path_in(
                 {
+                    "tools/execution_ledger.py",
                     "tools/perf_matrix.py",
+                    "tools/qualification_report.py",
+                    "tools/qualification_report_assets/qualification-report.css",
+                    "tools/qualification_report_assets/qualification-report.js",
+                    "tools/qualification_report_assets/qualification-report.schema.json",
                     "tools/reporting_html.py",
                 }
             ),
