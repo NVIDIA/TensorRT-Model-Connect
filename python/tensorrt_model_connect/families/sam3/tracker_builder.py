@@ -187,12 +187,6 @@ def _step_batch2_profile_shapes(
     return None
 
 
-def _validate_tracker_model(tracker: Any) -> None:
-    """Validate a tracker-like object's fixed architecture contract."""
-
-    _validate_tracker_config(tracker.config)
-
-
 def _config_value(config: Any, path: tuple[str, ...], *, prefix: str) -> Any:
     current = config
     for name in path:

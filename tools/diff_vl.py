@@ -121,11 +121,11 @@ def _bundle_family(bundle_path: str) -> str:
         return family
     model_type = str(header.get("model_type") or "")
     if model_type:
-        from tensorrt_model_connect.families import find_plugin
+        from tensorrt_model_connect.families import find_model
 
-        plugin = find_plugin(model_type)
-        if plugin is not None:
-            return str(getattr(plugin, "name", "") or "")
+        model = find_model(model_type)
+        if model is not None:
+            return model.__package__.rsplit(".", 1)[-1]
     return ""
 
 

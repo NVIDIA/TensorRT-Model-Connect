@@ -57,7 +57,7 @@ class TestMambaPlugin:
 
     def test_a_log_transform(self, tmp_path):
         """A_log should be transformed to A = -exp(A_log)."""
-        from tensorrt_model_connect.families.mamba import plugin
+        import tensorrt_model_connect.families.mamba.model as plugin
 
         config = {
             "model_type": "mamba",
@@ -84,7 +84,7 @@ class TestMambaPlugin:
 
     def test_in_proj_split(self, tmp_path):
         """in_proj should be split into w_in_x and w_in_z."""
-        from tensorrt_model_connect.families.mamba import plugin
+        import tensorrt_model_connect.families.mamba.model as plugin
 
         config = {
             "model_type": "mamba",
@@ -117,7 +117,7 @@ class TestMambaPlugin:
 
     def test_x_proj_split(self, tmp_path):
         """x_proj should be split into dt, B, C projections."""
-        from tensorrt_model_connect.families.mamba import plugin
+        import tensorrt_model_connect.families.mamba.model as plugin
 
         config = {
             "model_type": "mamba",
@@ -154,7 +154,7 @@ class TestMambaPlugin:
 
     def test_conv1d_reshaped(self, tmp_path):
         """conv1d weight [d_inner, 1, conv_kernel] should be reshaped to [d_inner, conv_kernel]."""
-        from tensorrt_model_connect.families.mamba import plugin
+        import tensorrt_model_connect.families.mamba.model as plugin
 
         config = {
             "model_type": "mamba",
@@ -178,7 +178,7 @@ class TestMambaPlugin:
 
     def test_metadata_keys(self, tmp_path):
         """Mamba-specific dimension metadata should be stored."""
-        from tensorrt_model_connect.families.mamba import plugin
+        import tensorrt_model_connect.families.mamba.model as plugin
 
         config = {
             "model_type": "mamba",

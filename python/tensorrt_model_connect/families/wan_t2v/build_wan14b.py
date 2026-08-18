@@ -39,12 +39,12 @@ def main():
           file=sys.stderr)
 
     # 3. Override plugin class variables for 14B
-    from tensorrt_model_connect.families.wan_t2v import WanT2VPlugin
-    WanT2VPlugin._DIT_DIM = dit_dim
-    WanT2VPlugin._DIT_NUM_HEADS = dit_cfg["num_attention_heads"]
-    WanT2VPlugin._DIT_NUM_LAYERS = dit_cfg["num_layers"]
-    WanT2VPlugin._DIT_FFN_DIM = dit_cfg["ffn_dim"]
-    WanT2VPlugin._DIT_CONTEXT_DIM = dit_cfg["text_dim"]
+    from tensorrt_model_connect.families.wan_t2v import model as wan_model
+    wan_model._DIT_DIM = dit_dim
+    wan_model._DIT_NUM_HEADS = dit_cfg["num_attention_heads"]
+    wan_model._DIT_NUM_LAYERS = dit_cfg["num_layers"]
+    wan_model._DIT_FFN_DIM = dit_cfg["ffn_dim"]
+    wan_model._DIT_CONTEXT_DIM = dit_cfg["text_dim"]
 
     # 4. Inject video dimensions into the model_index.json (config.raw)
     model_index_path = Path(model_dir) / "model_index.json"
@@ -57,9 +57,9 @@ def main():
     model_index_path.write_text(json.dumps(model_index, indent=2))
 
     # 5. Build using the standard pipeline
-    from tensorrt_model_connect.engine_builder import build_bundle
-    build_bundle._model_id_or_path_orig = args.model_id
-    build_bundle(model_dir, args.output, verbose=args.verbose)
+    from tensorrt_model_connect.engine_builder import build
+
+    build(str(model_dir), args.output, verbose=args.verbose)
 
     print("\n[14b] Done! Run with:", file=sys.stderr)
     print(f"  ./build/trtmc generate-video {args.output} "

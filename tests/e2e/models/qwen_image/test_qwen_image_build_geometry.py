@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from tensorrt_model_connect.families.qwen_image.config import ModelConfig
-from tensorrt_model_connect.families.qwen_image.plugin import (
+from tensorrt_model_connect.families.qwen_image.model import (
     _apply_static_image_geometry,
 )
 

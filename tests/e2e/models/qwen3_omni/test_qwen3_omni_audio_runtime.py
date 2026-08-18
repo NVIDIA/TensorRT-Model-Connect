@@ -24,8 +24,8 @@ from tensorrt_model_connect.families.qwen3_omni.audio_runtime import (
     _thinker_forward_input_ids,
 )
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.qwen3_omni.plugin import (
-    Qwen3OmniPlugin,
+from tensorrt_model_connect.families.qwen3_omni import model as Qwen3OmniModel
+from tensorrt_model_connect.families.qwen3_omni.model import (
     _talker_model_locator,
 )
 
@@ -173,7 +173,7 @@ def test_talker_model_locator_preserves_deliberate_local_directory(tmp_path) -> 
 
 
 def test_bundle_config_persists_portable_talker_locator() -> None:
-    plugin = Qwen3OmniPlugin()
+    plugin = Qwen3OmniModel
     plugin._talker_model_id = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     plugin._talker_model_revision = "abc123"
 
@@ -185,7 +185,7 @@ def test_bundle_config_persists_portable_talker_locator() -> None:
 
 def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen3_omni.plugin")
+        "tensorrt_model_connect.families.qwen3_omni.model")
     config = ModelConfig.create_tiny("qwen3_omni")
 
     class FakeReader:
@@ -224,7 +224,7 @@ def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(plugin_module, "_has_tensor", has_tensor)
     monkeypatch.setattr(plugin_module, "_load_tensor", load_tensor)
 
-    weights = plugin_module.Qwen3OmniPlugin().load_weights(
+    weights = plugin_module.load_weights(
         str(tmp_path), config, precision="bf16")
 
     assert weights["embedding"].dtype.name == "bfloat16"
@@ -239,7 +239,7 @@ def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> N
 
 def test_thinker_moe_batches_only_routed_expert_multiplies(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen3_omni.plugin")
+        "tensorrt_model_connect.families.qwen3_omni.model")
     constants = []
     matrix_multiplies = []
     gathers = []

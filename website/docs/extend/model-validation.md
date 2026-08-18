@@ -18,11 +18,11 @@ tests/e2e/models/<e2e-family>/MODEL.toml
 ```
 
 Each descriptor `id` must match its own directory. The three physical names
-normally match, but the Python plugin and E2E manifest select the runtime owner
-through the exact family-owned `runtime_strategy`. Do not substitute a generic
-task name such as `text_generation_causal`; `task_strategy` selects the reusable
-runner/comparator contract, while `runtime_strategy` selects a concrete native
-model DSO.
+normally match, but the Python family `model.py` and E2E manifest select the
+runtime owner through the exact family-owned `runtime_strategy`. Do not
+substitute a generic task name such as `text_generation_causal`;
+`task_strategy` selects the reusable runner/comparator contract, while
+`runtime_strategy` selects a concrete native model DSO.
 
 Before testing, record:
 

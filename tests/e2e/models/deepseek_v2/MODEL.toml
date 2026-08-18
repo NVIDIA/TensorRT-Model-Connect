@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "deepseek_v2"
-plugin = "deepseek_v2"
 test_manifests = [
   "manifests/deepseek-v2-lite-tp4.json",
   "manifests/deepseek-v2-lite.json",

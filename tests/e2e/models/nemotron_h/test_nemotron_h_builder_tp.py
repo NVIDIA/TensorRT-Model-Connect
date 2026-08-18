@@ -16,7 +16,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     nemotron_h_module = importlib.import_module(
-        "tensorrt_model_connect.families.nemotron_h.plugin")
+        "tensorrt_model_connect.families.nemotron_h.model")
     from tensorrt_model_connect.families.nemotron_h import tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
@@ -147,7 +147,7 @@ def test_nemotron_h_plugin_routes_parallel_builds(monkeypatch):
     monkeypatch.setattr(tp_builder, "build_nemotron_h_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = nemotron_h_module.NemotronHPlugin().build_engine(
+    result = nemotron_h_module.build_engine(
         _config(), _weights(), 17,
         verbose=True,
         debug_layer_outputs=True,

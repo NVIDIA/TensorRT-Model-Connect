@@ -80,7 +80,7 @@ class TestGPT2BuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from tensorrt_model_connect.families.gpt2 import plugin
+        from tensorrt_model_connect.families.gpt2 import model as plugin
         config = {
             "model_type": "gpt2",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -96,7 +96,7 @@ class TestGPT2BuildEngine:
         assert isinstance(engine, bytes) and len(engine) > 0
 
     def test_load_weights(self, tmp_path):
-        from tensorrt_model_connect.families.gpt2 import plugin
+        from tensorrt_model_connect.families.gpt2 import model as plugin
         config = {
             "model_type": "gpt2",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,

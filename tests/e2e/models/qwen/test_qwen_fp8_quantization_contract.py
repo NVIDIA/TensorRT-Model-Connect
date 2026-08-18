@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import fnmatch
 
-from tensorrt_model_connect.families.qwen.plugin import QwenPlugin
-
-
+from tensorrt_model_connect.families.qwen import model as QwenModel
 def test_qwen_fp8_quantizes_only_up_projections() -> None:
-    patterns = QwenPlugin().quant_exclude_patterns("fp8")
+    patterns = QwenModel.quant_exclude_patterns("fp8")
     projection_names = {
         (layer, projection): f"qwen/layer.{layer}.w_{projection}"
         for layer in range(28)

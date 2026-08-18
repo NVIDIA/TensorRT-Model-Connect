@@ -817,7 +817,7 @@ def _build_flux_dit_engine_batched(
     verbose: bool,
 ) -> bytes:
     """Build a dynamic-leading-batch FLUX.1 DiT TRT engine."""
-    from ...engine_builder import add_dynamic_batch_profile
+    from ...tvm_ffi.graph_build import add_dynamic_batch_profile
 
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")

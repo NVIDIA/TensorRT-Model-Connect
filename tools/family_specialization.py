@@ -25,9 +25,7 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = 1
 FAMILIES_PACKAGE = "tensorrt_model_connect.families"
-APPROVED_FAMILIES_ROOT_IMPORTS = frozenset({"base"})
-MODEL_ROOT_FILES = frozenset({"__init__.py", "model.py", "parallel.py", "runtime.py"})
-MODEL_ROOT_DIRECTORIES = frozenset({"components"})
+APPROVED_FAMILIES_ROOT_IMPORTS = frozenset()
 MISPLACED_MODEL_PATHS = frozenset(
     {
         "runtime_config_schema.py",
@@ -85,7 +83,7 @@ class DynamicEntryPoint:
 def family_dirs(repo_root: Path, selected: tuple[str, ...]) -> list[Path]:
     root = repo_root / "python/tensorrt_model_connect/families"
     discovered = sorted(
-        path for path in root.iterdir() if (path / "plugin.py").is_file()
+        path for path in root.iterdir() if (path / "model.py").is_file()
     )
     if not selected:
         return discovered
@@ -268,15 +266,31 @@ def _dynamic_entrypoints(
     symbols: dict[str, set[str]] = defaultdict(set)
     entries: list[DynamicEntryPoint] = []
 
-    plugin_module = str(manifest.get("module", "plugin"))
-    plugin_name = f"{FAMILIES_PACKAGE}.{family_dir.name}.{plugin_module}"
-    if plugin_name in modules:
-        roots.add(plugin_name)
+    model_path = family_dir / "model.py"
+    model_name = f"{FAMILIES_PACKAGE}.{family_dir.name}.model"
+    model_exists = model_name in modules
+    model_symbols = _module_bound_names(modules[model_name]) if model_exists else set()
+    for required_symbol in ("matches", "build"):
+        entries.append(
+            DynamicEntryPoint(
+                source="family model convention",
+                path="model.py",
+                symbol=required_symbol,
+                exists=model_path.is_file(),
+                module=model_name if model_exists else None,
+                symbol_exists=(required_symbol in model_symbols) if model_exists else None,
+            )
+        )
+    if model_exists:
+        roots.add(model_name)
+        symbols[model_name].update({"matches", "build"})
 
     seen: set[tuple[str, str | None]] = set()
     for value in _walk_strings(manifest):
         parts = [part.strip() for part in value.split("|")]
         for index, part in enumerate(parts):
+            if "*" in part or "?" in part:
+                continue
             if not re.search(r"\.(?:py|txt)$", part):
                 continue
             symbol = None
@@ -411,11 +425,11 @@ def _convention_tool_roots(
     roots: set[str] = set()
     sources: dict[str, list[str]] = defaultdict(list)
     missing: list[dict[str, str]] = []
-    plugin_text = (family_dir / "plugin.py").read_text(encoding="utf-8")
+    model_text = (family_dir / "model.py").read_text(encoding="utf-8")
     is_vision_language = bool(
         re.search(
             r"runtime_strategy\s*=\s*['\"][A-Za-z0-9_]+_vision_language['\"]",
-            plugin_text,
+            model_text,
         )
     )
     manifests = repo_root / "tests/e2e/models" / family_dir.name / "manifests"
@@ -436,7 +450,13 @@ def _convention_tool_roots(
             / family_dir.name
             / "vl_debug_runner.py"
         )
-        if not tool_path.is_file():
+        family_path = family_dir / "vl_debug_runner.py"
+        if family_path.is_file():
+            module = f"{FAMILIES_PACKAGE}.{family_dir.name}.vl_debug_runner"
+            if module in modules:
+                roots.add(module)
+                sources[module].append("tools/diff_vl.py::<family-dispatch>")
+        elif not tool_path.is_file():
             missing.append(
                 {
                     "source": "tools/diff_vl.py::<family-dispatch>",
@@ -509,6 +529,35 @@ def _attribute_symbol_roots(info: ModuleInfo) -> dict[str, set[str]]:
     return roots
 
 
+def _self_module_symbol_roots(info: ModuleInfo) -> set[str]:
+    """Resolve aliases such as ``graph_ops = sys.modules[__name__]``."""
+    aliases: set[str] = set()
+    for node in info.tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if not (
+            isinstance(value, ast.Subscript)
+            and isinstance(value.value, ast.Attribute)
+            and isinstance(value.value.value, ast.Name)
+            and value.value.value.id == "sys"
+            and value.value.attr == "modules"
+            and isinstance(value.slice, ast.Name)
+            and value.slice.id == "__name__"
+        ):
+            continue
+        aliases.update(
+            target.id for target in node.targets if isinstance(target, ast.Name)
+        )
+    return {
+        node.attr
+        for node in ast.walk(info.tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in aliases
+    }
+
+
 def _unreachable_symbols(
     modules: dict[str, ModuleInfo],
     production_modules: set[str],
@@ -543,6 +592,7 @@ def _unreachable_symbols(
             for name, nodes in definitions.items()
         }
         roots = set(external_roots[module_name]) & names
+        roots.update(_self_module_symbol_roots(info) & names)
         for node in info.tree.body:
             if not isinstance(
                 node,
@@ -688,17 +738,13 @@ def _sibling_imports(family: str, modules: dict[str, ModuleInfo]) -> list[dict[s
 
 
 def _noncanonical_model_paths(family_dir: Path) -> list[str]:
-    model_dir = family_dir / "model"
-    if not model_dir.is_dir():
-        return ["model/"]
-    result: list[str] = []
-    for path in sorted(model_dir.iterdir()):
-        if path.name == "__pycache__":
-            continue
-        if path.is_file() and path.name not in MODEL_ROOT_FILES:
-            result.append(path.relative_to(family_dir).as_posix())
-        elif path.is_dir() and path.name not in MODEL_ROOT_DIRECTORIES:
-            result.append(path.relative_to(family_dir).as_posix() + "/")
+    result = []
+    if not (family_dir / "model.py").is_file():
+        result.append("model.py")
+    if (family_dir / "model").exists():
+        result.append("model/")
+    if (family_dir / "plugin.py").exists():
+        result.append("plugin.py")
     return result
 
 
@@ -708,7 +754,7 @@ def _source_metrics(family_dir: Path) -> dict[str, int]:
         for path in family_dir.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
     ]
-    model_files = [path for path in files if (family_dir / "model") in path.parents]
+    model_files = [path for path in files if path == family_dir / "model.py"]
 
     def lines(paths: list[Path]) -> int:
         total = 0
@@ -835,7 +881,7 @@ def audit_family(
     tool_model_modules = sorted(
         info.relative_path
         for module_name, info in modules.items()
-        if module_name in tool_modules and info.relative_path.startswith("model/")
+        if module_name in tool_modules
     )
     violations: list[dict[str, Any]] = []
     categories = {

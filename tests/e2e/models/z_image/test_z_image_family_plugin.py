@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for Z-Image family plugin and serialization helpers.
+"""Unit tests for Z-Image family model and serialization helpers.
 
 Trace: ARCH-FAM-001, UD-FAM-ZIMAGE
-Intent: Validate Z-Image diffusion family plugin matching, weight serialization, and image config encoding
+Intent: Validate Z-Image family matching, weight serialization, and image config encoding
 Preconditions: Synthetic Z-Image model config and weight tensors are available
-Postconditions: Plugin matches Z-Image aliases, serializes preprocessor weights correctly, and rejects build_engine
+Postconditions: The model matches Z-Image aliases and serializes preprocessor weights correctly
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.z_image as zimg_mod
+    from tensorrt_model_connect.families.z_image import model as zimg_mod
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -72,21 +72,17 @@ def _decode_blob(blob: bytes) -> tuple[dict[str, dict], bytes]:
     return index, payload
 
 
-def test_matches_and_build_engine_not_supported() -> None:
-    """Intent: verify alias matching and explicit build_engine rejection.
+def test_matches_declared_z_image_aliases() -> None:
+    """Intent: verify alias matching.
 
-    Preconditions: plugin object is imported.
-    Postconditions: all declared aliases match and build_engine raises NotImplementedError.
+    Preconditions: the family model module is imported.
+    Postconditions: all declared aliases match and a sibling family does not.
     """
-    plugin = zimg_mod.plugin
-    assert plugin.matches("z_image")
-    assert plugin.matches("zimage")
-    assert plugin.matches("z-image")
-    assert plugin.matches("zimagepipeline")
-    assert not plugin.matches("pixart")
-
-    with pytest.raises(NotImplementedError, match="build_components"):
-        plugin.build_engine(_cfg(), {}, 16)
+    assert zimg_mod.matches("z_image")
+    assert zimg_mod.matches("zimage")
+    assert zimg_mod.matches("z-image")
+    assert zimg_mod.matches("zimagepipeline")
+    assert not zimg_mod.matches("pixart")
 
 
 def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
@@ -99,7 +95,7 @@ def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
     model_dir.mkdir()
     (model_dir / "model_index.json").write_text("{}")
 
-    weights = zimg_mod.plugin.load_weights(str(model_dir), _cfg())
+    weights = zimg_mod.load_weights(str(model_dir), _cfg())
     assert weights["_model_format"] == "diffusers"
     assert weights["_text_encoder_dir"].endswith("text_encoder")
     assert weights["_transformer_dir"].endswith("transformer")
@@ -110,7 +106,7 @@ def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
     bad_dir = tmp_path / "zimg_bad"
     bad_dir.mkdir()
     with pytest.raises(ValueError, match="Expected diffusers format"):
-        zimg_mod.plugin.load_weights(str(bad_dir), _cfg())
+        zimg_mod.load_weights(str(bad_dir), _cfg())
 
 
 @pytest.mark.parametrize(
@@ -188,7 +184,7 @@ def test_build_components_calls_all_subbuilders(
         "_vae_dir": "/model/vae",
     }
 
-    out = zimg_mod.plugin.build_components(
+    out = zimg_mod.build_components(
         "/model",
         _cfg(image_height=1024, image_width=768, _fp32_layers=fp32_layers),
         weights,
@@ -292,7 +288,7 @@ def test_build_components_tensor_parallel_builds_rank_denoisers(
         "_vae_dir": "/model/vae",
     }
 
-    out = zimg_mod.plugin.build_components(
+    out = zimg_mod.build_components(
         "/model",
         _cfg(image_height=512, image_width=512),
         weights,
@@ -315,15 +311,15 @@ def test_get_diffusion_config_uses_correct_latent_math() -> None:
     Preconditions: image dimensions are overridden in config.raw.
     Postconditions: returned config reflects expected backend type and dimensions.
     """
-    dc = zimg_mod.plugin.get_diffusion_config(_cfg(image_height=1024, image_width=768))
+    dc = zimg_mod.get_diffusion_config(_cfg(image_height=1024, image_width=768))
 
     assert dc["diffusion_backend_type"] == "z_image_2d"
     assert dc["video_height"] == 1024
     assert dc["video_width"] == 768
     assert dc["num_inference_steps"] == 9
     assert dc["guidance_scale"] == 0.0
-    assert dc["scale_factor_spatial"] == zimg_mod.plugin._VAE_SCALE_FACTOR
-    assert dc["dit_num_layers"] == zimg_mod.plugin._DIT_NUM_LAYERS
+    assert dc["scale_factor_spatial"] == zimg_mod._VAE_SCALE_FACTOR
+    assert dc["dit_num_layers"] == zimg_mod._DIT_NUM_LAYERS
 
 
 def test_serialize_preprocessor_weights_maps_and_converts_values() -> None:

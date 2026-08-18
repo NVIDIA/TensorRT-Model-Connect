@@ -196,7 +196,7 @@ def test_load_weights_mixed_branches_and_fallbacks(monkeypatch: pytest.MonkeyPat
     }
     _patch_tensor_io(monkeypatch, tensors)
 
-    weights = qwen3_5.plugin.load_weights("/unused", cfg)
+    weights = qwen3_5.load_weights("/unused", cfg)
 
     np.testing.assert_allclose(weights["embedding"], tensors["model.embed_tokens.weight"])
 
@@ -281,7 +281,7 @@ def test_get_bundle_config_overrides_normalizes_hybrid_fields():
         raw=raw,
     )
 
-    overrides = qwen3_5.plugin.get_bundle_config_overrides(cfg)
+    overrides = qwen3_5.get_bundle_config_overrides(cfg)
     assert overrides["layer_types"] == ["deltanet", "attention", "unknown"]
     assert overrides["num_mamba_layers"] == 1
     assert overrides["num_attention_layers"] == 1

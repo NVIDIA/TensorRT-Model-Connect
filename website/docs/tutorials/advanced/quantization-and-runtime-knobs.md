@@ -34,15 +34,14 @@ The advanced knobs change either:
 <Diagram
   src="/img/diagrams/tutorials/advanced/knob-scopes.svg"
   alt="Three knob boundaries where build-time inputs produce a native or optimized bundle, load options create IPipeline, and request options affect a typed task call"
-  caption="Build-time inputs shape the artifact, although a family native-default gate sees only ModelConfig; load options apply while creating IPipeline, and request options apply to the later task operation."
+  caption="Build-time inputs shape the artifact inside the selected family model module; load options apply while creating IPipeline, and request options apply to the later task operation."
 />
 
-Family routing runs before the optimized-runtime probe. Eligible dense Qwen3
-and Llama checkpoints declare a native default and skip that probe. For other
-requests, the probe matches the resolved model revision, active target, and
-effective public build options. A single supported profile owns the build; no
-supported profile falls back to the native path. A build failure after a
-profile claims the request is terminal.
+The shared builder resolves one family and calls its `model.build()` once.
+Most family modules run their native recipe directly. Qwen's module may match
+the resolved model revision, active target, and effective public options
+against its exact optimized profiles; no match runs Qwen's native recipe, while
+a claimed profile owns the build and fails terminally.
 
 ## Precision
 
@@ -55,9 +54,9 @@ $TRTMC build Qwen/Qwen3-0.6B \
 Supported precision choices in the CLI are `fp32`, `fp16`, and `bf16`.
 
 Precision changes the numeric type used by the engine. It affects memory, speed, and numerical behavior.
-For this eligible dense Qwen3 checkpoint, explicitly requesting FP16 keeps the
-family's native route but opts out of its BF16 full-context native-KV contract;
-the family uses its legacy native builder instead.
+For this eligible dense Qwen3 checkpoint, explicitly requesting FP16 opts out
+of its BF16 full-context native-KV contract; Qwen's `model.py` selects its
+compatible family-local native graph instead.
 
 | Precision | Typical use |
 | --- | --- |
@@ -65,11 +64,11 @@ the family uses its legacy native builder instead.
 | `fp16` | Common GPU inference default. |
 | `bf16` | Useful when model/backend support favors BF16 behavior. |
 
-For families that reach provider probing, precision is also an
-optimized-profile input. Changing it can cause a profile to start or stop
-matching, so two builds that differ only in the CLI flag can still use different
-runtime implementations. Dense Qwen3 and Llama architectures that claim their
-native default do not re-enter provider selection when precision changes.
+For Qwen requests that use its exact-profile selection, precision is also a
+profile input. Changing it can cause a profile to start or stop matching, so
+two builds that differ only in the CLI flag can still use different runtime
+implementations. Other families interpret precision entirely inside their own
+native recipe.
 
 ## Quantization
 
@@ -80,7 +79,7 @@ $TRTMC build Qwen/Qwen3-0.6B \
   --quant-calibration-samples 512
 ```
 
-The current quantization surface accepts `fp8`, `int8`, `int8_sq`, `int4`, `int4_awq`, `nvfp4`, and `w4a8`. Family plugins can exclude weight patterns, provide calibration data, and return a family-specific calibration adapter through the `FamilyPlugin` protocol.
+The current quantization surface accepts `fp8`, `int8`, `int8_sq`, `int4`, `int4_awq`, `nvfp4`, and `w4a8`. A family `model.py` can exclude weight patterns, provide calibration data, and select its family-specific calibration adapter directly.
 
 Qwen2.5-VL and Qwen3-VL use image-plus-text calibration rather than the
 generic causal-language-model adapter. See
@@ -98,17 +97,15 @@ Quantization is not just a compression flag. It is a contract between:
 
 | Part | Responsibility |
 | --- | --- |
-| Family plugin | Exclude sensitive weights, supply calibration prompts or adapters, support family-specific scale collection. |
+| Family `model.py` | Exclude sensitive weights, supply calibration prompts or adapters, support family-specific scale collection. |
 | Quantization registry | Interpret format names and format-specific policy. |
 | Builder | Apply quantization and write required metadata/scales. |
 | Runtime | Load and execute the resulting engine; it should not redo calibration. |
 
-For requests that reach provider probing, quantization format, calibration
-settings, and scale inputs are forwarded as public build options. If the exact
-combination is not qualified by an optimized implementation, the command
-proceeds through the native builder instead. The dense Qwen3 example above
-already owns the native route, so quantization opts into its compatible legacy
-native builder without probing a provider.
+Qwen includes quantization format, calibration settings, and scale inputs in
+its family-owned exact-profile decision. If the combination is not selected,
+Qwen continues through its native recipe. Other family modules consume those
+options directly without a shared provider probe.
 
 ## Reusing scales
 
@@ -144,8 +141,8 @@ request, the pipeline reads the state's preferred row count and chooses a
 matching decoder context.
 
 For eligible dense Qwen3 and Llama, `--dynamic-kv-cache` deliberately opts out
-of the native full-context fixed-KV route and uses the compatible legacy
-builder. A native full-context bundle rejects runtime `--kv-cache-size`; its
+of the native full-context fixed-KV route and uses the compatible family-local
+dynamic-KV recipe. A native full-context bundle rejects runtime `--kv-cache-size`; its
 physical capacity is fixed to the model context and shared by prefill and
 decode.
 

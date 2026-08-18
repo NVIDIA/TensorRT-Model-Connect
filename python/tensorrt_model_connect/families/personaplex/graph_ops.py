@@ -347,33 +347,6 @@ def add_gelu_erf(
     return result.get_output(0)
 
 
-def add_activation(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    activation_type: str,
-    dtype: np.dtype = np.float32,
-) -> trt.ITensor:
-    """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
-        return add_gelu_new(network, inp, dtype=dtype)
-    elif activation_type == "relu":
-        act = network.add_activation(inp, trt.ActivationType.RELU)
-        return act.get_output(0)
-    elif activation_type in ("relu2", "squared_relu"):
-        relu = network.add_activation(inp, trt.ActivationType.RELU)
-        sq = network.add_elementwise(
-            relu.get_output(0), relu.get_output(0),
-            trt.ElementWiseOperation.PROD)
-        return sq.get_output(0)
-    elif activation_type == "silu":
-        sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
-        swish = network.add_elementwise(
-            inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-        return swish.get_output(0)
-    else:
-        raise ValueError(f"Unsupported activation: {activation_type}")
-
-
 def compute_alibi_slopes(num_heads: int) -> np.ndarray:
     """Compute ALiBi slopes for each attention head (from the ALiBi paper).
 
@@ -397,26 +370,7 @@ def compute_alibi_slopes(num_heads: int) -> np.ndarray:
         return np.array(slopes_a + slopes_b, dtype=np.float32)
 
 
-def add_self_attention_block_with_rope(
-    network: trt.INetworkDefinition,
-    hidden: trt.ITensor,
-    w_q: np.ndarray,
-    w_k: np.ndarray,
-    w_v: np.ndarray,
-    w_o: np.ndarray,
-    hidden_size: int,
-    num_heads: int,
-    seq_length: int,
-    cos_table: np.ndarray,
-    sin_table: np.ndarray,
-    q_bias: np.ndarray | None = None,
-    k_bias: np.ndarray | None = None,
-    v_bias: np.ndarray | None = None,
-    o_bias: np.ndarray | None = None,
-    dtype: np.dtype = np.float32,
-    causal: bool = False,
-    interleaved_rope: bool = False,
-) -> trt.ITensor:
+def add_self_attention_block_with_rope(network: trt.INetworkDefinition, hidden: trt.ITensor, w_q: np.ndarray, w_k: np.ndarray, w_v: np.ndarray, w_o: np.ndarray, hidden_size: int, num_heads: int, seq_length: int, cos_table: np.ndarray, sin_table: np.ndarray, q_bias: np.ndarray | None=None, k_bias: np.ndarray | None=None, v_bias: np.ndarray | None=None, o_bias: np.ndarray | None=None, dtype: np.dtype=np.float32, causal: bool=False) -> trt.ITensor:
     """Full self-attention with precomputed RoPE (for vision encoders with 3D RoPE).
 
     Unlike the KV-cache decoder attention, this processes all positions at once
@@ -427,47 +381,26 @@ def add_self_attention_block_with_rope(
     Output: [seq_length, hidden_size]
     """
     head_dim = hidden_size // num_heads
-
-    # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
     q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
     k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k, dtype=dtype)
     v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v, dtype=dtype)
-
     if q_bias is not None:
         q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
     if k_bias is not None:
         k = add_bias_sum(network, k, hidden_size, k_bias, dtype=dtype)
     if v_bias is not None:
         v = add_bias_sum(network, v, hidden_size, v_bias, dtype=dtype)
-
     rope_dim = head_dim
-    cos_half = cos_table[:, : rope_dim // 2]
-    sin_half = sin_table[:, : rope_dim // 2]
-    cos_const = add_constant(
-        network, (1, seq_length, rope_dim // 2), cos_half.reshape(1, seq_length, -1), dtype=dtype)
-    sin_const = add_constant(
-        network, (1, seq_length, rope_dim // 2), sin_half.reshape(1, seq_length, -1), dtype=dtype)
-
-    q = add_apply_rope_native_sequence(
-        network, q, num_heads, head_dim, cos_const, sin_const,
-        rotary_embedding_dim=rope_dim, interleaved=interleaved_rope,
-        sequence_length=seq_length)
-    k = add_apply_rope_native_sequence(
-        network, k, num_heads, head_dim, cos_const, sin_const,
-        rotary_embedding_dim=rope_dim, interleaved=interleaved_rope,
-        sequence_length=seq_length)
-
-    context_flat = add_attention_from_rows(
-        network, q, k, v,
-        num_heads=num_heads, head_dim=head_dim,
-        q_seq=seq_length, kv_seq=seq_length, causal=causal)
-
-    # Output projection
-    out = add_matmul_rhs_constant(
-        network, context_flat, hidden_size, hidden_size, w_o, dtype=dtype)
+    cos_half = cos_table[:, :rope_dim // 2]
+    sin_half = sin_table[:, :rope_dim // 2]
+    cos_const = add_constant(network, (1, seq_length, rope_dim // 2), cos_half.reshape(1, seq_length, -1), dtype=dtype)
+    sin_const = add_constant(network, (1, seq_length, rope_dim // 2), sin_half.reshape(1, seq_length, -1), dtype=dtype)
+    q = add_apply_rope_native_sequence(network, q, num_heads, head_dim, cos_const, sin_const, rotary_embedding_dim=rope_dim, interleaved=True, sequence_length=seq_length)
+    k = add_apply_rope_native_sequence(network, k, num_heads, head_dim, cos_const, sin_const, rotary_embedding_dim=rope_dim, interleaved=True, sequence_length=seq_length)
+    context_flat = add_attention_from_rows(network, q, k, v, num_heads=num_heads, head_dim=head_dim, q_seq=seq_length, kv_seq=seq_length, causal=causal)
+    out = add_matmul_rhs_constant(network, context_flat, hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
         out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
-
     return out
 
 

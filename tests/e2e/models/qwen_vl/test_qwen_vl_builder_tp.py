@@ -46,7 +46,7 @@ def test_qwen_vl_plugin_routes_parallel_builds(
     monkeypatch, qwen3: bool, tp_size: int, deepstack_num_levels: int
 ) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_vl.plugin")
+        "tensorrt_model_connect.families.qwen_vl.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -56,7 +56,7 @@ def test_qwen_vl_plugin_routes_parallel_builds(
     monkeypatch.setattr(module, "build_qwen_vl_tp_decoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=tp_size, rank=1)
-    result = module.QwenVLPlugin().build_engine(
+    result = module.build_engine(
         _config(qwen3=qwen3),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         23,
@@ -75,7 +75,7 @@ def test_qwen_vl_plugin_routes_parallel_builds(
 
 def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_vl.plugin")
+        "tensorrt_model_connect.families.qwen_vl.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -84,7 +84,7 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
 
     monkeypatch.setattr(module, "build_standard_decoder_engine", fake_build)
 
-    result = module.QwenVLPlugin().build_engine(
+    result = module.build_engine(
         _config(qwen3=False),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         31,
@@ -104,8 +104,8 @@ def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.default_decoder")
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_vl.plugin")
-    plugin = plugin_module.QwenVLPlugin()
+        "tensorrt_model_connect.families.qwen_vl.model")
+    plugin = plugin_module
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -191,7 +191,7 @@ def test_qwen25_vl_lora_keeps_dual_profile_prefill(monkeypatch) -> None:
 
 def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_vl.plugin")
+        "tensorrt_model_connect.families.qwen_vl.model")
     vision_module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder")
     calls: dict[str, object] = {}
@@ -211,7 +211,7 @@ def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
         module._VISION_COMPONENT,
         module._VISION_LAYER_OFFSET + 5,
     ]
-    result = module.QwenVLPlugin().build_vision_engine(
+    result = module.build_vision_engine(
         "/tmp/model", config, {}, precision="fp16")
 
     assert result == b"qwen3-vl-vision-plan"
@@ -221,7 +221,7 @@ def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
 
 def test_qwen3_vl_vision_preserves_bf16_precision(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_vl.plugin")
+        "tensorrt_model_connect.families.qwen_vl.model")
     vision_module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder")
     calls: dict[str, object] = {}
@@ -238,7 +238,7 @@ def test_qwen3_vl_vision_preserves_bf16_precision(monkeypatch) -> None:
         vision_module, "build_qwen3_vl_vision_engine", fake_build)
 
     config = _config(qwen3=True)
-    result = module.QwenVLPlugin().build_vision_engine(
+    result = module.build_vision_engine(
         "/tmp/model", config, {}, precision="bf16")
 
     assert result == b"qwen3-vl-bf16-vision-plan"
@@ -247,7 +247,7 @@ def test_qwen3_vl_vision_preserves_bf16_precision(monkeypatch) -> None:
 
 def test_qwen3_vl_text_decoder_component_can_stay_fp32(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_vl.plugin")
+        "tensorrt_model_connect.families.qwen_vl.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -258,7 +258,7 @@ def test_qwen3_vl_text_decoder_component_can_stay_fp32(monkeypatch) -> None:
     config = _config(qwen3=True)
     config.raw["_fp32_layers"] = [module._TEXT_DECODER_COMPONENT]
 
-    result = module.QwenVLPlugin().build_engine(
+    result = module.build_engine(
         config,
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         31,

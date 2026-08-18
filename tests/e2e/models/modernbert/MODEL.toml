@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "modernbert"
-plugin = "modernbert"
 test_manifests = [
   "manifests/modernbert-base-tp4.json",
   "manifests/modernbert-base.json",

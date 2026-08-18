@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "dpr"
-plugin = "dpr"
 test_manifests = [
   "manifests/dpr-ctx-encoder-tp4.json",
   "manifests/dpr-ctx-encoder.json",

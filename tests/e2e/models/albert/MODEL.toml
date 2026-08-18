@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "albert"
-plugin = "albert"
 test_manifests = [
   "manifests/albert-base-tp4.json",
   "manifests/albert-base.json",

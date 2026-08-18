@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for FLUX family plugin and preprocessor serialization.
+"""Unit tests for FLUX family model and preprocessor serialization.
 
 Trace: ARCH-FAM-001, UD-FAM-FLUX
-Intent: Validate FLUX diffusion family plugin matching, weight serialization, and preprocessor blob encoding
+Intent: Validate FLUX diffusion family model matching, weight serialization, and preprocessor blob encoding
 Preconditions: Synthetic FLUX model config and weight tensors are available
-Postconditions: Plugin matches FLUX aliases, serializes preprocessor weights correctly, and rejects build_engine
+Postconditions: The model matches FLUX aliases and serializes preprocessor weights correctly
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import pytest
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.flux as flux_mod
+    from tensorrt_model_connect.families.flux import model as flux_mod
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
@@ -51,8 +51,8 @@ def _module(name: str, **attrs) -> types.ModuleType:
 
 def _decode_blob(blob: bytes) -> tuple[dict[str, dict], bytes]:
     idx_len = struct.unpack("<I", blob[:4])[0]
-    index = json.loads(blob[4:4 + idx_len].decode("utf-8"))
-    payload = blob[4 + idx_len:]
+    index = json.loads(blob[4 : 4 + idx_len].decode("utf-8"))
+    payload = blob[4 + idx_len :]
     return index, payload
 
 
@@ -71,11 +71,9 @@ def test_mistral_hidden_state_indices_map_to_preceding_decoder_layers() -> None:
 def test_flux2_chat_template_does_not_add_a_second_bos(tmp_path) -> None:
     transformer = tmp_path / "transformer"
     transformer.mkdir()
-    (transformer / "config.json").write_text(
-        json.dumps({"_class_name": "Flux2Transformer2DModel"})
-    )
+    (transformer / "config.json").write_text(json.dumps({"_class_name": "Flux2Transformer2DModel"}))
 
-    assert not flux_mod.plugin.diffusion_tokenizer_add_special_tokens(
+    assert not flux_mod.diffusion_tokenizer_add_special_tokens(
         tmp_path,
         detect_tokenizer_add_special_tokens=lambda _path: True,
     )
@@ -84,33 +82,27 @@ def test_flux2_chat_template_does_not_add_a_second_bos(tmp_path) -> None:
 def test_flux1_preserves_detected_tokenizer_special_tokens(tmp_path) -> None:
     transformer = tmp_path / "transformer"
     transformer.mkdir()
-    (transformer / "config.json").write_text(
-        json.dumps({"_class_name": "FluxTransformer2DModel"})
-    )
+    (transformer / "config.json").write_text(json.dumps({"_class_name": "FluxTransformer2DModel"}))
     tokenizer = tmp_path / "tokenizer"
     tokenizer.mkdir()
 
-    assert flux_mod.plugin.diffusion_tokenizer_add_special_tokens(
+    assert flux_mod.diffusion_tokenizer_add_special_tokens(
         tmp_path,
         detect_tokenizer_add_special_tokens=lambda path: path == tokenizer,
     )
 
 
-def test_matches_and_build_engine_not_supported() -> None:
-    """Intent: verify FLUX model aliases and explicit build_engine rejection.
+def test_matches_declared_flux_aliases() -> None:
+    """Intent: verify FLUX model aliases.
 
-    Preconditions: plugin object is imported.
-    Postconditions: aliases match and build_engine raises NotImplementedError.
+    Preconditions: the family model module is imported.
+    Postconditions: owned aliases match and a sibling family does not.
     """
-    plugin = flux_mod.plugin
-    assert plugin.matches("flux")
-    assert plugin.matches("flux.1")
-    assert plugin.matches("flux.2")
-    assert plugin.matches("flux_t2i")
-    assert not plugin.matches("wan_t2v")
-
-    with pytest.raises(NotImplementedError, match="build_components"):
-        plugin.build_engine(_cfg(), {}, 16)
+    assert flux_mod.matches(_cfg(model_type="flux"))
+    assert flux_mod.matches(_cfg(model_type="flux.1"))
+    assert flux_mod.matches(_cfg(model_type="flux.2"))
+    assert flux_mod.matches(_cfg(model_type="flux_t2i"))
+    assert not flux_mod.matches(_cfg(model_type="wan_t2v"))
 
 
 def test_load_weights_reads_component_configs(tmp_path) -> None:
@@ -128,15 +120,13 @@ def test_load_weights_reads_component_configs(tmp_path) -> None:
     (model_dir / "transformer" / "config.json").write_text(
         json.dumps({"num_attention_heads": 3, "guidance_embeds": True})
     )
-    (model_dir / "vae" / "config.json").write_text(
-        json.dumps({"latent_channels": 16})
-    )
+    (model_dir / "vae" / "config.json").write_text(json.dumps({"latent_channels": 16}))
     (model_dir / "scheduler" / "scheduler_config.json").write_text(
         json.dumps({"shift": 1.0, "use_dynamic_shifting": False})
     )
 
     config = _cfg()
-    weights = flux_mod.plugin.load_weights(str(model_dir), config)
+    weights = flux_mod.load_weights(str(model_dir), config)
 
     assert weights["_model_format"] == "diffusers"
     assert "_text_encoder_dir" in weights
@@ -157,7 +147,7 @@ def test_load_weights_rejects_missing_model_index(tmp_path) -> None:
     bad_dir = tmp_path / "flux_bad"
     bad_dir.mkdir()
     with pytest.raises(ValueError, match="Expected diffusers format"):
-        flux_mod.plugin.load_weights(str(bad_dir), _cfg())
+        flux_mod.load_weights(str(bad_dir), _cfg())
 
 
 def test_build_components_with_clip_and_second_t5(
@@ -178,25 +168,29 @@ def test_build_components_with_clip_and_second_t5(
     (model_dir / "vae").mkdir(parents=True)
 
     (model_dir / "text_encoder" / "config.json").write_text(
-        json.dumps({
-            "architectures": ["CLIPTextModel"],
-            "hidden_size": 12,
-            "num_hidden_layers": 2,
-            "num_attention_heads": 3,
-            "intermediate_size": 24,
-            "vocab_size": 99,
-            "max_position_embeddings": 77,
-        })
+        json.dumps(
+            {
+                "architectures": ["CLIPTextModel"],
+                "hidden_size": 12,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 3,
+                "intermediate_size": 24,
+                "vocab_size": 99,
+                "max_position_embeddings": 77,
+            }
+        )
     )
     (model_dir / "text_encoder_2" / "config.json").write_text(
-        json.dumps({
-            "d_model": 64,
-            "num_heads": 8,
-            "d_kv": 8,
-            "d_ff": 128,
-            "num_layers": 3,
-            "vocab_size": 321,
-        })
+        json.dumps(
+            {
+                "d_model": 64,
+                "num_heads": 8,
+                "d_kv": 8,
+                "d_ff": 128,
+                "num_layers": 3,
+                "vocab_size": 321,
+            }
+        )
     )
 
     def load_t5_weights(path, **kwargs):
@@ -294,7 +288,7 @@ def test_build_components_with_clip_and_second_t5(
         },
     }
 
-    out = flux_mod.plugin.build_components(
+    out = flux_mod.build_components(
         str(model_dir),
         _cfg(image_height=80, image_width=96),
         weights,
@@ -392,9 +386,10 @@ def test_build_components_builds_rank_local_flux_dit_for_tp(
     )
 
     from tensorrt_model_connect import trt_compat
+
     monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
 
-    out = flux_mod.plugin.build_components(
+    out = flux_mod.build_components(
         str(model_dir),
         _cfg(image_height=80, image_width=96),
         {
@@ -440,15 +435,17 @@ def test_build_components_treats_text_encoder_as_t5_when_not_clip(
     (model_dir / "vae").mkdir(parents=True)
 
     (model_dir / "text_encoder" / "config.json").write_text(
-        json.dumps({
-            "architectures": ["T5EncoderModel"],
-            "d_model": 48,
-            "num_heads": 6,
-            "d_kv": 8,
-            "d_ff": 96,
-            "num_layers": 2,
-            "vocab_size": 123,
-        })
+        json.dumps(
+            {
+                "architectures": ["T5EncoderModel"],
+                "d_model": 48,
+                "num_heads": 6,
+                "d_kv": 8,
+                "d_ff": 96,
+                "num_layers": 2,
+                "vocab_size": 123,
+            }
+        )
     )
 
     def load_t5_weights(_path, **_kwargs):
@@ -514,7 +511,7 @@ def test_build_components_treats_text_encoder_as_t5_when_not_clip(
         "_transformer_config": {},
     }
 
-    out = flux_mod.plugin.build_components(str(model_dir), _cfg(), weights, verbose=False)
+    out = flux_mod.build_components(str(model_dir), _cfg(), weights, verbose=False)
 
     assert out["text_encoders"] == [("t5", b"t5-plan")]
     assert calls["t5_load"] == 1
@@ -626,7 +623,7 @@ def test_build_flux2_components_forwards_precision_to_mistral(
         },
     }
 
-    out = flux_mod.plugin.build_components(
+    out = flux_mod.build_components(
         str(model_dir),
         _cfg(image_height=1024, image_width=1024),
         weights,
@@ -714,9 +711,10 @@ def test_build_flux2_components_builds_rank_local_dit_for_tp(
     )
 
     from tensorrt_model_connect import trt_compat
+
     monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
 
-    out = flux_mod.plugin.build_components(
+    out = flux_mod.build_components(
         str(model_dir),
         _cfg(image_height=384, image_width=384, max_cache_length=256),
         {
@@ -832,6 +830,7 @@ def test_build_flux2_components_builds_rank_local_fp8_dit_for_tp(
     )
 
     from tensorrt_model_connect import trt_compat
+
     monkeypatch.setattr(trt_compat, "tensorrt_version", lambda: "11.0.0")
 
     fp8_scales = {
@@ -841,7 +840,7 @@ def test_build_flux2_components_builds_rank_local_fp8_dit_for_tp(
         }
     }
 
-    out = flux_mod.plugin.build_components(
+    out = flux_mod.build_components(
         str(model_dir),
         _cfg(image_height=384, image_width=384, max_cache_length=256),
         {
@@ -969,7 +968,7 @@ def test_build_flux2_components_forwards_fp8_scales_to_dit_loader(
         }
     }
 
-    flux_mod.plugin.build_components(
+    flux_mod.build_components(
         str(model_dir),
         _cfg(image_height=1024, image_width=1024),
         weights,
@@ -995,15 +994,14 @@ def test_flux2_mha_forwards_fp8_attention_scales(
     fake_trt.DataType = types.SimpleNamespace(FP8=object())
     monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
     sys.modules.pop("tensorrt_model_connect.graph_ops", None)
-    sys.modules.pop(
-        "tensorrt_model_connect.families.flux.flux2_dit_builder", None)
+    sys.modules.pop("tensorrt_model_connect.families.flux.flux2_dit_builder", None)
 
     def _cleanup_trt_imports() -> None:
         import tensorrt_model_connect.trt_compat as trt_compat
+
         trt_compat._module = None
         sys.modules.pop("tensorrt_model_connect.graph_ops", None)
-        sys.modules.pop(
-            "tensorrt_model_connect.families.flux.flux2_dit_builder", None)
+        sys.modules.pop("tensorrt_model_connect.families.flux.flux2_dit_builder", None)
 
     request.addfinalizer(_cleanup_trt_imports)
 
@@ -1036,8 +1034,8 @@ def test_flux2_mha_forwards_fp8_attention_scales(
     )
 
     out = flux2_builder._mha(
-        object(), "q", "k", "v", 48, 128, 4096,
-        prefix="transformer_blocks.0.attn")
+        object(), "q", "k", "v", 48, 128, 4096, prefix="transformer_blocks.0.attn"
+    )
 
     assert out == "attention-output"
     assert calls["kwargs"]["quant_scales"] == {
@@ -1063,14 +1061,14 @@ def test_get_diffusion_config_guidance_toggle() -> None:
             "attention_head_dim": 6,
         }
     )
-    guided = flux_mod.plugin.get_diffusion_config(cfg_guided)
+    guided = flux_mod.get_diffusion_config(cfg_guided)
     assert guided["num_inference_steps"] == 28
     assert guided["guidance_scale"] == 3.5
     assert guided["guidance_embeds"] == 1
     assert guided["dit_dim"] == 30
 
     cfg_fast = _cfg(_transformer_config={"guidance_embeds": False})
-    fast = flux_mod.plugin.get_diffusion_config(cfg_fast)
+    fast = flux_mod.get_diffusion_config(cfg_fast)
     assert fast["num_inference_steps"] == 4
     assert fast["guidance_scale"] == 0.0
     assert fast["guidance_embeds"] == 0
@@ -1092,7 +1090,7 @@ def test_get_diffusion_config_uses_checkpoint_scheduler() -> None:
         },
     )
 
-    diffusion = flux_mod.plugin.get_diffusion_config(config)
+    diffusion = flux_mod.get_diffusion_config(config)
 
     assert diffusion["flow_shift"] == 1.0
     assert diffusion["use_dynamic_shifting"] == 0
@@ -1112,24 +1110,40 @@ def test_serialize_flux_preprocessor_guidance_key_control() -> None:
         "x_embedder.bias": np.array([1.0, 2.0], dtype=np.float32),
         "context_embedder.weight": np.arange(8, dtype=np.float32).reshape(2, 4),
         "context_embedder.bias": np.array([3.0, 4.0], dtype=np.float32),
-        "time_text_embed.timestep_embedder.linear_1.weight": np.arange(4, dtype=np.float32).reshape(2, 2),
+        "time_text_embed.timestep_embedder.linear_1.weight": np.arange(4, dtype=np.float32).reshape(
+            2, 2
+        ),
         "time_text_embed.timestep_embedder.linear_1.bias": np.array([5.0, 6.0], dtype=np.float32),
-        "time_text_embed.timestep_embedder.linear_2.weight": np.arange(4, dtype=np.float32).reshape(2, 2),
+        "time_text_embed.timestep_embedder.linear_2.weight": np.arange(4, dtype=np.float32).reshape(
+            2, 2
+        ),
         "time_text_embed.timestep_embedder.linear_2.bias": np.array([7.0, 8.0], dtype=np.float32),
-        "time_text_embed.text_embedder.linear_1.weight": np.arange(4, dtype=np.float32).reshape(2, 2),
+        "time_text_embed.text_embedder.linear_1.weight": np.arange(4, dtype=np.float32).reshape(
+            2, 2
+        ),
         "time_text_embed.text_embedder.linear_1.bias": np.array([9.0, 10.0], dtype=np.float32),
-        "time_text_embed.text_embedder.linear_2.weight": np.arange(4, dtype=np.float32).reshape(2, 2),
+        "time_text_embed.text_embedder.linear_2.weight": np.arange(4, dtype=np.float32).reshape(
+            2, 2
+        ),
         "time_text_embed.text_embedder.linear_2.bias": np.array([11.0, 12.0], dtype=np.float32),
-        "time_text_embed.guidance_embedder.linear_1.weight": np.arange(4, dtype=np.float32).reshape(2, 2),
+        "time_text_embed.guidance_embedder.linear_1.weight": np.arange(4, dtype=np.float32).reshape(
+            2, 2
+        ),
         "time_text_embed.guidance_embedder.linear_1.bias": np.array([13.0, 14.0], dtype=np.float32),
-        "time_text_embed.guidance_embedder.linear_2.weight": np.arange(4, dtype=np.float32).reshape(2, 2),
+        "time_text_embed.guidance_embedder.linear_2.weight": np.arange(4, dtype=np.float32).reshape(
+            2, 2
+        ),
         "time_text_embed.guidance_embedder.linear_2.bias": np.array([15.0, 16.0], dtype=np.float32),
     }
 
-    idx_off, _payload_off = _decode_blob(flux_mod._serialize_flux_preprocessor(base, guidance_embeds=False))
+    idx_off, _payload_off = _decode_blob(
+        flux_mod._serialize_flux_preprocessor(base, guidance_embeds=False)
+    )
     assert "condition_embedder.guidance_embedding.0.weight" not in idx_off
 
-    idx_on, payload_on = _decode_blob(flux_mod._serialize_flux_preprocessor(base, guidance_embeds=True))
+    idx_on, payload_on = _decode_blob(
+        flux_mod._serialize_flux_preprocessor(base, guidance_embeds=True)
+    )
     assert "condition_embedder.guidance_embedding.0.weight" in idx_on
 
     max_end = 0

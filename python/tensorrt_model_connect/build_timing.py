@@ -32,6 +32,56 @@ def add_build_timing(timing: dict | None, key: str, seconds: float) -> None:
     phases[key] = float(phases.get(key, 0.0)) + float(seconds)
 
 
+def build_timing_phase(timing: dict | None, key: str) -> float:
+    """Return one accumulated phase duration."""
+    if timing is None:
+        return 0.0
+    phases = timing.get("phases", {})
+    try:
+        return float(phases.get(key, 0.0))
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def untracked_phase_time(
+    elapsed: float,
+    before: float,
+    timing: dict | None,
+    key: str,
+) -> float:
+    """Return elapsed time not already recorded in one nested timing phase."""
+    tracked = max(0.0, build_timing_phase(timing, key) - before)
+    return max(0.0, elapsed - tracked)
+
+
+def compile_time_excluding_weight_load(
+    components_elapsed: float,
+    weights_before_components: float,
+    timing: dict | None,
+) -> float:
+    """Exclude nested component weight loading from component wall time."""
+    component_weights = max(
+        0.0,
+        build_timing_phase(timing, "weights_loading_s")
+        - weights_before_components,
+    )
+    return max(0.0, components_elapsed - component_weights)
+
+
+def untracked_compile_time(
+    measured_compile_elapsed: float,
+    compile_before_components: float,
+    timing: dict | None,
+) -> float:
+    """Return compile wall time not already reported by component builders."""
+    return untracked_phase_time(
+        measured_compile_elapsed,
+        compile_before_components,
+        timing,
+        "trt_compile_s",
+    )
+
+
 def write_build_timing(
     timing: dict | None,
     output_path: str | Path | None = None,

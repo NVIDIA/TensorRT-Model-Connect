@@ -2,14 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "lance"
-plugin = "lance"
 python_profile_specs = [
   "lance_reference|families/lance/python_profile_requirements/lance_reference.lock.txt|families/lance/python_profile_verify.py|true",
 ]
 default_execution_profiles = [
   "reference|lance_reference",
 ]
-module = "plugin"
 model_dir_adapter = "prepare_model.py|resolve_model_dir"
 hf_allow_patterns = [
   "Lance_3B/**",

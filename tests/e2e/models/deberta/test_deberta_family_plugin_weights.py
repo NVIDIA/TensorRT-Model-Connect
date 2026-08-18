@@ -54,7 +54,7 @@ class TestDebertaPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.deberta import plugin
+        import tensorrt_model_connect.families.deberta.model as plugin
 
         config = {
             "model_type": "deberta",
@@ -88,10 +88,10 @@ class TestDebertaPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.deberta import plugin
+        import tensorrt_model_connect.families.deberta.model as plugin
         assert plugin.matches("deberta")
         assert not plugin.matches("deberta-v2")
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.deberta import plugin
+        import tensorrt_model_connect.families.deberta.model as plugin
         assert plugin.runtime_strategy == "deberta_encoder_only"

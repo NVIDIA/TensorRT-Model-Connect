@@ -36,7 +36,7 @@ def _config() -> SimpleNamespace:
 
 
 def test_gpt_neo_plugin_routes_parallel_builds(monkeypatch) -> None:
-    module = importlib.import_module("tensorrt_model_connect.families.gpt_neo.plugin")
+    module = importlib.import_module("tensorrt_model_connect.families.gpt_neo.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -46,7 +46,7 @@ def test_gpt_neo_plugin_routes_parallel_builds(monkeypatch) -> None:
     monkeypatch.setattr(module, "build_dual_profile_tp_decoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2)
-    result = module.GPTNeoPlugin().build_engine(
+    result = module.build_engine(
         _config(),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         23,

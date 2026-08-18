@@ -1,22 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned registry contract tests."""
+"""Family-owned model entry contract tests."""
 
 from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("tensorrt", reason="registry contract tests import plugin modules")
+pytest.importorskip("tensorrt", reason="model entry imports TensorRT builders")
 
-from tensorrt_model_connect.families import find_plugin
-
-
-def _plugin(model_type: str):
-    plugin = find_plugin(model_type)
-    assert plugin is not None
-    return plugin
+from tensorrt_model_connect.families.mixtral import model
 
 def test_runtime_strategy() -> None:
-    plugin = _plugin("mixtral")
-    assert getattr(plugin, "runtime_strategy", None) == "mixtral_decoder_moe"
+    assert model.runtime_strategy == "mixtral_decoder_moe"

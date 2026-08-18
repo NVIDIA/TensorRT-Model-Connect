@@ -47,7 +47,8 @@ $TRTMC run /tmp/qwen25vl.bundle \
   --max-new-tokens 48
 ```
 
-The family plugin builds a vision encoder and a text decoder. The Qwen-VL
+The Qwen-VL family `model.py` builds its vision encoder, text decoder, and
+bundle sections. The Qwen-VL
 runtime plugin creates `QwenVlPipeline`, preprocesses the image, injects image
 embeddings into the prompt flow, and decodes text. InternVL uses its own
 `InternVlPipeline` in a separate model DSO.

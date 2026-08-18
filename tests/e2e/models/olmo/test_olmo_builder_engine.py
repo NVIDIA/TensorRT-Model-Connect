@@ -62,7 +62,7 @@ class OlmoPluginTester(FamilyPluginTester):
     by omitting norm weights; the plugin falls back to ones/zeros.
     """
 
-    plugin_module = "tensorrt_model_connect.families.olmo"
+    plugin_module = "tensorrt_model_connect.families.olmo.model"
     model_type = "olmo"
 
     def expected_weight_keys(self) -> set[str]:

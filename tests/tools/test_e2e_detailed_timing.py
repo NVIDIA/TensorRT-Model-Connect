@@ -16,9 +16,9 @@ from tests.e2e_harness.orchestrator import (  # noqa: E402
     _build_detailed_timing,
     _collect_trt_stage_timing,
 )
-from tensorrt_model_connect.engine_builder import (  # noqa: E402
-    _compile_time_excluding_component_weight_load,
-    _untracked_compile_time,
+from tensorrt_model_connect.build_timing import (  # noqa: E402
+    compile_time_excluding_weight_load,
+    untracked_compile_time,
 )
 
 
@@ -112,10 +112,10 @@ def test_diffusion_compile_time_excludes_component_weight_loading():
         },
     }
 
-    compile_s = _compile_time_excluding_component_weight_load(
+    compile_s = compile_time_excluding_weight_load(
         components_elapsed=100.0,
         weights_before_components=1.0,
-        build_timing=timing,
+        timing=timing,
     )
 
     assert compile_s == 88.0
@@ -130,10 +130,10 @@ def test_diffusion_compile_time_adds_only_untracked_compile_residual():
         },
     }
 
-    residual = _untracked_compile_time(
+    residual = untracked_compile_time(
         measured_compile_elapsed=88.0,
         compile_before_components=0.0,
-        build_timing=timing,
+        timing=timing,
     )
 
     assert residual == 8.0

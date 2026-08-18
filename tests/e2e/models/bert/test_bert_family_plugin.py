@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for BERT family plugin — verifies weight key mapping and transforms.
+"""Tests for the BERT family model — verifies weight mapping and transforms.
 
 Creates a synthetic BERT model directory with config.json and mock safetensors
 files containing random tensors of the correct shapes, then calls
-plugin.load_weights() and verifies the returned WeightDict.
+model.load_weights() and verifies the returned WeightDict.
 
 No GPU or TRT needed.
 
 Trace: ARCH-FAM-001, UD-FAM-BERT
-Intent: Validate BERT family plugin weight key mapping and transform correctness
+Intent: Validate BERT family weight key mapping and transform correctness
 Preconditions: Synthetic safetensors with BERT weight naming convention are available
 Postconditions: Loaded WeightDict contains expected keys with correct shapes for encoder-only architecture
 """
@@ -49,8 +49,8 @@ def _write_safetensors(model_dir: Path, tensors: dict[str, np.ndarray],
     save_file(tensors, str(model_dir / filename))
 
 
-class TestBertPlugin:
-    """BERT plugin: load_weights correctness with synthetic weights."""
+class TestBertModel:
+    """BERT model: load_weights correctness with synthetic weights."""
 
     VOCAB = 32
     HIDDEN = 16
@@ -116,25 +116,25 @@ class TestBertPlugin:
         return t
 
     def test_matches(self):
-        from tensorrt_model_connect.families.bert import plugin
+        from tensorrt_model_connect.families.bert import model
 
-        assert plugin.matches("bert")
-        assert not plugin.matches("gpt2")
-        assert not plugin.matches("llama")
-        assert not plugin.matches("roberta")
+        assert model.matches("bert")
+        assert not model.matches("gpt2")
+        assert not model.matches("llama")
+        assert not model.matches("roberta")
 
     def test_name(self):
-        from tensorrt_model_connect.families.bert import plugin
+        from tensorrt_model_connect.families.bert import model
 
-        assert plugin.name == "bert"
+        assert model.name == "bert"
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.bert import plugin
+        from tensorrt_model_connect.families.bert import model
 
-        assert plugin.runtime_strategy == "bert_encoder_only"
+        assert model.runtime_strategy == "bert_encoder_only"
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.bert import plugin
+        from tensorrt_model_connect.families.bert import model
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,
@@ -146,7 +146,7 @@ class TestBertPlugin:
         _write_safetensors(tmp_path, tensors)
 
         cfg = ModelConfig.from_dir(tmp_path)
-        weights = plugin.load_weights(str(tmp_path), cfg)
+        weights = model.load_weights(str(tmp_path), cfg)
 
         # Embedding keys
         assert "embedding" in weights
@@ -172,7 +172,7 @@ class TestBertPlugin:
         assert "pooler_bias" in weights
 
     def test_weight_shapes(self, tmp_path):
-        from tensorrt_model_connect.families.bert import plugin
+        from tensorrt_model_connect.families.bert import model
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,
@@ -184,7 +184,7 @@ class TestBertPlugin:
         _write_safetensors(tmp_path, tensors)
 
         cfg = ModelConfig.from_dir(tmp_path)
-        weights = plugin.load_weights(str(tmp_path), cfg)
+        weights = model.load_weights(str(tmp_path), cfg)
 
         # Projections are transposed to [in, out]
         assert weights["layer.0.w_q"].shape == (self.HIDDEN, self.HIDDEN)
@@ -197,7 +197,7 @@ class TestBertPlugin:
 
     def test_weight_transpose_correctness(self, tmp_path):
         """Verify that HF [out, in] weights are correctly transposed to [in, out]."""
-        from tensorrt_model_connect.families.bert import plugin
+        from tensorrt_model_connect.families.bert import model
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,
@@ -209,7 +209,7 @@ class TestBertPlugin:
         _write_safetensors(tmp_path, tensors)
 
         cfg = ModelConfig.from_dir(tmp_path)
-        weights = plugin.load_weights(str(tmp_path), cfg)
+        weights = model.load_weights(str(tmp_path), cfg)
 
         # The HF q_proj.weight is [out, in] = [hidden, hidden].
         # After transpose it should be [in, out] = [hidden, hidden].
@@ -220,7 +220,7 @@ class TestBertPlugin:
 
     def test_no_pooler(self, tmp_path):
         """BERT without pooler should not have pooler weights."""
-        from tensorrt_model_connect.families.bert import plugin
+        from tensorrt_model_connect.families.bert import model
 
         config = self._make_config(
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS,
@@ -235,7 +235,7 @@ class TestBertPlugin:
         _write_safetensors(tmp_path, tensors)
 
         cfg = ModelConfig.from_dir(tmp_path)
-        weights = plugin.load_weights(str(tmp_path), cfg)
+        weights = model.load_weights(str(tmp_path), cfg)
 
         assert "pooler_w" not in weights
         assert "pooler_bias" not in weights

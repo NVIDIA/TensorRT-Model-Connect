@@ -17,7 +17,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     bart_plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.bart.plugin")
+        "tensorrt_model_connect.families.bart.model")
     from tensorrt_model_connect.families.bart import decoder_tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
@@ -115,7 +115,7 @@ def test_bart_plugin_routes_parallel_builds(monkeypatch):
     monkeypatch.setattr(decoder_tp_builder, "build_bart_tp_decoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    plugin = bart_plugin_module.BartPlugin()
+    plugin = bart_plugin_module
     result = plugin.build_engine(
         _config(), _weights(), 17,
         verbose=True,

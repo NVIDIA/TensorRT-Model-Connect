@@ -58,7 +58,7 @@ class NemotronPluginTester(FamilyPluginTester):
       - Partial RoPE (partial_rotary_factor = 0.5)
     """
 
-    plugin_module = "tensorrt_model_connect.families.nemotron"
+    plugin_module = "tensorrt_model_connect.families.nemotron.model"
     model_type = "nemotron"
 
     def get_config_dict(self) -> dict:

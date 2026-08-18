@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "llama"
-plugin = "llama"
 test_manifests = [
   "manifests/falcon3-1b.json",
   "manifests/minitron-4b-depth.json",

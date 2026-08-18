@@ -384,7 +384,7 @@ class TestPhi4MultimodalPlugin:
         }
 
     def test_matches(self):
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         assert plugin.matches("phi4mm")
         assert plugin.matches("phi4_multimodal")
@@ -393,7 +393,7 @@ class TestPhi4MultimodalPlugin:
         assert not plugin.matches("qwen3")
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         _write_config(tmp_path, config)
@@ -424,7 +424,7 @@ class TestPhi4MultimodalPlugin:
 
     def test_fused_qkv_split(self, tmp_path):
         """Verify fused QKV is correctly split into Q, K, V."""
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         _write_config(tmp_path, config)
@@ -446,7 +446,7 @@ class TestPhi4MultimodalPlugin:
         assert weights["layer.0.w_v"].shape == (hidden, kv_dim)
 
     def test_vision_lora_is_merged_into_decoder_projection(self, tmp_path):
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         config["vision_lora"] = {"r": 2, "lora_alpha": 4}
@@ -470,7 +470,7 @@ class TestPhi4MultimodalPlugin:
 
     def test_fused_gate_up_split(self, tmp_path):
         """Verify fused gate_up is correctly split into gate and up."""
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         _write_config(tmp_path, config)
@@ -489,7 +489,7 @@ class TestPhi4MultimodalPlugin:
         assert weights["layer.0.w_down"].shape == (mlp, hidden)
 
     def test_embedding_shape(self, tmp_path):
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         _write_config(tmp_path, config)
@@ -503,7 +503,7 @@ class TestPhi4MultimodalPlugin:
 
     def test_tied_embeddings(self, tmp_path):
         """When lm_head.weight is missing, w_out should be tied to embedding."""
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         _write_config(tmp_path, config)
@@ -520,7 +520,7 @@ class TestPhi4MultimodalPlugin:
         np.testing.assert_allclose(w_out, embedding.T, atol=1e-6)
 
     def test_selected_fp32_decoder_layer_builds_in_fp16_engine(self, tmp_path):
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         _write_config(tmp_path, config)
@@ -536,7 +536,7 @@ class TestPhi4MultimodalPlugin:
         assert len(plan) > 0
 
     def test_vl_config_matches_dynamic_hd_contract(self, tmp_path):
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         config = self._make_config()
         _write_config(tmp_path, config)
@@ -551,7 +551,7 @@ class TestPhi4MultimodalPlugin:
         assert vl_config["vision_output_dim"] == self.HIDDEN
 
     def test_vision_weight_prefix_is_canonicalized(self, tmp_path):
-        from tensorrt_model_connect.families.phi4_multimodal.plugin import (
+        from tensorrt_model_connect.families.phi4_multimodal.model import (
             _load_vision_weights,
         )
 
@@ -588,7 +588,7 @@ class TestPhi4MultimodalGQA:
     HEADS, KV_HEADS, MLP = 8, 4, 64
 
     def test_gqa_kv_stays_compact(self, tmp_path):
-        from tensorrt_model_connect.families.phi4_multimodal import plugin
+        import tensorrt_model_connect.families.phi4_multimodal.model as plugin
 
         hidden = self.HIDDEN
         heads = self.HEADS
@@ -639,20 +639,17 @@ class TestPhi4MultimodalDiscovery:
     """Verify the plugin is auto-discovered by the families package."""
 
     def test_find_plugin(self):
-        from tensorrt_model_connect.families import find_plugin
-        p = find_plugin("phi4mm")
-        assert p is not None
-        assert p.name == "phi4_multimodal"
+        import tensorrt_model_connect.families.phi4_multimodal.model as model
+        assert model.matches("phi4mm")
+        assert model.name == "phi4_multimodal"
 
     def test_find_plugin_alternate_name(self):
-        from tensorrt_model_connect.families import find_plugin
-        p = find_plugin("phi4_multimodal")
-        assert p is not None
-        assert p.name == "phi4_multimodal"
+        import tensorrt_model_connect.families.phi4_multimodal.model as model
+        assert model.matches("phi4_multimodal")
+        assert model.name == "phi4_multimodal"
 
     def test_no_conflict_with_phi(self):
         """phi4mm should not match the regular phi plugin."""
-        from tensorrt_model_connect.families import find_plugin
-        p = find_plugin("phi4mm")
-        assert p is not None
-        assert p.name == "phi4_multimodal"
+        import tensorrt_model_connect.families.phi4_multimodal.model as model
+        assert model.matches("phi4mm")
+        assert model.name == "phi4_multimodal"

@@ -69,7 +69,7 @@ class TestNemotronLabsDiffusionPlugin:
         return tensors
 
     def test_load_weights_uses_encoder_prefix_and_diffusion_head(self, tmp_path):
-        from tensorrt_model_connect.families.nemotron_labs_diffusion import plugin
+        from tensorrt_model_connect.families.nemotron_labs_diffusion import model as plugin
 
         tensors = self._setup(tmp_path)
         cfg = ModelConfig.from_dir(tmp_path)
@@ -84,8 +84,8 @@ class TestNemotronLabsDiffusionPlugin:
 
     def test_build_engine_requests_full_logits_runtime(self, tmp_path, monkeypatch):
         plugin_mod = importlib.import_module(
-            "tensorrt_model_connect.families.nemotron_labs_diffusion.plugin")
-        from tensorrt_model_connect.families.nemotron_labs_diffusion import plugin
+            "tensorrt_model_connect.families.nemotron_labs_diffusion.model")
+        from tensorrt_model_connect.families.nemotron_labs_diffusion import model as plugin
 
         self._setup(tmp_path)
         cfg = ModelConfig.from_dir(tmp_path)
@@ -124,8 +124,8 @@ class TestNemotronLabsDiffusionPlugin:
 
     def test_build_extra_engines_merges_linear_spec_lora(self, tmp_path, monkeypatch):
         plugin_mod = importlib.import_module(
-            "tensorrt_model_connect.families.nemotron_labs_diffusion.plugin")
-        from tensorrt_model_connect.families.nemotron_labs_diffusion import plugin
+            "tensorrt_model_connect.families.nemotron_labs_diffusion.model")
+        from tensorrt_model_connect.families.nemotron_labs_diffusion import model as plugin
 
         self._setup(tmp_path)
         lora_dir = tmp_path / "linear_spec_lora"

@@ -88,16 +88,18 @@ def _make_bark_tp_weights(
     def rand(*shape: int) -> np.ndarray:
         return rng.randn(*shape).astype(np.float32)
 
-    weights = WeightDict({
-        "_attention_size": hidden,
-        "metadata": "kept",
-        "embedding": rand(_SEM_VOCAB, hidden),
-        "position_embedding": rand(_SEM_MAX_POS, hidden),
-        "final_norm": rand(hidden),
-        "final_norm_beta": rand(hidden),
-        "w_out": rand(hidden, _SEM_OUTPUT_VOCAB),
-        "extra_tensor": rand(3, 3),
-    })
+    weights = WeightDict(
+        {
+            "_attention_size": hidden,
+            "metadata": "kept",
+            "embedding": rand(_SEM_VOCAB, hidden),
+            "position_embedding": rand(_SEM_MAX_POS, hidden),
+            "final_norm": rand(hidden),
+            "final_norm_beta": rand(hidden),
+            "w_out": rand(hidden, _SEM_OUTPUT_VOCAB),
+            "extra_tensor": rand(3, 3),
+        }
+    )
     for i in range(num_layers):
         lp = f"layer.{i}"
         for key in ("w_q", "w_k", "w_v"):
@@ -111,8 +113,10 @@ def _make_bark_tp_weights(
         weights[f"{lp}.w_fc2"] = rand(mlp_size, hidden)
         weights[f"{lp}.fc2_bias"] = rand(hidden)
         for key in (
-            "input_norm", "input_norm_beta",
-            "post_attn_norm", "post_attn_norm_beta",
+            "input_norm",
+            "input_norm_beta",
+            "post_attn_norm",
+            "post_attn_norm_beta",
         ):
             weights[f"{lp}.{key}"] = rand(hidden)
     return weights
@@ -138,7 +142,7 @@ class BarkPluginTester(FamilyPluginTester):
       - HF prefix: semantic.*, coarse_acoustics.*, fine_acoustics.*
     """
 
-    plugin_module = "tensorrt_model_connect.families.bark"
+    plugin_module = "tensorrt_model_connect.families.bark.model"
     model_type = "bark"
     spec = TinyModelSpec(
         vocab_size=_SEM_VOCAB,
@@ -227,8 +231,7 @@ class BarkPluginTester(FamilyPluginTester):
         h = _COARSE_HIDDEN
         inter = h * 4
         t["coarse_acoustics.input_embeds_layer.weight"] = rand(_COARSE_VOCAB, h)
-        t["coarse_acoustics.position_embeds_layer.weight"] = rand(
-            _COARSE_MAX_POS, h)
+        t["coarse_acoustics.position_embeds_layer.weight"] = rand(_COARSE_MAX_POS, h)
         for i in range(_COARSE_LAYERS):
             p = f"coarse_acoustics.layers.{i}"
             t[f"{p}.layernorm_1.weight"] = rand(h)
@@ -244,10 +247,8 @@ class BarkPluginTester(FamilyPluginTester):
         h = _FINE_HIDDEN
         inter = h * 4
         for i in range(_FINE_N_EMBED_TABLES):
-            t[f"fine_acoustics.input_embeds_layers.{i}.weight"] = rand(
-                _FINE_CODEBOOK_SIZE, h)
-        t["fine_acoustics.position_embeds_layer.weight"] = rand(
-            _FINE_MAX_POS, h)
+            t[f"fine_acoustics.input_embeds_layers.{i}.weight"] = rand(_FINE_CODEBOOK_SIZE, h)
+        t["fine_acoustics.position_embeds_layer.weight"] = rand(_FINE_MAX_POS, h)
         for i in range(_FINE_LAYERS):
             p = f"fine_acoustics.layers.{i}"
             t[f"{p}.layernorm_1.weight"] = rand(h)
@@ -258,8 +259,7 @@ class BarkPluginTester(FamilyPluginTester):
             t[f"{p}.mlp.out_proj.weight"] = rand(h, inter)
         t["fine_acoustics.layernorm_final.weight"] = rand(h)
         for j in range(_FINE_N_LM_HEADS):
-            t[f"fine_acoustics.lm_heads.{j}.weight"] = rand(
-                _FINE_CODEBOOK_SIZE, h)
+            t[f"fine_acoustics.lm_heads.{j}.weight"] = rand(_FINE_CODEBOOK_SIZE, h)
 
         return t
 
@@ -285,27 +285,31 @@ class BarkPluginTester(FamilyPluginTester):
         # Semantic sub-model
         for prefix in ("semantic", "coarse"):
             n_layers = _SEM_LAYERS if prefix == "semantic" else _COARSE_LAYERS
-            keys.update({
-                f"{prefix}.embedding",
-                f"{prefix}.position_embedding",
-                f"{prefix}.final_norm",
-                f"{prefix}.final_norm_beta",
-                f"{prefix}.w_out",
-            })
+            keys.update(
+                {
+                    f"{prefix}.embedding",
+                    f"{prefix}.position_embedding",
+                    f"{prefix}.final_norm",
+                    f"{prefix}.final_norm_beta",
+                    f"{prefix}.w_out",
+                }
+            )
             for i in range(n_layers):
                 lp = f"{prefix}.layer.{i}"
-                keys.update({
-                    f"{lp}.input_norm",
-                    f"{lp}.input_norm_beta",
-                    f"{lp}.post_attn_norm",
-                    f"{lp}.post_attn_norm_beta",
-                    f"{lp}.w_q",
-                    f"{lp}.w_k",
-                    f"{lp}.w_v",
-                    f"{lp}.w_o",
-                    f"{lp}.w_fc1",
-                    f"{lp}.w_fc2",
-                })
+                keys.update(
+                    {
+                        f"{lp}.input_norm",
+                        f"{lp}.input_norm_beta",
+                        f"{lp}.post_attn_norm",
+                        f"{lp}.post_attn_norm_beta",
+                        f"{lp}.w_q",
+                        f"{lp}.w_k",
+                        f"{lp}.w_v",
+                        f"{lp}.w_o",
+                        f"{lp}.w_fc1",
+                        f"{lp}.w_fc2",
+                    }
+                )
 
         # Fine sub-model
         for i in range(_FINE_N_EMBED_TABLES):
@@ -317,18 +321,20 @@ class BarkPluginTester(FamilyPluginTester):
             keys.add(f"fine.w_lm_head_{j}")
         for i in range(_FINE_LAYERS):
             lp = f"fine.layer.{i}"
-            keys.update({
-                f"{lp}.input_norm",
-                f"{lp}.input_norm_beta",
-                f"{lp}.post_attn_norm",
-                f"{lp}.post_attn_norm_beta",
-                f"{lp}.w_q",
-                f"{lp}.w_k",
-                f"{lp}.w_v",
-                f"{lp}.w_o",
-                f"{lp}.w_fc1",
-                f"{lp}.w_fc2",
-            })
+            keys.update(
+                {
+                    f"{lp}.input_norm",
+                    f"{lp}.input_norm_beta",
+                    f"{lp}.post_attn_norm",
+                    f"{lp}.post_attn_norm_beta",
+                    f"{lp}.w_q",
+                    f"{lp}.w_k",
+                    f"{lp}.w_v",
+                    f"{lp}.w_o",
+                    f"{lp}.w_fc1",
+                    f"{lp}.w_fc2",
+                }
+            )
 
         return keys
 
@@ -345,21 +351,15 @@ class TestBarkEngine(FamilyPluginTestMixin):
     tester_class = BarkPluginTester
 
     # --- Tier 2 skips ---
-    @pytest.mark.skip(
-        reason="custom builder -- uses non-standard graph construction"
-    )
+    @pytest.mark.skip(reason="custom builder -- uses non-standard graph construction")
     def test_build_engine_succeeds(self, tester, tmp_path):
         pass
 
-    @pytest.mark.skip(
-        reason="custom builder -- uses non-standard graph construction"
-    )
+    @pytest.mark.skip(reason="custom builder -- uses non-standard graph construction")
     def test_engine_io_tensor_names(self, tester, tmp_path):
         pass
 
-    @pytest.mark.skip(
-        reason="custom builder -- uses non-standard graph construction"
-    )
+    @pytest.mark.skip(reason="custom builder -- uses non-standard graph construction")
     def test_engine_logits_output_shape(self, tester, tmp_path):
         pass
 
@@ -482,8 +482,7 @@ class TestBarkEngine(FamilyPluginTestMixin):
             key = f"{prefix}.position_embedding"
             assert key in weights, f"Missing key: {key}"
             assert weights[key].shape == (max_pos, hidden), (
-                f"{key} shape {weights[key].shape} != "
-                f"expected ({max_pos}, {hidden})"
+                f"{key} shape {weights[key].shape} != expected ({max_pos}, {hidden})"
             )
 
     # --- Override mixin tests that assume standard single-model layout ---
@@ -494,11 +493,8 @@ class TestBarkEngine(FamilyPluginTestMixin):
         Verify semantic.embedding has shape [vocab, hidden].
         """
         config, weights, _ = tester.prepare_config_and_weights(tmp_path)
-        assert "semantic.embedding" in weights, (
-            "Missing semantic.embedding key"
-        )
-        assert weights["semantic.embedding"].shape == (
-            _SEM_VOCAB, _SEM_HIDDEN), (
+        assert "semantic.embedding" in weights, "Missing semantic.embedding key"
+        assert weights["semantic.embedding"].shape == (_SEM_VOCAB, _SEM_HIDDEN), (
             f"semantic.embedding shape {weights['semantic.embedding'].shape} "
             f"!= expected ({_SEM_VOCAB}, {_SEM_HIDDEN})"
         )
@@ -628,26 +624,26 @@ class TestBarkEngine(FamilyPluginTestMixin):
         )
         np.testing.assert_array_equal(
             shard["layer.0.w_q"],
-            weights["layer.0.w_q"][:, _SEM_HIDDEN // 2:],
+            weights["layer.0.w_q"][:, _SEM_HIDDEN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.q_bias"],
-            weights["layer.0.q_bias"][_SEM_HIDDEN // 2:],
+            weights["layer.0.q_bias"][_SEM_HIDDEN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.w_o"],
-            weights["layer.0.w_o"][_SEM_HIDDEN // 2:, :],
+            weights["layer.0.w_o"][_SEM_HIDDEN // 2 :, :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.w_fc1"],
-            weights["layer.0.w_fc1"][:, (_SEM_HIDDEN * 4) // 2:],
+            weights["layer.0.w_fc1"][:, (_SEM_HIDDEN * 4) // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.fc1_bias"],
-            weights["layer.0.fc1_bias"][(_SEM_HIDDEN * 4) // 2:],
+            weights["layer.0.fc1_bias"][(_SEM_HIDDEN * 4) // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.w_fc2"],
-            weights["layer.0.w_fc2"][(_SEM_HIDDEN * 4) // 2:, :],
+            weights["layer.0.w_fc2"][(_SEM_HIDDEN * 4) // 2 :, :],
         )
         assert shard["layer.0.o_bias"] is weights["layer.0.o_bias"]

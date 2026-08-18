@@ -109,7 +109,7 @@ class TestDeepSeekV2Plugin:
 
     def test_mla_keys_present(self, tmp_path):
         """MLA-specific weight keys should be present."""
-        from tensorrt_model_connect.families.deepseek_v2 import plugin
+        from tensorrt_model_connect.families.deepseek_v2 import model as plugin
 
         config = {
             "model_type": "deepseek_v2",
@@ -163,7 +163,7 @@ class TestDeepSeekV2Plugin:
 
     def test_mla_metadata(self, tmp_path):
         """DeepSeek-V2 metadata keys should be stored."""
-        from tensorrt_model_connect.families.deepseek_v2 import plugin
+        from tensorrt_model_connect.families.deepseek_v2 import model as plugin
 
         config = {
             "model_type": "deepseek_v2",
@@ -204,7 +204,7 @@ class TestDeepSeekV2Plugin:
 
     def test_kv_a_transpose(self, tmp_path):
         """KV-A projection should be transposed."""
-        from tensorrt_model_connect.families.deepseek_v2 import plugin
+        from tensorrt_model_connect.families.deepseek_v2 import model as plugin
 
         config = {
             "model_type": "deepseek_v2",

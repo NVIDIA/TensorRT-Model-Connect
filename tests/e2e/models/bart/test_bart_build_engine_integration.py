@@ -109,7 +109,7 @@ class TestBartBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from tensorrt_model_connect.families.bart import plugin
+        import tensorrt_model_connect.families.bart.model as plugin
         config = {
             "model_type": "bart",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,
@@ -143,7 +143,7 @@ class TestBartBuildEngine:
 
     def test_decoder_cross_attention_uses_source_padding_mask(self, monkeypatch):
         plugin_module = importlib.import_module(
-            "tensorrt_model_connect.families.bart.plugin"
+            "tensorrt_model_connect.families.bart.model"
         )
 
         class FakeLayer:

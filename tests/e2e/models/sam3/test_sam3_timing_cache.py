@@ -564,9 +564,7 @@ def test_verified_isolated_vision_inventory_replays_strictly(
 
 
 def test_graph_contract_is_deterministic_and_engine_specific() -> None:
-    first = timing_cache._graph_contract_fingerprint(
-        "text-encoder", _SYNTHETIC_GRAPH_PROFILE
-    )
+    first = timing_cache._graph_contract_fingerprint("text-encoder", _SYNTHETIC_GRAPH_PROFILE)
     second = timing_cache._graph_contract_fingerprint(
         "text-encoder", {"shape": [1, 32], "precision": "fp32"}
     )
@@ -591,9 +589,7 @@ def test_vision_graph_contract_includes_conditional_tracker_neck() -> None:
 
     assert timing_cache._graph_contract_fingerprint(
         "vision-encoder", _VISION_GRAPH_PROFILE
-    ) != timing_cache._graph_contract_fingerprint(
-        "vision-encoder", without_tracker_neck
-    )
+    ) != timing_cache._graph_contract_fingerprint("vision-encoder", without_tracker_neck)
 
 
 def test_explicit_verified_policy_rejects_target_mismatch(
@@ -743,9 +739,7 @@ def test_model_snapshot_is_complete_deterministic_and_content_bound(tmp_path: Pa
     ]
     assert first["file_count"] == 3
     assert first["total_size_bytes"] == 3
-    canonical = json.dumps(
-        first["records"], separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    canonical = json.dumps(first["records"], separators=(",", ":"), sort_keys=True).encode("utf-8")
     assert first["aggregate_sha256"] == hashlib.sha256(canonical).hexdigest()
 
     (model_dir / "z.bin").write_bytes(b"y")
@@ -867,6 +861,10 @@ def test_recorder_cli_builds_only_the_selected_vision_candidate(
     class Plugin:
         name = "sam3"
 
+        def matches(self, config):
+            del config
+            return True
+
         def build_vision_engine(self, model_path, config, weights, **kwargs):
             assert model_path == str(model_dir)
             assert config.raw["_sam3_config"]["vision_image_size"] == 1008
@@ -882,18 +880,13 @@ def test_recorder_cli_builds_only_the_selected_vision_candidate(
                 graph_profile=_VISION_GRAPH_PROFILE,
             )
 
-    def reject_unrelated_weights(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("vision-only recording loaded unrelated text/core weights")
-
     monkeypatch.setattr(record_timing_cache, "_Recorder", Recorder)
     monkeypatch.setattr(
         record_timing_cache.ModelConfig,
         "from_dir",
         lambda path: SimpleNamespace(raw={}),
     )
-    monkeypatch.setattr(record_timing_cache, "find_plugin", lambda config: Plugin())
-    monkeypatch.setattr(record_timing_cache, "_load_plugin_weights", reject_unrelated_weights)
+    monkeypatch.setattr(record_timing_cache, "sam3_model", Plugin())
     monkeypatch.setattr(record_timing_cache, "_git_commit_best_effort", lambda root: "a" * 40)
     monkeypatch.setattr(timing_cache, "_runtime_metadata", lambda: _L4_RUNTIME)
     monkeypatch.setattr(
@@ -945,15 +938,11 @@ def test_recorder_cli_builds_only_the_selected_vision_candidate(
 def test_packaged_cache_payloads_match_manifest_hashes() -> None:
     contract_id = timing_cache._BUILTIN_TARGETS[_L4_RUNTIME.signature]
     contract = timing_cache_data.CONTRACTS[contract_id]
-    provenance_path = (
-        Path(__file__).with_name("data") / "sam3_l4_timing_cache_qualification.json"
-    )
+    provenance_path = Path(__file__).with_name("data") / "sam3_l4_timing_cache_qualification.json"
     provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
 
     assert contract["manifest"]["schema_version"] == timing_cache._SCHEMA_VERSION
-    assert set(contract["manifest"]["engines"]) == timing_cache._BUILTIN_ENGINE_KINDS[
-        contract_id
-    ]
+    assert set(contract["manifest"]["engines"]) == timing_cache._BUILTIN_ENGINE_KINDS[contract_id]
     assert "vision-encoder" not in contract["manifest"]["engines"]
     assert provenance["artifact_type"] == "sam3_l4_timing_cache_qualification_provenance"
     assert len(provenance["qualified_source_base_commit"]) == 40

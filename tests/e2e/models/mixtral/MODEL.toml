@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "mixtral"
-plugin = "mixtral"
 test_manifests = [
   "manifests/mixtral-stories-15m-tp2.json",
   "manifests/mixtral-stories-15m.json",

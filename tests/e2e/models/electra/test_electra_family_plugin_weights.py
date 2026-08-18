@@ -49,7 +49,7 @@ class TestElectraPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.electra import plugin
+        import tensorrt_model_connect.families.electra.model as plugin
 
         config = {
             "model_type": "electra",
@@ -82,10 +82,10 @@ class TestElectraPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.electra import plugin
+        import tensorrt_model_connect.families.electra.model as plugin
         assert plugin.matches("electra")
         assert not plugin.matches("bert")
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.electra import plugin
+        import tensorrt_model_connect.families.electra.model as plugin
         assert plugin.runtime_strategy == "electra_encoder_only"

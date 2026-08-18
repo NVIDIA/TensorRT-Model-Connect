@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import numpy as np
 import pytest
@@ -27,20 +28,28 @@ from tensorrt_model_connect.parallel_config import (
 
 
 FAMILY = 'codegen'
-PLUGIN_CLASS = 'CodeGenPlugin'
 MODEL_TYPE = 'codegen'
 TP_SIZE = 4
 RAW = {'rotary_dim': 2}
-EXPECTED_KWARGS = {'activation': 'gelu_new',
- 'fp32_lm_head': True,
+EXPECTED_KWARGS = {'fp32_lm_head': True,
  'fp32_qk_attention': True,
  'fp32_rope': True,
- 'interleaved_rope': True,
- 'mlp_type': 'gelu_fc',
- 'norm_type': 'layernorm',
- 'parallel_residual': True,
- 'partial_rotary_factor': 0.5,
- 'position_type': 'rope'}
+ 'partial_rotary_factor': 0.5}
+SPECIALIZED_SOURCE_MARKERS = (
+    "eps_tensor, 'layernorm', work_np_dtype",
+    "add_activation(network, fc1, 'gelu_new'",
+    "interleaved=True",
+    "mlp_out = _gelu_fc_mlp(",
+    "sum_attn = network.add_elementwise(hidden_state, attn_out",
+)
+RETIRED_FIXED_PARAMETERS = {
+    "activation",
+    "interleaved_rope",
+    "mlp_type",
+    "norm_type",
+    "parallel_residual",
+    "position_type",
+}
 
 
 def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
@@ -59,9 +68,22 @@ def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfi
     )
 
 
-def test_codegen_plugin_routes_tp_build(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_codegen_tp_builder_owns_fixed_family_contract() -> None:
+    builder_module = importlib.import_module(
+        "tensorrt_model_connect.families.codegen.dual_profile_decoder_tp_builder"
+    )
+    parameters = inspect.signature(
+        builder_module.build_dual_profile_tp_decoder_engine
+    ).parameters
+    assert RETIRED_FIXED_PARAMETERS.isdisjoint(parameters)
+    source = inspect.getsource(builder_module)
+    for marker in SPECIALIZED_SOURCE_MARKERS:
+        assert marker in source
+
+
+def test_codegen_model_routes_tp_build(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     captured: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -72,18 +94,18 @@ def test_codegen_plugin_routes_tp_build(monkeypatch) -> None:
         return b"tp-plan"
 
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "build_dual_profile_tp_decoder_engine",
         fake_build,
     )
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=TP_SIZE, rank=1)
-    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+    plan = model_module.build_engine(
         _config(MODEL_TYPE, TP_SIZE, RAW),
         WeightDict(),
         max_cache_length=17,
@@ -103,9 +125,9 @@ def test_codegen_plugin_routes_tp_build(monkeypatch) -> None:
         assert kwargs[key] == expected
 
 
-def test_codegen_plugin_routes_accuracy_precision_boundaries(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_codegen_model_routes_accuracy_precision_boundaries(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     captured: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -113,12 +135,12 @@ def test_codegen_plugin_routes_accuracy_precision_boundaries(monkeypatch) -> Non
         return b"single-device-plan"
 
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "build_standard_decoder_engine",
         fake_build,
     )
 
-    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+    plan = model_module.build_engine(
         _config(MODEL_TYPE, 1, RAW),
         WeightDict(),
         max_cache_length=17,
@@ -132,17 +154,17 @@ def test_codegen_plugin_routes_accuracy_precision_boundaries(monkeypatch) -> Non
     assert kwargs["fp32_lm_head"] is True
 
 
-def test_codegen_plugin_rejects_quantized_tp(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_codegen_model_rejects_quantized_tp(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+        model_module.build_engine(
             _config(MODEL_TYPE, TP_SIZE, RAW),
             WeightDict(),
             max_cache_length=17,

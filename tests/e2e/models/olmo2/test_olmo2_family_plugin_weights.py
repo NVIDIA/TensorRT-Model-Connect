@@ -42,7 +42,7 @@ class TestOlmo2Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import model as plugin
 
         config = {
             "model_type": "olmo2",
@@ -71,10 +71,10 @@ class TestOlmo2Plugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import model as plugin
         assert plugin.matches("olmo2")
         assert not plugin.matches("olmo")
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import model as plugin
         assert plugin.runtime_strategy == "olmo2_decoder_kv_cache"

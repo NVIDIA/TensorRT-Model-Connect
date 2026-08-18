@@ -22,7 +22,7 @@ from tensorrt_model_connect.families.segformer.segformer_tp_builder import (
 )
 
 segformer_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.segformer.plugin")
+    "tensorrt_model_connect.families.segformer.model")
 
 
 def _config(*, hidden_sizes=None, mlp_ratios=None):
@@ -80,7 +80,7 @@ def test_plugin_routes_parallel_builds_to_tp_builder(monkeypatch) -> None:
         segformer_plugin, "require_tensorrt_11_for_tensor_parallel", fake_require)
     monkeypatch.setattr(segformer_plugin, "build_segformer_tp_engine", fake_build)
 
-    out = segformer_plugin.plugin.build_engine(
+    out = segformer_plugin.build_engine(
         _config(),
         {"dummy": np.zeros(1, dtype=np.float32)},
         max_cache_length=1,
@@ -104,7 +104,7 @@ def test_plugin_rejects_quantized_tp(monkeypatch) -> None:
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        segformer_plugin.plugin.build_engine(
+        segformer_plugin.build_engine(
             _config(),
             {},
             max_cache_length=1,

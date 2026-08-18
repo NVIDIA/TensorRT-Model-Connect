@@ -47,7 +47,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
-from ...engine_builder import add_dynamic_batch_profile
+from ...tvm_ffi.graph_build import add_dynamic_batch_profile
 
 
 trt = trt_compat.get_trt()

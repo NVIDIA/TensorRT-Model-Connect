@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "codegen"
-plugin = "codegen"
 test_manifests = [
   "manifests/codegen-350m-tp4.json",
   "manifests/codegen-350m.json",

@@ -13,7 +13,7 @@ Usage:
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
     python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/qwen/plugin.cpp
-    python3 tools/test_impact.py --files python/tensorrt_model_connect/families/example/plugin.py --cap 15
+    python3 tools/test_impact.py --files python/tensorrt_model_connect/families/example/model.py --cap 15
 """
 
 import argparse
@@ -590,7 +590,7 @@ def _threshold_profile_task_strategy_routes(
 
 
 def build_impact_map(repo_root: Path) -> ImpactMap:
-    """Build the impact map by scanning manifests and family plugins."""
+    """Build the impact map by scanning manifests and family model modules."""
     models_dir = repo_root / "tests" / "e2e" / "models"
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     runtime_models_dir = repo_root / "src" / "runtime" / "models"
@@ -1327,33 +1327,19 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
             resolver=_match_result("family_package", _family_models),
             covered_by=(
-                "TestFamilyPlugin.test_family_only_change",
-                "TestFamilyPlugin.test_family_resource",
+                "TestFamilyModel.test_family_only_change",
+                "TestFamilyModel.test_family_resource",
                 "TestFamilyOwnedBuilder.test_family_local_model_implementation",
             ),
         ),
         ClassificationRule(
-            priority=30,
-            name="family_plugin",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"families/(\w+)\.py$",
-                lambda _path, _imap, match: match.group(1) not in ("__init__", "base"),
-            ),
-            resolver=_match_result("family_plugin", _family_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
-        ),
-        ClassificationRule(
             priority=40,
-            name="family_base",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"families/((__init__|base)\.py)$"
-            ),
-            resolver=_match_result("family_base", _all_models),
+            name="family_registry",
+            matcher=_path_equals("python/tensorrt_model_connect/families/__init__.py"),
+            resolver=_match_result("family_registry", _all_models),
             covered_by=(
-                "TestFamilyPlugin.test_family_base_all_models",
-                "TestFamilyPlugin.test_family_init_all_models",
+                "TestFamilyModel.test_family_registry_all_models",
+                "TestFamilyModel.test_family_init_all_models",
             ),
         ),
         ClassificationRule(
@@ -1785,7 +1771,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 ["tools"],
                 False,
             ),
-            covered_by=("TestFamilyPlugin.test_family_development_tool",),
+            covered_by=("TestFamilyModel.test_family_development_tool",),
         ),
         ClassificationRule(
             priority=448,
@@ -1795,11 +1781,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                     "tools/families/__init__.py",
                     "tools/family_source_isolation.py",
                     "tools/family_specialization.py",
-                    "tools/migrate_family_layout.py",
                     "tools/prune_family_helpers.py",
-                    "tools/relocate_family_development.py",
-                    "tools/specialize_family.py",
-                    "tools/specialize_family_switches.py",
                 }
             ),
             resolver=_match_result(
@@ -2164,7 +2146,6 @@ def _model_owned_python_test_targets(
 _MODEL_OWNED_COVERAGE_FALLBACK_RULES = {
     "cpp_runtime_model",
     "family_package",
-    "family_plugin",
     "python_profile_requirements",
     "specialized_builder",
 }
@@ -2605,7 +2586,6 @@ def _scoped_models_from_path(path: str, imap: ImpactMap) -> List[str]:
         "cpp_runtime_model",
         "e2e_data_file",
         "family_package",
-        "family_plugin",
         "manifest",
         "python_profile_requirements",
         "specialized_builder",
@@ -3097,41 +3077,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
             "version",
         ),
     ),
-    CandidateTokenDiffRefinementRule(
-        "shared_builder_config_lookup_family_registry",
-        "python/tensorrt_model_connect/families/__init__.py",
-        (
-            "callable(matches_config)",
-            "def_find_plugin",
-            "familyplugin",
-            "getattr(model_type",
-            "getattr(p",
-            "matches_config",
-            "model_type",
-            "model_type_str",
-            "p.matches",
-            "return_p",
-        ),
-    ),
-    CandidateTokenDiffRefinementRule(
-        "shared_builder_config_lookup_cli",
-        "python/tensorrt_model_connect/build_cli.py",
-        (
-            "find_plugin(config)",
-            "find_plugin(config.model_type)",
-            "plugin",
-            "raw_plugin",
-        ),
-    ),
-    CandidateTokenDiffRefinementRule(
-        "shared_builder_config_lookup_engine",
-        "python/tensorrt_model_connect/engine_builder.py",
-        (
-            "find_plugin(config)",
-            "find_plugin(config.model_type)",
-            "plugin",
-        ),
-    ),
     IdentifierDiffRefinementRule(
         "harness_shared_known_identifiers",
         paths=(
@@ -3183,47 +3128,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
         "python/tensorrt_model_connect/build_cli.py",
         ("fp8_scales", "save_fp8_scales"),
         _fp8_scale_models,
-    ),
-    TokenDiffRefinementRule(
-        "shared_builder_fp8_scales_engine",
-        "python/tensorrt_model_connect/engine_builder.py",
-        (
-            "fp8_scales",
-            "save_fp8_scales",
-            "_build_diffusion_bundle(",
-            "_effective_precision",
-            '"precision"',
-            '"quantization"',
-            "cfg_dict[",
-            "fp8_scales",
-        ),
-        _fp8_scale_models,
-    ),
-    TokenDiffRefinementRule(
-        "shared_builder_diffusion_tokenizer",
-        "python/tensorrt_model_connect/engine_builder.py",
-        (
-            "detect_diffusion_tokenizer_add_special_tokens",
-            "diffusion_tokenizer_add_special_tokens",
-            "diffusion_tokenizer_bundle_sections",
-            "detect_tokenizer_add_special_tokens",
-            "detect_add_special",
-            "diffusion",
-            "tokenizer_add_special_tokens",
-            "tokenizer_special_tokens_detection_s",
-            "tokenizer_t0",
-            "tokenizer_2",
-            "tok_subdir",
-            "tok_dir",
-            "if_tok_dir",
-            "model_dir_path",
-            "time_monotonic",
-            "build_timing",
-            "write_build_timing",
-            "add_build_timing",
-            "return_detect_tokenizer_add_special_tokens",
-        ),
-        _diffusion_task_models,
     ),
     TokenDiffRefinementRule(
         "harness_manifest_diffusion_thresholds",
@@ -3534,36 +3438,25 @@ def validate_map(
     warnings: List[str] = []
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
 
-    def _family_plugin_exists(family: str) -> bool:
-        return any(
-            (
-                (families_dir / f"{family}.py").exists(),
-                (families_dir / family / "__init__.py").exists(),
-            )
-        )
+    def _family_model_exists(family: str) -> bool:
+        return (families_dir / family / "model.py").is_file()
 
-    # 1. Every family in a manifest has a corresponding plugin module/package
+    # 1. Every family in a manifest has a concrete model build entry.
     for family in imap.family_to_models:
-        if not _family_plugin_exists(family):
+        if not _family_model_exists(family):
             errors.append(
-                f"Family '{family}' in manifests has no plugin module or package under "
-                f"{families_dir}"
+                f"Family '{family}' in manifests has no model.py build entry under "
+                f"{families_dir / family}"
             )
 
-    # 2. Every family plugin module/package has at least one manifest (warn only)
+    # 2. Every family model package has at least one manifest (warn only).
     if families_dir.is_dir():
-        for py_file in sorted(families_dir.glob("*.py")):
-            name = py_file.stem
-            if name in ("__init__", "base") or name.startswith("_"):
-                continue
-            if name not in imap.family_to_models:
-                warnings.append(f"Family plugin '{name}.py' has no manifests using it")
         for family_dir in sorted(path for path in families_dir.iterdir() if path.is_dir()):
             name = family_dir.name
-            if name.startswith("_") or not (family_dir / "__init__.py").exists():
+            if name.startswith("_") or not (family_dir / "model.py").is_file():
                 continue
             if name not in imap.family_to_models:
-                warnings.append(f"Family package '{name}/' has no manifests using it")
+                warnings.append(f"Family model '{name}/model.py' has no manifests using it")
 
     # 3. Core model set covers all distinct task_strategies
     core_task_strategies: Set[str] = set()

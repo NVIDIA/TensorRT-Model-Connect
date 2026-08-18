@@ -19,7 +19,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class QwenPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.qwen"
+    plugin_module = "tensorrt_model_connect.families.qwen.model"
     # Keep the shared mixin on Qwen2's legacy dense-mask graph. Native Qwen3
     # has a stricter BF16, head-dimension, and split-engine contract below.
     model_type = "qwen2"
@@ -30,7 +30,7 @@ class TestQwenEngine(FamilyPluginTestMixin):
 
 
 class Qwen3NativePluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.qwen"
+    plugin_module = "tensorrt_model_connect.families.qwen.model"
     model_type = "qwen3"
     spec = TinyModelSpec(
         vocab_size=32,
@@ -166,32 +166,9 @@ def test_qwen_tp_quantization_rejects_non_fp8():
         qwen_tp_builder._validate_tp_quantization(_quant_ctx("int8_sq"))
 
 
-def test_qwen_plugin_advertises_fp8_parallel_quantization_only():
-    from tensorrt_model_connect.families.qwen import plugin
+def test_qwen_model_advertises_fp8_parallel_quantization_only():
+    from tensorrt_model_connect.families.qwen import model
 
-    assert plugin.supports_parallel_quantization("fp8")
-    assert not plugin.supports_parallel_quantization("int8_sq")
-    assert not plugin.supports_parallel_quantization(None)
-
-
-def test_engine_builder_parallel_quantization_gate_allows_qwen_fp8():
-    from tensorrt_model_connect.engine_builder import (
-        _plugin_supports_parallel_quantization,
-    )
-    from tensorrt_model_connect.families.qwen import plugin
-
-    assert _plugin_supports_parallel_quantization(plugin, _quant_ctx("fp8"))
-
-
-def test_engine_builder_parallel_quantization_gate_rejects_default_plugin():
-    from tensorrt_model_connect.engine_builder import (
-        _plugin_supports_parallel_quantization,
-    )
-
-    class PluginWithoutParallelQuantization:
-        pass
-
-    assert not _plugin_supports_parallel_quantization(
-        PluginWithoutParallelQuantization(),
-        _quant_ctx("fp8"),
-    )
+    assert model.supports_parallel_quantization("fp8")
+    assert not model.supports_parallel_quantization("int8_sq")
+    assert not model.supports_parallel_quantization(None)

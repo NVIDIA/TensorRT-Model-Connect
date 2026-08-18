@@ -26,7 +26,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class BloomPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.bloom"
+    plugin_module = "tensorrt_model_connect.families.bloom.model"
     model_type = "bloom"
 
     def get_config_dict(self) -> dict:

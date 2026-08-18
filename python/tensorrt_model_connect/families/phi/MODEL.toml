@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "phi"
-plugin = "phi"
-module = "plugin"
 capabilities = ["split_decoder_roles"]
 aliases = [
   "phi",

@@ -20,13 +20,13 @@ from tests.e2e.models.minimax_h3 import pack_native_bundle
 
 def test_target_metadata_comes_from_the_build_machine(monkeypatch) -> None:
     monkeypatch.setattr(
-        pack_native_bundle.engine_builder,
-        "_get_trt_version",
+        pack_native_bundle,
+        "tensorrt_version",
         lambda: "11.1.0.106",
     )
     monkeypatch.setattr(
-        pack_native_bundle.engine_builder,
-        "_get_gpu_name",
+        pack_native_bundle,
+        "gpu_name",
         lambda: "NVIDIA Thor",
     )
 
@@ -39,13 +39,13 @@ def test_target_metadata_comes_from_the_build_machine(monkeypatch) -> None:
 
 def test_target_metadata_fails_closed_when_detection_is_incomplete(monkeypatch) -> None:
     monkeypatch.setattr(
-        pack_native_bundle.engine_builder,
-        "_get_trt_version",
+        pack_native_bundle,
+        "tensorrt_version",
         lambda: "unknown",
     )
     monkeypatch.setattr(
-        pack_native_bundle.engine_builder,
-        "_get_gpu_name",
+        pack_native_bundle,
+        "gpu_name",
         lambda: "",
     )
 

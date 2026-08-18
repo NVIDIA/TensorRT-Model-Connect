@@ -62,7 +62,7 @@ class RWKVPluginTester(FamilyPluginTester):
       - No attention mask, no position IDs, no KV cache
     """
 
-    plugin_module = "tensorrt_model_connect.families.rwkv.plugin"
+    plugin_module = "tensorrt_model_connect.families.rwkv.model"
     model_type = "rwkv"
     spec = TinyModelSpec(
         vocab_size=32,

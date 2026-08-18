@@ -13,7 +13,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_blocks, graph_ops
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import _mark_debug_output
+from .model import _mark_debug_output
 
 trt = trt_compat.get_trt()
 

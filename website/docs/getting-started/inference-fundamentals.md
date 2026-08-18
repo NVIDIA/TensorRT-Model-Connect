@@ -162,7 +162,7 @@ Three names matter:
 
 | Name | Example | Meaning |
 | --- | --- | --- |
-| Family plugin | `qwen`, `llama`, `whisper`, `flux` | Python build-time adapter that understands one model family's config, weights, graphs, and bundle sections. |
+| Family model module | `families/qwen/model.py`, `families/llama/model.py` | Required Python build entry point that owns one family's config → weights → engines/components → bundle recipe. |
 | Native runtime strategy | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Model-owned native C++ dispatch key. It selects exactly one runtime model DSO and then one registered `IPipelinePlugin`. |
 | Optimized implementation/profile | `qwen.tensorrt-edge-llm` plus an exact qualified profile | Delegated-runtime identity embedded in the bundle. It selects an integrity-checked implementation DSO without native strategy/registry/backend dispatch. |
 | Task strategy | `text_generation_causal`, `speech_to_text`, `diffusion_media_generation` | Shared E2E contract category used to choose runners, comparators, and CLI task shape. It is not runtime dispatch metadata. |

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "roberta"
-plugin = "roberta"
 test_manifests = [
   "manifests/camembert-base-tp4.json",
   "manifests/camembert-base.json",

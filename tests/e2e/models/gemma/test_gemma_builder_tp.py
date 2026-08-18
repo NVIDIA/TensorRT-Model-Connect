@@ -43,7 +43,7 @@ def _config() -> SimpleNamespace:
 
 def test_gemma_plugin_routes_parallel_builds(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.gemma.plugin")
+        "tensorrt_model_connect.families.gemma.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -53,7 +53,7 @@ def test_gemma_plugin_routes_parallel_builds(monkeypatch) -> None:
     monkeypatch.setattr(module, "build_dual_profile_tp_decoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2)
-    result = module.GemmaPlugin().build_engine(
+    result = module.build_engine(
         _config(),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         23,
@@ -71,7 +71,7 @@ def test_gemma_plugin_routes_parallel_builds(monkeypatch) -> None:
 
 def test_gemma_plugin_forwards_checkpoint_activation(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.gemma.plugin")
+        "tensorrt_model_connect.families.gemma.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -80,7 +80,7 @@ def test_gemma_plugin_forwards_checkpoint_activation(monkeypatch) -> None:
 
     monkeypatch.setattr(module, "build_standard_decoder_engine", fake_build)
 
-    result = module.GemmaPlugin().build_engine(
+    result = module.build_engine(
         _config(),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         23,
@@ -188,7 +188,7 @@ def test_gemma_dual_profile_mlp_uses_checkpoint_gelu(
 
 def test_gemma_rejects_missing_checkpoint_activation() -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.gemma.plugin")
+        "tensorrt_model_connect.families.gemma.model")
     config = _config()
     config.hidden_act = ""
     config.raw = {}
@@ -197,4 +197,4 @@ def test_gemma_rejects_missing_checkpoint_activation() -> None:
         ValueError,
         match="requires a supported checkpoint gated activation",
     ):
-        module.GemmaPlugin().build_engine(config, {}, 23)
+        module.build_engine(config, {}, 23)

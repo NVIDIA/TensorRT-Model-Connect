@@ -1,12 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for engine_builder.py — orchestrator logic.
-
-Tests plugin discovery and model resolution without requiring TRT.
+"""Tests for the thin engine builder's model resolution.
 
 Trace: ARCH-ENG-001, UD-ENG-03
-Intent: Validate the engine builder orchestrator's model resolution, plugin discovery, and family dispatch logic.
+Intent: Validate local and remote model resolution before family dispatch.
 Preconditions: tensorrt_model_connect is importable; no TRT or GPU required.
 Postconditions: Local directories with config.json resolve correctly, HF repo IDs are detected, and all registered family plugins are discoverable.
 """
@@ -25,7 +23,6 @@ import pytest
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 from tensorrt_model_connect.engine_builder import _resolve_model
-from tensorrt_model_connect.families import find_plugin, _ALL_PLUGINS
 
 engine_builder = importlib.import_module(_resolve_model.__module__)
 
@@ -178,21 +175,3 @@ class TestResolveModel:
             assert (staged / nemo_path.name).resolve() == nemo_path.resolve()
         finally:
             shutil.rmtree(staged)
-
-
-class TestFindPlugin:
-    def test_unsupported_model_type(self):
-        assert find_plugin("nonexistent_model_type_12345") is None
-
-    def test_all_plugins_have_required_attributes(self):
-        """Every plugin must have name, matches, load_weights, build_engine."""
-        for p in _ALL_PLUGINS:
-            assert hasattr(p, "name")
-            assert hasattr(p, "matches")
-            assert hasattr(p, "load_weights")
-            assert hasattr(p, "build_engine")
-            assert isinstance(p.name, str)
-            assert len(p.name) > 0
-            assert callable(p.matches)
-            assert callable(p.load_weights)
-            assert callable(p.build_engine)

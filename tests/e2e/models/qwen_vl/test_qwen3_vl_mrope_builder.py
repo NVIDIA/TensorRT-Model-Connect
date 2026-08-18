@@ -74,7 +74,7 @@ def _tiny_qwen3_vl_weights() -> dict[str, np.ndarray | int]:
 def test_qwen3_vl_decoder_declares_rank_two_mrope_profiles() -> None:
     import tensorrt as trt
 
-    from tensorrt_model_connect.families.qwen_vl.plugin import (
+    from tensorrt_model_connect.families.qwen_vl.model import (
         _build_qwen3_vl_decoder,
     )
 

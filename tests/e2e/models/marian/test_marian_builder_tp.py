@@ -16,7 +16,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     marian_plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.marian.plugin")
+        "tensorrt_model_connect.families.marian.model")
     from tensorrt_model_connect.families.marian import decoder_tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
@@ -113,7 +113,7 @@ def test_marian_plugin_routes_parallel_builds(monkeypatch):
     monkeypatch.setattr(decoder_tp_builder, "build_marian_tp_decoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = marian_plugin_module.MarianPlugin().build_engine(
+    result = marian_plugin_module.build_engine(
         _config(), _weights(), 17,
         verbose=True,
         debug_layer_outputs=True,

@@ -141,7 +141,7 @@ def make_error(stage_name: str, error: str):
         message=f"Contract verification error: {error}",
     )
 
-class NemotronLabsDiffusionPlugin:
+class NemotronLabsDiffusionModel:
     reference_families = ["nemotron_labs_diffusion_model_card"]
     user_contract = "model_card_generation_parity"
 
@@ -295,4 +295,4 @@ def _position_agreement(lhs: list[int], rhs: list[int]) -> float:
     matches = sum(1 for idx in range(common) if lhs[idx] == rhs[idx])
     return matches / denom
 
-plugin = NemotronLabsDiffusionPlugin()
+plugin = NemotronLabsDiffusionModel()

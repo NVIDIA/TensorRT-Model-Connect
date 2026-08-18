@@ -27,9 +27,9 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     # NOTE: never import the ``plugin`` submodule directly here — the import
-    # machinery would rebind the package attribute ``gpt_oss.plugin`` from
+    # machinery would rebind the package attribute ``gpt_oss`` from
     # the plugin *instance* to the submodule and break sibling tests.
-    import tensorrt_model_connect.families.gpt_oss as gpt_oss
+    import tensorrt_model_connect.families.gpt_oss.model as gpt_oss
     from tensorrt_model_connect.families.gpt_oss import graph_ops
     from tensorrt_model_connect.families.gpt_oss.config import ModelConfig
     from tensorrt_model_connect.families.gpt_oss.utils import (
@@ -258,7 +258,7 @@ def test_sliding_layers_restrict_attention_to_window():
     num_layers = 2
     tokens = [3, 5, 7, 11, 13, 17, 19, 23, 29, 31]
 
-    plugin = gpt_oss.plugin
+    plugin = gpt_oss
     logits_by_mode: dict[str, list[np.ndarray]] = {}
     for mode, layer_types in (
         ("sliding", ["sliding_attention", "full_attention"]),

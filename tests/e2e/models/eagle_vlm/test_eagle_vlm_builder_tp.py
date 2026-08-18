@@ -57,7 +57,7 @@ def _weights() -> WeightDict:
 
 def test_eagle_vlm_resolves_nested_legacy_rope_scaling() -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.eagle_vlm.plugin")
+        "tensorrt_model_connect.families.eagle_vlm.model")
 
     class Config(_Config):
         raw = {
@@ -77,7 +77,7 @@ def test_eagle_vlm_resolves_nested_legacy_rope_scaling() -> None:
 
 def test_eagle_vlm_prefers_rope_parameters_over_legacy_alias() -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.eagle_vlm.plugin")
+        "tensorrt_model_connect.families.eagle_vlm.model")
 
     class Config(_Config):
         raw = {
@@ -94,7 +94,7 @@ def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
     monkeypatch,
 ) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.eagle_vlm.plugin")
+        "tensorrt_model_connect.families.eagle_vlm.model")
     graph_blocks = importlib.import_module(
         "tensorrt_model_connect.families.eagle_vlm.graph_blocks")
     trt_compat = importlib.import_module("tensorrt_model_connect.trt_compat")
@@ -224,7 +224,7 @@ def test_eagle_vlm_tp_builder_rejects_single_device_mode() -> None:
 
 def test_eagle_vlm_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.eagle_vlm.plugin")
+        "tensorrt_model_connect.families.eagle_vlm.model")
     from tensorrt_model_connect.families.eagle_vlm import tp_builder
 
     calls = {}
@@ -246,7 +246,7 @@ def test_eagle_vlm_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
     monkeypatch.setattr(tp_builder, "build_eagle_vlm_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         _Config(),
         _weights(),
         max_cache_length=512,
@@ -262,7 +262,7 @@ def test_eagle_vlm_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
 
 def test_eagle_vlm_parallel_build_preserves_reranking_mode(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.eagle_vlm.plugin")
+        "tensorrt_model_connect.families.eagle_vlm.model")
     from tensorrt_model_connect.families.eagle_vlm import tp_builder
 
     calls = {}
@@ -281,7 +281,7 @@ def test_eagle_vlm_parallel_build_preserves_reranking_mode(monkeypatch) -> None:
     class RerankConfig(_Config):
         raw = {"is_reranker": True}
 
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         RerankConfig(),
         _weights(),
         max_cache_length=256,

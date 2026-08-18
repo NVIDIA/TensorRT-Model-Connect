@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.albert.plugin import AlbertPlugin
+from tensorrt_model_connect.families.albert import model as AlbertModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 albert_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.albert.plugin")
+    "tensorrt_model_connect.families.albert.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -220,7 +220,7 @@ def test_albert_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_encoder_engine", fake_build)
 
-    plan = AlbertPlugin().build_engine(
+    plan = AlbertModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -242,7 +242,7 @@ def test_albert_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        AlbertPlugin().build_engine(
+        AlbertModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

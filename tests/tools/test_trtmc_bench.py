@@ -1495,7 +1495,7 @@ def test_builder_source_digest_tracks_generic_and_family_build_inputs(tmp_path: 
     family_root = package_root / "families" / "distilbert"
     family_root.mkdir(parents=True)
     generic_builder = package_root / "engine_builder.py"
-    family_builder = family_root / "plugin.py"
+    family_builder = family_root / "model.py"
     ignored_test = family_root / "tests" / "test_family.py"
     ignored_test.parent.mkdir()
     generic_builder.write_text("GENERIC = 1\n", encoding="utf-8")

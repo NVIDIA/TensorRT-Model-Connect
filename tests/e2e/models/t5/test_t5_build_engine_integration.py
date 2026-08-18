@@ -103,7 +103,7 @@ class TestT5BuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from tensorrt_model_connect.families.t5 import plugin
+        import tensorrt_model_connect.families.t5.model as plugin
 
         config = {
             "model_type": "t5",

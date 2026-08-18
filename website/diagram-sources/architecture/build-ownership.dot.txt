@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 // @title: Build-time units and ownership
-// @description: Public build entry points resolve one model-owned family, then either a native builder or an exact optimized profile writes the deployment bundle while focused evidence proves each owned contract.
+// @description: Public build entry points resolve one family model module and call model.build exactly once; that module owns native or exact optimized construction and complete deployment-bundle assembly.
 digraph BuildOwnership {
   graph [
     bgcolor="#fbfcfe",
@@ -12,7 +12,7 @@ digraph BuildOwnership {
     splines="polyline",
     fontname="Arial",
     labelloc="t",
-    label=<<B>Build-time ownership</B><BR/><FONT POINT-SIZE="16">Public entry points route into one model-owned family before producing a bundle.</FONT>>,
+    label=<<B>Build-time ownership</B><BR/><FONT POINT-SIZE="16">Shared entry points resolve and dispatch; one family model module owns the complete bundle.</FONT>>,
     fontsize="28",
     fontcolor="#111827"
   ];
@@ -57,8 +57,8 @@ digraph BuildOwnership {
     fontsize="18";
     fontcolor="#1e3a8a";
     descriptor [label=<<B>Family descriptor</B><BR/><FONT POINT-SIZE="16">MODEL.toml + match rules</FONT>>];
-    plugin [label=<<B>FamilyPlugin</B><BR/><FONT POINT-SIZE="16">config · weights · checkpoint mapping</FONT>>];
-    native [label=<<B>Native builders</B><BR/><FONT POINT-SIZE="16">graph + TensorRT engine plans</FONT>>];
+    model [label=<<B>Family model.py</B><BR/><FONT POINT-SIZE="16">match · config · weights · route · bundle</FONT>>];
+    native [label=<<B>Native recipe</B><BR/><FONT POINT-SIZE="16">graph + TensorRT plans + sections</FONT>>];
     optimized [label=<<B>Exact optimized profile</B><BR/><FONT POINT-SIZE="16">implementation + isolated adapter</FONT>>];
   }
 
@@ -78,11 +78,11 @@ digraph BuildOwnership {
 
   cli -> descriptor;
   python -> descriptor;
-  descriptor -> plugin;
-  plugin -> native;
-  descriptor -> optimized;
+  descriptor -> model;
+  model -> native;
+  model -> optimized;
   native -> bundle;
   optimized -> bundle;
-  evidence -> plugin [style="dashed", label="proves family contract"];
+  evidence -> model [style="dashed", label="proves family contract"];
   evidence -> optimized [style="dashed", label="proves exact profile"];
 }

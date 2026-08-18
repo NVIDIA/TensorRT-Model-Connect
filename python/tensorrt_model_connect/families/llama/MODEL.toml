@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "llama"
-plugin = "llama"
-module = "plugin"
 capabilities = ["split_decoder_roles", "debug_layer_outputs"]
 aliases = [
   "LLaMA",
@@ -13,7 +11,6 @@ prefixes = [
   "llama",
 ]
 debug_runner = "debug_runner.py|runner_from_bundle"
-default_build_route = "build_routing.py|prefer_native_default"
 debug_runtime_strategies = [
   "llama_decoder_kv_cache",
 ]

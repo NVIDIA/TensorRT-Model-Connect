@@ -236,17 +236,17 @@ class TestSamPlugin:
     """SAM plugin load_weights and matches tests."""
 
     def test_matches(self):
-        from tensorrt_model_connect.families.sam import plugin
+        import tensorrt_model_connect.families.sam.model as plugin
         assert plugin.matches("sam")
         assert not plugin.matches("qwen3")
         assert not plugin.matches("bert")
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.sam import plugin
+        import tensorrt_model_connect.families.sam.model as plugin
         assert plugin.runtime_strategy == "sam_prompted_segmentation"
 
     def test_load_weights_has_encoder_keys(self, tmp_path):
-        from tensorrt_model_connect.families.sam import plugin
+        import tensorrt_model_connect.families.sam.model as plugin
 
         config_dict = _make_sam_config()
         _write_config(tmp_path, config_dict)
@@ -270,7 +270,7 @@ class TestSamPlugin:
             assert f"encoder.layer{i}.mlp.fc2.weight" in weights
 
     def test_load_weights_has_decoder_keys(self, tmp_path):
-        from tensorrt_model_connect.families.sam import plugin
+        import tensorrt_model_connect.families.sam.model as plugin
 
         config_dict = _make_sam_config()
         _write_config(tmp_path, config_dict)
@@ -291,7 +291,7 @@ class TestSamPlugin:
             assert f"decoder.layer{i}.cross_i2t.q.weight" in weights
 
     def test_load_weights_has_prompt_encoder_keys(self, tmp_path):
-        from tensorrt_model_connect.families.sam import plugin
+        import tensorrt_model_connect.families.sam.model as plugin
 
         config_dict = _make_sam_config()
         _write_config(tmp_path, config_dict)
@@ -306,7 +306,7 @@ class TestSamPlugin:
         assert "prompt.no_mask_embed" in weights
 
     def test_get_segmentation_config(self, tmp_path):
-        from tensorrt_model_connect.families.sam import plugin
+        import tensorrt_model_connect.families.sam.model as plugin
 
         config_dict = _make_sam_config()
         _write_config(tmp_path, config_dict)
@@ -328,7 +328,7 @@ class TestSamPlugin:
 
     def test_qkv_split(self, tmp_path):
         """Verify fused QKV weight is properly split into Q, K, V."""
-        from tensorrt_model_connect.families.sam import plugin
+        import tensorrt_model_connect.families.sam.model as plugin
 
         config_dict = _make_sam_config()
         _write_config(tmp_path, config_dict)

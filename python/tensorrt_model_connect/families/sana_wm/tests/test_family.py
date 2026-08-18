@@ -16,10 +16,9 @@ import pytest
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect import engine_builder
-import tensorrt_model_connect.families.sana_wm as sana_wm_mod
+import tensorrt_model_connect.families.sana_wm.model as sana_wm_mod
 
-sana_wm_plugin_mod = importlib.import_module("tensorrt_model_connect.families.sana_wm.plugin")
+sana_wm_plugin_mod = importlib.import_module("tensorrt_model_connect.families.sana_wm.model")
 _CACHED_STAGE1_TEXT_ENCODER_DIR = sana_wm_plugin_mod._cached_stage1_text_encoder_dir
 
 _SANA_WM_STAGE1_BUILD_ENV_VARS = tuple(
@@ -262,7 +261,7 @@ def test_sana_wm_plugin_emits_native_runtime_config(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     cfg = ModelConfig.from_dir(tmp_path)
 
-    plugin = sana_wm_mod.plugin
+    plugin = sana_wm_mod
     assert plugin.matches("sana_wm")
     assert plugin.matches("SanaMSVideoCamCtrl_1600M_P1_D20")
     assert not plugin.matches("ltx_video")
@@ -297,10 +296,10 @@ def test_sana_wm_plugin_rejects_build_without_native_plans(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     cfg = ModelConfig.from_dir(tmp_path)
 
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     with pytest.raises(NotImplementedError) as exc_info:
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+        sana_wm_mod.build_engine(cfg, weights, 256)
     message = str(exc_info.value)
     assert "pure C++ builds require a complete native TensorRT component set" in message
     assert "SanaMSVideoCamCtrl DiT" in message
@@ -308,7 +307,7 @@ def test_sana_wm_plugin_rejects_build_without_native_plans(tmp_path) -> None:
     assert "No ONNX fallback is used" in message
     assert "TRTMC_SANA_WM_DOWNLOAD_WEIGHTS=1" in message
 
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert overrides["engine_backend"] == "none"
     assert "sana_wm_allow_python_bridge" not in overrides
 
@@ -330,10 +329,10 @@ def test_sana_wm_plugin_reports_native_builder_gap_for_full_snapshot(tmp_path) -
     (tmp_path / "vae").mkdir()
     _write_refiner_diffusers_markers(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     with pytest.raises(NotImplementedError) as exc_info:
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+        sana_wm_mod.build_engine(cfg, weights, 256)
     message = str(exc_info.value)
     assert "raw component weights that the direct TensorRT builders can consume" in message
     assert "No ONNX fallback is used" in message
@@ -361,14 +360,14 @@ def test_sana_wm_plugin_marks_gemma3_refiner_connector_buildable(tmp_path) -> No
     )
     cfg = ModelConfig.from_dir(tmp_path)
 
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert weights["_refiner_text_encoder_dir"].endswith("refiner/text_encoder")
     assert weights["_refiner_text_encoder_model_type"] == "gemma3"
     assert weights["_can_build_refiner_text_encoder_plan"] is True
     assert weights["_can_build_refiner_text_connector_plan"] is True
     with pytest.raises(NotImplementedError) as exc_info:
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+        sana_wm_mod.build_engine(cfg, weights, 256)
     message = str(exc_info.value)
     assert "Gemma3 refiner text encoder plus LTX-2 text connector stack" not in message
     assert "LTX-2 refiner transformer/connectors denoiser" not in message
@@ -396,17 +395,17 @@ def test_sana_wm_plugin_does_not_treat_gemma3_refiner_as_legacy_buildable(
     cfg = ModelConfig.from_dir(tmp_path)
 
     with pytest.raises(ValueError, match="sana_wm_refiner_text_encoder_plan"):
-        sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+        sana_wm_mod.load_weights(str(tmp_path), cfg)
 
 
 def test_sana_wm_plugin_omits_buildable_text_encoder_from_builder_gap(tmp_path) -> None:
     (tmp_path / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     _write_text_encoder_config(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     with pytest.raises(NotImplementedError) as exc_info:
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+        sana_wm_mod.build_engine(cfg, weights, 256)
     message = str(exc_info.value)
     assert "stage-1 Gemma text encoder" not in message
     assert "SanaMSVideoCamCtrl DiT" in message
@@ -434,12 +433,12 @@ def test_sana_wm_plugin_downloads_stage1_text_encoder_when_opted_in(
         fake_download,
     )
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert weights["_stage1_text_encoder_dir"] == str(downloaded)
     assert captured["raw_config"] is cfg.raw
     with pytest.raises(NotImplementedError) as exc_info:
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256)
+        sana_wm_mod.build_engine(cfg, weights, 256)
     assert "stage-1 Gemma text encoder" not in str(exc_info.value)
 
 
@@ -476,9 +475,7 @@ def test_sana_wm_plugin_reuses_cached_stage1_text_encoder(
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
 
-    resolved = _CACHED_STAGE1_TEXT_ENCODER_DIR(
-        {"text_encoder": {"model": "gemma-2-2b-it"}}
-    )
+    resolved = _CACHED_STAGE1_TEXT_ENCODER_DIR({"text_encoder": {"model": "gemma-2-2b-it"}})
 
     assert resolved == cached
     assert captured == {
@@ -492,7 +489,7 @@ def test_sana_wm_gemma3_component_loads_nested_language_model_weights(
     monkeypatch,
 ) -> None:
     component_plugin = importlib.import_module(
-        "tensorrt_model_connect.families.sana_wm.components.gemma.plugin"
+        "tensorrt_model_connect.families.sana_wm.components.gemma.model"
     )
     component_config = importlib.import_module(
         "tensorrt_model_connect.families.sana_wm.components.gemma.config"
@@ -536,7 +533,7 @@ def test_sana_wm_gemma3_component_loads_nested_language_model_weights(
         fake_load_standard_weights,
     )
 
-    component_plugin.plugin.load_weights("/model", config, precision="bf16")
+    component_plugin.load_weights("/model", config, precision="bf16")
 
     assert captured["model_dir"] == "/model"
     assert captured["config"] is config
@@ -808,9 +805,9 @@ def test_sana_wm_plugin_builds_stage1_denoiser_extra_plan_from_raw_dit(
         fake_build,
     )
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
-    plans = sana_wm_mod.plugin.build_extra_engines(
+    plans = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         256,
@@ -854,16 +851,14 @@ def test_sana_wm_plugin_builds_missing_refiner_denoiser_plan(
         fake_build,
     )
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "sana_wm_refiner_denoiser_plan" not in weights["_native_plan_paths"]
     assert weights["_refiner_transformer_dir"].endswith("refiner/transformer")
     assert weights["_can_build_refiner_denoiser_plan"] is True
-    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
-        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == (b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n")
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         256,
@@ -883,7 +878,7 @@ def test_sana_wm_plugin_builds_missing_refiner_denoiser_plan(
     }
     assert captured["precision"] == "fp16"
     assert captured["verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert "sana_wm_refiner_denoiser_plan" in overrides["sana_wm_native_plan_sections"]
 
@@ -905,7 +900,7 @@ def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert weights["_stage1_dit_path"].endswith("dit/sana_wm_1600m_720p.safetensors")
     assert weights["_vae_dir"].endswith("vae")
@@ -919,7 +914,7 @@ def test_sana_wm_plugin_reads_local_stage1_dit_metadata(tmp_path) -> None:
     assert summary["chunk_plucker_channels"] == 48
     assert summary["raymap_channels"] == 3
 
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert overrides["sana_wm_dit_num_layers"] == 2
     assert overrides["sana_wm_dit_hidden_size"] == 2240
     assert overrides["sana_wm_dit_text_embed_dim"] == 2304
@@ -933,7 +928,7 @@ def test_sana_wm_plugin_accepts_legacy_single_file_refiner_layout(tmp_path) -> N
     (refiner_dir / "refiner.safetensors").write_bytes(b"legacy-refiner")
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert weights["_refiner_checkpoint"].endswith("refiner/refiner.safetensors")
     assert weights["_refiner_transformer_dir"].endswith("refiner")
@@ -950,7 +945,7 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert weights["_native_plan_paths"]["denoiser_plan"].endswith("denoiser_plan.plan")
     assert weights["_native_plan_paths"]["sana_wm_vae_encoder_plan"].endswith(
@@ -964,7 +959,7 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
         "refiner/text_encoder/tokenizer.json"
     )
 
-    extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
+    extras = sana_wm_mod.build_extra_engines(cfg, weights, 256)
     for section, data in plans.items():
         assert extras[section] == data
     assert extras["tokenizer.json"] == b'{"model": {"type": "Unigram"}}'
@@ -974,11 +969,9 @@ def test_sana_wm_plugin_embeds_prebuilt_native_plan_sections(tmp_path) -> None:
         == b'{"model": {"type": "Unigram"}, "refiner": true}'
     )
     assert extras["tokenizer_config.json"] == b'{"add_bos_token": true}'
-    assert (
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
 
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert overrides["sana_wm_native_plan_sections"] == list(plans)
 
@@ -993,17 +986,17 @@ def test_sana_wm_plugin_accepts_segmented_stage1_denoiser_plan_set(tmp_path) -> 
     _write_tokenizer(tmp_path)
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "denoiser_plan" not in weights["_native_plan_paths"]
     for section in sana_wm_plugin_mod._STAGE1_SEGMENTED_DENOISER_SECTIONS:
         assert weights["_native_plan_paths"][section].endswith(f"{section}.plan")
 
-    extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
+    extras = sana_wm_mod.build_extra_engines(cfg, weights, 256)
     for section, data in plans.items():
         assert extras[section] == data
 
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     sections = overrides["sana_wm_native_plan_sections"]
     assert "denoiser_plan" not in sections
     for section in sana_wm_plugin_mod._STAGE1_SEGMENTED_DENOISER_SECTIONS:
@@ -1016,14 +1009,14 @@ def test_sana_wm_plugin_embeds_prebuilt_refiner_text_connector_plan(tmp_path) ->
     _write_tokenizer(tmp_path)
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert weights["_native_plan_paths"]["sana_wm_refiner_text_connector_plan"].endswith(
         "sana_wm_refiner_text_connector_plan.plan"
     )
-    extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
+    extras = sana_wm_mod.build_extra_engines(cfg, weights, 256)
     assert extras["sana_wm_refiner_text_connector_plan"] == b"refiner-text-connector-plan"
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "sana_wm_refiner_text_connector_plan" in overrides["sana_wm_native_plan_sections"]
 
 
@@ -1062,8 +1055,8 @@ def test_sana_wm_plugin_prefers_stage1_tokenizer_over_refiner_tokenizer(
     monkeypatch.setenv("SANA_WM_TEXT_ENCODER_DIR", str(stage1_text_encoder))
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
-    extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
+    extras = sana_wm_mod.build_extra_engines(cfg, weights, 256)
 
     assert extras["tokenizer.json"] == b'{"stage1": true}'
     assert extras["tokenizer_config.json"] == b'{"add_bos_token": true}'
@@ -1121,12 +1114,12 @@ def test_sana_wm_plugin_builds_missing_stage1_text_encoder_plan(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "text_encoder_0_plan" not in weights["_native_plan_paths"]
     assert weights["_stage1_text_encoder_dir"].endswith("text_encoder")
     assert (
-        sana_wm_mod.plugin.build_engine(
+        sana_wm_mod.build_engine(
             cfg,
             weights,
             512,
@@ -1135,7 +1128,7 @@ def test_sana_wm_plugin_builds_missing_stage1_text_encoder_plan(
         == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
     )
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         512,
@@ -1150,7 +1143,7 @@ def test_sana_wm_plugin_builds_missing_stage1_text_encoder_plan(
     assert captured["max_cache_length"] == 310
     assert captured["precision"] == "bf16"
     assert captured["verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert overrides["sana_wm_native_plan_sections"][0] == "text_encoder_0_plan"
     assert set(overrides["sana_wm_native_plan_sections"]) == set(plans) | {"text_encoder_0_plan"}
@@ -1195,12 +1188,12 @@ def test_sana_wm_plugin_builds_missing_refiner_text_encoder_plan(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "sana_wm_refiner_text_encoder_plan" not in weights["_native_plan_paths"]
     assert weights["_refiner_text_encoder_dir"].endswith("refiner/text_encoder")
     assert (
-        sana_wm_mod.plugin.build_engine(
+        sana_wm_mod.build_engine(
             cfg,
             weights,
             128,
@@ -1209,7 +1202,7 @@ def test_sana_wm_plugin_builds_missing_refiner_text_encoder_plan(
         == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
     )
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         128,
@@ -1224,7 +1217,7 @@ def test_sana_wm_plugin_builds_missing_refiner_text_encoder_plan(
     assert captured["max_cache_length"] == 1024
     assert captured["precision"] == "bf16"
     assert captured["verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert "sana_wm_refiner_text_encoder_plan" in overrides["sana_wm_native_plan_sections"]
 
@@ -1268,15 +1261,13 @@ def test_sana_wm_plugin_builds_split_gemma3_refiner_text_encoder_plan(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "sana_wm_refiner_text_encoder_plan" not in weights["_native_plan_paths"]
     assert weights["_can_build_refiner_text_encoder_plan"] is True
-    assert sana_wm_mod.plugin.build_engine(cfg, weights, 128) == (
-        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
+    assert sana_wm_mod.build_engine(cfg, weights, 128) == (b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n")
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         128,
@@ -1293,7 +1284,7 @@ def test_sana_wm_plugin_builds_split_gemma3_refiner_text_encoder_plan(
     assert captured["max_cache_length"] == 1024
     assert captured["precision"] == "bf16"
     assert captured["verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert set(overrides["sana_wm_native_plan_sections"]) == set(plans) | {
         "sana_wm_refiner_text_encoder_plan"
     }
@@ -1370,14 +1361,14 @@ def test_sana_wm_plugin_builds_split_refiner_text_connector_plan_from_raw(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "sana_wm_refiner_text_encoder_plan" not in weights["_native_plan_paths"]
     assert "sana_wm_refiner_text_connector_plan" not in weights["_native_plan_paths"]
     assert weights["_can_build_refiner_text_encoder_plan"] is True
     assert weights["_can_build_refiner_text_connector_plan"] is True
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         128,
@@ -1395,7 +1386,7 @@ def test_sana_wm_plugin_builds_split_refiner_text_connector_plan_from_raw(
     assert captured["connector_config"] == connector_config
     assert captured["connector_precision"] == "bf16"
     assert captured["connector_verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "sana_wm_refiner_text_encoder_plan" in overrides["sana_wm_native_plan_sections"]
     assert "sana_wm_refiner_text_connector_plan" in overrides["sana_wm_native_plan_sections"]
 
@@ -1413,7 +1404,7 @@ def test_sana_wm_plugin_builds_split_gemma_refiner_text_with_connectors(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert weights["_refiner_text_encoder_model_type"] == "gemma"
     assert weights["_can_build_refiner_text_encoder_plan"] is True
@@ -1446,15 +1437,13 @@ def test_sana_wm_plugin_builds_missing_vae_decoder_plan(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "vae_decoder_plan" not in weights["_native_plan_paths"]
     assert weights["_sana_wm_vae_decoder_dir"].endswith("vae")
-    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
-        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == (b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n")
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         256,
@@ -1469,7 +1458,7 @@ def test_sana_wm_plugin_builds_missing_vae_decoder_plan(
     assert captured["raw_config"] is cfg.raw
     assert captured["precision"] == "bf16"
     assert captured["verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert "vae_decoder_plan" in overrides["sana_wm_native_plan_sections"]
 
@@ -1748,15 +1737,13 @@ def test_sana_wm_plugin_builds_missing_refiner_vae_decoder_plan(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "sana_wm_refiner_vae_decoder_plan" not in weights["_native_plan_paths"]
     assert weights["_sana_wm_refiner_vae_decoder_dir"].endswith("vae")
-    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
-        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == (b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n")
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         256,
@@ -1771,7 +1758,7 @@ def test_sana_wm_plugin_builds_missing_refiner_vae_decoder_plan(
     assert captured["raw_config"] is cfg.raw
     assert captured["precision"] == "bf16"
     assert captured["verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert "sana_wm_refiner_vae_decoder_plan" in overrides["sana_wm_native_plan_sections"]
 
@@ -1794,18 +1781,16 @@ def test_sana_wm_plugin_does_not_force_refiner_for_stage1_only_bundle(tmp_path) 
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
-    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
-        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
-    extras = sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == (b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n")
+    extras = sana_wm_mod.build_extra_engines(cfg, weights, 256)
 
     for section, data in plans.items():
         assert extras[section] == data
     assert "sana_wm_refiner_text_encoder_plan" not in extras
     assert "sana_wm_refiner_vae_decoder_plan" not in extras
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert "sana_wm_refiner_text_encoder_plan" not in overrides["sana_wm_native_plan_sections"]
     assert "sana_wm_refiner_vae_decoder_plan" not in overrides["sana_wm_native_plan_sections"]
@@ -1835,15 +1820,13 @@ def test_sana_wm_plugin_builds_missing_vae_encoder_plan(
     )
 
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+    weights = sana_wm_mod.load_weights(str(tmp_path), cfg)
 
     assert "sana_wm_vae_encoder_plan" not in weights["_native_plan_paths"]
     assert weights["_sana_wm_vae_encoder_dir"].endswith("vae")
-    assert sana_wm_mod.plugin.build_engine(cfg, weights, 256) == (
-        b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == (b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n")
 
-    extras = sana_wm_mod.plugin.build_extra_engines(
+    extras = sana_wm_mod.build_extra_engines(
         cfg,
         weights,
         256,
@@ -1858,7 +1841,7 @@ def test_sana_wm_plugin_builds_missing_vae_encoder_plan(
     assert captured["raw_config"] is cfg.raw
     assert captured["precision"] == "bf16"
     assert captured["verbose"] is True
-    overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
+    overrides = sana_wm_mod.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
     assert "sana_wm_vae_encoder_plan" in overrides["sana_wm_native_plan_sections"]
 
@@ -1875,14 +1858,12 @@ def test_sana_wm_plugin_discovers_native_plan_dir_from_config(tmp_path) -> None:
     )
 
     cfg = ModelConfig.from_dir(model_dir)
-    weights = sana_wm_mod.plugin.load_weights(str(model_dir), cfg)
+    weights = sana_wm_mod.load_weights(str(model_dir), cfg)
 
     assert weights["_native_plan_paths"]["denoiser_plan"] == str(plan_dir / "denoiser_plan.plan")
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
     assert (
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
-    assert (
-        sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)["denoiser_plan"]
+        sana_wm_mod.build_extra_engines(cfg, weights, 256)["denoiser_plan"]
         == plans["denoiser_plan"]
     )
 
@@ -1897,12 +1878,10 @@ def test_sana_wm_plugin_discovers_native_plan_dir_from_env(tmp_path, monkeypatch
     monkeypatch.setenv("SANA_WM_NATIVE_PLAN_DIR", str(plan_dir))
 
     cfg = ModelConfig.from_dir(model_dir)
-    weights = sana_wm_mod.plugin.load_weights(str(model_dir), cfg)
+    weights = sana_wm_mod.load_weights(str(model_dir), cfg)
 
     assert weights["_native_plan_paths"]["denoiser_plan"] == str(plan_dir / "denoiser_plan.plan")
-    assert (
-        sana_wm_mod.plugin.build_engine(cfg, weights, 256) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
-    )
+    assert sana_wm_mod.build_engine(cfg, weights, 256) == b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
 
 
 def test_sana_wm_plugin_discovers_native_plan_model_dir_from_config(tmp_path) -> None:
@@ -1917,14 +1896,14 @@ def test_sana_wm_plugin_discovers_native_plan_model_dir_from_config(tmp_path) ->
     )
 
     cfg = ModelConfig.from_dir(model_dir)
-    weights = sana_wm_mod.plugin.load_weights(str(model_dir), cfg)
+    weights = sana_wm_mod.load_weights(str(model_dir), cfg)
 
     native_plan_paths = weights["_native_plan_paths"]
     assert native_plan_paths["denoiser_plan"] == str(
         external_model_dir / "trtmc_engines" / "denoiser_plan.plan"
     )
     assert (
-        sana_wm_mod.plugin.build_extra_engines(cfg, weights, 256)["denoiser_plan"]
+        sana_wm_mod.build_extra_engines(cfg, weights, 256)["denoiser_plan"]
         == plans["denoiser_plan"]
     )
 
@@ -1938,7 +1917,7 @@ def test_sana_wm_plugin_rejects_partial_native_plan_sections(tmp_path) -> None:
     cfg = ModelConfig.from_dir(tmp_path)
 
     with pytest.raises(ValueError, match="complete prebuilt plan set"):
-        sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+        sana_wm_mod.load_weights(str(tmp_path), cfg)
 
 
 def test_sana_wm_plugin_rejects_native_plan_sections_without_tokenizer(tmp_path) -> None:
@@ -1948,7 +1927,7 @@ def test_sana_wm_plugin_rejects_native_plan_sections_without_tokenizer(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
 
     with pytest.raises(ValueError, match="require tokenizer assets"):
-        sana_wm_mod.plugin.load_weights(str(tmp_path), cfg)
+        sana_wm_mod.load_weights(str(tmp_path), cfg)
 
 
 def test_sana_wm_build_bundle_rejects_missing_native_sections(tmp_path, monkeypatch) -> None:
@@ -1957,16 +1936,11 @@ def test_sana_wm_build_bundle_rejects_missing_native_sections(tmp_path, monkeypa
     (model_dir / "config.yaml").write_text(_sana_yaml(), encoding="utf-8")
     output_path = str(tmp_path / "sana-wm.bundle")
 
-    monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda rtx=False: None)
-    monkeypatch.setattr(engine_builder.trt_compat, "resolved_summary", lambda: "mock TensorRT")
-    monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "10.0.0")
-    monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "mock-gpu")
-
     with pytest.raises(
         NotImplementedError,
         match="pure C\\+\\+ builds require a complete native",
     ):
-        engine_builder.build_bundle(
+        sana_wm_mod.build(
             str(model_dir),
             output_path,
             build_timing_path=str(tmp_path / "timing.json"),
@@ -1986,19 +1960,31 @@ def test_sana_wm_build_bundle_embeds_native_sections(tmp_path, monkeypatch) -> N
     output_path = str(tmp_path / "sana-wm.bundle")
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda rtx=False: None)
-    monkeypatch.setattr(engine_builder.trt_compat, "resolved_summary", lambda: "mock TensorRT")
-    monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "10.0.0")
-    monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "mock-gpu")
-
     def fake_write_bundle(path, info, sections):
         captured["path"] = path
         captured["info"] = info
         captured["sections"] = sections
 
-    monkeypatch.setattr(engine_builder, "write_bundle", fake_write_bundle)
+    from tensorrt_model_connect import bundle_writer
+    from tensorrt_model_connect.tvm_ffi import graph_build
+    from tensorrt_model_connect.families.sana_wm import native_plugin_builder
 
-    engine_builder.build_bundle(
+    native_plugin = tmp_path / "sana_wm_native_plugin.so"
+    native_plugin.write_bytes(b"native-plugin")
+
+    monkeypatch.setattr(bundle_writer, "tensorrt_version", lambda: "10.0.0")
+    monkeypatch.setattr(bundle_writer, "tensorrt_abi", lambda _version: "")
+    monkeypatch.setattr(bundle_writer, "gpu_name", lambda: "mock-gpu")
+    monkeypatch.setattr(bundle_writer, "write_bundle", fake_write_bundle)
+    monkeypatch.setattr(graph_build, "kernel_slots_section", lambda: None)
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "ensure_native_plugin",
+        lambda **_kwargs: native_plugin,
+    )
+    monkeypatch.setattr(sana_wm_mod.ctypes, "CDLL", lambda *_args, **_kwargs: None)
+
+    sana_wm_mod.build(
         str(model_dir),
         output_path,
         build_timing_path=str(tmp_path / "timing.json"),
@@ -2032,8 +2018,7 @@ def test_sana_wm_pre_scales_gemma_embedding_in_bf16_without_changing_lm_head() -
     sana_wm_plugin_mod._pre_scale_gemma_embedding_bf16(weights, 2304)
 
     expected = (
-        embedding.astype(ml_dtypes.bfloat16)
-        * np.asarray(48.0, dtype=ml_dtypes.bfloat16)
+        embedding.astype(ml_dtypes.bfloat16) * np.asarray(48.0, dtype=ml_dtypes.bfloat16)
     ).astype(ml_dtypes.bfloat16)
     np.testing.assert_array_equal(weights["embedding"], expected.astype(np.float16))
     np.testing.assert_array_equal(weights["w_out"], lm_head)

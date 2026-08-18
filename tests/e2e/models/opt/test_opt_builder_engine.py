@@ -25,7 +25,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class OPTPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.opt"
+    plugin_module = "tensorrt_model_connect.families.opt.model"
     model_type = "opt"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

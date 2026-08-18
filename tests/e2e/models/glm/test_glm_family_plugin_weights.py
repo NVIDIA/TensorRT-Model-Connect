@@ -52,7 +52,7 @@ class TestGlmPlugin:
 
     def test_gate_up_split(self, tmp_path):
         """Fused gate_up should be correctly split into gate and up."""
-        from tensorrt_model_connect.families.glm import plugin
+        from tensorrt_model_connect.families.glm import model as plugin
 
         config = {
             "model_type": "glm",
@@ -82,7 +82,7 @@ class TestGlmPlugin:
 
     def test_qkv_biases_stay_compact(self, tmp_path):
         """Q/K/V biases should be loaded; K/V biases stay compact."""
-        from tensorrt_model_connect.families.glm import plugin
+        from tensorrt_model_connect.families.glm import model as plugin
 
         config = {
             "model_type": "glm",

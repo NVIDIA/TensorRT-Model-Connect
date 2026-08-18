@@ -779,7 +779,6 @@ def _builder_source_digest(family: str, *, package_root: Path | None = None) -> 
     family_name = family.replace("-", "_")
     source_roots = (
         root,
-        root / "engine_defs",
         root / "families",
         root / "families" / family_name,
         root / "kernels",

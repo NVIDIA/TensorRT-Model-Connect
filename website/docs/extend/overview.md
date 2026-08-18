@@ -13,9 +13,9 @@ Choose the smallest extension point that matches the change.
   caption="Start with the owning extension path; the required source units and validation evidence follow from that choice."
 />
 
-Model support has two distinct ownership paths. Native support owns a
-`FamilyPlugin`, unique `runtime_strategy`, model DSO, and native E2E JSON
-manifest. Exact-qualified optimized support stays inside an existing family
+Model support has two distinct ownership paths. Native support owns a Python
+`model.py` build recipe, unique `runtime_strategy`, model DSO, and native E2E
+JSON manifest. Exact-qualified optimized support stays inside an existing family
 and owns its implementation/profile manifests, isolated adapter, embedded
 implementation DSO, Source-side contract tests, and profile semantic-source
 digest; it does not need a synthetic native strategy or model DSO. Any
@@ -37,7 +37,7 @@ target-hardware qualification is separately retained external evidence.
 | --- | --- |
 | Another native checkpoint with an identical family contract | Native E2E manifest data and focused evidence. |
 | Exact optimized deployment tuple for an existing family | Family-local implementation/profile data, isolated adapter/runtime DSO, and producer qualification evidence. |
-| New weight or config variant within a family | Python family plugin and tests; runtime only when the bundle or request state changes. |
+| New weight or config variant within a family | Family `model.py` and tests; runtime only when the bundle or request state changes. |
 | New graph semantics | Family-local builder/checkpoint logic and parity evidence. |
 | New runtime state or operation | Family-owned C++ plugin/pipeline plus C++ and E2E tests. |
 | New reusable task contract | E2E runner, comparator, thresholds, and focused evidence. |

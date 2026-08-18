@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "elf_flow"
-plugin = "elf_flow"
 python_profile_specs = [
   "elf_flow|families/elf_flow/python_profile_requirements/elf_flow.lock.txt|families/elf_flow/python_profile_verify.py|true",
   "elf_flow_reference|families/elf_flow/python_profile_requirements/elf_flow_reference.lock.txt|families/elf_flow/python_profile_reference_verify.py|true",
@@ -11,7 +10,6 @@ default_execution_profiles = [
   "build|elf_flow",
   "reference|elf_flow_reference",
 ]
-module = "plugin"
 config_adapter = "model_config.py|config_from_dir"
 model_dir_adapter = "prepare_model_dir.py|resolve_model_dir"
 hf_warm_dependencies = [

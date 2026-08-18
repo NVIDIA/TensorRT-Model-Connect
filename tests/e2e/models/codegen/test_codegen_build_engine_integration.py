@@ -76,7 +76,7 @@ class TestCodeGenBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from tensorrt_model_connect.families.codegen import plugin
+        from tensorrt_model_connect.families.codegen import model as plugin
         config = {
             "model_type": "codegen",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import struct
@@ -63,6 +64,49 @@ class BundleInfo:
 class BundleSection:
     name: str
     data: bytes
+
+
+def tensorrt_version() -> str:
+    """Return the selected builder TensorRT version for bundle provenance."""
+    from . import trt_compat
+
+    return trt_compat.tensorrt_version() or "unknown"
+
+
+def tensorrt_abi(version: str) -> str:
+    """Return the major.minor TensorRT ABI encoded in bundle metadata."""
+    match = re.search(r"(\d+)\.(\d+)", version or "")
+    return f"{match.group(1)}.{match.group(2)}" if match else ""
+
+
+def gpu_name() -> str:
+    """Return the active CUDA device name, or an empty string when unavailable."""
+    try:
+        from cuda.bindings import runtime as cudart
+    except ImportError:
+        try:
+            from cuda import cudart
+        except ImportError:
+            return ""
+
+    try:
+        success = (
+            cudart.cudaError_t.cudaSuccess
+            if hasattr(cudart, "cudaError_t")
+            else 0
+        )
+        status, device = cudart.cudaGetDevice()
+        if status != success:
+            return ""
+        status, properties = cudart.cudaGetDeviceProperties(device)
+        if status != success:
+            return ""
+        name = properties.name
+        if isinstance(name, bytes):
+            return name.decode("utf-8", errors="replace").rstrip("\x00")
+        return str(name).rstrip("\x00")
+    except Exception:
+        return ""
 
 
 @dataclass(frozen=True)

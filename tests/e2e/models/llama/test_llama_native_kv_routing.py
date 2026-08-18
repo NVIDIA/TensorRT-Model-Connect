@@ -256,7 +256,7 @@ def test_weight_contract_rejects_missing_shape_and_bias():
 def test_plugin_builds_the_requested_split_role_directly(monkeypatch):
     pytest.importorskip("tensorrt")
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.llama.plugin"
+        "tensorrt_model_connect.families.llama.model"
     )
 
     config = _small_config(role="prefill")
@@ -272,7 +272,7 @@ def test_plugin_builds_the_requested_split_role_directly(monkeypatch):
         _build,
     )
 
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         config,
         _weights(config),
         256,
@@ -282,7 +282,7 @@ def test_plugin_builds_the_requested_split_role_directly(monkeypatch):
     assert result == b"plan"
     assert captured["kwargs"]["profile_mode"] == "prefill"
     assert captured["kwargs"]["native_kv_cache"] is True
-    assert plugin_module.plugin.get_bundle_config_overrides(config) == {
+    assert plugin_module.get_bundle_config_overrides(config) == {
         "native_kv_contract_version": 1,
         "native_kv_cache": True,
     }
@@ -291,7 +291,7 @@ def test_plugin_builds_the_requested_split_role_directly(monkeypatch):
 def test_plugin_falls_back_for_explicit_legacy_build_options(monkeypatch):
     pytest.importorskip("tensorrt")
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.llama.plugin"
+        "tensorrt_model_connect.families.llama.model"
     )
 
     config = _small_config(role="decode")
@@ -309,7 +309,7 @@ def test_plugin_falls_back_for_explicit_legacy_build_options(monkeypatch):
         _build,
     )
 
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         config,
         _weights(config),
         128,
@@ -321,7 +321,7 @@ def test_plugin_falls_back_for_explicit_legacy_build_options(monkeypatch):
     assert captured["args"][2] == 128
     assert captured["kwargs"]["precision"] == "fp16"
     assert captured["kwargs"]["quant_ctx"] is quant_ctx
-    assert plugin_module.plugin.get_bundle_config_overrides(config) is None
+    assert plugin_module.get_bundle_config_overrides(config) is None
 
 
 def test_plugin_falls_back_outside_the_native_architecture_contract(
@@ -329,7 +329,7 @@ def test_plugin_falls_back_outside_the_native_architecture_contract(
 ):
     pytest.importorskip("tensorrt")
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.llama.plugin"
+        "tensorrt_model_connect.families.llama.model"
     )
     config = _small_config()
     config._head_dim = 64
@@ -346,9 +346,9 @@ def test_plugin_falls_back_outside_the_native_architecture_contract(
     )
 
     assert not prefer_native_default(config)
-    assert plugin_module.plugin.default_build_precision(config) == "fp32"
-    assert plugin_module.plugin.default_max_cache_length(config) == 256
-    assert plugin_module.plugin.build_engine(
+    assert plugin_module.default_build_precision(config) == "fp32"
+    assert plugin_module.default_max_cache_length(config) == 256
+    assert plugin_module.build_engine(
         config,
         _weights(config),
         128,

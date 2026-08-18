@@ -18,7 +18,11 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import SamPlugin, _resolve_sam_config
+from .model import (
+    _build_global_attention,
+    _build_windowed_attention,
+    _resolve_sam_config,
+)
 
 trt = trt_compat.get_trt()
 
@@ -140,11 +144,11 @@ def build_sam_tp_encoder_engine(
         normed_4d.reshape_dims = (1, grid_size, grid_size, hidden)
 
         if use_global_attn:
-            attn_out_4d = SamPlugin._build_global_attention(
+            attn_out_4d = _build_global_attention(
                 network, normed_4d.get_output(0), weights, w_prefix,
                 grid_size, hidden, num_heads, head_dim, seq_len)
         else:
-            attn_out_4d = SamPlugin._build_windowed_attention(
+            attn_out_4d = _build_windowed_attention(
                 network, normed_4d.get_output(0), weights, w_prefix,
                 grid_size, hidden, num_heads, head_dim, window_size)
 

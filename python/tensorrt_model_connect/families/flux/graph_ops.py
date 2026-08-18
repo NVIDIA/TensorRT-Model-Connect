@@ -137,59 +137,6 @@ def add_bias_sum(
     return _cast_back_to_trt_dtype(network, s.get_output(0), inp.dtype)
 
 
-def add_layer_norm(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    hidden_size: int,
-    gamma: np.ndarray,
-    beta: np.ndarray,
-    eps_tensor: trt.ITensor,
-    dtype: np.dtype = np.float32,
-) -> trt.ITensor:
-    """LayerNorm: gamma * ((x - mean) / sqrt(var + eps)) + beta.
-
-    FP32 precision boundary: when dtype != float32, casts to FP32 before
-    norm computation for numerical stability, then casts back.
-    """
-    need_cast = (dtype != np.float32)
-    output_dtype = inp.dtype
-    if need_cast:
-        inp = network.add_cast(inp, trt.float32).get_output(0)
-        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
-    # mean = reduce_mean(x)
-    mean = network.add_reduce(
-        inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    # x - mean
-    centered = network.add_elementwise(
-        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
-    # variance = mean((x - mean)^2)
-    sq = network.add_elementwise(
-        centered.get_output(0), centered.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    var = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    # sqrt(var + eps)
-    denom_in = network.add_elementwise(
-        var.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    # normalized = (x - mean) / sqrt(var + eps)
-    normalized = network.add_elementwise(
-        centered.get_output(0), recip.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    # gamma * normalized + beta
-    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
-    beta_t = add_constant(network, (1, hidden_size), beta, dtype=np.float32)
-    result = network.add_elementwise(
-        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
-    result = result.get_output(0)
-    if need_cast:
-        result = _cast_back_to_trt_dtype(network, result, output_dtype)
-    return result
-
-
 def add_rms_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

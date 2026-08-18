@@ -26,8 +26,9 @@ bespoke flag. `--set` is repeatable, and it overrides the same field from
 | One model family | `python/tensorrt_model_connect/families/<family>/runtime_config_schema.py` | `src/runtime/models/<owner>/config_schema.h` and `.cpp` | `runtime_config_schemas` in `src/runtime/models/<owner>/MODEL.toml` |
 
 Do not put a single-model namespace in the shared schema directories. The
-Python loader discovers family sidecars without importing every family plugin;
-CMake builds a model-owned C++ schema into the same DSO as its consumer.
+Python loader discovers family sidecars without importing family `model.py`
+modules; CMake builds a model-owned C++ schema into the same DSO as its
+consumer.
 
 ## Define the same contract in both languages
 
@@ -97,8 +98,8 @@ effect.
 1. Add matching Python and C++ schema tests for defaults, layer allowlists,
    type coercion, validators, and unknown fields.
 2. Add CLI tests for `--config` and repeated `--set`.
-3. Test that the owning builder/plugin consumes the resolved value; registration
-   alone is not feature coverage.
+3. Test that the owning family `model.py` or C++ runtime plugin consumes the
+   resolved value; registration alone is not feature coverage.
 4. For a model-owned C++ schema, add the source/registrar entry to the runtime
    `MODEL.toml` and build that model DSO.
 5. Verify the effective-config artifact and the user-visible behavior.

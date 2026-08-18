@@ -544,7 +544,7 @@ def build_vae_2d_decoder_engine(
     network.mark_output(x_out)
 
     if dynamic_batch:
-        from ...engine_builder import add_dynamic_batch_profile
+        from ...tvm_ffi.graph_build import add_dynamic_batch_profile
         add_dynamic_batch_profile(
             builder, config, network,
             input_names=["latent_input"],

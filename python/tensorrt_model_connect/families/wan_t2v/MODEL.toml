@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "wan_t2v"
-plugin = "wan_t2v"
-module = "plugin"
 aliases = [
   "wan",
   "wan2.1",

@@ -16,7 +16,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     rwkv_plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.rwkv.plugin")
+        "tensorrt_model_connect.families.rwkv.model")
     from tensorrt_model_connect.families.rwkv import tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
@@ -117,7 +117,7 @@ def test_rwkv_plugin_routes_parallel_builds(monkeypatch):
     monkeypatch.setattr(tp_builder, "build_rwkv_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = rwkv_plugin_module.RwkvPlugin().build_engine(
+    result = rwkv_plugin_module.build_engine(
         _config(), _weights(), 17,
         verbose=True,
         debug_layer_outputs=True,

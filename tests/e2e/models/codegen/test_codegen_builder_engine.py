@@ -60,7 +60,7 @@ class CodeGenPluginTester(FamilyPluginTester):
       - Separate lm_head with optional bias
     """
 
-    plugin_module = "tensorrt_model_connect.families.codegen"
+    plugin_module = "tensorrt_model_connect.families.codegen.model"
     model_type = "codegen"
     # CodeGen needs num_attention_heads divisible by mp_num=4
     spec = TinyModelSpec(

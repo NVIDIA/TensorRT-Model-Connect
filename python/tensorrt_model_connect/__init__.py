@@ -12,7 +12,6 @@ __version__ = "0.1.0"
 __all__ = [
     "__version__",
     "build",
-    "build_bundle",
     "write_bundle",
     "ModelConfig",
     "Pipeline",
@@ -25,14 +24,10 @@ def __getattr__(name: str) -> Any:
     This also keeps TensorRT API access out of package load so --rtx can
     select the backend before graph_ops binds trt_compat.get_trt().
     """
-    if name in {"build", "build_bundle"}:
-        from .engine_builder import build, build_bundle
+    if name == "build":
+        from .engine_builder import build
 
-        mapping = {
-            "build": build,
-            "build_bundle": build_bundle,
-        }
-        return mapping[name]
+        return build
 
     if name == "write_bundle":
         from .bundle_writer import write_bundle

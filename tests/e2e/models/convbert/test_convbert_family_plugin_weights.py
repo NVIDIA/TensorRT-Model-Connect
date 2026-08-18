@@ -64,7 +64,7 @@ class TestConvBERTPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.convbert import plugin
+        import tensorrt_model_connect.families.convbert.model as plugin
 
         config = {
             "model_type": "convbert",
@@ -94,6 +94,6 @@ class TestConvBERTPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.convbert import plugin
+        import tensorrt_model_connect.families.convbert.model as plugin
         assert plugin.matches("convbert")
         assert not plugin.matches("bert")

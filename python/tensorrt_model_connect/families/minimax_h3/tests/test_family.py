@@ -18,8 +18,8 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     SOL_ENGINE_1344X768_124F,
     default_workspace_limit_bytes,
 )
-from tensorrt_model_connect.families.minimax_h3.plugin import (
-    MiniMaxH3Plugin,
+from tensorrt_model_connect.families.minimax_h3 import model as MiniMaxH3Model
+from tensorrt_model_connect.families.minimax_h3.model import (
     _build_source_revision,
     _effective_build_config,
     _fixed_profile,
@@ -74,10 +74,10 @@ def test_manifest_discovers_both_public_pipeline_names() -> None:
 
 
 def test_plugin_aliases_are_exact() -> None:
-    plugin = MiniMaxH3Plugin()
+    plugin = MiniMaxH3Model
     for alias in ("minimax-h3", "minimax_h3", "MiniMaxH3Pipeline"):
-        assert plugin.matches(alias)
-    assert not plugin.matches("minimax-video-01")
+        assert plugin.matches(SimpleNamespace(model_type=alias, raw={}))
+    assert not plugin.matches(SimpleNamespace(model_type="minimax-video-01", raw={}))
 
 
 def test_plugin_fails_closed_on_unqualified_profile_or_source(monkeypatch) -> None:
@@ -133,7 +133,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         },
     }
     config = SimpleNamespace(raw={"seed": 7})
-    result = MiniMaxH3Plugin().diffusion_bundle_config(
+    result = MiniMaxH3Model.diffusion_bundle_config(
         config,
         components={"profile": SOL_ENGINE_1344X768_124F, "provenance": provenance},
     )
@@ -155,7 +155,7 @@ def test_plugin_bundle_config_preserves_exact_provenance() -> None:
         ],
     }
     with pytest.raises(ValueError, match="runtime profile"):
-        MiniMaxH3Plugin().diffusion_bundle_config(
+        MiniMaxH3Model.diffusion_bundle_config(
             SimpleNamespace(raw={"video_width": 1}),
             components={"profile": SOL_ENGINE_1344X768_124F, "provenance": provenance},
         )
@@ -182,7 +182,7 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
         "vae_decoder": b"vae",
         "tokenizer_json": b"{}",
     }
-    sections = dict(MiniMaxH3Plugin().diffusion_bundle_sections(components))
+    sections = dict(MiniMaxH3Model.diffusion_bundle_sections(components))
     assert tuple(sections) == (
         "text_encoder_plan",
         "adaln_precompute_plan",
@@ -192,7 +192,7 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
         "vae_tile_decoder_plan",
         "tokenizer.json",
     )
-    config = MiniMaxH3Plugin().diffusion_bundle_config(
+    config = MiniMaxH3Model.diffusion_bundle_config(
         SimpleNamespace(
             raw={
                 "first_block_cache": True,
@@ -216,7 +216,7 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
         "vae_tile_decoder.plan",
     }
     with pytest.raises(ValueError, match="finite and positive"):
-        MiniMaxH3Plugin().diffusion_bundle_config(
+        MiniMaxH3Model.diffusion_bundle_config(
             SimpleNamespace(
                 raw={
                     "first_block_cache": True,
@@ -229,7 +229,7 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
     malformed_provenance = dict(provenance)
     malformed_provenance["workspace_limit_bytes"] = {"text_encoder.plan": True}
     with pytest.raises(ValueError, match="workspace_limit_bytes"):
-        MiniMaxH3Plugin().diffusion_bundle_config(
+        MiniMaxH3Model.diffusion_bundle_config(
             config,
             components={
                 "profile": SOL_ENGINE_1344X768_124F,

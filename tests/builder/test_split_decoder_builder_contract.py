@@ -58,6 +58,38 @@ def _selects_prefill_or_dual_profile(text: str) -> bool:
     return False
 
 
+def _supports_prefill_profile_mode(text: str) -> bool:
+    tree = ast.parse(text)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if node.name != "build_dual_profile_decoder_engine":
+            continue
+        defaults = dict(zip(node.args.kwonlyargs, node.args.kw_defaults))
+        default = next(
+            (
+                value
+                for argument, value in defaults.items()
+                if argument.arg == "profile_mode"
+            ),
+            None,
+        )
+        if not isinstance(default, ast.Constant) or default.value != "dual_profile":
+            return False
+        return any(
+            isinstance(child, ast.Compare)
+            and isinstance(child.left, ast.Name)
+            and child.left.id == "profile_mode"
+            and any(
+                isinstance(comparator, ast.Constant)
+                and comparator.value == "prefill"
+                for comparator in child.comparators
+            )
+            for child in ast.walk(node)
+        )
+    return False
+
+
 def test_shared_builder_modules_are_removed() -> None:
     """Shared builder package must not retain concrete model builder logic."""
     violations = [
@@ -91,8 +123,7 @@ def test_family_dual_profile_builders_support_prefill_only_mode() -> None:
         text = _builder_contract_text(
             path, local_module="default_dual_profile_decoder")
         if (
-            'profile_mode: str = "dual_profile"' not in text
-            or 'profile_mode == "prefill"' not in text
+            not _supports_prefill_profile_mode(text)
             or "TRTMC_REVERSE_PROFILE_ORDER" not in text
         ):
             missing.append(str(path.relative_to(ROOT)))

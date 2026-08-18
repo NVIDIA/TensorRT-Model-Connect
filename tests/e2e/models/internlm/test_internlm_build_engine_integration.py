@@ -77,7 +77,7 @@ class TestInternLMBuildEngine:
         return t
 
     def test_build_engine(self, tmp_path):
-        from tensorrt_model_connect.families.internlm import plugin
+        from tensorrt_model_connect.families.internlm import model as plugin
         config = {
             "model_type": "internlm2",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,

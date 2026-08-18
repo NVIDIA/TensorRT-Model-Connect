@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "eagle_vlm"
-plugin = "eagle_vlm"
-module = "plugin"
 aliases = [
   "eagle_vlm",
   "eaglevlm",

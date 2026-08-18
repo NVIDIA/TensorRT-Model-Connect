@@ -48,7 +48,7 @@ class TestStarcoder2Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.starcoder2 import plugin
+        from tensorrt_model_connect.families.starcoder2 import model as plugin
 
         config = {
             "model_type": "starcoder2",
@@ -76,6 +76,6 @@ class TestStarcoder2Plugin:
         assert weights["layer.0.v_bias"].shape == (kv_hidden,)
 
     def test_matches(self):
-        from tensorrt_model_connect.families.starcoder2 import plugin
+        from tensorrt_model_connect.families.starcoder2 import model as plugin
         assert plugin.matches("starcoder2")
         assert not plugin.matches("gpt2")

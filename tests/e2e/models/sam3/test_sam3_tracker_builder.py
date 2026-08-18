@@ -706,10 +706,10 @@ def test_sam3_tracker_builder_has_only_required_direct_b1_b2_plans() -> None:
 
 def test_sam3_production_build_path_has_no_aoti_or_bridge_modules() -> None:
     family_dir = Path(tracker_builder.__file__).resolve().parent
-    plugin_source = (family_dir / "plugin.py").read_text(encoding="utf-8")
-    build_start = plugin_source.index("    def build_extra_engines(")
-    build_end = plugin_source.index("\n    def get_segmentation_config", build_start)
-    build_source = plugin_source[build_start:build_end]
+    model_source = (family_dir / "model.py").read_text(encoding="utf-8")
+    build_start = model_source.index("    def build_extra_engines(")
+    build_end = model_source.index("\n    def get_segmentation_config", build_start)
+    build_source = model_source[build_start:build_end]
 
     assert "build_sam3_tracker_engines" in build_source
     for forbidden in ("aoti", ".pt2", "libtorch", "tvm", "ffi", "native_plugin"):

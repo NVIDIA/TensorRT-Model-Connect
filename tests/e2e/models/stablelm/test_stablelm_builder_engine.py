@@ -57,7 +57,7 @@ class StableLMPluginTester(FamilyPluginTester):
       - QKV biases
     """
 
-    plugin_module = "tensorrt_model_connect.families.stablelm"
+    plugin_module = "tensorrt_model_connect.families.stablelm.model"
     model_type = "stablelm"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

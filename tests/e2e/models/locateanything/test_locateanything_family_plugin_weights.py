@@ -98,7 +98,7 @@ class TestLocateAnythingPlugin:
         _write_config(tmp_path, config)
 
     def test_load_text_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.locateanything import plugin
+        import tensorrt_model_connect.families.locateanything.model as plugin
 
         self._write_locateanything_config(tmp_path)
         tensors = self._make_text_tensors()
@@ -124,7 +124,7 @@ class TestLocateAnythingPlugin:
             self.HIDDEN // self.HEADS)
 
     def test_vision_weights_not_in_text(self, tmp_path):
-        from tensorrt_model_connect.families.locateanything import plugin
+        import tensorrt_model_connect.families.locateanything.model as plugin
 
         self._write_locateanything_config(tmp_path)
         tensors = self._make_text_tensors()
@@ -141,7 +141,7 @@ class TestLocateAnythingPlugin:
             assert not key.startswith("mlp1."), f"Projector key leaked: {key}"
 
     def test_get_vl_config(self, tmp_path):
-        from tensorrt_model_connect.families.locateanything import plugin
+        import tensorrt_model_connect.families.locateanything.model as plugin
 
         self._write_locateanything_config(tmp_path)
         cfg = ModelConfig.from_dir(tmp_path)

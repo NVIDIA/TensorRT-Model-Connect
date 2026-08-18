@@ -15,7 +15,7 @@ from .conftest import requires_trt
 @requires_trt
 def test_builds_a_trivial_engine_and_enforces_max_batch(tmp_path):
     import tensorrt as trt
-    from tensorrt_model_connect.engine_builder import add_dynamic_batch_profile
+    from tensorrt_model_connect.tvm_ffi.graph_build import add_dynamic_batch_profile
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)

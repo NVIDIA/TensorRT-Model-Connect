@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "xlnet"
-plugin = "xlnet"
 test_manifests = [
   "manifests/xlnet-base-tp4.json",
   "manifests/xlnet-base.json",

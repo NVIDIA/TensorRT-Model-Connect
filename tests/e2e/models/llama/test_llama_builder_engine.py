@@ -20,7 +20,7 @@ from tests.builder.family_plugin_test_mixin import (
 
 
 class LlamaPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.llama"
+    plugin_module = "tensorrt_model_connect.families.llama.model"
     model_type = "llama"
 
 

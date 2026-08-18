@@ -198,9 +198,9 @@ def build_evolve_prompt(
     ## Files You May Modify
 
     ### Python builder (engine construction):
-    - `python/tensorrt_model_connect/families/{family_name}/plugin.py` — family plugin config
-    - `python/tensorrt_model_connect/families/{family_name}/model/model.py` — model builder, TRT graph operations, and composable blocks
-    - `python/tensorrt_model_connect/engine_builder.py` — build orchestrator
+    - `python/tensorrt_model_connect/families/{family_name}/model.py` — complete model-owned build: config, weights, engine, and bundle
+    - Other files in that same family directory — optional graph helpers called only by its `model.py`
+    - `python/tensorrt_model_connect/engine_builder.py` — shared model resolution and direct dispatch only
 
     ### C++ runtime (execution — for L1 Runtime optimizations):
     - `src/runtime/models/{family_name}/kv_cache.h/cpp` — KV cache + decode step
@@ -213,7 +213,7 @@ def build_evolve_prompt(
     - `tools/perf_compare.py` — benchmarking tool
     - `tools/cpu_profile.py` — CPU phase profiling
     - `tools/diff_logits.py` — correctness checker
-    - `python/tensorrt_model_connect/families/{family_name}/model/runtime.py` — Python TRT inference runner, when the family needs one
+    - Family-local runtime helper, when that family needs one
     - `python/tensorrt_model_connect/config.py` — ModelConfig dataclass
 
     ## CRITICAL RULES
@@ -435,7 +435,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
         **Options (try only if profiling shows specific graph-level bottleneck):**
 
         - **Builder workspace**: `workspace_gb=N` (try 1, 2, 4, 8 GB)
-          File: family plugin or `standard_decoder_builder.py`
+          File: family `model.py` or a family-local decoder helper
           Phase 0 result: 0% across 9 variants.
 
         - **TF32 mode**: Enable TensorFloat-32 for matmuls.
@@ -450,7 +450,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
           Phase 0 result: 0% (same reason).
 
         - **Attention scale fusion**: Fold 1/sqrt(head_dim) into Q weights.
-          File: Family plugin `load_weights()`.
+          File: Family `model.py` weight-loading code.
 
         - **Alternative norm**: Rewrite RMSNorm using `add_reduce` ops.
           File: `model.py:add_rms_norm`
@@ -479,7 +479,7 @@ def _build_search_space(focus_area: str | None = None) -> str:
 
 
 def _infer_family(model: str) -> str:
-    """Infer family plugin name from model-owned registry metadata."""
+    """Infer the family name from model-owned registry metadata."""
     model_type = str(model).split("/")[-1]
     try:
         from tensorrt_model_connect.families import resolve_family_id

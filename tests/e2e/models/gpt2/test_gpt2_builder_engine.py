@@ -27,7 +27,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class GPT2PluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.gpt2"
+    plugin_module = "tensorrt_model_connect.families.gpt2.model"
     model_type = "gpt2"
 
     def get_config_dict(self) -> dict:

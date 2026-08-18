@@ -187,7 +187,6 @@ def build_dual_profile_decoder_engine(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim
     )
-    int(head_dim * partial_rotary_factor)
     builder_context = create_builder_context(verbose=verbose, workspace_bytes=1 << 30)
     builder = builder_context.builder
     network = builder_context.network
@@ -533,7 +532,7 @@ def build_dual_profile_decoder_engine(
     if verbose:
         mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
         print(
-            f"[trtmc build] Building {mode_label} engine (layers={num_layers}, hidden={hidden}, attn={attention_size}, kv={kv_attention_size}, mlp={mlp_size}, cache={max_cache_length}, opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, norm={'layernorm'}, mlp_type={'gelu_fc'}, pos={'learned'}, precision={precision}) ...",
+            f"[trtmc build] Building {mode_label} engine (layers={num_layers}, hidden={hidden}, attn={attention_size}, kv={kv_attention_size}, mlp={mlp_size}, cache={max_cache_length}, opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, norm=layernorm, mlp_type=gelu_fc, pos=learned, precision={precision}) ...",
             file=sys.stderr,
         )
     plan = build_bark_serialized_network(builder, network, trt_config)

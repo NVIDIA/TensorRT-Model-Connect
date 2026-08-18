@@ -46,7 +46,7 @@ must agree with them.
 | Model DSO loading | `include/trtmc/runtime/pipeline_plugin_loader.h` |
 | Backend and engine-execution abstraction | `include/trtmc/runtime/trt_backend.h`, `include/trtmc/runtime/trt_module.h` |
 | Runtime configuration | `include/trtmc/config/` |
-| Python family protocol | `python/tensorrt_model_connect/families/base.py` |
+| Python family build entry | `python/tensorrt_model_connect/families/<family>/model.py` |
 | Python bundle serialization | `python/tensorrt_model_connect/bundle_writer.py` |
 
 The declarations with C linkage at the bottom of `pipeline.h` are a limited
@@ -119,7 +119,8 @@ code elsewhere:
 1. Find the Python, runtime, or E2E descriptor that declares the owner.
 2. Follow the exact strategy, implementation/profile, or task identity named by
    that descriptor.
-3. Read the local plugin or adapter before reading shared infrastructure.
+3. Read the family `model.py`, runtime plugin, or optimized adapter before
+   reading shared infrastructure.
 4. Check which test or qualification artifact proves the stated behavior.
 5. Escalate to a shared abstraction only when multiple independent owners need
    the same assumption-free contract.

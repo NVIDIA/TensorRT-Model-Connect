@@ -92,7 +92,8 @@ lifecycle, and sampler behavior.
 pytest tests/builder -q
 ```
 
-Use builder tests when changing family plugins, graph ops, schedulers, quantization, config schemas, or bundle writing.
+Use builder tests when changing family `model.py` recipes, graph ops,
+schedulers, quantization, config schemas, or bundle writing.
 
 ## Tool tests
 

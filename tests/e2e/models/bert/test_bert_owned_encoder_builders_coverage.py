@@ -251,7 +251,7 @@ def test_build_encoder_engine_success_passes_activation(monkeypatch: pytest.Monk
     Postconditions: Layer helper receives BERT activation values and engine bytes are returned.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model.model", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model", fake_trt)
 
     monkeypatch.setattr(mod, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod, "_add_seq_layer_norm", _fake_tensor_fn("embed_ln"))
@@ -319,7 +319,7 @@ def test_build_encoder_engine_rejects_out_of_range_fp32_layer(
 ) -> None:
     fake_trt = _make_fake_trt()
     mod = _import_with_fake_trt(
-        "tensorrt_model_connect.families.bert.model.model", fake_trt)
+        "tensorrt_model_connect.families.bert.model", fake_trt)
     config = types.SimpleNamespace(
         hidden_size=4,
         num_hidden_layers=2,
@@ -342,7 +342,7 @@ def test_build_encoder_engine_raises_when_builder_returns_none(monkeypatch: pyte
     """
     fake_trt = _make_fake_trt()
     fake_trt.Builder.plan_to_return = None
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model.model", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model", fake_trt)
 
     monkeypatch.setattr(mod, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod, "_add_seq_layer_norm", _fake_tensor_fn("embed_ln"))

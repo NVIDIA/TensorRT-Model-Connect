@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "bark"
-plugin = "bark"
 test_manifests = [
   "manifests/bark-large-tp4.json",
   "manifests/bark-large.json",

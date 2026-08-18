@@ -114,43 +114,7 @@ def apply_norm(
             network, inp, hidden_size, gamma, eps_tensor, dtype=dtype)
 
 
-def add_attention_block(
-    network: trt.INetworkDefinition,
-    hidden: trt.ITensor,
-    cache_k: trt.ITensor,
-    cache_v: trt.ITensor,
-    attention_mask: trt.ITensor,
-    position_id: trt.ITensor,
-    *,
-    weights: WeightDict,
-    prefix: str,
-    hidden_size: int,
-    attention_size: int,
-    num_heads: int,
-    head_dim: int,
-    max_cache_length: int,
-    eps_tensor: trt.ITensor,
-    kv_attention_size: int | None = None,
-    num_kv_heads: int | None = None,
-    attention_scale: float | None = None,
-    eps: float | None = None,
-    norm_type: str = "rmsnorm",
-    position_type: str = "rope",
-    alibi_slopes_tensor: trt.ITensor | None = None,
-    alibi_indices_tensor: trt.ITensor | None = None,
-    dtype: np.dtype = np.float32,
-    quant_ctx: QuantContext | None = None,
-    layer_prefix: str = "",
-    # TRT 10 native API tensors.
-    cos_half_tensor: trt.ITensor | None = None,
-    sin_half_tensor: trt.ITensor | None = None,
-    rotary_embedding_dim: int = 0,
-    interleaved_rope: bool = False,
-    fp32_rope: bool = False,
-    fp32_qk_accumulation: bool = False,
-    ffi_attention_kernel: str | None = None,
-    dynamic_kv_cache: bool = False,
-) -> dict[str, trt.ITensor]:
+def add_attention_block(network: trt.INetworkDefinition, hidden: trt.ITensor, cache_k: trt.ITensor, cache_v: trt.ITensor, attention_mask: trt.ITensor, position_id: trt.ITensor, *, weights: WeightDict, prefix: str, hidden_size: int, attention_size: int, num_heads: int, head_dim: int, max_cache_length: int, eps_tensor: trt.ITensor, kv_attention_size: int | None=None, num_kv_heads: int | None=None, attention_scale: float | None=None, eps: float | None=None, alibi_slopes_tensor: trt.ITensor | None=None, alibi_indices_tensor: trt.ITensor | None=None, dtype: np.dtype=np.float32, quant_ctx: QuantContext | None=None, layer_prefix: str='', cos_half_tensor: trt.ITensor | None=None, sin_half_tensor: trt.ITensor | None=None, rotary_embedding_dim: int=0, fp32_rope: bool=False, fp32_qk_accumulation: bool=False, ffi_attention_kernel: str | None=None, dynamic_kv_cache: bool=False) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
     Returns {"normed": ..., "attn_out": ..., "present_k": ..., "present_v": ...}.
@@ -168,221 +132,84 @@ def add_attention_block(
         num_kv_heads = num_heads
     if kv_attention_size is None:
         kv_attention_size = num_kv_heads * head_dim
-
-    # Weight name for quant scale lookup — use layer_prefix if provided,
-    # otherwise fall back to the weights-dict prefix.
     _lp = layer_prefix or prefix
-
-    # Pre-attention norm
-    normed = apply_norm(
-        network, hidden, hidden_size,
-        weights[f"{prefix}.input_norm"],
-        weights.get(f"{prefix}.input_norm_beta"),
-        eps_tensor, norm_type, dtype=dtype, eps=eps)
-
-    # QKV projections
-    q = matmul(normed, hidden_size, attention_size,
-               weights[f"{prefix}.w_q"], f"{_lp}.w_q")
-    k = matmul(normed, hidden_size, kv_attention_size,
-               weights[f"{prefix}.w_k"], f"{_lp}.w_k")
-    v = matmul(normed, hidden_size, kv_attention_size,
-               weights[f"{prefix}.w_v"], f"{_lp}.w_v")
-
-    # Optional QKV biases
-    q_bias = weights.get(f"{prefix}.q_bias")
+    normed = apply_norm(network, hidden, hidden_size, weights[f'{prefix}.input_norm'], weights.get(f'{prefix}.input_norm_beta'), eps_tensor, 'layernorm', dtype=dtype, eps=eps)
+    q = matmul(normed, hidden_size, attention_size, weights[f'{prefix}.w_q'], f'{_lp}.w_q')
+    k = matmul(normed, hidden_size, kv_attention_size, weights[f'{prefix}.w_k'], f'{_lp}.w_k')
+    v = matmul(normed, hidden_size, kv_attention_size, weights[f'{prefix}.w_v'], f'{_lp}.w_v')
+    q_bias = weights.get(f'{prefix}.q_bias')
     if q_bias is not None:
         q = graph_ops.add_bias_sum(network, q, attention_size, q_bias, dtype=dtype)
-    k_bias = weights.get(f"{prefix}.k_bias")
+    k_bias = weights.get(f'{prefix}.k_bias')
     if k_bias is not None:
         k = graph_ops.add_bias_sum(network, k, kv_attention_size, k_bias, dtype=dtype)
-    v_bias = weights.get(f"{prefix}.v_bias")
+    v_bias = weights.get(f'{prefix}.v_bias')
     if v_bias is not None:
         v = graph_ops.add_bias_sum(network, v, kv_attention_size, v_bias, dtype=dtype)
-
-    # Optional per-head q/k norm
-    q_norm = weights.get(f"{prefix}.q_norm")
+    q_norm = weights.get(f'{prefix}.q_norm')
     if q_norm is not None:
-        q = graph_ops.add_rms_norm_per_head(
-            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype)
-    k_norm = weights.get(f"{prefix}.k_norm")
+        q = graph_ops.add_rms_norm_per_head(network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype)
+    k_norm = weights.get(f'{prefix}.k_norm')
     if k_norm is not None:
-        k = graph_ops.add_rms_norm_per_head(
-            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
-
-    # ------------------------------------------------------------------ #
-    # RoPE via native IRotaryEmbeddingLayer                              #
-    # ------------------------------------------------------------------ #
+        k = graph_ops.add_rms_norm_per_head(network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
     use_native_attention = ffi_attention_kernel is None
-
-    if position_type == "rope":
-        if cos_half_tensor is None or sin_half_tensor is None:
-            raise ValueError(
-                "RoPE attention requires half-dimension cos/sin tensors for "
-                "TRT native IRotaryEmbeddingLayer")
-        rope_dim = rotary_embedding_dim or head_dim
-        rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
-        key_output_dtype = k.dtype
-        if fp32_rope:
-            if q.dtype != trt.float32:
-                q = network.add_cast(q, trt.float32).get_output(0)
-            if k.dtype != trt.float32:
-                k = network.add_cast(k, trt.float32).get_output(0)
-        q = graph_ops.add_apply_rope_native(
-            network, q, num_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope)
-        k = graph_ops.add_apply_rope_native(
-            network, k, num_kv_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope)
-        if fp32_rope and k.dtype != key_output_dtype:
-            k = network.add_cast(k, key_output_dtype).get_output(0)
-
-    # Save present K/V (before concatenation, this is the raw projection output)
+    if cos_half_tensor is None or sin_half_tensor is None:
+        raise ValueError('RoPE attention requires half-dimension cos/sin tensors for TRT native IRotaryEmbeddingLayer')
+    rope_dim = rotary_embedding_dim or head_dim
+    rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
+    key_output_dtype = k.dtype
+    if fp32_rope:
+        if q.dtype != trt.float32:
+            q = network.add_cast(q, trt.float32).get_output(0)
+        if k.dtype != trt.float32:
+            k = network.add_cast(k, trt.float32).get_output(0)
+    q = graph_ops.add_apply_rope_native(network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, rope_dim, True)
+    k = graph_ops.add_apply_rope_native(network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, rope_dim, True)
+    if fp32_rope and k.dtype != key_output_dtype:
+        k = network.add_cast(k, key_output_dtype).get_output(0)
     present_k = k
     present_v = v
-
-    # Reshape current K, V for concatenation
     k_reshape = network.add_shuffle(k)
     k_reshape.reshape_dims = (1, kv_attention_size)
     v_reshape = network.add_shuffle(v)
     v_reshape.reshape_dims = (1, kv_attention_size)
-
-    # Concatenate with cache
-    all_k = network.add_concatenation(
-        [cache_k, k_reshape.get_output(0)])
+    all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
     all_k.axis = 0
-    all_v = network.add_concatenation(
-        [cache_v, v_reshape.get_output(0)])
+    all_v = network.add_concatenation([cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
-
-    # ------------------------------------------------------------------ #
-    # Attention core — native IAttention or FFI kernel                    #
-    # ------------------------------------------------------------------ #
     if use_native_attention:
         kv_seq = None if dynamic_kv_cache else attention_window
         if alibi_slopes_tensor is not None:
             if alibi_indices_tensor is None:
-                raise ValueError("ALiBi attention requires cache position indices")
+                raise ValueError('ALiBi attention requires cache position indices')
             if dynamic_kv_cache:
-                raise ValueError("dynamic_kv_cache is not supported for ALiBi attention")
-            mask_4d = graph_ops.add_alibi_mask_4d(
-                network,
-                attention_mask,
-                position_id,
-                alibi_slopes_tensor,
-                alibi_indices_tensor,
-                num_heads,
-            )
+                raise ValueError('dynamic_kv_cache is not supported for ALiBi attention')
+            mask_4d = graph_ops.add_alibi_mask_4d(network, attention_mask, position_id, alibi_slopes_tensor, alibi_indices_tensor, num_heads)
         else:
             mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
-
-        context = graph_ops.add_attention_from_rows(
-            network,
-            q,
-            all_k.get_output(0),
-            all_v.get_output(0),
-            num_heads=num_heads,
-            head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            q_seq=1,
-            kv_seq=kv_seq,
-            causal=False,
-            mask=mask_4d,
-            scale=attention_scale,
-            fp32_qk_accumulation=fp32_qk_accumulation,
-        )
+        context = graph_ops.add_attention_from_rows(network, q, all_k.get_output(0), all_v.get_output(0), num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads, q_seq=1, kv_seq=kv_seq, causal=False, mask=mask_4d, scale=attention_scale, fp32_qk_accumulation=fp32_qk_accumulation)
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:
-            raise ValueError(
-                "FFI decoder attention requires num_kv_heads == num_heads; "
-                "use TRT native attention for compact GQA/MQA KV cache")
-        # Fused attention kernel via TVM-FFI plugin
-        context = graph_ops.add_decoder_attention_ffi(
-            network, q, all_k.get_output(0), all_v.get_output(0),
-            kernel_name=ffi_attention_kernel,
-            num_heads=num_heads, head_dim=head_dim,
-            attention_window=attention_window)
-
-    # Output projection
-    attn_out = matmul(context,
-                      attention_size, hidden_size,
-                      weights[f"{prefix}.w_o"], f"{_lp}.w_o")
-
-    # Optional output projection bias
-    o_bias = weights.get(f"{prefix}.o_bias")
+            raise ValueError('FFI decoder attention requires num_kv_heads == num_heads; use TRT native attention for compact GQA/MQA KV cache')
+        context = graph_ops.add_decoder_attention_ffi(network, q, all_k.get_output(0), all_v.get_output(0), kernel_name=ffi_attention_kernel, num_heads=num_heads, head_dim=head_dim, attention_window=attention_window)
+    attn_out = matmul(context, attention_size, hidden_size, weights[f'{prefix}.w_o'], f'{_lp}.w_o')
+    o_bias = weights.get(f'{prefix}.o_bias')
     if o_bias is not None:
         attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias, dtype=dtype)
-
-    return {
-        "normed": normed,
-        "attn_out": attn_out,
-        "present_k": present_k,
-        "present_v": present_v,
-    }
+    return {'normed': normed, 'attn_out': attn_out, 'present_k': present_k, 'present_v': present_v}
 
 
-def add_swiglu_mlp(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    *,
-    weights: WeightDict,
-    prefix: str,
-    hidden_size: int,
-    mlp_size: int,
-    dtype: np.dtype = np.float32,
-    quant_ctx: QuantContext | None = None,
-    layer_prefix: str = "",
-) -> trt.ITensor:
-    """Gate/up/down SwiGLU MLP. Returns output tensor."""
-    matmul = _make_matmul_fn(network, dtype, quant_ctx)
-    _lp = layer_prefix or prefix
-
-    gate = matmul(inp, hidden_size, mlp_size,
-                  weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
-    up = matmul(inp, hidden_size, mlp_size,
-                weights[f"{prefix}.w_up"], f"{_lp}.w_up")
-
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-
-    mlp_out = matmul(gated.get_output(0), mlp_size, hidden_size,
-                     weights[f"{prefix}.w_down"], f"{_lp}.w_down")
-    return mlp_out
-
-
-def add_gelu_fc_mlp(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    *,
-    weights: WeightDict,
-    prefix: str,
-    hidden_size: int,
-    mlp_size: int,
-    activation: str = "gelu_new",
-    dtype: np.dtype = np.float32,
-    quant_ctx: QuantContext | None = None,
-    layer_prefix: str = "",
-) -> trt.ITensor:
+def add_gelu_fc_mlp(network: trt.INetworkDefinition, inp: trt.ITensor, *, weights: WeightDict, prefix: str, hidden_size: int, mlp_size: int, dtype: np.dtype=np.float32, quant_ctx: QuantContext | None=None, layer_prefix: str='') -> trt.ITensor:
     """fc1 -> activation -> fc2 MLP. Returns output tensor."""
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
-
-    fc1 = matmul(inp, hidden_size, mlp_size,
-                 weights[f"{prefix}.w_fc1"], f"{_lp}.w_fc1")
-    fc1_bias = weights.get(f"{prefix}.fc1_bias")
+    fc1 = matmul(inp, hidden_size, mlp_size, weights[f'{prefix}.w_fc1'], f'{_lp}.w_fc1')
+    fc1_bias = weights.get(f'{prefix}.fc1_bias')
     if fc1_bias is not None:
         fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=dtype)
-
-    activated = graph_ops.add_activation(network, fc1, activation, dtype=dtype)
-
-    fc2 = matmul(activated, mlp_size, hidden_size,
-                 weights[f"{prefix}.w_fc2"], f"{_lp}.w_fc2")
-    fc2_bias = weights.get(f"{prefix}.fc2_bias")
+    activated = graph_ops.add_activation(network, fc1, 'gelu_new', dtype=dtype)
+    fc2 = matmul(activated, mlp_size, hidden_size, weights[f'{prefix}.w_fc2'], f'{_lp}.w_fc2')
+    fc2_bias = weights.get(f'{prefix}.fc2_bias')
     if fc2_bias is not None:
         fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, fc2_bias, dtype=dtype)
-
     return fc2

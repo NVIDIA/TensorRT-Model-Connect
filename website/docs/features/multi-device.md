@@ -87,9 +87,9 @@ that plan and supplies rank identity through the distributed runtime or an
 explicit graph input. Ulysses all-to-all operations exchange sequence and head
 shards inside the graph.
 
-CP currently applies to model-owned diffusion paths. The common builder rejects
-CP for families that do not implement `parallel_config`; the FLUX family also
-restricts Ulysses CP to FLUX.1.
+CP currently applies to model-owned diffusion paths. Each family `model.py`
+rejects unsupported CP requests itself; the FLUX family also restricts Ulysses
+CP to FLUX.1.
 
 ## Runtime contract
 

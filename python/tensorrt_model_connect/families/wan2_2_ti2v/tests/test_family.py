@@ -25,11 +25,11 @@ from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
     validate_native_config,
 )
 from tensorrt_model_connect.families.wan2_2_ti2v import fp8_profile
-from tensorrt_model_connect.families.wan2_2_ti2v.plugin import (
+from tensorrt_model_connect.families.wan2_2_ti2v import model as Wan22TI2VModel
+from tensorrt_model_connect.families.wan2_2_ti2v.model import (
     WAN22_EAGER_BUNDLE_SECTIONS,
     WAN22_LAZY_BUNDLE_SECTIONS,
     WAN22_MODEL_OWNED_BUNDLE_SECTIONS,
-    Wan22TI2VPlugin,
 )
 
 
@@ -80,10 +80,7 @@ _TEST_CHECKPOINT_PAYLOAD = b"wan22-test-checkpoint"
 
 def _packaged_snapshot(root: Path) -> Path:
     snapshot = (
-        root
-        / "models--Wan-AI--Wan2.2-TI2V-5B"
-        / "snapshots"
-        / fp8_profile.PACKAGED_HF_REVISION
+        root / "models--Wan-AI--Wan2.2-TI2V-5B" / "snapshots" / fp8_profile.PACKAGED_HF_REVISION
     )
     snapshot.mkdir(parents=True)
     (snapshot / "test-checkpoint.bin").write_bytes(_TEST_CHECKPOINT_PAYLOAD)
@@ -140,7 +137,7 @@ def test_packaged_fp8_asset_is_complete_and_immutable(
         "_current_device_profile",
         lambda: ((10, 3), False),
     )
-    scales = Wan22TI2VPlugin().fp8_precomputed_scales(
+    scales = Wan22TI2VModel.fp8_precomputed_scales(
         str(snapshot),
         _runtime_config(),
     )
@@ -166,15 +163,12 @@ def test_packaged_fp8_asset_is_complete_and_immutable(
         "_current_device_profile",
         lambda: ((11, 0), True),
     )
-    assert (
-        Wan22TI2VPlugin().fp8_precomputed_scales(str(snapshot), _runtime_config())
-        == scales
-    )
+    assert Wan22TI2VModel.fp8_precomputed_scales(str(snapshot), _runtime_config()) == scales
     local_checkpoint = tmp_path / "local-checkpoint"
     local_checkpoint.mkdir()
     (local_checkpoint / "test-checkpoint.bin").write_bytes(_TEST_CHECKPOINT_PAYLOAD)
     assert (
-        Wan22TI2VPlugin().fp8_precomputed_scales(
+        Wan22TI2VModel.fp8_precomputed_scales(
             str(local_checkpoint),
             _runtime_config(),
         )
@@ -182,9 +176,7 @@ def test_packaged_fp8_asset_is_complete_and_immutable(
     )
 
 
-def test_packaged_fp8_request_fails_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_packaged_fp8_request_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _use_test_checkpoint_identity(monkeypatch)
     snapshot = _packaged_snapshot(tmp_path)
     monkeypatch.setattr(
@@ -194,9 +186,9 @@ def test_packaged_fp8_request_fails_closed(
     )
 
     with pytest.raises(ValueError, match="exact checkpoint files"):
-        Wan22TI2VPlugin().fp8_precomputed_scales(str(tmp_path), _runtime_config())
+        Wan22TI2VModel.fp8_precomputed_scales(str(tmp_path), _runtime_config())
     with pytest.raises(ValueError, match="official"):
-        Wan22TI2VPlugin().fp8_precomputed_scales(
+        Wan22TI2VModel.fp8_precomputed_scales(
             str(snapshot),
             _runtime_config(
                 video_width=672,
@@ -212,7 +204,7 @@ def test_packaged_fp8_request_fails_closed(
         lambda: ((11, 0), False),
     )
     with pytest.raises(ValueError, match="portable BF16"):
-        Wan22TI2VPlugin().fp8_precomputed_scales(str(snapshot), _runtime_config())
+        Wan22TI2VModel.fp8_precomputed_scales(str(snapshot), _runtime_config())
 
 
 def test_packaged_fp8_checkpoint_corruption_fails_closed(
@@ -227,7 +219,7 @@ def test_packaged_fp8_checkpoint_corruption_fails_closed(
         lambda: ((11, 0), True),
     )
     with pytest.raises(ValueError, match="content does not match"):
-        Wan22TI2VPlugin().fp8_precomputed_scales(str(snapshot), _runtime_config())
+        Wan22TI2VModel.fp8_precomputed_scales(str(snapshot), _runtime_config())
 
 
 def test_packaged_fp8_asset_corruption_fails_closed(
@@ -292,10 +284,10 @@ def test_native_checkpoint_config_is_exact() -> None:
 
 
 def test_plugin_matches_only_official_model_type_and_family_id() -> None:
-    plugin = Wan22TI2VPlugin()
+    plugin = Wan22TI2VModel
     assert plugin.pipeline_classes == ("WanModel",)
-    assert plugin.matches("ti2v")
-    assert plugin.matches("wan2_2_ti2v")
+    assert plugin.matches(SimpleNamespace(model_type="ti2v", raw={}))
+    assert plugin.matches(SimpleNamespace(model_type="wan2_2_ti2v", raw={}))
     for unrelated in (
         "ti2v-5b",
         "wan2.2-ti2v-5b",
@@ -305,14 +297,14 @@ def test_plugin_matches_only_official_model_type_and_family_id() -> None:
         "WanModel",
         "WanPipeline",
     ):
-        assert not plugin.matches(unrelated)
+        assert not plugin.matches(SimpleNamespace(model_type=unrelated, raw={}))
 
 
 def test_load_weights_requires_complete_native_checkpoint(tmp_path: Path) -> None:
     _write_checkpoint(tmp_path)
     config = _runtime_config()
 
-    weights = Wan22TI2VPlugin().load_weights(str(tmp_path), config)
+    weights = Wan22TI2VModel.load_weights(str(tmp_path), config)
 
     assert weights["_vae_checkpoint"] == str(tmp_path / "Wan2.2_VAE.pth")
     assert weights["_text_encoder_checkpoint"] == str(tmp_path / "models_t5_umt5-xxl-enc-bf16.pth")
@@ -320,14 +312,14 @@ def test_load_weights_requires_complete_native_checkpoint(tmp_path: Path) -> Non
 
     (tmp_path / "Wan2.2_VAE.pth").unlink()
     with pytest.raises(FileNotFoundError, match="Wan2.2_VAE.pth"):
-        Wan22TI2VPlugin().load_weights(str(tmp_path), _runtime_config())
+        Wan22TI2VModel.load_weights(str(tmp_path), _runtime_config())
 
 
 def test_bundle_hooks_emit_staged_native_bundle() -> None:
-    plugin = Wan22TI2VPlugin()
+    model = Wan22TI2VModel
     components = _bundle_components()
 
-    assert plugin.diffusion_bundle_sections(components) == [
+    assert model.diffusion_bundle_sections(components) == [
         ("text_encoder_0_plan", b"wan22-t5-plan"),
         ("denoiser_plan", b"wan22-dit-plan"),
         ("vae_decoder_plan", b"wan22-vae-recurrent-plan"),
@@ -335,10 +327,8 @@ def test_bundle_hooks_emit_staged_native_bundle() -> None:
         ("tokenizer.json", b'{"model":{"type":"Unigram"}}'),
     ]
     assert len(WAN22_MODEL_OWNED_BUNDLE_SECTIONS) == 5
-    with pytest.raises(NotImplementedError, match="build_components"):
-        plugin.build_engine(_runtime_config(), {}, 512)
 
-    bundle_config = plugin.diffusion_bundle_config(_runtime_config(), components=components)
+    bundle_config = model.diffusion_bundle_config(_runtime_config(), components=components)
     assert bundle_config["bundle_loading"] == {
         "mode": "staged",
         "eager_sections": list(WAN22_EAGER_BUNDLE_SECTIONS),
@@ -356,33 +346,28 @@ def test_bundle_hooks_emit_staged_native_bundle() -> None:
 def test_public_builder_routes_wan_to_component_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import tensorrt_model_connect.engine_builder as engine_builder
+    from tensorrt_model_connect import bundle_writer
+    from tensorrt_model_connect.families.wan2_2_ti2v import model
 
     _write_checkpoint(tmp_path)
-    plugin = Wan22TI2VPlugin()
     components = _bundle_components()
     calls = []
     monkeypatch.setattr(
-        plugin,
+        model,
         "build_components",
         lambda *args, **kwargs: calls.append((args, kwargs)) or components,
     )
-    monkeypatch.setattr(engine_builder, "find_plugin", lambda _config: plugin)
-    monkeypatch.setattr(engine_builder, "find_diffusion_plugin", lambda _class_name: plugin)
-    monkeypatch.setattr(engine_builder, "_setup_trt_import", lambda _rtx: None)
-    monkeypatch.setattr(engine_builder.trt_compat, "resolved_summary", lambda: "TensorRT test")
-    monkeypatch.setattr(engine_builder, "_get_trt_version", lambda: "11.1.0")
-    monkeypatch.setattr(engine_builder, "_get_gpu_name", lambda: "NVIDIA GB300")
-    monkeypatch.setattr(engine_builder.build_bundle, "_fp8_scales", None, raising=False)
+    monkeypatch.setattr(bundle_writer, "tensorrt_version", lambda: "11.1.0")
+    monkeypatch.setattr(bundle_writer, "gpu_name", lambda: "NVIDIA GB300")
     captured = {}
     monkeypatch.setattr(
-        engine_builder,
+        bundle_writer,
         "write_bundle",
         lambda output, info, sections: captured.update(output=output, info=info, sections=sections),
     )
 
     output_path = str(tmp_path / "wan22.bundle")
-    engine_builder.build_bundle(
+    model.build(
         str(tmp_path),
         output_path,
     )
@@ -392,6 +377,7 @@ def test_public_builder_routes_wan_to_component_bundle(
     assert captured["output"] == output_path
     assert captured["info"].family == "wan2_2_ti2v"
     assert captured["info"].precision == "bf16"
+    assert captured["info"].max_batch_size is None
     assert [section.name for section in captured["sections"]] == [
         *WAN22_MODEL_OWNED_BUNDLE_SECTIONS,
         "config.json",
@@ -409,16 +395,14 @@ def test_public_builder_routes_wan_to_component_bundle(
     }
     scale_calls = []
     monkeypatch.setattr(
-        plugin,
+        model,
         "fp8_precomputed_scales",
-        lambda model_dir, config: (
-            scale_calls.append((model_dir, config)) or packaged_scales
-        ),
+        lambda model_dir, config: scale_calls.append((model_dir, config)) or packaged_scales,
     )
-    monkeypatch.setattr(engine_builder.build_bundle, "_fp8_scales", "auto")
-    engine_builder.build_bundle(
+    model.build(
         str(tmp_path),
         output_path,
+        fp8_scales="auto",
     )
 
     assert len(scale_calls) == 1
@@ -426,13 +410,24 @@ def test_public_builder_routes_wan_to_component_bundle(
     assert calls[1][1]["fp8_scales"] is packaged_scales
     assert captured["info"].quantization == "fp8"
     config_payload = json.loads(
-        next(
-            section.data
-            for section in captured["sections"]
-            if section.name == "config.json"
-        )
+        next(section.data for section in captured["sections"] if section.name == "config.json")
     )
     assert config_payload["quantization"] == {"format": "fp8"}
+
+    model.build(
+        str(tmp_path),
+        output_path,
+        max_batch_size=4,
+        family_build_options={"wan2_2_ti2v": {"first_block_cache": True}},
+    )
+    assert captured["info"].max_batch_size == {
+        "dit": 4,
+        "text_encoder": 8,
+        "vae": 1,
+    }
+    assert calls[2][0][1].raw["_family_build_options"] == {
+        "wan2_2_ti2v": {"first_block_cache": True}
+    }
 
 
 def test_component_builder_emits_four_native_plans(
@@ -578,7 +573,7 @@ def test_component_builder_emits_four_native_plans(
 
 
 def test_runtime_config_supports_only_qualified_profiles_and_seed_range() -> None:
-    plugin = Wan22TI2VPlugin()
+    plugin = Wan22TI2VModel
     official = plugin.get_diffusion_config(_runtime_config())
     assert plugin.runtime_strategy == "diffusion_wan2_2_ti2v"
     assert set(official) == {

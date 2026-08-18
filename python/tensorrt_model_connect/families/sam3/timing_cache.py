@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
@@ -14,7 +13,7 @@ import json
 import math
 from pathlib import Path
 import re
-from typing import Any, Iterator, Literal, Mapping
+from typing import Any, Literal, Mapping
 
 from tensorrt_model_connect import trt_compat
 
@@ -110,18 +109,6 @@ class Sam3TimingCachePolicy:
 _POLICY: ContextVar[Sam3TimingCachePolicy] = ContextVar(
     "sam3_timing_cache_policy", default=Sam3TimingCachePolicy()
 )
-
-
-@contextmanager
-def use_sam3_timing_cache(policy: Sam3TimingCachePolicy) -> Iterator[None]:
-    """Temporarily override cache selection without process environment state."""
-
-    policy.validate()
-    token = _POLICY.set(policy)
-    try:
-        yield
-    finally:
-        _POLICY.reset(token)
 
 
 def _graph_contract_fingerprint(engine_kind: str, graph_profile: Mapping[str, Any]) -> str:

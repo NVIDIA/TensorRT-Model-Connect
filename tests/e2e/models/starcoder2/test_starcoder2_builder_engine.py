@@ -58,7 +58,7 @@ class StarCoder2PluginTester(FamilyPluginTester):
       - Separate Q/K/V/O projections with GQA
     """
 
-    plugin_module = "tensorrt_model_connect.families.starcoder2"
+    plugin_module = "tensorrt_model_connect.families.starcoder2.model"
     model_type = "starcoder2"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

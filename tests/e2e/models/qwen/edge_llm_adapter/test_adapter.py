@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import importlib
 import importlib.util
 import json
 import os
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -78,6 +80,42 @@ EDGE_SOURCE = EDGE_DEPENDENCY["source"]
 EDGE_VERSION = EDGE_DEPENDENCY["version"]
 EDGE_TAG = EDGE_DEPENDENCY["tag"]
 EDGE_COMMIT = EDGE_DEPENDENCY["commit"]
+
+
+def _import_qwen_model(monkeypatch: pytest.MonkeyPatch):
+    """Import the family entry with lightweight TensorRT symbols."""
+    from tensorrt_model_connect import trt_compat
+
+    fake_trt = types.SimpleNamespace(
+        ElementWiseOperation=types.SimpleNamespace(
+            SUM="sum", SUB="sub", PROD="prod", DIV="div", POW="pow"
+        ),
+        MatrixOperation=types.SimpleNamespace(NONE="none", TRANSPOSE="transpose"),
+        AttentionNormalizationOp=types.SimpleNamespace(SOFTMAX="softmax"),
+        ActivationType=types.SimpleNamespace(SIGMOID="sigmoid", TANH="tanh", RELU="relu"),
+        ReduceOperation=types.SimpleNamespace(AVG="avg", SUM="sum", MAX="max"),
+        UnaryOperation=types.SimpleNamespace(SQRT="sqrt", RECIP="recip", EXP="exp"),
+        NetworkDefinitionCreationFlag=types.SimpleNamespace(
+            EXPLICIT_BATCH=0, STRONGLY_TYPED=1
+        ),
+        BuilderFlag=types.SimpleNamespace(TF32="tf32"),
+        MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
+        Permutation=lambda value: tuple(value),
+        float32="float32",
+        float16="float16",
+        bfloat16="bfloat16",
+        int32="int32",
+    )
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    monkeypatch.setattr(trt_compat, "_module", fake_trt)
+    for module_name in tuple(sys.modules):
+        if module_name == "tensorrt_model_connect.families.qwen" or module_name.startswith(
+            "tensorrt_model_connect.families.qwen."
+        ):
+            sys.modules.pop(module_name, None)
+    return importlib.import_module("tensorrt_model_connect.families.qwen.model")
+
+
 TENSORRT_VERSION = DEPENDENCY_LOCK["tensorrt"]["version"]
 TENSORRT_VERSION_COMPONENTS = tuple(int(component) for component in TENSORRT_VERSION.split("."))
 CUDA_VERSION = DEPENDENCY_LOCK["cuda"]["version"]
@@ -1080,36 +1118,45 @@ def test_native_python_default_leaves_precision_to_the_model_family() -> None:
     assert defaults["max_batch_size"] == MC_DEFAULT_DEPLOYMENT["max_batch_size"]
 
 
-def test_public_python_model_id_default_dispatches_without_native_fallback(
+def test_qwen_model_owns_default_optimized_dispatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    model = _import_qwen_model(monkeypatch)
 
     bundle = tmp_path / "qwen-default.bundle"
     captured: dict[str, object] = {}
 
-    def select_optimized(model_id: str, output_path: str, public_options: dict):
+    def select_optimized(
+        model_id: str,
+        output_path: str,
+        *,
+        family_name: str,
+        parameters: dict,
+    ):
         captured.update(
             model_id=model_id,
             output_path=output_path,
-            public_options=public_options,
+            family_name=family_name,
+            public_options=parameters["public_options"],
         )
         bundle.write_bytes(b"delegated")
         return object()
 
-    monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", select_optimized)
-    monkeypatch.setattr(
-        engine_builder,
-        "_build_native_impl",
-        lambda **_kwargs: pytest.fail("qualified default request must not use MC native"),
+    monkeypatch.setattr(orchestrator, "try_build_optimized_runtime", select_optimized)
+
+    assert model._try_optimized_runtime(
+        "/cache/models--Qwen--Qwen3-0.6B/snapshots/" + MODEL_REVISION,
+        str(bundle),
+        {"precision": None, "max_cache_length": None, "max_batch_size": 1},
     )
 
-    engine_builder.build(MODEL_ID, str(bundle))
-
     assert bundle.read_bytes() == b"delegated"
-    assert captured["model_id"] == MODEL_ID
+    assert str(captured["model_id"]).endswith(MODEL_REVISION)
     assert captured["output_path"] == str(bundle)
+    assert captured["family_name"] == "qwen"
     public_options = captured["public_options"]
     assert isinstance(public_options, dict)
     assert {
@@ -1170,6 +1217,7 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.build_cli as build_cli
+    qwen_model = _import_qwen_model(monkeypatch)
 
     captured = {}
 
@@ -1187,7 +1235,13 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
         build_cli.main()
 
     assert exit_info.value.code == 0
-    options = build_cli._optimized_cli_public_options(captured["args"])
+    options = qwen_model._optimized_public_options(
+        {
+            "precision": captured["args"].precision,
+            "max_cache_length": captured["args"].max_cache_length,
+            "max_batch_size": captured["args"].max_batch_size,
+        }
+    )
     assert {field: options[field] for field in MC_DEFAULT_DEPLOYMENT} == MC_DEFAULT_DEPLOYMENT
     assert _public_reason(options) == ""
 
@@ -1212,7 +1266,13 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
         build_cli.main()
 
     assert exit_info.value.code == 0
-    options = build_cli._optimized_cli_public_options(captured["args"])
+    options = qwen_model._optimized_public_options(
+        {
+            "precision": captured["args"].precision,
+            "max_cache_length": captured["args"].max_cache_length,
+            "max_batch_size": captured["args"].max_batch_size,
+        }
+    )
     assert {
         field: options[field] for field in QUALIFIED_EDGE_DEPLOYMENT
     } == QUALIFIED_EDGE_DEPLOYMENT
@@ -1235,7 +1295,13 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
         build_cli.main()
 
     assert exit_info.value.code == 0
-    options = build_cli._optimized_cli_public_options(captured["args"])
+    options = qwen_model._optimized_public_options(
+        {
+            "precision": captured["args"].precision,
+            "max_cache_length": captured["args"].max_cache_length,
+            "max_batch_size": captured["args"].max_batch_size,
+        }
+    )
     reason = _public_reason(options)
     assert "does not qualify public deployment tuple" in reason
 
