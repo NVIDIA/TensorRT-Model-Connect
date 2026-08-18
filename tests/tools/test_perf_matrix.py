@@ -1787,6 +1787,7 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
         "output_contract": "normalized-text",
     }
     assert rows["gemma.generate"]["baseline"]["output_contract"] == "exact-text"
+    assert rows["gemma.generate"]["baseline"]["precision"] == "fp16"
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["deepseek_ocr.generate"]["baseline"]["output_contract"] == "ocr-text"

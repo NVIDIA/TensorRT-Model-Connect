@@ -288,6 +288,7 @@ entries:
       mode: torch-compile
       compile_scope: model.forward
       output_contract: exact-text
+      precision: fp16
   - id: glm.generate
     family: glm
     operation: generate

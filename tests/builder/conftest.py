@@ -167,7 +167,12 @@ def run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarr
 
     trt_inputs = {}
     for name, arr in inputs.items():
-        dt = trt.float32 if arr.dtype == np.float32 else trt.int32
+        if arr.dtype == np.float32:
+            dt = trt.float32
+        elif arr.dtype == np.float16:
+            dt = trt.float16
+        else:
+            dt = trt.int32
         t = network.add_input(name, dt, tuple(arr.shape))
         trt_inputs[name] = t
 
@@ -200,11 +205,15 @@ def run_trt_graph(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarr
     for i in range(engine.num_io_tensors):
         tname = engine.get_tensor_name(i)
         shape = tuple(engine.get_tensor_shape(tname))
-        nbytes = int(np.prod(shape)) * 4
+        mode = engine.get_tensor_mode(tname)
+        nbytes = (
+            inputs[tname].nbytes
+            if mode == trt.TensorIOMode.INPUT
+            else int(np.prod(shape)) * 4
+        )
         err, ptr = cudart.cudaMallocAsync(nbytes, stream)
         _check_cuda(err)
         device_bufs[tname] = ptr
-        mode = engine.get_tensor_mode(tname)
         if mode == trt.TensorIOMode.INPUT:
             arr = inputs[tname]
             cudart.cudaMemcpyAsync(

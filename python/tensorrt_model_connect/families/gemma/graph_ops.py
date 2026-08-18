@@ -244,50 +244,19 @@ def add_gelu_new(
 ) -> trt.ITensor:
     """GELU (tanh approximation): 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))).
 
-    Constants are cast to ``inp.dtype`` so the elementwise ops are valid in
-    a STRONGLY_TYPED network when ``inp`` is bf16 (storage np_dtype is
-    fp16, runtime trt_dtype is bfloat16) or any other non-matching combo.
+    Evaluate TensorRT's fused GELU_TANH implementation in FP32, matching
+    PyTorch's FP16 GELU behavior while avoiding the precision-sensitive FP16
+    cubic intermediates of a manually expanded formula.  Cast the result back
+    to the input dtype for the surrounding MLP.
     """
-    target_dtype = inp.dtype
-    const_shape = (1,) * max(1, len(tuple(inp.shape)))
-
-    def _const(name, value):
-        c = add_constant(
-            network, const_shape, np.array([value], dtype=np.float32), dtype=dtype)
-        return _cast_back_to_trt_dtype(network, c, target_dtype)
-
-    # x^3
-    x_sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
-    x_cu = network.add_elementwise(
-        x_sq.get_output(0), inp, trt.ElementWiseOperation.PROD)
-    # 0.044715 * x^3
-    coeff = _const("coeff", 0.044715)
-    scaled_cube = network.add_elementwise(
-        x_cu.get_output(0), coeff, trt.ElementWiseOperation.PROD)
-    # x + 0.044715 * x^3
-    inner_sum = network.add_elementwise(
-        inp, scaled_cube.get_output(0), trt.ElementWiseOperation.SUM)
-    # sqrt(2/pi) * (x + 0.044715 * x^3)
-    sqrt_2_over_pi = _const("sqrt_2_over_pi", np.sqrt(2.0 / np.pi))
-    tanh_arg = network.add_elementwise(
-        sqrt_2_over_pi, inner_sum.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    # tanh(...)
-    tanh_l = network.add_activation(
-        tanh_arg.get_output(0), trt.ActivationType.TANH)
-    # 1 + tanh(...)
-    one = _const("one", 1.0)
-    one_plus_tanh = network.add_elementwise(
-        one, tanh_l.get_output(0), trt.ElementWiseOperation.SUM)
-    # 0.5 * x
-    half = _const("half", 0.5)
-    half_x = network.add_elementwise(
-        half, inp, trt.ElementWiseOperation.PROD)
-    # 0.5 * x * (1 + tanh(...))
-    result = network.add_elementwise(
-        half_x.get_output(0), one_plus_tanh.get_output(0),
-        trt.ElementWiseOperation.PROD)
-    return result.get_output(0)
+    del dtype
+    output_dtype = inp.dtype
+    work = inp
+    if output_dtype != trt.float32:
+        work = network.add_cast(inp, trt.float32).get_output(0)
+    result = network.add_activation(
+        work, trt.ActivationType.GELU_TANH).get_output(0)
+    return _cast_back_to_trt_dtype(network, result, output_dtype)
 
 
 def add_activation(
