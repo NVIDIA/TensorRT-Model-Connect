@@ -637,7 +637,7 @@ def test_selected_models_artifact_records_configured_bindings(tmp_path) -> None:
     assert selection.read_text(encoding="utf-8") == "model-a\nmodel-b\nmodel-c\n"
 
 
-def test_accuracy_platform_exclusions_are_reported_without_execution(tmp_path) -> None:
+def test_accuracy_platform_exclusions_are_removed_before_execution() -> None:
     plan = {
         "models": [
             {
@@ -667,72 +667,10 @@ def test_accuracy_platform_exclusions_are_reported_without_execution(tmp_path) -
             }
         ]
     }
-    output = tmp_path / "accuracy"
-
     assert [
         (binding["model"], binding["workload"])
         for binding in model_checks._task_bindings(plan, "accuracy")
     ] == [("model-a", "suite-a")]
-    written = model_checks._write_accuracy_platform_results(plan, output)
-    _, html_path, report = model_checks.trtmc_validate.write_report(output)
-
-    assert [path.relative_to(output).as_posix() for path in written] == [
-        "model-b/suite-b/comparison.json",
-        "model-c/suite-c/comparison.json",
-    ]
-    assert report["summary"]["platform_excluded"] == 2
-    assert report["summary"]["not_compared"] == 2
-    assert all(result["execution"]["status"] == "not_run" for result in report["results"])
-    assert all("platform_exclusion" in result for result in report["results"])
-    html = html_path.read_text(encoding="utf-8")
-    assert "2 platform excluded" in html
-    assert "Model is excluded from platform test-platform" in html
-    assert "qualification is intentionally deferred" in html
-
-
-def test_accuracy_platform_exclusion_does_not_replace_executed_result(tmp_path) -> None:
-    output = tmp_path / "accuracy"
-    comparison = output / "model-b" / "suite-b" / "comparison.json"
-    comparison.parent.mkdir(parents=True)
-    comparison.write_text(
-        json.dumps(
-            {
-                "model": "model-b",
-                "workload": "suite-b",
-                "execution": {"status": "completed"},
-                "validation": {"status": "passed"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    plan = {
-        "models": [
-            {
-                "tasks": {
-                    "accuracy": {
-                        "bindings": [
-                            {
-                                "model": "model-b",
-                                "workload": "suite-b",
-                                "status": "excluded",
-                                "reason": "Model is excluded from platform test-platform",
-                            }
-                        ]
-                    }
-                }
-            }
-        ]
-    }
-
-    with pytest.raises(
-        model_checks.ModelCheckError,
-        match="refusing to replace a previously executed Accuracy result",
-    ):
-        model_checks._write_accuracy_platform_results(plan, output)
-
-    assert json.loads(comparison.read_text(encoding="utf-8"))["execution"] == {
-        "status": "completed"
-    }
 
 
 @pytest.mark.parametrize(

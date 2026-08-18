@@ -1445,6 +1445,54 @@ def test_wall_time_rejects_incomplete_or_invalid_timestamps(
     assert perf_matrix._wall_time_html(record) == "—"
 
 
+def test_public_perf_result_with_unknown_precision_has_no_performance_light() -> None:
+    row = {
+        "id": "model.generate",
+        "status": "green",
+        "resolved_settings": {"model": {"precision": "fp16"}},
+        "candidate": {"precision": "fp16", "samples_ms": [10.0]},
+        "baseline": {"samples_ms": [20.0]},
+        "comparison": {},
+    }
+
+    public = perf_matrix._public_perf_result(row)
+
+    assert public["state"] == "terminal"
+    assert public["result"] == "white"
+    assert public["issue"]["code"] == "comparison_contract"
+    assert public["output_validation"]["status"] == "Pass"
+    assert public["latency"] == {"reference_ms": None, "candidate_ms": None}
+
+
+def test_cleanup_warning_does_not_replace_a_valid_performance_result() -> None:
+    row = {
+        "status": "green",
+        "resolved_settings": {
+            "baseline_precision": "fp16",
+            "model": {"precision": "fp16"},
+        },
+        "candidate": {"precision": "fp16"},
+        "warnings": [
+            {
+                "stage": "cleanup",
+                "code": "resource_cleanup_failed",
+                "message": "scratch directory retained",
+            }
+        ],
+    }
+
+    assert perf_matrix._final_status([row]) == "completed-with-warnings"
+    assert perf_matrix._perf_state_and_result(row) == ("terminal", "green")
+
+
+@pytest.mark.parametrize("status", ["pending", "running"])
+def test_public_perf_progress_has_no_traffic_light(status: str) -> None:
+    public = perf_matrix._public_perf_result({"id": "model.generate", "status": status})
+
+    assert public["state"] == status
+    assert public["result"] is None
+
+
 def test_run_consolidates_results_and_records_replayable_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1483,7 +1531,10 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert len(run_directories) == 1
     output = run_directories[0]
     assert sorted(path.name for path in output.iterdir()) == [
+        "artifacts",
+        "assets",
         "report.html",
+        "report.json",
         "results.json",
     ]
     assert not scratch_root.exists()
@@ -1546,50 +1597,87 @@ def test_run_consolidates_results_and_records_replayable_commands(
     }
     assert rows["gpt2.generate"]["baseline"]["mode"] == "torch-compile"
     assert rows["mamba.generate"]["baseline_contract"]["mode"] == "hf-eager"
+    public_report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert public_report["schema_version"] == "trtmc.qualification-report/v1"
+    assert public_report["report_kind"] == "performance"
+    assert public_report["accounting"] == {
+        "selected": 1,
+        "comparable": 1,
+        "operational_coverage_percent": 100.0,
+        "progress": {"pending": 0, "running": 0, "terminal": 1},
+        "outcomes": {"green": 1, "yellow": 0, "red": 0, "white": 0},
+        "invariants": {
+            "selected": "pending + running + terminal",
+            "terminal": "green + yellow + red + white",
+            "comparable": "green + yellow + red",
+        },
+        "definitions": {
+            "green": {
+                "class": "valid-comparison",
+                "label": "Meets the target",
+                "denominator": "comparable",
+            },
+            "yellow": {
+                "class": "valid-comparison",
+                "label": "Valid comparison in the review band",
+                "denominator": "comparable",
+            },
+            "red": {
+                "class": "valid-comparison",
+                "label": "Valid comparison that misses the target",
+                "denominator": "comparable",
+            },
+            "white": {
+                "class": "coverage-gap",
+                "label": "No valid comparison",
+                "denominator": "selected",
+            },
+        },
+    }
+    assert len(public_report["results"]) == 1
+    public_row = public_report["results"][0]
+    assert public_row["id"] == "gpt2.generate"
+    assert public_row["state"] == "terminal"
+    assert public_row["result"] == "green"
+    assert public_row["precision"] == {
+        "reference": "fp32",
+        "candidate": "fp16",
+    }
+    assert public_row["output_validation"]["status"] == "Pass"
+    assert public_row["latency"] == {
+        "reference_ms": 20.45,
+        "candidate_ms": 10.45,
+    }
+    assert public_row["issue"] is None
+    assert all(
+        "stdout_tail" not in command and "stderr_tail" not in command
+        for command in public_row["commands"].values()
+    )
+    assert "minimax-h3-768p" not in json.dumps(public_report)
+    assert MINIMAX_H3_EXCLUSION_REASON not in json.dumps(public_report)
+    log_records = public_row["debug"]["logs"]
+    assert {record["label"] for record in log_records} == {
+        "TRTMC stdout",
+        "TRTMC stderr",
+        "Reference stdout",
+        "Reference stderr",
+    }
+    for record in log_records:
+        assert not Path(record["href"]).is_absolute()
+        assert (output / record["href"]).is_file()
+
     report = (output / "report.html").read_text(encoding="utf-8")
-    assert ">gpt2<" in report
-    assert "HF eager" in report
-    assert "77 model types" in report
-    assert "107 model comparisons" in report
-    assert "107 single-process profiles" in report
-    assert "1 explicitly excluded profile" in report
-    assert (
-        f"{expected_catalog_coverage['excluded_l0_profiles']} duplicate L0 profiles are excluded"
-    ) in report
-    assert (f"{expected_catalog_coverage['ready_profiles']} ready catalog profiles") in report
-    assert (f"{expected_catalog_coverage['distributed_profiles']} distributed profiles") in report
-    assert (
-        f"{expected_catalog_coverage['other_profiles']} other or unsupported profiles"
-    ) in report
-    assert "<th>Model</th>" in report
-    assert "<th>Task type</th>" in report
-    assert "Total campaign wall time:" in report
-    assert "<th>Model wall time</th>" in report
-    assert "not used for traffic-light classification" in report
-    assert "TRTMC infer p50 (ms)" in report
-    assert "Baseline infer p50 (ms)" in report
-    assert "TRTMC bundle preparation" in report
-    assert "Built · 1m 23.1s" in report
-    assert "83.125 s" in report
-    assert "1 built in this test task (1m 23.1s total)" in report
-    assert "excluded from the infer-time traffic-light comparison" in report
-    assert ">10.450<" in report
-    assert ">20.450<" in report
-    assert "<th>Status</th>" in report
-    assert "<td>green</td>" not in report
-    assert "Needs alignment" not in report
-    assert "Measured scope" in report
-    assert "Timing contracts were validated before execution for 1 comparisons" in report
-    assert "Measured: public pipeline call" in report
-    assert "Measured: public operation call" in report
-    assert "Includes: pipeline-internal preprocessing, model execution, returned output" in report
-    assert "Excludes: model load, compile setup, warmup" in report
-    assert "Show raw commands" in report
-    assert str(fake_trtmc) in report
-    assert str(fake_baseline) in report
-    assert "reproduce.py" not in report
-    assert str(REPOSITORY) in report
-    assert "PYTHONPATH" in report
+    assert 'data-report="report.json"' in report
+    assert "gpt2.generate" not in report
+    assert "minimax-h3-768p" not in report
+    frontend = (output / "assets/qualification-report.js").read_text(
+        encoding="utf-8"
+    )
+    assert "Comparable results" in frontend
+    assert "Operational coverage" in frontend
+    assert "Failures" in frontend
+    assert "Reference latency" in frontend
+    assert "TRTMC latency" in frontend
 
     baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
     request = baseline_argv[baseline_argv.index("--request-json") + 1]
@@ -1612,7 +1700,10 @@ def test_run_consolidates_results_and_records_replayable_commands(
     resumed_rows = {row["id"]: row for row in resumed["cases"]}
     assert resumed_rows["gpt2.generate"]["status"] == "green"
     assert sorted(path.name for path in output.iterdir()) == [
+        "artifacts",
+        "assets",
         "report.html",
+        "report.json",
         "results.json",
     ]
     assert not scratch_root.exists()
@@ -1722,9 +1813,32 @@ def test_run_records_preflight_failure_and_finishes_campaign(
     assert row["reason"] == "profile unavailable"
     assert row["commands"]["resolve"]["rendered"].endswith("run --dry-run")
     assert sorted(path.name for path in output.iterdir()) == [
+        "artifacts",
+        "assets",
         "report.html",
+        "report.json",
         "results.json",
     ]
+    public_report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert public_report["accounting"]["selected"] == 1
+    assert public_report["accounting"]["comparable"] == 0
+    assert public_report["accounting"]["outcomes"]["white"] == 1
+    public_row = public_report["results"][0]
+    assert public_row["state"] == "terminal"
+    assert public_row["result"] == "white"
+    assert public_row["issue"]["stage"] == "reference-preflight"
+    assert public_row["issue"]["code"] == "execution_failure"
+    assert public_row["output_validation"]["status"] == "Not completed"
+    assert public_row["debug"]["logs"] == [
+        {
+            "label": "Reference Preflight diagnostic",
+            "href": "artifacts/gpt2.generate/logs/reference-preflight.log",
+        }
+    ]
+    diagnostic = output / public_row["debug"]["logs"][0]["href"]
+    assert diagnostic.is_file()
+    assert "profile unavailable" in diagnostic.read_text(encoding="utf-8")
+    assert "minimax-h3-768p" not in json.dumps(public_report)
     assert not scratch_root.exists()
 
 

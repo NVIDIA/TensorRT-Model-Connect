@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trtmc.qualification-report.schema.json",
+  "title": "TRTMC qualification report",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "report_kind",
+    "identity",
+    "run",
+    "accounting",
+    "results"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "trtmc.qualification-report/v1"
+    },
+    "report_kind": {
+      "enum": ["accuracy", "performance"]
+    },
+    "identity": {
+      "type": "object",
+      "required": ["title", "run_id"]
+    },
+    "run": {
+      "type": "object",
+      "required": ["environment_href"],
+      "properties": {
+        "environment_href": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        }
+      }
+    },
+    "accounting": {
+      "type": "object",
+      "required": [
+        "selected",
+        "comparable",
+        "operational_coverage_percent",
+        "progress",
+        "outcomes",
+        "definitions"
+      ],
+      "properties": {
+        "selected": {"type": "integer", "minimum": 0},
+        "comparable": {"type": "integer", "minimum": 0},
+        "operational_coverage_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "progress": {
+          "type": "object",
+          "required": ["pending", "running", "terminal"],
+          "properties": {
+            "pending": {"type": "integer", "minimum": 0},
+            "running": {"type": "integer", "minimum": 0},
+            "terminal": {"type": "integer", "minimum": 0}
+          }
+        },
+        "outcomes": {
+          "type": "object",
+          "required": ["green", "yellow", "red", "white"],
+          "properties": {
+            "green": {"type": "integer", "minimum": 0},
+            "yellow": {"type": "integer", "minimum": 0},
+            "red": {"type": "integer", "minimum": 0},
+            "white": {"type": "integer", "minimum": 0}
+          }
+        },
+        "definitions": {"type": "object"}
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "state", "result"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "state": {"enum": ["pending", "running", "terminal"]},
+          "result": {
+            "type": ["string", "null"],
+            "enum": ["green", "yellow", "red", "white", null]
+          },
+          "precision": {"type": "object"},
+          "issue": {"type": ["object", "null"]},
+          "debug": {"type": "object"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"state": {"const": "terminal"}}},
+            "then": {
+              "properties": {
+                "result": {"enum": ["green", "yellow", "red", "white"]}
+              }
+            },
+            "else": {"properties": {"result": {"const": null}}}
+          },
+          {
+            "if": {"properties": {"result": {"const": "white"}}},
+            "then": {
+              "required": ["issue", "debug"],
+              "properties": {
+                "issue": {
+                  "type": "object",
+                  "required": ["priority", "stage", "domain", "code", "message"]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

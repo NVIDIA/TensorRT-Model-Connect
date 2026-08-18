@@ -61,6 +61,7 @@ from tools.reporting_html import (  # noqa: E402
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
 from tools import model_selection  # noqa: E402
+from tools import qualification_report  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
@@ -2851,29 +2852,163 @@ def _report_counts(
     return validation_counts, comparison_counts, execution_errors
 
 
-def _traffic_light_counts(
-    results: Sequence[Mapping[str, Any]],
-) -> dict[str, int]:
-    counts = {"green": 0, "yellow": 0, "red": 0, "white": 0}
-    for result in results:
-        counts[_traffic_light_status(result)] += 1
-    return counts
-
-
-def _platform_exclusion_count(results: Sequence[Mapping[str, Any]]) -> int:
-    return sum(isinstance(result.get("platform_exclusion"), Mapping) for result in results)
-
-
 def _traffic_light_status(result: Mapping[str, Any]) -> str:
+    execution_status = str(result["execution"]["status"])
     validation_status = str(result["validation"]["status"])
     comparison_status = str(result["comparison"]["status"])
-    if validation_status == "skipped":
-        return "yellow"
-    if comparison_status == "agreement":
+    precision = _accuracy_precision(result)
+    if execution_status != "completed":
+        return "white"
+    if "Not recorded" in precision.values():
+        return "white"
+    if comparison_status not in {"agreement", "disagreement"}:
+        return "white"
+    if validation_status not in {"passed", "failed"}:
+        return "white"
+    if comparison_status == "agreement" and validation_status == "passed":
         return "green"
-    if comparison_status == "disagreement":
+    if comparison_status == "disagreement" or validation_status == "failed":
         return "red"
     return "white"
+
+
+def _accuracy_precision(result: Mapping[str, Any]) -> dict[str, str]:
+    contract = result.get("precision_contract", {})
+    contract = contract if isinstance(contract, Mapping) else {}
+    raw_result = result.get("raw_result", {})
+    raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+    reference = (
+        contract.get("reference_precision")
+        or contract.get("reference_dtype")
+        or raw_result.get("reference_precision")
+        or raw_result.get("reference_dtype")
+    )
+    base = contract.get("trtmc_base_precision") or raw_result.get("precision")
+    quantization = contract.get("trtmc_quantization")
+    if quantization and str(quantization).lower() not in {"none", "false"}:
+        candidate = (
+            f"{str(quantization).lower()} ({str(base).lower()} base)"
+            if base
+            else str(quantization).lower()
+        )
+    else:
+        candidate = str(base).lower() if base else ""
+    return {
+        "reference": str(reference).lower() if reference else "Not recorded",
+        "candidate": candidate or "Not recorded",
+    }
+
+
+def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
+    if _traffic_light_status(result) != "white":
+        return None
+    execution = result.get("execution", {})
+    execution = execution if isinstance(execution, Mapping) else {}
+    if execution.get("status") == "error":
+        raw_result = result.get("raw_result", {})
+        raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+        worker_failure = result.get("executor") == "model_worker"
+        return {
+            "priority": "P1",
+            "stage": "compare" if worker_failure else "candidate",
+            "domain": "harness/unknown",
+            "code": "worker_no_result" if worker_failure else "execution_error",
+            "message": str(
+                execution.get("last_error")
+                or raw_result.get("error")
+                or result.get("not_compared_reason")
+                or "candidate execution did not produce a comparison"
+            ),
+        }
+    precision = _accuracy_precision(result)
+    if "Not recorded" in precision.values():
+        return {
+            "priority": "P1",
+            "stage": "preflight",
+            "domain": "policy-config",
+            "code": "comparison_contract",
+            "message": "Reference and TRTMC compute precision were not both recorded",
+        }
+    comparison = result.get("comparison", {})
+    comparison = comparison if isinstance(comparison, Mapping) else {}
+    return {
+        "priority": "P1",
+        "stage": "compare",
+        "domain": "harness/unknown",
+        "code": "no_valid_comparison",
+        "message": str(
+            result.get("not_compared_reason")
+            or comparison.get("reason")
+            or "comparison evidence is incomplete"
+        ),
+    }
+
+
+def _report_log_links(output: Path, case_dir: Path) -> list[dict[str, str]]:
+    links = []
+    for path in sorted(case_dir.rglob("*.log")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(output).as_posix()
+        links.append({"label": path.relative_to(case_dir).as_posix(), "href": relative})
+    return links
+
+
+def _report_command_artifacts(
+    output: Path,
+    case_dir: Path,
+    result: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    reproduce = result.get("reproduce", {})
+    reproduce = reproduce if isinstance(reproduce, Mapping) else {}
+    command_logs = reproduce.get("command_logs", {})
+    command_logs = command_logs if isinstance(command_logs, Mapping) else {}
+    requested = {
+        str(name)
+        for side in ("hf", "trtmc")
+        for name in command_logs.get(side, [])
+        if str(name).strip()
+    }
+    artifacts = []
+    for name in sorted(requested):
+        matches = sorted(path for path in case_dir.rglob(Path(name).name) if path.is_file())
+        if not matches:
+            continue
+        path = matches[0]
+        artifacts.append(
+            {
+                "label": name,
+                "href": path.relative_to(output).as_posix(),
+            }
+        )
+    return artifacts
+
+
+def _public_accuracy_result(
+    output: Path,
+    path: Path,
+    result: Mapping[str, Any],
+) -> dict[str, Any]:
+    public = dict(result)
+    public.update(
+        {
+            "id": f"{result.get('model', '')}::{result.get('workload') or 'not-compared'}",
+            "state": "terminal",
+            "result": _traffic_light_status(result),
+            "precision": _accuracy_precision(result),
+            "issue": _accuracy_issue(result),
+            "debug": {
+                "result": path.relative_to(output).as_posix(),
+                "logs": _report_log_links(output, path.parent),
+                "command_artifacts": _report_command_artifacts(
+                    output,
+                    path.parent,
+                    result,
+                ),
+            },
+        }
+    )
+    return public
 
 
 def _report_rows(
@@ -3066,66 +3201,76 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths = sorted(output.glob("*/*/comparison.json"))
     results = _normalize_result_files(result_paths)
     result_paths, results = _deduplicate_results(result_paths, results)
+    selected = [
+        (path, result)
+        for path, result in zip(result_paths, results, strict=True)
+        if not isinstance(result.get("platform_exclusion"), Mapping)
+    ]
+    result_paths = [path for path, _result in selected]
+    results = [result for _path, result in selected]
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
-    traffic_light_counts = _traffic_light_counts(results)
-    platform_excluded = _platform_exclusion_count(results)
     sample_counts = [
         count for result in results if (count := _selected_sample_count(result)) is not None
     ]
     generated_at = _utc_now()
-    report = {
-        "schema_version": "trtmc.validation-report/v2",
-        "generated_at": generated_at.isoformat(),
-        "validation_status": (
-            "failed"
-            if not results or validation_counts["failed"]
-            else "incomplete"
-            if validation_counts["not_compared"]
-            else "passed"
+    validation_status = (
+        "failed"
+        if not results or validation_counts["failed"]
+        else "incomplete"
+        if (
+            validation_counts["not_compared"]
+            or validation_counts["skipped"]
+            or execution_errors
+            or any(_traffic_light_status(result) == "white" for result in results)
+        )
+        else "passed"
+    )
+    summary = {
+        "cases": len(results),
+        "execution_completed": sum(
+            result["execution"]["status"] == "completed" for result in results
         ),
-        "summary": {
-            "cases": len(results),
-            "execution_completed": sum(
-                result["execution"]["status"] == "completed" for result in results
-            ),
-            "execution_errors": execution_errors,
-            "agreements": comparison_counts["agreement"],
-            "disagreements": comparison_counts["disagreement"],
-            "not_compared": comparison_counts["not_run"],
-            "validation_passed": validation_counts["passed"],
-            "validation_failed": validation_counts["failed"],
-            "validation_skipped": validation_counts["skipped"],
-            "platform_excluded": platform_excluded,
-            "selected_samples": sum(sample_counts),
-        },
-        "results": results,
+        "execution_errors": execution_errors,
+        "agreements": comparison_counts["agreement"],
+        "disagreements": comparison_counts["disagreement"],
+        "not_compared": comparison_counts["not_run"],
+        "validation_passed": validation_counts["passed"],
+        "validation_failed": validation_counts["failed"],
+        "validation_skipped": validation_counts["skipped"],
+        "selected_samples": sum(sample_counts),
     }
     run_path = output / "run.json"
+    run: dict[str, Any] = {}
     if run_path.is_file():
-        report["run"] = json.loads(run_path.read_text(encoding="utf-8"))
-        duration_seconds = report["run"].get("duration_seconds")
+        run = json.loads(run_path.read_text(encoding="utf-8"))
+        duration_seconds = run.get("duration_seconds")
         if duration_seconds is None:
             duration_seconds = _elapsed_seconds(
-                report["run"].get("started_at"),
+                run.get("started_at"),
                 generated_at,
             )
         if duration_seconds is not None:
-            report["summary"]["duration_seconds"] = duration_seconds
-    json_path = output / "report.json"
-    html_path = output / "report.html"
-    json_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False),
-        encoding="utf-8",
+            summary["duration_seconds"] = duration_seconds
+    public_results = [
+        _public_accuracy_result(output, path, result)
+        for path, result in zip(result_paths, results, strict=True)
+    ]
+    return qualification_report.materialize_report(
+        output,
+        report_kind="accuracy",
+        title="TRTMC Accuracy & Fidelity Qualification",
+        identity={
+            "run_id": output.name,
+            "disposition": validation_status,
+            "source_revision": run.get("source_revision"),
+        },
+        run=run,
+        results=public_results,
+        metadata={
+            "validation_status": validation_status,
+            "summary": summary,
+        },
     )
-    document = _report_document(
-        report,
-        rows=_report_rows(output, results, result_paths),
-        comparison_counts=comparison_counts,
-        execution_errors=execution_errors,
-        traffic_light_counts=traffic_light_counts,
-    )
-    html_path.write_text(document, encoding="utf-8")
-    return json_path, html_path, report
 
 
 def _print_result(
@@ -3140,6 +3285,7 @@ def _print_result(
         print("Status: NOT COMPARED")
         print(f"Reason: {not_compared_reason}")
         print(f"Compare result: {comparison}")
+        print(f"Report data:   {report.with_name('report.json')}")
         print(f"Report:         {report}")
         return
     execution = result.get("execution", {})
@@ -3168,6 +3314,7 @@ def _print_result(
             print(f"Worker log: {worker_log}")
     if not verbose:
         print(f"Compare result: {comparison}")
+        print(f"Report data: {report.with_name('report.json')}")
         print(f"Report: {report}")
         return
     reproduce = result.get("reproduce", {})
@@ -3193,6 +3340,7 @@ def _print_result(
         print("  unavailable; see comparison result")
     print()
     print(f"Compare result: {comparison}")
+    print(f"Report data:   {report.with_name('report.json')}")
     print(f"Report:         {report}")
 
 

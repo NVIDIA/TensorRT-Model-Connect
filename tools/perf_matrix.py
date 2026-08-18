@@ -62,6 +62,7 @@ from tools.reporting_html import (  # noqa: E402
     task_type_label,
 )
 from tools import model_selection  # noqa: E402
+from tools import qualification_report  # noqa: E402
 
 
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
@@ -1040,6 +1041,8 @@ def _initial_results(
         "platform": platform.platform(),
         "python": platform.python_version(),
         "python_executable": sys.executable,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+        "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES", ""),
         **_gpu_environment(),
     }
     return {
@@ -1697,9 +1700,29 @@ def _run_command(
         "exit_code": exit_code,
         "elapsed_seconds": elapsed,
         "stdout": stdout,
+        "stderr": stderr,
         "stdout_tail": stdout[-16000:],
         "stderr_tail": stderr[-16000:],
     }
+
+
+def _materialize_command_logs(
+    output: Path,
+    case_id: str,
+    side: str,
+    command: MutableMapping[str, Any],
+) -> list[dict[str, str]]:
+    directory = output / "artifacts" / _slug(case_id) / "logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    links = []
+    for stream in ("stdout", "stderr"):
+        path = directory / f"{side}.{stream}.log"
+        path.write_text(str(command.pop(stream, "")), encoding="utf-8")
+        href = path.relative_to(output).as_posix()
+        command[f"{stream}_log"] = href
+        side_label = "TRTMC" if side == "trtmc" else "Reference"
+        links.append({"label": f"{side_label} {stream}", "href": href})
+    return links
 
 
 def _gpu_memory_usage_mib() -> list[tuple[int, int]]:
@@ -2263,7 +2286,14 @@ def _run_supported_case(
             minimum_free_fraction=options.minimum_gpu_free_fraction
         )
         command = _run_command(argv, environment, options.timeout_seconds)
-        command.pop("stdout", None)
+        row.setdefault("logs", []).extend(
+            _materialize_command_logs(
+                getattr(options, "output", case_work),
+                str(case["id"]),
+                side,
+                command,
+            )
+        )
         commands[side] = command
         if command["exit_code"] != 0:
             row["status"] = "failed"
@@ -2434,9 +2464,14 @@ def _should_skip(row: Mapping[str, Any]) -> bool:
 
 
 def _final_status(rows: Iterable[Mapping[str, Any]]) -> str:
-    statuses = {str(row.get("status")) for row in rows}
+    materialized = list(rows)
+    statuses = {str(row.get("status")) for row in materialized}
     invalid = {"failed", "contract-mismatch", "partial", "pending", "running"}
-    return "completed-with-errors" if statuses & invalid else "completed"
+    if statuses & invalid:
+        return "completed-with-errors"
+    if any(row.get("warnings") for row in materialized):
+        return "completed-with-warnings"
+    return "completed"
 
 
 def _light(status: str) -> str:
@@ -2445,6 +2480,182 @@ def _light(status: str) -> str:
         "yellow": "🟡",
         "red": "🔴",
     }.get(status, "⚪")
+
+
+def _perf_precision(row: Mapping[str, Any]) -> dict[str, str]:
+    resolved = row.get("resolved_settings", {})
+    resolved = resolved if isinstance(resolved, Mapping) else {}
+    model = resolved.get("model", {})
+    model = model if isinstance(model, Mapping) else {}
+    baseline = row.get("baseline", {})
+    baseline = baseline if isinstance(baseline, Mapping) else {}
+    candidate = row.get("candidate", {})
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    contract = row.get("baseline_contract", {})
+    contract = contract if isinstance(contract, Mapping) else {}
+    reference = (
+        resolved.get("baseline_precision")
+        or baseline.get("precision")
+        or contract.get("precision")
+    )
+    trtmc = candidate.get("precision") or model.get("precision")
+    return {
+        "reference": str(reference).lower() if reference else "Not recorded",
+        "candidate": str(trtmc).lower() if trtmc else "Not recorded",
+    }
+
+
+def _perf_state_and_result(row: Mapping[str, Any]) -> tuple[str, str | None]:
+    status = str(row.get("status", "pending"))
+    if status in {"pending", "running"}:
+        return status, None
+    if status in qualification_report.RGB_RESULTS and "Not recorded" in _perf_precision(
+        row
+    ).values():
+        return "terminal", "white"
+    return "terminal", status if status in qualification_report.RGB_RESULTS else "white"
+
+
+def _perf_issue(row: Mapping[str, Any], result: str | None) -> dict[str, str] | None:
+    if result != "white":
+        return None
+    status = str(row.get("status", "failed"))
+    reason = str(
+        row.get("reason")
+        or (row.get("comparison", {}).get("reason") if isinstance(row.get("comparison"), Mapping) else "")
+        or "performance comparison did not complete"
+    )
+    if status == "contract-mismatch":
+        return {
+            "priority": "P1",
+            "stage": "compare",
+            "domain": "model-workload",
+            "code": "output_not_comparable",
+            "message": reason,
+        }
+    if status in qualification_report.RGB_RESULTS:
+        return {
+            "priority": "P1",
+            "stage": "preflight",
+            "domain": "policy-config",
+            "code": "comparison_contract",
+            "message": "Reference and TRTMC compute precision were not both recorded",
+        }
+    return {
+        "priority": "P1",
+        "stage": str(row.get("failure_stage", "candidate")),
+        "domain": "harness/unknown",
+        "code": "execution_failure",
+        "message": reason,
+    }
+
+
+def _perf_output_validation(
+    row: Mapping[str, Any],
+    result: str | None,
+) -> dict[str, Any]:
+    resolved = row.get("resolved_settings", {})
+    resolved = resolved if isinstance(resolved, Mapping) else {}
+    contract = str(resolved.get("output_contract", "") or "Not recorded")
+    comparison = row.get("comparison", {})
+    comparison = comparison if isinstance(comparison, Mapping) else {}
+    if str(row.get("status")) in qualification_report.RGB_RESULTS:
+        status = "Pass"
+        reason = None
+    elif str(row.get("status")) == "contract-mismatch":
+        status = "Fail"
+        reason = str(comparison.get("reason", "") or row.get("reason", ""))
+    else:
+        status = "Not completed"
+        reason = str(row.get("reason", "") or "") or None
+    return {"status": status, "contract": contract, "reason": reason}
+
+
+def _perf_latency(row: Mapping[str, Any], result: str | None) -> dict[str, float | None]:
+    if result not in qualification_report.RGB_RESULTS:
+        return {"reference_ms": None, "candidate_ms": None}
+    try:
+        return {
+            "reference_ms": _median(row["baseline"]),
+            "candidate_ms": _median(row["candidate"]),
+        }
+    except (KeyError, PerfMatrixError, TypeError, ValueError):
+        return {"reference_ms": None, "candidate_ms": None}
+
+
+def _public_perf_result(row: Mapping[str, Any]) -> dict[str, Any]:
+    state, result = _perf_state_and_result(row)
+    public = deepcopy(dict(row))
+    commands = public.get("commands", {})
+    if isinstance(commands, Mapping):
+        for command in commands.values():
+            if isinstance(command, MutableMapping):
+                command.pop("stdout_tail", None)
+                command.pop("stderr_tail", None)
+    public.update(
+        {
+            "state": state,
+            "result": result,
+            "precision": _perf_precision(row),
+            "output_validation": _perf_output_validation(row, result),
+            "latency": _perf_latency(row, result),
+            "issue": _perf_issue(row, result),
+            "debug": {
+                "logs": [dict(record) for record in row.get("logs", [])],
+            },
+        }
+    )
+    return public
+
+
+def _public_perf_results(results: Mapping[str, Any]) -> list[dict[str, Any]]:
+    selected = {str(value) for value in results.get("selected_entry_ids", [])}
+    return [
+        _public_perf_result(row)
+        for row in results.get("cases", [])
+        if str(row.get("id", "")) in selected
+    ]
+
+
+def _materialize_public_perf_report(
+    output: Path,
+    results: Mapping[str, Any],
+) -> tuple[Path, Path, dict[str, Any]]:
+    environment = results.get("environment", {})
+    environment = environment if isinstance(environment, Mapping) else {}
+    run = {
+        "source_revision": results.get("git_commit"),
+        "hostname": environment.get("hostname"),
+        "gpu": environment.get("gpu"),
+        "gpu_uuid": environment.get("gpu_uuid"),
+        "driver": environment.get("driver"),
+        "platform": environment.get("platform"),
+        "python": environment.get("python"),
+        "python_executable": environment.get("python_executable"),
+        "cuda_visible_devices": environment.get("cuda_visible_devices"),
+        "nvidia_visible_devices": environment.get("nvidia_visible_devices"),
+        "started_at": results.get("started_at"),
+        "finished_at": results.get("finished_at"),
+    }
+    return qualification_report.materialize_report(
+        output,
+        report_kind="performance",
+        title="TRTMC Performance Qualification",
+        identity={
+            "run_id": output.name,
+            "disposition": results.get("status", "running"),
+            "source_revision": results.get("git_commit"),
+        },
+        run=run,
+        results=_public_perf_results(results),
+        metadata={
+            "campaign": {
+                "suite_name": results.get("suite_name"),
+                "suite_sha256": results.get("suite_sha256"),
+                "status": results.get("status", "running"),
+            }
+        },
+    )
 
 
 def _baseline_label(row: Mapping[str, Any]) -> str:
@@ -3034,7 +3245,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
 
 def _write_artifacts(output: Path, results: Mapping[str, Any]) -> None:
     _write_json(output / "results.json", results)
-    (output / "report.html").write_text(_report_html(results), encoding="utf-8")
+    _materialize_public_perf_report(output, results)
     legacy_replay = output / "reproduce.py"
     if legacy_replay.is_file():
         legacy_replay.unlink()
@@ -3151,6 +3362,7 @@ def _report_existing(arguments: argparse.Namespace) -> int:
         _apply_bundle_preparation_receipt(results, receipt)
     _write_artifacts(output, results)
     print(f"Results: {output / 'results.json'}")
+    print(f"Report data: {output / 'report.json'}")
     print(f"Report: {output / 'report.html'}")
     return 0
 
@@ -3326,9 +3538,13 @@ def _execute_campaign(
             if item["status"] == "failed"
         ]
         if cleanup_failures:
-            row["performance_status_before_cleanup_failure"] = row.get("status")
-            row["status"] = "failed"
-            row["reason"] = f"resource cleanup failed: {'; '.join(cleanup_failures)}"
+            row.setdefault("warnings", []).append(
+                {
+                    "stage": "cleanup",
+                    "code": "resource_cleanup_failed",
+                    "message": "; ".join(cleanup_failures),
+                }
+            )
         rows[case_id].clear()
         rows[case_id].update(row)
         _write_artifacts(options.output, results)
@@ -3345,6 +3561,7 @@ def _execute_campaign(
     except OSError:
         pass
     print(f"Results: {options.output / 'results.json'}")
+    print(f"Report data: {options.output / 'report.json'}")
     print(f"Report: {options.output / 'report.html'}")
     return 1 if _campaign_failed(results, selected_ids) else 0
 

@@ -908,75 +908,6 @@ def _task_bindings(plan: Mapping[str, Any], task: str) -> list[dict[str, Any]]:
     ]
 
 
-def _platform_task_bindings(
-    plan: Mapping[str, Any],
-    task: str,
-) -> list[dict[str, Any]]:
-    return [
-        binding
-        for model in plan["models"]
-        for binding in model["tasks"].get(task, {}).get("bindings", [])
-        if binding["status"] == "excluded"
-    ]
-
-
-def _accuracy_platform_result(binding: Mapping[str, Any]) -> dict[str, Any]:
-    reason = str(binding["reason"])
-    return {
-        "schema_version": "trtmc.validation-result/v2",
-        "model": str(binding["model"]),
-        "workload": str(binding["workload"]),
-        "executor": "platform_exclusion",
-        "execution": {"status": "not_run", "exit_code": None},
-        "comparison": {
-            "status": "not_run",
-            "mode": "platform_exclusion",
-            "primary_metric": None,
-            "metrics": {},
-            "failures": [],
-        },
-        "validation": {"status": "not_compared"},
-        "not_compared_reason": reason,
-        "platform_exclusion": {"reason": reason},
-        "reference_environment": [],
-        "reproduce": {},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def _write_accuracy_platform_results(
-    plan: Mapping[str, Any],
-    output: Path,
-) -> list[Path]:
-    written: list[Path] = []
-    for binding in _platform_task_bindings(plan, "accuracy"):
-        workload = str(binding.get("workload", "") or "")
-        if not workload:
-            raise ModelCheckError(
-                f"platform Accuracy binding has no workload: {binding['model']}"
-            )
-        comparison = output / str(binding["model"]) / workload / "comparison.json"
-        if comparison.exists():
-            try:
-                previous = json.loads(comparison.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ModelCheckError(
-                    f"cannot read platform result {comparison}: {exc}"
-                ) from exc
-            if not isinstance(previous.get("platform_exclusion"), Mapping):
-                raise ModelCheckError(
-                    "refusing to replace a previously executed Accuracy result with a "
-                    f"platform exclusion: {binding['model']}={workload}"
-                )
-        comparison.parent.mkdir(parents=True, exist_ok=True)
-        comparison.write_text(
-            json.dumps(_accuracy_platform_result(binding), indent=2) + "\n",
-            encoding="utf-8",
-        )
-        written.append(comparison)
-    return written
-
-
 def _selected_perf_reference_contracts(
     plan: Mapping[str, Any],
     models_dir: Path,
@@ -1364,13 +1295,6 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.dry_run:
         return 0
 
-    accuracy_platform_results = _write_accuracy_platform_results(
-        plan,
-        run_root / "accuracy",
-    )
-    if accuracy_platform_results:
-        trtmc_validate.write_report(run_root / "accuracy")
-
     reference_environment: dict[str, str] = {}
     reference_contracts = _selected_perf_reference_contracts(plan, arguments.models_dir)
     reference_environment.update(
@@ -1387,8 +1311,6 @@ def _run(arguments: argparse.Namespace) -> int:
         )
 
     task_results: dict[str, int] = {}
-    if accuracy_platform_results and not _task_bindings(plan, "accuracy"):
-        task_results["accuracy"] = 0
     runnable = [(task, command) for task, command in execution_commands if command is not None]
     for index, (task, command) in enumerate(runnable, start=1):
         label = _task_label(task)

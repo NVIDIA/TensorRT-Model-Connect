@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 import json
 import os
@@ -2219,6 +2220,7 @@ def test_print_result_verbose_exposes_raw_commands_and_result_locations(tmp_path
         "  trtmc run --model model-a\n"
         "\n"
         f"Compare result: {comparison}\n"
+        f"Report data:   {report.with_name('report.json')}\n"
         f"Report:         {report}\n"
     )
     assert "package" not in output.lower()
@@ -2296,6 +2298,10 @@ def test_write_report_links_each_comparison(tmp_path):
                 "task_type": "Text → Audio",
                 "user_contract": "tts_audio",
                 "status": "passed",
+                "precision_contract": {
+                    "trtmc_base_precision": "fp16",
+                    "reference_precision": "fp16",
+                },
                 "reference_environment": [
                     {"name": "reference_common", "python": "/profiles/python"}
                 ],
@@ -2325,7 +2331,6 @@ def test_write_report_links_each_comparison(tmp_path):
         "validation_passed": 1,
         "validation_failed": 0,
         "validation_skipped": 0,
-        "platform_excluded": 0,
         "selected_samples": 100,
     }
     assert report["validation_status"] == "passed"
@@ -2333,40 +2338,27 @@ def test_write_report_links_each_comparison(tmp_path):
     assert report["results"][0]["comparison"]["status"] == "agreement"
     assert report["results"][0]["validation"]["status"] == "passed"
     assert "status" not in report["results"][0]
+    assert report["schema_version"] == "trtmc.qualification-report/v1"
+    assert report["accounting"]["selected"] == 1
+    assert report["accounting"]["comparable"] == 1
+    assert report["accounting"]["outcomes"] == {
+        "green": 1,
+        "red": 0,
+        "white": 0,
+        "yellow": 0,
+    }
+    assert report["results"][0]["result"] == "green"
     assert json_path == tmp_path / "report.json"
     assert html_path == tmp_path / "report.html"
     document = html_path.read_text(encoding="utf-8")
-    assert "model-a/workload-a/comparison.json" in document
-    assert "Agreement" in document
-    assert "Completed" in document
-    assert "TRTMC Reference Consistency Report" in document
-    assert "🟢 1 &nbsp; 🟡 0 &nbsp;" in document
-    assert "🔴 0 &nbsp; ⚪ 0" in document
-    assert "Vanilla reproduction" in document
-    assert "<th>Model type</th>" in document
-    assert "<th>Operation</th>" in document
-    assert "<th>Model</th>" in document
-    assert "<th>Task type</th>" in document
-    assert "Text → Audio" in document
-    assert "tts_audio" in document
-    assert "Dataset · Reference 1/1 · TRTMC 1/1" in document
-    assert "Dataset slice (100 samples)" in document
-    assert "<th>Samples</th>" in document
-    assert "<td>100</td>" in document
+    assert 'data-report="report.json"' in document
+    assert "model-a" not in document
+    assert (tmp_path / "assets/qualification-report.js").is_file()
+    assert (tmp_path / "assets/qualification-report.css").is_file()
     assert report["summary"]["selected_samples"] == 100
-    assert "prepared inputs" not in document
-    assert "$ python tools/trtmc_validate.py model-a" in document
-    assert "$ python hf.py" in document
-    assert "$ trtmc run" in document
-    assert 'id="report-filter-search"' in document
-    assert 'id="report-filter-model-type"' in document
-    assert 'id="report-filter-operation"' in document
-    assert 'id="report-filter-task-type"' in document
-    assert 'id="report-filter-status"' in document
-    assert 'data-filter-model-type="example"' in document
-    assert 'data-filter-operation="generate_audio"' in document
-    assert 'data-filter-task-type="Text → Audio"' in document
-    assert 'data-filter-status="green"' in document
+    frontend = (tmp_path / "assets/qualification-report.js").read_text(encoding="utf-8")
+    assert "Complete qualification register" in frontend
+    assert "Vanilla reproduction" in frontend
 
 
 @pytest.mark.parametrize(
@@ -2426,9 +2418,11 @@ def test_write_report_surfaces_quantized_reference_precision_contract(
         "reference_dtype": "bfloat16",
         "comparison": "quantized_vs_unquantized_reference",
     }
-    document = html_path.read_text(encoding="utf-8")
-    assert "TRTMC FP8 (BF16 base) vs HF BF16" in document
-    assert "Quantized candidate vs unquantized reference" in document
+    assert report["results"][0]["precision"] == {
+        "reference": "bf16",
+        "candidate": "fp8 (bf16 base)",
+    }
+    assert "quantized-model" not in html_path.read_text(encoding="utf-8")
 
 
 def test_report_infers_task_type_for_legacy_standard_result(tmp_path):
@@ -2460,31 +2454,139 @@ def test_report_infers_task_type_for_legacy_standard_result(tmp_path):
     assert result["task_strategy"] == "text_to_audio"
     assert result["task_type"] == "Text → Audio"
     assert result["user_contract"] == "tts_audio"
-    document = html_path.read_text(encoding="utf-8")
-    assert "<strong>Text → Audio</strong>" in document
-    assert '<div class="detail">tts_audio</div>' in document
+    assert "bark-large" not in html_path.read_text(encoding="utf-8")
 
 
-def test_traffic_light_counts_are_mutually_exclusive():
+def test_accuracy_traffic_light_statuses_are_mutually_exclusive():
     def result(validation, comparison):
         return {
+            "execution": {"status": "completed"},
             "validation": {"status": validation},
             "comparison": {"status": comparison},
+            "precision_contract": {
+                "trtmc_base_precision": "fp16",
+                "reference_precision": "fp16",
+            },
         }
 
-    assert trtmc_validate._traffic_light_counts(
-        [
+    statuses = [
+        trtmc_validate._traffic_light_status(value)
+        for value in [
             result("passed", "agreement"),
             result("skipped", "not_run"),
             result("failed", "disagreement"),
             result("not_compared", "not_run"),
         ]
-    ) == {
+    ]
+
+    assert Counter(statuses) == {
         "green": 1,
-        "yellow": 1,
         "red": 1,
-        "white": 1,
+        "white": 2,
     }
+
+
+def test_accuracy_result_with_unknown_precision_has_no_result_light() -> None:
+    result = {
+        "execution": {"status": "completed"},
+        "validation": {"status": "passed"},
+        "comparison": {"status": "agreement"},
+    }
+
+    assert trtmc_validate._traffic_light_status(result) == "white"
+    assert trtmc_validate._accuracy_issue(result) == {
+        "priority": "P1",
+        "stage": "preflight",
+        "domain": "policy-config",
+        "code": "comparison_contract",
+        "message": "Reference and TRTMC compute precision were not both recorded",
+    }
+
+
+def test_write_report_removes_legacy_platform_exclusion_rows(tmp_path: Path) -> None:
+    selected = tmp_path / "model-a" / "suite-a"
+    selected.mkdir(parents=True)
+    (selected / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "suite-a",
+                "execution": {"status": "completed", "exit_code": 0},
+                "comparison": {
+                    "status": "agreement",
+                    "mode": "test",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "passed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    excluded = tmp_path / "excluded-model" / "suite-b"
+    excluded.mkdir(parents=True)
+    (excluded / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "excluded-model",
+                "workload": "suite-b",
+                "execution": {"status": "not_run", "exit_code": None},
+                "comparison": {
+                    "status": "not_run",
+                    "mode": "platform_exclusion",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "not_compared"},
+                "platform_exclusion": {"reason": "not supported"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    json_path, _, report = trtmc_validate.write_report(tmp_path)
+
+    assert report["accounting"]["selected"] == 1
+    assert [row["model"] for row in report["results"]] == ["model-a"]
+    assert "excluded-model" not in json_path.read_text(encoding="utf-8")
+
+
+def test_accuracy_report_publishes_direct_relative_log_links(tmp_path: Path) -> None:
+    case_dir = tmp_path / "model-a" / "suite-a"
+    case_dir.mkdir(parents=True)
+    (case_dir / "worker.log").write_text("raw worker output\n", encoding="utf-8")
+    (case_dir / "execution.log").write_text("raw execution output\n", encoding="utf-8")
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "suite-a",
+                "execution": {"status": "error", "exit_code": 1},
+                "comparison": {
+                    "status": "not_run",
+                    "mode": "",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "failed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, _, report = trtmc_validate.write_report(tmp_path)
+
+    row = report["results"][0]
+    assert row["result"] == "white"
+    assert row["issue"]["stage"] == "candidate"
+    assert row["debug"]["logs"] == [
+        {"label": "execution.log", "href": "model-a/suite-a/execution.log"},
+        {"label": "worker.log", "href": "model-a/suite-a/worker.log"},
+    ]
+    assert all((tmp_path / item["href"]).is_file() for item in row["debug"]["logs"])
 
 
 def test_diffusion_report_flattens_nested_reference_metrics():
@@ -2621,10 +2723,13 @@ def test_legacy_e2e_result_is_not_reported_as_reference_agreement(tmp_path):
     assert result["comparison"]["status"] == "not_run"
     assert result["validation"]["status"] == "not_compared"
     assert result["not_compared_reason"] == trtmc_validate.LEGACY_E2E_REASON
-    document = html_path.read_text(encoding="utf-8")
-    assert "🟢 0 &nbsp; 🟡 0 &nbsp;" in document
-    assert "🔴 0 &nbsp; ⚪ 1" in document
-    assert "E2E execution does not compare aligned reference" in document
+    assert report["accounting"]["outcomes"] == {
+        "green": 0,
+        "yellow": 0,
+        "red": 0,
+        "white": 1,
+    }
+    assert "model-a" not in html_path.read_text(encoding="utf-8")
 
 
 def test_not_compared_result_replaces_legacy_e2e_row_without_deleting_evidence(
@@ -2678,7 +2783,7 @@ def test_write_report_records_total_duration(tmp_path, monkeypatch):
     _, html_path, report = trtmc_validate.write_report(tmp_path)
 
     assert report["summary"]["duration_seconds"] == 10_923.5
-    assert "3h 02m 04s total duration" in html_path.read_text(encoding="utf-8")
+    assert "10923.5" not in html_path.read_text(encoding="utf-8")
 
 
 def test_write_report_preserves_finalized_duration(tmp_path, monkeypatch):
@@ -2701,7 +2806,7 @@ def test_write_report_preserves_finalized_duration(tmp_path, monkeypatch):
     _, html_path, report = trtmc_validate.write_report(tmp_path)
 
     assert report["summary"]["duration_seconds"] == 10.0
-    assert "0h 00m 10s total duration" in html_path.read_text(encoding="utf-8")
+    assert "10.0" not in html_path.read_text(encoding="utf-8")
 
 
 def test_write_report_does_not_render_validation_wrapper(tmp_path):
@@ -2726,9 +2831,7 @@ def test_write_report_does_not_render_validation_wrapper(tmp_path):
     _, html_path, _ = trtmc_validate.write_report(tmp_path)
 
     document = html_path.read_text(encoding="utf-8")
-    assert "python hf.py --prompt &#x27;&lt;hello&gt;&#x27;" in document
-    assert "Not reached; see comparison.json." in document
-    assert "validation/engine.py" not in document
+    assert "python hf.py" not in document
     migrated = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
     assert "validation" not in migrated["reproduce"]
     assert set(migrated["reproduce"]) == {
@@ -2775,7 +2878,7 @@ def test_write_report_recovers_json_logged_runner_command(tmp_path):
         "trtmc build",
         "trtmc solve model.bundle --field-input 1,2",
     ]
-    assert "$ trtmc solve model.bundle --field-input 1,2" in html_path.read_text(encoding="utf-8")
+    assert "trtmc solve model.bundle --field-input 1,2" in json.dumps(report)
 
 
 def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
@@ -2836,8 +2939,7 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     assert reproduction["command_logs"]["trtmc"] == ["bundle_run.log"]
     assert "prompt-5000" not in json.dumps(report)
     document = html_path.read_text(encoding="utf-8")
-    assert "Showing 1 of 10000 commands" in document
-    assert "prompt-9999" in document
+    assert "prompt-9999" not in document
     assert "prompt-5000" not in document
     assert (case_dir / "comparison.json").stat().st_size < 20_000
     assert (tmp_path / "report.json").stat().st_size < 20_000
@@ -2939,7 +3041,14 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
                 "model": "model-a",
                 "workload": "workload-a",
                 "status": "failed",
-                "raw_result": {"status": "failed", "work_dir": str(work_dir)},
+                "raw_result": {
+                    "status": "failed",
+                    "work_dir": str(work_dir),
+                    "precision_contract": {
+                        "trtmc_base_precision": "fp16",
+                        "reference_precision": "fp16",
+                    },
+                },
             }
         ),
         encoding="utf-8",
@@ -2965,13 +3074,8 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         encoding="utf-8"
     ) == json.dumps(prompt, ensure_ascii=False) + "\n"
     rendered = html_path.read_text(encoding="utf-8")
-    assert "1 failed samples · results and vanilla commands" in rendered
-    assert "Reference result" in rendered
-    assert "TRTMC result" in rendered
-    assert "reference answer" in rendered
-    assert "TRTMC answer" in rendered
-    assert "Reference vanilla command" in rendered
-    assert "TRTMC vanilla command" in rendered
+    assert "reference answer" not in rendered
+    assert report["results"][0]["result"] == "red"
     for wrapper in (
         "validation/engine.py",
         "trtmc_compare.py",
@@ -3322,10 +3426,8 @@ def test_report_bounds_inline_failed_samples_but_keeps_full_artifact(tmp_path):
     assert metadata["count"] == sample_count
     assert len(artifact.read_text(encoding="utf-8").splitlines()) == sample_count
     rendered = html_path.read_text(encoding="utf-8")
-    assert "Showing 20 of 25" in rendered
-    assert "sample-19" in rendered
+    assert "sample-19" not in rendered
     assert "sample-20" not in rendered
-    assert "View all in disagreements.jsonl" in rendered
     assert (case_dir / "comparison.json").stat().st_size < 20_000
     assert (tmp_path / "report.json").stat().st_size < 20_000
 

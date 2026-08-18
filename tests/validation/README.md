@@ -140,7 +140,11 @@ python tools/trtmc_validate.py gpt2-125m mmlu_continuation_parity \
 
 For configured consistency workloads, the case result is always written to
 `<output>/<model>/<workload>/comparison.json`; `report.json` and `report.html`
-are written at the output root. Exit status `0` means reference consistency
+are written at the output root. `report.json` is the public result contract;
+`report.html` is a static renderer that fetches that JSON and does not own
+counts, verdicts, metrics, or links. The same directory also contains the
+renderer under `assets/` and the run environment snapshot under
+`artifacts/run/environment.json`. Exit status `0` means reference consistency
 passed, `1` means the case ran but validation failed, and `2` means CLI or
 setup validation failed before the case could run. Requesting a model that is
 explicitly marked not compared also writes
@@ -302,11 +306,13 @@ failures.
 `status: not_compared`, and the reason. CI matrix generation can select only
 entries that contain a workload.
 
-The HTML artifact is named **TRTMC Reference Consistency Report** because it
-covers task accuracy as well as token, embedding, and numerical agreement.
-For large datasets it shows one dataset-run command and at most three
+The public artifact is named **TRTMC Accuracy & Fidelity Qualification** because
+it covers task accuracy as well as token, embedding, and numerical agreement.
+For large datasets it records one dataset-run command and at most three
 representative commands per backend. The first disagreement is preferred when
-one exists.
+one exists. The HTML presents Metrics, Logs, Vanilla reproduction, and Commands
+as separate entries. Log entries are relative links to published files, never
+execution-machine paths or captured output tails.
 
 When per-sample differences exist, the model row also shows up to 20 affected
 samples. Each sample contains the exact input, both raw prediction records,
@@ -329,7 +335,7 @@ previews, playable video files up to the artifact size limit, and WAV/audio
 controls are rendered next to the two result records. Passing samples do not
 duplicate media.
 
-The report keeps three statuses separate:
+The report keeps execution evidence and the public outcome separate:
 
 - `execution`: whether the programs completed or errored;
 - `comparison`: whether TRTMC agrees or disagrees with the reference;
@@ -338,8 +344,14 @@ The report keeps three statuses separate:
 An unimplemented consistency contract uses `execution: not_run`,
 `comparison: not_run`, and `validation: not_compared`.
 
-The HTML report renders each status as an independent colored signal and shows
-the primary agreement metric next to it.
+Platform exclusions are removed before `report.json` is materialized and never
+appear in its rows, counts, search data, or denominator. A selected terminal
+case receives green, yellow, or red only after execution completed, both compute
+precisions were recorded, and a valid comparison exists. Otherwise it receives
+white (`No valid comparison`) with structured priority, failed stage, cause
+domain, reason code, and a direct diagnostic-log link. Pending and running cases
+have no traffic light. `Comparable results` counts only green/yellow/red;
+`Operational coverage` reports comparable/selected and the white count.
 
 ## Precision contract
 

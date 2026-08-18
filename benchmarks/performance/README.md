@@ -278,23 +278,41 @@ returns nonzero when any selected entry is not ready.
 ## Results and reproduction
 
 Each new run creates a unique directory below `storage.results_root`. The final
-directory contains only:
+directory contains:
 
 ```text
+artifacts/
+assets/
+report.json
 results.json
 report.html
 ```
 
-`results.json` contains resolved configuration, raw samples, timing policies,
-commands, bundle-preparation status and build time, and bounded diagnostic
-output. `report.html` shows the total campaign wall-clock span, each
-model-profile case's wall time, the family matrix, both infer-time p50 values,
-TRTMC bundle preparation, measured scopes, and traffic lights. Its self-contained
-filters search family, operation, model, or entry ID and select traffic-light or
-bundle-preparation status without a server dependency. Per-case wall time
-includes bundle preparation, GPU headroom waits, both commands, and orchestration
-overhead. It and bundle build time are reported for run observability but are
-excluded from the infer-time comparison.
+`results.json` remains the internal resume and execution record. `report.json`
+is the public, queryable qualification snapshot and contains only selected
+entries; catalog and platform exclusions are absent. `report.html` is a static
+frontend that fetches `report.json`; it does not calculate counts, classify a
+case, scan scratch directories, or reconstruct links. The schema and renderer
+are published under `assets/`.
+
+Green, yellow, and red mean the candidate and reference completed a valid
+comparison. White means a selected terminal case did not form a valid
+comparison. Pending and running entries have no light. The header therefore
+shows `Comparable results` (green/yellow/red) separately from equally prominent
+`Operational coverage` (comparable/selected plus white). Platform exclusions
+contribute to neither denominator. A targeted run publishes only the targeted
+entries even though the internal `results.json` retains the complete matrix for
+resume.
+
+Each executed candidate/reference command writes complete stdout and stderr to
+`artifacts/<case>/logs/`; `report.json` exposes only relative links to those real
+files. A preflight failure that launched no subprocess receives a published
+diagnostic log containing the captured failure and replay command. Compute
+precision identifies Reference and TRTMC independently, output validation is
+shown as the prerequisite for latency comparison, and Reference/TRTMC p50
+latencies are separate fields. Metrics, Logs, and Commands remain separate
+report entries. The run environment snapshot is published at
+`artifacts/run/environment.json`.
 
 The preparation receipt uses schema `trtmc.perf-bundle-preparation/v1`, scope
 `test_task`, and the performance run's exact `git_commit`. Each entry under
