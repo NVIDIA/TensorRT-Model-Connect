@@ -17,6 +17,7 @@ from .environment import (
     COMMON_ENVIRONMENT,
     OPTIONAL_HUGGING_FACE_ENVIRONMENT,
     TRUSTED_ENVIRONMENT,
+    forwarded_environment,
 )
 from .process import CiError, CommandRunner, GitHubFiles
 
@@ -235,7 +236,10 @@ class CiContainer:
             )
 
     def _environment_arguments(self) -> list[str]:
-        names = COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT
+        names = forwarded_environment(
+            COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT,
+            self.env,
+        )
         arguments = [item for name in names for item in ("-e", f"{name}={self.env.get(name, '')}")]
         if not self.config.hardened:
             arguments.extend(

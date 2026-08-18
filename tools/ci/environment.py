@@ -24,6 +24,24 @@ COMMON_ENVIRONMENT = (
     "TRTMC_SELECTED_WHEEL_TENSORRT_VERSION",
 )
 
+OPTIONAL_TUNING_ENVIRONMENT = (
+    "TRTMC_BUILDER_OPTIMIZATION_LEVEL",
+    "TRTMC_MAX_NUM_TACTICS",
+    "TRTMC_AVG_TIMING_ITERATIONS",
+)
+
+
+def forwarded_environment(
+    names: tuple[str, ...], env: dict[str, str]
+) -> tuple[str, ...]:
+    """Omit optional tuning controls that do not carry an effective value."""
+    return tuple(
+        name
+        for name in names
+        if name not in OPTIONAL_TUNING_ENVIRONMENT or env.get(name, "").strip()
+    )
+
+
 TRUSTED_ENVIRONMENT = COMMON_ENVIRONMENT + (
     "ENGINE_DIR",
     "TRTMC_STORAGE_ROOT",
@@ -39,9 +57,7 @@ TRUSTED_ENVIRONMENT = COMMON_ENVIRONMENT + (
     "TRTMC_E2E_DEPRIORITIZE_GPU0",
     "TRTMC_TRT_TIMING_CACHE_PATH",
     "TRTMC_TRT_TIMING_CACHE_DIR",
-    "TRTMC_BUILDER_OPTIMIZATION_LEVEL",
-    "TRTMC_MAX_NUM_TACTICS",
-    "TRTMC_AVG_TIMING_ITERATIONS",
+    *OPTIONAL_TUNING_ENVIRONMENT,
     "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL",
     "PYTHON_COVERAGE_MIN_LINE",
     "PYTHON_COVERAGE_MIN_BRANCH",

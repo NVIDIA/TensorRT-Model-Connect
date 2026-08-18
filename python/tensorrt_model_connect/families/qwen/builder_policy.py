@@ -35,7 +35,7 @@ def configure_qwen_builder(
         major_minor[0] == 11
         and major_minor[1] >= 2
     ):
-        if "TRTMC_BUILDER_OPTIMIZATION_LEVEL" not in os.environ:
+        if not os.environ.get("TRTMC_BUILDER_OPTIMIZATION_LEVEL", "").strip():
             # TRT 11.2+ can otherwise select numerically unstable FP8 tactics.
             trt_config.builder_optimization_level = 0
         fp16_tail_length = 22

@@ -18,7 +18,9 @@ from pathlib import Path
 import yaml
 
 from tools.ci.container import CiContainer
+from tools.ci.environment import OPTIONAL_TUNING_ENVIRONMENT
 from tools.ci.quality import UnitTestRunner
+from tools.ci.stage import ContainerStageRunner
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -835,6 +837,34 @@ def test_github_container_only_exports_nonempty_hf_transport_controls() -> None:
     assert 'if self.env.get(name, "")' in start_text
     for name in ("HF_HUB_DISABLE_XET", "HF_HUB_DOWNLOAD_TIMEOUT", "HF_HUB_ETAG_TIMEOUT"):
         assert name not in stage_text
+
+
+def test_github_container_only_exports_nonempty_tuning_controls(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    base_env = {
+        "TRTMC_CI_WORKSPACE": str(workspace),
+        "TRTMC_CI_IMAGE": "example.invalid/trtmc:test",
+    }
+
+    for name in OPTIONAL_TUNING_ENVIRONMENT:
+        for value in (None, "", "   ", "3"):
+            env = dict(base_env)
+            if value is not None:
+                env[name] = value
+            arguments = CiContainer(env)._environment_arguments()
+            forwarded = [
+                arguments[index + 1]
+                for index, item in enumerate(arguments[:-1])
+                if item == "-e"
+            ]
+            stage_command = ContainerStageRunner("package", env)._docker_command()
+            if value == "3":
+                assert f"{name}=3" in forwarded
+                assert name in stage_command
+            else:
+                assert not any(item.startswith(f"{name}=") for item in forwarded)
+                assert name not in stage_command
 
 
 def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:

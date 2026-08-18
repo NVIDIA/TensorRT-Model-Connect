@@ -3,6 +3,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from tensorrt_model_connect.families.qwen.builder_policy import (
     configure_qwen_builder,
 )
@@ -16,7 +18,12 @@ def _quant_context(format_name: str):
         ))
 
 
-def test_qwen_fp8_uses_accuracy_stable_builder_level():
+@pytest.mark.parametrize("override", [None, "", "   "])
+def test_qwen_fp8_uses_accuracy_stable_builder_level(monkeypatch, override):
+    if override is None:
+        monkeypatch.delenv("TRTMC_BUILDER_OPTIMIZATION_LEVEL", raising=False)
+    else:
+        monkeypatch.setenv("TRTMC_BUILDER_OPTIMIZATION_LEVEL", override)
     config = SimpleNamespace(builder_optimization_level=5)
     quant_context = _quant_context("fp8")
 

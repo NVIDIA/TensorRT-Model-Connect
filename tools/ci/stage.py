@@ -13,7 +13,7 @@ import signal
 import subprocess
 
 from .container import ContainerConfig
-from .environment import COMMON_ENVIRONMENT, TRUSTED_ENVIRONMENT
+from .environment import COMMON_ENVIRONMENT, TRUSTED_ENVIRONMENT, forwarded_environment
 from .process import CiError, CommandRunner
 
 
@@ -60,7 +60,10 @@ class ContainerStageRunner:
         return result.stdout.strip() == "true"
 
     def _docker_command(self) -> list[str]:
-        names = COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT
+        names = forwarded_environment(
+            COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT,
+            self.env,
+        )
         forwarded = [item for name in names for item in ("-e", name)]
         return [
             "docker",
