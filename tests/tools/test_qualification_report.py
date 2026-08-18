@@ -112,6 +112,30 @@ def test_materialized_html_is_a_renderer_and_not_a_result_source(tmp_path) -> No
     assert (tmp_path / report["run"]["environment_href"]).is_file()
     assert not list(tmp_path.glob(".report.json.*.tmp"))
 
+    static_paths = [
+        html_path,
+        tmp_path / "assets/qualification-report.css",
+        tmp_path / "assets/qualification-report.js",
+        tmp_path / "assets/qualification-report.schema.json",
+    ]
+    mtimes = {path: path.stat().st_mtime_ns for path in static_paths}
+    qualification_report.materialize_report(
+        tmp_path,
+        report_kind="accuracy",
+        title="Accuracy qualification",
+        identity={"run_id": "run-1"},
+        run={"source_revision": "abc123"},
+        results=[
+            {
+                "id": "model-a::task-a",
+                "model": "model-a",
+                "state": "terminal",
+                "result": "green",
+            }
+        ],
+    )
+    assert {path: path.stat().st_mtime_ns for path in static_paths} == mtimes
+
 
 def test_white_case_without_process_output_gets_a_clickable_diagnostic_log(
     tmp_path,

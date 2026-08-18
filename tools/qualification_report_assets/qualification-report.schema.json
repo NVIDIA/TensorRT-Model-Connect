@@ -86,6 +86,14 @@
             "type": ["string", "null"],
             "enum": ["green", "yellow", "red", "white", null]
           },
+          "progress": {
+            "type": "object",
+            "required": ["stage", "attempt"],
+            "properties": {
+              "stage": {"type": ["string", "null"]},
+              "attempt": {"type": "integer", "minimum": 0}
+            }
+          },
           "precision": {"type": "object"},
           "samples": {
             "type": "object",

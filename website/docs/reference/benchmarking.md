@@ -80,12 +80,18 @@ python3 tools/perf_matrix.py report artifacts/perf/example-run \
   --preparation-receipt artifacts/perf/bundle-preparation.json
 ```
 
-Every new run writes `results.json` and `report.html` below the configured
-results root. The JSON records resolved configuration, provenance, raw
-samples, exact leaf commands, timing policies, and bundle preparation; the
-HTML shows candidate/reference p50 values and the traffic light. The report's
-self-contained controls can filter by text, traffic light, or bundle
-preparation status without a server.
+Every new run writes `results.json`, `report.json`, and `report.html` below the
+configured results root. Before timing preflight starts, it also freezes the
+ordered selected-case inventory in `ledger/campaign.json` and creates one
+atomic receipt per case under `ledger/cases/`. `report.json` is rebuilt from
+those receipts after each state transition, so a caller can poll per-model
+pending, running, and terminal progress. Resume marks a leftover running
+case attempt interrupted, preserves comparable and non-retryable receipts,
+and starts a new attempt for unfinished or explicitly retryable White cases.
+The receipt keeps the earlier failed result and its attempt evidence.
+`results.json` remains the compatibility projection with resolved
+configuration, provenance, raw samples, exact leaf commands, timing policies,
+and bundle preparation. `report.html` is only the renderer for `report.json`.
 
 A separately run bundle-preparation step can be attached with the `report`
 command shown above. The receipt must use schema

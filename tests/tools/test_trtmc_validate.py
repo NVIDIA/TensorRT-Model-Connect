@@ -923,6 +923,163 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     assert returncode == 0
     result = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
     assert result["resource_cleanup"]["engine"]["status"] == "deleted"
+    receipt = trtmc_validate.ExecutionLedger.load(
+        output, task_kind="accuracy"
+    ).receipt("model-a::suite-a")
+    assert receipt["state"] == "terminal"
+    comparison_mtime = (case_dir / "comparison.json").stat().st_mtime_ns
+
+    assert trtmc_validate._run_all_bindings(
+        [binding],
+        arguments=arguments,
+        catalog={"sample_limits": {"suite-a": 1}},
+    ) == 0
+    assert (case_dir / "comparison.json").stat().st_mtime_ns == comparison_mtime
+
+
+def test_accuracy_report_is_rebuilt_from_ordered_live_receipts(tmp_path):
+    cases = [
+        {
+            "id": "model-a::suite-a",
+            "result_path": "model-a/suite-a/comparison.json",
+            "report": {"model": "model-a", "workload": "suite-a", "sample_limit": 20},
+        },
+        {
+            "id": "model-b::suite-b",
+            "result_path": "model-b/suite-b/comparison.json",
+            "report": {"model": "model-b", "workload": "suite-b", "sample_limit": 10},
+        },
+    ]
+    ledger = trtmc_validate.ExecutionLedger.open(
+        tmp_path,
+        campaign_id="run-1",
+        task_kind="accuracy",
+        fingerprint="revision-1",
+        cases=cases,
+    )
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "suite-a",
+            "execution": {"status": "completed", "exit_code": 0},
+            "comparison": {
+                "status": "agreement",
+                "mode": "exact",
+                "primary_metric": None,
+                "metrics": {},
+                "failures": [],
+            },
+            "validation": {"status": "passed"},
+            "precision_contract": {
+                "reference_precision": "fp16",
+                "trtmc_base_precision": "fp16",
+            },
+        }
+    )
+    ledger.begin("model-a::suite-a", stage="candidate")
+    ledger.finish("model-a::suite-a", result="green", payload=result)
+
+    _, _, report = trtmc_validate.write_report(tmp_path)
+
+    assert [(row["id"], row["state"], row["result"]) for row in report["results"]] == [
+        ("model-a::suite-a", "terminal", "green"),
+        ("model-b::suite-b", "pending", None),
+    ]
+    assert [row["progress"] for row in report["results"]] == [
+        {"stage": "candidate", "attempt": 1},
+        {"stage": None, "attempt": 0},
+    ]
+    assert json.loads(
+        (tmp_path / "model-a/suite-a/comparison.json").read_text(encoding="utf-8")
+    ) == result
+    assert report["accounting"]["progress"] == {
+        "pending": 1,
+        "running": 0,
+        "terminal": 1,
+    }
+
+
+def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "results"
+    arguments = trtmc_validate.build_parser().parse_args(
+        [
+            "--binding",
+            "model-a=suite-a",
+            "--output",
+            str(output),
+            "--model-work-dir",
+            str(tmp_path / "work"),
+            "--reference-cache-dir",
+            str(tmp_path / "references"),
+            "--engine-retention",
+            "retain",
+            "--hf-cache-retention",
+            "retain",
+        ]
+    )
+    binding = trtmc_validate.Binding("model-a", "suite-a")
+    catalog = {"sample_limits": {"suite-a": 1}}
+    monkeypatch.setattr(trtmc_validate, "write_run_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(trtmc_validate, "finalize_run_metadata", lambda *args: None)
+    monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
+    monkeypatch.setattr(trtmc_validate, "_check_free_space", lambda *args: 100.0)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        trtmc_validate._run_all_bindings(
+            [binding], arguments=arguments, catalog=catalog
+        )
+    ledger = trtmc_validate.ExecutionLedger.load(output, task_kind="accuracy")
+    running = ledger.receipt("model-a::suite-a")
+    assert running["state"] == "running"
+    evidence = running["attempts"][0]["evidence"]
+    assert evidence["commands"]["worker"]["rendered"]
+    assert (output / evidence["logs"][0]["href"]).is_file()
+    live = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert live["results"][0]["progress"] == {"stage": "candidate", "attempt": 1}
+    assert live["results"][0]["commands"]["worker"]["rendered"]
+
+    arguments.resume_existing = True
+    monkeypatch.setattr(trtmc_validate, "_validate_resume_request", lambda *args: None)
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_run_supervised_binding_with_retries",
+        lambda *args, **kwargs: trtmc_validate._normalize_result(
+            {
+                "model": "model-a",
+                "workload": "suite-a",
+                "execution": {"status": "completed", "exit_code": 0},
+                "comparison": {
+                    "status": "agreement",
+                    "mode": "exact",
+                    "primary_metric": None,
+                    "metrics": {},
+                    "failures": [],
+                },
+                "validation": {"status": "passed"},
+                "precision_contract": {
+                    "reference_precision": "fp16",
+                    "trtmc_base_precision": "fp16",
+                },
+            }
+        ),
+    )
+
+    assert trtmc_validate._run_all_bindings(
+        [binding], arguments=arguments, catalog=catalog
+    ) == 0
+    receipt = ledger.receipt("model-a::suite-a")
+    assert receipt["result"] == "green"
+    assert [(attempt["attempt"], attempt["state"]) for attempt in receipt["attempts"]] == [
+        (1, "interrupted"),
+        (2, "completed"),
+    ]
 
 
 def test_resume_existing_rejects_different_source_revision(tmp_path, monkeypatch):

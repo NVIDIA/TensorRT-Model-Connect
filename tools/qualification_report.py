@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 from typing import Any, Mapping, Sequence
 
 
@@ -101,6 +100,15 @@ def _write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
         json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    temporary.replace(path)
+
+
+def _write_bytes_if_changed(path: Path, content: bytes) -> None:
+    if path.is_file() and path.read_bytes() == content:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_bytes(content)
     temporary.replace(path)
 
 
@@ -268,6 +276,6 @@ def materialize_report(
         "qualification-report.js",
         "qualification-report.schema.json",
     ):
-        shutil.copyfile(ASSET_DIRECTORY / name, assets / name)
-    html_path.write_text(_html_shell(title), encoding="utf-8")
+        _write_bytes_if_changed(assets / name, (ASSET_DIRECTORY / name).read_bytes())
+    _write_bytes_if_changed(html_path, _html_shell(title).encode("utf-8"))
     return json_path, html_path, report

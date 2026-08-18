@@ -26,7 +26,7 @@ import statistics
 import subprocess
 import sys
 import time
-from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, MutableMapping, Sequence
 
 import yaml
 
@@ -66,6 +66,7 @@ from tools.reporting_html import (  # noqa: E402
     task_type_label,
 )
 from tools import model_selection  # noqa: E402
+from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools import qualification_report  # noqa: E402
 
 
@@ -1082,20 +1083,49 @@ def _initial_results(
             ),
         },
         "selected_entry_ids": [str(case["id"]) for case in selected],
-        "cases": [
-            {
-                "id": case["id"],
-                "family": case["family"],
-                "operation": case["operation"],
-                "model": case["model"],
-                "workload_contract": deepcopy(dict(case["workload"])),
-                "measurement_contract": deepcopy(dict(case["measurement"])),
-                "baseline_contract": dict(case["baseline"]),
-                "status": "pending",
-            }
-            for case in cases
-        ],
+        "cases": [_pending_perf_row(case) for case in cases],
     }
+
+
+def _pending_perf_row(case: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": case["id"],
+        "family": case["family"],
+        "operation": case["operation"],
+        "model": case["model"],
+        "workload_contract": deepcopy(dict(case["workload"])),
+        "measurement_contract": deepcopy(dict(case["measurement"])),
+        "baseline_contract": dict(case["baseline"]),
+        "status": "pending",
+    }
+
+
+def _open_perf_ledger(
+    output: Path,
+    selected: Sequence[Mapping[str, Any]],
+    results: Mapping[str, Any],
+) -> ExecutionLedger:
+    fingerprint_input = {
+        "git_commit": results.get("git_commit"),
+        "suite_sha256": results.get("suite_sha256"),
+        "environment_sha256": results.get("environment_config", {}).get("sha256"),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_input, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    try:
+        return ExecutionLedger.open(
+            output,
+            campaign_id=str(results.get("run_id") or output.name),
+            task_kind="performance",
+            fingerprint=fingerprint,
+            cases=[
+                {"id": str(case["id"]), "report": _pending_perf_row(case)}
+                for case in selected
+            ],
+        )
+    except ExecutionLedgerError as error:
+        raise PerfMatrixError(str(error)) from error
 
 
 def _load_resume(path: Path) -> dict[str, Any]:
@@ -1747,12 +1777,15 @@ def _materialize_command_logs(
     case_id: str,
     side: str,
     command: MutableMapping[str, Any],
+    *,
+    case_attempt: int = 1,
 ) -> list[dict[str, str]]:
     directory = output / "artifacts" / _slug(case_id) / "logs"
     directory.mkdir(parents=True, exist_ok=True)
     links = []
+    attempt_suffix = "" if case_attempt == 1 else f".case-attempt-{case_attempt}"
     for stream in ("stdout", "stderr"):
-        path = directory / f"{side}.{stream}.log"
+        path = directory / f"{side}{attempt_suffix}.{stream}.log"
         path.write_text(str(command.pop(stream, "")), encoding="utf-8")
         href = path.relative_to(output).as_posix()
         command[f"{stream}_log"] = href
@@ -1771,13 +1804,45 @@ def _materialize_command_logs(
             if not source.is_file():
                 continue
             suffix = "".join(source.suffixes) or ".log"
-            path = directory / f"{side}.{_slug(label)}{suffix}"
+            path = directory / f"{side}{attempt_suffix}.{_slug(label)}{suffix}"
             shutil.copyfile(source, path)
             record = {"label": label, "href": path.relative_to(output).as_posix()}
             materialized.append(record)
             links.append(record)
         diagnostic["artifacts"] = materialized
     return links
+
+
+def _perf_attempt_evidence(
+    output: Path,
+    case_id: str,
+    case_attempt: int,
+    resolve_command: Mapping[str, Any],
+    environment: Mapping[str, str],
+) -> dict[str, Any]:
+    directory = output / "artifacts" / _slug(case_id) / "logs"
+    directory.mkdir(parents=True, exist_ok=True)
+    suffix = "" if case_attempt == 1 else f".case-attempt-{case_attempt}"
+    logs = []
+    for side, label in (("trtmc", "TRTMC"), ("baseline", "Reference")):
+        for stream in ("stdout", "stderr"):
+            path = directory / f"{side}{suffix}.{stream}.log"
+            path.touch(exist_ok=True)
+            logs.append(
+                {
+                    "label": f"{label} {stream} case attempt {case_attempt}",
+                    "href": path.relative_to(output).as_posix(),
+                }
+            )
+    return {
+        "commands": {"resolve": deepcopy(dict(resolve_command))},
+        "logs": logs,
+        "environment": {
+            name: environment[name]
+            for name in REPRODUCTION_ENVIRONMENT_NAMES
+            if environment.get(name)
+        },
+    }
 
 
 def _gpu_memory_usage_mib() -> list[tuple[int, int]]:
@@ -2316,6 +2381,9 @@ def _run_supported_case(
     options: RunOptions,
     case_work: Path,
     row: MutableMapping[str, Any],
+    *,
+    case_attempt: int = 1,
+    progress: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> None:
     environment = _case_command_environment(options, case_work)
     digest = _workload_digest(resolved)
@@ -2326,17 +2394,30 @@ def _run_supported_case(
     row["resolved_settings"]["baseline_python_profile"] = profile
     reference_precision = baseline_argv[baseline_argv.index("--precision") + 1]
     row["resolved_settings"]["baseline_precision"] = reference_precision
-    commands = {
-        "trtmc": {"argv": candidate_argv, "rendered": shlex.join(candidate_argv)},
-        "baseline": {"argv": baseline_argv, "rendered": shlex.join(baseline_argv)},
-    }
-    row["commands"] = commands
+    commands = row.setdefault("commands", {})
+    commands.update({
+        "trtmc": {
+            "argv": candidate_argv,
+            "rendered": shlex.join(candidate_argv),
+            "cwd": str(REPOSITORY),
+        },
+        "baseline": {
+            "argv": baseline_argv,
+            "rendered": shlex.join(baseline_argv),
+            "cwd": str(REPOSITORY),
+        },
+    })
     if getattr(options, "verbose", False):
         print(f"[{case['id']}] TRTMC: {commands['trtmc']['rendered']}", flush=True)
         print(f"[{case['id']}] baseline: {commands['baseline']['rendered']}", flush=True)
     order = ("trtmc", "baseline") if _stable_even(str(case["id"])) else ("baseline", "trtmc")
     for side in order:
         argv = candidate_argv if side == "trtmc" else baseline_argv
+        if progress is not None:
+            progress(
+                "candidate" if side == "trtmc" else "reference",
+                {"commands": deepcopy(row["commands"])},
+            )
         _wait_for_gpu_memory_headroom(
             minimum_free_fraction=options.minimum_gpu_free_fraction
         )
@@ -2347,6 +2428,7 @@ def _run_supported_case(
                 str(case["id"]),
                 side,
                 command,
+                case_attempt=case_attempt,
             )
         )
         commands[side] = command
@@ -2391,17 +2473,28 @@ def _run_one(
     options: RunOptions,
     work_root: Path,
     preflight: tuple[dict[str, Any], list[str], dict[str, str]],
+    *,
+    case_attempt: int = 1,
+    progress: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     resolved, _, dry_command = preflight
     digest = _workload_digest(resolved)
     row = _case_row(case, resolved, digest)
     row["commands"]["resolve"] = dry_command
-    case_work = work_root / _slug(str(case["id"]))
+    case_work = work_root / _slug(str(case["id"])) / f"attempt-{case_attempt}"
     if case_work.exists():
         shutil.rmtree(case_work)
     case_work.mkdir(parents=True, exist_ok=True)
     try:
-        _run_supported_case(case, resolved, options, case_work, row)
+        _run_supported_case(
+            case,
+            resolved,
+            options,
+            case_work,
+            row,
+            case_attempt=case_attempt,
+            progress=progress,
+        )
     except (PerfMatrixError, OSError, ValueError, RuntimeError) as exc:
         row["status"] = "failed"
         row["reason"] = str(exc)
@@ -2594,6 +2687,43 @@ def _perf_state_and_result(row: Mapping[str, Any]) -> tuple[str, str | None]:
     ).values():
         return "terminal", "white"
     return "terminal", status if status in qualification_report.RGB_RESULTS else "white"
+
+
+def _sync_perf_results_from_ledger(
+    results: MutableMapping[str, Any],
+    ledger: ExecutionLedger,
+) -> None:
+    rows = _result_rows(results)
+    for entry in ledger.snapshot():
+        case = entry["case"]
+        receipt = entry["receipt"]
+        case_id = str(case["id"])
+        if case_id not in rows:
+            raise PerfMatrixError(f"Performance ledger contains unknown case {case_id!r}")
+        base = case.get("report")
+        if not isinstance(base, Mapping):
+            raise PerfMatrixError(f"invalid Performance ledger descriptor for {case_id!r}")
+        if receipt["state"] == "terminal":
+            row = deepcopy(receipt["payload"])
+            state, derived = _perf_state_and_result(row)
+            if state != "terminal" or receipt["result"] != derived:
+                raise PerfMatrixError(
+                    f"Performance ledger result mismatch for {case_id!r}: "
+                    f"receipt={receipt['result']}, result={derived}"
+                )
+        else:
+            row = {**deepcopy(dict(base)), "status": receipt["state"]}
+            active = receipt["attempts"][-1] if receipt["attempts"] else {}
+            evidence = active.get("evidence", {})
+            evidence = evidence if isinstance(evidence, Mapping) else {}
+            row["commands"] = deepcopy(dict(evidence.get("commands", {})))
+            row["logs"] = deepcopy(list(evidence.get("logs", [])))
+        row["progress"] = {
+            "stage": receipt["stage"],
+            "attempt": receipt["active_attempt"] or len(receipt["attempts"]),
+        }
+        rows[case_id].clear()
+        rows[case_id].update(row)
 
 
 def _perf_issue(row: Mapping[str, Any], result: str | None) -> dict[str, str] | None:
@@ -3323,7 +3453,13 @@ def _report_html(results: Mapping[str, Any]) -> str:
 </body></html>"""
 
 
-def _write_artifacts(output: Path, results: Mapping[str, Any]) -> None:
+def _write_artifacts(
+    output: Path,
+    results: MutableMapping[str, Any],
+    ledger: ExecutionLedger | None = None,
+) -> None:
+    if ledger is not None:
+        _sync_perf_results_from_ledger(results, ledger)
     _write_json(output / "results.json", results)
     _materialize_public_perf_report(output, results)
     legacy_replay = output / "reproduce.py"
@@ -3440,7 +3576,15 @@ def _report_existing(arguments: argparse.Namespace) -> int:
             arguments.preparation_receipt.resolve(), "preparation receipt"
         )
         _apply_bundle_preparation_receipt(results, receipt)
-    _write_artifacts(output, results)
+    try:
+        ledger = (
+            ExecutionLedger.load(output, task_kind="performance")
+            if (output / "ledger" / "campaign.json").is_file()
+            else None
+        )
+    except ExecutionLedgerError as error:
+        raise PerfMatrixError(str(error)) from error
+    _write_artifacts(output, results, ledger)
     print(f"Results: {output / 'results.json'}")
     print(f"Report data: {output / 'report.json'}")
     print(f"Report: {output / 'report.html'}")
@@ -3563,6 +3707,8 @@ def _execute_campaign(
     worker: Mapping[str, Any],
     storage_preflight: Mapping[str, Any],
 ) -> int:
+    ledger = _open_perf_ledger(options.output, selected, results)
+    ledger.recover_interrupted()
     results["candidate_worker_preflight"] = dict(worker)
     results["storage_preflight"] = deepcopy(dict(storage_preflight))
     results["reference_preflight"] = deepcopy(dict(reference_preflight))
@@ -3574,29 +3720,92 @@ def _execute_campaign(
         timing_preflight["status"] = "partial"
     results["timing_preflight"] = timing_preflight
     rows = _result_rows(results)
+    for case in selected:
+        case_id = str(case["id"])
+        receipt = ledger.receipt(case_id)
+        if receipt["state"] == "terminal" or not _should_skip(rows[case_id]):
+            continue
+        ledger.begin(
+            case_id,
+            stage="legacy-import",
+            evidence={
+                "commands": deepcopy(dict(rows[case_id].get("commands", {}))),
+                "logs": deepcopy(list(rows[case_id].get("logs", []))),
+            },
+        )
+        state, result = _perf_state_and_result(rows[case_id])
+        if state != "terminal" or result is None:
+            raise PerfMatrixError(f"cannot import incomplete result for {case_id!r}")
+        ledger.finish(case_id, result=result, payload=rows[case_id])
+    _sync_perf_results_from_ledger(results, ledger)
+    rows = _result_rows(results)
     work_root = options.scratch_root / options.output.name
     work_root.mkdir(parents=True, exist_ok=True)
     for case in selected:
         case_id = str(case["id"])
         failure = preflight_failures.get(case_id)
-        if failure is None or _should_skip(rows[case_id]):
+        receipt = ledger.receipt(case_id)
+        if failure is None or receipt["state"] == "terminal":
             continue
-        rows[case_id].clear()
-        rows[case_id].update(_resolution_failure_row(case, failure))
-    _write_artifacts(options.output, results)
+        failure_row = _resolution_failure_row(case, failure)
+        ledger.begin(
+            case_id,
+            stage="preflight",
+            evidence={"commands": deepcopy(dict(failure_row.get("commands", {})))},
+        )
+        ledger.finish(
+            case_id,
+            result="white",
+            payload=failure_row,
+            attempt_outcome="failed",
+            evidence={"retryable": True},
+        )
+    _write_artifacts(options.output, results, ledger)
     for case in selected:
         case_id = str(case["id"])
-        existing = rows[case_id]
-        if _should_skip(existing):
-            print(f"[{case['id']}] resume: keeping {existing['status']}", flush=True)
+        receipt = ledger.receipt(case_id)
+        if receipt["state"] == "terminal":
+            existing = receipt["payload"]
+            action = "resume: keeping" if case_id in preflight else "preflight: recorded"
+            print(f"[{case['id']}] {action} {existing['status']}", flush=True)
             continue
         if case_id not in preflight:
+            existing = rows[case_id]
             print(
                 f"[{case_id}] skipped: {existing.get('reason', 'preflight failed')}",
                 flush=True,
             )
             continue
-        row = _run_one(case, options, work_root, preflight[case_id])
+        case_attempt = len(receipt["attempts"]) + 1
+        case_work = work_root / _slug(case_id) / f"attempt-{case_attempt}"
+        attempt_evidence = _perf_attempt_evidence(
+            options.output,
+            case_id,
+            case_attempt,
+            preflight[case_id][2],
+            _case_command_environment(options, case_work),
+        )
+        ledger.begin(
+            case_id,
+            stage=("candidate" if _stable_even(case_id) else "reference"),
+            evidence=attempt_evidence,
+        )
+        _write_artifacts(options.output, results, ledger)
+
+        def publish_progress(stage: str, evidence: Mapping[str, Any]) -> None:
+            ledger.update_stage(case_id, stage, evidence=evidence)
+            _write_artifacts(options.output, results, ledger)
+
+        row = _run_one(
+            case,
+            options,
+            work_root,
+            preflight[case_id],
+            case_attempt=case_attempt,
+            progress=publish_progress,
+        )
+        if not row.get("logs"):
+            row["logs"] = deepcopy(attempt_evidence["logs"])
         passed = row.get("status") in {"green", "yellow", "red"}
         bundle_cleanup = _cleanup_managed_bundle(
             preflight[case_id][0],
@@ -3625,13 +3834,38 @@ def _execute_campaign(
                     "message": "; ".join(cleanup_failures),
                 }
             )
-        rows[case_id].clear()
-        rows[case_id].update(row)
-        _write_artifacts(options.output, results)
+        state, result = _perf_state_and_result(row)
+        if state != "terminal" or result is None:
+            raise PerfMatrixError(f"Performance case {case_id!r} did not finish")
+        ledger.finish(
+            case_id,
+            result=result,
+            payload=row,
+            attempt_outcome=(
+                "timed_out"
+                if any(
+                    command.get("exit_code") == 124
+                    for command in row.get("commands", {}).values()
+                    if isinstance(command, Mapping)
+                )
+                else "failed"
+                if row.get("status") == "failed"
+                else "completed"
+            ),
+            evidence={
+                "return_codes": {
+                    name: command.get("exit_code")
+                    for name, command in row.get("commands", {}).items()
+                    if isinstance(command, Mapping) and "exit_code" in command
+                },
+                "retryable": row.get("status") == "failed",
+            },
+        )
+        _write_artifacts(options.output, results, ledger)
     selected_ids = {str(case["id"]) for case in selected}
     results["finished_at"] = _now()
     results["status"] = _final_status(_selected_rows(results, selected_ids))
-    _write_artifacts(options.output, results)
+    _write_artifacts(options.output, results, ledger)
     try:
         work_root.rmdir()
     except OSError:
@@ -3721,11 +3955,13 @@ def _run_new(arguments: argparse.Namespace) -> int:
     )
     storage = _environment_preflight(environment, preliminary_options)
     worker = _preflight_worker(preliminary_options)
-    preflight, references, failures = _preflight_selected(selected, preliminary_options)
     run_id, output = _new_run_directory(results_root, suite)
     options = _run_options(environment, output, verbose=arguments.verbose)
     results = _initial_results(suite_path, suite, cases, selected, environment)
     results["run_id"] = run_id
+    ledger = _open_perf_ledger(output, selected, results)
+    _write_artifacts(output, results, ledger)
+    preflight, references, failures = _preflight_selected(selected, options)
     return _execute_campaign(
         selected=selected,
         options=options,
@@ -3774,6 +4010,10 @@ def _resume(arguments: argparse.Namespace) -> int:
             "cannot resume because the resolved environment values changed"
         )
     options = _run_options(environment, output, verbose=arguments.verbose)
+    ledger = _open_perf_ledger(output, selected, results)
+    ledger.recover_interrupted()
+    ledger.reopen_retryable()
+    _write_artifacts(output, results, ledger)
     storage = _environment_preflight(environment, options)
     worker = _preflight_worker(options)
     preflight, references, failures = _preflight_selected(selected, options)

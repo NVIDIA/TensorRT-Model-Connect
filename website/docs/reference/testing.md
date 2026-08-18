@@ -167,6 +167,15 @@ model ultimately fails.
 Each case writes
 `<output>/<model>/<workload>/comparison.json`; the output root receives
 `report.json` and the **TRTMC Reference Consistency Report** in `report.html`.
+The run also freezes its ordered selected-case inventory in
+`<output>/ledger/campaign.json` and atomically maintains one receipt per case
+under `<output>/ledger/cases/`. `report.json` is rebuilt from those receipts,
+so it includes pending, running, and terminal cases while the command is still
+running. On `--resume-existing`, a leftover running attempt becomes
+interrupted, completed receipts remain unchanged, and only unfinished cases
+can start a new case attempt. Model-worker retries remain nested evidence
+within that case attempt; they are not additional ledger attempts.
+`comparison.json` remains an atomically repaired compatibility projection.
 A not-compared entry writes
 `<output>/<model>/not-compared/comparison.json` without launching a worker.
 Exit status `0` means all attempted comparisons passed, `1` means execution

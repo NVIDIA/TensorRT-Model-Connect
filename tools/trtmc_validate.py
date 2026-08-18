@@ -60,6 +60,7 @@ from tools.reporting_html import (  # noqa: E402
 )
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
+from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools import model_selection  # noqa: E402
 from tools import qualification_report  # noqa: E402
 
@@ -745,6 +746,7 @@ def _run_subprocess(command: Sequence[str], log_path: Path, env: Mapping[str, st
             list(command),
             check=False,
             text=True,
+            cwd=REPO_ROOT,
             stdout=output,
             stderr=subprocess.STDOUT,
             env=dict(env),
@@ -771,6 +773,7 @@ def _run_supervised_subprocess(
         process = subprocess.Popen(
             list(command),
             text=True,
+            cwd=REPO_ROOT,
             stdout=output,
             stderr=subprocess.STDOUT,
             env=dict(env),
@@ -3414,17 +3417,91 @@ details {{ min-width: 210px; }}
 """
 
 
+def _accuracy_ledger_report_rows(
+    output: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ledger = ExecutionLedger.load(output, task_kind="accuracy")
+    terminal_results: list[dict[str, Any]] = []
+    public_results: list[dict[str, Any]] = []
+    for entry in ledger.snapshot():
+        case = entry["case"]
+        receipt = entry["receipt"]
+        report_fields = case.get("report", {})
+        if not isinstance(report_fields, Mapping):
+            raise ValidationError(f"invalid Accuracy ledger descriptor for {case['id']!r}")
+        if receipt["state"] != "terminal":
+            active = receipt["attempts"][-1] if receipt["attempts"] else {}
+            evidence = active.get("evidence", {})
+            evidence = evidence if isinstance(evidence, Mapping) else {}
+            public_results.append(
+                {
+                    **dict(report_fields),
+                    "id": case["id"],
+                    "state": receipt["state"],
+                    "result": None,
+                    "progress": {
+                        "stage": receipt["stage"],
+                        "attempt": receipt["active_attempt"]
+                        or len(receipt["attempts"]),
+                    },
+                    "precision": {
+                        "reference": "Not recorded",
+                        "candidate": "Not recorded",
+                    },
+                    "samples": {
+                        "planned": report_fields.get("sample_limit"),
+                        "evaluated": None,
+                    },
+                    "commands": copy.deepcopy(dict(evidence.get("commands", {}))),
+                    "debug": {
+                        "logs": copy.deepcopy(list(evidence.get("logs", []))),
+                        "command_artifacts": [],
+                    },
+                }
+            )
+            continue
+        result = _normalize_result(receipt["payload"])
+        derived = _traffic_light_status(result)
+        if receipt["result"] != derived:
+            raise ValidationError(
+                f"Accuracy ledger result mismatch for {case['id']!r}: "
+                f"receipt={receipt['result']}, comparison={derived}"
+            )
+        result_path = output / str(case["result_path"])
+        encoded = json.dumps(result, indent=2, ensure_ascii=False)
+        if not result_path.is_file() or result_path.read_text(encoding="utf-8") != encoded:
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = result_path.with_name(f".{result_path.name}.{os.getpid()}.tmp")
+            temporary.write_text(encoded, encoding="utf-8")
+            temporary.replace(result_path)
+        terminal_results.append(result)
+        public = _public_accuracy_result(output, result_path, result)
+        public["progress"] = {
+            "stage": receipt["stage"],
+            "attempt": len(receipt["attempts"]),
+        }
+        public_results.append(public)
+    return terminal_results, public_results
+
+
 def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
-    result_paths = sorted(output.glob("*/*/comparison.json"))
-    results = _normalize_result_files(result_paths)
-    result_paths, results = _deduplicate_results(result_paths, results)
-    selected = [
-        (path, result)
-        for path, result in zip(result_paths, results, strict=True)
-        if not isinstance(result.get("platform_exclusion"), Mapping)
-    ]
-    result_paths = [path for path, _result in selected]
-    results = [result for _path, result in selected]
+    if (output / "ledger" / "campaign.json").is_file():
+        results, public_results = _accuracy_ledger_report_rows(output)
+    else:
+        result_paths = sorted(output.glob("*/*/comparison.json"))
+        results = _normalize_result_files(result_paths)
+        result_paths, results = _deduplicate_results(result_paths, results)
+        selected = [
+            (path, result)
+            for path, result in zip(result_paths, results, strict=True)
+            if not isinstance(result.get("platform_exclusion"), Mapping)
+        ]
+        result_paths = [path for path, _result in selected]
+        results = [result for _path, result in selected]
+        public_results = [
+            _public_accuracy_result(output, path, result)
+            for path, result in zip(result_paths, results, strict=True)
+        ]
     validation_counts, comparison_counts, execution_errors = _report_counts(results)
     sample_counts = [
         count for result in results if (count := _selected_sample_count(result)) is not None
@@ -3443,7 +3520,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
         else "passed"
     )
     summary = {
-        "cases": len(results),
+        "cases": len(public_results),
         "execution_completed": sum(
             result["execution"]["status"] == "completed" for result in results
         ),
@@ -3468,10 +3545,8 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             )
         if duration_seconds is not None:
             summary["duration_seconds"] = duration_seconds
-    public_results = [
-        _public_accuracy_result(output, path, result)
-        for path, result in zip(result_paths, results, strict=True)
-    ]
+    if any(row["state"] != "terminal" for row in public_results):
+        validation_status = "running"
     return qualification_report.materialize_report(
         output,
         report_kind="accuracy",
@@ -4320,7 +4395,11 @@ def _run_supervised_binding(
     case_dir.mkdir(parents=True, exist_ok=True)
     comparison_path = case_dir / "comparison.json"
     comparison_path.unlink(missing_ok=True)
-    worker_log = case_dir / ("worker.log" if attempt == 1 else f"worker.attempt-{attempt}.log")
+    worker_log = _worker_log_path(
+        case_dir,
+        case_attempt=int(getattr(arguments, "case_attempt", 1)),
+        worker_attempt=attempt,
+    )
     command = _worker_command(binding, arguments)
     launch_error = ""
     error_type = "WorkerProcessError"
@@ -4371,6 +4450,20 @@ def _run_supervised_binding(
         encoding="utf-8",
     )
     return result
+
+
+def _worker_log_path(
+    case_dir: Path,
+    *,
+    case_attempt: int,
+    worker_attempt: int,
+) -> Path:
+    if case_attempt == 1:
+        name = "worker.log" if worker_attempt == 1 else f"worker.attempt-{worker_attempt}.log"
+    else:
+        suffix = "" if worker_attempt == 1 else f".worker-attempt-{worker_attempt}"
+        name = f"worker.case-attempt-{case_attempt}{suffix}.log"
+    return case_dir / name
 
 
 def _archive_failed_attempt(case_dir: Path, attempt: int) -> dict[str, str]:
@@ -4551,6 +4644,53 @@ def _validate_resume_request(output: Path) -> None:
         raise ValidationError("cannot resume Accuracy results with a different resolved command")
 
 
+def _accuracy_case_id(binding: Binding) -> str:
+    return f"{binding.model}::{binding.workload or 'not-compared'}"
+
+
+def _open_accuracy_ledger(
+    bindings: Sequence[Binding],
+    arguments: argparse.Namespace,
+    catalog: Mapping[str, Any],
+) -> ExecutionLedger:
+    fingerprint_input = {
+        "source_revision": _source_revision(),
+        "command": _resume_command(shlex.join(sys.argv)),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_input, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    cases = []
+    for binding in bindings:
+        result_path = _case_directory(arguments.output, binding) / "comparison.json"
+        sample_limit = (
+            resolve_sample_limit(catalog, binding, arguments.limit)
+            if binding.runnable
+            else None
+        )
+        cases.append(
+            {
+                "id": _accuracy_case_id(binding),
+                "result_path": result_path.relative_to(arguments.output).as_posix(),
+                "report": {
+                    "model": binding.model,
+                    "workload": binding.workload,
+                    "sample_limit": sample_limit,
+                },
+            }
+        )
+    try:
+        return ExecutionLedger.open(
+            arguments.output,
+            campaign_id=arguments.output.name,
+            task_kind="accuracy",
+            fingerprint=fingerprint,
+            cases=cases,
+        )
+    except ExecutionLedgerError as error:
+        raise ValidationError(str(error)) from error
+
+
 def _run_all_bindings(
     bindings: Iterable[Binding],
     *,
@@ -4566,20 +4706,38 @@ def _run_all_bindings(
         arguments.output,
         cuda_visible_devices=arguments.cuda_visible_devices,
     )
+    ledger = _open_accuracy_ledger(bindings, arguments, catalog)
+    if arguments.resume_existing:
+        ledger.recover_interrupted()
+    write_report(arguments.output)
     failed = False
     not_compared = False
     remaining = Counter(binding.model for binding in bindings if binding.runnable)
     model_passed = {model: True for model in remaining}
     for binding in bindings:
+        case_id = _accuracy_case_id(binding)
+        receipt = ledger.receipt(case_id)
         if not binding.runnable:
-            print(
-                f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
-                flush=True,
-            )
-            result, comparison = _write_not_compared_case(
-                binding,
-                arguments.output,
-            )
+            if receipt["state"] == "terminal":
+                result = _normalize_result(receipt["payload"])
+                comparison = _case_directory(arguments.output, binding) / "comparison.json"
+            else:
+                ledger.begin(case_id, stage="preflight")
+                write_report(arguments.output)
+                print(
+                    f"\nNot compared: {binding.model} / {binding.not_compared_reason}",
+                    flush=True,
+                )
+                result, comparison = _write_not_compared_case(
+                    binding,
+                    arguments.output,
+                )
+                normalized = _normalize_result(result)
+                ledger.finish(
+                    case_id,
+                    result=_traffic_light_status(normalized),
+                    payload=normalized,
+                )
             not_compared = True
             _, report_path, _ = write_report(arguments.output)
             _print_result(result, comparison, report_path, arguments.verbose)
@@ -4590,6 +4748,65 @@ def _run_all_bindings(
             arguments,
             binding,
         )
+        if receipt["state"] == "terminal":
+            result = _normalize_result(receipt["payload"])
+            model_failed = result["validation"]["status"] == "failed"
+            model_passed[binding.model] = model_passed[binding.model] and not model_failed
+            remaining[binding.model] -= 1
+            print(
+                f"\nResume: keeping terminal result for {binding.model} / {binding.workload}",
+                flush=True,
+            )
+            _, report_path, _ = write_report(arguments.output)
+            comparison = _case_directory(arguments.output, binding) / "comparison.json"
+            _print_result(result, comparison, report_path, arguments.verbose)
+            failed = failed or model_failed
+            if model_failed and arguments.on_model_failure == "stop":
+                print(f"Stopping after failed model: {binding.model}", flush=True)
+                break
+            continue
+        case_attempt = len(receipt["attempts"]) + 1
+        binding_arguments.case_attempt = case_attempt
+        case_dir = _case_directory(arguments.output, binding)
+        worker_log = _worker_log_path(
+            case_dir,
+            case_attempt=case_attempt,
+            worker_attempt=1,
+        )
+        worker_log.parent.mkdir(parents=True, exist_ok=True)
+        worker_log.touch(exist_ok=True)
+        worker_command = _worker_command(binding, binding_arguments)
+        worker_environment = _worker_environment(binding_arguments)
+        ledger.begin(
+            case_id,
+            stage="preflight",
+            evidence={
+                "commands": {
+                    "worker": {
+                        "argv": worker_command,
+                        "rendered": shlex.join(worker_command),
+                        "cwd": str(REPO_ROOT),
+                    }
+                },
+                "logs": [
+                    {
+                        "label": f"Accuracy worker case attempt {case_attempt}",
+                        "href": worker_log.relative_to(arguments.output).as_posix(),
+                    }
+                ],
+                "environment": {
+                    name: worker_environment[name]
+                    for name in (
+                        "CUDA_VISIBLE_DEVICES",
+                        "HF_HOME",
+                        "LD_LIBRARY_PATH",
+                        "PYTHONPATH",
+                    )
+                    if worker_environment.get(name)
+                },
+            },
+        )
+        write_report(arguments.output)
         result = (
             _resumable_binding_result(arguments.output, binding)
             if arguments.resume_existing
@@ -4597,6 +4814,8 @@ def _run_all_bindings(
         )
         if result is None:
             free_gib = _check_free_space(arguments, binding)
+            ledger.update_stage(case_id, "candidate")
+            write_report(arguments.output)
             print(
                 f"\nStarting worker: {binding.model} / {binding.workload} / "
                 f"{sample_note} / {free_gib:.1f} GiB free",
@@ -4609,7 +4828,7 @@ def _run_all_bindings(
             )
         else:
             print(
-                f"\nResume: keeping terminal result for {binding.model} / {binding.workload}",
+                f"\nResume: importing terminal result for {binding.model} / {binding.workload}",
                 flush=True,
             )
         model_failed = result["validation"]["status"] == "failed"
@@ -4643,6 +4862,30 @@ def _run_all_bindings(
         comparison.write_text(
             json.dumps(result, indent=2, ensure_ascii=False),
             encoding="utf-8",
+        )
+        ledger.update_stage(case_id, "compare")
+        normalized = _normalize_result(result)
+        light = _traffic_light_status(normalized)
+        raw_result = normalized.get("raw_result", {})
+        timed_out = (
+            isinstance(raw_result, Mapping)
+            and raw_result.get("error_type") == "WorkerTimeoutError"
+        )
+        ledger.finish(
+            case_id,
+            result=light,
+            payload=normalized,
+            attempt_outcome=(
+                "timed_out"
+                if timed_out
+                else "failed"
+                if normalized["execution"]["status"] == "error"
+                else "completed"
+            ),
+            evidence={
+                "return_code": normalized["execution"].get("exit_code"),
+                "retryable": normalized["execution"].get("retryable"),
+            },
         )
         _, report_path, _ = write_report(arguments.output)
         comparison = _case_directory(arguments.output, binding) / "comparison.json"

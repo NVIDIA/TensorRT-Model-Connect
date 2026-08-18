@@ -156,7 +156,11 @@
   }
 
   function resultCell(row) {
-    if (row.state !== "terminal") return el("span", "state", row.state || "pending");
+    if (row.state !== "terminal") {
+      const progress = row.progress || {};
+      const details = [progress.stage, progress.attempt ? `attempt ${progress.attempt}` : null].filter(Boolean).join(" · ");
+      return add(el("div", ""), el("span", "state", row.state || "pending"), details ? el("div", "detail", details) : null);
+    }
     const value = el("div");
     value.append(signal(row.result));
     if (row.result === "white" && row.issue) value.append(el("div", "detail", `${row.issue.stage} · ${row.issue.code}`));
