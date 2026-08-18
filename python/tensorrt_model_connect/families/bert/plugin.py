@@ -10,6 +10,7 @@ from ...parallel_config import (
     require_tensorrt_11_for_tensor_parallel,
 )
 from .config import ModelConfig
+from .model.model import build as build_model_bundle
 from .model.model import build_encoder_engine
 from .weights import WeightDict, load_bert_weights
 
@@ -60,3 +61,4 @@ class BertPlugin:
 
 
 plugin = BertPlugin()
+plugin.build = build_model_bundle

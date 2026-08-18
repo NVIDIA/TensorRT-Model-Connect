@@ -770,3 +770,338 @@ def _add_encoder_layer(
     )
 
     return normed2
+
+
+def _build_call_supports(function, name: str) -> bool:
+    import inspect
+
+    return name in inspect.signature(function).parameters
+
+
+def _detect_build_tokenizer_frame(
+    source: str,
+    *,
+    revision: str | None = None,
+) -> tuple[list[int], list[int]] | None:
+    from pathlib import Path
+
+    try:
+        from transformers import AutoTokenizer
+
+        kwargs = {"trust_remote_code": True}
+        if revision:
+            kwargs["revision"] = revision
+        if not Path(source).is_dir():
+            kwargs["local_files_only"] = True
+        tokenizer = AutoTokenizer.from_pretrained(source, **kwargs)
+        default_ids = list(tokenizer.encode("hello"))
+        plain_ids = list(tokenizer.encode("hello", add_special_tokens=False))
+    except Exception:
+        return None
+    if default_ids == plain_ids:
+        return [], []
+    if not plain_ids:
+        return default_ids, []
+    for start in range(len(default_ids) - len(plain_ids) + 1):
+        if default_ids[start : start + len(plain_ids)] == plain_ids:
+            return default_ids[:start], default_ids[start + len(plain_ids) :]
+    return None
+
+
+def _ensure_build_tokenizer(model_dir) -> None:
+    import tempfile
+    from pathlib import Path
+
+    tokenizer_path = model_dir / "tokenizer.json"
+    if tokenizer_path.is_file():
+        return
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(str(model_dir), use_fast=True)
+        with tempfile.TemporaryDirectory(prefix="trtmc-tokenizer-") as temporary:
+            generated = Path(temporary) / "tokenizer.json"
+            backend = getattr(tokenizer, "backend_tokenizer", None)
+            if backend is None:
+                backend = getattr(tokenizer, "_tokenizer", None)
+            if backend is not None and hasattr(backend, "save"):
+                backend.save(str(generated))
+            if not generated.is_file():
+                tokenizer.save_pretrained(temporary)
+            if not generated.is_file():
+                raise RuntimeError("tokenizer conversion did not create tokenizer.json")
+            with tempfile.NamedTemporaryFile(
+                dir=model_dir,
+                prefix=".trtmc-tokenizer-",
+                suffix=".json",
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+                output.write(generated.read_bytes())
+            temporary_path.replace(tokenizer_path)
+    except Exception as exc:
+        print(
+            "[trtmc build] Warning: could not generate tokenizer.json "
+            f"(C++ runtime may fail to create tokenizer): {exc}",
+            file=sys.stderr,
+        )
+
+
+def build(model_dir: str, output_path: str, *, options: dict[str, object]) -> None:
+    """Build one complete BERT bundle without shared model orchestration."""
+
+    import json
+    import re
+    import time
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from tensorrt_model_connect import trt_compat as build_trt_compat
+    from tensorrt_model_connect.build_timing import (
+        add_build_timing,
+        new_build_timing,
+        write_build_timing,
+    )
+    from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
+    from tensorrt_model_connect.parallel_config import (
+        normalize_parallel_config,
+        rank_engine_section,
+        require_tensorrt_11_for_tensor_parallel,
+    )
+    from tensorrt_model_connect.families.bert.plugin import plugin
+
+    model_path = Path(model_dir)
+    parallel = normalize_parallel_config(options.get("parallel_config"))
+    if parallel.cp_enabled:
+        raise NotImplementedError("BERT does not support context-parallel builds")
+    if options.get("dynamic_kv_cache") or options.get("triattention_stats_path"):
+        raise ValueError("BERT does not use a decoder KV-cache runtime")
+
+    config = ModelConfig.from_dir(model_path)
+    config.raw["_model_dir"] = str(model_path)
+    config.raw["_fp32_layers"] = sorted(set(options.get("fp32_layers") or ()))
+    config.raw["_family_build_options"] = dict(options.get("family_build_options") or {})
+    config.raw["_parallel_build_enabled"] = bool(parallel.enabled)
+    config.raw["_rtx_build_requested"] = bool(options.get("rtx"))
+    precision = str(options.get("precision") or "fp32").lower()
+    config.raw["_resolved_build_precision"] = precision
+    max_cache_length = int(options.get("max_cache_length") or 256)
+    if max_cache_length < 1:
+        raise ValueError("max_cache_length must be >= 1")
+
+    timing = new_build_timing(options.get("build_timing_path"))
+    timing["model_dir"] = str(model_path)
+    timing["output_path"] = str(output_path)
+    started = time.monotonic()
+    write_build_timing(timing)
+
+    weights_started = time.monotonic()
+    weight_kwargs = {"precision": precision} if _build_call_supports(
+        plugin.load_weights, "precision"
+    ) else {}
+    weights = plugin.load_weights(str(model_path), config, **weight_kwargs)
+    add_build_timing(timing, "weights_loading_s", time.monotonic() - weights_started)
+    write_build_timing(timing)
+
+    quantize = options.get("quantize")
+    quant_ctx = None
+    quant_plan = None
+    if quantize:
+        from tensorrt_model_connect.quantization import QuantPlan, build_quant_context
+
+        quant_plan = QuantPlan.from_build_args(
+            precision=precision,
+            quantize=str(quantize),
+            quant_scales=options.get("quant_scales"),
+            quant_calibration_samples=int(options.get("quant_calibration_samples") or 512),
+        )
+        quant_method = str(config.raw.get("quantization_config", {}).get("quant_method", "")).lower()
+        if quant_plan.scale_source == "modelopt" and quant_method in {
+            "awq",
+            "gptq",
+            "compressed-tensors",
+            "compressed_tensors",
+        }:
+            quant_plan = replace(quant_plan, scale_source="prequantized")
+        quant_ctx = build_quant_context(
+            format_name=quant_plan.quant_format,
+            model_dir=str(model_path),
+            config=config,
+            scales_json=options.get("quant_scales"),
+            num_calibration_samples=int(options.get("quant_calibration_samples") or 512),
+            plugin=plugin,
+            quant_plan=quant_plan,
+            graph_ops=sys.modules[__name__],
+        )
+
+    if parallel.enabled:
+        require_tensorrt_11_for_tensor_parallel(parallel, feature="BERT tensor-parallel builds")
+        if quant_ctx is not None:
+            raise ValueError("BERT tensor-parallel builds do not support quantization")
+
+    verbose = bool(options.get("verbose"))
+    compile_started = time.monotonic()
+    if parallel.enabled:
+        plans = {
+            rank: plugin.build_engine(
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
+                parallel_config=parallel.for_rank(rank),
+            )
+            for rank in range(parallel.tp_size)
+        }
+        sections = [
+            BundleSection(rank_engine_section(rank), plan)
+            for rank, plan in sorted(plans.items())
+        ]
+        decoder_layout = "dual_profile"
+    else:
+        from tensorrt_model_connect.tvm_ffi.graph_build import (
+            engine_role,
+            inspection_role,
+        )
+
+        role = (
+            "dual_profile"
+            if str(options.get("decoder_engine_layout") or "split") == "dual_profile"
+            else "decode"
+        )
+
+        def build_role(selected_role: str) -> bytes:
+            with engine_role(selected_role):
+                return plugin.build_engine(
+                    config,
+                    weights,
+                    max_cache_length,
+                    precision=precision,
+                    quant_ctx=quant_ctx,
+                    verbose=verbose,
+                    parallel_config=parallel,
+                )
+
+        target_role = inspection_role()
+        if target_role is not None:
+            build_role(target_role)
+            raise RuntimeError("graph inspection did not reach TensorRT serialization")
+        plan = build_role(role)
+        sections = [BundleSection("engine_plan", plan)]
+        decoder_layout = "dual_profile" if role == "dual_profile" else "single"
+    compile_elapsed = time.monotonic() - compile_started
+    add_build_timing(timing, "trt_compile_s", compile_elapsed)
+    add_build_timing(timing, "trt_compile_main_engine_s", compile_elapsed)
+    write_build_timing(timing)
+
+    tokenizer_source = str(options.get("tokenizer_source_model_id_or_path") or model_path)
+    tokenizer_frame = _detect_build_tokenizer_frame(
+        tokenizer_source,
+        revision=(
+            str(options["tokenizer_source_revision"])
+            if options.get("tokenizer_source_revision")
+            else None
+        ),
+    )
+    _ensure_build_tokenizer(model_path)
+    if tokenizer_frame is None:
+        tokenizer_frame = _detect_build_tokenizer_frame(str(model_path))
+    prefix_ids, suffix_ids = tokenizer_frame or ([], [])
+    add_special_tokens = bool(prefix_ids or suffix_ids)
+
+    trt_version = build_trt_compat.tensorrt_version() or "unknown"
+    version_match = re.search(r"(\d+)\.(\d+)", trt_version)
+    trt_abi = f"{version_match.group(1)}.{version_match.group(2)}" if version_match else ""
+    try:
+        from tensorrt_model_connect.runtime_provider.target import (
+            _probe_current_target_with_device,
+        )
+
+        gpu_name = str(_probe_current_target_with_device()[0]["gpu_name"])
+    except Exception:
+        gpu_name = ""
+    info = BundleInfo(
+        model_id=model_path.name,
+        model_type=config.model_type,
+        family=plugin.name,
+        trt_version=trt_version,
+        trt_abi=trt_abi,
+        gpu_name=gpu_name,
+        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        vocab_size=config.vocab_size,
+        hidden_size=config.hidden_size,
+        num_layers=config.num_hidden_layers,
+        num_attention_heads=config.num_attention_heads,
+        num_key_value_heads=config.num_key_value_heads,
+        max_cache_length=max_cache_length,
+        runtime_strategy=plugin.runtime_strategy,
+        precision=precision,
+        quantization=(quant_plan.quant_format if quant_plan else "none"),
+        tokenizer_add_special_tokens=add_special_tokens,
+    )
+
+    source_config = model_path / "config.json"
+    runtime_config = (
+        json.loads(source_config.read_text(encoding="utf-8"))
+        if source_config.is_file()
+        else dict(config.raw)
+    )
+    runtime_config.update(
+        {
+            "runtime_strategy": plugin.runtime_strategy,
+            "engine_backend": "trt_rtx" if options.get("rtx") else "trt",
+            "trt_version": trt_version,
+            "precision": precision,
+            "tokenizer_add_special_tokens": int(add_special_tokens),
+            "decoder_engine_layout": decoder_layout,
+        }
+    )
+    if trt_abi:
+        runtime_config["trt_abi"] = trt_abi
+    if tokenizer_frame is not None:
+        runtime_config["tokenizer_special_prefix_ids"] = prefix_ids
+        runtime_config["tokenizer_special_suffix_ids"] = suffix_ids
+    if quant_plan is not None:
+        runtime_config["quantization"] = quant_plan.as_config_dict()
+    runtime_config.update(parallel.to_bundle_config_fields())
+
+    for filename in (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.txt",
+        "special_tokens_map.json",
+    ):
+        path = model_path / filename
+        if path.is_file():
+            sections.append(BundleSection(filename, path.read_bytes()))
+    sections.append(
+        BundleSection("config.json", json.dumps(runtime_config, indent=2).encode("utf-8"))
+    )
+
+    from tensorrt_model_connect.tvm_ffi.graph_build import kernel_slots_section
+
+    slot_section = kernel_slots_section()
+    if slot_section is not None:
+        sections.append(BundleSection("kernel_slots.json", slot_section))
+    kernel_manifest = []
+    for global_name, library in options.get("kernel_artifacts") or ():
+        section_name = f"kernel_{global_name.replace('.', '_')}.so"
+        sections.append(BundleSection(section_name, Path(library).read_bytes()))
+        kernel_manifest.append(
+            {"global_name": global_name, "func_name": "run", "section": section_name}
+        )
+    if kernel_manifest:
+        sections.append(
+            BundleSection(
+                "kernel_manifest.json",
+                json.dumps({"kernels": kernel_manifest}).encode("utf-8"),
+            )
+        )
+
+    write_started = time.monotonic()
+    write_bundle(output_path, info, sections)
+    add_build_timing(timing, "bundle_write_s", time.monotonic() - write_started)
+    timing["total_s"] = time.monotonic() - started
+    write_build_timing(timing)
