@@ -15,11 +15,13 @@ Postconditions: Report correctly classifies modalities and produces valid HTML w
 
 from __future__ import annotations
 
+import base64
 import importlib
 import json
 import re
 import struct
 import sys
+import zlib
 from pathlib import Path
 from typing import Any, Dict
 
@@ -158,8 +160,6 @@ def _write_junit(e2e_root: Path, body: str) -> None:
 def _make_tiny_png(path: Path) -> None:
     """Write a minimal valid 1x1 red PNG file."""
     # Minimal PNG: 8-byte sig + IHDR + IDAT + IEND
-    import zlib
-
     sig = b"\x89PNG\r\n\x1a\n"
 
     def _chunk(ctype: bytes, data: bytes) -> bytes:
@@ -171,6 +171,176 @@ def _make_tiny_png(path: Path) -> None:
     raw_data = zlib.compress(b"\x00\xff\x00\x00")  # filter=None, R=255,G=0,B=0
     png = sig + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", raw_data) + _chunk(b"IEND", b"")
     path.write_bytes(png)
+
+
+def _make_image_feature_result(
+    *,
+    grid: int = 3,
+    width: int = 3,
+    registers: int = 0,
+    ref_patches: list[list[float]] | None = None,
+    trt_patches: list[list[float]] | None = None,
+    ref_prefix: list[list[float]] | None = None,
+    trt_prefix: list[list[float]] | None = None,
+) -> Dict[str, Any]:
+    """Build a valid paired image-feature result with explicit spatial vectors."""
+    patch_count = grid * grid
+    prefix_count = 1 + registers
+    if ref_patches is None:
+        ref_patches = [
+            [float(1 + (patch * 3 + channel) % 11) for channel in range(width)]
+            for patch in range(patch_count)
+        ]
+    if trt_patches is None:
+        trt_patches = [
+            [value + 0.0001 * ((patch + channel) % 3 - 1)
+             for channel, value in enumerate(vector)]
+            for patch, vector in enumerate(ref_patches)
+        ]
+    if ref_prefix is None:
+        ref_prefix = [
+            [float(101 + token * width + channel) for channel in range(width)]
+            for token in range(prefix_count)
+        ]
+    if trt_prefix is None:
+        trt_prefix = [list(vector) for vector in ref_prefix]
+
+    for label, vectors, expected_count in (
+        ("Reference patches", ref_patches, patch_count),
+        ("TensorRT patches", trt_patches, patch_count),
+        ("Reference prefix", ref_prefix, prefix_count),
+        ("TensorRT prefix", trt_prefix, prefix_count),
+    ):
+        assert len(vectors) == expected_count, label
+        assert all(len(vector) == width for vector in vectors), label
+
+    def stage_data(prefix: list[list[float]], patches: list[list[float]]) -> Dict[str, Any]:
+        vectors = prefix + patches
+        flat = [value for vector in vectors for value in vector]
+        return {
+            "last_hidden_state": {
+                "shape": [1, prefix_count + patch_count, width],
+                "data": flat,
+            },
+            "pooler_output": {"shape": [1, width], "data": list(prefix[0])},
+            "num_register_tokens": registers,
+        }
+
+    return _make_result(
+        task_strategy="image_feature_extraction",
+        family="dinov3",
+        metrics={
+            "shape_match": {
+                "value": 1.0,
+                "threshold": 1.0,
+                "operator": "==",
+                "passed": True,
+            },
+            "full_cosine": {
+                "value": 0.9999,
+                "threshold": 0.999,
+                "operator": ">=",
+                "passed": True,
+            },
+            "relative_frobenius": {
+                "value": 0.003,
+                "threshold": 0.01,
+                "operator": "<=",
+                "passed": True,
+            },
+            "p01_patch_cosine": {
+                "value": 0.9998,
+                "threshold": 0.995,
+                "operator": ">=",
+                "passed": True,
+            },
+        },
+        detailed_timing={"comparison_s": 0.02},
+        repro_commands={
+            "TRT": "trtmc extract-features model.bundle --image input.png",
+        },
+        stage_outputs={
+            "trt_full_inference": {
+                "stage_name": "full_inference",
+                "data": stage_data(trt_prefix, trt_patches),
+                "metadata": {},
+            },
+            "ref_full_inference": {
+                "stage_name": "full_inference",
+                "data": stage_data(ref_prefix, ref_patches),
+                "metadata": {},
+            },
+        },
+    )
+
+
+def _decode_rgb_png_data_uri(uri: str) -> tuple[int, int, list[tuple[int, int, int]], int]:
+    """Decode one report-owned, non-interlaced RGB PNG data URI."""
+    prefix = "data:image/png;base64,"
+    assert uri.startswith(prefix)
+    payload = base64.b64decode(uri[len(prefix):], validate=True)
+    assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+
+    offset = 8
+    width = height = 0
+    compressed = bytearray()
+    while offset < len(payload):
+        length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        kind = payload[offset + 4 : offset + 8]
+        data_start = offset + 8
+        data_end = data_start + length
+        chunk = payload[data_start:data_end]
+        stored_crc = struct.unpack(">I", payload[data_end : data_end + 4])[0]
+        assert zlib.crc32(kind + chunk) & 0xFFFFFFFF == stored_crc
+        if kind == b"IHDR":
+            width, height, depth, color_type, compression, filtering, interlace = (
+                struct.unpack(">IIBBBBB", chunk)
+            )
+            assert (depth, color_type, compression, filtering, interlace) == (8, 2, 0, 0, 0)
+        elif kind == b"IDAT":
+            compressed.extend(chunk)
+        elif kind == b"IEND":
+            break
+        offset = data_end + 4
+
+    scanlines = zlib.decompress(bytes(compressed))
+    stride = 1 + width * 3
+    assert len(scanlines) == height * stride
+    pixels: list[tuple[int, int, int]] = []
+    for row in range(height):
+        start = row * stride
+        assert scanlines[start] == 0
+        values = scanlines[start + 1 : start + stride]
+        pixels.extend(
+            (values[index], values[index + 1], values[index + 2])
+            for index in range(0, len(values), 3)
+        )
+    return width, height, pixels, len(payload)
+
+
+def _query_png_maps(markup: str) -> list[Dict[str, Any]]:
+    """Extract semantic metadata and the embedded PNG from every query map."""
+    pattern = re.compile(
+        r'<figure class="feature-query-map feature-query-map-'
+        r'(?P<kind>reference|trt|delta)" (?P<attrs>[^>]*)>'
+        r'.*?<img src="(?P<uri>data:image/png;base64,[A-Za-z0-9+/=]+)"',
+        re.DOTALL,
+    )
+    maps = []
+    for match in pattern.finditer(markup):
+        attrs = dict(re.findall(r'(data-[a-z-]+)="([^"]+)"', match.group("attrs")))
+        maps.append(
+            {
+                "kind": match.group("kind"),
+                "query_index": int(attrs["data-query-index"]),
+                "grid_rows": int(attrs["data-grid-rows"]),
+                "grid_cols": int(attrs["data-grid-cols"]),
+                "scale_min": float(attrs["data-scale-min"]),
+                "scale_max": float(attrs["data-scale-max"]),
+                "uri": match.group("uri"),
+            }
+        )
+    return maps
 
 
 def _make_tiny_wav(path: Path) -> None:
@@ -1114,142 +1284,243 @@ class TestRenderGenericModel:
 
 
 class TestAdditionalStrategyRenderers:
-    def test_image_features_are_human_comparable_and_bounded(self, tmp_path):
+    def test_image_features_render_bounded_query_maps_before_diagnostics(self, tmp_path):
         mod = _import_report()
         image = tmp_path / "input.png"
         _make_tiny_png(image)
-        shape = [1, 201, 2]
-        reference_values = [((index % 19) - 9) / 10.0 for index in range(402)]
-        trt_values = [
-            value + ((index % 7) - 3) * 0.0001
-            for index, value in enumerate(reference_values)
-        ]
-        result = _make_result(
-            task_strategy="image_feature_extraction",
-            family="dinov3",
-            metrics={
-                "shape_match": {
-                    "value": 1.0,
-                    "threshold": 1.0,
-                    "operator": "==",
-                    "passed": True,
-                },
-                "register_count_match": {
-                    "value": 1.0,
-                    "threshold": 1.0,
-                    "operator": "==",
-                    "passed": True,
-                },
-                "full_cosine": {
-                    "value": 0.9999,
-                    "threshold": 0.999,
-                    "operator": ">=",
-                    "passed": True,
-                },
-                "relative_frobenius": {
-                    "value": 0.003,
-                    "threshold": 0.01,
-                    "operator": "<=",
-                    "passed": True,
-                },
-                "p01_patch_cosine": {
-                    "value": 0.9998,
-                    "threshold": 0.995,
-                    "operator": ">=",
-                    "passed": True,
-                },
-            },
-            detailed_timing={
-                "weights_loading_s": 1.0,
-                "trt_compile_s": 2.0,
-                "trt_engine_execute_s": 0.01,
-                "comparison_s": 0.02,
-            },
-            repro_commands={
-                "TRT": "trtmc extract-features model.bundle --image input.jpeg",
-            },
-            stage_outputs={
-                "trt_full_inference": {
-                    "stage_name": "full_inference",
-                    "data": {
-                        "last_hidden_state": {"shape": shape, "data": trt_values},
-                        "pooler_output": {"shape": [1, 2], "data": trt_values[:2]},
-                        "num_register_tokens": 4,
-                    },
-                    "metadata": {},
-                },
-                "ref_full_inference": {
-                    "stage_name": "full_inference",
-                    "data": {
-                        "last_hidden_state": {"shape": shape, "data": reference_values},
-                        "pooler_output": {
-                            "shape": [1, 2],
-                            "data": reference_values[:2],
-                        },
-                        "num_register_tokens": 4,
-                    },
-                    "metadata": {},
-                },
-            },
-        )
+        result = _make_image_feature_result(grid=14, width=3, registers=4)
+        hidden = result["stage_outputs"]["ref_full_inference"]["data"][
+            "last_hidden_state"
+        ]["data"]
+        hidden[-1] = 987654.321098765
+        result["stage_outputs"]["trt_full_inference"]["data"][
+            "last_hidden_state"
+        ]["data"][-1] = hidden[-1]
         result["case_config"]["inputs"]["image"] = "input.png"
 
         rendered = mod.render_model_section(result, project_dir=tmp_path)
+        maps = _query_png_maps(rendered)
 
-        assert rendered.index("Feature Parity Overview") < rendered.index(
-            "Raw structured outputs (bounded preview)"
+        assert rendered.index('<section class="feature-query-comparison"') < rendered.index(
+            '<details class="feature-diagnostics">'
         )
-        assert "data:image/png;base64," in rendered
-        assert "[1 \u00d7 201 \u00d7 2]" in rendered
-        assert "[1 \u00d7 2]" in rendered
-        assert "CLS tokens" in rendered
-        assert "Register tokens" in rendered
-        assert "Prefix tokens" in rendered
-        assert "Patch tokens" in rendered
-        assert "14 \u00d7 14" in rendered
-        assert "Exact invariants" in rendered
-        assert "shape_match exact invariant PASS" in rendered
-        assert "full_cosine" in rendered
-        assert "0.999900" in rendered
-        assert "0.999000" in rendered
-        assert "Margin +0.000900" in rendered
-        assert "Margin +0.007000" in rendered
-        assert 'role="meter"' in rendered
+        assert '<details class="feature-diagnostics" open' not in rendered
+        assert '<details class="feature-raw-details" open' not in rendered
+        assert rendered.count('class="feature-query-card"') == 8
+        assert rendered.count('class="feature-query-marker"') == 8
+        assert rendered.count(
+            'class="feature-query-marker feature-query-marker-compact"'
+        ) == 24
         assert (
-            'aria-label="full_cosine: value 0.999900 &gt;= threshold 0.999000; '
-            "margin +0.000900; recorded state PASS; 10.00 percent of allowed error used"
-        ) in rendered
-        assert "10.00% of allowed error used" in rendered
-        assert "30.00% of allowed error used" in rendered
-        assert "TensorRT versus reference scatter" in rendered
-        assert rendered.count('<circle class="feature-scatter-point') == 240
-        assert 'data-sample-count="240"' in rendered
-        assert 'data-total-pairs="402"' in rendered
-        assert "240 bounded paired values from 402 full-tensor elements" in rendered
-        assert "largest absolute deltas plus a uniform sample" in rendered
-        assert "Five largest paired element deltas" in rendered
-        assert rendered.count('class="feature-heatmap-cell"') == 196
-        assert 'role="img"' in rendered
-        assert "14 by 14 patch-token cosine error-budget heatmap" in rendered
-        assert 'data-grid-rows="14"' in rendered
-        assert 'data-grid-cols="14"' in rendered
-        assert 'data-scale-threshold="0.995000000"' in rendered
-        assert 'data-patch-index="0"' in rendered
-        assert "relative L2 error" in rendered
-        assert "Observed range:" in rendered
-        assert "Worst observed patch" in rendered
-        assert "0% ideal" in rendered
-        assert "100% limit" in rendered
-        assert "percentile gate applies to the aggregate p01 metric" in rendered
-        assert "Row (1-based)" in rendered
-        assert "Column (1-based)" in rendered
-        raw_tag = '<details class="feature-raw-details">'
-        assert raw_tag in rendered
-        assert raw_tag.replace(">", " open>") not in rendered
-        assert "&lt;... 378 more values&gt;" in rendered
+            "--feature-query-x:25.000000%;--feature-query-y:25.000000%"
+            in rendered
+        )
+        assert len(maps) == 24
+        assert {item["kind"] for item in maps} == {"reference", "trt", "delta"}
+        assert {kind: sum(item["kind"] == kind for item in maps)
+                for kind in ("reference", "trt", "delta")} == {
+            "reference": 8,
+            "trt": 8,
+            "delta": 8,
+        }
+        expected_queries = mod._feature_query_indices(14)
+        assert expected_queries == [45, 49, 52, 101, 108, 143, 147, 150]
+        assert len(expected_queries) == len(set(expected_queries)) == 8
+        assert [
+            item["query_index"] for item in maps if item["kind"] == "reference"
+        ] == expected_queries
+
+        for item in maps:
+            width, height, pixels, byte_count = _decode_rgb_png_data_uri(item["uri"])
+            assert (width, height, len(pixels)) == (14, 14, 196)
+            assert byte_count <= 1024
+        sources = re.findall(r'<img [^>]*src="([^"]+)"', rendered)
+        assert len(sources) == 25  # one input plus 8 × 3 derived maps
+        assert all(source.startswith("data:image/png;base64,") for source in sources)
+        assert "987654.321098765" not in rendered
+        assert "more values&gt;" in rendered
+        assert len(rendered) < 200_000
+        assert "feature-scatter" not in rendered
         assert "Reproduction Commands" in rendered
-        assert "trtmc extract-features" in rendered
         assert "Detailed Timing" in rendered
+
+    def test_query_maps_use_one_reference_query_and_shared_fixed_scales(self):
+        mod = _import_report()
+        root = 2**-0.5
+        ref_patches = [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [1.0, 1.0],
+            [1.0, -1.0],
+            [2.0, 0.0],
+            [0.0, -2.0],
+            [-1.0, -1.0],
+            [-1.0, 1.0],
+        ]
+        trt_patches = [
+            [0.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [1.0, -1.0],
+            [2.0, 0.0],
+            [0.0, -2.0],
+            [1.0, 1.0],
+            [1.0, -1.0],
+        ]
+        result = _make_image_feature_result(
+            grid=3,
+            width=2,
+            registers=2,
+            ref_patches=ref_patches,
+            trt_patches=trt_patches,
+            ref_prefix=[[50.0, 50.0], [60.0, 60.0], [70.0, 70.0]],
+            trt_prefix=[[-50.0, 50.0], [-60.0, 60.0], [-70.0, 70.0]],
+        )
+
+        rendered = mod.render_image_feature_model(result, project_dir=None)
+        maps = {(item["query_index"], item["kind"]): item
+                for item in _query_png_maps(rendered)}
+        reference = maps[(0, "reference")]
+        trt = maps[(0, "trt")]
+        delta = maps[(0, "delta")]
+
+        assert reference["scale_min"] == trt["scale_min"] == -1.0
+        assert reference["scale_max"] == trt["scale_max"] == 1.0
+        assert (delta["scale_min"], delta["scale_max"]) == (
+            0.0,
+            mod._FEATURE_QUERY_DELTA_LIMIT,
+        )
+        _, _, ref_pixels, _ = _decode_rgb_png_data_uri(reference["uri"])
+        _, _, trt_pixels, _ = _decode_rgb_png_data_uri(trt["uri"])
+        _, _, delta_pixels, _ = _decode_rgb_png_data_uri(delta["uri"])
+
+        # Q1 is Reference [1, 0]. The TensorRT map must still query with
+        # Reference [1, 0], so its first two similarities are 0 and 1. If it
+        # used TensorRT's local [0, 1] query, those two pixels would be reversed.
+        assert ref_pixels[:4] == [
+            mod._feature_similarity_rgb(1.0, -1.0, 1.0),
+            mod._feature_similarity_rgb(0.0, -1.0, 1.0),
+            mod._feature_similarity_rgb(-1.0, -1.0, 1.0),
+            mod._feature_similarity_rgb(root, -1.0, 1.0),
+        ]
+        assert trt_pixels[:4] == [
+            mod._feature_similarity_rgb(0.0, -1.0, 1.0),
+            mod._feature_similarity_rgb(1.0, -1.0, 1.0),
+            mod._feature_similarity_rgb(0.0, -1.0, 1.0),
+            mod._feature_similarity_rgb(root, -1.0, 1.0),
+        ]
+        assert delta_pixels[0] == mod._feature_delta_rgb(1.0)
+        assert all(
+            item["scale_min"] == 0.0
+            and item["scale_max"] == mod._FEATURE_QUERY_DELTA_LIMIT
+            for item in maps.values()
+            if item["kind"] == "delta"
+        )
+
+    def test_cls_and_register_prefix_values_do_not_change_query_maps(self):
+        grid, width, registers = 3, 3, 4
+        patch_count = grid * grid
+        patches = [
+            [float(1 + (patch + channel) % 7) for channel in range(width)]
+            for patch in range(patch_count)
+        ]
+        first = _make_image_feature_result(
+            grid=grid,
+            width=width,
+            registers=registers,
+            ref_patches=patches,
+            trt_patches=[list(vector) for vector in patches],
+            ref_prefix=[[1.0, 2.0, 3.0]] * (1 + registers),
+            trt_prefix=[[4.0, 5.0, 6.0]] * (1 + registers),
+        )
+        second = _make_image_feature_result(
+            grid=grid,
+            width=width,
+            registers=registers,
+            ref_patches=patches,
+            trt_patches=[list(vector) for vector in patches],
+            ref_prefix=[[-900.0, 0.5, 700.0]] * (1 + registers),
+            trt_prefix=[[800.0, -600.0, 0.25]] * (1 + registers),
+        )
+
+        first_maps = _query_png_maps(
+            _import_report().render_image_feature_model(first, project_dir=None)
+        )
+        second_maps = _query_png_maps(
+            _import_report().render_image_feature_model(second, project_dir=None)
+        )
+
+        assert [(item["kind"], item["query_index"], item["uri"])
+                for item in first_maps] == [
+            (item["kind"], item["query_index"], item["uri"])
+            for item in second_maps
+        ]
+
+    def test_degenerate_reference_scale_uses_theoretical_range(self):
+        mod = _import_report()
+        ref_patches = [[1.0, 0.0] for _ in range(9)]
+        trt_patches = [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [-1.0, 0.0],
+        ]
+        result = _make_image_feature_result(
+            grid=3,
+            width=2,
+            ref_patches=ref_patches,
+            trt_patches=trt_patches,
+        )
+
+        rendered = mod.render_image_feature_model(result, project_dir=None)
+        maps = {(item["query_index"], item["kind"]): item
+                for item in _query_png_maps(rendered)}
+        reference = maps[(0, "reference")]
+        trt = maps[(0, "trt")]
+        _, _, ref_pixels, _ = _decode_rgb_png_data_uri(reference["uri"])
+        _, _, trt_pixels, _ = _decode_rgb_png_data_uri(trt["uri"])
+
+        assert (reference["scale_min"], reference["scale_max"]) == (-1.0, 1.0)
+        assert (trt["scale_min"], trt["scale_max"]) == (-1.0, 1.0)
+        assert 'data-scale-mode="theoretical-fallback"' in rendered
+        assert "degenerate Reference range" in rendered
+        assert len(set(ref_pixels)) == 1
+        assert len(set(trt_pixels)) == 3
+
+    def test_identical_features_have_identical_maps_and_zero_delta(self):
+        mod = _import_report()
+        patches = [
+            [float(1 + (patch * 2 + channel) % 13) for channel in range(3)]
+            for patch in range(9)
+        ]
+        result = _make_image_feature_result(
+            grid=3,
+            width=3,
+            registers=4,
+            ref_patches=patches,
+            trt_patches=[list(vector) for vector in patches],
+        )
+
+        maps = _query_png_maps(mod.render_image_feature_model(result, project_dir=None))
+        by_query = {(item["query_index"], item["kind"]): item for item in maps}
+        zero_color = mod._feature_delta_rgb(0.0)
+
+        assert len(maps) == 24
+        for query_index in mod._feature_query_indices(3):
+            assert by_query[(query_index, "reference")]["uri"] == by_query[
+                (query_index, "trt")
+            ]["uri"]
+            delta = by_query[(query_index, "delta")]
+            assert (delta["scale_min"], delta["scale_max"]) == (0.0, 0.01)
+            _, _, pixels, _ = _decode_rgb_png_data_uri(delta["uri"])
+            assert pixels == [zero_color] * 9
 
     def test_image_feature_failure_is_explicit_without_changing_criteria(self):
         mod = _import_report()
@@ -1281,92 +1552,68 @@ class TestAdditionalStrategyRenderers:
         assert "0.999000" in rendered
         assert "Margin -0.019000" in rendered
         assert "shortfall" in rendered
-        assert "scatter unavailable" in rendered
-        assert "heatmap unavailable" in rendered
+        assert "feature-viz-unavailable" in rendered
+        assert not _query_png_maps(rendered)
 
-    def test_image_feature_malformed_tensor_falls_back_to_collapsed_raw(self):
+    def test_invalid_feature_topologies_fail_closed_without_partial_maps(self):
         mod = _import_report()
-        result = _make_result(
-            task_strategy="image_feature_extraction",
-            metrics={
-                "full_cosine": {
-                    "value": 0.9999,
-                    "threshold": 0.999,
-                    "operator": ">=",
-                    "passed": True,
-                },
+        malformed = _make_image_feature_result()
+        malformed["stage_outputs"]["trt_full_inference"]["data"][
+            "last_hidden_state"
+        ]["data"].pop()
+
+        non_square = _make_image_feature_result()
+        for prefix in ("trt", "ref"):
+            tensor = non_square["stage_outputs"][f"{prefix}_full_inference"]["data"][
+                "last_hidden_state"
+            ]
+            tensor["shape"] = [1, 7, 3]  # one pseudo-CLS plus six patches
+            tensor["data"] = tensor["data"][:21]
+
+        zero_patch = _make_image_feature_result()
+        for prefix in ("trt", "ref"):
+            tensor = zero_patch["stage_outputs"][f"{prefix}_full_inference"]["data"][
+                "last_hidden_state"
+            ]
+            tensor["data"][3:6] = [0.0, 0.0, 0.0]
+
+        nonfinite = _make_image_feature_result()
+        nonfinite["stage_outputs"]["ref_full_inference"]["data"][
+            "last_hidden_state"
+        ]["data"][3] = float("nan")
+
+        oversized = _make_image_feature_result(grid=33, width=1)
+        cases = (
+            (malformed, "requires"),
+            (non_square, "square patch grid"),
+            (zero_patch, "non-zero finite feature vectors"),
+            (nonfinite, "non-finite"),
+            (oversized, str(mod._MAX_FEATURE_HEATMAP_TOKENS)),
+        )
+        for result, evidence in cases:
+            rendered = mod.render_image_feature_model(result, project_dir=None)
+            assert "feature-viz-unavailable" in rendered
+            assert evidence in rendered
+            assert not _query_png_maps(rendered)
+            assert '<details class="feature-diagnostics">' in rendered
+            assert '<details class="feature-raw-details">' in rendered
+            assert "All recorded metrics" in rendered
+
+        vectors, error = mod._feature_patch_vectors(
+            {"shape": [1, 1025, 4097], "values": []},
+            {
+                "batch": 1,
+                "token_count": 1025,
+                "width": 4097,
+                "cls_tokens": 1,
+                "register_tokens": 0,
+                "prefix_tokens": 1,
+                "patch_tokens": 1024,
+                "grid": 32,
             },
-            detailed_timing={"comparison_s": 0.01},
-            repro_commands={"TRT": "trtmc extract-features model.bundle --image input.png"},
-            stage_outputs={
-                "trt_full_inference": {
-                    "data": {
-                        "last_hidden_state": {"shape": [1, 5, 2], "data": [0.1]},
-                        "pooler_output": {"shape": [1, 2], "data": [0.1, 0.2]},
-                        "num_register_tokens": 0,
-                    },
-                },
-                "ref_full_inference": {
-                    "data": {
-                        "last_hidden_state": {
-                            "shape": [1, 5, 2],
-                            "data": [0.1] * 10,
-                        },
-                        "pooler_output": {"shape": [1, 2], "data": [0.1, 0.2]},
-                        "num_register_tokens": 0,
-                    },
-                },
-            },
         )
-
-        rendered = mod.render_image_feature_model(result, project_dir=None)
-
-        assert "Feature Parity Overview" in rendered
-        assert "Paired full-tensor scatter unavailable" in rendered
-        assert "Patch cosine heatmap unavailable" in rendered
-        assert 'class="feature-scatter-point"' not in rendered
-        assert 'class="feature-heatmap-cell"' not in rendered
-        assert '<details class="feature-raw-details">' in rendered
-        assert "All recorded metrics" in rendered
-        assert "Reproduction Commands" in rendered
-        assert "Detailed Timing" in rendered
-
-    def test_scatter_includes_unsampled_outlier_and_uses_all_pair_extrema(self):
-        mod = _import_report()
-        total = 1000
-        reference_values = [index / 1000.0 for index in range(total)]
-        trt_values = list(reference_values)
-        naive_uniform = set(mod._sample_pair_indices(total, mod._MAX_FEATURE_SCATTER_POINTS))
-        outlier_index = next(index for index in range(100, total) if index not in naive_uniform)
-        trt_values[outlier_index] += 5.0
-        finite_indices = list(range(total))
-        selected, _ = mod._bounded_pair_indices(
-            trt_values,
-            reference_values,
-            finite_indices,
-            mod._MAX_FEATURE_SCATTER_POINTS,
-        )
-        axis_extreme_index = next(
-            index for index in range(20, total) if index not in selected
-        )
-        reference_values[axis_extreme_index] = 100.0
-        trt_values[axis_extreme_index] = 100.0
-        trt_tensor = {"shape": [1, 250, 4], "values": trt_values}
-        ref_tensor = {"shape": [1, 250, 4], "values": reference_values}
-
-        rendered, error = mod._render_feature_scatter(trt_tensor, ref_tensor)
-
-        assert error is None
-        assert outlier_index not in naive_uniform
-        assert (
-            f'class="feature-scatter-point feature-scatter-worst" '
-            f'data-flat-index="{outlier_index}"'
-        ) in rendered
-        assert f'data-flat-index="{axis_extreme_index}"' not in rendered
-        assert 'data-axis-max="100"' in rendered
-        assert rendered.count("<circle class=\"feature-scatter-point") <= 240
-        assert "Absolute delta" in rendered
-        assert "token, and channel indices are zero-based" in rendered
+        assert vectors is None
+        assert f"{mod._MAX_FEATURE_MAP_VALUES:,}" in error
 
     def test_metric_pass_state_rejects_strings_and_flags_inconsistency(self):
         mod = _import_report()
@@ -1419,118 +1666,45 @@ class TestAdditionalStrategyRenderers:
         assert "numeric equation, which is not satisfied" in inconsistent_html
         assert "recorded verdict remains the displayed source of truth" in inconsistent_html
 
-    def test_image_feature_nonfinite_and_extreme_values_are_safe(self):
+    def test_convnext_feature_topology_renders_eight_seven_by_seven_queries(self):
         mod = _import_report()
-        nonfinite = _make_result(
-            task_strategy="image_feature_extraction",
-            metrics={
-                "p01_patch_cosine": {
-                    "value": 0.9,
-                    "threshold": 0.8,
-                    "operator": ">=",
-                    "passed": True,
-                },
-            },
-            stage_outputs={
-                prefix + "_full_inference": {
-                    "data": {
-                        "last_hidden_state": {
-                            "shape": [1, 5, 1],
-                            "data": [float("nan"), 0.0, 0.0, 0.0, 0.0],
-                        },
-                        "pooler_output": {"shape": [1, 1], "data": [0.0]},
-                        "num_register_tokens": 0,
-                    }
-                }
-                for prefix in ("trt", "ref")
-            },
-        )
-        nonfinite_html = mod.render_image_feature_model(nonfinite, project_dir=None)
-
-        assert "contains a non-finite numeric value" in nonfinite_html
-        assert 'class="feature-scatter-point' not in nonfinite_html
-        assert 'class="feature-heatmap-cell"' not in nonfinite_html
-
-        ref_values = [1e308, -1e308, 1e308, 1e308, -1e308] * 2
-        trt_values = [-1e308, 1e308, 1e308, 1e308, -1e308] * 2
-        extreme = _make_result(
-            task_strategy="image_feature_extraction",
-            metrics={
-                "p01_patch_cosine": {
-                    "value": 0.5,
-                    "threshold": 0.0,
-                    "operator": ">=",
-                    "passed": True,
-                },
-            },
-            stage_outputs={
-                "trt_full_inference": {
-                    "data": {
-                        "last_hidden_state": {"shape": [1, 5, 2], "data": trt_values},
-                        "pooler_output": {"shape": [1, 2], "data": trt_values[:2]},
-                        "num_register_tokens": 0,
-                    }
-                },
-                "ref_full_inference": {
-                    "data": {
-                        "last_hidden_state": {"shape": [1, 5, 2], "data": ref_values},
-                        "pooler_output": {"shape": [1, 2], "data": ref_values[:2]},
-                        "num_register_tokens": 0,
-                    }
-                },
-            },
-        )
-        extreme_html = mod.render_image_feature_model(extreme, project_dir=None)
-
-        assert '<circle class="feature-scatter-point' in extreme_html
-        assert 'class="feature-heatmap-cell"' in extreme_html
-        assert "exceeds float range" in extreme_html
-        assert not re.search(
-            r'(?:cx|cy|x1|x2|y1|y2|data-[^=]+)="[^"]*(?:nan|inf)',
-            extreme_html.lower(),
-        )
-
-    def test_convnext_feature_topology_renders_seven_by_seven_heatmap(self):
-        mod = _import_report()
-        shape = [1, 50, 2]
-        ref_values = [float(index % 17 + 1) for index in range(100)]
-        trt_values = [value + 0.0001 for value in ref_values]
-        result = _make_result(
-            task_strategy="image_feature_extraction",
-            family="dinov3",
-            metrics={
-                "p01_patch_cosine": {
-                    "value": 0.9999,
-                    "threshold": 0.995,
-                    "operator": ">=",
-                    "passed": True,
-                },
-            },
-            stage_outputs={
-                prefix + "_full_inference": {
-                    "data": {
-                        "last_hidden_state": {
-                            "shape": shape,
-                            "data": trt_values if prefix == "trt" else ref_values,
-                        },
-                        "pooler_output": {
-                            "shape": [1, 2],
-                            "data": (trt_values if prefix == "trt" else ref_values)[:2],
-                        },
-                        "num_register_tokens": 0,
-                    }
-                }
-                for prefix in ("trt", "ref")
-            },
-        )
+        result = _make_image_feature_result(grid=7, width=2, registers=0)
 
         rendered = mod.render_image_feature_model(result, project_dir=None)
+        maps = _query_png_maps(rendered)
 
         assert "Patch tokens</span><strong>49" in rendered
         assert "Patch grid</span><strong>7 \u00d7 7" in rendered
-        assert 'data-grid-rows="7"' in rendered
-        assert 'data-grid-cols="7"' in rendered
-        assert rendered.count('class="feature-heatmap-cell"') == 49
+        assert len(maps) == 24
+        assert [item["query_index"] for item in maps if item["kind"] == "reference"] == (
+            mod._feature_query_indices(7)
+        )
+        for item in maps:
+            assert (item["grid_rows"], item["grid_cols"]) == (7, 7)
+            width, height, pixels, _ = _decode_rgb_png_data_uri(item["uri"])
+            assert (width, height, len(pixels)) == (7, 7, 49)
+
+    def test_image_feature_query_maps_escape_untrusted_identity_and_filename(self, tmp_path):
+        model_name = 'model"><script>alert(1)</script>'
+        image = tmp_path / "input<script>alert(2).png"
+        _make_tiny_png(image)
+        result = _make_image_feature_result()
+        result["case_name"] = model_name
+        result["case_config"]["name"] = model_name
+        result["case_config"]["metadata"]["model_name"] = model_name
+        result["case_config"]["inputs"]["image"] = image.name
+
+        rendered = _import_report().render_model_section(result, project_dir=tmp_path)
+
+        assert '<script>alert(1)</script>' not in rendered
+        assert '<script>alert(2)' not in rendered
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+        assert "input&lt;script&gt;alert(2).png" in rendered
+        assert len(_query_png_maps(rendered)) == 24
+        assert all(
+            source.startswith("data:image/png;base64,")
+            for source in re.findall(r'<img [^>]*src="([^"]+)"', rendered)
+        )
 
     def test_diffusion_text_uses_paired_text_renderer(self):
         mod = _import_report()

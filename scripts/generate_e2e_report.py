@@ -25,7 +25,9 @@ import html
 import json
 import math
 import re
+import struct
 import sys
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
@@ -48,11 +50,13 @@ _MAX_EMBED_BYTES = 10 * 1024 * 1024
 # Number of evenly-spaced frames to embed for diffusion models.
 _MAX_DIFFUSION_FRAMES = 6
 
-# Image-feature plots stay compact even when a model emits a large activation
-# tensor.  The report visualizes a deterministic sample and derived per-token
-# similarities; it never serializes the complete tensors into the HTML.
-_MAX_FEATURE_SCATTER_POINTS = 240
+# Image-feature maps stay compact even when a model emits a large activation
+# tensor. The report embeds only small derived RGB maps, never the full tensor.
 _MAX_FEATURE_HEATMAP_TOKENS = 1024
+_MAX_FEATURE_MAP_VALUES = 4 * 1024 * 1024
+_FEATURE_QUERY_COUNT = 8
+_FEATURE_QUERY_DELTA_LIMIT = 0.01
+_FEATURE_MIN_SIMILARITY_SPAN = 0.05
 
 _TRTMC_TIMING_RE = re.compile(
     r"^\[trtmc\.timing\]\s+"
@@ -1753,13 +1757,6 @@ def _feature_metric_entries(result: Dict[str, Any]) -> List[Tuple[str, str, Dict
     return entries
 
 
-def _feature_metric_threshold(result: Dict[str, Any], metric_name: str) -> Optional[float]:
-    for _, name, metric in _feature_metric_entries(result):
-        if name == metric_name:
-            return _metric_float(metric.get("threshold"))
-    return None
-
-
 def _metric_float(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -1931,196 +1928,6 @@ def _render_feature_metric_bars(result: Dict[str, Any]) -> str:
     )
 
 
-def _sample_pair_indices(length: int, maximum: int) -> List[int]:
-    if length <= 0:
-        return []
-    if length <= maximum:
-        return list(range(length))
-    return [round(index * (length - 1) / (maximum - 1)) for index in range(maximum)]
-
-
-def _finite_abs_delta(left: float, right: float) -> Optional[float]:
-    delta = abs(left - right)
-    return delta if math.isfinite(delta) else None
-
-
-def _worst_pair_indices(
-    trt_values: List[float], ref_values: List[float], indices: List[int], count: int
-) -> List[int]:
-    def sort_key(index: int) -> Tuple[float, int]:
-        delta = _finite_abs_delta(trt_values[index], ref_values[index])
-        return (-(delta if delta is not None else sys.float_info.max), index)
-
-    return sorted(indices, key=sort_key)[:count]
-
-
-def _bounded_pair_indices(
-    trt_values: List[float],
-    ref_values: List[float],
-    finite_indices: List[int],
-    maximum: int,
-) -> Tuple[List[int], List[int]]:
-    worst = _worst_pair_indices(trt_values, ref_values, finite_indices, min(5, maximum))
-    if len(finite_indices) <= maximum:
-        return finite_indices, worst
-    worst_set = set(worst)
-    uniform_candidates = [index for index in finite_indices if index not in worst_set]
-    uniform_count = maximum - len(worst)
-    uniform_offsets = _sample_pair_indices(len(uniform_candidates), uniform_count)
-    selected = worst + [uniform_candidates[offset] for offset in uniform_offsets]
-    return sorted(set(selected)), worst
-
-
-def _axis_ratio(value: float, low: float, high: float) -> float:
-    if high == low:
-        return 0.5
-    direct_span = high - low
-    if math.isfinite(direct_span) and direct_span > 0.0:
-        ratio = (value - low) / direct_span
-    else:
-        scale = max(abs(low), abs(high), 1.0)
-        scaled_low = low / scale
-        scaled_span = high / scale - scaled_low
-        ratio = (value / scale - scaled_low) / scaled_span if scaled_span > 0.0 else 0.5
-    if not math.isfinite(ratio):
-        return 0.5
-    return min(1.0, max(0.0, ratio))
-
-
-def _feature_flat_coordinates(index: int, shape: List[int]) -> Tuple[str, str]:
-    if len(shape) != 3:
-        return "&mdash;", "&mdash;"
-    _, tokens, width = shape
-    batch = index // (tokens * width)
-    token = (index // width) % tokens
-    channel = index % width
-    return f"batch {batch}, token {token}", str(channel)
-
-
-def _render_feature_worst_table(
-    trt_tensor: Dict[str, Any], ref_tensor: Dict[str, Any], worst_indices: List[int]
-) -> str:
-    rows = []
-    trt_values = trt_tensor["values"]
-    ref_values = ref_tensor["values"]
-    for index in worst_indices:
-        token, channel = _feature_flat_coordinates(index, trt_tensor["shape"])
-        delta = _finite_abs_delta(trt_values[index], ref_values[index])
-        delta_text = f"{delta:.7g}" if delta is not None else "exceeds float range"
-        rows.append(
-            "<tr>"
-            f"<td>{index}</td><td>{token}</td><td>{channel}</td>"
-            f"<td>{ref_values[index]:.7g}</td><td>{trt_values[index]:.7g}</td>"
-            f"<td>{delta_text}</td></tr>"
-        )
-    return (
-        '<table class="feature-worst-table">'
-        '<caption>Five largest paired element deltas; flat, token, and channel indices '
-        "are zero-based.</caption>"
-        "<thead><tr><th>Flat index</th><th>Token</th><th>Channel</th>"
-        "<th>Reference</th><th>TensorRT</th><th>Absolute delta</th></tr></thead>"
-        "<tbody>" + "".join(rows) + "</tbody></table>"
-    )
-
-
-def _render_feature_scatter(
-    trt_tensor: Optional[Dict[str, Any]],
-    ref_tensor: Optional[Dict[str, Any]],
-) -> Tuple[str, Optional[str]]:
-    if trt_tensor is None or ref_tensor is None:
-        return "", "Paired full-tensor scatter unavailable because a tensor payload is invalid."
-    if trt_tensor["shape"] != ref_tensor["shape"]:
-        return "", "Paired full-tensor scatter unavailable because tensor shapes differ."
-
-    trt_values = trt_tensor["values"]
-    ref_values = ref_tensor["values"]
-    finite_indices = [
-        index
-        for index, (trt_value, ref_value) in enumerate(zip(trt_values, ref_values))
-        if math.isfinite(trt_value) and math.isfinite(ref_value)
-    ]
-    if not finite_indices:
-        return "", "Paired full-tensor scatter unavailable because no finite value pairs exist."
-    indices, worst_indices = _bounded_pair_indices(
-        trt_values,
-        ref_values,
-        finite_indices,
-        _MAX_FEATURE_SCATTER_POINTS,
-    )
-    worst_set = set(worst_indices)
-
-    values = [
-        value
-        for index in finite_indices
-        for value in (trt_values[index], ref_values[index])
-    ]
-    low, high = min(values), max(values)
-    width, height, pad = 620.0, 390.0, 48.0
-
-    def x_position(value: float) -> float:
-        return pad + _axis_ratio(value, low, high) * (width - 2.0 * pad)
-
-    def y_position(value: float) -> float:
-        return height - pad - _axis_ratio(value, low, high) * (height - 2.0 * pad)
-
-    points = []
-    for index in indices:
-        trt_value = trt_values[index]
-        ref_value = ref_values[index]
-        label = f"flat index {index}: reference {ref_value:.7g}, TRT {trt_value:.7g}"
-        point_class = "feature-scatter-point"
-        if index in worst_set:
-            point_class += " feature-scatter-worst"
-        points.append(
-            f'<circle class="{point_class}" data-flat-index="{index}" '
-            f'cx="{x_position(ref_value):.2f}" cy="{y_position(trt_value):.2f}" '
-            f'r="2.6" aria-label="{_esc(label)}">'
-            f"<title>{_esc(label)}</title></circle>"
-        )
-    sampled_count = len(indices)
-    total_count = len(trt_values)
-    if sampled_count == total_count:
-        sample_label = f"All {total_count:,} paired full-tensor values"
-    else:
-        sample_label = (
-            f"{sampled_count} bounded paired values from {total_count:,} full-tensor "
-            f"elements: {len(worst_indices)} largest absolute deltas plus a uniform sample"
-        )
-    if len(finite_indices) != total_count:
-        sample_label += f" ({len(finite_indices):,} finite pairs available)"
-    aria = (
-        f"TensorRT versus reference scatter; {sample_label}; "
-        "reference on x axis and TensorRT on y axis"
-    )
-    svg = (
-        '<figure class="feature-scatter">'
-        f'<svg viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
-        f'aria-label="{_esc(aria)}" data-sample-count="{sampled_count}" '
-        f'data-total-pairs="{total_count}" data-axis-min="{low:.17g}" '
-        f'data-axis-max="{high:.17g}">'
-        f"<title>{_esc(aria)}</title>"
-        '<rect x="0" y="0" width="620" height="390" fill="#ffffff" />'
-        f'<line class="feature-scatter-diagonal" x1="{pad}" y1="{height - pad}" '
-        f'x2="{width - pad}" y2="{pad}" />'
-        f'<line class="feature-scatter-axis" x1="{pad}" y1="{height - pad}" '
-        f'x2="{width - pad}" y2="{height - pad}" />'
-        f'<line class="feature-scatter-axis" x1="{pad}" y1="{pad}" '
-        f'x2="{pad}" y2="{height - pad}" />'
-        + "".join(points)
-        + f'<text x="{width / 2:.1f}" y="{height - 8:.1f}" text-anchor="middle">'
-        "Reference value</text>"
-        f'<text x="14" y="{height / 2:.1f}" text-anchor="middle" '
-        f'transform="rotate(-90 14 {height / 2:.1f})">TensorRT value</text>'
-        "</svg>"
-        f"<figcaption><strong>{_esc(sample_label)}.</strong> "
-        "Points on the dashed diagonal are exact matches; hover a point for its flat "
-        f"index and paired values. Shared axes use extrema from all {len(finite_indices):,} "
-        "finite pairs.</figcaption>"
-        f"{_render_feature_worst_table(trt_tensor, ref_tensor, worst_indices)}</figure>"
-    )
-    return svg, None
-
-
 def _cosine_pair(lhs: List[float], rhs: List[float]) -> Optional[float]:
     if not lhs or len(lhs) != len(rhs):
         return None
@@ -2144,187 +1951,372 @@ def _cosine_pair(lhs: List[float], rhs: List[float]) -> Optional[float]:
     return min(1.0, max(-1.0, cosine))
 
 
-def _stable_relative_l2(lhs: List[float], rhs: List[float]) -> Optional[float]:
-    scale = max((abs(value) for value in lhs + rhs), default=0.0)
-    if scale == 0.0:
-        return 0.0
-    scaled_lhs = [value / scale for value in lhs]
-    scaled_rhs = [value / scale for value in rhs]
-    error_norm = math.sqrt(
-        sum((left - right) ** 2 for left, right in zip(scaled_lhs, scaled_rhs))
-    )
-    reference_norm = math.sqrt(sum(value * value for value in scaled_rhs))
-    if reference_norm == 0.0:
-        return 0.0 if error_norm == 0.0 else None
-    ratio = error_norm / reference_norm
-    return ratio if math.isfinite(ratio) else None
+def _unit_vector(values: List[float]) -> Optional[List[float]]:
+    scale = max((abs(value) for value in values), default=0.0)
+    if scale == 0.0 or not math.isfinite(scale):
+        return None
+    scaled = [value / scale for value in values]
+    norm = math.sqrt(math.fsum(value * value for value in scaled))
+    if norm == 0.0 or not math.isfinite(norm):
+        return None
+    return [value / norm for value in scaled]
 
 
-def _heatmap_budget_color(budget_usage: float) -> str:
-    ratio = min(1.0, max(0.0, budget_usage / 100.0))
-    stops = (
-        (0.00, (29, 78, 216)),
-        (0.25, (147, 197, 253)),
-        (0.50, (253, 230, 138)),
-        (0.75, (251, 146, 60)),
-        (1.00, (220, 38, 38)),
-    )
-    lower_position, lower_color = stops[0]
-    upper_position, upper_color = stops[-1]
-    for position, color in stops[1:]:
-        if ratio <= position:
-            upper_position, upper_color = position, color
-            break
-        lower_position, lower_color = position, color
-    span = upper_position - lower_position or 1.0
-    local_ratio = (ratio - lower_position) / span
-    rgb = tuple(
-        round(first + local_ratio * (second - first))
-        for first, second in zip(lower_color, upper_color)
-    )
-    return f"rgb({rgb[0]} {rgb[1]} {rgb[2]})"
-
-
-def _render_patch_cosine_heatmap(
-    trt_tensor: Optional[Dict[str, Any]],
-    ref_tensor: Optional[Dict[str, Any]],
-    topology: Optional[Dict[str, int]],
-    patch_threshold: Optional[float],
-) -> Tuple[str, Optional[str]]:
-    if trt_tensor is None or ref_tensor is None or topology is None:
-        return "", "Patch cosine heatmap unavailable because tensor topology is invalid."
-    if trt_tensor["shape"] != ref_tensor["shape"]:
-        return "", "Patch cosine heatmap unavailable because tensor shapes differ."
+def _feature_patch_vectors(
+    tensor: Optional[Dict[str, Any]], topology: Optional[Dict[str, int]]
+) -> Tuple[Optional[List[List[float]]], Optional[str]]:
+    if tensor is None or topology is None:
+        return None, "Query-patch maps require valid tensors and topology."
     if topology["batch"] != 1:
-        return "", (
-            "Patch cosine heatmap unavailable because a single spatial map requires batch size 1; "
+        return None, (
+            "Query-patch maps require batch size 1; "
             f"observed {topology['batch']}."
         )
-    grid = topology["grid"]
-    if grid <= 0:
-        return "", (
-            f"Patch cosine heatmap unavailable because {topology['patch_tokens']} patch tokens "
-            "do not form a square grid."
+    if topology["grid"] <= 0:
+        return None, (
+            f"Query-patch maps require a square patch grid; observed "
+            f"{topology['patch_tokens']} patch tokens."
         )
     if topology["patch_tokens"] > _MAX_FEATURE_HEATMAP_TOKENS:
-        return "", (
-            f"Patch cosine heatmap omitted because {topology['patch_tokens']} patches exceed the "
-            f"bounded {_MAX_FEATURE_HEATMAP_TOKENS}-cell report limit."
+        return None, (
+            f"Query-patch maps are bounded to {_MAX_FEATURE_HEATMAP_TOKENS} patches; "
+            f"observed {topology['patch_tokens']}."
         )
-    if patch_threshold is None or not -1.0 <= patch_threshold < 1.0:
-        return "", (
-            "Patch cosine heatmap unavailable because the recorded p01_patch_cosine "
-            "threshold is missing or invalid."
+    feature_values = topology["patch_tokens"] * topology["width"]
+    if feature_values > _MAX_FEATURE_MAP_VALUES:
+        return None, (
+            f"Query-patch maps are bounded to {_MAX_FEATURE_MAP_VALUES:,} spatial "
+            f"feature values; observed {feature_values:,}."
         )
 
     width = topology["width"]
-    patch_start = topology["prefix_tokens"]
-    trt_values = trt_tensor["values"]
-    ref_values = ref_tensor["values"]
-    cosines: List[float] = []
-    relative_errors: List[Optional[float]] = []
-    budgets: List[float] = []
+    start_token = topology["prefix_tokens"]
+    values = tensor["values"]
+    patches: List[List[float]] = []
     for patch_index in range(topology["patch_tokens"]):
-        start = (patch_start + patch_index) * width
-        end = start + width
-        trt_patch = trt_values[start:end]
-        ref_patch = ref_values[start:end]
-        cosine = _cosine_pair(trt_patch, ref_patch)
-        if cosine is None:
-            return "", (
-                "Patch cosine heatmap unavailable because at least one patch has invalid or "
-                "non-finite values."
+        start = (start_token + patch_index) * width
+        unit = _unit_vector(values[start : start + width])
+        if unit is None:
+            return None, (
+                "Query-patch maps require non-zero finite feature vectors; "
+                f"patch {patch_index} is invalid."
             )
-        cosines.append(cosine)
-        relative_errors.append(_stable_relative_l2(trt_patch, ref_patch))
-        budget = 100.0 * (1.0 - cosine) / (1.0 - patch_threshold)
-        if not math.isfinite(budget):
-            return "", "Patch cosine heatmap unavailable because its budget scale overflowed."
-        budgets.append(max(0.0, budget))
+        patches.append(unit)
+    return patches, None
 
-    observed_low, observed_high = min(cosines), max(cosines)
-    worst_index = min(range(len(cosines)), key=cosines.__getitem__)
-    worst_row, worst_column = divmod(worst_index, grid)
-    cell, gap = 22, 2
-    extent = grid * (cell + gap)
-    cells = []
-    for patch_index, cosine in enumerate(cosines):
-        row, column = divmod(patch_index, grid)
-        relative_error = relative_errors[patch_index]
-        relative_label = (
-            f"{relative_error:.6f}" if relative_error is not None else "unavailable"
-        )
-        label = (
-            f"Patch {patch_index}, row {row + 1}, column {column + 1}, "
-            f"cosine {cosine:.6f}, {budgets[patch_index]:.2f} percent of p01 error "
-            f"budget, relative L2 error {relative_label}; row and column are 1-based"
-        )
-        relative_attribute = (
-            f' data-relative-l2="{relative_error:.9f}"'
-            if relative_error is not None
-            else ""
-        )
-        cells.append(
-            f'<rect class="feature-heatmap-cell" x="{column * (cell + gap) + 1}" '
-            f'y="{row * (cell + gap) + 1}" width="{cell}" height="{cell}" rx="2" '
-            f'fill="{_heatmap_budget_color(budgets[patch_index])}" '
-            f'data-patch-index="{patch_index}" data-cosine="{cosine:.9f}" '
-            f'data-budget-used="{budgets[patch_index]:.6f}"{relative_attribute} '
-            f'aria-label="{_esc(label)}"><title>{_esc(label)}</title></rect>'
-        )
-    aria = (
-        f"{grid} by {grid} patch-token cosine error-budget heatmap relative to recorded "
-        f"p01 threshold {patch_threshold:.6f}; observed cosine range "
-        f"{observed_low:.6f} to {observed_high:.6f}; rows and columns are 1-based"
+
+def _feature_query_indices(grid: int) -> List[int]:
+    """Select a deterministic eight-query spatial lattice."""
+    if grid <= 0:
+        return []
+    if grid < 3:
+        return list(range(min(grid * grid, _FEATURE_QUERY_COUNT)))
+    anchors = [min(grid - 1, grid * quarter // 4) for quarter in (1, 2, 3)]
+    center = (anchors[1], anchors[1])
+    positions = [
+        (row, column)
+        for row in anchors
+        for column in anchors
+        if (row, column) != center
+    ]
+    return [row * grid + column for row, column in positions]
+
+
+def _dot_unit_vectors(lhs: List[float], rhs: List[float]) -> float:
+    value = math.fsum(left * right for left, right in zip(lhs, rhs))
+    return min(1.0, max(-1.0, value))
+
+
+def _interpolate_palette(
+    ratio: float, stops: Tuple[Tuple[float, Tuple[int, int, int]], ...]
+) -> Tuple[int, int, int]:
+    ratio = min(1.0, max(0.0, ratio))
+    low_position, low_color = stops[0]
+    high_position, high_color = stops[-1]
+    for position, color in stops[1:]:
+        if ratio <= position:
+            high_position, high_color = position, color
+            break
+        low_position, low_color = position, color
+    span = high_position - low_position or 1.0
+    local = (ratio - low_position) / span
+    return tuple(
+        round(low + local * (high - low))
+        for low, high in zip(low_color, high_color)
     )
-    worst_patch_rows = []
-    for patch_index in sorted(
-        range(len(cosines)), key=lambda index: (cosines[index], index)
-    )[:5]:
-        row, column = divmod(patch_index, grid)
-        relative_error = relative_errors[patch_index]
-        relative_text = (
-            f"{relative_error:.6f}" if relative_error is not None else "Unavailable"
+
+
+def _feature_similarity_rgb(value: float, low: float, high: float) -> Tuple[int, int, int]:
+    span = high - low
+    ratio = (value - low) / span if span > 0.0 else 1.0
+    viridis = (
+        (0.000, (68, 1, 84)),
+        (0.125, (71, 44, 122)),
+        (0.250, (59, 82, 139)),
+        (0.375, (44, 114, 142)),
+        (0.500, (33, 145, 140)),
+        (0.625, (40, 174, 128)),
+        (0.750, (94, 201, 98)),
+        (0.875, (173, 220, 48)),
+        (1.000, (253, 231, 37)),
+    )
+    return _interpolate_palette(ratio, viridis)
+
+
+def _feature_delta_rgb(value: float) -> Tuple[int, int, int]:
+    ratio = value / _FEATURE_QUERY_DELTA_LIMIT
+    magma = (
+        (0.00, (0, 0, 4)),
+        (0.25, (81, 18, 124)),
+        (0.50, (183, 55, 121)),
+        (0.75, (252, 137, 97)),
+        (1.00, (252, 253, 191)),
+    )
+    return _interpolate_palette(ratio, magma)
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+
+def _rgb_png_data_uri(grid: int, pixels: List[Tuple[int, int, int]]) -> str:
+    if grid <= 0 or len(pixels) != grid * grid:
+        raise ValueError("RGB heatmap dimensions do not match the pixel payload")
+    rows = bytearray()
+    for row in range(grid):
+        rows.append(0)
+        for pixel in pixels[row * grid : (row + 1) * grid]:
+            rows.extend(pixel)
+    header = struct.pack(">IIBBBBB", grid, grid, 8, 2, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(rows), level=9))
+        + _png_chunk(b"IEND", b"")
+    )
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+def _render_feature_query_marker(
+    label: str, row: int, column: int, grid: int, *, compact: bool = False
+) -> str:
+    x_percent = 100.0 * (column + 0.5) / grid
+    y_percent = 100.0 * (row + 0.5) / grid
+    compact_class = " feature-query-marker-compact" if compact else ""
+    aria = f"{label}, patch row {row + 1}, column {column + 1}"
+    return (
+        f'<span class="feature-query-marker{compact_class}" '
+        f'style="--feature-query-x:{x_percent:.6f}%;'
+        f'--feature-query-y:{y_percent:.6f}%" aria-label="{_esc(aria)}">'
+        f'<span aria-hidden="true">{_esc(label)}</span></span>'
+    )
+
+
+def _render_feature_query_input(
+    image_path: Optional[Path], query_indices: List[int], grid: int
+) -> str:
+    uri = None
+    if image_path is not None:
+        uri = encode_file_base64(image_path, _mime_for_ext(image_path.suffix))
+    if uri is None:
+        image_html = '<p class="missing">Model input image is unavailable.</p>'
+    else:
+        image_html = (
+            f'<img src="{uri}" class="feature-query-input-image" '
+            'alt="Model input with numbered query patch markers" />'
         )
-        worst_patch_rows.append(
-            "<tr>"
-            f"<td>{patch_index}</td><td>{row + 1}</td><td>{column + 1}</td>"
-            f"<td>{cosines[patch_index]:.6f}</td>"
-            f"<td>{budgets[patch_index]:.2f}%</td><td>{relative_text}</td></tr>"
-        )
-    worst_patch_table = (
-        '<table class="feature-worst-table feature-worst-patches">'
-        '<caption>Five lowest-cosine spatial patches; row and column are 1-based.</caption>'
-        "<thead><tr><th>Patch index</th><th>Row (1-based)</th><th>Column (1-based)</th>"
-        "<th>Cosine</th><th>Budget used</th><th>Relative L2</th></tr></thead><tbody>"
-        + "".join(worst_patch_rows)
-        + "</tbody></table>"
+    markers = []
+    for ordinal, query_index in enumerate(query_indices, start=1):
+        row, column = divmod(query_index, grid)
+        markers.append(_render_feature_query_marker(f"Q{ordinal}", row, column, grid))
+    filename = (
+        f' <span class="media-filename">{_esc(image_path.name)}</span>'
+        if image_path is not None
+        else ""
     )
     return (
-        '<figure class="feature-heatmap">'
-        f'<svg class="feature-heatmap-svg" viewBox="0 0 {extent} {extent}" '
-        f'role="img" aria-label="{_esc(aria)}" data-grid-rows="{grid}" '
-        f'data-grid-cols="{grid}" data-scale-threshold="{patch_threshold:.9f}">'
-        f"<title>{_esc(aria)}</title>"
-        '<desc>Each square is one row-major spatial patch. Color uses a fixed error-budget '
-        "scale from zero percent ideal to one hundred percent at the recorded p01 limit.</desc>"
-        + "".join(cells)
-        + "</svg>"
-        '<div class="feature-heatmap-legend" role="img" '
-        f'aria-label="Patch cosine error-budget legend: 0 percent ideal, 50 percent, '
-        f'100 percent at p01 threshold {patch_threshold:.6f}">'
-        '<span class="feature-heatmap-gradient" aria-hidden="true"></span>'
-        '<span>0% ideal</span><span>50%</span><span>100% limit</span></div>'
-        '<figcaption><strong>Patch-token cosine by spatial position.</strong> '
-        f'Observed range: <data>{observed_low:.6f}</data> to '
-        f'<data>{observed_high:.6f}</data>. Worst observed patch: index {worst_index} '
-        f'(row {worst_row + 1}, column {worst_column + 1}; 1-based), cosine '
-        f'{cosines[worst_index]:.6f}. '
-        '<span class="feature-heatmap-note">Color uses the recorded p01_patch_cosine '
-        f'threshold {_format_metric_value("p01_patch_cosine", patch_threshold)}: '
-        'budget = (1 - patch cosine) / (1 - threshold). The percentile gate applies to '
-        "the aggregate p01 metric, not to each individual patch cell.</span></figcaption>"
-        f"{worst_patch_table}</figure>"
+        '<figure class="feature-query-input">'
+        '<div class="feature-query-input-frame" '
+        f'style="--feature-grid:{grid}">{image_html}{"".join(markers)}</div>'
+        '<figcaption><strong>Model-space input view.</strong> The source image is shown '
+        f'as a square to match the {grid} × {grid} feature grid. Numbered markers are '
+        f'{len(query_indices)} deterministic spatial queries.{filename}</figcaption></figure>'
+    )
+
+
+def _render_feature_map_image(
+    title: str,
+    uri: str,
+    *,
+    label: str,
+    query_index: int,
+    grid: int,
+    scale_low: float,
+    scale_high: float,
+    map_kind: str,
+) -> str:
+    row, column = divmod(query_index, grid)
+    alt = (
+        f"{title} for {label}, query patch row {row + 1}, column {column + 1}; "
+        f"color scale {scale_low:.6f} to {scale_high:.6f}"
+    )
+    return (
+        f'<figure class="feature-query-map feature-query-map-{_esc(map_kind)}" '
+        f'data-query-index="{query_index}" data-grid-rows="{grid}" '
+        f'data-grid-cols="{grid}" data-scale-min="{scale_low:.9f}" '
+        f'data-scale-max="{scale_high:.9f}">'
+        f'<h6>{_esc(title)}</h6><div class="feature-query-map-frame" '
+        f'style="--feature-grid:{grid}">'
+        f'<img src="{uri}" alt="{_esc(alt)}" />'
+        f'{_render_feature_query_marker("", row, column, grid, compact=True)}'
+        "</div></figure>"
+    )
+
+
+def _render_query_patch_maps(
+    trt_tensor: Optional[Dict[str, Any]],
+    ref_tensor: Optional[Dict[str, Any]],
+    topology: Optional[Dict[str, int]],
+    image_path: Optional[Path],
+) -> Tuple[str, Optional[str]]:
+    if trt_tensor is None or ref_tensor is None or topology is None:
+        return "", "DINO-style query-patch maps require valid paired feature tensors."
+    if trt_tensor["shape"] != ref_tensor["shape"]:
+        return "", "DINO-style query-patch maps require matching tensor shapes."
+    ref_patches, ref_error = _feature_patch_vectors(ref_tensor, topology)
+    trt_patches, trt_error = _feature_patch_vectors(trt_tensor, topology)
+    if ref_patches is None or trt_patches is None:
+        return "", ref_error or trt_error
+
+    grid = topology["grid"]
+    query_indices = _feature_query_indices(grid)
+    cards = []
+    all_deltas: List[float] = []
+    for ordinal, query_index in enumerate(query_indices, start=1):
+        label = f"Q{ordinal}"
+        row, column = divmod(query_index, grid)
+        query = ref_patches[query_index]
+        ref_map = [_dot_unit_vectors(query, patch) for patch in ref_patches]
+        trt_map = [_dot_unit_vectors(query, patch) for patch in trt_patches]
+        deltas = [abs(trt - ref) for trt, ref in zip(trt_map, ref_map)]
+        all_deltas.extend(deltas)
+        scale_low, scale_high = min(ref_map), 1.0
+        scale_mode = "reference"
+        if scale_high - scale_low < _FEATURE_MIN_SIMILARITY_SPAN:
+            scale_low = -1.0
+            scale_mode = "theoretical-fallback"
+        ref_uri = _rgb_png_data_uri(
+            grid,
+            [_feature_similarity_rgb(value, scale_low, scale_high) for value in ref_map],
+        )
+        trt_uri = _rgb_png_data_uri(
+            grid,
+            [_feature_similarity_rgb(value, scale_low, scale_high) for value in trt_map],
+        )
+        delta_uri = _rgb_png_data_uri(
+            grid, [_feature_delta_rgb(value) for value in deltas]
+        )
+        query_parity = _dot_unit_vectors(query, trt_patches[query_index])
+        mean_delta = math.fsum(deltas) / len(deltas)
+        max_delta = max(deltas)
+        clamped = sum(
+            value < scale_low or value > scale_high for value in trt_map
+        )
+        clamp_note = (
+            f" · {clamped} TRT cells clipped to Reference scale"
+            if clamped
+            else ""
+        )
+        fallback_note = (
+            " · degenerate Reference range; using theoretical [-1, 1] scale"
+            if scale_mode == "theoretical-fallback"
+            else ""
+        )
+        cards.append(
+            '<article class="feature-query-card" '
+            f'data-query-index="{query_index}" data-query-row="{row}" '
+            f'data-query-column="{column}" data-query-source="reference" '
+            f'data-scale-mode="{scale_mode}" '
+            f'data-query-feature-cosine="{query_parity:.9f}" '
+            f'data-mean-map-delta="{mean_delta:.9f}" '
+            f'data-max-map-delta="{max_delta:.9f}">'
+            f'<header><h5>{label} · patch row {row + 1}, column {column + 1}</h5>'
+            '<p>One Reference query embedding is shared by both target maps.</p></header>'
+            '<div class="feature-query-map-grid">'
+            + _render_feature_map_image(
+                "Reference similarity",
+                ref_uri,
+                label=label,
+                query_index=query_index,
+                grid=grid,
+                scale_low=scale_low,
+                scale_high=scale_high,
+                map_kind="reference",
+            )
+            + _render_feature_map_image(
+                "TensorRT similarity",
+                trt_uri,
+                label=label,
+                query_index=query_index,
+                grid=grid,
+                scale_low=scale_low,
+                scale_high=scale_high,
+                map_kind="trt",
+            )
+            + _render_feature_map_image(
+                "Absolute map delta",
+                delta_uri,
+                label=label,
+                query_index=query_index,
+                grid=grid,
+                scale_low=0.0,
+                scale_high=_FEATURE_QUERY_DELTA_LIMIT,
+                map_kind="delta",
+            )
+            + "</div>"
+            '<div class="feature-query-legends">'
+            '<div><span class="feature-similarity-gradient" aria-hidden="true"></span>'
+            f'<span>{scale_low:.4f}</span><span>cosine</span><span>1.0000</span></div>'
+            '<div><span class="feature-delta-gradient" aria-hidden="true"></span>'
+            f'<span>0</span><span>|Δ cosine|</span><span>≥ {_FEATURE_QUERY_DELTA_LIMIT:.3f}</span>'
+            "</div></div>"
+            '<p class="feature-query-stats">'
+            f'Query feature cosine: <strong>{query_parity:.6f}</strong> · '
+            f'Mean map |Δ|: <strong>{mean_delta:.6f}</strong> · '
+            f'Max map |Δ|: <strong>{max_delta:.6f}</strong>'
+            f'{clamp_note}{fallback_note}</p></article>'
+        )
+
+    max_delta = max(all_deltas, default=0.0)
+    return (
+        '<section class="feature-query-comparison" '
+        'aria-label="DINO-style query patch similarity maps">'
+        '<header class="feature-query-heading"><div>'
+        '<p class="feature-eyebrow">Dense feature visualization</p>'
+        '<h4>DINO-style query-patch similarity maps</h4>'
+        '<p>Selecting a patch asks which other image regions have a similar feature. '
+        'Reference and TensorRT use the same spatial query and the exact same Reference '
+        'query embedding, so matching colors are directly comparable. CLS and register '
+        'tokens are excluded; only the row-major spatial patch grid is visualized.</p></div>'
+        f'<div class="feature-query-summary"><strong>{len(query_indices)} queries</strong>'
+        f'<span>{grid} × {grid} patches</span>'
+        f'<span>Max shown map |Δ| {max_delta:.6f}</span></div></header>'
+        '<div class="feature-query-intro">'
+        f'{_render_feature_query_input(image_path, query_indices, grid)}'
+        '<aside><h5>How to read these maps</h5><ol>'
+        '<li>Find a numbered red query marker on the input.</li>'
+        '<li>Compare the Reference and TensorRT color patterns in the same row.</li>'
+        '<li>Use the absolute-delta map to locate differences. Black is identical; '
+        f'the fixed upper scale is {_FEATURE_QUERY_DELTA_LIMIT:.3f} cosine.</li>'
+        '</ol><p>Each Reference/TensorRT pair shares a Reference-derived color scale; '
+        'different query rows may use different printed minima. Delta colors are a fixed '
+        'diagnostic scale, not a pass/fail threshold. These eight probes are not exhaustive; '
+        'the full-tensor numerical criteria remain authoritative.</p>'
+        '<p>The eight queries use a deterministic 3 × 3 spatial lattice with the '
+        'center omitted, mirroring the concept of the DINOv3 overview without claiming '
+        'its exact official coordinates or palette.</p></aside></div>'
+        '<div class="feature-query-card-grid">' + "".join(cards) + "</div></section>"
     ), None
 
 
@@ -2351,54 +2343,34 @@ def render_image_feature_model(
 
     trt_tensor, trt_error = _feature_tensor(pair.get("trt"), "last_hidden_state")
     ref_tensor, ref_error = _feature_tensor(pair.get("ref"), "last_hidden_state")
-    scatter, scatter_error = _render_feature_scatter(trt_tensor, ref_tensor)
-    patch_threshold = _feature_metric_threshold(result, "p01_patch_cosine")
-    heatmap, heatmap_error = _render_patch_cosine_heatmap(
+    query_maps, query_error = _render_query_patch_maps(
         trt_tensor,
         ref_tensor,
         topology,
-        patch_threshold,
+        image_path,
     )
 
-    parts = [
-        '<section class="feature-parity-overview" aria-label="Feature parity overview">',
-        "<h4>Feature Parity Overview</h4>",
-        '<div class="feature-overview-grid">',
-    ]
-    if image_path is not None:
-        parts.append(_render_image_card("Input Image", image_path))
-    elif image_ref:
-        parts.append(_render_image_card("Input Image", None))
+    parts = []
+    if query_maps:
+        parts.append(query_maps)
     else:
+        reason = trt_error or ref_error or query_error or topology_error
         parts.append(
-            '<div class="media-card missing-media"><h4>Input Image</h4>'
-            '<p class="missing">No input image was declared.</p></div>'
+            '<p class="feature-viz-unavailable"><strong>DINO-style query-patch maps '
+            f'unavailable:</strong> {_esc(reason)}</p>'
         )
-    parts.append(f'<div class="feature-topology-panel"><h4>Tensor topology</h4>{shape_html}</div>')
-    parts.append("</div></section>")
-    parts.append(_render_feature_invariants(result))
-    parts.append(_render_feature_metric_bars(result))
 
-    parts.append('<section class="feature-visual-comparison" aria-label="TensorRT vs reference">')
-    parts.append("<h4>TensorRT vs reference</h4>")
-    if scatter:
-        parts.append(scatter)
-    else:
-        reason = trt_error or ref_error or scatter_error or topology_error
-        if reason and not reason.startswith("Paired full-tensor scatter unavailable"):
-            reason = f"Paired full-tensor scatter unavailable: {reason}."
-        parts.append(f'<p class="feature-viz-unavailable">{_esc(reason)}</p>')
-    if heatmap:
-        parts.append(heatmap)
-    else:
-        reason = trt_error or ref_error or heatmap_error or topology_error
-        if reason and not reason.startswith("Patch cosine heatmap unavailable"):
-            reason = f"Patch cosine heatmap unavailable: {reason}."
-        parts.append(f'<p class="feature-viz-unavailable">{_esc(reason)}</p>')
-    parts.append("</section>")
-
-    parts.append("<h4>All recorded metrics</h4>")
-    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(
+        '<details class="feature-diagnostics"><summary>Numerical parity evidence</summary>'
+        '<div class="feature-diagnostics-body">'
+        '<section class="feature-parity-overview" aria-label="Feature tensor topology">'
+        f'<h4>Tensor topology</h4>{shape_html}</section>'
+        f'{_render_feature_invariants(result)}'
+        f'{_render_feature_metric_bars(result)}'
+        '<h4>All recorded metrics</h4>'
+        f'{_render_metrics_table(result.get("stages", {}))}'
+        "</div></details>"
+    )
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
     parts.append(_render_timing_sections(result))
     parts.append(_render_collapsed_feature_raw(result))
