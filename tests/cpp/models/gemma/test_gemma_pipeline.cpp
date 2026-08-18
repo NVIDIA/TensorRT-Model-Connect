@@ -120,8 +120,7 @@ void test_one_token_batched_prefill_does_not_touch_decoder() {
     auto prefill_stats = std::make_shared<ModuleStats>();
     auto decoder = std::make_unique<CountingModule>(decode_stats, false, stream);
     auto prefill = std::make_unique<CountingModule>(prefill_stats, true, stream);
-    auto cache = std::make_unique<trtmc::GemmaKvCache>(1, 704, 4, stream,
-                                                      trtmc::DType::kFloat32);
+    auto cache = std::make_unique<trtmc::GemmaKvCache>(1, 704, 4, stream, trtmc::DType::kFloat32);
 
     trtmc::GemmaTextGenConfig config;
     config.vocab_size = 4;
@@ -134,8 +133,7 @@ void test_one_token_batched_prefill_does_not_touch_decoder() {
     std::vector<trtmc::GemmaTextGenerationPipeline::DecoderContext> decoders;
     decoders.push_back({704, std::move(decoder)});
     trtmc::GemmaTextGenerationPipeline pipeline(std::move(decoders), std::move(cache), config,
-                                                stream, nullptr, "", nullptr,
-                                                std::move(prefill));
+                                                stream, nullptr, "", nullptr, std::move(prefill));
 
     trtmc::GenerateConfig request;
     request.max_new_tokens = 1;

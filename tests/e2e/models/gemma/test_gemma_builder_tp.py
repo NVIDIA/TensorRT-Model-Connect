@@ -112,9 +112,23 @@ class _FakeNetwork:
             return _FakeLayer(lhs + rhs)
         raise AssertionError(f"unexpected elementwise operation: {operation}")
 
+    def add_cast(self, tensor, dtype):
+        assert dtype == self._trt.float32
+        return _FakeLayer(np.asarray(tensor, dtype=np.float32))
+
     def add_activation(self, tensor, activation):
-        assert activation == self._trt.ActivationType.TANH
-        return _FakeLayer(np.tanh(tensor))
+        if activation == self._trt.ActivationType.TANH:
+            return _FakeLayer(np.tanh(tensor))
+        if activation == self._trt.ActivationType.GELU_TANH:
+            result = 0.5 * tensor * (
+                1.0
+                + np.tanh(
+                    math.sqrt(2.0 / math.pi)
+                    * (tensor + 0.044715 * np.power(tensor, 3))
+                )
+            )
+            return _FakeLayer(result)
+        raise AssertionError(f"unexpected activation: {activation}")
 
 
 def test_gemma_dual_profile_mlp_uses_checkpoint_gelu(
