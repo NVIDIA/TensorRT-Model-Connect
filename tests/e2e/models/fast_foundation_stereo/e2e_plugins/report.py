@@ -268,8 +268,8 @@ def render(result: dict[str, Any], *, project_dir: Path) -> str:
         'right input is a horizontal shift of the left, compare the two disparity color '
         'patterns, then look for bright error regions. Images are diagnostic; the numeric '
         'certification below remains authoritative.</div><div class="ffs-stereo-grid">'
-        + _card("Left input", left_uri, "Synthetic rectified left image.")
-        + _card("Right input", right_uri, "Same scene shifted horizontally.")
+        + _card("Left input", left_uri, "Repo-owned realistic rectified left view.")
+        + _card("Right input", right_uri, "Matching right-camera view of the same office.")
         + '</div><div class="ffs-stereo-grid outputs">'
         + _card(
             "Reference disparity",

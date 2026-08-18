@@ -12,6 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from PIL import Image
 
 from tensorrt_model_connect.families.fast_foundation_stereo.prepare_model import (
     configure_official_model_args,
@@ -19,22 +20,20 @@ from tensorrt_model_connect.families.fast_foundation_stereo.prepare_model import
 )
 
 
-def _synthetic_stereo(pixel_shift: int) -> tuple[np.ndarray, np.ndarray]:
-    if not 0 < pixel_shift < 700:
-        raise ValueError(f"pixel_shift must be in [1, 699], got {pixel_shift}")
-    y, x = np.mgrid[0:700, 0:700]
-    left = np.stack(((x % 256), (y % 256), ((x + y) % 256)), axis=-1).astype(np.uint8)
-    right = np.zeros_like(left)
-    right[:, :-pixel_shift] = left[:, pixel_shift:]
-    right[:, -pixel_shift:] = left[:, -1:]
-    return left, right
+def _load_stereo_image(path: Path) -> np.ndarray:
+    with Image.open(path) as image:
+        pixels = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    if pixels.shape != (700, 700, 3):
+        raise ValueError(f"Stereo fixture must be 700x700 RGB, got {pixels.shape}")
+    return pixels
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--pixel-shift", type=int, default=12)
+    parser.add_argument("--left-image", type=Path, required=True)
+    parser.add_argument("--right-image", type=Path, required=True)
     parser.add_argument("--valid-iters", type=int, default=8)
     parser.add_argument("--max-disp", type=int, default=192)
     arguments = parser.parse_args()
@@ -57,7 +56,8 @@ def main() -> None:
     )
     model = model.cuda().eval()
 
-    left, right = _synthetic_stereo(arguments.pixel_shift)
+    left = _load_stereo_image(arguments.left_image)
+    right = _load_stereo_image(arguments.right_image)
     left_tensor = torch.as_tensor(left, device="cuda").float()[None].permute(0, 3, 1, 2)
     right_tensor = torch.as_tensor(right, device="cuda").float()[None].permute(0, 3, 1, 2)
     padder = InputPadder(left_tensor.shape, divis_by=32, force_square=False)

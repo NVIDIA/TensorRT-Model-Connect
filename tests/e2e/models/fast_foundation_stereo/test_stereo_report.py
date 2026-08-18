@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 from pathlib import Path
 import re
@@ -13,6 +14,9 @@ import sys
 import numpy as np
 
 from tests.e2e.models.fast_foundation_stereo.e2e_plugins import report
+from tests.e2e.models.fast_foundation_stereo.e2e_plugins.runner import (
+    _write_stereo_inputs,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -40,6 +44,22 @@ def _png_dimensions(markup: str) -> list[tuple[int, int]]:
         assert payload[12:16] == b"IHDR"
         dimensions.append(struct.unpack(">II", payload[16:24]))
     return dimensions
+
+
+def test_model_owned_office_fixture_is_stable_and_runtime_sized(tmp_path: Path) -> None:
+    left, right = _write_stereo_inputs(tmp_path)
+
+    expected = {
+        left: "73cc585a0e38493a5588137fea302b8472f63e76443759bd8ba0a19ce8be76a6",
+        right: "6c56733d64567e198fa75375ab7042bd26a8aa1fdd8f8fb4908186ca7f2f51c5",
+    }
+    for path, digest in expected.items():
+        payload = path.read_bytes()
+        assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+        assert payload[12:16] == b"IHDR"
+        assert struct.unpack(">II", payload[16:24]) == (700, 700)
+        assert hashlib.sha256(payload).hexdigest() == digest
+    assert left.read_bytes() != right.read_bytes()
 
 
 def _result(artifact_dir: Path, *, status: str = "pass") -> dict:

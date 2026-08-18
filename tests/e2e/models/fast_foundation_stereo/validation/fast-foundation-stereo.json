@@ -1,15 +1,15 @@
 {
   "schema_version": "trtmc.model-plugin-validation/v1",
-  "dataset": "Fast-FoundationStereo deterministic rectified pair",
-  "version": "1",
+  "dataset": "Fast-FoundationStereo generated office rectified pair",
+  "version": "2",
   "requests": [
     {
-      "sample_id": "fast-foundation-stereo-shift-12",
+      "sample_id": "fast-foundation-stereo-office-v1",
       "testcase": "fast-foundation-stereo",
       "stage": "full_inference",
-      "category": "synthetic-rectified-stereo",
+      "category": "generated-realistic-rectified-stereo",
       "inputs": {
-        "pixel_shift": 12
+        "fixture": "generated-office-v1"
       }
     }
   ]

@@ -50,8 +50,9 @@ def test_validation_contract_uses_model_plugin_parity() -> None:
         {"scorer": "model_plugin_parity"},
         {"min_sample_pass_rate": 1.0},
         json.loads(
-            '[{"sample_id":"fast-foundation-stereo-shift-12",'
+            '[{"sample_id":"fast-foundation-stereo-office-v1",'
             '"testcase":"fast-foundation-stereo","stage":"full_inference",'
-            '"category":"synthetic-rectified-stereo","inputs":{"pixel_shift":12}}]'
+            '"category":"generated-realistic-rectified-stereo",'
+            '"inputs":{"fixture":"generated-office-v1"}}]'
         ),
     )

@@ -54,6 +54,13 @@ class FastFoundationStereoTorchReference:
         model_root = staged or checkpoint
         artifact_dir = Path(ctx.artifacts_dir or "/tmp") / case.name
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        left_path = artifact_dir / "left.png"
+        right_path = artifact_dir / "right.png"
+        if not left_path.is_file() or not right_path.is_file():
+            return StageOutput(
+                stage_name=stage.name,
+                data={"error": "Stereo input artifacts are missing"},
+            )
         output_path = artifact_dir / "torch_disparity.npy"
         script = Path(__file__).resolve().parents[1] / "official_reference.py"
         command = [
@@ -63,8 +70,10 @@ class FastFoundationStereoTorchReference:
             str(model_root),
             "--output",
             str(output_path),
-            "--pixel-shift",
-            str(int(case.inputs.get("pixel_shift", 12))),
+            "--left-image",
+            str(left_path),
+            "--right-image",
+            str(right_path),
             "--valid-iters",
             "8",
             "--max-disp",
