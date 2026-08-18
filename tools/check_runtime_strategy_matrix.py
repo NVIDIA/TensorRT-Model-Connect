@@ -241,8 +241,13 @@ def _iter_plugin_python_files(root: Path, kind: str) -> Iterable[Path]:
     if flat_files:
         yield from flat_files
         return
-    for plugin_dir in sorted(root.glob(f"*/e2e_plugins/{kind}")):
-        yield from sorted(plugin_dir.glob("*.py"))
+    singular = {"runners": "runner.py", "comparators": "comparator.py"}.get(kind)
+    for plugin_root in sorted(root.glob("*/e2e_plugins")):
+        if singular is not None and (plugin_root / singular).is_file():
+            yield plugin_root / singular
+        plugin_dir = plugin_root / kind
+        if plugin_dir.is_dir():
+            yield from sorted(plugin_dir.glob("*.py"))
 
 
 def _extract_class_map_by_method(root: Path, kind: str, method_name: str) -> dict[str, set[str]]:
@@ -354,13 +359,26 @@ def validate_matrix_data(
             expected_task = task_strategy
 
         cli_commands = entry.get("cli_commands")
-        if (
-            not isinstance(cli_commands, list)
-            or not cli_commands
-            or not all(_is_nonempty_str(item) for item in cli_commands)
+        if not isinstance(cli_commands, list) or not all(
+            _is_nonempty_str(item) for item in cli_commands
         ):
             errors.append(
-                f"{runtime_strategy}: 'cli_commands' must be a non-empty list of strings."
+                f"{runtime_strategy}: 'cli_commands' must be a list of non-empty strings."
+            )
+            cli_commands = []
+        cli_exemption = entry.get("cli_exemption")
+        if cli_exemption is not None and not _is_nonempty_str(cli_exemption):
+            errors.append(
+                f"{runtime_strategy}: cli_exemption must be a non-empty string when provided."
+            )
+        has_cli_exemption = _is_nonempty_str(cli_exemption)
+        if cli_commands and has_cli_exemption:
+            errors.append(
+                f"{runtime_strategy}: cli_exemption must be omitted when CLI commands exist."
+            )
+        if not cli_commands and not has_cli_exemption:
+            errors.append(
+                f"{runtime_strategy}: requires 'cli_exemption' when no CLI command exists."
             )
 
         performance_mode = entry.get("performance_mode")

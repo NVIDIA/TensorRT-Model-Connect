@@ -2926,12 +2926,14 @@ class RuntimeStrategyMatrixRule(DiffRefinementRule):
     name = "runtime_strategy_matrix_known_strategies"
     path = "tests/runtime_strategy_matrix.yaml"
     allowed_tokens = (
+        "cli_exemption",
         "cli_commands",
         "comparator_class",
         "diff_framework_check_classes",
         "diff_framework_exemption",
         "neural_operator",
         "no_diff_framework_check_currently_registers_runtime_strategies",
+        "performance_mode",
         "runner_class",
         "solve",
         "task_strategy",

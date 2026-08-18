@@ -8,6 +8,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
 import re
 import sys
 import tempfile
@@ -590,6 +591,8 @@ def _resolve_model(model_id_or_path: str, *, revision: str | None = None) -> str
             repo_id=model_id_or_path,
             revision=revision,
             allow_patterns=hf_snapshot_allow_patterns(),
+            local_files_only=os.environ.get("HF_HUB_OFFLINE", "").lower()
+            in {"1", "on", "true", "yes"},
         )
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)

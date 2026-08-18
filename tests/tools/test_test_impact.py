@@ -2164,11 +2164,13 @@ diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.
 @@ -1 +1 @@
 +    "decoder_moe_family_decoder_moe": {
 +      "task_strategy": "text_generation_causal",
-+      "cli_commands": ["solve"],
++      "cli_commands": [],
++      "cli_exemption": "Uses a model-owned public C ABI.",
 +      "runner_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.runners.text_generation.TextGenerationCausalRunner",
 +      "comparator_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.comparators.text.TextComparator",
 +      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['decoder_moe_family_decoder_moe']."
++      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['decoder_moe_family_decoder_moe'].",
++      "performance_mode": "multi_stage"
 +    },
 +    "sequence_quantile_runtime": {
 +      "task_strategy": "neural_operator",

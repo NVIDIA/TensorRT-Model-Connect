@@ -304,11 +304,14 @@ def test_catalog_exposes_every_declared_profile_and_family() -> None:
         expected_manifests.extend(descriptor.parent / path for path in declared)
     expected_distributed = 0
     expected_regressions = 0
+    expected_e2e_only = 0
     for manifest in expected_manifests:
         raw = json.loads(manifest.read_text(encoding="utf-8"))
         distributed = bool(raw.get("distributed_runtime", {}).get("enabled"))
+        e2e_only = bool(raw.get("benchmark_exclusion_reason"))
         expected_distributed += distributed
-        expected_regressions += not distributed and all(
+        expected_e2e_only += e2e_only
+        expected_regressions += not distributed and not e2e_only and all(
             testcase.get("test_category", "e2e") == "regression"
             for testcase in raw["testcases"]
         )
@@ -316,10 +319,14 @@ def test_catalog_exposes_every_declared_profile_and_family() -> None:
     assert len(entries) == len(expected_manifests)
     assert len({entry.family for entry in entries}) == len(descriptors)
     assert sum(entry.status == "ready" for entry in entries) == (
-        len(expected_manifests) - expected_distributed - expected_regressions
+        len(expected_manifests)
+        - expected_distributed
+        - expected_regressions
+        - expected_e2e_only
     )
     assert sum(entry.status == "distributed" for entry in entries) == expected_distributed
     assert sum(entry.status == "regression" for entry in entries) == expected_regressions
+    assert sum(entry.status == "e2e_only" for entry in entries) == expected_e2e_only
     assert not [entry for entry in entries if entry.status in {"invalid", "unsupported"}]
 
 

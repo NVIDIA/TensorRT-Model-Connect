@@ -1,0 +1,11 @@
+{
+  "threshold_overrides": {
+    "minimum_frame_mask_iou": 0.98,
+    "minimum_macro_mask_iou": 0.99,
+    "minimum_global_mask_iou": 0.99,
+    "minimum_bbox_iou": 0.995,
+    "maximum_bbox_coordinate_error": 0.5,
+    "maximum_bbox_score_error": 0.01,
+    "label_exact": 1.0
+  }
+}

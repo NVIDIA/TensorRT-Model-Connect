@@ -155,13 +155,35 @@ class TextComparator:
         """,
         encoding="utf-8",
     )
+    flat_plugins = (
+        tmp_path / "tests" / "e2e" / "models" / "specialized" / "e2e_plugins"
+    )
+    flat_plugins.mkdir(parents=True)
+    (flat_plugins / "runner.py").write_text(
+        """
+class SpecializedRunner:
+    def strategy_name(self):
+        return "prompted_segmentation"
+        """,
+        encoding="utf-8",
+    )
+    (flat_plugins / "comparator.py").write_text(
+        """
+class SpecializedComparator:
+    def task_strategy(self):
+        return "prompted_segmentation"
+        """,
+        encoding="utf-8",
+    )
 
     models_dir = tmp_path / "tests" / "e2e" / "models"
     assert mod.extract_runner_classes_by_task_strategy(models_dir) == {
         "text_generation_causal": {"TextGenerationCausalRunner"},
+        "prompted_segmentation": {"SpecializedRunner"},
     }
     assert mod.extract_comparator_classes_by_task_strategy(models_dir) == {
         "text_generation_causal": {"TextComparator"},
+        "prompted_segmentation": {"SpecializedComparator"},
     }
 
 
@@ -185,6 +207,30 @@ def test_validate_matrix_data_requires_exemption_when_no_diff_check():
     )
 
     assert any("diff_framework_exemption" in message for message in errors)
+
+
+def test_validate_matrix_data_accepts_cli_exemption_when_no_command():
+    mod = _import_checker()
+    errors = mod.validate_matrix_data(
+        matrix={
+            "unit_specialized": {
+                "task_strategy": "prompted_segmentation",
+                "cli_commands": [],
+                "cli_exemption": "Uses a model-owned public C ABI.",
+                "runner_class": "SpecializedRunner",
+                "comparator_class": "SpecializedComparator",
+                "diff_framework_check_classes": ["SpecializedDiffTest"],
+                "performance_mode": "multi_stage",
+            }
+        },
+        cpp_runtime_strategies={"unit_specialized"},
+        runtime_to_task_strategy={"unit_specialized": "prompted_segmentation"},
+        diff_check_classes={"SpecializedDiffTest"},
+        runner_classes_by_task={"prompted_segmentation": {"SpecializedRunner"}},
+        comparator_classes_by_task={"prompted_segmentation": {"SpecializedComparator"}},
+    )
+
+    assert not errors
 
 
 def test_validate_matrix_data_detects_runtime_source_mismatch():

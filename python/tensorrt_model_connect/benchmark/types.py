@@ -66,6 +66,7 @@ class ModelDescriptor:
     testcases: tuple[Mapping[str, Any], ...]
     build_settings: Mapping[str, Any]
     distributed_runtime: Mapping[str, Any]
+    benchmark_exclusion_reason: str = ""
 
     def identity(self) -> dict[str, Any]:
         try:

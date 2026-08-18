@@ -635,19 +635,22 @@ def test_auto_register_artifacts_includes_reference_visuals_and_metadata_audio(
             self.artifacts[key] = rel_path
 
     sink = Sink()
+    input_image = tmp_path / "input.png"
     visual = tmp_path / "hf_seg_viz.png"
     audio = tmp_path / "talker_decode.wav"
+    input_image.write_bytes(b"png")
     visual.write_bytes(b"png")
     audio.write_bytes(b"wav")
     output = StageOutput(
         stage_name="full_inference",
-        data={"viz_path": str(visual)},
+        data={"input_image_path": str(input_image), "viz_path": str(visual)},
         metadata={"audio_output_path": str(audio)},
     )
 
     orchestrator._auto_register_artifacts(sink, output, "ref")
 
     assert sink.artifacts == {
+        "ref_input_image": "input.png",
         "ref_segmentation_map": "hf_seg_viz.png",
         "ref_wav": "talker_decode.wav",
     }

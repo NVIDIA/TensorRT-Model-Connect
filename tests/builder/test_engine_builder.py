@@ -79,7 +79,10 @@ class TestResolveModel:
         assert result == str(dl_dir)
         assert called["nemo"] is False
 
-    def test_download_forwards_requested_model_revision(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(("offline", "local_only"), [("ON", True), ("0", False)])
+    def test_download_forwards_requested_model_revision(
+        self, tmp_path, monkeypatch, offline, local_only
+    ):
         """A pinned Hub revision is part of model resolution, not plugin policy."""
         dl_dir = tmp_path / "dl"
         dl_dir.mkdir()
@@ -94,6 +97,7 @@ class TestResolveModel:
 
         fake_hf.snapshot_download = snapshot_download
         monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+        monkeypatch.setenv("HF_HUB_OFFLINE", offline)
 
         result = _resolve_model(
             "example-org/pinned-model",
@@ -103,6 +107,7 @@ class TestResolveModel:
         assert result == str(dl_dir)
         assert captured["repo_id"] == "example-org/pinned-model"
         assert captured["revision"] == "0123456789abcdef0123456789abcdef01234567"
+        assert captured["local_files_only"] is local_only
 
     def test_download_uses_nemo_when_no_hf_config(self, tmp_path, monkeypatch):
         """NeMo fallback remains active for snapshots that are .nemo-only."""

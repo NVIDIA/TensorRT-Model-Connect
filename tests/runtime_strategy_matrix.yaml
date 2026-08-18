@@ -52,6 +52,7 @@
     "phi4_multimodal_vision_language",
     "segformer_segmentation",
     "sam_prompted_segmentation",
+    "sam2_bbox_video_tracking",
     "sam3_prompted_segmentation",
     "dinov3_image_feature_extraction",
     "timm_vit_image_classification",
@@ -839,6 +840,16 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sam_prompted_segmentation'].",
       "performance_mode": "single_pass"
+    },
+    "sam2_bbox_video_tracking": {
+      "task_strategy": "prompted_segmentation",
+      "cli_commands": [],
+      "cli_exemption": "SAM2 uses its model-owned fixed five-frame public C ABI instead of a generic IPipeline CLI operation.",
+      "runner_class": "runner.Sam2PublicRunner",
+      "comparator_class": "comparator.Sam2AccuracyComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "The model-owned L0 comparator gates the six-plan public C ABI; production accuracy remains bound to the external L3 snapshot.",
+      "performance_mode": "multi_stage"
     },
     "sam3_prompted_segmentation": {
       "task_strategy": "prompted_segmentation",

@@ -1449,6 +1449,16 @@ def _input_ref(inputs: Dict[str, Any], names: Tuple[str, ...]) -> Any:
     return None
 
 
+def _segmentation_input_media(
+    result: Dict[str, Any], project_dir: Optional[Path]
+) -> Optional[Path]:
+    inputs = (result.get("case_config") or {}).get("inputs") or {}
+    declared = _input_ref(inputs, ("image", "image_path", "input_image"))
+    if declared:
+        return _resolve_input_media(declared, project_dir)
+    return _find_output_media(result, "trt", ("input_image",), ("input_image_path",))
+
+
 def _render_audio_player(title: str, path: Optional[Path]) -> str:
     if path is None:
         return (
@@ -1935,19 +1945,15 @@ def render_segmentation_model(result: Dict[str, Any], project_dir: Optional[Path
     """Render detail section for a segmentation model."""
     cc = result.get("case_config", {})
     inputs = cc.get("inputs") or {}
-    image_rel = inputs.get("image", "")
+    input_image = _segmentation_input_media(result, project_dir)
     prompt = inputs.get("prompt", "")
 
     parts = []
 
     # Input image
-    if image_rel:
+    if input_image:
         parts.append('<div class="media-compare">')
-        parts.append(
-            _render_image_card(
-                "Input Image", _resolve_input_media(image_rel, project_dir)
-            )
-        )
+        parts.append(_render_image_card("Input Image", input_image))
         parts.append("</div>")
 
     if prompt:
@@ -3696,8 +3702,7 @@ def validate_evidence(
                     result.get("stage_outputs") or {}, "ref_") is not None,
                     "missing reference transcript")
         elif strategy in {"segmentation", "prompted_segmentation"}:
-            input_image = _resolve_input_media(_input_ref(
-                inputs, ("image", "image_path", "input_image")), project_dir)
+            input_image = _segmentation_input_media(result, project_dir)
             image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
             trt_visuals = _find_output_media_all(
                 result, "trt", ("segmented_image", "segmentation_map", "output"),

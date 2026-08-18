@@ -112,6 +112,7 @@ _WEIGHT_PATTERNS = [
     "*.safetensors",
     "*.bin",
     "*.pth",
+    "sam2.1_hiera_small.pt",
     "*.nemo",
     "model.npz",
     "elf_params.npz",

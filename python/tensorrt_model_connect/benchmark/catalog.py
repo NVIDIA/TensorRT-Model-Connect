@@ -91,6 +91,16 @@ class ManifestCatalog:
                     )
                 )
                 continue
+            if model.benchmark_exclusion_reason:
+                entries.append(
+                    _catalog_entry(
+                        model,
+                        "e2e_only",
+                        model.benchmark_exclusion_reason,
+                        operation="-",
+                    )
+                )
+                continue
             try:
                 adapter = adapter_for_task_strategy(model.task_strategy)
             except BenchmarkError as exc:
@@ -189,15 +199,26 @@ class ManifestCatalog:
             raise BenchmarkError(f"cannot read model manifest {path}: {exc}") from exc
         if not isinstance(raw, dict):
             raise BenchmarkError(f"model manifest must be a JSON object: {path}")
+        benchmark_exclusion_reason = raw.get("benchmark_exclusion_reason", "")
+        if not isinstance(benchmark_exclusion_reason, str):
+            raise BenchmarkError(
+                f"benchmark_exclusion_reason in model manifest {path} must be a string"
+            )
+        benchmark_exclusion_reason = benchmark_exclusion_reason.strip()
+        if "benchmark_exclusion_reason" in raw and not benchmark_exclusion_reason:
+            raise BenchmarkError(
+                f"benchmark_exclusion_reason in model manifest {path} must be non-empty"
+            )
         required = {
             "name",
-            "hf_id",
             "bundle",
             "family",
             "task_strategy",
             "runtime_strategy",
             "testcases",
         }
+        if not benchmark_exclusion_reason:
+            required.add("hf_id")
         missing = sorted(required - set(raw))
         if missing:
             raise BenchmarkError(f"model manifest {path} is missing: {', '.join(missing)}")
@@ -250,9 +271,14 @@ class ManifestCatalog:
         )
         if "fp8_scales" in build_settings:
             _resolve_manifest_asset(path, "fp8_scales", build_settings["fp8_scales"])
+        hf_id = raw.get("hf_id", raw.get("model_id", ""))
+        if not isinstance(hf_id, str) or not hf_id.strip():
+            raise BenchmarkError(
+                f"model manifest {path} must declare a non-empty hf_id or model_id"
+            )
         return ModelDescriptor(
             name=str(raw["name"]),
-            hf_id=str(raw["hf_id"]),
+            hf_id=hf_id,
             hf_revision=hf_revision.strip(),
             bundle_name=str(raw["bundle"]),
             family=str(raw["family"]),
@@ -263,6 +289,7 @@ class ManifestCatalog:
             testcases=tuple(testcases),
             build_settings=build_settings,
             distributed_runtime=dict(distributed_runtime),
+            benchmark_exclusion_reason=benchmark_exclusion_reason,
         )
 
 
@@ -280,6 +307,10 @@ def _resolve_manifest_asset(path: Path, field: str, value: object) -> Path:
 
 
 def _require_supported_model(model: ModelDescriptor) -> None:
+    if model.benchmark_exclusion_reason:
+        raise BenchmarkError(
+            f"model profile {model.name!r} is E2E-only: {model.benchmark_exclusion_reason}"
+        )
     adapter = adapter_for_task_strategy(model.task_strategy)
     config = model.distributed_runtime
     if config.get("enabled"):

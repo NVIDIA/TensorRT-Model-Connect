@@ -1762,6 +1762,40 @@ class TestRenderSegmentationModel:
         assert "Reference Segmentation" in html
         assert html.count("data:image/png;base64,") == 2
 
+    def test_accepts_generated_input_and_segmentation_artifacts(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "generated-segmentation"
+        model_dir.mkdir()
+        input_path = model_dir / "input.png"
+        mask_path = model_dir / "mask.png"
+        _make_tiny_png(input_path)
+        _make_tiny_png(mask_path)
+        result = _make_result(
+            name="generated-segmentation",
+            task_strategy="prompted_segmentation",
+            stage_outputs={
+                "trt_tracking": {
+                    "data": {
+                        "input_image_path": str(input_path),
+                        "viz_path": str(mask_path),
+                    }
+                },
+                "ref_tracking": {"data": {"_invariant_only": True}},
+            },
+        )
+        result["case_config"]["reference_backend"] = "invariant_only"
+        result["_artifact_dir"] = str(model_dir)
+
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+        rendered = mod.render_segmentation_model(result, project_dir=tmp_path)
+        assert rendered.count("data:image/png;base64,") == 2
+
+        result["case_config"]["inputs"]["image"] = "missing.png"
+        assert any(
+            "missing or unembeddable input image" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+
     def test_prompted_segmentation_shows_text_prompt(self, tmp_path):
         mod = _import_report()
         model_dir = tmp_path / "prompted-text-segmentation-model"

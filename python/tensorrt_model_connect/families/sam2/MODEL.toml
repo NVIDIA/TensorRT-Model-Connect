@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sam2"
+plugin = "sam2"
+module = "plugin"
+config_adapter = "model_config.py|config_from_dir"
+default_build_route = "model_config.py|prefer_native_default"
+aliases = [
+  "sam2",
+  "sam2_video_tracking",
+  "sam2_bbox_video_tracking",
+]
+prefixes = [
+  "sam2",
+]
+hf_allow_patterns = [
+  "sam2.1_hiera_s.yaml",
+  "sam2.1_hiera_small.pt",
+]
+hf_required_files = [
+  "facebook/sam2.1-hiera-small|sam2.1_hiera_s.yaml",
+  "facebook/sam2.1-hiera-small|sam2.1_hiera_small.pt",
+]

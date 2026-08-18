@@ -169,6 +169,7 @@ def test_validation_ready_models_exclude_l0_and_regression_profiles():
     assert regressions == {
         "minitron-4b-width-regression-native-kv-chunked-prefill",
         "qwen3-0.6b-regression-native-kv-chunked-prefill",
+        "sam2-l4-local",
     }
     assert selected == eligible - l0_only - regressions
 
