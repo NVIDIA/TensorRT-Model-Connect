@@ -8,6 +8,7 @@ runtime_strategies = ["sam2_hoi_video_tracking"]
 runtime_link_libraries = ["jpeg"]
 runtime_tests = [
   "test_hoi_postprocess|test_hoi_postprocess.cpp|_|hoi_postprocess.cpp|_",
+  "test_sam2_hoi_engine_timing|test_sam2_hoi_engine_timing.cpp|_|_|REQUIRES_TRT,REQUIRES_GPU",
   "test_sam2_hoi_pafpn_composite|test_sam2_hoi_pafpn_composite.cpp|nlohmann_json::nlohmann_json|pafpn_composite.cpp|_",
   "test_sam2_hoi_jpeg|test_sam2_hoi_jpeg.cpp|trtmc_jpeg,Threads::Threads|jpeg_decoder.cpp|_",
   "test_sam2_hoi_io|test_sam2_hoi_io.cpp|_|sam2_hoi_io.cpp|_",
