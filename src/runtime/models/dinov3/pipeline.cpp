@@ -58,6 +58,21 @@ std::vector<float> copy_device_tensor_to_floats(const void* data, std::size_t co
     return result;
 }
 
+bool supports_direct_output(const TrtModule& model) {
+    return model.has_input("pixel_values") && !model.input_is_dynamic("pixel_values") &&
+           model.has_output("last_hidden_state") && model.has_output("pooler_output");
+}
+
+bool has_float32_outputs(const TrtModule& model) {
+    return model.tensor_dtype("last_hidden_state") == DType::kFloat32 &&
+           model.tensor_dtype("pooler_output") == DType::kFloat32;
+}
+
+bool has_supported_shapes(const std::vector<int64_t>& hidden, const std::vector<int64_t>& pooler) {
+    return hidden.size() == 3 && pooler.size() == 2 && hidden[0] == 1 && pooler[0] == 1 &&
+           hidden[2] == pooler[1];
+}
+
 const Tensor& require_output(const TensorMap& outputs, const char* name) {
     const auto output = outputs.find(name);
     if (output == outputs.end())
@@ -76,19 +91,16 @@ Dinov3ImageFeaturePipeline::Dinov3ImageFeaturePipeline(std::unique_ptr<TrtModule
     if (!model_ || !model_->ok())
         throw std::runtime_error("Dinov3ImageFeaturePipeline: invalid model");
 
-    if (!model_->has_input("pixel_values") || model_->input_is_dynamic("pixel_values") ||
-        !model_->has_output("last_hidden_state") || !model_->has_output("pooler_output"))
+    if (!supports_direct_output(*model_))
         return;
 
     auto hidden_shape = model_->tensor_shape("last_hidden_state");
     auto pooler_shape = model_->tensor_shape("pooler_output");
     const auto hidden = model_->device_ptr("last_hidden_state");
     const auto pooler = model_->device_ptr("pooler_output");
-    if (hidden == nullptr || pooler == nullptr ||
-        model_->tensor_dtype("last_hidden_state") != DType::kFloat32 ||
-        model_->tensor_dtype("pooler_output") != DType::kFloat32 || hidden_shape.size() != 3 ||
-        pooler_shape.size() != 2 || hidden_shape[0] != 1 || pooler_shape[0] != 1 ||
-        hidden_shape[2] != pooler_shape[1])
+    if (hidden == nullptr || pooler == nullptr)
+        return;
+    if (!has_float32_outputs(*model_) || !has_supported_shapes(hidden_shape, pooler_shape))
         return;
 
     const auto hidden_count =
