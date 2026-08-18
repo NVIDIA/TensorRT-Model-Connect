@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import copy
+from contextlib import contextmanager
 import importlib
 import inspect
 import json
@@ -37,7 +39,7 @@ from .families import (
     resolve_nemo_archive_model_dir,
 )
 from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
-from .bundle_writer import BundleInfo, BundleSection, write_bundle
+from .bundle_writer import BundleInfo, BundleSection, FileBundleSection, write_bundle
 from . import trt_compat
 from .triattention_export import (
     TriAttentionBundleConfig,
@@ -297,6 +299,161 @@ def _normalize_bundle_sections(
             )
         sections.append(BundleSection(section.name, bytes(section.data)))
     return sections
+
+
+@contextmanager
+def _file_backed_section_staging():
+    """Own one temporary section directory through bundle publication."""
+    with tempfile.TemporaryDirectory(prefix="trtmc-file-sections-") as directory:
+        yield Path(directory)
+
+
+def _file_backed_bundle_hook(plugin):
+    """Return only an explicitly declared hook, not dynamic mock attributes."""
+    try:
+        inspect.getattr_static(plugin, "build_file_backed_bundle_sections")
+    except AttributeError:
+        return None
+    hook = getattr(plugin, "build_file_backed_bundle_sections", None)
+    return hook if callable(hook) else None
+
+
+def _normalize_file_backed_bundle_sections(
+    plugin,
+    raw_sections,
+    *,
+    staging_dir: Path,
+) -> list[FileBundleSection]:
+    if not isinstance(raw_sections, (list, tuple)):
+        raise TypeError(
+            f"Plugin {plugin.name}.build_file_backed_bundle_sections() must return "
+            "a list or tuple so section order is deterministic"
+        )
+    staging_root = staging_dir.resolve(strict=True)
+    sections: list[FileBundleSection] = []
+    names: set[str] = set()
+    for index, section in enumerate(raw_sections):
+        if not isinstance(section, FileBundleSection):
+            raise TypeError(
+                f"Plugin {plugin.name}.build_file_backed_bundle_sections() item {index} "
+                "must be a FileBundleSection"
+            )
+        if section.expected_sha256 is None:
+            raise ValueError(
+                f"Plugin {plugin.name}.build_file_backed_bundle_sections() item {index} "
+                "must declare expected_sha256"
+            )
+        if not section.name or section.name in names:
+            raise ValueError(
+                f"Plugin {plugin.name}.build_file_backed_bundle_sections() has "
+                f"an invalid or duplicate section name: {section.name!r}"
+            )
+        source = section.source_path.resolve(strict=True)
+        if not source.is_relative_to(staging_root):
+            raise ValueError(
+                f"Plugin {plugin.name}.build_file_backed_bundle_sections() item {index} "
+                "must be inside its staging_dir"
+            )
+        names.add(section.name)
+        sections.append(section)
+    return sections
+
+
+def _validate_staged_bundle_inventory(
+    sections: list[BundleSection | FileBundleSection],
+) -> None:
+    """Fail before publication when staged config cannot partition the bundle."""
+    config_sections = [section for section in sections if section.name == "config.json"]
+    if len(config_sections) != 1:
+        return
+    config_section = config_sections[0]
+    if not isinstance(config_section, BundleSection):
+        raise ValueError("Staged bundle config.json must be an in-memory section")
+    try:
+        config = json.loads(config_section.data)
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as error:
+        raise ValueError("Bundle config.json is not valid JSON") from error
+    policy = config.get("bundle_loading") if isinstance(config, dict) else None
+    if policy is None:
+        return
+    if not isinstance(policy, dict) or set(policy) != {
+        "mode",
+        "eager_sections",
+        "lazy_sections",
+    }:
+        raise ValueError("Invalid staged bundle_loading policy schema")
+    eager = policy.get("eager_sections")
+    lazy = policy.get("lazy_sections")
+    if (
+        policy.get("mode") != "staged"
+        or not isinstance(eager, list)
+        or not isinstance(lazy, list)
+        or not eager
+        or not lazy
+        or any(not isinstance(name, str) or not name for name in [*eager, *lazy])
+        or "config.json" not in eager
+    ):
+        raise ValueError("Invalid staged bundle_loading policy")
+    declared = [*eager, *lazy]
+    actual = [section.name for section in sections]
+    if len(declared) != len(set(declared)) or len(actual) != len(set(actual)):
+        raise ValueError("Staged bundle_loading contains duplicate section names")
+    if set(declared) != set(actual):
+        missing = sorted(set(actual) - set(declared))
+        unknown = sorted(set(declared) - set(actual))
+        raise ValueError(
+            "Staged bundle_loading must partition bundle sections exactly; "
+            f"undeclared={missing}, absent={unknown}"
+        )
+
+
+def _file_backed_bundle_sections_from_plugin(
+    plugin,
+    config,
+    weights,
+    max_cache_length: int,
+    *,
+    staging_dir: Path,
+    precision: str,
+    verbose: bool,
+    quant_ctx,
+    build_timing: dict,
+    parallel_config: ParallelConfig,
+) -> list[FileBundleSection]:
+    """Materialize late-bound files after model-owned config is rendered.
+
+    Inventory-dependent config such as ``bundle_loading`` belongs in the
+    existing ``get_bundle_config_overrides(config)`` hook. This hook must not
+    mutate config because config.json has already been serialized.
+    """
+    hook = _file_backed_bundle_hook(plugin)
+    if hook is None:
+        return []
+    config_before = copy.deepcopy(config.raw)
+    kwargs = {"staging_dir": staging_dir, "verbose": verbose}
+    if _call_supports_kwarg(hook, "precision"):
+        kwargs["precision"] = precision
+    if _call_supports_kwarg(hook, "quant_ctx"):
+        kwargs["quant_ctx"] = quant_ctx
+    if _call_supports_kwarg(hook, "build_timing"):
+        kwargs["build_timing"] = build_timing
+    if _call_supports_kwarg(hook, "parallel_config"):
+        kwargs["parallel_config"] = parallel_config
+    raw_sections = hook(config, weights, max_cache_length, **kwargs)
+    if config.raw != config_before:
+        raise RuntimeError(
+            f"Plugin {plugin.name}.build_file_backed_bundle_sections() mutated config; "
+            "use get_bundle_config_overrides(config) instead"
+        )
+    if raw_sections is None:
+        raise ValueError(
+            f"Plugin {plugin.name}.build_file_backed_bundle_sections() returned None"
+        )
+    return _normalize_file_backed_bundle_sections(
+        plugin,
+        raw_sections,
+        staging_dir=staging_dir,
+    )
 
 
 def _diffusion_bundle_sections_from_plugin(
@@ -1612,8 +1769,48 @@ def build_bundle(
         manifest_json = json.dumps({"kernels": manifest_entries}).encode("utf-8")
         sections.append(BundleSection("kernel_manifest.json", manifest_json))
 
-    write_t0 = time.monotonic()
-    write_bundle(output_path, info, sections)
+    file_backed_hook = _file_backed_bundle_hook(plugin)
+    if file_backed_hook is not None:
+        with _file_backed_section_staging() as staging_dir:
+            file_backed_t0 = time.monotonic()
+            compile_before_file_backed = _build_timing_phase(build_timing, "trt_compile_s")
+            try:
+                file_backed_sections = _file_backed_bundle_sections_from_plugin(
+                    plugin,
+                    config,
+                    weights,
+                    max_cache_length,
+                    staging_dir=staging_dir,
+                    precision=precision,
+                    verbose=verbose,
+                    quant_ctx=quant_ctx,
+                    build_timing=build_timing,
+                    parallel_config=parallel,
+                )
+                sections.extend(file_backed_sections)
+            finally:
+                file_backed_elapsed = time.monotonic() - file_backed_t0
+                untracked_file_backed = _untracked_compile_time(
+                    file_backed_elapsed, compile_before_file_backed, build_timing)
+                _add_build_timing(build_timing, "trt_compile_s", untracked_file_backed)
+                _add_build_timing(
+                    build_timing,
+                    "trt_compile_file_backed_sections_s",
+                    file_backed_elapsed,
+                )
+                _write_build_timing(build_timing)
+            print(
+                f"[trtmc build] File-backed sections built [{file_backed_elapsed:.1f}s] "
+                f"({len(file_backed_sections)} sections)",
+                file=sys.stderr,
+            )
+            _validate_staged_bundle_inventory(sections)
+            write_t0 = time.monotonic()
+            write_bundle(output_path, info, sections)
+    else:
+        _validate_staged_bundle_inventory(sections)
+        write_t0 = time.monotonic()
+        write_bundle(output_path, info, sections)
     _add_build_timing(build_timing, "bundle_write_s", time.monotonic() - write_t0)
     t4 = time.monotonic()
     build_timing["total_s"] = t4 - t0

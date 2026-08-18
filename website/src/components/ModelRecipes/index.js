@@ -31,7 +31,7 @@ export default function ModelRecipeTaskIndex() {
           <table>
             <thead>
               <tr>
-                <th>Hugging Face task</th>
+                <th>Task category</th>
                 <th>Model families</th>
                 <th>Declared recipes</th>
                 <th>What it covers</th>

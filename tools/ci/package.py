@@ -34,6 +34,7 @@ WHEEL_INSTALL_STATE = "wheel-installed.json"
 RELEASE_LEGAL_FILES = ("LICENSE", "NOTICE", "ASSET_LICENSES.md")
 PACKAGE_TENSORRT_VERSION_ENV = "TRTMC_PACKAGE_TENSORRT_VERSION"
 EXACT_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
+SAM2_HOI_RUNTIME_LIBRARY = "libtrtmc_model_sam2_hoi.so"
 
 
 def _target_tensorrt_version(
@@ -191,6 +192,56 @@ def _validate_archive_backend_identity(
             root / "libtrtmc_backend_trt.so"
         )
     _validate_backend_identity(location, tensorrt_version, backend_abi, runtime_version)
+
+
+def validate_sam2_hoi_release_dso(
+    context: CiContext,
+    location: str,
+    path: Path,
+) -> tuple[str, str]:
+    """Require SAM2-HOI's release DSO to own a private static libjpeg copy."""
+
+    dynamic = context.output(["readelf", "--wide", "-d", path])
+    needed = re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", dynamic)
+    jpeg_dependencies = sorted(name for name in needed if "jpeg" in name.lower())
+    if jpeg_dependencies:
+        raise CiError(
+            f"{location}: {SAM2_HOI_RUNTIME_LIBRARY} has external libjpeg DT_NEEDED "
+            f"entries: {jpeg_dependencies}"
+        )
+
+    symbols = context.output(["readelf", "--wide", "--dyn-syms", path])
+    jpeg_exports = set()
+    for line in symbols.splitlines():
+        fields = line.split()
+        if len(fields) < 8 or not fields[0].endswith(":"):
+            continue
+        bind, visibility, index = fields[4:7]
+        name = fields[7].split("@", maxsplit=1)[0]
+        if (
+            bind == "GLOBAL"
+            and visibility == "DEFAULT"
+            and index != "UND"
+            and name.startswith("jpeg_")
+        ):
+            jpeg_exports.add(name)
+    if jpeg_exports:
+        raise CiError(
+            f"{location}: {SAM2_HOI_RUNTIME_LIBRARY} exports global/default libjpeg "
+            f"symbols: {sorted(jpeg_exports)}"
+        )
+    return dynamic, symbols
+
+
+def _validate_archive_sam2_hoi_release_dso(
+    context: CiContext,
+    location: str,
+    payload: bytes,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="trtmc-wheel-sam2-hoi-") as directory:
+        path = Path(directory) / SAM2_HOI_RUNTIME_LIBRARY
+        path.write_bytes(payload)
+        validate_sam2_hoi_release_dso(context, location, path)
 
 
 class InstalledWheelValidator:
@@ -370,6 +421,19 @@ class WheelArchiveValidator:
                 for name in names
                 if "/bin/libtrtmc_backend_trt" in name and name.endswith(".so")
             ]
+            model_plugins = sorted(
+                name
+                for name in names
+                if "/bin/libtrtmc_model_" in name and name.endswith(".so")
+            )
+            sam2_hoi_plugins = [
+                name for name in model_plugins if Path(name).name == SAM2_HOI_RUNTIME_LIBRARY
+            ]
+            if len(sam2_hoi_plugins) != 1:
+                raise CiError(
+                    f"{wheel}: expected exactly one packaged {SAM2_HOI_RUNTIME_LIBRARY}, "
+                    f"found {len(sam2_hoi_plugins)}"
+                )
             metadata_entries = sorted(
                 name for name in names if name.endswith(".dist-info/METADATA")
             )
@@ -402,6 +466,11 @@ class WheelArchiveValidator:
                 str(wheel),
                 tensorrt_version,
                 native_payloads,
+            )
+            _validate_archive_sam2_hoi_release_dso(
+                self.context,
+                str(wheel),
+                archive.read(sam2_hoi_plugins[0]),
             )
             wheel_metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/WHEEL"))
@@ -473,6 +542,7 @@ class WheelArchiveValidator:
                 *package_cores,
                 *script_cores,
                 *backends,
+                *model_plugins,
             ]
         ):
             print(f"  {entry}")

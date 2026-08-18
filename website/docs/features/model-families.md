@@ -11,7 +11,8 @@ bundle metadata.
 
 On the native path, family plugins can:
 
-- Match a Hugging Face `model_type` or diffusers pipeline class.
+- Match a Hugging Face `model_type`, a diffusers pipeline class, or an
+  explicitly declared local source package.
 - Load and normalize weights.
 - Emit the concrete model-owned runtime strategy implemented by the matching
   C++ model DSO.
@@ -23,7 +24,7 @@ On the native path, family plugins can:
 
 Native family packages live in
 `python/tensorrt_model_connect/families/<family>/`. At this revision there are
-78 package manifests. Use the repository validator for the live inventory:
+80 package manifests. Use the repository validator for the live inventory:
 
 ```bash
 python3 tools/model_ci.py validate
@@ -41,7 +42,8 @@ Common native TensorRT groups:
 - Audio and speech: Whisper, Canary, Bark, Magpie, PersonaPlex, Nemotron streaming.
 - Diffusion: FLUX, Wan 2.1/2.2, LTX-Video, Qwen-Image, SANA-WM, Z-Image,
   PixArt.
-- Perception: SegFormer, SAM, SAM3, and timm ViT classification.
+- Perception: SegFormer, SAM, SAM2-HOI video tracking, SAM3, and timm ViT
+  classification.
 - Time-series/operators: Chronos-Bolt, PatchTSMixer, PatchTST, and TimesFM.
 
 ### LocateAnything task contract

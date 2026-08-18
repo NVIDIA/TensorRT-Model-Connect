@@ -176,10 +176,11 @@ The host half, `ModelProofRunner`, performs trusted setup:
 1. Create a positive source projection with `tools/model_ci.py project`.
 2. Validate that the projection contains the requested model and approved
    platform files, but no peer model source.
-3. Select the model-owned runtime, Python tests, E2E cases, resource class, and
-   optional reference checkout.
+3. Select the model-owned runtime, Python tests, E2E cases, resource class,
+   optional reference checkout, and optional digest-pinned local source package.
 4. Warm only the selected Hugging Face repositories and reflink them into a
-   proof-private cache view.
+   proof-private cache view, copy any selected reference, and privately
+   materialize any selected local source package.
 5. Acquire either shared GPU slots or a whole GPU through `GpuLease`.
 6. Start a read-only, network-disabled proof container.
 
@@ -261,6 +262,7 @@ path-scoped Pages builds are independent.
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
 | `model_proof_inner.py` | Build, test, compare, and report one model | Hermetic container |
 | `model_reference_cache.py` | Warm and verify pinned external model-reference checkouts | Trusted host |
+| `model_source_cache.py` | Verify and privately materialize digest-pinned local model-source archives | Trusted host |
 | `validation.py` | Prepare and run eligible nightly ETTh1 parity | Host and container |
 
 `scripts/schedule_e2e.py` is a compatibility entry point. The implementation is
@@ -603,6 +605,21 @@ the producing class remains the source of truth for optional evidence fields.
   pinned commit privately with `git archive`, and runs the proof without a
   network. Bulk nightly warming and selected premerge first-use warming share
   the same validation and atomic publication path.
+
+### `model_source_cache.py`
+
+- **Functionality / units:** `ModelSourcePackagePreparer` resolves one
+  suite-selected `[model_source_package]`, snapshots its cache file, verifies
+  the declared SHA-256 digest, and materializes a private regular-file tree.
+- **Inputs:** The selected owner contract, `TRTMC_MODEL_SOURCE_CACHE_ROOT`, a
+  family-owned `.tar.gz` cache path, and proof-private work/artifact roots.
+- **Outputs:** A symlink-free private payload plus
+  `model-source-package.json`, including exact member counts and a deterministic
+  materialized-tree digest.
+- **Boundary:** Archive size, member count, paths, metadata, link targets, and
+  expansion are validated before the GPU lease. The proof container receives
+  only the validated tree as an exact read-only nested mount; it never sees the
+  shared archive cache.
 
 ### `model_proof_selection.py`
 

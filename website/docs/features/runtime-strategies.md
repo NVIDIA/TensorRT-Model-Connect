@@ -23,23 +23,23 @@ selects that path before reading a native strategy.
 | Vision and multimodal | `qwen_vl_vision_language`, `internvl_vision_language`, `qwen3_omni_multimodal` |
 | Speech and audio | `whisper_speech_to_text`, `nemotron_speech_streaming_speech_to_text_rnnt`, `text_to_audio_bark`, `personaplex_speech_to_speech` |
 | Diffusion | `diffusion_flux`, `diffusion_wan`, `diffusion_wan2_2_ti2v`, `diffusion_qwen_image`, `diffusion_sana_wm` |
-| Perception | `dinov3_image_feature_extraction`, `segformer_segmentation`, `sam_prompted_segmentation`, `sam3_prompted_segmentation`, `timm_vit_image_classification` |
+| Perception | `dinov3_image_feature_extraction`, `segformer_segmentation`, `sam_prompted_segmentation`, `sam3_prompted_segmentation`, `sam2_hoi_video_tracking`, `timm_vit_image_classification` |
 | Numeric operators | `chronos_bolt_trt`, `patchtsmixer_trt`, `patchtst_trt`, `timesfm_trt` |
 
 The complete live list is the union of the `runtime_strategies` arrays in the
-runtime model manifests. At this revision it contains 81 unique keys for 80
+runtime model manifests. At this revision it contains 82 unique keys for 81
 runtime owners.
 
 ## Runtime strategy versus task strategy
 
 Do not use a generic task label as a runtime strategy:
 
-| Layer | Qwen example | LLaMA example |
-| --- | --- | --- |
-| Python family | `qwen` | `llama` |
-| Runtime strategy | `qwen_decoder_kv_cache` | `llama_decoder_kv_cache` |
-| Runtime DSO | `libtrtmc_model_qwen.so` | `libtrtmc_model_llama.so` |
-| E2E task strategy | `text_generation_causal` | `text_generation_causal` |
+| Layer | Qwen example | LLaMA example | SAM2-HOI example |
+| --- | --- | --- | --- |
+| Python family | `qwen` | `llama` | `sam2_hoi` |
+| Runtime strategy | `qwen_decoder_kv_cache` | `llama_decoder_kv_cache` | `sam2_hoi_video_tracking` |
+| Runtime DSO | `libtrtmc_model_qwen.so` | `libtrtmc_model_llama.so` | `libtrtmc_model_sam2_hoi.so` |
+| E2E task strategy | `text_generation_causal` | `text_generation_causal` | `hoi_video_tracking` |
 
 The task strategy lets generic runners and comparators share a user contract.
 The runtime strategy keeps pipeline code, state, samplers, helpers, and

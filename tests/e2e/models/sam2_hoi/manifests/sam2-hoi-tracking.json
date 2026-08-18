@@ -1,0 +1,95 @@
+{
+  "name": "sam2-hoi-tracking",
+  "hf_id": "artifacts/sam2_hoi/hoi",
+  "model_source_kind": "local_source_package",
+  "bundle": "sam2-hoi-tracking.bundle",
+  "family": "sam2_hoi",
+  "runtime_strategy": "sam2_hoi_video_tracking",
+  "task_strategy": "hoi_video_tracking",
+  "precision": "bf16",
+  "max_cache_length": 7,
+  "trust_remote_code": false,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "testcases": [
+    {
+      "name": "sam2-hoi-tracking",
+      "trace_id": "IT-E2E-SAM2-HOI-01",
+      "comparison_profile": "sam2-hoi-full-chain-accuracy-v2",
+      "reference_precision": "bf16",
+      "frames_dir": "artifacts/sam2_hoi/hoi/inputs",
+      "reference_npz": "artifacts/sam2_hoi/hoi/reference/torch_reference.npz",
+      "expected_frame_count": 5,
+      "expected_height": 1280,
+      "expected_width": 1088,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/SOURCE_COMMIT"
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/checkpoint/sam2.1_hiera_small_with_hoi_ft_aug_e5_c4.pt"
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/inputs/000000.jpg"
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/inputs/000001.jpg"
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/inputs/000002.jpg"
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/inputs/000003.jpg"
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/inputs/000004.jpg"
+          },
+          "gating": true
+        },
+        {
+          "kind": "asset_exists",
+          "args": {
+            "path": "artifacts/sam2_hoi/hoi/reference/torch_reference.npz"
+          },
+          "gating": true
+        }
+      ],
+      "metadata": {
+        "source_commit": "79ab25d6bd5535bcb748de9f3b90e16b1a24e58d",
+        "checkpoint_sha256": "88849a8268a38ba66061093f90866af1d033d05d0f1de865534bf490e9880292",
+        "archive_layout": "Extract the reviewed hoi package at artifacts/sam2_hoi/hoi so SOURCE_COMMIT, checkpoint/, inputs/, reference/, sam2/, and vendor/ remain siblings.",
+        "output_contract": "All five frames must retain exact object IDs, detection labels, and interaction pairs, plus bounded boxes, scores, and binary masks."
+      }
+    }
+  ]
+}

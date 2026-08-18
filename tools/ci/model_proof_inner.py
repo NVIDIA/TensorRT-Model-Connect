@@ -8,17 +8,24 @@ Boundary: projected-source validation, build, tests, comparison, and per-model r
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
 from .context import CiContext
 from .model_proof import ModelProofRequest
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
+from .model_source_cache import (
+    MODEL_SOURCE_CACHE_ROOT_ENV,
+    materialized_tree_sha256,
+)
+from .package import SAM2_HOI_RUNTIME_LIBRARY, validate_sam2_hoi_release_dso
 from .process import CiError
 from .selected_wheel import SelectedWheelRuntime
 from .validation import ValidationRunner
@@ -58,6 +65,7 @@ class ProofStatus:
 
     STEPS = {
         "hf_cache_isolation": "hf-cache-repos.json",
+        "model_source_isolation": "model-source-package.json",
         "model_reference_isolation": "selection.json",
         "projection_validation": "source-projection.json, selection.json",
         "configure": "configure.log",
@@ -161,10 +169,6 @@ class ModelProofInnerPipeline:
             self.status = ProofStatus(
                 self.artifacts / "model-proof-status.json", self.request, lease
             )
-            count = self._validate_hf_cache()
-            self.status.step("hf_cache_isolation", "passed")
-            self.status.fact("hf_cache_isolation", "selected-repositories-only")
-            self.status.fact("hf_cache_repository_count", count)
             shutil.copy2(
                 self.source / ".trtmc-model-projection.json",
                 self.artifacts / "source-projection.json",
@@ -172,6 +176,11 @@ class ModelProofInnerPipeline:
             self.selection = ModelProofSelector(
                 self.request.model, self.request.suite, self.request.revision, self.source
             ).select(self.artifacts / "selection.json", lease)
+            count = self._validate_hf_cache()
+            self.status.step("hf_cache_isolation", "passed")
+            self.status.fact("hf_cache_isolation", "selected-repositories-only")
+            self.status.fact("hf_cache_repository_count", count)
+            self._validate_model_source_package()
             self._validate_reference_cache()
             self.status.step("projection_validation", "passed")
             self._build_and_test()
@@ -367,6 +376,7 @@ class ModelProofInnerPipeline:
         return expected
 
     def _validate_hf_cache(self) -> int:
+        assert self.selection
         expected_environment = {
             "HF_HOME": "/work/hf-home",
             "HF_MODULES_CACHE": "/work/hf-modules",
@@ -388,9 +398,21 @@ class ModelProofInnerPipeline:
         payload = json.loads((self.artifacts / "hf-cache-repos.json").read_text(encoding="utf-8"))
         if payload.get("schema_version") != 1 or payload.get("hub_cache") != "/hf-cache/hub":
             raise CiError("selected HF cache evidence has an unsupported schema")
+        if payload.get("selected_models") != sorted(self.selection.e2e_models):
+            raise CiError("selected HF cache evidence has the wrong model selection")
         repositories = payload.get("repositories")
-        if not isinstance(repositories, list) or not repositories:
-            raise CiError("selected HF cache evidence contains no repositories")
+        if not isinstance(repositories, list):
+            raise CiError("selected HF cache evidence repositories must be a list")
+        local_source_only = payload.get("local_source_only")
+        if not repositories:
+            if not (
+                local_source_only is True
+                and self.selection.model_source_package is not None
+                and not self.selection.hf_models
+            ):
+                raise CiError("selected HF cache evidence contains no repositories")
+        elif local_source_only is not False:
+            raise CiError("non-empty HF cache evidence cannot be local-source-only")
         expected_folders = set()
         for entry in repositories:
             repo_id = entry.get("repo_id") if isinstance(entry, dict) else None
@@ -405,6 +427,8 @@ class ModelProofInnerPipeline:
                 raise CiError(f"selected HF cache evidence is noncanonical for {repo_id!r}")
             if entry.get("cache_path") != f"/hf-cache/hub/{folder}":
                 raise CiError(f"selected HF cache evidence has an invalid path for {repo_id!r}")
+            if folder in expected_folders:
+                raise CiError(f"selected HF cache evidence duplicates {repo_id!r}")
             path = hub / folder
             if (
                 path.is_symlink()
@@ -419,6 +443,128 @@ class ModelProofInnerPipeline:
                 f"selected HF cache view mismatch: {sorted(actual)} != {sorted(expected_folders)}"
             )
         return len(repositories)
+
+    @staticmethod
+    def _mount_is_read_only(path: Path) -> bool:
+        def unescape(value: str) -> str:
+            return (
+                value.replace("\\040", " ")
+                .replace("\\011", "\t")
+                .replace("\\012", "\n")
+                .replace("\\134", "\\")
+            )
+
+        expected = str(path.resolve(strict=True))
+        for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+            before, separator, _after = line.partition(" - ")
+            fields = before.split()
+            if not separator or len(fields) < 6:
+                continue
+            if unescape(fields[4]) == expected:
+                return "ro" in fields[5].split(",")
+        return False
+
+    def _validate_model_source_package(self) -> None:
+        assert self.status and self.selection
+        contract = self.selection.model_source_package
+        evidence_path = self.artifacts / "model-source-package.json"
+        if not contract:
+            if self.context.env.get(MODEL_SOURCE_CACHE_ROOT_ENV) or evidence_path.exists():
+                raise CiError("model source package exposed for a model that declares none")
+            self.status.step(
+                "model_source_isolation",
+                "passed",
+                "selection.json (no local model source package required)",
+            )
+            self.status.fact("model_source_isolation", "not-required")
+            return
+        if self.context.env.get(MODEL_SOURCE_CACHE_ROOT_ENV):
+            raise CiError("shared model source package cache must not enter the proof container")
+
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        expected = {
+            "schema_version": 1,
+            "model": self.request.model,
+            "isolation": "selected-digest-private",
+            "cache_file": contract["cache_file"],
+            "sha256": contract["sha256"],
+            "project_path": contract["project_path"],
+            "entrypoint": contract["entrypoint"],
+            "container_path": f"/src/{contract['project_path']}",
+            "copy_method": "verified-tar-materialization",
+        }
+        for key, value in expected.items():
+            if evidence.get(key) != value:
+                raise CiError(f"model source package evidence mismatch for {key}")
+        counts = {}
+        for field in (
+            "member_count",
+            "regular_file_count",
+            "directory_count",
+            "materialized_symlink_count",
+        ):
+            value = evidence.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise CiError(f"model source package evidence has an invalid {field}")
+            counts[field] = value
+        if counts["member_count"] != (
+            counts["regular_file_count"]
+            + counts["directory_count"]
+            + counts["materialized_symlink_count"]
+        ):
+            raise CiError("model source package evidence member counts do not reconcile")
+
+        root = self.source.joinpath(*Path(contract["project_path"]).parts)
+        if root.is_symlink() or not root.is_dir():
+            raise CiError("selected model source package mount is unavailable")
+        if not root.resolve().is_relative_to(self.source.resolve()):
+            raise CiError("selected model source package mount escapes /src")
+        regular_files = 0
+        directories = 0
+        for path in root.rglob("*"):
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise CiError("selected model source package mount contains a symlink")
+            if stat.S_ISREG(metadata.st_mode):
+                regular_files += 1
+            elif stat.S_ISDIR(metadata.st_mode):
+                directories += 1
+            else:
+                raise CiError("selected model source package mount contains a special file")
+        if (
+            regular_files != (counts["regular_file_count"] + counts["materialized_symlink_count"])
+            or directories < counts["directory_count"]
+        ):
+            raise CiError("selected model source package tree does not match its evidence")
+        entrypoint = root.joinpath(*Path(contract["entrypoint"]).parts)
+        if entrypoint.is_symlink() or not entrypoint.is_file():
+            raise CiError("selected model source package entrypoint is not a regular file")
+        tree_digest = evidence.get("materialized_tree_sha256")
+        if (
+            not isinstance(tree_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", tree_digest)
+            or materialized_tree_sha256(root) != tree_digest
+        ):
+            raise CiError("selected model source package tree digest mismatch")
+        if not self._mount_is_read_only(root):
+            raise CiError("selected model source package is not an exact read-only mount")
+        probe = root / f".trtmc-write-probe-{os.getpid()}"
+        try:
+            descriptor = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as error:
+            if error.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
+                raise CiError(
+                    "selected model source package write probe failed unexpectedly"
+                ) from error
+        else:
+            os.close(descriptor)
+            probe.unlink(missing_ok=True)
+            raise CiError("selected model source package mount is writable")
+
+        self.status.step("model_source_isolation", "passed", "model-source-package.json")
+        self.status.fact("model_source_isolation", "selected-digest-private")
+        self.status.fact("model_source_sha256", contract["sha256"])
+        self.status.fact("model_source_tree_sha256", tree_digest)
 
     def _validate_reference_cache(self) -> None:
         assert self.status and self.selection
@@ -564,12 +710,22 @@ class ModelProofInnerPipeline:
             "model_reference_isolation": (
                 "selected-pinned-private" if self.selection.reference_cache else "not-required"
             ),
+            "model_source_isolation": (
+                "selected-digest-private" if self.selection.model_source_package else "not-required"
+            ),
         }
         if self.selection.min_free_gpu_memory_mib:
             proof["gpu_memory_admission"] = payload["gpu_memory_admission"]
         if self.selection.reference_cache:
             proof["model_reference_revision"] = self.selection.reference_cache["revision"]
             proof["model_reference_evidence"] = "model-reference-cache.json"
+        if self.selection.model_source_package:
+            source_evidence = json.loads(
+                (self.artifacts / "model-source-package.json").read_text(encoding="utf-8")
+            )
+            proof["model_source_sha256"] = self.selection.model_source_package["sha256"]
+            proof["model_source_tree_sha256"] = source_evidence["materialized_tree_sha256"]
+            proof["model_source_evidence"] = "model-source-package.json"
         proof.update(self._selected_wheel_proof())
         (self.artifacts / "proof.json").write_text(
             json.dumps(proof, indent=2) + "\n", encoding="utf-8"
@@ -635,6 +791,23 @@ class ModelProofInnerPipeline:
                     f"selected wheel model DSO is missing or unsafe: {runtime_library}"
                 )
             runtime_library_source = "selected-wheel"
+            if runtime_model == "sam2_hoi":
+                if runtime_library != SAM2_HOI_RUNTIME_LIBRARY:
+                    raise CiError(
+                        f"SAM2-HOI selected an unexpected runtime library: {runtime_library}"
+                    )
+                wheel_dynamic, wheel_symbols = validate_sam2_hoi_release_dso(
+                    self.context,
+                    "selected wheel",
+                    runtime_dso,
+                )
+                (self.artifacts / "selected-wheel-model-dso.dynamic.txt").write_text(
+                    wheel_dynamic + "\n", encoding="utf-8"
+                )
+                (self.artifacts / "selected-wheel-model-dso.dyn-syms.txt").write_text(
+                    wheel_symbols + "\n", encoding="utf-8"
+                )
+                self.status.fact("sam2_hoi_libjpeg_linkage", "private-static")
 
         plugin_dir = self.work / "model-plugins" / runtime_model
         plugin_dir.mkdir(parents=True)

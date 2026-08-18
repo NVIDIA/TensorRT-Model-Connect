@@ -1,0 +1,6 @@
+FlashAttention commit: 979702c87a8713a8e0a5e9fee122b90d2ef13be5
+PyTorch pin: e2d141dbde55c2a4370fac5165b0561b6af4798b
+Source path: third_party/flash-attention/csrc/flash_attn/src
+Vendored scope: exact 12-header compile closure for SAM2-HOI Hiera forward BF16 D96 only.
+Local delta: flash.h and flash_fwd_kernel.h include the self-contained philox_at_free.cuh shim instead of ATen CUDA headers; the shim preserves the dead dropout-state layout used by the exact kernel code generation.
+Philox source paths at the PyTorch pin: aten/src/ATen/cuda/detail/PhiloxCudaStateRaw.cuh and aten/src/ATen/cuda/detail/UnpackRaw.cuh.

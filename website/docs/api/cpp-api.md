@@ -66,6 +66,44 @@ schema-driven JSON file on the C++ path. `set_tokens` supplies repeatable
 The current Qwen Edge-LLM optimized implementation rejects both runtime config
 surfaces instead of silently ignoring them.
 
+## Video tracking capability
+
+Video tracking is an optional capability interface, separate from
+`IPipeline`, so adding it does not shift the base pipeline ABI. Test for the
+capability after loading a bundle:
+
+```cpp
+auto pipe = trtmc::load("/tmp/sam2-hoi.bundle", options);
+auto* tracker = dynamic_cast<trtmc::IVideoTrackingPipeline*>(pipe.get());
+if (tracker == nullptr) {
+    throw std::runtime_error("bundle does not support video tracking");
+}
+
+std::vector<trtmc::VideoFrame> owned;
+owned.push_back(tracker->load_video_frame("000000.jpg"));
+owned.push_back(tracker->load_video_frame("000001.jpg"));
+
+std::vector<trtmc::VideoFrameView> views;
+for (const auto& frame : owned) {
+    views.push_back(frame.view());
+}
+
+const int32_t produced = tracker->track_video(
+    views, "/tmp/tracking.json", "/tmp/tracking-masks");
+```
+
+`VideoFrame` owns RGB HWC float32 pixels in `[0, 1]` and its `view()` returns a
+borrowed `VideoFrameView`. Keep every owner and its pixel storage alive and
+unmodified for the complete `track_video()` call. `load_video_frame()` lets a
+family select a source-compatible decoder; this matters when small JPEG pixel
+differences can change detector postprocessing. The call is one-shot and owns
+the model-specific session/state internally. Its return value is the number of
+produced frames, while the selected family defines the JSON schema and assets
+written under the output directory. Passing both output paths as empty strings
+runs the complete synchronous capability call but discards JSON and per-frame
+assets. This supports in-process timing without file I/O. Exactly one empty
+output path is invalid.
+
 ## Inspect a bundle without loading it
 
 `include/trtmc/bundle.h` exposes metadata inspection independently of

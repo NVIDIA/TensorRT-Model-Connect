@@ -92,6 +92,7 @@ class TrtModuleImpl final : public ITrtModule {
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
     bool alias_groups_ready_{true};
+    bool timing_enabled_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, void*> initial_external_bindings_;

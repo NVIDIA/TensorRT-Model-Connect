@@ -13,6 +13,7 @@ Postconditions: Bundle magic bytes, header JSON, section offsets/sizes, and payl
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import struct
@@ -25,7 +26,9 @@ from tensorrt_model_connect.bundle_writer import (
     BUNDLE_MAGIC,
     BundleInfo,
     BundleSection,
+    FileBundleSection,
     _bundle_section_from_file,
+    bundle_section_from_file,
     write_bundle,
 )
 
@@ -41,6 +44,21 @@ class TestBundleMagic:
 def test_bundle_section_public_constructor_remains_name_and_bytes_only():
     assert tuple(inspect.signature(BundleSection).parameters) == ("name", "data")
     assert not hasattr(BundleSection, "from_file")
+
+
+def test_file_bundle_section_public_factory_requires_size_and_sha(tmp_path):
+    source = tmp_path / "engine.plan"
+    source.write_bytes(b"plan")
+    section = bundle_section_from_file(
+        "engine_plan",
+        source,
+        expected_size=4,
+        expected_sha256=hashlib.sha256(b"plan").hexdigest(),
+    )
+    assert isinstance(section, FileBundleSection)
+    assert section.name == "engine_plan"
+    assert section.source_path == source
+    assert section.expected_size == 4
 
 
 class TestWriteBundle:
@@ -165,6 +183,95 @@ class TestWriteBundle:
         header, sections = self._read_bundle(str(out_path))
         assert header["sections"]["edge/artifacts/llm.engine"]["size"] == len(payload)
         assert sections["edge/artifacts/llm.engine"] == payload
+
+    def test_public_file_backed_sections_preserve_order_without_read_bytes(
+        self, tmp_path, monkeypatch
+    ):
+        sources = []
+        sections = []
+        for index, payload in enumerate((b"first", b"second", b"third")):
+            source = tmp_path / f"{index}.plan"
+            source.write_bytes(payload)
+            sources.append(source)
+            sections.append(
+                bundle_section_from_file(
+                    f"plan_{index}",
+                    source,
+                    expected_size=len(payload),
+                    expected_sha256=hashlib.sha256(payload).hexdigest(),
+                )
+            )
+        monkeypatch.setattr(
+            type(sources[0]),
+            "read_bytes",
+            lambda _self: (_ for _ in ()).throw(
+                AssertionError("file-backed sections must be streamed")
+            ),
+        )
+        destination = tmp_path / "ordered.bundle"
+        write_bundle(destination, BundleInfo(model_id="ordered"), sections)
+        header, payloads = self._read_bundle(str(destination))
+        assert list(header["sections"]) == ["plan_0", "plan_1", "plan_2"]
+        assert list(payloads) == ["plan_0", "plan_1", "plan_2"]
+
+    def test_public_file_backed_section_rejects_symlink_size_and_sha(self, tmp_path):
+        source = tmp_path / "engine.plan"
+        source.write_bytes(b"engine")
+        symlink = tmp_path / "link.plan"
+        symlink.symlink_to(source.name)
+        digest = hashlib.sha256(b"engine").hexdigest()
+        with pytest.raises(ValueError, match="not a regular file"):
+            bundle_section_from_file(
+                "symlink", symlink, expected_size=len(b"engine"), expected_sha256=digest
+            )
+        with pytest.raises(ValueError, match="source size mismatch"):
+            bundle_section_from_file(
+                "wrong_size",
+                source,
+                expected_size=len(b"engine") + 1,
+                expected_sha256=digest,
+            )
+        with pytest.raises(ValueError, match="invalid expected_sha256"):
+            bundle_section_from_file(
+                "bad_sha", source, expected_size=len(b"engine"), expected_sha256="bad"
+            )
+        with pytest.raises(ValueError, match="require expected_sha256"):
+            bundle_section_from_file(
+                "missing_sha", source, expected_size=len(b"engine"), expected_sha256=None
+            )
+
+    @pytest.mark.parametrize("invalid_size", [-1, True, "6"])
+    def test_public_file_backed_section_rejects_invalid_expected_size(
+        self, tmp_path, invalid_size
+    ):
+        source = tmp_path / "engine.plan"
+        source.write_bytes(b"engine")
+        with pytest.raises(ValueError, match="invalid expected_size"):
+            bundle_section_from_file(
+                "bad_size",
+                source,
+                expected_size=invalid_size,
+                expected_sha256=hashlib.sha256(b"engine").hexdigest(),
+            )
+
+    def test_duplicate_names_are_rejected_before_overwriting_destination(self, tmp_path):
+        destination = tmp_path / "existing.bundle"
+        destination.write_bytes(b"keep")
+        source = tmp_path / "same.plan"
+        source.write_bytes(b"b")
+        file_section = bundle_section_from_file(
+            "same",
+            source,
+            expected_size=1,
+            expected_sha256=hashlib.sha256(b"b").hexdigest(),
+        )
+        with pytest.raises(ValueError, match="non-empty and unique"):
+            write_bundle(
+                destination,
+                BundleInfo(model_id="duplicate"),
+                [BundleSection("same", b"a"), file_section],
+            )
+        assert destination.read_bytes() == b"keep"
 
     def test_file_backed_digest_mismatch_is_not_published(self, tmp_path):
         source = tmp_path / "mutable.engine"

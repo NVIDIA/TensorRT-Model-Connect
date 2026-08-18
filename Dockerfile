@@ -36,6 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12-venv \
     python3-pip \
     lcov \
+    libjpeg-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # The pinned NVIDIA NGC image is the official TensorRT 11.1 ARM64 development

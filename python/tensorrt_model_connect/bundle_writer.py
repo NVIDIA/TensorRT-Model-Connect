@@ -66,10 +66,33 @@ class BundleSection:
 
 
 @dataclass(frozen=True)
-class _FileBundleSection:
+class FileBundleSection:
+    """One immutable, file-backed section streamed into a bundle."""
+
     name: str
     source_path: Path
+    expected_size: int
     expected_sha256: str | None
+
+
+def bundle_section_from_file(
+    name: str,
+    source_path: str | Path,
+    *,
+    expected_size: int,
+    expected_sha256: str,
+) -> FileBundleSection:
+    """Create a checked file-backed section for model-owned bundle hooks."""
+    if not isinstance(expected_sha256, str):
+        raise ValueError("Public file-backed bundle sections require expected_sha256")
+    section = FileBundleSection(
+        name=name,
+        source_path=Path(source_path),
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
+    )
+    _section_size(section)
+    return section
 
 
 def _bundle_section_from_file(
@@ -78,21 +101,29 @@ def _bundle_section_from_file(
     *,
     expected_sha256: str | None = None,
 ) -> BundleSection:
-    """Create a private file-backed section for atomic streaming writes."""
+    """Backward-compatible private helper; new hooks use bundle_section_from_file."""
 
+    path = Path(source_path)
     return cast(
         BundleSection,
-        _FileBundleSection(
+        FileBundleSection(
             name=name,
-            source_path=Path(source_path),
+            source_path=path,
+            expected_size=path.lstat().st_size,
             expected_sha256=expected_sha256,
         ),
     )
 
 
-def _section_size(section: BundleSection) -> int:
-    if not isinstance(section, _FileBundleSection):
+def _section_size(section: BundleSection | FileBundleSection) -> int:
+    if not isinstance(section, FileBundleSection):
         return len(section.data)
+    if (
+        not isinstance(section.expected_size, int)
+        or isinstance(section.expected_size, bool)
+        or section.expected_size < 0
+    ):
+        raise ValueError(f"Bundle section {section.name!r} has invalid expected_size")
     try:
         source_stat = section.source_path.lstat()
     except OSError as exc:
@@ -103,16 +134,23 @@ def _section_size(section: BundleSection) -> int:
         raise ValueError(
             f"Bundle section {section.name!r} source is not a regular file: {section.source_path}"
         )
+    if source_stat.st_size != section.expected_size:
+        raise ValueError(
+            f"Bundle section {section.name!r} source size mismatch: "
+            f"expected {section.expected_size}, got {source_stat.st_size}"
+        )
     if section.expected_sha256 is not None and (
         len(section.expected_sha256) != 64
         or any(character not in "0123456789abcdef" for character in section.expected_sha256)
     ):
         raise ValueError(f"Bundle section {section.name!r} has invalid expected_sha256")
-    return source_stat.st_size
+    return section.expected_size
 
 
-def _write_section(output, section: BundleSection, expected_size: int) -> None:
-    if not isinstance(section, _FileBundleSection):
+def _write_section(
+    output, section: BundleSection | FileBundleSection, expected_size: int
+) -> None:
+    if not isinstance(section, FileBundleSection):
         output.write(section.data)
         return
 
@@ -191,7 +229,7 @@ def _open_atomic_bundle_output(destination: Path):
 def _write_file_backed_bundle(
     path: str | Path,
     info: BundleInfo,
-    sections: list[BundleSection],
+    sections: list[BundleSection | FileBundleSection],
 ) -> None:
     """Atomically stream a bundle containing private file-backed sections."""
     # Build section offset/size list for JSON header
@@ -264,10 +302,13 @@ def _write_file_backed_bundle(
 def write_bundle(
     path: str | Path,
     info: BundleInfo,
-    sections: list[BundleSection],
+    sections: list[BundleSection | FileBundleSection],
 ) -> None:
     """Write a .bundle artifact file."""
-    if any(isinstance(section, _FileBundleSection) for section in sections):
+    section_names = [section.name for section in sections]
+    if any(not name for name in section_names) or len(section_names) != len(set(section_names)):
+        raise ValueError("Bundle section names must be non-empty and unique")
+    if any(isinstance(section, FileBundleSection) for section in sections):
         _write_file_backed_bundle(path, info, sections)
         return
 

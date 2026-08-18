@@ -1041,6 +1041,62 @@ def test_source_quality_lint_uses_resolved_ci_base_ref() -> None:
     assert "f\"origin/{self.context.env.get('GITHUB_REF_NAME', 'main')}\"" in text
 
 
+def test_source_quality_exempts_only_manifest_verified_vendor_sources(tmp_path: Path) -> None:
+    import hashlib
+
+    from tools.ci.process import CiError
+    from tools.ci.quality import _partition_cpp_format_inputs
+
+    root_relative = (
+        "python/tensorrt_model_connect/families/sam2_hoi/native_plugins/vendor/cutlass/"
+    )
+    root = tmp_path / root_relative
+    source = root / "include" / "example.h"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"reviewed vendor bytes\n")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    (root / "MANIFEST.sha256").write_text(
+        f"{digest}  ./include/example.h\n", encoding="utf-8"
+    )
+    source_relative = root_relative + "include/example.h"
+
+    formatted, skipped = _partition_cpp_format_inputs(
+        tmp_path, ["src/example.cpp", source_relative]
+    )
+    assert formatted == ["src/example.cpp"]
+    assert skipped == [source_relative]
+
+    source.write_bytes(b"drifted vendor bytes\n")
+    try:
+        _partition_cpp_format_inputs(tmp_path, [source_relative])
+    except CiError as error:
+        assert "digest mismatch" in str(error)
+    else:
+        raise AssertionError("drifted vendor source must fail closed")
+
+    source.write_bytes(b"reviewed vendor bytes\n")
+    unmanifested = root_relative + "include/unmanifested.h"
+    try:
+        _partition_cpp_format_inputs(tmp_path, [unmanifested])
+    except CiError as error:
+        assert "unmanifested vendor C++ source" in str(error)
+    else:
+        raise AssertionError("unmanifested vendor source must fail closed")
+
+    target = root / "include" / "target.h"
+    target.write_bytes(b"symlink target bytes\n")
+    link = root / "include" / "link.h"
+    link.symlink_to(target.name)
+    link_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    (root / "MANIFEST.sha256").write_text(
+        f"{link_digest}  ./include/link.h\n", encoding="utf-8"
+    )
+    try:
+        _partition_cpp_format_inputs(tmp_path, [root_relative + "include/link.h"])
+    except CiError as error:
+        assert "missing or unsafe" in str(error)
+    else:
+        raise AssertionError("symlinked vendor source must fail closed")
 
 
 def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
@@ -1291,6 +1347,30 @@ def test_model_plugins_are_staged_for_installed_trtmc() -> None:
     assert "TRTMC model plugin DSOs were not staged" in conanfile
     assert '"site-packages" / "tensorrt_model_connect" / "bin"' in loader
     assert '"trtmc" / "models"' in loader
+
+
+def test_sam2_hoi_release_dso_uses_private_static_libjpeg() -> None:
+    cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
+    conanfile = (REPO_ROOT / "conanfile.py").read_text()
+    manifest = (REPO_ROOT / "src/runtime/models/sam2_hoi/MODEL.toml").read_text()
+    package = _ci_source("package.py")
+    model_proof = _ci_source("model_proof_inner.py")
+
+    assert 'self.requires("libjpeg-turbo/2.1.5")' in conanfile
+    assert '"libjpeg-turbo/*:shared": False' in conanfile
+    assert '"libjpeg-turbo/*:fPIC": True' in conanfile
+    assert '"libjpeg-turbo/*:libjpeg8_compatibility": True' in conanfile
+    assert "if(TRTMC_DISTRIBUTABLE_BUILD)" in cmake
+    assert "find_package(libjpeg-turbo CONFIG REQUIRED)" in cmake
+    assert "libjpeg-turbo::jpeg-static" in cmake
+    assert "find_package(JPEG REQUIRED)" in cmake
+    assert '"LINKER:--exclude-libs,ALL"' in cmake
+    assert 'runtime_link_libraries = ["jpeg"]' in manifest
+    assert (
+        "test_sam2_hoi_jpeg.cpp|trtmc_jpeg,Threads::Threads|jpeg_decoder.cpp" in manifest
+    )
+    assert "_validate_archive_sam2_hoi_release_dso(" in package
+    assert "validate_sam2_hoi_release_dso(" in model_proof
 
 
 def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:

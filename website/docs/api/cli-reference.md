@@ -153,6 +153,9 @@ trtmc segment-prompted <bundle.bundle> --image PATH --output DIR [--point-x F --
 trtmc segment-prompted <bundle.bundle> --image PATH --output DIR --prompt "object"
 trtmc classify <bundle.bundle> --image PATH [--benchmark N --warmup N]
 trtmc detect <bundle.bundle> --image PATH [--output-json PATH]
+trtmc track-hoi <bundle.bundle> --frames-dir DIR --output-json PATH --output-masks-dir DIR \
+  [--benchmark N --warmup N] \
+  [--benchmark-scope predecoded|loaded-request --benchmark-json RECEIPT]
 trtmc generate-audio <bundle.bundle> --prompt "text" --output PATH
 trtmc serve-audio <bundle.bundle>
 trtmc generate-video <bundle.bundle> --prompt "text" --output DIR
@@ -182,6 +185,71 @@ Depending on the command, shared load/run options include `--hf-python`,
 and repeatable `--set`. `trtmc --help` prints one combined synopsis for all
 commands; it is not separate per-command help. Read the relevant command
 section in that combined output and this reference for the accepted options.
+
+### HOI video tracking
+
+`track-hoi` is the one-shot video capability used by the `sam2_hoi` family:
+
+```bash
+trtmc track-hoi sam2-hoi-tracking.bundle \
+  --frames-dir ./frames \
+  --output-json ./tracking.json \
+  --output-masks-dir ./masks
+```
+
+Without `--benchmark`, the command runs once and preserves its normal output
+behavior. `--benchmark N` runs warmup calls, times `N` in-process calls, and
+then makes one final untimed call that writes the requested JSON and NPY masks.
+The default `--benchmark-scope predecoded` loads the bundle and decodes the
+ordered frames once, then reuses those decoded views. `loaded-request` keeps
+the model loaded but re-enumerates and freshly decodes the frame directory
+inside every warmup and timed request. Neither scope includes output writes in
+timing.
+
+Use a separate receipt path to retain every raw sample and the certified final
+output paths:
+
+```bash
+trtmc track-hoi sam2-hoi-tracking.bundle \
+  --frames-dir ./frames \
+  --output-json ./tracking.json \
+  --output-masks-dir ./masks \
+  --benchmark 100 \
+  --warmup 3 \
+  --benchmark-scope loaded-request \
+  --benchmark-json ./loaded-request-benchmark.json
+```
+
+The `trtmc.command-benchmark/v1` receipt reports the ordered raw latency rows,
+mean, median, archive-compatible rounded-index p90, minimum, maximum,
+requests/s, normalized five-frame clips/s, and input/produced frames/s. Its
+`timing_boundary` object explicitly records whether enumeration and decode are
+included. The additive top-level `frame_loading` object retains the actual
+`frame_decode_mode` and `frame_decode_max_concurrency`; for `predecoded`, that
+materialization remains outside the timed region and the decoded views are
+reused. Both scopes include all preprocessing,
+inference, and postprocessing owned by the selected video-tracking capability;
+both exclude pipeline/bundle/model load, warmup, output serialization, the final
+materialized run, request-input release, and receipt writing. The receipt names
+the steady wall clock, and `track_video()` return is the synchronous stop
+boundary. A receipt cannot name the accuracy JSON path, and `--benchmark-json`
+or `--benchmark-scope` without a positive `--benchmark` is rejected.
+
+The input directory must contain at least one decodable JPEG, PNG, or BMP.
+Files are naturally sorted by filename, so `1.jpg`, `2.jpg`, and `10.jpg` run
+in temporal order. All frames in one request must have the same resolution.
+The runtime scans for the first frame with any HOI detections and emits that
+conditioning frame and all later frames. The current fixed-batch SAM2-HOI
+recipe requires that first nonempty detection result to select exactly two
+tracked objects; it does not skip a nonempty result with a different selection
+count. If the loaded bundle does not implement `IVideoTrackingPipeline`, the
+command fails instead of selecting a model by name.
+
+The JSON has `schema_version: 1` and an ordered `frames` array. Each frame
+contains `frame_index`, `object_ids`, `binary_masks_path`, `det_bboxes`,
+`det_labels`, `det_scores`, and `interaction_pairs`. The mask path names an
+absolute uint8 NPY tensor written under `--output-masks-dir`; the current
+SAM2-HOI contract uses shape `[2, 1, H, W]`.
 
 These shared options have route-specific contracts:
 
@@ -213,8 +281,8 @@ an inventory, not a claim that every option is accepted by every command.
 | Area | Canonical options |
 | --- | --- |
 | Help and version | `--help`, `--version` |
-| Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
-| Output selection | `--output`, `--output-json`, `--audio-out`, `--list-engines` |
+| Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--frames-dir`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
+| Output selection | `--output`, `--output-json`, `--output-masks-dir`, `--audio-out`, `--list-engines` |
 | Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kernel-bindings`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
 | Text generation | `--max-new-tokens`, `--source-language-token-id`, `--forced-bos-token-id`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
 | Diffusion and raw-state generation | `--num-steps`, `--num-inference-steps`, `--guidance-scale`, `--cfg-scale`, `--sde-gamma`, `--initial-latents-raw`, `--condition-latents-raw`, `--condition-mask-raw`, `--sampling-steps-raw`, `--sde-noise-raw`, `--negative-prompt`, `--height`, `--width`, `--num-images` |

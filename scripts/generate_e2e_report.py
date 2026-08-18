@@ -102,6 +102,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "reranking": "reranking",
     "neural_operator": "neural_operator",
     "omni_multimodal": "omni",
+    "hoi_video_tracking": "structured",
     # Kept explicit for forward-compatible manifests.  Unknown strategies
     # still receive the structured TRT/reference fallback renderer.
     "object_detection": "detection",

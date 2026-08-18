@@ -55,6 +55,7 @@
     "sam2_bbox_video_tracking",
     "sam3_prompted_segmentation",
     "dinov3_image_feature_extraction",
+    "sam2_hoi_video_tracking",
     "timm_vit_image_classification",
     "whisper_speech_to_text",
     "canary_speech_to_text",
@@ -872,6 +873,17 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['dinov3_image_feature_extraction']; the model-owned E2E comparator gates full semantic tensor parity against Hugging Face.",
       "performance_mode": "single_pass"
+    },
+    "sam2_hoi_video_tracking": {
+      "task_strategy": "hoi_video_tracking",
+      "cli_commands": [
+        "track-hoi"
+      ],
+      "runner_class": "video_tracking.HoiVideoTrackingRunner",
+      "comparator_class": "video_tracking.HoiVideoTrackingComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sam2_hoi_video_tracking']; the model-owned five-frame comparator gates exact identities and strict detection, interaction, and mask parity.",
+      "performance_mode": "multi_stage"
     },
     "timm_vit_image_classification": {
       "task_strategy": "image_classification",

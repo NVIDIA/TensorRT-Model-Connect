@@ -11,8 +11,8 @@ import RecipePageLayout from './RecipePageLayout';
 
 const BUNDLE_CLI_REFERENCE = {
   build: {
-    purpose: 'Build one exact checkpoint into a TensorRT-Model-Connect bundle.',
-    syntax: 'trtmc build <hf-id> --output <bundle.bundle>',
+    purpose: 'Build one exact model source into a TensorRT-Model-Connect bundle.',
+    syntax: 'trtmc build <model-source> --output <bundle.bundle>',
   },
   inspect: {
     purpose: 'Inspect bundle metadata, runtime identity, and packaged sections.',
@@ -22,7 +22,7 @@ const BUNDLE_CLI_REFERENCE = {
 
 const COMMAND_ORDER = [
   'build', 'run', 'encode', 'embed', 'rerank', 'classify', 'segment',
-  'segment-prompted', 'generate-audio', 'generate-video', 'transcribe',
+  'segment-prompted', 'track-hoi', 'generate-audio', 'generate-video', 'transcribe',
   'speak', 'solve', 'inspect',
 ];
 
@@ -33,6 +33,9 @@ function parallelLabel(profile) {
 }
 
 function ArchitectureNames({profile}) {
+  if (profile.modelSourceKind === 'local_source_package') {
+    return <><span>Family-owned source graph</span><br /><small>Not sourced from Hugging Face metadata</small></>;
+  }
   if (profile.hfArchitectures.length === 0) {
     return <><span>—</span><br /><small>Not declared by checkpoint metadata</small></>;
   }
@@ -54,6 +57,7 @@ function collectArchitectureContracts(profiles) {
   const contracts = new Map();
   for (const profile of profiles) {
     const key = JSON.stringify([
+      profile.modelSourceKind,
       profile.hfModelType,
       profile.hfArchitectures,
       profile.hfArchitectureSource,
@@ -138,7 +142,7 @@ function FamilyConfigReference({family, commands}) {
               </tbody>
             </table>
             {buildField && (
-              <pre><code>{`trtmc build <hf-id> --output <bundle.bundle> --set ${buildField.key}=<value>`}</code></pre>
+              <pre><code>{`trtmc build <model-source> --output <bundle.bundle> --set ${buildField.key}=<value>`}</code></pre>
             )}
             {sessionField && (
               <pre><code>{`trtmc ${runtimeCommand} <bundle.bundle> <task-inputs> --set ${sessionField.key}=<value>`}</code></pre>
@@ -189,19 +193,19 @@ export default function ModelFamilyRecipePage({familySlug}) {
 
         <h2>Supported architectures and task heads</h2>
         <p>
-          The Hugging Face values below are copied from checkpoint metadata at
-          the recorded revision. The TRTMC task contract comes from the exact
-          E2E recipe. Architecture identity selects or describes a source graph;
-          it does not imply that TRTMC reproduces every Hugging Face head with
-          the same <code>model_type</code>. For example, an encoder recipe may
-          consume the base model and intentionally return hidden states instead
+          Hugging Face values are copied from checkpoint metadata at the recorded
+          revision. Local source-package recipes are identified explicitly and
+          use their family-owned graph instead. The TRTMC task contract comes
+          from the exact E2E recipe; architecture identity does not imply that
+          TRTMC reproduces every source-model head. For example, an encoder recipe
+          may consume the base model and intentionally return hidden states instead
           of the checkpoint&apos;s pretraining or classification logits.
         </p>
         <table>
           <thead>
             <tr>
-              <th>HF <code>model_type</code></th>
-              <th>HF architecture / pipeline class</th>
+              <th>Source <code>model_type</code></th>
+              <th>Architecture / pipeline class</th>
               <th>TRTMC task contract</th>
               <th>Exact recipe profiles</th>
             </tr>
@@ -209,13 +213,19 @@ export default function ModelFamilyRecipePage({familySlug}) {
           <tbody>
             {architectureContracts.map((contract) => (
               <tr key={`${contract.hfModelType}-${contract.hfArchitectureSource}-${contract.hfArchitectures.join('-')}-${contract.taskStrategy}`}>
-                <td>{contract.hfModelType === 'not declared' ? '—' : <code>{contract.hfModelType}</code>}</td>
+                <td>{['not declared', 'not applicable'].includes(contract.hfModelType)
+                  ? '—'
+                  : <code>{contract.hfModelType}</code>}</td>
                 <td>
                   <ArchitectureNames profile={contract} />
                   <br />
                   <small>
-                    Metadata: <code>{contract.hfMetadataFile}</code> at{' '}
-                    <code>{contract.hfMetadataRevision.slice(0, 12)}</code>
+                    {contract.modelSourceKind === 'local_source_package' ? (
+                      <>Local source package</>
+                    ) : (
+                      <>Metadata: <code>{contract.hfMetadataFile}</code> at{' '}
+                        <code>{contract.hfMetadataRevision.slice(0, 12)}</code></>
+                    )}
                   </small>
                 </td>
                 <td><code>{contract.taskStrategy}</code></td>
@@ -234,7 +244,7 @@ export default function ModelFamilyRecipePage({familySlug}) {
           <thead>
             <tr>
               <th>Recipe</th>
-              <th>Exact Hugging Face checkpoint</th>
+              <th>Exact model source</th>
               <th>Task</th>
               <th>Build configuration</th>
               <th>Declared E2E cases</th>
@@ -247,9 +257,14 @@ export default function ModelFamilyRecipePage({familySlug}) {
                 <td><code>{profile.profile}</code></td>
                 <td>
                   <code>{profile.hfId}</code>
-                  {profile.revision !== 'not pinned' && <><br /><small>Revision: <code>{profile.revision}</code></small></>}
+                  {profile.modelSourceKind === 'local_source_package'
+                    ? <><br /><small>Local source package</small></>
+                    : profile.revision !== 'not pinned' && <><br /><small>Revision: <code>{profile.revision}</code></small></>}
                 </td>
                 <td>
+                  {profile.modelSourceKind === 'local_source_package' && (
+                    <><code>{profile.taskStrategy}</code><br /><small>Nearest catalog category:</small></>
+                  )}
                   {profile.hfTasks.map((taskSlug) => (
                     <div key={taskSlug}>
                       <Link to={`/models-recipes/model-recipes/tasks/${taskSlug}`}>

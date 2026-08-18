@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Preserve third-party source bytes covered by their upstream manifests.
+python/tensorrt_model_connect/families/sam2_hoi/native_plugins/vendor/** -whitespace

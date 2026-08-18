@@ -144,6 +144,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   neural_operator: ['solve'],
   omni_multimodal: ['generate-audio'],
   prompted_segmentation: ['segment-prompted'],
+  hoi_video_tracking: ['track-hoi'],
   reranking: ['rerank'],
   segmentation: ['segment'],
   speech_to_speech: ['speak'],
@@ -318,6 +319,8 @@ function hfTasksForManifest(manifest) {
       return ['image-segmentation'];
     case 'prompted_segmentation':
       return ['mask-generation'];
+    case 'hoi_video_tracking':
+      return ['mask-generation'];
     case 'neural_operator':
       return ['time-series-forecasting'];
     case 'diffusion_media_generation': {
@@ -335,6 +338,27 @@ function hfTasksForManifest(manifest) {
         `No Hugging Face task mapping for task_strategy=${manifest.task_strategy}`
       );
   }
+}
+
+function modelSourceKindForManifest(manifest) {
+  const kind = manifest.model_source_kind || 'huggingface';
+  if (!['huggingface', 'local_source_package'].includes(kind)) {
+    throw new Error(
+      `Unsupported model_source_kind=${kind} for profile ${manifest.name}`
+    );
+  }
+  return kind;
+}
+
+function localSourceMetadataFields() {
+  return {
+    hfModelType: 'not applicable',
+    hfArchitectures: [],
+    hfArchitectureSource: 'local source package',
+    hfMetadataRevision: 'not applicable',
+    hfMetadataRevisionSource: 'not applicable',
+    hfMetadataFile: 'not applicable',
+  };
 }
 
 function cliCommandsForManifest(manifest, hfTasks) {
@@ -1107,6 +1131,18 @@ function commandContractForProfile(profile, capability) {
         evidence,
       };
     }
+    case 'hoi_video_tracking':
+      return {
+        command: 'track-hoi',
+        purpose: 'Detect human-object interactions and propagate object masks through an ordered frame sequence.',
+        syntax: 'trtmc track-hoi <bundle.bundle> --frames-dir <frames-dir> --output-json <tracking.json> --output-masks-dir <masks-dir>',
+        options: [
+          option('--frames-dir <DIR>', 'Required', 'Directory of naturally ordered JPEG, PNG, or BMP video frames.'),
+          option('--output-json <PATH>', 'Required', 'Write ordered detections, object IDs, interaction pairs, and mask paths as JSON.'),
+          option('--output-masks-dir <DIR>', 'Required', 'Write one uint8 NPY mask tensor per produced frame.'),
+        ],
+        evidence,
+      };
     case 'text_to_audio':
     case 'omni_multimodal':
       return {
@@ -1388,10 +1424,18 @@ function collectModelSupportInventory(repoRoot) {
       if (!manifest.name || !manifest.hf_id || !manifest.family || !manifest.task_strategy) {
         return null;
       }
-      const hfMetadata = hfMetadataById.get(manifest.hf_id);
-      if (!hfMetadata) {
+      const modelSourceKind = modelSourceKindForManifest(manifest);
+      const hfMetadata = modelSourceKind === 'huggingface'
+        ? hfMetadataById.get(manifest.hf_id)
+        : null;
+      if (modelSourceKind === 'huggingface' && !hfMetadata) {
         throw new Error(
           `Missing Hugging Face model metadata for ${manifest.hf_id} (${manifestPath})`
+        );
+      }
+      if (modelSourceKind === 'local_source_package' && manifest.hf_revision) {
+        throw new Error(
+          `Local source-package profile must not declare hf_revision (${manifestPath})`
         );
       }
       if (manifest.hf_revision && manifest.hf_revision !== hfMetadata.revision) {
@@ -1404,6 +1448,7 @@ function collectModelSupportInventory(repoRoot) {
       return {
         profile: manifest.name,
         hfId: manifest.hf_id,
+        modelSourceKind,
         revision: manifest.hf_revision || 'not pinned',
         bundle: manifest.bundle || `${manifest.name}.bundle`,
         family: manifest.family,
@@ -1416,7 +1461,7 @@ function collectModelSupportInventory(repoRoot) {
           : [],
         fp32Layers: Array.isArray(manifest.fp32_layers) ? manifest.fp32_layers : [],
         sourcePath: path.relative(repoRoot, manifestPath).replace(/\\/g, '/'),
-        ...hfMetadataFields(hfMetadata),
+        ...(hfMetadata ? hfMetadataFields(hfMetadata) : localSourceMetadataFields()),
         ...manifestBuildConfiguration(manifest),
       };
     })
@@ -1481,7 +1526,9 @@ function collectModelSupportInventory(repoRoot) {
     };
   });
   const referencedHfIds = new Set([
-    ...modelProfiles.map((profile) => profile.hfId),
+    ...modelProfiles
+      .filter((profile) => profile.modelSourceKind === 'huggingface')
+      .map((profile) => profile.hfId),
     ...performanceSnapshot.map((row) => row.hfId),
   ]);
   const staleMetadata = [...hfMetadataById.keys()].filter(

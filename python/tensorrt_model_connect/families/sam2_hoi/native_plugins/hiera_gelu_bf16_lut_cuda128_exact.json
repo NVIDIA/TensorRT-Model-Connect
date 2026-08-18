@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "description": "Complete raw-BF16 to raw-BF16 mapping for PyTorch 2.7.1 CUDA exact GELU",
+  "source": {
+    "project": "PyTorch",
+    "commit": "e2d141dbde55c2a4370fac5165b0561b6af4798b",
+    "path": "aten/src/ATen/native/cuda/ActivationGeluKernel.cu",
+    "expression": "x * 0.5f * (1.0f + erf(x * M_SQRT1_2))",
+    "compiler": "CUDA 12.8.61",
+    "oracle_dso_sha256": "a6eb2d4ad977cc218d044d39a0fd29ef7e93c4b1a790658a5e8faa790208b4dc",
+    "oracle_image_sha256": "ebc243f4d5f77462ade6cc483a3b85daa692e79a480391af99ca493485178721"
+  },
+  "table": {
+    "entries": 65536,
+    "entry_format": "little-endian raw IEEE BF16 uint16",
+    "size_bytes": 131072,
+    "binary_sha256": "c577423f9580e2d2e5943d57e92770a98d875d95a87861e32525d3db97df811f",
+    "cuda_include_sha256": "e5d85ba5af299f03678e876b6e0d26d640a55f9273d7e8da39007d54e01b69f1"
+  },
+  "special_value_policy": {
+    "positive_zero": "0x0000",
+    "negative_zero": "0x8000",
+    "positive_infinity": "0x7f80",
+    "negative_infinity": "0x7fff",
+    "all_254_nan_inputs": "0x7fff"
+  },
+  "validation": {
+    "cuda_12_8_sm89_complete_domain_report_sha256": "db868317e95e909c2263dab0be552fb1c17f6bfb4596f7c7fe8c7147ac7039d9",
+    "cuda_13_3_sm89_complete_domain_report_sha256": "3970c8972ba7aaacede1d1b482ed1b074d627e23388e811bd5d9a6accf6df279",
+    "cuda_13_3_sm89_four_shape_trt_report_sha256": "b57cafcd188d03b3c78de0737d042ce9c6c3cdbc7ef5ec0508ccc9d06b08ac7b",
+    "cuda_13_3_arm_sm100_complete_domain_report_sha256": "63793d5622c5d7981f25e66986f3b412c22a03c73554f56ee93b36e9961eeeb3"
+  },
+  "runtime_dependencies": {
+    "torch": false,
+    "aten": false,
+    "c10": false
+  },
+  "license": "See the PyTorch section in the repository NOTICE file"
+}

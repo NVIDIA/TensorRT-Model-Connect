@@ -1,0 +1,14 @@
+{
+  "threshold_overrides": {
+    "detection_score_max_abs": 0.01,
+    "detection_box_max_abs_pixels": 2.0,
+    "detection_box_min_iou": 0.99,
+    "mask_min_iou": 0.99,
+    "mask_min_dice": 0.9949748743718593,
+    "mask_min_pixel_agreement": 0.999,
+    "exact_object_ids": 1.0,
+    "exact_det_labels": 1.0,
+    "exact_interaction_pairs": 1.0,
+    "required_frame_count": 5.0
+  }
+}

@@ -9,9 +9,11 @@
 #include "trtmc/runtime/measurement.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -34,6 +36,21 @@ void allocate_host_output_staging(
     const std::string& name, std::size_t nbytes, bool is_external) {
     if (nbytes > 0 && !is_external)
         host_output_staging[name].resize(nbytes);
+}
+
+bool engine_timing_enabled_from_environment() {
+    const char* value = std::getenv("TRTMC_ENGINE_TIMING");
+    if (value == nullptr || std::strcmp(value, "1") == 0)
+        return true;
+    if (std::strcmp(value, "0") == 0) {
+        static std::once_flag logged;
+        std::call_once(logged, [] {
+            std::cerr << "[trtmc.engine_timing] collection=disabled "
+                         "source=TRTMC_ENGINE_TIMING=0\n";
+        });
+        return false;
+    }
+    throw std::invalid_argument("TRTMC_ENGINE_TIMING must be exactly 0 or 1");
 }
 
 } // namespace
@@ -68,6 +85,16 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
+    try {
+        // Read the process policy exactly once for this module. Later
+        // environment changes cannot alter an already-created execution path.
+        timing_enabled_ = engine_timing_enabled_from_environment();
+    } catch (const std::exception& error) {
+        std::cerr << "[trt_module] Invalid engine timing configuration: " << error.what() << '\n';
+        delete ctx_;
+        ctx_ = nullptr;
+        return;
+    }
     try {
         discover_tensor_aliases(engine);
         validate_initial_external_bindings(engine, external_bindings);
@@ -659,7 +686,7 @@ void TrtModuleImpl::finish_timing_event(TimingEvent event) {
 
 void TrtModuleImpl::record_timed_enqueue() {
     TimingEvent timing_event;
-    const bool timing_ok = begin_timing_event(timing_event);
+    const bool timing_ok = timing_enabled_ && begin_timing_event(timing_event);
     if (use_cuda_graph_ && cuda_graph_->ready()) {
         cuda_graph_->launch(stream_);
         if (timing_ok)

@@ -27,7 +27,7 @@ know the concept and need every option or API field.
 | --- | --- | --- |
 | Decoder text, encoder NLP, embedding, reranking | [Text Generation](text-generation.md) | `run`, `encode`, `embed`, `rerank` |
 | Vision-language, ASR, TTS, speech-to-speech | [Multimodal & Speech](multimodal-speech.md) | `run --image`, `transcribe`, `generate-audio`, `speak` |
-| Diffusion, classification, segmentation | [Image & Video Generation](image-video-generation.md) | `generate-video`, `classify`, `segment`, `segment-prompted` |
+| Diffusion, classification, segmentation, HOI tracking | [Image & Video Generation](image-video-generation.md) | `generate-video`, `classify`, `segment`, `segment-prompted`, `track-hoi` |
 | Forecasting and neural operators | [Time-Series](time-series.md) | `solve` |
 
 The supported-model inventory is separate from these instructions. Confirm an

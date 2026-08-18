@@ -17,6 +17,7 @@ RUN apt-get update && \
       build-essential \
       cmake \
       git \
+      libjpeg-dev \
       ninja-build \
       nlohmann-json3-dev \
       patchelf \

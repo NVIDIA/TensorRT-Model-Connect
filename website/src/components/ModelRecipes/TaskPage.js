@@ -26,7 +26,9 @@ export default function ModelTaskRecipePage({taskSlug}) {
         <p>
           Classification follows the Hugging Face task taxonomy. See the{' '}
           <a href={task.hfUrl}>Hugging Face {task.label} task page</a> for the
-          ecosystem-level task definition.
+          ecosystem-level task definition. A local source-package recipe may
+          map to its nearest category while declaring a more specific TRTMC
+          task contract on the family page.
         </p>
 
         <h2>Model families</h2>
@@ -35,7 +37,7 @@ export default function ModelTaskRecipePage({taskSlug}) {
             <tr>
               <th>Model family</th>
               <th>Declared recipes</th>
-              <th>Exact checkpoint examples</th>
+              <th>Exact model source examples</th>
               <th>Runtime CLI</th>
             </tr>
           </thead>

@@ -1481,6 +1481,7 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
+            ".gitattributes",
             "CODEOWNERS",
             "ruff.toml",
             "tests/__init__.py",

@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sam2_hoi"
+plugin = "sam2_hoi"
+module = "plugin"
+aliases = [
+  "sam2-hoi",
+  "sam2_hoi",
+  "sam2.1-hoi",
+  "sam2_1_hoi",
+]
+prefixes = [
+  "sam2-hoi",
+  "sam2_hoi",
+  "sam2.1-hoi",
+  "sam2_1_hoi",
+]
+config_adapter = "source_package.py|resolve_config"

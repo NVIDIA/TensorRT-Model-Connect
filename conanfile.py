@@ -168,8 +168,23 @@ class TensorRTModelConnectConan(ConanFile):
 
     settings = "os", "compiler", "build_type", "arch"
 
+    # Release model DSOs must not inherit a host libjpeg runtime dependency.
+    # Pin every option that affects the libjpeg ABI or emitted code instead of
+    # relying on ConanCenter recipe defaults.
+    default_options = {
+        "libjpeg-turbo/*:shared": False,
+        "libjpeg-turbo/*:fPIC": True,
+        "libjpeg-turbo/*:SIMD": True,
+        "libjpeg-turbo/*:libjpeg7_compatibility": True,
+        "libjpeg-turbo/*:libjpeg8_compatibility": True,
+        "libjpeg-turbo/*:turbojpeg": False,
+        "libjpeg-turbo/*:java": False,
+        "libjpeg-turbo/*:enable12bit": False,
+    }
+
     def requirements(self) -> None:
         self.requires("nlohmann_json/3.11.3")
+        self.requires("libjpeg-turbo/2.1.5")
 
     def layout(self) -> None:
         cmake_layout(self)

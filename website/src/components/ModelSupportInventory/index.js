@@ -14,6 +14,7 @@ const TASK_LABELS = {
   encoder_only_nlp: 'Encoder NLP',
   image_classification: 'Image classification',
   image_feature_extraction: 'Image feature extraction',
+  hoi_video_tracking: 'HOI video tracking',
   neural_operator: 'Time-series / neural operator',
   omni_multimodal: 'Omni multimodal',
   prompted_segmentation: 'Prompted segmentation',
@@ -34,7 +35,7 @@ const TASK_GROUPS = {
   ],
   'image-video': [
     'diffusion_media_generation', 'image_classification', 'image_feature_extraction',
-    'segmentation', 'prompted_segmentation',
+    'segmentation', 'prompted_segmentation', 'hoi_video_tracking',
   ],
   'time-series': ['neural_operator', 'diffusion_text_generation'],
 };
@@ -62,7 +63,7 @@ function ModelProfileTable({profiles, taskGroup}) {
         <table>
           <thead>
             <tr>
-              <th>Hugging Face checkpoint</th>
+              <th>Model source</th>
               <th>Manifest profile</th>
               <th>Task</th>
               <th>Family / runtime</th>
@@ -76,7 +77,9 @@ function ModelProfileTable({profiles, taskGroup}) {
                 <td>
                   <code>{profile.hfId}</code>
                   <br />
-                  <small>Revision: {profile.revision}</small>
+                  <small>{profile.modelSourceKind === 'local_source_package'
+                    ? 'Local source package'
+                    : `Revision: ${profile.revision}`}</small>
                 </td>
                 <td>
                   <code>{profile.profile}</code>

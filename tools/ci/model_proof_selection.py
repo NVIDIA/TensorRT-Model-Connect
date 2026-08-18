@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .model_reference_cache import parse_model_reference_contract
+from .model_source_cache import parse_model_source_package_contract
 from .process import CiError
 
 
@@ -45,6 +46,21 @@ class ModelProofSelection:
         value = self.payload.get("model_reference_cache")
         return dict(value) if isinstance(value, dict) else None
 
+    @property
+    def model_source_package(self) -> dict[str, str] | None:
+        value = self.payload.get("model_source_package")
+        return dict(value) if isinstance(value, dict) else None
+
+    @property
+    def hf_models(self) -> list[str]:
+        return list(
+            dict.fromkeys(
+                str(case["model"])
+                for case in self.payload["e2e_cases"]
+                if case.get("model_source_kind") != "local_source_package"
+            )
+        )
+
 
 class ModelProofSelector:
     """Turn allowlisted projected metadata into one deterministic proof selection."""
@@ -71,8 +87,34 @@ class ModelProofSelector:
         reference_cache = self._reference_cache(
             owner_data, str(owners["e2e"]), e2e_dir / "MODEL.toml"
         )
+        source_package = self._model_source_package(
+            owner_data, str(owners["e2e"]), e2e_dir / "MODEL.toml"
+        )
         cases = self._cases(e2e_dir)
         selected_cases = self._select_cases(cases, str(owners["e2e"]))
+        local_source_cases = [
+            case
+            for case in selected_cases
+            if case["model_source_kind"] == "local_source_package"
+        ]
+        if local_source_cases and source_package is None:
+            raise CiError(
+                "selected local_source_package E2E case has no suite-selected "
+                "model_source_package contract"
+            )
+        if source_package is not None and not local_source_cases:
+            raise CiError(
+                "suite-selected model_source_package contract has no selected "
+                "local_source_package E2E case"
+            )
+        if source_package is not None and any(
+            case["hf_id"] != source_package["project_path"]
+            for case in local_source_cases
+        ):
+            raise CiError(
+                "selected local_source_package hf_id must exactly match "
+                "model_source_package.project_path"
+            )
         resource = (
             "exclusive_gpu"
             if any(case["resource_class"] == "exclusive_gpu" for case in selected_cases)
@@ -119,6 +161,8 @@ class ModelProofSelector:
         }
         if reference_cache:
             payload["model_reference_cache"] = reference_cache
+        if source_package:
+            payload["model_source_package"] = source_package
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return ModelProofSelection(payload)
@@ -198,6 +242,17 @@ class ModelProofSelector:
         )
         return contract.as_payload() if contract else None
 
+    def _model_source_package(
+        self, owner: dict[str, object], family: str, owner_manifest: Path
+    ) -> dict[str, str] | None:
+        contract = parse_model_source_package_contract(
+            owner,
+            family,
+            owner_manifest,
+            self.suite,
+        )
+        return contract.as_payload() if contract else None
+
     def _cases(self, e2e_dir: Path) -> list[dict[str, object]]:
         timing = {}
         timing_path = self.source / "tests/e2e/timing_estimates.json"
@@ -230,6 +285,12 @@ class ModelProofSelector:
                     )
                 min_free_gpu_memory_mib = raw_minimum
             model = str(data.get("name") or path.stem)
+            source_kind = str(data.get("model_source_kind") or "huggingface")
+            if source_kind not in {"huggingface", "local_source_package"}:
+                raise CiError(f"E2E manifest has an invalid model_source_kind: {path}")
+            hf_id = data.get("hf_id")
+            if not isinstance(hf_id, str) or not hf_id:
+                raise CiError(f"E2E manifest has no hf_id: {path}")
             testcases = data.get("testcases")
             if not isinstance(testcases, list) or not testcases:
                 raise CiError(f"E2E manifest has no testcases: {path}")
@@ -264,6 +325,8 @@ class ModelProofSelector:
                     {
                         "name": name,
                         "model": model,
+                        "hf_id": hf_id,
+                        "model_source_kind": source_kind,
                         "manifest": path.name,
                         "test_category": test_category,
                         "ci_tier": tier,

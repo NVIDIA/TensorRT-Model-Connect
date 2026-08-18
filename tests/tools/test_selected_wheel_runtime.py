@@ -13,10 +13,13 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tools.ci.context import CiContext
 from tools.ci import model_proof_inner as model_proof_inner_module
 from tools.ci.model_proof import ModelProofRequest, ModelProofRunner
 from tools.ci.model_proof_inner import ModelProofInnerPipeline
+from tools.ci.process import CiError
 from tools.ci.quality import UnitTestRunner
 from tools.ci.selected_wheel import SelectedWheelRuntime
 
@@ -224,6 +227,7 @@ def test_model_proof_mounts_selected_wheels_read_only_and_forwards_contract(
         tmp_path / "projection",
         tmp_path / "work",
         tmp_path / "hf",
+        None,
         "fixture-image",
         SimpleNamespace(reference_cache=None),
         None,
@@ -413,3 +417,76 @@ def test_model_proof_stages_wheel_model_dso_but_keeps_source_cpp_tests(
     )
     pipeline._run_cpp_tests(["test_fixture"])
     assert calls[0][1]["TRTMC_MODEL_PLUGIN_DIR"] == str(work / "build/models")
+
+
+@pytest.mark.parametrize(
+    ("dynamic", "symbols", "message"),
+    [
+        (
+            "0x0000000000000001 (NEEDED) Shared library: [libjpeg.so.8]",
+            "",
+            "external libjpeg DT_NEEDED",
+        ),
+        (
+            "",
+            (
+                "17: 0000000000002000 128 FUNC GLOBAL DEFAULT 13 "
+                "jpeg_std_error@@LIBJPEG_8.0"
+            ),
+            "global/default libjpeg symbols",
+        ),
+    ],
+)
+def test_model_proof_rejects_nonhermetic_sam2_hoi_selected_wheel_dso(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    dynamic: str,
+    symbols: str,
+    message: str,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    work = tmp_path / "work"
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    runtime_library = "libtrtmc_model_sam2_hoi.so"
+    scratch = work / "build/models/sam2_hoi" / runtime_library
+    scratch.parent.mkdir(parents=True)
+    scratch.write_bytes(b"\x7fELFsource")
+    target = work / "selected-wheel-runtime/site-packages"
+    packaged = target / "tensorrt_model_connect/bin" / runtime_library
+    packaged.parent.mkdir(parents=True)
+    packaged.write_bytes(b"\x7fELFwheel")
+    runtime = SelectedWheelRuntime(
+        wheel=tmp_path / "wheel.whl",
+        site_packages=target,
+        python=Path("/opt/venv/bin/python"),
+        trtmc=target / "tensorrt_model_connect/bin/trtmc",
+        python_tag=PYTHON_TAG,
+        tensorrt_version=TENSORRT_VERSION,
+        package_version=PACKAGE_VERSION,
+        provenance=artifacts / "selected-wheel.json",
+    )
+    context = CiContext(source, {})
+
+    def readelf(command: list[object], **_kwargs: object) -> str:
+        if Path(command[-1]) != packaged:
+            return ""
+        return dynamic if "-d" in command else symbols
+
+    monkeypatch.setattr(context, "output", readelf)
+    pipeline = ModelProofInnerPipeline(
+        context,
+        ModelProofRequest("sam2_hoi", revision="a" * 40),
+    )
+    pipeline.source = source
+    pipeline.work = work
+    pipeline.artifacts = artifacts
+    pipeline.selected_wheel = runtime
+    pipeline.status = SimpleNamespace(
+        step=lambda *_args: None,
+        fact=lambda *_args: None,
+    )
+
+    with pytest.raises(CiError, match=message):
+        pipeline._validate_dso("sam2_hoi", runtime_library)

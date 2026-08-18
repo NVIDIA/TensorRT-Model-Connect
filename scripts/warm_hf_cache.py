@@ -298,6 +298,7 @@ if args.strict and filter_names is not None:
 
 entries: list[tuple[str, str, str, bool, bool]] = []
 file_assets: list[tuple[str, str, str, str]] = []
+selected_model_sources: dict[str, str] = {}
 for m in manifests:
     d = json.loads(m.read_text())
     name = d.get("name", m.stem)
@@ -305,19 +306,22 @@ for m in manifests:
         continue
     if not _manifest_has_eligible_testcase(d, excluded_ci_tiers):
         continue
-    if not d.get("hf_id"):
-        continue
     if filter_names is not None and name not in filter_names:
         continue
-    entries.append(
-        (
-            name,
-            d["hf_id"],
-            str(d.get("hf_revision", "") or "").strip(),
-            bool(d.get("gated")),
-            True,
+    source_kind = str(d.get("model_source_kind") or "huggingface")
+    if source_kind not in {"huggingface", "local_source_package"}:
+        raise RuntimeError(f"unsupported model_source_kind for {name}: {source_kind}")
+    selected_model_sources[str(name)] = source_kind
+    if source_kind != "local_source_package" and d.get("hf_id"):
+        entries.append(
+            (
+                name,
+                d["hf_id"],
+                str(d.get("hf_revision", "") or "").strip(),
+                bool(d.get("gated")),
+                True,
+            )
         )
-    )
     entries.extend(
         (
             dependency_name,
@@ -708,6 +712,8 @@ def _cache_repository_manifest(
     repo_ids: list[str],
     *,
     hub_cache: pathlib.Path,
+    selected_models: list[str] | None = None,
+    allow_empty_local_source: bool = False,
 ) -> dict[str, object]:
     """Return a fail-closed manifest for selected repositories in one HF cache."""
     try:
@@ -757,22 +763,31 @@ def _cache_repository_manifest(
             }
         )
 
-    if not repositories:
+    if not repositories and not allow_empty_local_source:
         raise RuntimeError("no selected Hugging Face repositories were resolved")
-    return {
+    payload: dict[str, object] = {
         "schema_version": 1,
         "hub_cache": str(canonical_hub),
         "repositories": repositories,
     }
+    if selected_models is not None:
+        payload["selected_models"] = sorted(selected_models)
+        payload["local_source_only"] = bool(allow_empty_local_source and not repositories)
+    return payload
 
 
 def _write_cache_repository_manifest(
     output: pathlib.Path,
     repo_ids: list[str],
+    *,
+    selected_models: list[str],
+    allow_empty_local_source: bool,
 ) -> None:
     payload = _cache_repository_manifest(
         repo_ids,
         hub_cache=pathlib.Path(hf_constants.HF_HUB_CACHE),
+        selected_models=selected_models,
+        allow_empty_local_source=allow_empty_local_source,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(f".{output.name}.tmp-{os.getpid()}")
@@ -895,6 +910,16 @@ if args.emit_cache_repos and not warned:
         _write_cache_repository_manifest(
             pathlib.Path(args.emit_cache_repos),
             selected_repo_ids,
+            selected_models=sorted(selected_model_sources),
+            allow_empty_local_source=(
+                filter_names is not None
+                and bool(selected_model_sources)
+                and all(
+                    kind == "local_source_package"
+                    for kind in selected_model_sources.values()
+                )
+                and not selected_repo_ids
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: could not emit selected cache repositories: {exc}", file=sys.stderr)

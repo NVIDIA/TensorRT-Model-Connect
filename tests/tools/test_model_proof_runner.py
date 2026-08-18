@@ -31,7 +31,7 @@ from tools.ci.model_proof_inner import (
     ModelProofInnerPipeline,
     _classify_e2e_proof_kinds,
 )
-from tools.ci.model_proof_selection import ModelProofSelector
+from tools.ci.model_proof_selection import ModelProofSelection, ModelProofSelector
 from tools.ci.process import CiError
 
 
@@ -113,10 +113,13 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "  run)\n"
         '    if [[ " $* " == *" /src/scripts/warm_hf_cache.py "* ]]; then\n'
         '      mkdir -p "$FAKE_ARTIFACTS"\n'
+        "      selected_models=$(python3 -c 'import json,sys; "
+        "print(json.dumps(sorted(line.strip() for line in open(sys.argv[1]) if line.strip())))' "
+        '"$FAKE_ARTIFACTS/cache-check-models.txt")\n'
         '      if [ "${FAKE_CACHE_EVIDENCE_MODE:-valid}" = escape ]; then\n'
-        '        printf \'%s\\n\' \'{"schema_version":1,"hub_cache":"/hf-cache/hub","repositories":[{"repo_id":"fixture/model","repo_type":"model","cache_folder":"../escape","cache_path":"/hf-cache/escape"}]}\' > "$FAKE_ARTIFACTS/hf-cache-repos.json"\n'
+        '        printf \'{"schema_version":1,"hub_cache":"/hf-cache/hub","selected_models":%s,"local_source_only":false,"repositories":[{"repo_id":"fixture/model","repo_type":"model","cache_folder":"../escape","cache_path":"/hf-cache/escape"}]}\\n\' "$selected_models" > "$FAKE_ARTIFACTS/hf-cache-repos.json"\n'
         "      else\n"
-        '        printf \'%s\\n\' \'{"schema_version":1,"hub_cache":"/hf-cache/hub","repositories":[{"repo_id":"fixture/model","repo_type":"model","cache_folder":"models--fixture--model","cache_path":"/hf-cache/hub/models--fixture--model"}]}\' > "$FAKE_ARTIFACTS/hf-cache-repos.json"\n'
+        '        printf \'{"schema_version":1,"hub_cache":"/hf-cache/hub","selected_models":%s,"local_source_only":false,"repositories":[{"repo_id":"fixture/model","repo_type":"model","cache_folder":"models--fixture--model","cache_path":"/hf-cache/hub/models--fixture--model"}]}\\n\' "$selected_models" > "$FAKE_ARTIFACTS/hf-cache-repos.json"\n'
         "      fi\n"
         "      exit 0\n"
         "    fi\n"
@@ -585,6 +588,107 @@ def test_every_owned_e2e_family_has_one_premerge_smoke_case(tmp_path: Path) -> N
         ]
         assert len(smoke_cases) == 1, family
         assert selection["e2e_cases"][0]["ci_tier"] != "nightly_only", family
+
+
+@pytest.mark.parametrize("suite", ["premerge", "nightly"])
+def test_sam2_hoi_selects_the_real_local_source_contract(tmp_path: Path, suite: str) -> None:
+    selection = _run_test_selection(tmp_path, "sam2_hoi", suite)
+
+    assert [case["name"] for case in selection["e2e_cases"]] == ["sam2-hoi-tracking"]
+    assert selection["e2e_cases"][0]["ci_tier"] == ""
+    assert selection["e2e_cases"][0]["model_source_kind"] == "local_source_package"
+    assert selection["e2e_cases"][0]["hf_id"] == "artifacts/sam2_hoi/hoi"
+    assert selection["model_source_package"] == {
+        "cache_file": (
+            "sam2_hoi/hoi_infer-"
+            "891c1729686f93fafab7ac6d4994db6cf3c3f27595ff9e5f97c9d6ee406f12b0.tar.gz"
+        ),
+        "sha256": "891c1729686f93fafab7ac6d4994db6cf3c3f27595ff9e5f97c9d6ee406f12b0",
+        "project_path": "artifacts/sam2_hoi/hoi",
+        "entrypoint": "SOURCE_COMMIT",
+    }
+
+
+@pytest.mark.parametrize("mutation", ["remove-contract", "mismatch-path", "wrong-suite"])
+def test_selector_rejects_an_unprovisionable_local_source_case(
+    tmp_path: Path, mutation: str
+) -> None:
+    def configure(source: Path, _projection: dict[str, object]) -> None:
+        owner = source / "tests/e2e/models/sam2_hoi/MODEL.toml"
+        text = owner.read_text(encoding="utf-8")
+        if mutation == "remove-contract":
+            prefix, source_contract = text.split("[model_source_package]", maxsplit=1)
+            _contract, defaults = source_contract.split("[e2e_defaults", maxsplit=1)
+            text = prefix + "[e2e_defaults" + defaults
+        elif mutation == "wrong-suite":
+            text = text.replace('suites = ["premerge", "nightly"]', 'suites = ["nightly"]')
+        owner.write_text(text, encoding="utf-8")
+        if mutation == "mismatch-path":
+            manifest = source / ("tests/e2e/models/sam2_hoi/manifests/sam2-hoi-tracking.json")
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["hf_id"] = "artifacts/sam2_hoi/other"
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CiError, match="local_source_package|model_source_package"):
+        _run_test_selection(
+            tmp_path,
+            "sam2_hoi",
+            "premerge",
+            projection_setup=configure,
+        )
+
+
+def test_empty_hf_evidence_is_allowed_only_for_an_hf_free_local_source_selection(
+    tmp_path: Path,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    payload = {
+        "schema_version": 1,
+        "hub_cache": "/hf-cache/hub",
+        "selected_models": ["sam2-hoi-tracking"],
+        "local_source_only": True,
+        "repositories": [],
+    }
+    (artifacts / "hf-cache-repos.json").write_text(json.dumps(payload), encoding="utf-8")
+    selection_payload = {
+        "e2e_cases": [
+            {
+                "name": "sam2-hoi-tracking",
+                "model": "sam2-hoi-tracking",
+                "model_source_kind": "local_source_package",
+            }
+        ],
+        "model_source_package": {
+            "cache_file": "sam2_hoi/package.tar.gz",
+            "sha256": "a" * 64,
+            "project_path": "artifacts/sam2_hoi/hoi",
+            "entrypoint": "SOURCE_COMMIT",
+        },
+    }
+    runner = ModelProofRunner(CiContext(REPO_ROOT, {}), ModelProofRequest("sam2_hoi"))
+    runner.artifacts_dir = artifacts
+
+    assert runner._validated_cache_evidence(hub, ModelProofSelection(selection_payload)) == []
+
+    selection_payload["e2e_cases"][0]["model_source_kind"] = "huggingface"
+    with pytest.raises(CiError, match="contains no repositories"):
+        runner._validated_cache_evidence(hub, ModelProofSelection(selection_payload))
+
+
+def test_model_source_package_is_prepared_and_mounted_before_gpu_leasing() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+    host = source.split("def _run_host(self)", maxsplit=1)[1].split("def _project", maxsplit=1)[0]
+    proof = source.split("def _run_proof_container(", maxsplit=1)[1].split(
+        "def _proof_environment", maxsplit=1
+    )[0]
+
+    assert host.index("_prepare_model_source_package") < host.index("GpuLease(")
+    assert "mountpoint.mkdir(parents=True)" in source
+    assert "mountpoint must be an empty directory" in source
+    assert "dst=/src/{contract['project_path']},readonly" in proof
 
 
 def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
@@ -1883,7 +1987,8 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
     assert "HF Hub cache directory does not exist" not in host
     assert 'hub in {Path("/"), self.context.repository}' in host
     assert "hf_modules_cache" not in host
-    assert 'f"type=bind,src={hub},dst=/hf-cache/hub,readonly"' in cache_check
+    assert "check_hub = hub" in cache_check
+    assert 'f"type=bind,src={check_hub},dst=/hf-cache/hub,readonly"' in cache_check
     assert "dst=/hf-cache/modules" not in cache_check
     assert 'f"type=bind,src={private_hub},dst=/hf-cache/hub"' in proof
     assert "src={private_hub},dst=/hf-cache/hub,readonly" not in proof

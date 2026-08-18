@@ -1,0 +1,4 @@
+CUTLASS commit: afa1772203677c5118fcd82537a9c8fefbcc7008
+PyTorch pin: e2d141dbde55c2a4370fac5165b0561b6af4798b
+Source path: third_party/cutlass/include
+Vendored scope: exact 130-header transitive compile closure for the SAM2-HOI Hiera FlashAttention96 launcher.

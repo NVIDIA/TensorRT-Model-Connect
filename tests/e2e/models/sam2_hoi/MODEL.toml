@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sam2_hoi"
+plugin = "sam2_hoi"
+test_manifests = [
+  "manifests/sam2-hoi-tracking.json",
+]
+
+[model_source_package]
+suites = ["premerge", "nightly"]
+cache_file = "sam2_hoi/hoi_infer-891c1729686f93fafab7ac6d4994db6cf3c3f27595ff9e5f97c9d6ee406f12b0.tar.gz"
+sha256 = "891c1729686f93fafab7ac6d4994db6cf3c3f27595ff9e5f97c9d6ee406f12b0"
+project_path = "artifacts/sam2_hoi/hoi"
+entrypoint = "SOURCE_COMMIT"
+
+[e2e_defaults.hoi_video_tracking]
+reference_backend = "sam2_hoi_archive_reference"
+oracle_level = "L3_snapshot_regression"
+stages = [
+  { name = "full_tracking", required = true },
+]
+input_fields = [
+  { input = "frames_dir", manifest = "frames_dir" },
+  { input = "reference_npz", manifest = "reference_npz" },
+  { input = "expected_frame_count", manifest = "expected_frame_count" },
+  { input = "expected_height", manifest = "expected_height" },
+  { input = "expected_width", manifest = "expected_width" },
+]

@@ -208,6 +208,7 @@ test('collects support inventory from repository metadata', (context) => {
       revision: 'not pinned',
       bundle: 'beta-base-tp2.bundle',
       family: 'beta',
+      modelSourceKind: 'huggingface',
       runtimeStrategy: 'encoder',
       taskStrategy: 'encoder_only_nlp',
       hfTasks: ['feature-extraction'],
@@ -232,6 +233,7 @@ test('collects support inventory from repository metadata', (context) => {
       revision: alphaRevision,
       bundle: 'alpha-small.bundle',
       family: 'alpha',
+      modelSourceKind: 'huggingface',
       runtimeStrategy: 'decoder',
       taskStrategy: 'text_generation_causal',
       hfTasks: ['text-generation'],
@@ -322,6 +324,38 @@ test('collects support inventory from repository metadata', (context) => {
   assert.deepEqual(inventory.publicCliCommands, [
     'build', 'encode', 'graph', 'inspect', 'run', 'version',
   ]);
+});
+
+test('publishes the local SAM2 HOI source-package recipe without fake HF metadata', () => {
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const inventory = collectModelSupportInventory(repoRoot);
+  const profile = inventory.modelProfiles.find(
+    (candidate) => candidate.profile === 'sam2-hoi-tracking'
+  );
+
+  assert.ok(profile);
+  assert.equal(profile.modelSourceKind, 'local_source_package');
+  assert.equal(profile.hfId, 'artifacts/sam2_hoi/hoi');
+  assert.equal(profile.hfMetadataFile, 'not applicable');
+  assert.deepEqual(profile.hfTasks, ['mask-generation']);
+  assert.deepEqual(profile.cliCommands, ['track-hoi']);
+
+  const family = inventory.familyRecipes.find(
+    (candidate) => candidate.family === 'sam2_hoi'
+  );
+  assert.ok(family);
+  const contract = family.commandContracts.find(
+    (candidate) => candidate.command === 'track-hoi'
+  );
+  assert.ok(contract);
+  assert.equal(
+    contract.syntax,
+    'trtmc track-hoi <bundle.bundle> --frames-dir <frames-dir> --output-json <tracking.json> --output-masks-dir <masks-dir>'
+  );
+  assert.deepEqual(
+    contract.options.map((entry) => entry.flag),
+    ['--frames-dir <DIR>', '--output-json <PATH>', '--output-masks-dir <DIR>']
+  );
 });
 
 test('fails closed when a source-of-truth directory is missing', (context) => {

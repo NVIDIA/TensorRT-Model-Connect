@@ -111,11 +111,14 @@ native executable is also staged into the wheel scripts directory so pip
 installs `trtmc` into the target environment's `bin/` directory. Release-wheel
 metadata declares TensorRT and the other Python builder dependencies.
 
-The Conan recipe manages `nlohmann_json` for native wheel builds. TensorRT and
-CUDA are supplied by the build environment and by pip/host runtime dependencies,
-not by Conan recipes. Release wheel builds also disable the optional
-libtorch-backed multinomial sampler so the wheel does not link against
-PyTorch's native DSOs or inherit their platform floor.
+The Conan recipe manages `nlohmann_json` and the static PIC
+`libjpeg-turbo/2.1.5` dependency for native wheel builds. The JPEG library is
+linked privately into the SAM2-HOI model DSO; ordinary source builds use the
+system JPEG development package instead. TensorRT and CUDA are supplied by the
+build environment and by pip/host runtime dependencies, not by Conan recipes.
+Release wheel builds also disable the optional libtorch-backed multinomial
+sampler so the wheel does not link against PyTorch's native DSOs or inherit
+their platform floor.
 
 Release validation uses the repository `Dockerfile`, pinned to the official
 TensorRT 11.1 CUDA 13 cohort on Ubuntu 24.04 / glibc 2.39. `auditwheel` verifies

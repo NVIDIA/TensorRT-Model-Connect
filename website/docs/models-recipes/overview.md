@@ -77,7 +77,9 @@ for reproduction and interpretation details.
 The support table is a retained release snapshot. The current checkout may
 contain additional E2E manifests, L0 replacements, and distributed variants.
 Those declarations are available through [Model Recipes](model-recipes.md),
-organized as Hugging Face task → model family → exact manifest recipe.
+organized by a Hugging Face-derived task taxonomy → model family → exact
+manifest recipe. Local source packages use the nearest applicable task
+category without claiming a Hugging Face repository.
 
 Platform specializations will roll out in phases aligned with model coverage
 available in TensorRT Edge-LLM and TensorRT-Model-Connect releases. Each batch

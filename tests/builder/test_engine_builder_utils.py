@@ -14,12 +14,13 @@ Postconditions: HF directories are correctly identified, tokenizer special-token
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import tensorrt_model_connect.engine_builder as engine_builder
@@ -29,6 +30,10 @@ try:
         _is_hf_model_dir,
         _detect_tokenizer_add_special_tokens,
         _detect_tokenizer_special_frame,
+        _file_backed_bundle_sections_from_plugin,
+        _file_backed_bundle_hook,
+        _file_backed_section_staging,
+        _validate_staged_bundle_inventory,
         _resolve_model,
         _get_trt_version,
         _trt_abi_from_version,
@@ -39,9 +44,277 @@ try:
         _tokenizer_json_bundle_override_from_plugin,
         build_bundle,
     )
+    from tensorrt_model_connect.bundle_writer import (
+        BundleInfo,
+        BundleSection,
+        FileBundleSection,
+        bundle_section_from_file,
+        write_bundle,
+    )
     from tensorrt_model_connect.families import family_hf_allow_patterns
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect not importable", allow_module_level=True)
+
+
+class TestFileBackedBundleSectionHook:
+    def _call(self, plugin):
+        with _file_backed_section_staging() as staging_dir:
+            sections = _file_backed_bundle_sections_from_plugin(
+                plugin,
+                SimpleNamespace(raw={}),
+                {"weight": object()},
+                32,
+                staging_dir=staging_dir,
+                precision="bf16",
+                verbose=True,
+                quant_ctx="quant",
+                build_timing={},
+                parallel_config="parallel",
+            )
+            assert all(section.source_path.is_file() for section in sections)
+            return sections, staging_dir
+
+    def test_absent_hook_preserves_legacy_family_behavior(self):
+        sections, staging_dir = self._call(SimpleNamespace(name="legacy"))
+        assert sections == []
+        assert not staging_dir.exists()
+
+    def test_dynamic_mock_attribute_does_not_opt_in(self):
+        plugin = MagicMock()
+        plugin.name = "legacy_mock"
+        assert callable(plugin.build_file_backed_bundle_sections)
+        assert _file_backed_bundle_hook(plugin) is None
+        sections, staging_dir = self._call(plugin)
+        assert sections == []
+        assert not staging_dir.exists()
+
+    def test_hook_receives_owned_staging_and_preserves_order(self):
+        captured = {}
+
+        class Plugin:
+            name = "ordered"
+
+            def build_file_backed_bundle_sections(
+                self,
+                config,
+                weights,
+                max_cache_length,
+                *,
+                staging_dir,
+                precision,
+                verbose,
+                quant_ctx,
+                build_timing,
+                parallel_config,
+            ):
+                captured.update(
+                    config=config,
+                    weights=weights,
+                    max_cache_length=max_cache_length,
+                    staging_dir=staging_dir,
+                    precision=precision,
+                    verbose=verbose,
+                    quant_ctx=quant_ctx,
+                    build_timing=build_timing,
+                    parallel_config=parallel_config,
+                )
+                result = []
+                for name, payload in (("leaf_001", b"one"), ("leaf_000", b"zero")):
+                    path = staging_dir / f"{name}.plan"
+                    path.write_bytes(payload)
+                    result.append(
+                        bundle_section_from_file(
+                            name,
+                            path,
+                            expected_size=len(payload),
+                            expected_sha256=hashlib.sha256(payload).hexdigest(),
+                        )
+                    )
+                return result
+
+        sections, staging_dir = self._call(Plugin())
+        assert [section.name for section in sections] == ["leaf_001", "leaf_000"]
+        assert captured["precision"] == "bf16"
+        assert captured["parallel_config"] == "parallel"
+        assert not staging_dir.exists()
+
+    def test_staging_cleans_up_after_hook_failure(self):
+        observed = None
+        with pytest.raises(RuntimeError, match="boom"):
+            with _file_backed_section_staging() as staging_dir:
+                observed = staging_dir
+                (staging_dir / "partial.plan").write_bytes(b"partial")
+                raise RuntimeError("boom")
+        assert observed is not None and not observed.exists()
+
+    def test_staging_survives_until_write_and_cleans_after_write_failure(self, tmp_path):
+        observed = None
+        destination = tmp_path / "failed.bundle"
+        with pytest.raises(RuntimeError, match="changed after validation"):
+            with _file_backed_section_staging() as staging_dir:
+                observed = staging_dir
+                source = staging_dir / "leaf.plan"
+                source.write_bytes(b"leaf")
+                section = bundle_section_from_file(
+                    "leaf",
+                    source,
+                    expected_size=4,
+                    expected_sha256="0" * 64,
+                )
+                assert source.is_file()
+                write_bundle(destination, BundleInfo(model_id="failure"), [section])
+        assert observed is not None and not observed.exists()
+        assert not destination.exists()
+        assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
+
+    def test_staging_survives_until_successful_write_then_cleans(self, tmp_path):
+        destination = tmp_path / "success.bundle"
+        with _file_backed_section_staging() as staging_dir:
+            observed = staging_dir
+            source = staging_dir / "leaf.plan"
+            source.write_bytes(b"leaf")
+            section = bundle_section_from_file(
+                "leaf",
+                source,
+                expected_size=4,
+                expected_sha256=hashlib.sha256(b"leaf").hexdigest(),
+            )
+            write_bundle(destination, BundleInfo(model_id="success"), [section])
+            assert source.is_file()
+        assert not observed.exists()
+        assert destination.is_file()
+
+    @pytest.mark.parametrize("result", [None, iter(())])
+    def test_hook_rejects_none_or_unordered_iterables(self, result):
+        plugin = SimpleNamespace(
+            name="invalid",
+            build_file_backed_bundle_sections=lambda *_args, **_kwargs: result,
+        )
+        expected = ValueError if result is None else TypeError
+        with pytest.raises(expected):
+            self._call(plugin)
+
+    def test_hook_cannot_mutate_already_rendered_config(self):
+        def build(config, *_args, **_kwargs):
+            config.raw["bundle_loading"] = {"mutated": True}
+            return []
+
+        plugin = SimpleNamespace(name="mutating", build_file_backed_bundle_sections=build)
+        with pytest.raises(RuntimeError, match="get_bundle_config_overrides"):
+            self._call(plugin)
+
+    def test_hook_rejects_sources_outside_owned_staging(self, tmp_path):
+        source = tmp_path / "external.plan"
+        source.write_bytes(b"external")
+        section = bundle_section_from_file(
+            "external",
+            source,
+            expected_size=len(b"external"),
+            expected_sha256=hashlib.sha256(b"external").hexdigest(),
+        )
+        plugin = SimpleNamespace(
+            name="external",
+            build_file_backed_bundle_sections=lambda *_args, **_kwargs: [section],
+        )
+        with pytest.raises(ValueError, match="inside its staging_dir"):
+            self._call(plugin)
+
+    def test_hook_requires_sha_even_for_direct_descriptors(self):
+        def build(*_args, staging_dir, **_kwargs):
+            source = staging_dir / "unhashed.plan"
+            source.write_bytes(b"unhashed")
+            return [
+                FileBundleSection(
+                    name="unhashed",
+                    source_path=source,
+                    expected_size=len(b"unhashed"),
+                    expected_sha256=None,
+                )
+            ]
+
+        plugin = SimpleNamespace(name="unhashed", build_file_backed_bundle_sections=build)
+        with pytest.raises(ValueError, match="must declare expected_sha256"):
+            self._call(plugin)
+
+    def test_hook_rejects_duplicate_names(self):
+        class Plugin:
+            name = "duplicate"
+
+            def build_file_backed_bundle_sections(self, *_args, staging_dir, **_kwargs):
+                sections = []
+                for index in range(2):
+                    payload = str(index).encode()
+                    path = staging_dir / f"{index}.plan"
+                    path.write_bytes(payload)
+                    sections.append(
+                        bundle_section_from_file(
+                            "same",
+                            path,
+                            expected_size=len(payload),
+                            expected_sha256=hashlib.sha256(payload).hexdigest(),
+                        )
+                    )
+                return sections
+
+        with pytest.raises(ValueError, match="duplicate section name"):
+            self._call(Plugin())
+
+
+class TestStagedBundleInventory:
+    @staticmethod
+    def _sections(policy, extra=()):
+        return [
+            BundleSection(
+                "config.json",
+                json.dumps({"bundle_loading": policy}).encode("utf-8"),
+            ),
+            BundleSection("manifest.json", b"{}"),
+            BundleSection("engine_plan", b"plan"),
+            *(BundleSection(name, b"extra") for name in extra),
+        ]
+
+    def test_exact_partition_is_accepted(self):
+        sections = self._sections(
+            {
+                "mode": "staged",
+                "eager_sections": ["config.json", "manifest.json"],
+                "lazy_sections": ["engine_plan"],
+            }
+        )
+        _validate_staged_bundle_inventory(sections)
+
+    def test_undeclared_optional_section_is_rejected(self):
+        sections = self._sections(
+            {
+                "mode": "staged",
+                "eager_sections": ["config.json", "manifest.json"],
+                "lazy_sections": ["engine_plan"],
+            },
+            extra=("tokenizer.json",),
+        )
+        with pytest.raises(ValueError, match="partition bundle sections exactly"):
+            _validate_staged_bundle_inventory(sections)
+
+    def test_absent_and_duplicate_declared_sections_are_rejected(self):
+        absent = self._sections(
+            {
+                "mode": "staged",
+                "eager_sections": ["config.json", "manifest.json"],
+                "lazy_sections": ["engine_plan", "missing.plan"],
+            }
+        )
+        with pytest.raises(ValueError, match="partition bundle sections exactly"):
+            _validate_staged_bundle_inventory(absent)
+
+        duplicate = self._sections(
+            {
+                "mode": "staged",
+                "eager_sections": ["config.json", "manifest.json"],
+                "lazy_sections": ["engine_plan", "engine_plan"],
+            }
+        )
+        with pytest.raises(ValueError, match="duplicate section names"):
+            _validate_staged_bundle_inventory(duplicate)
 
 
 class TestIsHfModelDir:

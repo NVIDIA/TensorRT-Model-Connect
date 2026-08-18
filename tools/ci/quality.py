@@ -8,6 +8,7 @@ Boundary: pre-model CPU validation; isolated model certification is a later stag
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -19,6 +20,79 @@ from .context import CiContext
 from .package import WheelPackageManager
 from .process import CiError
 from .selected_wheel import SelectedWheelRuntime
+
+
+_BYTE_PINNED_CPP_VENDOR_ROOTS = (
+    "python/tensorrt_model_connect/families/sam2_hoi/native_plugins/vendor/cutlass/",
+    "python/tensorrt_model_connect/families/sam2_hoi/native_plugins/vendor/flash_attention/",
+)
+
+
+def _load_byte_pinned_vendor_files(repository: Path, root_relative: str) -> frozenset[str]:
+    """Load and verify one exact vendor manifest before granting format exemption."""
+    repository = repository.resolve()
+    declared_root = repository / root_relative
+    if declared_root.is_symlink() or not declared_root.is_dir():
+        raise CiError(f"byte-pinned vendor root is missing or unsafe: {declared_root}")
+    root = declared_root.resolve()
+    if not root.is_relative_to(repository) or root != declared_root:
+        raise CiError(f"byte-pinned vendor root resolves unsafely: {declared_root}")
+    manifest = root / "MANIFEST.sha256"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise CiError(f"byte-pinned vendor manifest is missing or unsafe: {manifest}")
+
+    pinned: set[str] = set()
+    for line_number, line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2:
+            raise CiError(f"invalid vendor manifest row {manifest}:{line_number}")
+        expected_sha256, manifest_path = fields
+        if (
+            len(expected_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in expected_sha256)
+            or not manifest_path.startswith("./")
+        ):
+            raise CiError(f"invalid vendor manifest row {manifest}:{line_number}")
+
+        relative = Path(manifest_path[2:])
+        declared_source = root / relative
+        if ".." in relative.parts:
+            raise CiError(f"vendor manifest path escapes its root: {manifest_path}")
+        if declared_source.is_symlink() or not declared_source.is_file():
+            raise CiError(f"vendor manifest source is missing or unsafe: {declared_source}")
+        source = declared_source.resolve()
+        if not source.is_relative_to(root) or source != declared_source:
+            raise CiError(f"vendor manifest source resolves unsafely: {declared_source}")
+        actual_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise CiError(
+                f"vendor manifest digest mismatch for {source}: "
+                f"expected {expected_sha256}, found {actual_sha256}"
+            )
+        repository_path = declared_source.relative_to(repository).as_posix()
+        if repository_path in pinned:
+            raise CiError(f"duplicate vendor manifest path: {repository_path}")
+        pinned.add(repository_path)
+    return frozenset(pinned)
+
+
+def _partition_cpp_format_inputs(
+    repository: Path, changed_files: list[str]
+) -> tuple[list[str], list[str]]:
+    """Separate only manifest-verified vendor bytes from clang-format inputs."""
+    format_files = list(changed_files)
+    skipped: list[str] = []
+    for root_relative in _BYTE_PINNED_CPP_VENDOR_ROOTS:
+        candidates = [path for path in format_files if path.startswith(root_relative)]
+        if not candidates:
+            continue
+        pinned = _load_byte_pinned_vendor_files(repository, root_relative)
+        unpinned = sorted(set(candidates) - pinned)
+        if unpinned:
+            raise CiError("unmanifested vendor C++ source: " + ", ".join(unpinned))
+        skipped.extend(candidates)
+        format_files = [path for path in format_files if path not in pinned]
+    return format_files, skipped
 
 
 class EnvironmentVerifier:
@@ -139,7 +213,12 @@ class SourceQualityChecks:
             print("Checking Python lint on changed files:")
             print("\n".join(python_files))
             self.context.run(["ruff", "check", "--config", "ruff.toml", *python_files])
-        cpp_files = self._changed_files(base, "*.cpp", "*.h")
+        changed_cpp_files = self._changed_files(base, "*.cpp", "*.h")
+        cpp_files, skipped_vendored = _partition_cpp_format_inputs(
+            self.context.repository, changed_cpp_files
+        )
+        if skipped_vendored:
+            print(f"Skipping clang-format for {len(skipped_vendored)} byte-pinned vendor files")
         if cpp_files:
             print("Checking C++ formatting on changed files:")
             print("\n".join(cpp_files))

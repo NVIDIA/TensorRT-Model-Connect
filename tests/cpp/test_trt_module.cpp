@@ -34,6 +34,7 @@
 
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
+#include "test_helpers.h"
 #include "trtmc/runtime/tensor.h"
 #include "trtmc/runtime/trt_module.h"
 
@@ -55,6 +56,18 @@ static void check(bool condition, const char* test_name) {
 
 // Process-wide logger (TRT requires a single logger for all objects).
 static trtmc::TrtLogger g_logger;
+
+namespace trtmc {
+
+class TrtModuleImplTestPeer {
+  public:
+    static bool timing_enabled(const TrtModuleImpl& module) { return module.timing_enabled_; }
+    static std::size_t timing_event_count(const TrtModuleImpl& module) {
+        return module.timing_events_.size();
+    }
+};
+
+} // namespace trtmc
 
 // Build a tiny TRT engine: identity mapping input[4] → output[4] (float32)
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
@@ -482,6 +495,54 @@ static void test_forward_device_with_input() {
     cudaStreamDestroy(stream);
 }
 
+static void test_engine_timing_environment() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    {
+        trtmc_test::EnvVarGuard timing("TRTMC_ENGINE_TIMING");
+        trtmc::TrtModuleImpl module(engine.get(), engine->createExecutionContext(), stream);
+        check(module.ok(), "engine timing default: module is ok");
+        check(trtmc::TrtModuleImplTestPeer::timing_enabled(module),
+              "engine timing default: enabled");
+    }
+    {
+        trtmc_test::EnvVarGuard timing("TRTMC_ENGINE_TIMING", "1");
+        trtmc::TrtModuleImpl module(engine.get(), engine->createExecutionContext(), stream);
+        check(module.ok(), "engine timing explicit on: module is ok");
+        check(trtmc::TrtModuleImplTestPeer::timing_enabled(module),
+              "engine timing explicit on: enabled");
+        module.forward_async({});
+        module.sync();
+        check(trtmc::TrtModuleImplTestPeer::timing_event_count(module) == 1,
+              "engine timing explicit on: event retained");
+    }
+    {
+        trtmc_test::EnvVarGuard timing("TRTMC_ENGINE_TIMING", "0");
+        trtmc::TrtModuleImpl module(engine.get(), engine->createExecutionContext(), stream);
+        check(module.ok(), "engine timing off: module is ok");
+        check(!trtmc::TrtModuleImplTestPeer::timing_enabled(module), "engine timing off: disabled");
+        setenv("TRTMC_ENGINE_TIMING", "1", 1);
+        check(!trtmc::TrtModuleImplTestPeer::timing_enabled(module),
+              "engine timing off: construction snapshot is stable");
+        module.forward_async({});
+        module.sync();
+        check(trtmc::TrtModuleImplTestPeer::timing_event_count(module) == 0,
+              "engine timing off: no event retained");
+    }
+    {
+        trtmc_test::EnvVarGuard timing("TRTMC_ENGINE_TIMING", "invalid");
+        trtmc::TrtModuleImpl module(engine.get(), engine->createExecutionContext(), stream);
+        check(!module.ok(), "engine timing invalid: module creation fails closed");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
 int main() {
     test_forward_cpu();
     test_forward_async();
@@ -494,6 +555,7 @@ int main() {
     test_forward_device_with_input();
     test_profile_idx_default();
     test_profile_idx_invalid();
+    test_engine_timing_environment();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

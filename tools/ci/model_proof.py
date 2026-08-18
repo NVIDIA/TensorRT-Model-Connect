@@ -16,12 +16,13 @@ import signal
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .context import CiContext
 from .gpu_lease import GpuLease
 from .model_reference_cache import ModelReferenceCacheWarmer, ModelReferenceContract
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
+from .model_source_cache import ModelSourcePackagePreparer
 from .process import CiError
 from .selected_wheel import (
     SELECTED_WHEEL_DIR_ENV,
@@ -240,6 +241,7 @@ class ModelProofRunner:
         self.lease: GpuLease | None = None
         self.container_name = ""
         self.artifacts_dir: Path | None = None
+        self.model_source_private_root: Path | None = None
         self.revision = request.revision
 
     def run_host(self) -> None:
@@ -274,11 +276,14 @@ class ModelProofRunner:
         projection = output / "projection"
         self.artifacts_dir = output / "artifacts"
         work = output / "work"
+        self.model_source_private_root = output / "model-source-private"
         output.mkdir(parents=True, exist_ok=True)
         for path in (self.artifacts_dir, work):
             if path.exists():
                 shutil.rmtree(path)
             path.mkdir(parents=True)
+        if self.model_source_private_root.exists():
+            shutil.rmtree(self.model_source_private_root)
         self._project(projection)
         selection = ModelProofSelector(
             self.request.model, self.request.suite, self.revision, projection
@@ -286,6 +291,7 @@ class ModelProofRunner:
         ModelReferenceCache(self.context, self.request).prepare(
             selection.reference_cache, work, self.artifacts_dir
         )
+        model_source = self._prepare_model_source_package(selection, projection)
         expected = self.context.env.get("TRTMC_MODEL_PROOF_EXPECTED_RESOURCE_CLASS", "")
         if expected and expected not in {"shared", "exclusive_gpu"}:
             raise CiError(
@@ -319,7 +325,9 @@ class ModelProofRunner:
             validation_container,
             self._job_labels(),
         ).prepare()
-        private_hub = self._prepare_hf_cache(projection, work, image, models_file)
+        private_hub = self._prepare_hf_cache(
+            projection, work, image, models_file, selection
+        )
         (self.artifacts_dir / "gpu-lease-requested.txt").write_text(
             selection.resource_class + "\n", encoding="utf-8"
         )
@@ -348,6 +356,7 @@ class ModelProofRunner:
             projection,
             work,
             private_hub,
+            model_source,
             image,
             selection,
             validation_dir,
@@ -356,6 +365,37 @@ class ModelProofRunner:
             if not (self.artifacts_dir / name).is_file():
                 raise CiError(f"model proof did not emit {name}")
         print(f"Model proof artifacts: {self.artifacts_dir}")
+
+    def _prepare_model_source_package(
+        self,
+        selection: ModelProofSelection,
+        projection: Path,
+    ) -> Path | None:
+        assert self.artifacts_dir is not None and self.model_source_private_root is not None
+        contract = selection.model_source_package
+        source = ModelSourcePackagePreparer(self.context, self.request.model).prepare(
+            contract,
+            self.model_source_private_root,
+            self.artifacts_dir,
+        )
+        if source is None:
+            return None
+
+        assert contract is not None
+        mountpoint = projection.joinpath(*PurePosixPath(contract["project_path"]).parts)
+        current = projection
+        for part in PurePosixPath(contract["project_path"]).parts:
+            current /= part
+            if current.is_symlink():
+                raise CiError("model source package mountpoint contains a symlink")
+        if mountpoint.exists():
+            if not mountpoint.is_dir() or any(mountpoint.iterdir()):
+                raise CiError("model source package mountpoint must be an empty directory")
+        else:
+            mountpoint.mkdir(parents=True)
+        if not mountpoint.resolve().is_relative_to(projection.resolve()):
+            raise CiError("model source package mountpoint escapes the projection")
+        return source
 
     def _project(self, projection: Path) -> None:
         assert self.artifacts_dir is not None
@@ -413,7 +453,12 @@ class ModelProofRunner:
         return value.replace("_", "-")
 
     def _prepare_hf_cache(
-        self, projection: Path, work: Path, image: str, models_file: Path
+        self,
+        projection: Path,
+        work: Path,
+        image: str,
+        models_file: Path,
+        selection: ModelProofSelection,
     ) -> Path:
         assert self.artifacts_dir is not None
         root = self.context.env.get(
@@ -423,6 +468,15 @@ class ModelProofRunner:
         hub = Path(self.context.env.get("TRTMC_HF_HUB_CACHE", str(Path(root) / "hub"))).resolve()
         if hub in {Path("/"), self.context.repository}:
             raise CiError("unsafe HF Hub cache path")
+        check_hub = hub
+        if not selection.hf_models:
+            if selection.model_source_package is None:
+                raise CiError("an empty HF model selection requires a local source package")
+            empty_root = work / "hf-empty-check"
+            if empty_root.exists():
+                shutil.rmtree(empty_root)
+            check_hub = empty_root / "hub"
+            check_hub.mkdir(parents=True)
         name = self._base_container_name() + "-cache-check"
         self.container_name = name
         self.context.run(["docker", "rm", "-f", name], check=False, capture_output=True)
@@ -447,7 +501,7 @@ class ModelProofRunner:
             "--mount",
             f"type=bind,src={self.artifacts_dir},dst=/artifacts",
             "--mount",
-            f"type=bind,src={hub},dst=/hf-cache/hub,readonly",
+            f"type=bind,src={check_hub},dst=/hf-cache/hub,readonly",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=1g",
             "--workdir",
@@ -480,7 +534,7 @@ class ModelProofRunner:
                 f"offline HF cache readiness check failed for {self.request.model} (exit {result})"
             )
         try:
-            evidence = self._validated_cache_evidence(hub)
+            evidence = self._validated_cache_evidence(check_hub, selection)
         except (CiError, OSError, json.JSONDecodeError) as error:
             raise CiError(
                 "selected Hugging Face cache evidence failed closed validation"
@@ -552,16 +606,33 @@ class ModelProofRunner:
                     pass
         return private_hub
 
-    def _validated_cache_evidence(self, hub: Path) -> list[tuple[Path, str]]:
+    def _validated_cache_evidence(
+        self,
+        hub: Path,
+        selection: ModelProofSelection,
+    ) -> list[tuple[Path, str]]:
         assert self.artifacts_dir is not None
         payload = json.loads(
             (self.artifacts_dir / "hf-cache-repos.json").read_text(encoding="utf-8")
         )
         if payload.get("schema_version") != 1 or payload.get("hub_cache") != "/hf-cache/hub":
             raise CiError("selected Hugging Face cache evidence has an unsupported schema")
+        if payload.get("selected_models") != sorted(selection.e2e_models):
+            raise CiError("selected Hugging Face cache evidence has the wrong model selection")
         repositories = payload.get("repositories")
-        if not isinstance(repositories, list) or not repositories:
-            raise CiError("selected HF cache evidence contains no repositories")
+        if not isinstance(repositories, list):
+            raise CiError("selected HF cache evidence repositories must be a list")
+        local_source_only = payload.get("local_source_only")
+        if not repositories:
+            if not (
+                local_source_only is True
+                and selection.model_source_package is not None
+                and not selection.hf_models
+            ):
+                raise CiError("selected HF cache evidence contains no repositories")
+            return []
+        if local_source_only is not False:
+            raise CiError("non-empty HF cache evidence cannot be local-source-only")
         result = []
         seen = set()
         resolved_hub = hub.resolve(strict=True)
@@ -597,6 +668,7 @@ class ModelProofRunner:
         projection: Path,
         work: Path,
         private_hub: Path,
+        model_source: Path | None,
         image: str,
         selection: ModelProofSelection,
         validation_dir: Path | None,
@@ -617,6 +689,16 @@ class ModelProofRunner:
             "--mount",
             f"type=bind,src={private_hub},dst=/hf-cache/hub",
         ]
+        if model_source is not None:
+            contract = selection.model_source_package
+            if contract is None:
+                raise CiError("model source package mount has no selected contract")
+            mounts.extend(
+                [
+                    "--mount",
+                    f"type=bind,src={model_source},dst=/src/{contract['project_path']},readonly",
+                ]
+            )
         if validation_dir is not None:
             mounts.extend(
                 [
@@ -844,6 +926,8 @@ class ModelProofRunner:
             )
         if self.lease:
             self.lease.release()
+        if self.model_source_private_root and self.model_source_private_root.exists():
+            shutil.rmtree(self.model_source_private_root)
 
     def _signal(self, number: int, _frame: object) -> None:
         raise SystemExit(130 if number == signal.SIGINT else 143)

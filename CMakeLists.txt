@@ -224,6 +224,7 @@ add_library(trtmc_core SHARED
   src/runtime/core/image_features.cpp
   src/runtime/core/measurement.cpp
   src/runtime/core/pipeline_pool.cpp
+  src/runtime/core/video_frame_batch_loader.cpp
   src/runtime/core/stb_impl.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
@@ -436,6 +437,32 @@ if(NOT _trtmc_has_tvm_ffi)
   message(STATUS "TVM-FFI kernel bridge disabled")
 endif()
 
+function(_trtmc_ensure_jpeg_target)
+  if(TARGET trtmc_jpeg)
+    return()
+  endif()
+
+  if(TRTMC_DISTRIBUTABLE_BUILD)
+    find_package(libjpeg-turbo CONFIG REQUIRED)
+    if(NOT TARGET libjpeg-turbo::jpeg-static)
+      message(FATAL_ERROR
+        "Distributable model DSOs require Conan's static PIC "
+        "libjpeg-turbo::jpeg-static target")
+    endif()
+    set(_trtmc_jpeg_provider libjpeg-turbo::jpeg-static)
+    message(STATUS "libjpeg: using Conan static PIC target for distributable model DSOs")
+  else()
+    if(NOT TARGET JPEG::JPEG)
+      find_package(JPEG REQUIRED)
+    endif()
+    set(_trtmc_jpeg_provider JPEG::JPEG)
+    message(STATUS "libjpeg: using system JPEG::JPEG target for source build")
+  endif()
+
+  add_library(trtmc_jpeg INTERFACE)
+  target_link_libraries(trtmc_jpeg INTERFACE ${_trtmc_jpeg_provider})
+endfunction()
+
 # --- Per-model runtime plugin DSOs ---
 add_custom_target(trtmc_model_plugins)
 foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
@@ -487,6 +514,16 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
           "but cuBLAS was not found")
       endif()
       target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE ${TRTMC_CUBLAS_LIBRARY})
+    elseif(_trtmc_model_link_library STREQUAL "jpeg")
+      _trtmc_ensure_jpeg_target()
+      target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE trtmc_jpeg Threads::Threads)
+      if(TRTMC_DISTRIBUTABLE_BUILD)
+        # Keep statically linked libjpeg symbols local to the owning model DSO.
+        # This avoids symbol preemption if the host process loaded another
+        # libjpeg implementation before TensorRT-Model-Connect.
+        target_link_options(trtmc_model_${_trtmc_model} PRIVATE
+          "LINKER:--exclude-libs,ALL")
+      endif()
     else()
       message(FATAL_ERROR
         "Unknown runtime_link_libraries entry '${_trtmc_model_link_library}' "
@@ -669,6 +706,8 @@ endif()
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
+  src/cli/track_hoi_benchmark.cpp
+  src/cli/video_frame_loader.cpp
 )
 target_link_libraries(trtmc PRIVATE trtmc_core Threads::Threads)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -926,7 +965,14 @@ trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
-target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+target_sources(test_cli_args PRIVATE
+  src/cli/args.cpp
+  src/cli/track_hoi_benchmark.cpp
+)
+trtmc_add_test(test_cli_video_frame_loader)
+target_sources(test_cli_video_frame_loader PRIVATE
+  src/cli/video_frame_loader.cpp
+)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)
