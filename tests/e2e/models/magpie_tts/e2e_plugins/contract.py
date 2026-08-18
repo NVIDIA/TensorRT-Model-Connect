@@ -265,7 +265,7 @@ def _run_asr_roundtrip(
         logger.warning("HF ASR subprocess failed (model=%s): %s", model_id, e)
         return None
 
-class MagpieTTSPlugin:
+class MagpieTTSModel:
     reference_families = ["tts_magpie"]
     user_contract = "tts_audio"
 
@@ -485,4 +485,4 @@ class MagpieTTSPlugin:
             "TTS audio contract failed",
         )
 
-plugin = MagpieTTSPlugin()
+plugin = MagpieTTSModel()

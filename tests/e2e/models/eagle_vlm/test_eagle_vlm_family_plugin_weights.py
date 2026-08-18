@@ -50,7 +50,7 @@ class TestEagleVLMPlugin:
 
     def test_load_weights_embedding(self, tmp_path):
         """Embedding mode: loads Llama backbone weights, no score head."""
-        from tensorrt_model_connect.families.eagle_vlm import plugin
+        import tensorrt_model_connect.families.eagle_vlm.model as plugin
 
         config = {
             "model_type": "eagle",
@@ -90,7 +90,7 @@ class TestEagleVLMPlugin:
 
     def test_load_weights_reranking(self, tmp_path):
         """Reranking mode: loads score head weights."""
-        from tensorrt_model_connect.families.eagle_vlm import plugin
+        import tensorrt_model_connect.families.eagle_vlm.model as plugin
 
         config = {
             "model_type": "eagle",
@@ -118,7 +118,7 @@ class TestEagleVLMPlugin:
 
     def test_get_vl_config(self, tmp_path):
         """get_vl_config returns embedding config with vision info."""
-        from tensorrt_model_connect.families.eagle_vlm import plugin
+        import tensorrt_model_connect.families.eagle_vlm.model as plugin
 
         config = {
             "model_type": "eagle",
@@ -145,7 +145,7 @@ class TestEagleVLMPlugin:
 
     def test_bundle_config_overrides_embedding(self, tmp_path):
         """Bundle config overrides: embedding mode."""
-        from tensorrt_model_connect.families.eagle_vlm import plugin
+        import tensorrt_model_connect.families.eagle_vlm.model as plugin
 
         config = {
             "model_type": "eagle",
@@ -163,7 +163,7 @@ class TestEagleVLMPlugin:
 
     def test_bundle_config_overrides_reranking(self, tmp_path):
         """Bundle config overrides: reranking mode."""
-        from tensorrt_model_connect.families.eagle_vlm import plugin
+        import tensorrt_model_connect.families.eagle_vlm.model as plugin
 
         config = {
             "model_type": "eagle",

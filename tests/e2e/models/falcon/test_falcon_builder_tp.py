@@ -47,7 +47,7 @@ def test_falcon_plugin_routes_parallel_builds(
     monkeypatch, alibi: bool, position_type: str, alibi_bias_scale: float
 ) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.falcon.plugin")
+        "tensorrt_model_connect.families.falcon.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -57,7 +57,7 @@ def test_falcon_plugin_routes_parallel_builds(
     monkeypatch.setattr(module, "build_dual_profile_tp_decoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2)
-    result = module.FalconPlugin().build_engine(
+    result = module.build_engine(
         _config(alibi=alibi),
         {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
         23,

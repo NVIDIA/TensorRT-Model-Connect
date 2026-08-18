@@ -12,7 +12,7 @@ from pathlib import Path
 
 def _builder_function_source(name: str) -> str:
     repo_root = Path(__file__).resolve().parents[4]
-    source_path = repo_root / "python/tensorrt_model_connect/families/timesfm/plugin.py"
+    source_path = repo_root / "python/tensorrt_model_connect/families/timesfm/model.py"
     source = source_path.read_text(encoding="utf-8")
     module = ast.parse(source)
     function = next(

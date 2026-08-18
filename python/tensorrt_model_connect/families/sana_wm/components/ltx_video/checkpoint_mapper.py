@@ -23,13 +23,6 @@ except ImportError:
 from safetensors import safe_open
 
 
-def _target_np_dtype(precision: str) -> np.dtype:
-    """Map precision string to numpy dtype for weight storage."""
-    if precision in ("fp16", "bf16"):
-        return np.float16
-    return np.float32
-
-
 class WeightDict(dict):
     """A dict mapping logical weight names to flat float32 arrays.
 

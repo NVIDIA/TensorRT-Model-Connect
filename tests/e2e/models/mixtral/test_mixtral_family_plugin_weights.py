@@ -56,7 +56,7 @@ class TestMixtralPlugin:
 
     def test_expert_weights_mapped(self, tmp_path):
         """Expert gate/up/down weights should be correctly mapped and transposed."""
-        from tensorrt_model_connect.families.mixtral import plugin
+        from tensorrt_model_connect.families.mixtral import model as plugin
 
         config = {
             "model_type": "mixtral",
@@ -93,7 +93,7 @@ class TestMixtralPlugin:
                     self.MOE_INTER, self.HIDDEN)
 
     def test_moe_metadata(self, tmp_path):
-        from tensorrt_model_connect.families.mixtral import plugin
+        from tensorrt_model_connect.families.mixtral import model as plugin
 
         config = {
             "model_type": "mixtral",
@@ -119,7 +119,7 @@ class TestMixtralPlugin:
 
     def test_expert_transpose_values(self, tmp_path):
         """Verify expert weight values are transposed correctly."""
-        from tensorrt_model_connect.families.mixtral import plugin
+        from tensorrt_model_connect.families.mixtral import model as plugin
 
         config = {
             "model_type": "mixtral",

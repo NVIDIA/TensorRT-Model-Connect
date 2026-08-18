@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "gpt_neox"
-plugin = "gpt_neox"
 test_manifests = [
   "manifests/pythia-70m-tp4.json",
   "manifests/pythia-70m.json",

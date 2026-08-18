@@ -139,8 +139,9 @@ def _install(monkeypatch):
         captured["profile_kwargs"] = kwargs
         raise _CapturedAndStop()
 
-    import tensorrt_model_connect.engine_builder as eb
-    monkeypatch.setattr(eb, "add_dynamic_batch_profile", stop)
+    from tensorrt_model_connect.tvm_ffi import graph_build
+
+    monkeypatch.setattr(graph_build, "add_dynamic_batch_profile", stop)
     return captured
 
 

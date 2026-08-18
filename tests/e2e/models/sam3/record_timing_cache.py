@@ -24,8 +24,7 @@ from typing import Any, Mapping
 
 from tensorrt_model_connect import trt_compat
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.engine_builder import _load_plugin_weights
-from tensorrt_model_connect.families import find_plugin
+from tensorrt_model_connect.families.sam3 import model as sam3_model
 from tensorrt_model_connect.families.sam3 import timing_cache
 
 
@@ -229,7 +228,9 @@ class _Recorder:
         plan = raw_builder.build_serialized_network(raw_network, raw_config)
         if plan is None:
             return None
-        active_cache = raw_config.get_timing_cache() if hasattr(raw_config, "get_timing_cache") else cache
+        active_cache = (
+            raw_config.get_timing_cache() if hasattr(raw_config, "get_timing_cache") else cache
+        )
         payload = bytes(active_cache.serialize())
         tactics = timing_cache._query_tactics(active_cache)
         if not payload:
@@ -302,7 +303,7 @@ class _Recorder:
             "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
             "# SPDX-License-Identifier: Apache-2.0",
             "",
-            '\"\"\"Generated SAM3 timing-cache candidates; qualification is still required.\"\"\"',
+            '"""Generated SAM3 timing-cache candidates; qualification is still required."""',
             "",
             "CONTRACTS = {",
             f"    {contract_id!r}: {{",
@@ -314,7 +315,7 @@ class _Recorder:
             encoded = base64.b64encode(payload).decode("ascii")
             lines.append(f"            {engine_kind!r}: (")
             lines.extend(
-                f"                {encoded[index:index + 88]!r}"
+                f"                {encoded[index : index + 88]!r}"
                 for index in range(0, len(encoded), 88)
             )
             lines.append("            ),")
@@ -363,11 +364,10 @@ def main() -> None:
     config.raw["_decoder_engine_role"] = "decode"
     config.raw["_fp32_layers"] = []
     config.raw["_family_build_options"] = {}
-    plugin = find_plugin(config)
-    if plugin is None or getattr(plugin, "name", None) != "sam3":
-        raise RuntimeError(f"expected the SAM3 family plugin, got {plugin!r}")
+    if not sam3_model.matches(config):
+        raise RuntimeError(f"expected the SAM3 family model, got {config.model_type!r}")
     # The engine builders import the wrapper by value, so replacing only the
-    # timing_cache module attribute would not intercept real plugin builds.
+    # timing_cache module attribute would not intercept real model builds.
     # Patch every bound owner and restore all of them even when a build fails.
     if args.engine == "vision-encoder":
         from tensorrt_model_connect.families.sam3 import vision_encoder_builder
@@ -380,9 +380,7 @@ def main() -> None:
         )
 
         wrapper_owners = (timing_cache, core_builder, text_encoder_builder)
-    originals = tuple(
-        (owner, owner.build_sam3_serialized_network) for owner in wrapper_owners
-    )
+    originals = tuple((owner, owner.build_sam3_serialized_network) for owner in wrapper_owners)
     for owner, _original in originals:
         owner.build_sam3_serialized_network = recorder.build
     try:
@@ -390,7 +388,7 @@ def main() -> None:
             # Avoid loading the text/core/tracker weights. Resolve the same
             # model and processor contract used by the ordinary plugin path,
             # then build only the shared vision plan.
-            from tensorrt_model_connect.families.sam3.plugin import (
+            from tensorrt_model_connect.families.sam3.model import (
                 _load_sam3_processor_config,
                 _resolve_sam3_config,
             )
@@ -398,7 +396,7 @@ def main() -> None:
             resolved = _resolve_sam3_config(config.raw)
             resolved.update(_load_sam3_processor_config(str(model_dir)))
             config.raw["_sam3_config"] = resolved
-            vision_plan = plugin.build_vision_engine(
+            vision_plan = sam3_model.build_vision_engine(
                 str(model_dir),
                 config,
                 {},
@@ -406,7 +404,7 @@ def main() -> None:
                 verbose=args.verbose,
             )
             if vision_plan is None:
-                raise RuntimeError("SAM3 plugin did not produce a vision candidate plan")
+                raise RuntimeError("SAM3 model did not produce a vision candidate plan")
             plans = {
                 "vision_engine_plan": (
                     output_directory / "vision_engine_plan.bin",
@@ -414,8 +412,8 @@ def main() -> None:
                 )
             }
         else:
-            weights = _load_plugin_weights(plugin, str(model_dir), config, precision="fp32")
-            text_plan = plugin.build_engine(
+            weights = sam3_model.load_weights(str(model_dir), config, precision="fp32")
+            text_plan = sam3_model.build_engine(
                 config,
                 weights,
                 256,
@@ -426,10 +424,12 @@ def main() -> None:
             )
             resolved = config.raw.get("_sam3_config")
             if not isinstance(resolved, dict) or not resolved.get("video_tracking_supported"):
-                raise RuntimeError("SAM3 video configuration was not resolved during weight loading")
+                raise RuntimeError(
+                    "SAM3 video configuration was not resolved during weight loading"
+                )
             resolved["video_tracking_supported"] = False
             try:
-                extra_plans = plugin.build_extra_engines(
+                extra_plans = sam3_model.build_extra_engines(
                     config,
                     weights,
                     256,
@@ -438,9 +438,7 @@ def main() -> None:
                 )
             finally:
                 resolved["video_tracking_supported"] = True
-            if not isinstance(extra_plans, dict) or set(extra_plans) != {
-                "sam3_core_engine_plan"
-            }:
+            if not isinstance(extra_plans, dict) or set(extra_plans) != {"sam3_core_engine_plan"}:
                 raise RuntimeError(f"unexpected SAM3 fast-build engine inventory: {extra_plans!r}")
             core_plan = extra_plans["sam3_core_engine_plan"]
             plans = {
@@ -464,8 +462,7 @@ def main() -> None:
         "model_dir": str(model_dir),
         "model_snapshot": model_snapshot,
         "plans": {
-            name: _file_record(path, root=output_directory)
-            for name, (path, _plan) in plans.items()
+            name: _file_record(path, root=output_directory) for name, (path, _plan) in plans.items()
         },
         "schema_version": 1,
         "source": source_snapshot,

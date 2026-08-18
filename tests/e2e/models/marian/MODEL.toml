@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "marian"
-plugin = "marian"
 test_manifests = [
   "manifests/marian-en-ru-tp4.json",
   "manifests/marian-en-ru.json",

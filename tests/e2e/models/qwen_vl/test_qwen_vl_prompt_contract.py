@@ -15,9 +15,7 @@ pytest.importorskip(
 )
 
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.qwen_vl.plugin import QwenVLPlugin
-
-
+from tensorrt_model_connect.families.qwen_vl import model as QwenVLModel
 _QWEN25_TEMPLATE = (
     "<|im_start|>system\n"
     "You are a helpful assistant.<|im_end|>\n"
@@ -62,7 +60,7 @@ def test_vl_prompt_template_matches_checkpoint_chat_contract(
         )
     )
 
-    vl_config = QwenVLPlugin().get_vl_config(config)
+    vl_config = QwenVLModel.get_vl_config(config)
 
     assert vl_config is not None
     assert vl_config["num_image_pad_tokens"] == expected_pad_count

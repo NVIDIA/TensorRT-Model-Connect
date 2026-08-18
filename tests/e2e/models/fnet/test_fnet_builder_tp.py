@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.fnet.plugin import FNetPlugin
+from tensorrt_model_connect.families.fnet import model as FNetModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 fnet_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.fnet.plugin")
+    "tensorrt_model_connect.families.fnet.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -191,7 +191,7 @@ def test_fnet_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_fnet_encoder_engine", fake_build)
 
-    plan = FNetPlugin().build_engine(
+    plan = FNetModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -213,7 +213,7 @@ def test_fnet_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        FNetPlugin().build_engine(
+        FNetModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

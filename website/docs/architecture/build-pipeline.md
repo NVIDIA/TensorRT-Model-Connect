@@ -13,20 +13,19 @@ one `.bundle` bundle. The public entry points are:
 - `tensorrt_model_connect.build()`, implemented by
   `python/tensorrt_model_connect/engine_builder.py`.
 
-Both entry points resolve the model's owning family before committing to a
-native or optimized implementation.
+Both entry points resolve the model's owning family, import its `model.py`, and
+call that module's `build()` exactly once.
 
 ## Authoritative build routing
 
 <Diagram
   src="/img/diagrams/architecture/build-route-selection.svg"
-  alt="Build-route decision tree resolving a model family, accepting its native default or probing exact optimized profiles, then writing one bundle"
-  caption="A family-owned native default evaluates only the resolved ModelConfig and bypasses optimized-profile probing. Otherwise target and effective public options enter the exact-profile probe; no match uses native and ambiguity fails closed."
+  alt="Build-route decision tree resolving one family model module and calling its complete build recipe"
+  caption="The shared path resolves and dispatches only. The selected family owns native engines, any exact optimized profile, and final bundle assembly."
 />
 
-Multiple optimized profiles claiming one request are an error. Once an
-optimized adapter has claimed a request, its build failure is terminal; the
-router does not silently retry the native path.
+There is no central native/optimized router or legacy build fallback. A family
+that supports multiple implementations owns that decision locally.
 
 ## 1. Resolve the source model
 
@@ -44,36 +43,23 @@ forms.
 
 ## 2. Resolve the owning family
 
-Family discovery is descriptor-driven, but it has three intentionally distinct
-flows:
+Family discovery is descriptor-driven:
 
-1. A full config uses `architecture_patterns` to bound candidates, evaluates
-   their `matches_config()` predicates, then uses the all-package compatibility
-   fallback only when needed.
-2. A string or `model_type` tries a direct descriptor ID, alias/prefix
-   candidates, then the same compatibility fallback.
+1. A full config uses `architecture_patterns`, aliases, and prefixes to bound
+   candidates, then calls their required `matches(config)` function.
+2. A string or `model_type` uses the same indexed metadata.
 3. A Diffusers pipeline class uses descriptor
    `diffusion_pipeline_classes` only; it has no all-package fallback.
 
-Descriptor discovery imports the selected family package and reads its
-package-level `plugin`. The descriptor's `module` field is specialization and
-tooling metadata, not an arbitrary import selector.
+The resolver imports exactly `families.<id>.model`. Unknown inputs fail closed;
+there is no `pkgutil` scan, package proxy, or manifest-selected Python module.
 
 ## 3. Select the build path
 
-### Model-owned native default
-
-A family can declare a `default_build_route`. When that route accepts the
-resolved `ModelConfig`, it owns the native build immediately. The callable does
-not receive public build options; those options still affect the selected
-native builder, but enter optimized profile matching only when the native
-default does not claim the model. This is model-owned policy, not a central
-model-name switch.
-
 ### Exact-qualified optimized implementation
 
-Requests without a matching native default probe implementations only inside
-the selected family. Selection binds:
+Qwen's `model.py` can probe its exact optimized implementation profiles before
+executing its native recipe. Selection binds:
 
 - model ID and immutable revision;
 - active deployment target;
@@ -89,12 +75,11 @@ Those profile fields drive exact selection; they are not a fresh
 target-hardware result. The public Source tree does not publish the former
 qualification runner or retained target artifacts.
 
-### Native fallback
+### Native family recipe
 
-If no optimized profile claims the request, the native `FamilyPlugin` owns the
-rest of the build. It loads weights, applies family config and quantization
-policy, constructs one or more TensorRT networks, compiles engine plans, and
-emits native bundle metadata.
+Each `model.py` loads weights, applies its config and quantization policy,
+constructs one or more TensorRT networks, compiles engine plans, assembles
+model-specific sections, and writes the bundle.
 
 Supplying a trusted external-kernel manifest with `--kernel` deliberately uses
 the owning family's native TensorRT path rather than optimized-provider
@@ -105,7 +90,7 @@ selection.
 | Unit | Responsibility |
 | --- | --- |
 | `ModelConfig` | Normalize source configuration |
-| `FamilyPlugin` | Match the model, load weights, and own build entry points |
+| Family `model.py` | Match the model and own config → weights → engines → bundle |
 | Family checkpoint mapper | Translate source tensor names and layouts |
 | Family graph helpers/builders | Express model-specific TensorRT graph semantics |
 | Quantization units | Plan calibration, scales, formats, and exclusions |

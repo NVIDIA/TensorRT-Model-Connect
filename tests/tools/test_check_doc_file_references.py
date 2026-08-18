@@ -36,6 +36,8 @@ Trace IDs:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tools import check_doc_file_references as cdfr
 
 
@@ -106,7 +108,7 @@ def test_extract_path_references_skips_angle_bracket_placeholder() -> None:
     # Angle-bracket placeholders like `tools/<family>.py` are templates in
     # scaffolding docs, not real files. They must be skipped so doc authors
     # can write `tools/<family>.py` without tripping the CI gate.
-    content = "run `tools/<family>.py` to scaffold a new plugin\n"
+    content = "run `tools/<family>.py` to scaffold a new family model\n"
 
     refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
@@ -138,3 +140,18 @@ def test_extract_path_references_h_cpp_shorthand_yields_two_entries_same_line() 
     assert refs == [(1, "src/foo.h"), (1, "src/foo.cpp")]
     # The two entries share exactly one line number; guard the invariant.
     assert {line for line, _path in refs} == {1}
+
+
+def test_actual_counts_use_canonical_family_model_entries(tmp_path: Path) -> None:
+    families = tmp_path / "python/tensorrt_model_connect/families"
+    for name in ("alpha", "beta"):
+        path = families / name / "model.py"
+        path.parent.mkdir(parents=True)
+        path.write_text("def build(model_dir, output_path, **options):\n    pass\n")
+    legacy = families / "legacy/plugin.py"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("plugin = object()\n")
+
+    counts = cdfr._get_actual_counts(tmp_path)
+
+    assert counts["family_models"] == 2

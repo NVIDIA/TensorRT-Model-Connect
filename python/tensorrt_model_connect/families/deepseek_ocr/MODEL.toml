@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "deepseek_ocr"
-plugin = "deepseek_ocr"
-module = "plugin"
 python_profile_specs = [
   "deepseek_ocr|families/deepseek_ocr/python_profile_requirements/deepseek_ocr.lock.txt|families/deepseek_ocr/python_profile_verify.py|true",
 ]

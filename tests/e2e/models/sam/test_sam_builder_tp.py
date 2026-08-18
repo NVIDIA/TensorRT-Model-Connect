@@ -16,7 +16,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     sam_plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.sam.plugin")
+        "tensorrt_model_connect.families.sam.model")
     from tensorrt_model_connect.families.sam import sam_tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
@@ -95,7 +95,7 @@ def test_sam_plugin_routes_parallel_builds(monkeypatch):
     monkeypatch.setattr(sam_tp_builder, "build_sam_tp_encoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = sam_plugin_module.SamPlugin().build_engine(
+    result = sam_plugin_module.build_engine(
         _model_config(), {"encoder.layer0.mlp.fc1.weight": np.zeros((32, 64))}, 7,
         verbose=True,
         parallel_config=parallel,
@@ -118,7 +118,7 @@ def test_sam_plugin_rejects_parallel_quantization(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="quantization"):
-        sam_plugin_module.SamPlugin().build_engine(
+        sam_plugin_module.build_engine(
             _model_config(), {}, 1,
             quant_ctx=object(),
             parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=4, rank=0),

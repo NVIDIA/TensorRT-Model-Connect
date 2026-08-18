@@ -322,17 +322,17 @@ def _sam3_core_tensors(prefix: str = "detector_model.") -> dict[str, np.ndarray]
 
 
 def test_sam3_matches_sam3_video_not_legacy_sam() -> None:
-    from tensorrt_model_connect.families import find_plugin
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families import find_model
+    from tensorrt_model_connect.families.sam3 import model
 
-    assert plugin.matches("sam3")
-    assert plugin.matches("sam3_video")
-    assert not plugin.matches("sam")
-    assert not plugin.matches("qwen3")
-    assert plugin.runtime_strategy == "sam3_prompted_segmentation"
-    assert plugin.requires_tokenizer is True
-    assert find_plugin("sam3").name == "sam3"
-    assert find_plugin("sam3_video").name == "sam3"
+    assert model.matches("sam3")
+    assert model.matches("sam3_video")
+    assert not model.matches("sam")
+    assert not model.matches("qwen3")
+    assert model.runtime_strategy == "sam3_prompted_segmentation"
+    assert model.requires_tokenizer is True
+    assert find_model("sam3").name == "sam3"
+    assert find_model("sam3_video").name == "sam3"
 
 
 @pytest.mark.parametrize(
@@ -348,7 +348,7 @@ def test_sam3_load_weights_fails_before_engine_build_for_incomplete_tokenizer(
     tokenizer_payload: str | None,
     message: str,
 ) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     _write_config(tmp_path, _sam3_config())
     tokenizer_path = tmp_path / "tokenizer.json"
@@ -363,7 +363,7 @@ def test_sam3_load_weights_fails_before_engine_build_for_incomplete_tokenizer(
 
 
 def test_sam3_load_weights_maps_text_encoder_prefix(tmp_path: Path) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     _write_config(tmp_path, _sam3_config())
     _write_safetensors(tmp_path, _sam3_text_tensors())
@@ -379,7 +379,7 @@ def test_sam3_load_weights_maps_text_encoder_prefix(tmp_path: Path) -> None:
 
 
 def test_sam3_segmentation_config_marks_text_prompt_variant(tmp_path: Path) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     _write_config(tmp_path, _sam3_config())
     _write_processor_config(tmp_path)
@@ -410,7 +410,7 @@ def test_sam3_segmentation_config_marks_text_prompt_variant(tmp_path: Path) -> N
 def test_sam3_segmentation_config_falls_back_to_meta_processor_defaults(
     tmp_path: Path,
 ) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     _write_config(tmp_path, _sam3_config())
     _write_safetensors(tmp_path, _sam3_text_tensors(prefix=""))
@@ -424,7 +424,7 @@ def test_sam3_segmentation_config_falls_back_to_meta_processor_defaults(
 
 
 def test_sam3_build_engine_delegates_to_text_encoder_builder(tmp_path: Path, monkeypatch) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     _write_config(tmp_path, _sam3_config())
     _write_safetensors(tmp_path, _sam3_text_tensors())
@@ -454,7 +454,7 @@ def test_sam3_build_engine_delegates_to_text_encoder_builder(tmp_path: Path, mon
 
 
 def test_sam3_build_vision_engine_delegates_to_vision_builder(tmp_path: Path, monkeypatch) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     _write_config(tmp_path, _sam3_config())
     tensors = _sam3_text_tensors()
@@ -490,7 +490,7 @@ def test_sam3_build_vision_engine_delegates_to_vision_builder(tmp_path: Path, mo
 
 
 def test_sam3_build_extra_engines_delegates_to_core_builder(tmp_path: Path, monkeypatch) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     _write_config(tmp_path, _sam3_config())
     tensors = _sam3_text_tensors()
@@ -536,7 +536,7 @@ def test_sam3_build_extra_engines_delegates_to_core_builder(tmp_path: Path, monk
 
 
 def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch) -> None:
-    from tensorrt_model_connect.families.sam3 import plugin
+    from tensorrt_model_connect.families.sam3 import model as plugin
 
     raw_config = _sam3_config()
     raw_config["tracker_config"] = {

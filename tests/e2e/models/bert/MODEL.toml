@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "bert"
-plugin = "bert"
 test_manifests = [
   "manifests/all-minilm-l6-v2.json",
   "manifests/bert-base-uncased-tp4.json",

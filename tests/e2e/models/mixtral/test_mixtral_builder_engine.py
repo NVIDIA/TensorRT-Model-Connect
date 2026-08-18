@@ -64,7 +64,7 @@ class MixtralPluginTester(FamilyPluginTester):
       - Standard top-k softmax routing with renormalized weights
     """
 
-    plugin_module = "tensorrt_model_connect.families.mixtral"
+    plugin_module = "tensorrt_model_connect.families.mixtral.model"
     model_type = "mixtral"
 
     def get_config_dict(self) -> dict:

@@ -20,7 +20,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 try:
     from tensorrt_model_connect.config import ModelConfig
     import tensorrt_model_connect.families.nemotron_h as nemotron_h
-    from tensorrt_model_connect.families.nemotron_h.plugin import plugin
+    import tensorrt_model_connect.families.nemotron_h.model as plugin
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 

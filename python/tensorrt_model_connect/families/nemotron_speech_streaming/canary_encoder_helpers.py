@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Canary family plugin -- FastConformer encoder-decoder ASR (speech-to-text).
+"""Canary family model -- FastConformer encoder-decoder ASR (speech-to-text).
 
 nvidia/canary-1b-v2: 978M-param NeMo encoder-decoder ASR model.
   - Encoder: FastConformer (32 layers) with DW-striding subsampling (8x, 256ch),

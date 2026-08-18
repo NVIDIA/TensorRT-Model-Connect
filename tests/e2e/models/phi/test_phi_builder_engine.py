@@ -19,7 +19,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class PhiPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.phi"
+    plugin_module = "tensorrt_model_connect.families.phi.model"
     model_type = "phi3"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

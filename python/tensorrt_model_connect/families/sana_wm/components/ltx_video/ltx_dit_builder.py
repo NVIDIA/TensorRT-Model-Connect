@@ -19,14 +19,11 @@ Engine I/O:
 from __future__ import annotations
 
 import math
-import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from tensorrt_model_connect import trt_compat
-from ...builder_lifetime import get_process_trt_logger
 from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
 
 if TYPE_CHECKING:
@@ -36,29 +33,8 @@ trt: Any = None
 graph_ops: Any = None
 
 
-def _ensure_trt() -> Any:
-    global trt
-    if trt is None:
-        trt = trt_compat.get_trt()
-    return trt
-
-
-def _ensure_graph_ops() -> Any:
-    global graph_ops
-    if graph_ops is None:
-        from . import graph_ops as graph_ops_module
-
-        graph_ops = graph_ops_module
-    return graph_ops
-
-
 def _target_np_dtype(precision: str) -> np.dtype:
     return np.float16 if precision == "fp16" else np.float32
-
-
-def _trt_dtype(precision: str) -> trt.DataType:
-    trt_module = _ensure_trt()
-    return trt_module.float16 if precision == "fp16" else trt_module.float32
 
 
 def _cast_back(
@@ -143,241 +119,6 @@ def load_ltx_dit_weights(
     weights["proj_out.weight"] = t("proj_out.weight")
     weights["proj_out.bias"] = f("proj_out.bias")
     return weights
-
-
-def build_ltx_dit_engine(
-    weights: "Mapping[str, np.ndarray]",
-    *,
-    latent_frames: int,
-    latent_height: int,
-    latent_width: int,
-    text_seq_len: int = 128,
-    text_dim: int = 4096,
-    in_channels: int = 128,
-    dim: int = 2048,
-    num_heads: int = 32,
-    num_layers: int = 28,
-    frame_rate: int = 25,
-    temporal_compression_ratio: int = 8,
-    spatial_compression_ratio: int = 32,
-    eps: float = 1e-6,
-    precision: str = "fp16",
-    verbose: bool = False,
-) -> bytes:
-    """Build the LTX transformer denoiser as a TensorRT plan."""
-    if precision not in ("fp16", "fp32"):
-        raise ValueError("LTX DiT raw builder currently supports fp16 or fp32")
-
-    _ensure_trt()
-    _ensure_graph_ops()
-    seq_len = latent_frames * latent_height * latent_width
-    head_dim = dim // num_heads
-    trt_dtype = _trt_dtype(precision)
-    np_dtype = _target_np_dtype(precision)
-
-    logger = get_process_trt_logger(trt, verbose=verbose)
-    builder = trt.Builder(logger)
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
-
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-    )
-
-    hidden_in = network.add_input(
-        "hidden_states", trt_dtype, (1, seq_len, in_channels)
-    )
-    encoder_in = network.add_input(
-        "encoder_hidden_states", trt_dtype, (1, text_seq_len, text_dim)
-    )
-    timestep_in = network.add_input("timestep", trt.float32, (1,))
-    encoder_mask = network.add_input(
-        "encoder_attention_mask", trt.float32, (1, text_seq_len)
-    )
-
-    block_eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([eps], dtype=np.float32)
-    )
-    qk_eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-5], dtype=np.float32)
-    )
-
-    hidden = _drop_batch(network, hidden_in, (seq_len, in_channels))
-    encoder_hidden = _drop_batch(network, encoder_in, (text_seq_len, text_dim))
-
-    hidden = _linear(network, hidden, in_channels, dim, weights, "proj_in", np_dtype)
-
-    time_proj = graph_ops.add_timestep_embedding(
-        network, timestep_in, dim=256, dtype=np.float32
-    )
-    embedded_timestep = _linear(
-        network,
-        time_proj,
-        256,
-        dim,
-        weights,
-        "time_embed.emb.timestep_embedder.linear_1",
-        np_dtype,
-    )
-    embedded_timestep = graph_ops.add_silu(network, embedded_timestep)
-    embedded_timestep = _linear(
-        network,
-        embedded_timestep,
-        dim,
-        dim,
-        weights,
-        "time_embed.emb.timestep_embedder.linear_2",
-        np_dtype,
-    )
-    temb = graph_ops.add_silu(network, embedded_timestep)
-    temb = _linear(
-        network, temb, dim, 6 * dim, weights, "time_embed.linear", np_dtype
-    )
-
-    context = _linear(
-        network,
-        encoder_hidden,
-        text_dim,
-        dim,
-        weights,
-        "caption_projection.linear_1",
-        np_dtype,
-    )
-    context = graph_ops.add_gelu_new(network, context, dtype=np_dtype)
-    context = _linear(
-        network,
-        context,
-        dim,
-        dim,
-        weights,
-        "caption_projection.linear_2",
-        np_dtype,
-    )
-
-    rotary_cos, rotary_sin = make_ltx_rope_tables(
-        latent_frames=latent_frames,
-        latent_height=latent_height,
-        latent_width=latent_width,
-        dim=dim,
-        frame_rate=frame_rate,
-        temporal_compression_ratio=temporal_compression_ratio,
-        spatial_compression_ratio=spatial_compression_ratio,
-    )
-    rotary_cos_t = graph_ops.add_constant(
-        network, (seq_len, dim), rotary_cos, dtype=np.float32
-    )
-    rotary_sin_t = graph_ops.add_constant(
-        network, (seq_len, dim), rotary_sin, dtype=np.float32
-    )
-    rot_half = graph_ops.add_constant(
-        network,
-        (dim, dim),
-        _make_ltx_rotate_half_matrix(dim, num_heads, interleaved=True),
-        dtype=np.float32,
-    )
-
-    cross_mask = _make_cross_attention_mask(
-        network, encoder_mask, text_seq_len=text_seq_len
-    )
-
-    for i in range(num_layers):
-        p = f"transformer_blocks.{i}"
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            _ltx_block_modulation(network, temb, weights[f"{p}.scale_shift_table"], dim)
-        )
-
-        norm_hidden = graph_ops.add_rms_norm(
-            network,
-            hidden,
-            dim,
-            np.ones(dim, dtype=np.float32),
-            block_eps_t,
-            dtype=np_dtype,
-        )
-        norm_hidden = _modulate(network, norm_hidden, scale_msa, shift_msa)
-
-        attn_hidden = _ltx_attention(
-            network,
-            norm_hidden,
-            None,
-            None,
-            weights,
-            f"{p}.attn1",
-            dim=dim,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            q_seq_len=seq_len,
-            kv_seq_len=seq_len,
-            eps_t=qk_eps_t,
-            dtype=np_dtype,
-            rotary_cos=rotary_cos_t,
-            rotary_sin=rotary_sin_t,
-            rot_half=rot_half,
-        )
-        hidden = _residual_gated(network, hidden, attn_hidden, gate_msa)
-
-        cross_hidden = _ltx_attention(
-            network,
-            hidden,
-            context,
-            cross_mask,
-            weights,
-            f"{p}.attn2",
-            dim=dim,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            q_seq_len=seq_len,
-            kv_seq_len=text_seq_len,
-            eps_t=qk_eps_t,
-            dtype=np_dtype,
-        )
-        hidden = network.add_elementwise(
-            hidden, cross_hidden, trt.ElementWiseOperation.SUM
-        ).get_output(0)
-
-        ff_norm = graph_ops.add_rms_norm(
-            network,
-            hidden,
-            dim,
-            np.ones(dim, dtype=np.float32),
-            block_eps_t,
-            dtype=np_dtype,
-        )
-        ff_norm = _modulate(network, ff_norm, scale_mlp, shift_mlp)
-        ff_out = _ffn(network, ff_norm, weights, p, dim, np_dtype)
-        hidden = _residual_gated(network, hidden, ff_out, gate_mlp)
-
-    shift, scale = _final_modulation(
-        network, embedded_timestep, weights["scale_shift_table"], dim
-    )
-    out = graph_ops.add_layer_norm(
-        network,
-        hidden,
-        dim,
-        np.ones(dim, dtype=np.float32),
-        np.zeros(dim, dtype=np.float32),
-        block_eps_t,
-        dtype=np_dtype,
-    )
-    out = _modulate(network, out, scale, shift)
-    out = _linear(network, out, dim, in_channels, weights, "proj_out", np_dtype)
-
-    out_batched = network.add_shuffle(out)
-    out_batched.reshape_dims = (1, seq_len, in_channels)
-    out_fp32 = network.add_cast(out_batched.get_output(0), trt.float32).get_output(0)
-    out_fp32.name = "sample"
-    network.mark_output(out_fp32)
-
-    print(
-        "[ltx-dit] Building TRT engine "
-        f"(precision={precision}, tokens={seq_len}, layers={num_layers}, "
-        f"dim={dim}, heads={num_heads}) ...",
-        file=sys.stderr,
-    )
-    plan = builder.build_serialized_network(network, config)
-    if plan is None:
-        raise RuntimeError("TRT engine serialization failed for LTX DiT")
-    return bytes(plan)
 
 
 def make_ltx_rope_tables(
@@ -517,45 +258,6 @@ def _modulate(
     return network.add_elementwise(
         scaled, shift, trt.ElementWiseOperation.SUM
     ).get_output(0)
-
-
-def _ltx_block_modulation(
-    network: trt.INetworkDefinition,
-    temb: trt.ITensor,
-    table: np.ndarray,
-    dim: int,
-) -> list[trt.ITensor]:
-    chunks: list[trt.ITensor] = []
-    for i in range(6):
-        t = network.add_slice(temb, (0, i * dim), (1, dim), (1, 1)).get_output(0)
-        c = graph_ops.add_constant(
-            network, (1, dim), table[i].reshape(1, dim), dtype=table.dtype
-        )
-        c = _cast_back(network, c, t.dtype)
-        chunks.append(
-            network.add_elementwise(t, c, trt.ElementWiseOperation.SUM).get_output(0)
-        )
-    return chunks
-
-
-def _final_modulation(
-    network: trt.INetworkDefinition,
-    embedded_timestep: trt.ITensor,
-    table: np.ndarray,
-    dim: int,
-) -> tuple[trt.ITensor, trt.ITensor]:
-    out = []
-    for i in range(2):
-        c = graph_ops.add_constant(
-            network, (1, dim), table[i].reshape(1, dim), dtype=table.dtype
-        )
-        c = _cast_back(network, c, embedded_timestep.dtype)
-        out.append(
-            network.add_elementwise(
-                embedded_timestep, c, trt.ElementWiseOperation.SUM
-            ).get_output(0)
-        )
-    return out[0], out[1]
 
 
 def _make_cross_attention_mask(

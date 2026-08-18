@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect.families.magpie_tts.plugin import (
+from tensorrt_model_connect.families.magpie_tts.model import (
     _validate_supported_checkpoint_architecture,
 )
 from tests.e2e_harness import orchestrator

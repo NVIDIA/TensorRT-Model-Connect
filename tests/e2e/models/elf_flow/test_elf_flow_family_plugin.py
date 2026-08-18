@@ -24,7 +24,7 @@ import pytest
 try:
     from safetensors.numpy import save_file
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families.elf_flow import plugin
+    from tensorrt_model_connect.families.elf_flow import model as plugin
     from tensorrt_model_connect.families.elf_flow.config import (
         make_elf_rope_cache,
         resolve_elf_config,
@@ -441,7 +441,7 @@ def test_orbax_checkpoint_loader_selects_ema_params(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.elf_flow.plugin")
+        "tensorrt_model_connect.families.elf_flow.model")
     checkpoint = tmp_path / "checkpoint_0"
     checkpoint.mkdir()
     (checkpoint / "_CHECKPOINT_METADATA").write_text("{}")

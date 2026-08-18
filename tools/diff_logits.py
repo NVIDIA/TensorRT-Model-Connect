@@ -91,19 +91,19 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose):
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families import find_plugin
+    from tensorrt_model_connect.families import find_model
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
-    plugin = find_plugin(config.model_type)
-    if plugin is None:
-        raise ValueError(f"No plugin for model_type={config.model_type!r}")
+    model = find_model(config)
+    if model is None:
+        raise ValueError(f"No family model for model_type={config.model_type!r}")
 
     print(f"[diff] Loading weights ({config.model_type}) ...", file=sys.stderr)
-    weights = plugin.load_weights(model_dir, config)
+    weights = model.load_weights(model_dir, config)
     print(f"[diff] Building TRT engine (cache={max_cache_length}) ...",
           file=sys.stderr)
-    engine_plan = plugin.build_engine(
+    engine_plan = model.build_engine(
         config, weights, max_cache_length, verbose=verbose)
     print(f"[diff] Engine built ({len(engine_plan) / 1e6:.1f} MB)",
           file=sys.stderr)
@@ -111,7 +111,7 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose):
     handler = _find_family_diff_logits_handler(config.model_type)
     attach_plans = getattr(handler, "attach_additional_plans", None)
     if callable(attach_plans):
-        attach_plans(plugin, model_dir, config, weights, verbose=verbose)
+        attach_plans(model, model_dir, config, weights, verbose=verbose)
 
     return engine_plan, config, model_dir
 

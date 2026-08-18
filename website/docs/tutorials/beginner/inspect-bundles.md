@@ -127,7 +127,7 @@ from section names alone.
 | Field | Why it matters |
 | --- | --- |
 | `model_id` | Confirms the source model. |
-| `family` | Confirms the Python family plugin. |
+| `family` | Confirms the Python family model module that built the artifact. |
 | `precision` | Confirms build precision. |
 | `runtime_strategy` | Selects the native C++ model DSO and pipeline plugin; it may be empty for an optimized bundle. |
 | `optimized_runtime.json` section | Its presence selects the optimized path. The descriptor payload binds the implementation/profile, but the current inspector does not print those values. |
@@ -146,8 +146,9 @@ implementation:
   caption="runtime_strategy connects native bundle metadata to a registered model plugin and its concrete IPipeline implementation."
 />
 
-Do not confuse it with `family`. `family` explains the Python builder that
-created the native bundle. `runtime_strategy` explains its C++ runtime shape.
+Do not confuse it with `family`. `family` identifies the Python `model.py`
+recipe that created the native bundle. `runtime_strategy` explains its C++
+runtime shape.
 In the current model-encapsulated layout, every runtime strategy has exactly
 one model-manifest owner and selects that owner's DSO before registry lookup.
 

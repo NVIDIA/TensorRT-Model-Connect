@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "internlm"
-plugin = "internlm"
-module = "plugin"
 capabilities = ["split_decoder_roles", "debug_layer_outputs"]
 python_profile_specs = [
   "internlm|families/internlm/python_profile_requirements/internlm.lock.txt|families/internlm/python_profile_verify.py|true",

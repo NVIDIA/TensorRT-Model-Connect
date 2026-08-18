@@ -854,54 +854,6 @@ def add_patch_embed_3d(
     return reshape_out.get_output(0)
 
 
-def add_spatial_merge(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    w_fc1: np.ndarray,
-    w_fc2: np.ndarray,
-    b_fc1: np.ndarray | None,
-    b_fc2: np.ndarray | None,
-    norm_gamma: np.ndarray,
-    input_dim: int,
-    hidden_dim: int,
-    output_dim: int,
-    eps_tensor: trt.ITensor,
-    seq_length: int,
-    merge_size: int = 2,
-    dtype: np.dtype = np.float32,
-) -> trt.ITensor:
-    """Spatial merge: 2x2 merge MLP that reduces spatial resolution.
-
-    Reshapes [seq, dim] -> merge adjacent 2x2 patches, then MLP.
-    Input: [seq_length, input_dim]
-    Output: [seq_length // (merge_size^2), output_dim]
-
-    Note: This is a simplified version. For Qwen2.5-VL, the merge
-    concatenates merge_size^2 adjacent patches, then applies layernorm + MLP.
-    """
-    # LayerNorm on the merged representation
-    norm = add_layer_norm(
-        network, inp, input_dim,
-        norm_gamma, np.zeros(input_dim, dtype=np.float32), eps_tensor,
-        dtype=dtype)
-
-    # For simplicity in the TRT graph, we use a 2-layer MLP directly
-    # on the already-flattened input. The spatial rearrangement is handled
-    # during preprocessing.
-    fc1 = add_matmul_rhs_constant(network, norm, input_dim, hidden_dim, w_fc1, dtype=dtype)
-    if b_fc1 is not None:
-        fc1 = add_bias_sum(network, fc1, hidden_dim, b_fc1, dtype=dtype)
-
-    # GELU activation
-    activated = add_gelu_new(network, fc1, dtype=dtype)
-
-    fc2 = add_matmul_rhs_constant(network, activated, hidden_dim, output_dim, w_fc2, dtype=dtype)
-    if b_fc2 is not None:
-        fc2 = add_bias_sum(network, fc2, output_dim, b_fc2, dtype=dtype)
-
-    return fc2
-
-
 # Alias: add_gelu_tanh is the same as add_gelu_new (tanh approximation)
 add_gelu_tanh = add_gelu_new
 

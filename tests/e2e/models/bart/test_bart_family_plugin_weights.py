@@ -79,7 +79,7 @@ class TestBartPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.bart import plugin
+        import tensorrt_model_connect.families.bart.model as plugin
 
         config = {
             "model_type": "bart",
@@ -127,7 +127,7 @@ class TestBartPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.bart import plugin
+        import tensorrt_model_connect.families.bart.model as plugin
         assert plugin.matches("bart")
         assert plugin.matches("mbart")
         assert not plugin.matches("t5")

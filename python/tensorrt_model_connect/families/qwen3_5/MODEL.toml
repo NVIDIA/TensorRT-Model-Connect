@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "qwen3_5"
-plugin = "qwen3_5"
-module = "plugin"
 aliases = [
   "qwen35",
   "qwen3.5",

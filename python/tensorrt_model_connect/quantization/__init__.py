@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from .adapters import resolve_calibration_adapter
+from .adapters import AutoCausalLMCalibrationAdapter, CalibrationAdapter
 from .context import QuantContext
 from .formats import QuantFormat
 from .plan import QuantPlan, canonicalize_quant_format
@@ -57,13 +57,13 @@ def build_quant_context(
     scales_json: str | None = None,
     num_calibration_samples: int = 512,
     calibration_prompts: list[str] | None = None,
-    plugin: object | None = None,
+    calibration_adapter: CalibrationAdapter | None = None,
     quant_plan: QuantPlan | None = None,
     graph_ops: Any | None = None,
 ) -> QuantContext:
     """Construct a QuantContext from high-level parameters.
 
-    This is the main entry point called by engine_builder.py.
+    Family model modules call this leaf primitive when they support quantization.
 
     Args:
         format_name: Quantization format ('fp8', 'int8_sq', 'int4_awq', etc.)
@@ -92,12 +92,7 @@ def build_quant_context(
 
     if exclude_patterns is None:
         exclude_patterns = _default_exclude_patterns()
-    if calibration_prompts is None and plugin is not None:
-        calibration_data = getattr(plugin, "calibration_data", None)
-        if callable(calibration_data):
-            calibration_prompts = calibration_data(plan.quant_format)
-
-    adapter = resolve_calibration_adapter(plugin, plan.quant_format)
+    adapter = calibration_adapter or AutoCausalLMCalibrationAdapter()
 
     # Select scale provider
     if plan.scale_source == "precomputed" and plan.scale_artifact:

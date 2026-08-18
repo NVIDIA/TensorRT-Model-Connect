@@ -249,8 +249,6 @@ def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     manifest.write_text(
         """# Synthetic family used only by the image-fingerprint tests.
 id = "demo"
-plugin = "demo"
-module = "plugin"
 aliases = ["demo"]
 prefixes = ["demo"]
 python_profile_specs = [
@@ -258,6 +256,11 @@ python_profile_specs = [
 ]
 default_execution_profiles = ["reference|demo"]
 """,
+        encoding="utf-8",
+    )
+    (demo_root / "model.py").write_text(
+        "def matches(config): return True\n"
+        "def build(model_dir, output_path, **options): pass\n",
         encoding="utf-8",
     )
     requirements = demo_root / "requirements.lock.txt"

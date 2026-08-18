@@ -302,7 +302,7 @@ def _build_t5_encoder_engine_batched(
     verbose: bool,
 ) -> bytes:
     """Build a dynamic-leading-batch T5 encoder TRT engine."""
-    from ...engine_builder import add_dynamic_batch_profile
+    from ...tvm_ffi.graph_build import add_dynamic_batch_profile
 
     opt_batch = min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
 

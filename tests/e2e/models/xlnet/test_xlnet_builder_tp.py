@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.xlnet.plugin import XlnetPlugin
+from tensorrt_model_connect.families.xlnet import model as XlnetModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 xlnet_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.xlnet.plugin")
+    "tensorrt_model_connect.families.xlnet.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -224,7 +224,7 @@ def test_xlnet_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_xlnet_engine", fake_build)
 
-    plan = XlnetPlugin().build_engine(
+    plan = XlnetModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -246,7 +246,7 @@ def test_xlnet_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        XlnetPlugin().build_engine(
+        XlnetModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

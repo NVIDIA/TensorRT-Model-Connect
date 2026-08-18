@@ -20,7 +20,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.deepseek_v2 as deepseek_v2
+    import tensorrt_model_connect.families.deepseek_v2.model as deepseek_v2
     moe_routing = importlib.import_module(
         "tensorrt_model_connect.families.deepseek_v2.moe_routing")
 except (ImportError, ModuleNotFoundError):
@@ -61,7 +61,7 @@ def test_get_bundle_config_overrides_injects_k_cache_head_dim():
         num_key_value_heads=2,
         raw={"qk_nope_head_dim": 96, "qk_rope_head_dim": 32},
     )
-    assert deepseek_v2.plugin.get_bundle_config_overrides(cfg) == {"head_dim": 128}
+    assert deepseek_v2.get_bundle_config_overrides(cfg) == {"head_dim": 128}
 
 
 def test_load_weights_v2_lite_dense_and_moe_routing(
@@ -150,7 +150,7 @@ def test_load_weights_v2_lite_dense_and_moe_routing(
     # model.norm.weight and lm_head.weight intentionally omitted (fallbacks).
     _patch_tensor_io(monkeypatch, tensors)
 
-    weights = deepseek_v2.plugin.load_weights("/unused", cfg)
+    weights = deepseek_v2.load_weights("/unused", cfg)
 
     # Direct-Q path present; LoRA-Q path absent.
     assert "layer.0.w_q" in weights
@@ -248,7 +248,7 @@ def test_load_weights_q_lora_branch_with_present_final_and_lm_head(
     }
     _patch_tensor_io(monkeypatch, tensors)
 
-    weights = deepseek_v2.plugin.load_weights("/unused", cfg)
+    weights = deepseek_v2.load_weights("/unused", cfg)
 
     assert "layer.0.w_q" not in weights
     assert "layer.0.w_q_a" in weights
@@ -263,9 +263,9 @@ def test_matches_accepts_v2_and_v3_aliases():
     Preconditions: inputs include valid aliases and a non-matching family name.
     Postconditions: only deepseek_v2 and deepseek_v3 match.
     """
-    assert deepseek_v2.plugin.matches("deepseek_v2")
-    assert deepseek_v2.plugin.matches("DeepSeek_V3")
-    assert not deepseek_v2.plugin.matches("deepseek_v1")
+    assert deepseek_v2.matches("deepseek_v2")
+    assert deepseek_v2.matches("DeepSeek_V3")
+    assert not deepseek_v2.matches("deepseek_v1")
 
 
 def test_deepseek_v3_noaux_router_contract_is_supported():

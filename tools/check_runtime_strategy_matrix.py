@@ -21,14 +21,6 @@ DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtmc_c.cpp"
 DEFAULT_BUILDERS_DIR = PROJECT_ROOT / "src" / "runtime" / "builders"
 DEFAULT_RUNTIME_REGISTRY_PATH = PROJECT_ROOT / "src" / "runtime" / "registry" / "pipeline_factory.cpp"
 DEFAULT_RUNTIME_MODELS_DIR = PROJECT_ROOT / "src" / "runtime" / "models"
-DEFAULT_TORCHTRT_STRATEGIES_DIR = (
-    PROJECT_ROOT
-    / "python"
-    / "tensorrt_model_connect"
-    / "engine_defs"
-    / "torch_trt"
-    / "strategies"
-)
 DEFAULT_DIFF_CHECKS_DIR = PROJECT_ROOT / "tools" / "diff_framework" / "checks"
 DEFAULT_E2E_MODELS_DIR = PROJECT_ROOT / "tests" / "e2e" / "models"
 DEFAULT_RUNNERS_DIR = DEFAULT_E2E_MODELS_DIR
@@ -145,18 +137,11 @@ def discover_runtime_strategy_source_files(
     cpp_path: Path,
     builders_dir: Path,
     runtime_registry_path: Path,
-    torchtrt_strategies_dir: Path,
 ) -> list[Path]:
     """Discover source files that spell runtime strategy keys."""
     discovered = discover_runtime_cpp_files(cpp_path=cpp_path, builders_dir=builders_dir)
     if runtime_registry_path.exists():
         discovered.append(runtime_registry_path.resolve())
-    if torchtrt_strategies_dir.exists():
-        discovered.extend(
-            path.resolve()
-            for path in sorted(torchtrt_strategies_dir.glob("*.py"))
-            if not path.name.startswith("_")
-        )
     return discovered
 
 
@@ -453,7 +438,6 @@ def validate_matrix_paths(
     builders_dir: Path = DEFAULT_BUILDERS_DIR,
     runtime_registry_path: Path = DEFAULT_RUNTIME_REGISTRY_PATH,
     runtime_models_dir: Path = DEFAULT_RUNTIME_MODELS_DIR,
-    torchtrt_strategies_dir: Path = DEFAULT_TORCHTRT_STRATEGIES_DIR,
     e2e_models_dir: Path = DEFAULT_E2E_MODELS_DIR,
     diff_checks_dir: Path = DEFAULT_DIFF_CHECKS_DIR,
     runners_dir: Path = DEFAULT_RUNNERS_DIR,
@@ -470,7 +454,6 @@ def validate_matrix_paths(
         cpp_path=cpp_path.resolve(),
         builders_dir=builders_dir.resolve(),
         runtime_registry_path=runtime_registry_path.resolve(),
-        torchtrt_strategies_dir=torchtrt_strategies_dir.resolve(),
     )
     cpp_runtime_strategies = extract_runtime_strategies_from_cpp_files(
         runtime_cpp_files,
@@ -529,12 +512,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to src/runtime/models directory.",
     )
     parser.add_argument(
-        "--torchtrt-strategies-dir",
-        type=Path,
-        default=DEFAULT_TORCHTRT_STRATEGIES_DIR,
-        help="Path to torch-trt strategy source files.",
-    )
-    parser.add_argument(
         "--e2e-models-dir",
         type=Path,
         default=DEFAULT_E2E_MODELS_DIR,
@@ -571,7 +548,6 @@ def main(argv: list[str] | None = None) -> int:
             builders_dir=args.builders_dir,
             runtime_registry_path=args.runtime_registry,
             runtime_models_dir=args.runtime_models_dir,
-            torchtrt_strategies_dir=args.torchtrt_strategies_dir,
             e2e_models_dir=args.e2e_models_dir,
             diff_checks_dir=args.diff_checks_dir,
             runners_dir=args.runners_dir,

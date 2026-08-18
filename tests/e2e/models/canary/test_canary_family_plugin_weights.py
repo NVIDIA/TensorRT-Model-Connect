@@ -33,9 +33,9 @@ class TestCanaryPlugin:
 
     def test_audio_config_preserves_nemo_frontend_contract(self):
         plugin = importlib.import_module(
-            "tensorrt_model_connect.families.canary.plugin")
+            "tensorrt_model_connect.families.canary.model")
 
-        audio_config = plugin.CanaryPlugin().get_audio_config(SimpleNamespace())
+        audio_config = plugin.get_audio_config(SimpleNamespace())
 
         assert audio_config == {
             "mel_frontend": "nemo",
@@ -50,7 +50,7 @@ class TestCanaryPlugin:
 
     def test_vision_build_forwards_fp32_layer_selection(self, monkeypatch):
         plugin = importlib.import_module(
-            "tensorrt_model_connect.families.canary.plugin")
+            "tensorrt_model_connect.families.canary.model")
 
         calls = {}
 
@@ -62,7 +62,7 @@ class TestCanaryPlugin:
         config = SimpleNamespace(raw={"_fp32_layers": [3, 7]})
         weights = WeightDict()
 
-        plan = plugin.CanaryPlugin().build_vision_engine(
+        plan = plugin.build_vision_engine(
             "/model", config, weights, precision="fp16", verbose=True)
 
         assert plan == b"encoder-plan"
@@ -76,7 +76,7 @@ class TestCanaryPlugin:
 
     def test_norm_epsilon_falls_back_for_full_fp32_build(self):
         plugin = importlib.import_module(
-            "tensorrt_model_connect.families.canary.plugin")
+            "tensorrt_model_connect.families.canary.model")
         regular_eps = object()
 
         selected = plugin._select_norm_eps(
@@ -86,7 +86,7 @@ class TestCanaryPlugin:
 
     def test_norm_epsilon_uses_promoted_tensor_for_mixed_precision(self):
         plugin = importlib.import_module(
-            "tensorrt_model_connect.families.canary.plugin")
+            "tensorrt_model_connect.families.canary.model")
         regular_eps = object()
         promoted_eps = object()
 
@@ -258,7 +258,7 @@ class TestCanaryPlugin:
         pytest.importorskip("torch", reason="torch required for canary test")
         pytest.importorskip("yaml", reason="yaml required for canary test")
 
-        from tensorrt_model_connect.families.canary import plugin
+        from tensorrt_model_connect.families.canary import model as plugin
 
         sd = self._make_nemo_state_dict(
             self.VOCAB, self.HIDDEN, self.ENC_LAYERS, self.DEC_LAYERS,
@@ -342,7 +342,7 @@ class TestCanaryPlugin:
 
     def test_prompt_metadata_is_derived_from_local_tokenizer(self, monkeypatch, tmp_path):
         canary_module = importlib.import_module(
-            "tensorrt_model_connect.families.canary.plugin")
+            "tensorrt_model_connect.families.canary.model")
 
         pieces = [
             "<unk>", "▁", "<|startofcontext|>", "<|startoftranscript|>",

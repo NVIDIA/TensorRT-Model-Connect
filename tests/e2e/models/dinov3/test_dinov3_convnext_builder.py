@@ -159,7 +159,7 @@ def test_load_convnext_weights_accepts_current_and_legacy_prefixes(
 def test_family_load_repairs_generic_bundle_info_fields(tmp_path) -> None:
     pytest.importorskip("tensorrt")
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families.dinov3.plugin import plugin
+    import tensorrt_model_connect.families.dinov3.model as plugin
 
     save_file(_tiny_checkpoint(""), str(tmp_path / "model.safetensors"))
     (tmp_path / "config.json").write_text(

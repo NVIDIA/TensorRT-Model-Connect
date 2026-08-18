@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.convbert.plugin import ConvBertPlugin
+from tensorrt_model_connect.families.convbert import model as ConvBertModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 convbert_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.convbert.plugin")
+    "tensorrt_model_connect.families.convbert.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -212,7 +212,7 @@ def test_convbert_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_convbert_encoder_engine", fake_build)
 
-    plan = ConvBertPlugin().build_engine(
+    plan = ConvBertModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -234,7 +234,7 @@ def test_convbert_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        ConvBertPlugin().build_engine(
+        ConvBertModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

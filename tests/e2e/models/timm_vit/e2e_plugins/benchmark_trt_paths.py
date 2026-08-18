@@ -67,18 +67,23 @@ def _create_timm_model(model_id: str):
 def _build_api_engine(model_id: str, plan_path: Path, *, verbose: bool) -> None:
     from tensorrt_model_connect.config import ModelConfig
     from tensorrt_model_connect.engine_builder import _resolve_model
-    from tensorrt_model_connect.families import find_plugin
+    from tensorrt_model_connect.families import find_model
 
     model_dir = Path(_resolve_model(model_id))
     config = ModelConfig.from_dir(model_dir)
-    plugin = find_plugin(config.model_type)
-    if plugin is None or plugin.name != "timm_vit":
+    family_model = find_model(config)
+    family = (
+        family_model.__package__.rsplit(".", 1)[-1]
+        if family_model is not None
+        else ""
+    )
+    if family != "timm_vit":
         raise RuntimeError(
-            f"Expected timm_vit plugin for {config.model_type!r}, got {plugin}"
+            f"Expected timm_vit model for {config.model_type!r}, got {family_model}"
         )
 
-    weights = plugin.load_weights(str(model_dir), config, precision="fp32")
-    plan = plugin.build_engine(
+    weights = family_model.load_weights(str(model_dir), config, precision="fp32")
+    plan = family_model.build_engine(
         config,
         weights,
         max_cache_length=1,

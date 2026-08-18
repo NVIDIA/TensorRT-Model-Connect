@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "qwen_moe"
-plugin = "qwen_moe"
-module = "plugin"
 capabilities = ["disable_dual_profile_decoder"]
 aliases = [
   "qwen2_moe",

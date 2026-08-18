@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "t5"
-plugin = "t5"
 test_manifests = [
   "manifests/t5-small-tp4.json",
   "manifests/t5-small.json",

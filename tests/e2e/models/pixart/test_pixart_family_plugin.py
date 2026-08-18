@@ -25,7 +25,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.pixart as pixart_mod
+    from tensorrt_model_connect.families.pixart import model as pixart_mod
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -111,30 +111,29 @@ def _pixart_tensors() -> dict[str, np.ndarray]:
     return d
 
 
-def test_matches_and_build_engine_not_supported() -> None:
-    """Intent: validate alias matching and build_engine rejection for PixArt.
+def test_matches_declared_pixart_aliases() -> None:
+    """Intent: validate alias matching for PixArt.
 
-    Preconditions: plugin object is imported.
-    Postconditions: declared aliases match; build_engine raises NotImplementedError.
+    Preconditions: the family model module is imported.
+    Postconditions: declared aliases match and a sibling family does not.
     """
-    plugin = pixart_mod.plugin
-    assert plugin.matches("pixart")
-    assert plugin.matches("pixart_sigma")
-    assert plugin.matches("pixart_alpha")
-    assert plugin.matches("pixartsigma")
-    assert plugin.matches("pixartalpha")
-    assert not plugin.matches("flux")
-
-    with pytest.raises(NotImplementedError, match="build_components"):
-        plugin.build_engine(_cfg(), {}, 16)
+    assert pixart_mod.matches("pixart")
+    assert pixart_mod.matches("pixart_sigma")
+    assert pixart_mod.matches("pixart_alpha")
+    assert pixart_mod.matches("pixartsigma")
+    assert pixart_mod.matches("pixartalpha")
+    assert not pixart_mod.matches("flux")
 
 
 def test_pixart_pipeline_classes_resolve_to_pixart_plugin() -> None:
     """PixArt owns the real Diffusers pipeline class mapping for PixArt models."""
-    from tensorrt_model_connect.families import find_diffusion_plugin
+    from tensorrt_model_connect.config import ModelConfig as BuildModelConfig
 
     for pipeline_class in ("PixArtSigmaPipeline", "PixArtAlphaPipeline"):
-        assert find_diffusion_plugin(pipeline_class) is pixart_mod.plugin
+        config = BuildModelConfig(
+            model_type="pixart", raw={"_class_name": pipeline_class}
+        )
+        assert pixart_mod.matches(config)
 
 
 def test_pixart_sigma_l0_reserves_an_exclusive_gpu() -> None:
@@ -160,7 +159,7 @@ def test_load_weights_success_and_missing_model_index(tmp_path) -> None:
         json.dumps({"num_attention_heads": 4, "num_layers": 2})
     )
 
-    weights = pixart_mod.plugin.load_weights(str(model_dir), _cfg())
+    weights = pixart_mod.load_weights(str(model_dir), _cfg())
     assert weights["_model_format"] == "diffusers"
     assert weights["_text_encoder_dir"].endswith("text_encoder")
     assert weights["_transformer_config"]["num_layers"] == 2
@@ -168,7 +167,7 @@ def test_load_weights_success_and_missing_model_index(tmp_path) -> None:
     bad_dir = tmp_path / "pixart_bad"
     bad_dir.mkdir()
     with pytest.raises(ValueError, match="Expected diffusers format"):
-        pixart_mod.plugin.load_weights(str(bad_dir), _cfg())
+        pixart_mod.load_weights(str(bad_dir), _cfg())
 
 
 def test_build_components_uses_transformer_and_t5_configs(
@@ -281,7 +280,7 @@ def test_build_components_uses_transformer_and_t5_configs(
         _class_name="PixArtSigmaPipeline",
     )
     config.raw["_fp32_layers"] = [2]
-    out = pixart_mod.plugin.build_components(
+    out = pixart_mod.build_components(
         str(model_dir),
         config,
         weights,
@@ -379,7 +378,7 @@ def test_build_components_tensor_parallel_uses_tp_dit_builder(
         lambda *_args, **_kwargs: b"pixart-pre",
     )
 
-    out = pixart_mod.plugin.build_components(
+    out = pixart_mod.build_components(
         str(model_dir),
         _cfg(image_height=256, image_width=384),
         {
@@ -429,7 +428,7 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
         image_width=832,
     )
 
-    dc = pixart_mod.plugin.get_diffusion_config(cfg)
+    dc = pixart_mod.get_diffusion_config(cfg)
     assert dc["dit_dim"] == 30
     assert dc["dit_num_heads"] == 5
     assert dc["dit_num_layers"] == 3
@@ -443,7 +442,7 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
 
 def test_get_diffusion_config_keeps_pixart_alpha_text_length() -> None:
     """PixArt Alpha retains the 120-token Diffusers pipeline contract."""
-    dc = pixart_mod.plugin.get_diffusion_config(
+    dc = pixart_mod.get_diffusion_config(
         _cfg(_class_name="PixArtAlphaPipeline")
     )
 

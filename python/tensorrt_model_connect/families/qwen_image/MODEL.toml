@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "qwen_image"
-plugin = "qwen_image"
-module = "plugin"
 aliases = [
   "qwen-image",
   "qwen_image",

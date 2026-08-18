@@ -20,7 +20,7 @@ from tensorrt_model_connect.families.nemotron_speech_streaming.predictor_tp_buil
     _validate_predictor_tp,
 )
 
-nss = importlib.import_module("tensorrt_model_connect.families.nemotron_speech_streaming.plugin")
+nss = importlib.import_module("tensorrt_model_connect.families.nemotron_speech_streaming.model")
 
 
 def _weights(hidden: int = 8) -> dict:
@@ -80,7 +80,7 @@ def test_plugin_routes_parallel_builds_to_tp_predictor(monkeypatch) -> None:
     monkeypatch.setattr(nss, "require_tensorrt_11_for_tensor_parallel", fake_require)
     monkeypatch.setattr(nss, "build_nemotron_streaming_tp_predictor", fake_build)
 
-    out = nss.plugin.build_engine(
+    out = nss.build_engine(
         SimpleNamespace(),
         _weights(),
         128,
@@ -99,7 +99,7 @@ def test_plugin_rejects_tp_quantization(monkeypatch) -> None:
     monkeypatch.setattr(nss, "require_tensorrt_11_for_tensor_parallel", lambda *_, **__: None)
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        nss.plugin.build_engine(
+        nss.build_engine(
             SimpleNamespace(),
             _weights(),
             128,

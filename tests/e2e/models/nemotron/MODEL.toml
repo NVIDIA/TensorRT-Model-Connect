@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "nemotron"
-plugin = "nemotron"
 test_manifests = [
   "manifests/nemotron-hindi-4b.json",
   "manifests/nemotron-mini-4b.json",

@@ -66,12 +66,12 @@ def _mock_model_strategy_detection(
 
     fake_families = types.ModuleType("tensorrt_model_connect.families")
     if plugin_found:
-        plugin = types.SimpleNamespace()
+        model = types.SimpleNamespace()
         if runtime_strategy is not None:
-            plugin.runtime_strategy = runtime_strategy
-        fake_families.find_plugin = lambda _model_type: plugin
+            model.runtime_strategy = runtime_strategy
+        fake_families.find_model = lambda _config: model
     else:
-        fake_families.find_plugin = lambda _model_type: None
+        fake_families.find_model = lambda _config: None
 
     fake_pkg.engine_builder = fake_engine_builder
     fake_pkg.config = fake_config
@@ -277,7 +277,7 @@ class TestRunner:
             strategy = runner.detect_runtime_strategy("test/model")
         assert strategy == "future_runtime_strategy"
 
-    def test_detect_runtime_strategy_missing_plugin_warns_without_fallback(
+    def test_detect_runtime_strategy_missing_model_warns_without_fallback(
         self, monkeypatch
     ):
         runner = _import_runner()
@@ -288,7 +288,7 @@ class TestRunner:
         assert result.status == "warning"
         assert result.runtime_strategy is None
 
-        with pytest.warns(RuntimeWarning, match="No family plugin resolved"):
+        with pytest.warns(RuntimeWarning, match="No family model resolved"):
             strategy = runner.detect_runtime_strategy("test/model")
         assert strategy == ""
 

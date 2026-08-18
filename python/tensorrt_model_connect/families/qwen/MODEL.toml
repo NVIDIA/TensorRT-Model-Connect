@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "qwen"
-plugin = "qwen"
-module = "plugin"
 capabilities = ["split_decoder_roles", "debug_layer_outputs"]
 aliases = [
   "qwen",
@@ -17,7 +15,6 @@ prefixes = [
   "qwq",
 ]
 debug_runner = "debug_runner.py|runner_from_bundle"
-default_build_route = "build_routing.py|prefer_native_default"
 debug_runtime_strategies = [
   "qwen_decoder_kv_cache",
 ]

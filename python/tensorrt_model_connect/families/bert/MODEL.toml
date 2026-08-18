@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "bert"
-plugin = "bert"
-module = "plugin"
 aliases = [
   "bert",
 ]

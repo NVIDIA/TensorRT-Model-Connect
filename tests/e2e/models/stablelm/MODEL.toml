@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "stablelm"
-plugin = "stablelm"
 test_manifests = [
   "manifests/stablelm2-1.6b-tp4.json",
   "manifests/stablelm2-1.6b.json",

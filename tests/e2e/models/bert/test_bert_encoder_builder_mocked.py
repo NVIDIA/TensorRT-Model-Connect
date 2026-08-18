@@ -73,7 +73,7 @@ def _import_with_fake_trt(module_name: str):
 @pytest.mark.unit
 def test_encoder_seq_layer_norm_uses_native_normalization() -> None:
     """BERT encoder layer norm uses TRT native add_normalization_v2."""
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model.model")
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.bert.model")
 
     class _FakeTensor:
         def __init__(self, name: str, dtype=np.float32, shape: tuple[int, ...] = (3, 4)):

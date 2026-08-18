@@ -99,10 +99,10 @@ environment that owns them.
 
 ## Selection and failure semantics
 
-The builder resolves the model family first. A matching family-owned native
-default route takes precedence. Otherwise only that family's optimized
-implementations are considered. Exactly one qualified profile may claim the
-request; no claim continues to native construction.
+The shared builder resolves the model family and calls its `model.build()`
+once. A family that supports an optimized implementation owns the profile
+decision inside that function. Exactly one qualified profile may claim the
+request; no claim continues through that family's native recipe.
 
 Once a profile claims a request, adapter build or optimized bundle-load failure
 is terminal. It must not silently fall back to native behavior, because that

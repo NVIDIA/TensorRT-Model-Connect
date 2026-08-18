@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "eagle_vlm"
-plugin = "eagle_vlm"
 test_manifests = [
   "manifests/nemotron-embed-vl-1b-v2-tp4.json",
   "manifests/nemotron-embed-vl-1b-v2.json",

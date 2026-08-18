@@ -70,7 +70,7 @@ class PhiMoEPluginTester(FamilyPluginTester):
       - lm_head weight + bias
     """
 
-    plugin_module = "tensorrt_model_connect.families.phi_moe"
+    plugin_module = "tensorrt_model_connect.families.phi_moe.model"
     model_type = "phimoe"
 
     def get_config_dict(self) -> dict:

@@ -100,7 +100,7 @@ def test_olmo2_tp_builder_rejects_single_device_mode() -> None:
 
 def test_olmo2_plugin_routes_parallel_builds(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.olmo2.plugin")
+        "tensorrt_model_connect.families.olmo2.model")
     from tensorrt_model_connect.families.olmo2 import tp_builder
 
     calls = {}
@@ -122,7 +122,7 @@ def test_olmo2_plugin_routes_parallel_builds(monkeypatch) -> None:
     monkeypatch.setattr(tp_builder, "build_olmo2_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         _Config(),
         _weights(),
         max_cache_length=256,
@@ -137,7 +137,7 @@ def test_olmo2_plugin_routes_parallel_builds(monkeypatch) -> None:
 
 def test_olmo2_plugin_routes_split_prefill_builds(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.olmo2.plugin")
+        "tensorrt_model_connect.families.olmo2.model")
     prefill_builder = importlib.import_module(
         "tensorrt_model_connect.families.olmo2.prefill_builder")
 
@@ -157,14 +157,14 @@ def test_olmo2_plugin_routes_split_prefill_builds(monkeypatch) -> None:
 
     config = _Config()
     config.raw["_decoder_engine_role"] = "prefill"
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         config,
         _weights(),
         max_cache_length=352,
         precision="fp32",
     )
 
-    assert plugin_module.plugin.supports_split_decoder_roles is True
+    assert plugin_module.supports_split_decoder_roles is True
     assert result == b"olmo2-prefill-plan"
     assert calls["build"]["max_cache_length"] == 352
     assert calls["build"]["kwargs"] == {

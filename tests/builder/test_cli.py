@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import types
 from unittest.mock import patch
 
 import pytest
@@ -104,7 +105,7 @@ class TestBuildArgs:
 
 
 class TestMainParser:
-    def test_build_help_hides_legacy_method_selector(self, monkeypatch, capsys):
+    def test_build_help_has_no_method_selector(self, monkeypatch, capsys):
         import tensorrt_model_connect.build_cli as cli
 
         monkeypatch.setattr(sys, "argv", ["trtmc", "build", "--help"])
@@ -188,24 +189,13 @@ def test_cmd_build_derives_output_and_keeps_native_capacity_unset(monkeypatch):
     import tensorrt_model_connect.build_cli as cli
     import tensorrt_model_connect.engine_builder as engine_builder
 
-    captured = {}
+    captured = {"calls": 0}
 
-    optimized_call = {}
-
-    def _no_optimized(*_args, **kwargs):
-        optimized_call.update(kwargs)
-        return None
-
-    monkeypatch.setattr(
-        engine_builder,
-        "_try_build_optimized_runtime",
-        _no_optimized,
-    )
-
-    def _fake_native_build(**kwargs):
+    def _fake_build(**kwargs):
+        captured["calls"] += 1
         captured.update(kwargs)
 
-    monkeypatch.setattr(engine_builder, "_build_native_impl", _fake_native_build)
+    monkeypatch.setattr(engine_builder, "build", _fake_build)
     args = argparse.Namespace(
         model="example-org/GenericDecoder-0.6B",
         output=None,
@@ -223,7 +213,98 @@ def test_cmd_build_derives_output_and_keeps_native_capacity_unset(monkeypatch):
     assert cli._cmd_build(args) == 0
     assert captured["output_path"] == "GenericDecoder-0.6B.bundle"
     assert captured["max_cache_length"] is None
-    assert optimized_call == {}
+    assert captured["calls"] == 1
+
+
+def test_cmd_build_rtx_profile_resolution_does_not_import_family_model(
+    monkeypatch,
+    tmp_path,
+):
+    import tensorrt_model_connect.build_cli as cli
+    import tensorrt_model_connect.engine_builder as engine_builder
+    from tensorrt_model_connect import families, trt_compat
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text('{"model_type":"example_model"}')
+    monkeypatch.setattr(
+        families,
+        "resolve_family_id_from_config",
+        lambda _config: "example_family",
+    )
+    rtx = types.ModuleType("tensorrt_rtx")
+    monkeypatch.setitem(sys.modules, "tensorrt_rtx", rtx)
+    monkeypatch.delitem(sys.modules, "tensorrt", raising=False)
+    for module_name in tuple(sys.modules):
+        if module_name == "tensorrt_model_connect.families.example_family" or module_name.startswith(
+            "tensorrt_model_connect.families.example_family."
+        ):
+            monkeypatch.delitem(sys.modules, module_name)
+    monkeypatch.setattr(trt_compat, "_module", None)
+    monkeypatch.setattr(trt_compat, "_backend_module_name", "tensorrt")
+    monkeypatch.setattr(trt_compat, "_backend_label", "TensorRT")
+    calls = []
+
+    def build(**kwargs):
+        assert "tensorrt_model_connect.families.example_family.model" not in sys.modules
+        engine_builder._setup_trt_import(kwargs["rtx"])
+        calls.append(kwargs)
+
+    monkeypatch.setattr(engine_builder, "build", build)
+    args = argparse.Namespace(
+        model=str(model_dir),
+        output=str(tmp_path / "example.bundle"),
+        max_cache_length=32,
+        precision="fp16",
+        quantize=None,
+        quant_scales=None,
+        quant_calibration_samples=512,
+        verbose=False,
+        tensor_parallel_size=1,
+        context_parallel_size=1,
+        active_python_profile="",
+        _skip_profile_resolution=False,
+        rtx=True,
+    )
+
+    assert cli._cmd_build(args) == 0
+    assert len(calls) == 1
+    assert calls[0]["rtx"] is True
+    assert trt_compat._module is None
+    assert trt_compat._backend_module_name == "tensorrt_rtx"
+    assert sys.modules["tensorrt"] is rtx
+
+
+def test_profile_metadata_prefers_chronos_architecture_without_model_import(
+    monkeypatch,
+    tmp_path,
+):
+    import tensorrt_model_connect.build_cli as cli
+
+    model_dir = tmp_path / "chronos"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "t5",
+                "architectures": ["ChronosBoltModelForForecasting"],
+                "chronos_config": {"context_length": 16},
+            }
+        )
+    )
+    for family in ("chronos_bolt", "t5"):
+        for module_name in tuple(sys.modules):
+            if module_name == f"tensorrt_model_connect.families.{family}" or module_name.startswith(
+                f"tensorrt_model_connect.families.{family}."
+            ):
+                monkeypatch.delitem(sys.modules, module_name)
+
+    resolved, family = cli._resolve_build_model_metadata(str(model_dir))
+
+    assert resolved == str(model_dir)
+    assert family == "chronos_bolt"
+    assert "tensorrt_model_connect.families.chronos_bolt.model" not in sys.modules
+    assert "tensorrt_model_connect.families.t5.model" not in sys.modules
 
 
 class TestInspectArgs:
@@ -404,8 +485,8 @@ class TestCmdBuildMocked:
             captured_kwargs["precision"] = precision
             captured_kwargs["verbose"] = verbose
 
-        original_build = eb._build_native_impl
-        eb._build_native_impl = mock_build
+        original_build = eb.build
+        eb.build = mock_build
         try:
             args = argparse.Namespace(
                 model="/path/to/model",
@@ -417,11 +498,7 @@ class TestCmdBuildMocked:
                 verbose=True,
                 _skip_profile_resolution=True,
             )
-            with patch(
-                "tensorrt_model_connect.runtime_provider.orchestrator.try_build_optimized_runtime",
-                return_value=None,
-            ):
-                result = _cmd_build(args)
+            result = _cmd_build(args)
             assert result == 0
             assert captured_kwargs["model_id_or_path"] == "/path/to/model"
             assert captured_kwargs["output_path"] == str(
@@ -429,7 +506,7 @@ class TestCmdBuildMocked:
             assert captured_kwargs["max_cache_length"] == 512
             assert captured_kwargs["verbose"] is True
         finally:
-            eb._build_native_impl = original_build
+            eb.build = original_build
 
     def test_build_preserves_original_model_identity_after_profile_resolution(
         self, monkeypatch, tmp_path
@@ -443,7 +520,7 @@ class TestCmdBuildMocked:
         def mock_build(model_id_or_path, **kwargs):
             captured["model_id_or_path"] = model_id_or_path
 
-        monkeypatch.setattr(eb, "_build_native_impl", mock_build)
+        monkeypatch.setattr(eb, "build", mock_build)
         monkeypatch.setattr(
             cli,
             "_resolve_build_model_metadata",
@@ -467,11 +544,7 @@ class TestCmdBuildMocked:
             _skip_profile_resolution=False,
         )
 
-        with patch(
-            "tensorrt_model_connect.runtime_provider.orchestrator.try_build_optimized_runtime",
-            return_value=None,
-        ):
-            assert cli._cmd_build(args) == 0
+        assert cli._cmd_build(args) == 0
 
         assert captured["model_id_or_path"] == "example-org/example-model"
 
@@ -486,8 +559,8 @@ class TestCmdBuildMocked:
                        precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, **kwargs):
             received_verbose.append(verbose)
 
-        original_build = eb._build_native_impl
-        eb._build_native_impl = mock_build
+        original_build = eb.build
+        eb.build = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model", output=str(tmp_path / "out.bundle"),
@@ -502,7 +575,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received_verbose == [False]
         finally:
-            eb._build_native_impl = original_build
+            eb.build = original_build
 
     def test_max_cache_length_propagated(self, tmp_path):
         """Verify max_cache_length value is forwarded to engine_builder.build()."""
@@ -515,8 +588,8 @@ class TestCmdBuildMocked:
                        precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, **kwargs):
             received_cache.append(max_cache_length)
 
-        original_build = eb._build_native_impl
-        eb._build_native_impl = mock_build
+        original_build = eb.build
+        eb.build = mock_build
         try:
             for cache_len in [128, 1024, 4096]:
                 args = argparse.Namespace(
@@ -532,7 +605,7 @@ class TestCmdBuildMocked:
                 _cmd_build(args)
             assert received_cache == [128, 1024, 4096]
         finally:
-            eb._build_native_impl = original_build
+            eb.build = original_build
 
     def test_dynamic_kv_cache_propagated(self, tmp_path):
         """Verify dynamic_kv_cache is forwarded to engine_builder.build()."""
@@ -547,8 +620,8 @@ class TestCmdBuildMocked:
                        verbose=False, **kwargs):
             received.append(dynamic_kv_cache)
 
-        original_build = eb._build_native_impl
-        eb._build_native_impl = mock_build
+        original_build = eb.build
+        eb.build = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -566,7 +639,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received == [True]
         finally:
-            eb._build_native_impl = original_build
+            eb.build = original_build
 
     def test_dynamic_kv_profile_rows_propagated(self, tmp_path):
         """Verify explicit dynamic-KV profile rows are forwarded to build()."""
@@ -579,8 +652,8 @@ class TestCmdBuildMocked:
                        dynamic_kv_profile_rows_override=None, **kwargs):
             received.append(dynamic_kv_profile_rows_override)
 
-        original_build = eb._build_native_impl
-        eb._build_native_impl = mock_build
+        original_build = eb.build
+        eb.build = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -611,7 +684,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received == [[32, 64, 128]]
         finally:
-            eb._build_native_impl = original_build
+            eb.build = original_build
 
     def test_decoder_engine_layout_propagated(self, tmp_path):
         """Verify --decoder-engine-layout is forwarded to engine_builder.build()."""
@@ -624,8 +697,8 @@ class TestCmdBuildMocked:
                        decoder_engine_layout="split", **kwargs):
             received.append(decoder_engine_layout)
 
-        original_build = eb._build_native_impl
-        eb._build_native_impl = mock_build
+        original_build = eb.build
+        eb.build = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -657,7 +730,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received == ["dual_profile"]
         finally:
-            eb._build_native_impl = original_build
+            eb.build = original_build
 
     def test_build_exception_returns_1(self, tmp_path):
         """When engine_builder.build() raises, _cmd_build returns 1."""
@@ -667,8 +740,8 @@ class TestCmdBuildMocked:
         def mock_build(*args, **kwargs):
             raise RuntimeError("TRT build failed: out of memory")
 
-        original_build = eb._build_native_impl
-        eb._build_native_impl = mock_build
+        original_build = eb.build
+        eb.build = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -681,7 +754,7 @@ class TestCmdBuildMocked:
             result = _cmd_build(args)
             assert result == 1
         finally:
-            eb._build_native_impl = original_build
+            eb.build = original_build
 
     def test_missing_fp8_scales_fails_before_native_build(
         self, monkeypatch, tmp_path, capsys
@@ -689,17 +762,15 @@ class TestCmdBuildMocked:
         from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
-        native_calls = []
-        monkeypatch.setattr(eb, "_try_build_optimized_runtime",
-                            lambda *args, **kwargs: None)
-        monkeypatch.setattr(eb, "_build_native_impl",
-                            lambda *args, **kwargs: native_calls.append(kwargs))
+        build_calls = []
+        monkeypatch.setattr(eb, "build",
+                            lambda *args, **kwargs: build_calls.append(kwargs))
         scales_path = tmp_path / "missing-scales.json"
 
         result = _cmd_build(self._fp8_build_args(tmp_path, scales_path))
 
         assert result == 1
-        assert native_calls == []
+        assert build_calls == []
         stderr = capsys.readouterr().err
         assert str(scales_path) in stderr
         assert "could not read FP8 scales file" in stderr
@@ -718,18 +789,16 @@ class TestCmdBuildMocked:
         from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
-        native_calls = []
-        monkeypatch.setattr(eb, "_try_build_optimized_runtime",
-                            lambda *args, **kwargs: None)
-        monkeypatch.setattr(eb, "_build_native_impl",
-                            lambda *args, **kwargs: native_calls.append(kwargs))
+        build_calls = []
+        monkeypatch.setattr(eb, "build",
+                            lambda *args, **kwargs: build_calls.append(kwargs))
         scales_path = tmp_path / "invalid-scales.json"
         scales_path.write_text(contents, encoding="utf-8")
 
         result = _cmd_build(self._fp8_build_args(tmp_path, scales_path))
 
         assert result == 1
-        assert native_calls == []
+        assert build_calls == []
         stderr = capsys.readouterr().err
         assert str(scales_path) in stderr
         assert expected_error in stderr
@@ -740,11 +809,9 @@ class TestCmdBuildMocked:
         from tensorrt_model_connect.build_cli import _cmd_build
         import tensorrt_model_connect.engine_builder as eb
 
-        native_calls = []
-        monkeypatch.setattr(eb, "_try_build_optimized_runtime",
-                            lambda *args, **kwargs: None)
-        monkeypatch.setattr(eb, "_build_native_impl",
-                            lambda *args, **kwargs: native_calls.append(kwargs))
+        build_calls = []
+        monkeypatch.setattr(eb, "build",
+                            lambda *args, **kwargs: build_calls.append(kwargs))
         scales_path = tmp_path / "scales.json"
         scales = {
             "transformer.block.0": {
@@ -757,8 +824,8 @@ class TestCmdBuildMocked:
         result = _cmd_build(self._fp8_build_args(tmp_path, scales_path))
 
         assert result == 0
-        assert len(native_calls) == 1
-        assert native_calls[0]["fp8_scales"] == scales
+        assert len(build_calls) == 1
+        assert build_calls[0]["fp8_scales"] == scales
         stderr = capsys.readouterr().err
         assert f"Loaded FP8 scales from {scales_path}" in stderr
 
@@ -772,7 +839,7 @@ class TestCmdBuildMocked:
         monkeypatch.setattr(
             cli,
             "_resolve_build_model_metadata",
-            lambda model_ref, method_name: ("/tmp/resolved-model", "example_profile"),
+            lambda model_ref: ("/tmp/resolved-model", "example_profile"),
         )
         monkeypatch.setattr(
             cli,

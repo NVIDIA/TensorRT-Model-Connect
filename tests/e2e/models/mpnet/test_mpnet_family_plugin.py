@@ -104,9 +104,9 @@ def test_matches_and_prefix_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     Preconditions: _has_tensor is monkeypatched for each scenario.
     Postconditions: detect_prefix and _pfx return expected values.
     """
-    assert mpnet_mod.plugin.matches("mpnet")
-    assert mpnet_mod.plugin.matches("MPNet")
-    assert not mpnet_mod.plugin.matches("bert")
+    assert mpnet_mod.matches("mpnet")
+    assert mpnet_mod.matches("MPNet")
+    assert not mpnet_mod.matches("bert")
 
     monkeypatch.setattr(
         mpnet_mod,
@@ -167,7 +167,7 @@ def test_load_weights_no_prefix_with_relative_bias(
     _install_tensor_stubs(monkeypatch, tensors)
 
     cfg = _cfg(pad_token_id=1, type_vocab_size=3)
-    weights = mpnet_mod.plugin.load_weights("/unused", cfg)
+    weights = mpnet_mod.load_weights("/unused", cfg)
 
     np.testing.assert_allclose(weights["embedding"], tensors["embeddings.word_embeddings.weight"])
     np.testing.assert_allclose(weights["position_embedding"], tensors["embeddings.position_embeddings.weight"][2:])
@@ -192,7 +192,7 @@ def test_load_weights_mpnet_prefix_without_relative_bias(
     tensors = _make_mpnet_tensors("mpnet", include_rel_bias=False)
     _install_tensor_stubs(monkeypatch, tensors)
 
-    weights = mpnet_mod.plugin.load_weights("/unused", _cfg())
+    weights = mpnet_mod.load_weights("/unused", _cfg())
 
     np.testing.assert_allclose(
         weights["embedding"],
@@ -243,7 +243,7 @@ def test_build_engine_with_relative_bias_precompute(
         "_relative_attention_num_buckets": 8,
     }
 
-    out = mpnet_mod.plugin.build_engine(cfg, weights, 5, verbose=True)
+    out = mpnet_mod.build_engine(cfg, weights, 5, verbose=True)
 
     assert out == b"mpnet-plan"
     assert calls["compute"]["seq_length"] == 5
@@ -280,7 +280,7 @@ def test_build_engine_without_relative_bias_does_not_compute(
     monkeypatch.setattr(mpnet_mod, "_compute_relative_position_bias", fail_compute)
     monkeypatch.setattr(mpnet_mod, "build_encoder_engine", fake_builder)
 
-    out = mpnet_mod.plugin.build_engine(
+    out = mpnet_mod.build_engine(
         _cfg(),
         {"embedding": np.zeros((9, 4), dtype=np.float32)},
         7,

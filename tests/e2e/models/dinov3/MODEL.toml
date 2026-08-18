@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "dinov3"
-plugin = "dinov3"
 test_manifests = [
   "manifests/dinov3-vits16-timm-l0.json",
   "manifests/dinov3-vits16-pretrain-lvd1689m.json",

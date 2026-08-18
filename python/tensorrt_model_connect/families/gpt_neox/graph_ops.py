@@ -317,29 +317,6 @@ def add_activation(
         raise ValueError(f"Unsupported activation: {activation_type}")
 
 
-def compute_alibi_slopes(num_heads: int) -> np.ndarray:
-    """Compute ALiBi slopes for each attention head (from the ALiBi paper).
-
-    For power-of-2 num_heads: geometric sequence 2^(-8/n * i), i in 1..n.
-    For non-power-of-2: interleave two geometric sequences.
-
-    Returns: [num_heads] float32 array.
-    """
-    def _get_slopes_power_of_2(n: int) -> list[float]:
-        start = 2 ** (-(2 ** -(np.log2(n) - 3)))
-        return [start * (start ** i) for i in range(n)]
-
-    if num_heads > 0 and (num_heads & (num_heads - 1)) == 0:
-        # Power of 2
-        return np.array(_get_slopes_power_of_2(num_heads), dtype=np.float32)
-    else:
-        closest_power_of_2 = 2 ** int(np.floor(np.log2(num_heads)))
-        slopes_a = _get_slopes_power_of_2(closest_power_of_2)
-        slopes_b = _get_slopes_power_of_2(2 * closest_power_of_2)
-        slopes_b = slopes_b[0::2][: num_heads - closest_power_of_2]
-        return np.array(slopes_a + slopes_b, dtype=np.float32)
-
-
 # Alias: add_gelu_tanh is the same as add_gelu_new (tanh approximation)
 add_gelu_tanh = add_gelu_new
 

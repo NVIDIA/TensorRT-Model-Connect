@@ -40,7 +40,7 @@ class TestOlmoPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.olmo import plugin
+        from tensorrt_model_connect.families.olmo import model as plugin
 
         config = {
             "model_type": "olmo",
@@ -63,6 +63,6 @@ class TestOlmoPlugin:
         assert "w_out" in weights
 
     def test_matches(self):
-        from tensorrt_model_connect.families.olmo import plugin
+        from tensorrt_model_connect.families.olmo import model as plugin
         assert plugin.matches("olmo")
         assert not plugin.matches("olmo2")

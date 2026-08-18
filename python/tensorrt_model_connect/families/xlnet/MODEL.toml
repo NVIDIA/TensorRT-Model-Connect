@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "xlnet"
-plugin = "xlnet"
-module = "plugin"
 aliases = [
   "xlnet",
 ]

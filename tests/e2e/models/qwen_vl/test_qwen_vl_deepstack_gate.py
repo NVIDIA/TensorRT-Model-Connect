@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 
 plugin = importlib.import_module(
-    "tensorrt_model_connect.families.qwen_vl.plugin")
+    "tensorrt_model_connect.families.qwen_vl.model")
 
 
 @dataclass

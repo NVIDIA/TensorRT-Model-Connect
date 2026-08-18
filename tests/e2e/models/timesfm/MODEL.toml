@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "timesfm"
-plugin = "timesfm"
 test_manifests = [
   "manifests/timesfm-2.0-500m-official-tp4.json",
   "manifests/timesfm-2.0-500m-official.json",

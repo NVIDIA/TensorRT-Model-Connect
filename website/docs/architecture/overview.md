@@ -27,20 +27,20 @@ checkpoint, engine, bundle, DSO, prefill, or KV cache are new to you.
 />
 
 The diagram shows two artifact shapes, not two user-selected public APIs.
-`trtmc build` and the Python `build()` function resolve the model family first.
-A family-owned native default may claim the request immediately. Otherwise, an
-exact model/revision/target/options profile may select an optimized adapter; no
-qualified profile continues to the native builder.
+`trtmc build` and the Python `build()` function resolve the model family,
+import `families/<id>/model.py`, and call `model.build()` exactly once. That
+family module owns the complete native recipe and any exact optimized-profile
+selection. Shared code does not retry another builder.
 
 ## The two bundle paths
 
 | Concern | Native bundle | Optimized-runtime bundle |
 | --- | --- | --- |
-| Build owner | Python `FamilyPlugin` and family-local TensorRT builders | Family-local implementation/profile and isolated adapter |
+| Build owner | Family `model.py`: config → weights → TensorRT plans → bundle | The same family `model.py`, plus its implementation/profile and isolated adapter |
 | Primary identity | `runtime_strategy` | `optimized_runtime.json` implementation and profile |
 | Runtime implementation | Installed `libtrtmc_model_<owner>.so` | Exact embedded `libtrtmc_impl_*.so` |
 | TensorRT execution boundary | Installed backend DSO implementing `IBackend` | Delegated implementation behind its private factory |
-| Fallback behavior | Used when no optimized profile claims the request | Descriptor presence claims this path; load failures do not fall back to native |
+| Route behavior | The family runs its native recipe when it does not select an exact optimized profile | A claimed profile owns the build; adapter or load failure is terminal |
 | Evidence | Native E2E manifest and model-owned tests | Exact profile qualification plus adapter, bundle, and host evidence |
 
 Both shapes still depend on compatible host facilities such as the NVIDIA

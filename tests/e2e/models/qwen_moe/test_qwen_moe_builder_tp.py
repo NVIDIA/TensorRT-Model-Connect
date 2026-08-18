@@ -16,17 +16,19 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     qwen_moe_module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen_moe.plugin")
+        "tensorrt_model_connect.families.qwen_moe.model")
     from tensorrt_model_connect.families.qwen_moe import tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
-def test_direct_plugin_module_import_preserves_package_plugin_api():
+def test_model_entry_has_no_plugin_compatibility_api():
     from tensorrt_model_connect.families import qwen_moe
 
-    assert qwen_moe.plugin is qwen_moe_module.plugin
+    assert not hasattr(qwen_moe, "plugin")
+    assert qwen_moe_module.name == "qwen_moe"
+    assert callable(qwen_moe_module.build)
 
 
 def _config(num_kv_heads: int = 4) -> SimpleNamespace:
@@ -178,7 +180,7 @@ def test_qwen_moe_plugin_routes_parallel_builds(monkeypatch):
     monkeypatch.setattr(tp_builder, "build_qwen_moe_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = qwen_moe_module.Qwen3MoePlugin().build_engine(
+    result = qwen_moe_module.build_engine(
         _config(), _weights(), 17,
         precision="fp16",
         verbose=True,

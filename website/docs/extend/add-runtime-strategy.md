@@ -78,7 +78,7 @@ in the same manifest with `runtime_tests` or `runtime_config_schemas`.
 
 ## 4. Emit the exact key
 
-The Python family plugin must emit the exact model-owned strategy in bundle
+The Python family `model.py` must emit the exact model-owned strategy in bundle
 `config.json`. Keep the corresponding Python descriptor in
 `python/tensorrt_model_connect/families/<family>/MODEL.toml`.
 

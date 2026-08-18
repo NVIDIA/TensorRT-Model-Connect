@@ -224,14 +224,14 @@ class TestFlashInferKernelSetup:
 
 
 class TestEngineBuilderKernelArtifacts:
-    """Verify build_bundle accepts kernel_artifacts and packages them."""
+    """Verify build accepts kernel_artifacts and packages them."""
 
-    def test_build_bundle_signature_has_kernel_artifacts(self):
-        """build_bundle() accepts kernel_artifacts keyword argument."""
+    def test_build_signature_has_kernel_artifacts(self):
+        """build() accepts the kernel_artifacts keyword argument."""
         import inspect
-        from tensorrt_model_connect.engine_builder import build_bundle
+        from tensorrt_model_connect.engine_builder import build
 
-        sig = inspect.signature(build_bundle)
+        sig = inspect.signature(build)
         assert "kernel_artifacts" in sig.parameters
         param = sig.parameters["kernel_artifacts"]
         assert param.default is None

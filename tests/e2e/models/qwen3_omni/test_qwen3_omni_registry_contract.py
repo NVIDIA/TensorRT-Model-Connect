@@ -7,21 +7,22 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("tensorrt", reason="registry contract tests import plugin modules")
+pytest.importorskip("tensorrt", reason="registry contract tests import model modules")
 
-from tensorrt_model_connect.families import find_plugin
+from tensorrt_model_connect.families import find_model
 
 
-def _plugin(model_type: str):
-    plugin = find_plugin(model_type)
-    assert plugin is not None
-    return plugin
+def _model(model_type: str):
+    model = find_model(model_type)
+    assert model is not None
+    return model
+
 
 def test_vision_language_runtime_contract() -> None:
-    plugin = _plugin("qwen3_omni")
-    assert getattr(plugin, "runtime_strategy", None) == "qwen3_omni_multimodal"
-    assert getattr(plugin, "embed_input", False) is True
-    assert callable(getattr(plugin, "build_vision_engine", None))
-    assert callable(getattr(plugin, "get_vl_config", None))
+    model = _model("qwen3_omni")
+    assert getattr(model, "runtime_strategy", None) == "qwen3_omni_multimodal"
+    assert getattr(model, "embed_input", False) is True
+    assert callable(getattr(model, "build_vision_engine", None))
+    assert callable(getattr(model, "get_vl_config", None))
 
-    assert callable(getattr(plugin, "build_extra_engines", None))
+    assert callable(getattr(model, "build_extra_engines", None))

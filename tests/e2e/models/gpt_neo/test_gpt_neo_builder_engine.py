@@ -60,7 +60,7 @@ class GPTNeoPluginTester(FamilyPluginTester):
       - Tied word embeddings (transformer.wte == lm_head)
     """
 
-    plugin_module = "tensorrt_model_connect.families.gpt_neo"
+    plugin_module = "tensorrt_model_connect.families.gpt_neo.model"
     model_type = "gpt_neo"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

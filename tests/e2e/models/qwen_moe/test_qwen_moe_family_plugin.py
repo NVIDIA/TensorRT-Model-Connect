@@ -128,7 +128,7 @@ class TestQwen3MoePlugin:
         return t
 
     def test_matches(self):
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
         assert plugin.matches("qwen3_moe")
         assert plugin.matches("Qwen3_moe")
         assert not plugin.matches("qwen3")
@@ -136,12 +136,12 @@ class TestQwen3MoePlugin:
         assert not plugin.matches("mixtral")
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
         assert plugin.runtime_strategy == "qwen_moe_decoder_moe"
 
     def test_load_weights_dense_layer_keys(self, tmp_path):
         """Dense MLP layer (layer 0) should have w_gate/w_up/w_down."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         _write_config(tmp_path, self._make_config())
         _write_safetensors(tmp_path, self._make_tensors())
@@ -159,7 +159,7 @@ class TestQwen3MoePlugin:
 
     def test_load_weights_moe_layer_keys(self, tmp_path):
         """MoE layer (layer 1) should have router and expert keys but no shared expert (Qwen3-MoE)."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         _write_config(tmp_path, self._make_config())
         _write_safetensors(tmp_path, self._make_tensors())
@@ -188,7 +188,7 @@ class TestQwen3MoePlugin:
 
     def test_load_weights_attention_keys(self, tmp_path):
         """Attention keys should be present for all layers."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         _write_config(tmp_path, self._make_config())
         _write_safetensors(tmp_path, self._make_tensors())
@@ -210,7 +210,7 @@ class TestQwen3MoePlugin:
 
     def test_transpose_applied(self, tmp_path):
         """Weight projections should be transposed from [out, in] to [in, out]."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         tensors = self._make_tensors()
         _write_config(tmp_path, self._make_config())
@@ -244,7 +244,7 @@ class TestQwen3MoePlugin:
 
     def test_gqa_kv_stays_compact(self, tmp_path):
         """K/V should stay compact at kv_dim."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         _write_config(tmp_path, self._make_config())
         _write_safetensors(tmp_path, self._make_tensors())
@@ -261,7 +261,7 @@ class TestQwen3MoePlugin:
 
     def test_metadata_keys(self, tmp_path):
         """Metadata should be stored correctly."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         _write_config(tmp_path, self._make_config())
         _write_safetensors(tmp_path, self._make_tensors())
@@ -279,7 +279,7 @@ class TestQwen3MoePlugin:
 
     def test_expert_transpose_values(self, tmp_path):
         """Verify expert weight values match transposed HF originals."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         tensors = self._make_tensors()
         _write_config(tmp_path, self._make_config())
@@ -304,7 +304,7 @@ class TestQwen3MoePlugin:
 
     def test_no_shared_expert_keys_for_qwen3_moe(self, tmp_path):
         """Qwen3-MoE should NOT have shared expert keys in the weight dict."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         tensors = self._make_tensors()
         _write_config(tmp_path, self._make_config())
@@ -321,7 +321,7 @@ class TestQwen3MoePlugin:
 
     def test_tied_embeddings(self, tmp_path):
         """When lm_head.weight is missing, w_out = transposed embedding."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         config = self._make_config()
         config["tie_word_embeddings"] = True
@@ -341,7 +341,7 @@ class TestQwen3MoePlugin:
 
     def test_all_moe_no_dense(self, tmp_path):
         """With mlp_only_layers=[], all layers should be MoE (Qwen3-MoE, no shared experts)."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         config = self._make_config()
         config["mlp_only_layers"] = []
@@ -388,7 +388,7 @@ class TestQwen3MoePlugin:
 
     def test_fp16_load_uses_packed_fp16_expert_weights(self, tmp_path):
         """Large MoE matrices should honor fp16 load precision."""
-        from tensorrt_model_connect.families.qwen_moe import plugin
+        from tensorrt_model_connect.families.qwen_moe import model as plugin
 
         tensors = self._make_tensors()
         _write_config(tmp_path, self._make_config())
@@ -405,9 +405,8 @@ class TestQwen3MoePlugin:
         assert weights["layer.1.experts.w_down"].dtype == np.float16
         assert weights["final_norm"].dtype == np.float32
 
-    def test_plugin_discovery(self):
-        """Plugin should be discoverable via find_plugin."""
-        from tensorrt_model_connect.families import find_plugin
-        p = find_plugin("qwen3_moe")
-        assert p is not None
-        assert p.name == "qwen_moe"
+    def test_model_entry_matches_owned_alias(self):
+        from tensorrt_model_connect.families.qwen_moe import model
+
+        assert model.matches("qwen3_moe")
+        assert model.name == "qwen_moe"

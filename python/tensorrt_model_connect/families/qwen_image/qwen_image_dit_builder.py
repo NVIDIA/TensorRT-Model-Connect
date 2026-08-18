@@ -1640,7 +1640,7 @@ def build_qwen_image_dit_engine(
     timestep = network.add_input("timestep", trt.float32, (input_batch,))
 
     if use_dynamic_batch:
-        from ...engine_builder import add_dynamic_batch_profile
+        from ...tvm_ffi.graph_build import add_dynamic_batch_profile
 
         opt_batch = min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
         add_dynamic_batch_profile(

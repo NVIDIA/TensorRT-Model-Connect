@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "mamba"
-plugin = "mamba"
 test_manifests = [
   "manifests/mamba-130m-tp4.json",
   "manifests/mamba-130m.json",

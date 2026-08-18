@@ -36,7 +36,7 @@ def test_lance_bf16_build_rounds_rope_inv_freq_like_official_reference(
     monkeypatch,
 ) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.lance.plugin")
+        "tensorrt_model_connect.families.lance.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -44,7 +44,7 @@ def test_lance_bf16_build_rounds_rope_inv_freq_like_official_reference(
         return b"lance-bf16-plan"
 
     monkeypatch.setattr(module, "build_standard_decoder_engine", fake_build)
-    result = module.LancePlugin().build_engine(
+    result = module.build_engine(
         SimpleNamespace(), {}, 512, precision="bf16")
 
     assert result == b"lance-bf16-plan"
@@ -80,7 +80,7 @@ def test_lance_rope_table_can_match_bf16_inv_freq_buffer() -> None:
 
 def test_lance_vl_config_matches_official_x2t_image_framing() -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.lance.plugin")
+        "tensorrt_model_connect.families.lance.model")
     config = SimpleNamespace(
         raw={
             "vision_config": {
@@ -93,7 +93,7 @@ def test_lance_vl_config_matches_official_x2t_image_framing() -> None:
         hidden_size=2048,
     )
 
-    vl_config = module.LancePlugin().get_vl_config(config)
+    vl_config = module.get_vl_config(config)
 
     assert vl_config is not None
     assert vl_config["fixed_image_size"] == 448

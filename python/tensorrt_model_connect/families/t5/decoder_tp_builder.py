@@ -3,7 +3,7 @@
 
 """Tensor-parallel T5 decoder builder.
 
-This mirrors the single-device decoder graph in ``plugin.py`` while applying
+This mirrors the single-device decoder graph in ``model.py`` while applying
 tensor parallelism only to the decoder projections:
 
 * self-attention and cross-attention Q/K/V projections are column-sharded,
@@ -22,7 +22,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import _make_t5_causal_buckets, _make_t5_cross_buckets, _mark_debug_output
+from .model import _make_t5_causal_buckets, _make_t5_cross_buckets, _mark_debug_output
 
 trt = trt_compat.get_trt()
 

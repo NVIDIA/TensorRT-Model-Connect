@@ -209,7 +209,6 @@ def test_package_init_exports_expected_symbols() -> None:
 
     assert pkg.__version__ == "0.1.0"
     assert callable(pkg.build)
-    assert callable(pkg.build_bundle)
     assert callable(pkg.write_bundle)
     assert hasattr(pkg, "ModelConfig")
     assert hasattr(pkg, "Pipeline")

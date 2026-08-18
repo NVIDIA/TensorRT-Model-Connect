@@ -16,7 +16,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     deepseek_ocr_module = importlib.import_module(
-        "tensorrt_model_connect.families.deepseek_ocr.plugin")
+        "tensorrt_model_connect.families.deepseek_ocr.model")
     from tensorrt_model_connect.checkpoint_mapper import WeightDict
     from tensorrt_model_connect import trt_compat
     from tensorrt_model_connect.families.deepseek_ocr import graph_ops, tp_builder
@@ -162,7 +162,7 @@ def test_deepseek_ocr_plugin_routes_parallel_builds(monkeypatch) -> None:
     monkeypatch.setattr(tp_builder, "build_deepseek_ocr_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=2, rank=1)
-    plugin = deepseek_ocr_module.DeepSeekOCRPlugin()
+    plugin = deepseek_ocr_module
     result = plugin.build_engine(
         _config(), _weights(), 4096,
         verbose=True,
@@ -186,7 +186,7 @@ def test_deepseek_ocr_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
     )
 
     with pytest.raises(ValueError, match="debug layer outputs"):
-        deepseek_ocr_module.DeepSeekOCRPlugin().build_engine(
+        deepseek_ocr_module.build_engine(
             _config(),
             _weights(),
             max_cache_length=4096,
@@ -214,7 +214,7 @@ def test_deepseek_ocr_forwards_fp16_to_vision_engine(monkeypatch) -> None:
     )
     config = _config()
 
-    plan = deepseek_ocr_module.DeepSeekOCRPlugin().build_vision_engine(
+    plan = deepseek_ocr_module.build_vision_engine(
         "/model", config, _weights(), precision="fp16", verbose=True)
 
     assert plan == b"vision-plan"
@@ -256,7 +256,7 @@ def test_deepseek_ocr_resizes_sam_position_embedding_for_768_view() -> None:
 
 
 def test_deepseek_ocr_uses_official_768_single_view_contract() -> None:
-    vl_config = deepseek_ocr_module.DeepSeekOCRPlugin().get_vl_config(_config())
+    vl_config = deepseek_ocr_module.get_vl_config(_config())
 
     assert vl_config is not None
     assert vl_config["fixed_image_size"] == 768

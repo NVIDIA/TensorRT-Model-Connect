@@ -53,9 +53,10 @@ std::cout << pipeline->generate("What is the capital of France? Answer in one wo
 - Hand a versioned `.bundle` artifact from the Python-first build environment
   to native C++ task APIs such as text generation, transcription, image and
   video generation, segmentation, embedding, and forecasting.
-- Use model-family-owned builders, runtime pipelines, helper kernels, and
-  validation contracts as concrete blueprints for modification and
-  customization.
+- Use each family's self-contained `model.py` build recipe, runtime pipeline,
+  helper kernels, and validation contracts as concrete blueprints for
+  modification and customization. The shared Python entry point only resolves
+  the owning family and calls `model.build()` once.
 - Keep native TensorRT execution and exactly qualified optimized-runtime
   dispatch behind the same task-oriented application boundary.
 

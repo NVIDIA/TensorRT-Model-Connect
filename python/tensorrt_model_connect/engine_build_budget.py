@@ -257,9 +257,17 @@ def _claim_build(
     claim_path = _ledger_path(guard_dir, identity)
     recovery = _recovery_request()
     normalized_arguments = _jsonable_arguments(arguments)
-    if "model_dir" in normalized_arguments:
-        normalized_arguments["model_dir"] = _stable_model_dir_argument(
-            normalized_arguments["model_dir"]
+    model_argument = next(
+        (
+            name
+            for name in ("model_id_or_path", "model_dir")
+            if name in normalized_arguments
+        ),
+        None,
+    )
+    if model_argument is not None:
+        normalized_arguments[model_argument] = _stable_model_dir_argument(
+            normalized_arguments[model_argument]
         )
     encoded_arguments = json.dumps(
         normalized_arguments, sort_keys=True, separators=(",", ":")

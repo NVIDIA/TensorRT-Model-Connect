@@ -101,7 +101,7 @@ def test_matches() -> None:
     Preconditions: plugin instance is imported.
     Postconditions: only "distilbert" (case-insensitive) matches.
     """
-    plugin = distilbert_mod.plugin
+    plugin = distilbert_mod
     assert plugin.matches("distilbert")
     assert plugin.matches("DistilBERT")
     assert not plugin.matches("bert")
@@ -117,7 +117,7 @@ def test_load_weights_maps_and_transposes(monkeypatch: pytest.MonkeyPatch) -> No
     _install_tensor_stubs(monkeypatch, tensors)
 
     cfg = _cfg(type_vocab_size=3)
-    weights = distilbert_mod.plugin.load_weights("/unused", cfg)
+    weights = distilbert_mod.load_weights("/unused", cfg)
 
     np.testing.assert_allclose(
         weights["embedding"],
@@ -158,7 +158,7 @@ def test_load_weights_rejects_bad_embedding_shape(
     _install_tensor_stubs(monkeypatch, tensors)
 
     with pytest.raises(AssertionError, match="Embedding shape"):
-        distilbert_mod.plugin.load_weights("/unused", _cfg())
+        distilbert_mod.load_weights("/unused", _cfg())
 
 
 def test_build_engine_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,7 +181,7 @@ def test_build_engine_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cfg = _cfg()
     raw_weights = {"embedding": np.zeros((8, 4), dtype=np.float32)}
-    out = distilbert_mod.plugin.build_engine(cfg, raw_weights, 19, verbose=True)
+    out = distilbert_mod.build_engine(cfg, raw_weights, 19, verbose=True)
 
     assert out == b"distil-plan"
     assert calls["config"] is cfg

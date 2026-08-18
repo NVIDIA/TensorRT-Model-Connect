@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "olmo2"
-plugin = "olmo2"
-module = "plugin"
 aliases = [
   "olmo2",
 ]

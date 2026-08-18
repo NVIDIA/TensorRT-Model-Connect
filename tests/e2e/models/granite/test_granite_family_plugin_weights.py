@@ -40,7 +40,7 @@ class TestGranitePlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.granite import plugin
+        from tensorrt_model_connect.families.granite import model as plugin
 
         config = {
             "model_type": "granite",
@@ -61,7 +61,7 @@ class TestGranitePlugin:
         assert "embedding" in weights
 
     def test_matches(self):
-        from tensorrt_model_connect.families.granite import plugin
+        from tensorrt_model_connect.families.granite import model as plugin
         assert plugin.matches("granite")
         assert plugin.matches("granitemoeshared")
         assert not plugin.matches("llama")

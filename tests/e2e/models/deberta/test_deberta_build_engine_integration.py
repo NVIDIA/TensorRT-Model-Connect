@@ -89,7 +89,7 @@ class TestDebertaBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from tensorrt_model_connect.families.deberta import plugin
+        import tensorrt_model_connect.families.deberta.model as plugin
 
         config = {
             "model_type": "deberta",

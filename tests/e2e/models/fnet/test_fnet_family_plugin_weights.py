@@ -43,7 +43,7 @@ class TestFNetPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.fnet import plugin
+        import tensorrt_model_connect.families.fnet.model as plugin
 
         config = {
             "model_type": "fnet",
@@ -76,6 +76,6 @@ class TestFNetPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.fnet import plugin
+        import tensorrt_model_connect.families.fnet.model as plugin
         assert plugin.matches("fnet")
         assert not plugin.matches("bert")

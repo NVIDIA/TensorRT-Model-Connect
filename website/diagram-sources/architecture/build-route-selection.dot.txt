@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 // @title: Native and optimized build-route selection
-// @description: The builder resolves the owning family, accepts a family-owned native default immediately, otherwise probes only exact family profiles and selects either one optimized adapter, the native builder, or a terminal ambiguity error.
+// @description: The shared builder resolves one family and calls its model.build exactly once; that family module owns any exact optimized-profile decision, its native recipe, bundle assembly, and fail-closed errors.
 digraph BuildRouteSelection {
   graph [
     bgcolor="#fbfcfe",
@@ -12,7 +12,7 @@ digraph BuildRouteSelection {
     splines="polyline",
     fontname="Arial",
     labelloc="t",
-    label=<<B>Select one build route</B><BR/><FONT POINT-SIZE="16">Family resolution happens first; a claimed optimized build never falls back after failure.</FONT>>,
+    label=<<B>Select one build route</B><BR/><FONT POINT-SIZE="16">Shared code resolves and dispatches once; the family model owns every later decision.</FONT>>,
     fontsize="28",
     fontcolor="#111827"
   ];
@@ -44,34 +44,28 @@ digraph BuildRouteSelection {
   family [
     fillcolor="#eff6ff",
     color="#2563eb",
-    label=<<B>Resolve owning family</B><BR/><FONT POINT-SIZE="16">load descriptor and route metadata</FONT>>
+    label=<<B>Resolve owning family</B><BR/><FONT POINT-SIZE="16">descriptor metadata bounds candidates</FONT>>
   ];
-  native_default [
-    shape="diamond",
-    fillcolor="#fffbeb",
-    color="#b45309",
-    label=<<B>Native default claims<BR/>this ModelConfig?</B>>
+  model [
+    fillcolor="#eff6ff",
+    color="#2563eb",
+    label=<<B>Import family model.py</B><BR/><FONT POINT-SIZE="16">call model.build() exactly once</FONT>>
   ];
   probe_inputs [
     fillcolor="#f5f3ff",
     color="#7c3aed",
-    label=<<B>Optimized probe inputs</B><BR/><FONT POINT-SIZE="16">target + effective public options</FONT>>
-  ];
-  probe [
-    fillcolor="#eff6ff",
-    color="#2563eb",
-    label=<<B>Probe this family's profiles</B><BR/><FONT POINT-SIZE="16">exact revision + target + effective options</FONT>>
+    label=<<B>Family-owned route inputs</B><BR/><FONT POINT-SIZE="16">revision + target + effective options</FONT>>
   ];
   outcome [
     shape="diamond",
     fillcolor="#fffbeb",
     color="#b45309",
-    label=<<B>Qualified profile<BR/>matches?</B>>
+    label=<<B>Family selects one exact<BR/>optimized profile?</B>>
   ];
   native [
     fillcolor="#ecfccb",
     color="#4d7c0f",
-    label=<<B>Native FamilyPlugin</B><BR/><FONT POINT-SIZE="16">build TensorRT plans + assets</FONT>>
+    label=<<B>Family native recipe</B><BR/><FONT POINT-SIZE="16">config → weights → plans → sections</FONT>>
   ];
   optimized [
     fillcolor="#f5f3ff",
@@ -94,19 +88,16 @@ digraph BuildRouteSelection {
     label=<<B>Fail closed</B><BR/><FONT POINT-SIZE="16">multiple claims → error</FONT><BR/><FONT POINT-SIZE="16">claimed adapter failure → terminal</FONT>>
   ];
 
-  request -> family -> native_default;
-  native_default -> native [label="yes"];
-  native_default -> probe [label="no"];
-  probe_inputs -> probe;
-  probe -> outcome;
-  outcome -> optimized [label="exactly one"];
-  outcome -> native [label="none"];
-  outcome -> terminal [label="multiple"];
+  request -> family -> model -> outcome;
+  probe_inputs -> outcome;
+  outcome -> optimized [label="yes"];
+  outcome -> native [label="no"];
+  outcome -> terminal [label="invalid / multiple"];
   native -> native_bundle;
   optimized -> optimized_bundle;
   optimized -> terminal [style="dashed", label="build failure"];
 
-  { rank=same; native; outcome; probe_inputs; }
+  { rank=same; native; outcome; }
   { rank=same; native_bundle; optimized_bundle; }
   { rank=same; optimized_bundle; terminal; native_bundle; }
 }

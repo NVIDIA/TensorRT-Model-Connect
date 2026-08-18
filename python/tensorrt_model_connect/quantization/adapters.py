@@ -143,7 +143,6 @@ class StandardDecoderCalibrationAdapter(AutoCausalLMCalibrationAdapter):
             return seam
         return None
 
-
 class QwenVLCalibrationAdapter:
     """Calibration adapter for Qwen-VL (Qwen2.5-VL / Qwen3-VL).
 
@@ -340,17 +339,3 @@ class QwenVLCalibrationAdapter:
             if match is not None:
                 return f"layer.{match.group(1)}.{suffix}"
         return None
-
-
-def resolve_calibration_adapter(
-    plugin: Any | None,
-    format_name: str,
-) -> CalibrationAdapter:
-    """Return a family-supplied adapter or the default decoder adapter."""
-    if plugin is not None:
-        quant_adapter = getattr(plugin, "quant_adapter", None)
-        if callable(quant_adapter):
-            adapter = quant_adapter(format_name)
-            if adapter is not None:
-                return adapter
-    return AutoCausalLMCalibrationAdapter()

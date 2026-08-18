@@ -60,7 +60,7 @@ class XGLMPluginTester(FamilyPluginTester):
       - Config uses d_model, ffn_dim, attention_heads, num_layers
     """
 
-    plugin_module = "tensorrt_model_connect.families.xglm"
+    plugin_module = "tensorrt_model_connect.families.xglm.model"
     model_type = "xglm"
 
     def get_config_dict(self) -> dict:

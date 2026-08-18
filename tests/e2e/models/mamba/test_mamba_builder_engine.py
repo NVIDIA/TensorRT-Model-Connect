@@ -60,7 +60,7 @@ class MambaPluginTester(FamilyPluginTester):
       - HF prefix: backbone.layers.{i}.mixer.* and backbone.layers.{i}.norm.*
     """
 
-    plugin_module = "tensorrt_model_connect.families.mamba.plugin"
+    plugin_module = "tensorrt_model_connect.families.mamba.model"
     model_type = "mamba"
     spec = TinyModelSpec(
         vocab_size=32,

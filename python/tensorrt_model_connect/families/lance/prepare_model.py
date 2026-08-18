@@ -8,7 +8,7 @@ The Lance HF repo is not a flat HF checkpoint: the LLM lives under
 ``Lance_3B/`` (or ``Lance_3B_Video/``) as ``llm_config.json`` +
 ``model.safetensors``, and the Qwen2.5-VL ViT is a separate ``Qwen2.5-VL-ViT/``
 dir. ``trtmc build`` expects a single directory with a ``config.json`` whose
-``model_type`` selects a family plugin.
+``model_type`` selects a family model.
 
 This script writes a staged directory (symlinks, no copies of large weights):
 
@@ -23,7 +23,7 @@ Then build it (understanding path):
     ./build/trtmc build <out> -o /tmp/lance.bundle --max-cache-length 384 --precision bf16
 
 Generation/editing tasks (t2i/t2v/edit) are not supported yet; this stages the
-understanding sub-model that the ``lance`` family plugin builds.
+understanding sub-model that the ``lance`` family model builds.
 """
 from __future__ import annotations
 

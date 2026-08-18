@@ -131,7 +131,7 @@ def test_matches() -> None:
     Preconditions: plugin instance is imported.
     Postconditions: roberta/xlm-roberta match, unrelated types do not.
     """
-    plugin = roberta_mod.plugin
+    plugin = roberta_mod
     assert plugin.matches("roberta")
     assert plugin.matches("xlm-roberta")
     assert plugin.matches("XLM-RoBERTa")
@@ -189,7 +189,7 @@ def test_load_weights_with_model_prefix_and_pooler(
     _install_tensor_stubs(monkeypatch, tensors)
 
     cfg = _cfg(type_vocab_size=2, pad_token_id=1)
-    weights = roberta_mod.plugin.load_weights("/unused", cfg)
+    weights = roberta_mod.load_weights("/unused", cfg)
 
     raw_pos = tensors["model.roberta.embeddings.position_embeddings.weight"]
     np.testing.assert_allclose(weights["position_embedding"], raw_pos[2:])
@@ -225,7 +225,7 @@ def test_load_weights_without_token_type_or_pooler(
     _install_tensor_stubs(monkeypatch, tensors)
 
     cfg = _cfg(type_vocab_size=5, pad_token_id=3)
-    weights = roberta_mod.plugin.load_weights("/unused", cfg)
+    weights = roberta_mod.load_weights("/unused", cfg)
 
     raw_pos = tensors["roberta.embeddings.position_embeddings.weight"]
     np.testing.assert_allclose(weights["position_embedding"], raw_pos[4:])
@@ -257,7 +257,7 @@ def test_build_engine_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
 
     cfg = _cfg()
     raw_weights = {"embedding": np.zeros((7, 4), dtype=np.float32)}
-    out = roberta_mod.plugin.build_engine(cfg, raw_weights, 33, verbose=False)
+    out = roberta_mod.build_engine(cfg, raw_weights, 33, verbose=False)
 
     assert out == b"roberta-plan"
     assert calls["config"] is cfg

@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "gpt_oss"
-plugin = "gpt_oss"
-module = "plugin"
 capabilities = ["debug_layer_outputs"]
 aliases = [
   "gpt_oss",

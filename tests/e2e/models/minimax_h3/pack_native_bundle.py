@@ -11,11 +11,13 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from tensorrt_model_connect import engine_builder
 from tensorrt_model_connect.bundle_writer import (
     BundleInfo,
     BundleSection,
     _bundle_section_from_file,
+    gpu_name,
+    tensorrt_abi,
+    tensorrt_version,
     write_bundle,
 )
 from tensorrt_model_connect.families.minimax_h3.config import SOL_ENGINE_1344X768_124F
@@ -46,14 +48,14 @@ LAZY_BUNDLE_SECTIONS = tuple(PLAN_SECTIONS)
 def _target_metadata() -> tuple[str, str, str]:
     """Bind a bundle to the TensorRT ABI and GPU that built its plans."""
 
-    trt_version = engine_builder._get_trt_version()
-    trt_abi = engine_builder._trt_abi_from_version(trt_version)
-    gpu_name = engine_builder._get_gpu_name()
-    if trt_version == "unknown" or not trt_abi or not gpu_name:
+    version = tensorrt_version()
+    abi = tensorrt_abi(version)
+    gpu = gpu_name()
+    if version == "unknown" or not abi or not gpu:
         raise RuntimeError(
             "MiniMax-H3 bundle packaging requires a detected TensorRT version and GPU"
         )
-    return trt_version, trt_abi, gpu_name
+    return version, abi, gpu
 
 
 def _bundle_loading_policy(plan_sections=PLAN_SECTIONS) -> dict[str, object]:

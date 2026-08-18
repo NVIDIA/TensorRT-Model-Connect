@@ -6,7 +6,7 @@
 Shared features own modules in this package. Model-family specific features
 own ``runtime_config_schema.py`` sidecars under
 ``tensorrt_model_connect/families/<family>/``. Loading sidecars by file path
-keeps schema discovery generic without importing family plugins.
+keeps schema discovery generic without importing family model modules.
 """
 
 from __future__ import annotations

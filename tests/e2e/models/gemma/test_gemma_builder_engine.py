@@ -26,7 +26,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class GemmaPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.gemma"
+    plugin_module = "tensorrt_model_connect.families.gemma.model"
     model_type = "gemma"
 
     def get_config_dict(self) -> dict:

@@ -45,7 +45,7 @@ class TestLlamaPlugin:
     VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 2, 32
 
     def test_selected_fp32_layers_use_single_engine_layout(self):
-        from tensorrt_model_connect.families.llama import plugin
+        from tensorrt_model_connect.families.llama import model as plugin
 
         config = ModelConfig(
             hidden_size=self.HIDDEN,
@@ -61,7 +61,7 @@ class TestLlamaPlugin:
 
     def test_load_weights(self, tmp_path):
         """LLaMA uses load_standard_weights — verify compact GQA K/V."""
-        from tensorrt_model_connect.families.llama import plugin
+        from tensorrt_model_connect.families.llama import model as plugin
 
         head_dim = self.HIDDEN // self.HEADS  # 4
         kv_hidden = self.KV_HEADS * head_dim  # 8
@@ -98,7 +98,7 @@ class TestLlamaPlugin:
 
     def test_tied_embeddings(self, tmp_path):
         """When lm_head.weight is missing, w_out = transposed embedding."""
-        from tensorrt_model_connect.families.llama import plugin
+        from tensorrt_model_connect.families.llama import model as plugin
 
         config = {
             "model_type": "llama",
