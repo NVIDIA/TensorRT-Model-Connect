@@ -10674,7 +10674,9 @@ def compare_prompted_segmentation_prediction_sets(
             }
         )
     valid = [case for case in cases if "error" not in case]
-    mean_backend_iou = _mean([float(case["backend_mask_iou"]) for case in valid])
+    backend_ious = [float(case["backend_mask_iou"]) for case in valid]
+    mean_backend_iou = _mean(backend_ious)
+    worst_backend_iou = min(backend_ious, default=0.0)
     hf_gt_iou = _mean([float(case["hf_ground_truth_iou"]) for case in valid])
     bundle_gt_iou = _mean([float(case["bundle_ground_truth_iou"]) for case in valid])
     min_backend_iou = float(gates.get("min_backend_mask_iou", 0.90))
@@ -10694,6 +10696,7 @@ def compare_prompted_segmentation_prediction_sets(
         "valid_count": len(valid),
         "prompt_mode": prompt_mode,
         "mean_backend_mask_iou": mean_backend_iou,
+        "worst_backend_mask_iou": worst_backend_iou,
         "hf_mean_ground_truth_iou": hf_gt_iou,
         "bundle_mean_ground_truth_iou": bundle_gt_iou,
         "ground_truth_iou_drop_from_hf": gt_drop,
@@ -11156,6 +11159,24 @@ def run_full_duplex_bench_comparison(
     return summary
 
 
+def _full_duplex_gate_actuals(summary: Mapping[str, Any]) -> dict[str, float]:
+    metrics = summary.get("metrics", {})
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    fields = {
+        "tor_abs_delta": ".tor",
+        "backchannel_frequency_abs_delta": ".frequency",
+        "backchannel_jsd_abs_delta": ".jsd",
+    }
+    return {
+        result_name: max(
+            float(metric["abs_delta"])
+            for name, metric in metrics.items()
+            if str(name).endswith(suffix) and isinstance(metric, Mapping)
+        )
+        for result_name, suffix in fields.items()
+    }
+
+
 def validate_full_duplex_bench_answers(answers: Path) -> None:
     """Reject non-formal slices before starting either inference backend."""
     from tools.full_duplex_bench_score import validate_requests_manifest
@@ -11421,6 +11442,7 @@ def eval_one_model(
             "passed_count": summary["passed_count"],
             "metric_gate_count": summary["metric_gate_count"],
             "metric_gate_pass_rate": summary["metric_gate_pass_rate"],
+            **_full_duplex_gate_actuals(summary),
             "metrics": report_metrics,
             "gates": summary["gates"],
             "gate_failures": summary["gate_failures"],
@@ -11597,6 +11619,7 @@ def eval_one_model(
             "valid_count": summary["valid_count"],
             "prompt_mode": summary["prompt_mode"],
             "mean_backend_mask_iou": summary["mean_backend_mask_iou"],
+            "worst_backend_mask_iou": summary["worst_backend_mask_iou"],
             "hf_mean_ground_truth_iou": summary["hf_mean_ground_truth_iou"],
             "bundle_mean_ground_truth_iou": summary["bundle_mean_ground_truth_iou"],
             "ground_truth_iou_drop_from_hf": summary[
@@ -11632,6 +11655,7 @@ def eval_one_model(
             "sample_pass_rate": summary["sample_pass_rate"],
             "hf_top1_accuracy": summary["hf_top1_accuracy"],
             "bundle_top1_accuracy": summary["bundle_top1_accuracy"],
+            "metrics": summary["metrics"],
             "mean_pairwise_ordering_agreement": summary["metrics"][
                 "pairwise_ordering_agreement"
             ]["mean"],
@@ -11867,6 +11891,10 @@ def eval_one_model(
                 else "failed"
             ),
         }
+        if "require_matching_initial_latents" in suite.get("gates", {}):
+            # The comparator raises before producing a result when any pair is
+            # missing or has different initial-latent evidence.
+            result["matching_initial_latents"] = 1.0
     else:
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         bundle_data = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
@@ -11926,6 +11954,13 @@ def eval_one_model(
                     suite.get("gates", {}),
                 )
             )
+    configured_gates = dict(suite.get("gates", {}))
+    result["configured_gates"] = configured_gates
+    result["gate_metric_kinds"] = dict(suite.get("gate_metric_kinds", {}))
+    result["gate_policy"] = str(
+        suite.get("gate_policy")
+        or ("blocking" if configured_gates else "")
+    )
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
         encoding="utf-8",

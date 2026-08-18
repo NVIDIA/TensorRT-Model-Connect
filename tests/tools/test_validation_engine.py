@@ -138,6 +138,25 @@ def test_full_duplex_bench_scorer_rejects_stale_summary_after_crash(
         )
 
 
+def test_full_duplex_gate_actuals_use_worst_aggregate_delta() -> None:
+    actuals = validation_engine._full_duplex_gate_actuals(
+        {
+            "metrics": {
+                "synthetic_pause_handling.tor": {"abs_delta": 0.02},
+                "candor_pause_handling.tor": {"abs_delta": 0.08},
+                "icc_backchannel.frequency": {"abs_delta": 0.004},
+                "icc_backchannel.jsd": {"abs_delta": 0.01},
+            }
+        }
+    )
+
+    assert actuals == {
+        "tor_abs_delta": 0.08,
+        "backchannel_frequency_abs_delta": 0.004,
+        "backchannel_jsd_abs_delta": 0.01,
+    }
+
+
 def test_full_duplex_bench_rejects_short_slice_before_inference(tmp_path: Path) -> None:
     answers = {
         "schema_version": "trtmc.full-duplex-bench-validation/v1",
@@ -666,6 +685,7 @@ def test_default_suites_include_text_generation_gap_models() -> None:
         humaneval, codegen
     )
     assert resolved_codegen["gates"] == {"min_exact_match_rate": 1.0}
+    assert resolved_codegen["gate_policy"] == "blocking"
 
     for suite_id in (
         "newstest2019_en_ru_marian_translation_parity",
@@ -675,6 +695,29 @@ def test_default_suites_include_text_generation_gap_models() -> None:
         assert validation_engine.suite_by_id(suites, suite_id)["scoring"]["task_metric"] == (
             "sacrebleu"
         )
+
+
+def test_default_suites_classify_every_empty_gate_policy() -> None:
+    suites = validation_engine.load_suites()
+
+    unclassified = [
+        suite["id"]
+        for suite in suites
+        if not suite.get("gates")
+        and suite.get("gate_policy") != "observation_only"
+    ]
+
+    assert unclassified == []
+
+
+def test_asr_similarity_gate_is_not_classified_as_a_sample_pass_rate() -> None:
+    suites = validation_engine.load_suites()
+
+    for suite_id in ("librispeech_clean_asr", "librispeech_clean_asr_streaming"):
+        suite = validation_engine.suite_by_id(suites, suite_id)
+        assert suite["gate_metric_kinds"] == {
+            "min_prediction_agreement": "continuous"
+        }
 
 
 def test_phi_moe_mmlu_uses_model_specific_agreement_gate() -> None:
@@ -1163,6 +1206,7 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
     assert point["status"] == "passed"
     assert text["status"] == "passed"
     assert point["mean_backend_mask_iou"] == 1.0
+    assert point["worst_backend_mask_iou"] == 1.0
     assert text["mean_backend_mask_iou"] == 1.0
 
 
@@ -7612,6 +7656,12 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
     assert result["prediction_agreement_rate"] == 0.5
     assert result["status"] == "failed"
     assert result["error_type"] == "BenchmarkGateError"
+    assert result["configured_gates"] == {
+        "max_accuracy_drop_from_hf": 0.01,
+        "min_prediction_agreement": 0.98,
+    }
+    assert result["gate_metric_kinds"] == {}
+    assert result["gate_policy"] == "blocking"
     assert result["gate_failures"] == [
         {
             "gate": "max_accuracy_drop_from_hf",

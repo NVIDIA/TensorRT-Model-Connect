@@ -63,6 +63,7 @@ from tools import trtmc_disagreements  # noqa: E402
 from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools import model_selection  # noqa: E402
 from tools import qualification_report  # noqa: E402
+from tools.validation.gate_policy import evaluate_shadow_gates  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
@@ -1219,7 +1220,11 @@ _COMPARISON_METRICS = (
     "hf_mean_iou",
     "bundle_mean_iou",
     "backend_mean_iou",
+    "worst_backend_mask_iou",
     "mean_iou_drop_from_hf",
+    "tor_abs_delta",
+    "backchannel_frequency_abs_delta",
+    "backchannel_jsd_abs_delta",
     "mean_vector_cosine",
     "min_vector_cosine",
     "mean_pair_cosine_abs_delta",
@@ -3115,6 +3120,14 @@ def _report_command_artifacts(
     return artifacts
 
 
+def _nonnegative_sample_count(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _accuracy_samples(result: Mapping[str, Any]) -> dict[str, int | None]:
     reproduce = result.get("reproduce", {})
     reproduce = reproduce if isinstance(reproduce, Mapping) else {}
@@ -3125,22 +3138,51 @@ def _accuracy_samples(result: Mapping[str, Any]) -> dict[str, int | None]:
     metrics = comparison.get("metrics", {})
     metrics = metrics if isinstance(metrics, Mapping) else {}
 
-    def nonnegative(value: Any) -> int | None:
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return None
-        return parsed if parsed >= 0 else None
-
-    planned = nonnegative(dataset.get("sample_limit"))
+    planned = _nonnegative_sample_count(dataset.get("sample_limit"))
     if planned == 0:
         planned = None
-    evaluated = nonnegative(dataset.get("prepared_input_count"))
+    evaluated = _nonnegative_sample_count(dataset.get("prepared_input_count"))
     if evaluated is None:
-        evaluated = nonnegative(metrics.get("valid_count"))
+        evaluated = _nonnegative_sample_count(metrics.get("valid_count"))
     if evaluated is None:
-        evaluated = nonnegative(metrics.get("sample_count"))
+        evaluated = _nonnegative_sample_count(metrics.get("sample_count"))
     return {"planned": planned, "evaluated": evaluated}
+
+
+def _accuracy_gate_sample_count(
+    comparison: Mapping[str, Any],
+    samples: Mapping[str, int | None],
+) -> int | None:
+    metrics = comparison.get("metrics", {})
+    metrics = metrics if isinstance(metrics, Mapping) else {}
+    valid_count = _nonnegative_sample_count(metrics.get("valid_count"))
+    return valid_count if valid_count is not None else samples.get("evaluated")
+
+
+def _shadow_gate_metrics(
+    comparison: Mapping[str, Any],
+    raw_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    value = comparison.get("metrics", {})
+    metrics = dict(value) if isinstance(value, Mapping) else {}
+    metrics.update(
+        {
+            str(name): metric
+            for name, metric in raw_result.items()
+            if isinstance(metric, (int, float)) and not isinstance(metric, bool)
+        }
+    )
+    nested = raw_result.get("metrics", {})
+    if isinstance(nested, Mapping):
+        for name, summary in nested.items():
+            if not isinstance(summary, Mapping):
+                continue
+            for statistic in ("mean", "min", "max"):
+                metric = summary.get(statistic)
+                if isinstance(metric, (int, float)) and not isinstance(metric, bool):
+                    key = str(name) if statistic == "mean" else f"{statistic}_{name}"
+                    metrics[key] = metric
+    return metrics
 
 
 _SAMPLE_DIFFERENCE_RAW_KEYS = {
@@ -3225,13 +3267,35 @@ def _public_accuracy_result(
     result: Mapping[str, Any],
 ) -> dict[str, Any]:
     public = dict(result)
+    samples = _accuracy_samples(result)
+    comparison = result.get("comparison", {})
+    comparison = dict(comparison) if isinstance(comparison, Mapping) else {}
+    raw_result = result.get("raw_result", {})
+    raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+    configured_gates = raw_result.get("configured_gates")
+    policy_mode = str(raw_result.get("gate_policy", "") or "")
+    if isinstance(configured_gates, Mapping) or policy_mode:
+        comparison["gate_evaluation"] = evaluate_shadow_gates(
+            metrics=_shadow_gate_metrics(comparison, raw_result),
+            configured_gates=(
+                configured_gates if isinstance(configured_gates, Mapping) else {}
+            ),
+            sample_count=_accuracy_gate_sample_count(comparison, samples),
+            policy_mode=policy_mode or "blocking",
+            metric_kinds=(
+                raw_result.get("gate_metric_kinds")
+                if isinstance(raw_result.get("gate_metric_kinds"), Mapping)
+                else {}
+            ),
+        )
     public.update(
         {
             "id": f"{result.get('model', '')}::{result.get('workload') or 'not-compared'}",
             "state": "terminal",
             "result": _traffic_light_status(result),
             "precision": _accuracy_precision(result),
-            "samples": _accuracy_samples(result),
+            "samples": samples,
+            "comparison": comparison,
             "sample_differences": _public_sample_differences(
                 output,
                 path.parent,

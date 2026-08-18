@@ -55,6 +55,14 @@ tr[data-result="white"] { background: #f0f2ef; } tr[data-result="red"] { backgro
 .precision-side { display: flex; justify-content: space-between; gap: 10px; white-space: nowrap; }
 .precision-side span { color: var(--muted); font-size: 11px; }.precision-side strong { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
 .metric { display: flex; justify-content: space-between; gap: 14px; font-size: 12px; font-variant-numeric: tabular-nums; }.metric span { color: var(--muted); }
+.metric-evidence { display: grid; gap: 6px; min-width: 130px; }
+.gate-check { position: relative; margin: 8px 0; padding: 9px 74px 9px 10px; border: 1px solid var(--line); border-left-width: 4px; border-radius: 8px; background: var(--raised); }
+.gate-check h4 { margin: 0 0 4px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
+.gate-pass { border-left-color: var(--green); }.gate-fail { border-left-color: var(--red); }
+.gate-fact { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.gate-verdict { position: absolute; top: 9px; right: 10px; font-size: 11px; }
+.gate-pass .gate-verdict { color: var(--green-dark); }.gate-fail .gate-verdict { color: var(--red); }
+.gate-issue { margin: 8px 0; padding: 9px 10px; border-left: 4px solid var(--amber); border-radius: 8px; background: #fff9e8; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
 .timing { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .log-links { display: grid; gap: 4px; min-width: 110px; }.log-links a { width: fit-content; font-size: 12px; font-weight: 650; white-space: nowrap; }
 .command-artifact { display: block; width: fit-content; margin-top: 5px; font-size: 12px; font-weight: 650; }

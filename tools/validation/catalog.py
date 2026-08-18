@@ -280,4 +280,6 @@ def resolve_suite_for_model(suite: dict[str, Any], model: dict[str, Any]) -> dic
             raise ValueError(f"Suite {suite['id']} gate profile for {owner} must be a mapping")
         gates.update(profile_gates)
     resolved["gates"] = gates
+    if gates:
+        resolved["gate_policy"] = "blocking"
     return resolved

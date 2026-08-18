@@ -1000,6 +1000,158 @@ def test_accuracy_report_is_rebuilt_from_ordered_live_receipts(tmp_path):
     }
 
 
+def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_path):
+    cases = [
+        {
+            "id": "model-a::suite-a",
+            "result_path": "model-a/suite-a/comparison.json",
+            "report": {"model": "model-a", "workload": "suite-a", "sample_limit": 20},
+        }
+    ]
+    ledger = trtmc_validate.ExecutionLedger.open(
+        tmp_path,
+        campaign_id="run-1",
+        task_kind="accuracy",
+        fingerprint="revision-1",
+        cases=cases,
+    )
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "suite-a",
+            "execution": {"status": "completed", "exit_code": 0},
+            "comparison": {
+                "status": "agreement",
+                "mode": "mcq",
+                "primary_metric": None,
+                "metrics": {"prediction_agreement_rate": 0.95},
+                "failures": [],
+            },
+            "validation": {"status": "passed"},
+            "precision_contract": {
+                "reference_precision": "fp16",
+                "trtmc_base_precision": "fp16",
+            },
+            "raw_result": {
+                "configured_gates": {"min_prediction_agreement": 0.98},
+                "gate_policy": "blocking",
+            },
+            "reproduce": {
+                "dataset": {
+                    "sample_limit": 20,
+                    "prepared_input_count": 20,
+                }
+            },
+        }
+    )
+    ledger.begin("model-a::suite-a", stage="compare")
+    ledger.finish("model-a::suite-a", result="green", payload=result)
+
+    _, _, report = trtmc_validate.write_report(tmp_path)
+
+    row = report["results"][0]
+    assert row["result"] == "green"
+    assert row["comparison"]["gate_evaluation"] == {
+        "schema_version": "trtmc.validation-gate-evaluation/v1",
+        "status": "fail",
+        "sample_count": 20,
+        "checks": [
+            {
+                "gate": "min_prediction_agreement",
+                "metric": "prediction_agreement_rate",
+                "operator": ">=",
+                "actual": 0.95,
+                "required": 0.98,
+                "verdict": "fail",
+                "effective": {
+                    "kind": "proportion",
+                    "required_passes": 20,
+                    "allowed_failures": 0,
+                    "observed_passes": 19,
+                    "observed_failures": 1,
+                    "resolution": 0.05,
+                },
+            }
+        ],
+        "issues": [],
+    }
+
+
+def test_accuracy_shadow_gate_uses_valid_pairs_not_prepared_inputs(tmp_path):
+    case_dir = tmp_path / "model-a" / "suite-a"
+    case_dir.mkdir(parents=True)
+    result_path = case_dir / "comparison.json"
+    result_path.write_text("{}", encoding="utf-8")
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "suite-a",
+            "execution": {"status": "completed", "exit_code": 0},
+            "comparison": {
+                "status": "disagreement",
+                "mode": "mcq",
+                "primary_metric": None,
+                "metrics": {
+                    "prediction_agreement_rate": 18 / 19,
+                    "valid_count": 19,
+                },
+                "failures": [],
+            },
+            "validation": {"status": "failed"},
+            "raw_result": {
+                "configured_gates": {"min_prediction_agreement": 0.95},
+                "gate_policy": "blocking",
+            },
+            "reproduce": {
+                "dataset": {
+                    "sample_limit": 20,
+                    "prepared_input_count": 20,
+                }
+            },
+        }
+    )
+
+    public = trtmc_validate._public_accuracy_result(tmp_path, result_path, result)
+
+    assert public["samples"] == {"planned": 20, "evaluated": 20}
+    evaluation = public["comparison"]["gate_evaluation"]
+    assert evaluation["sample_count"] == 19
+    assert evaluation["checks"][0]["effective"]["observed_failures"] == 1
+
+
+def test_accuracy_shadow_gate_preserves_worst_nested_metric(tmp_path):
+    case_dir = tmp_path / "model-a" / "suite-a"
+    case_dir.mkdir(parents=True)
+    result_path = case_dir / "comparison.json"
+    result_path.write_text("{}", encoding="utf-8")
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "suite-a",
+            "execution": {"status": "completed", "exit_code": 0},
+            "raw_result": {
+                "status": "failed",
+                "valid_count": 5,
+                "metrics": {
+                    "pixel_mean": {"mean": 0.5, "min": 0.1, "max": 0.9}
+                },
+                "configured_gates": {"max_pixel_mean": 0.85},
+                "gate_policy": "blocking",
+            },
+            "reproduce": {
+                "dataset": {"sample_limit": 5, "prepared_input_count": 5}
+            },
+        }
+    )
+
+    public = trtmc_validate._public_accuracy_result(tmp_path, result_path, result)
+
+    evaluation = public["comparison"]["gate_evaluation"]
+    assert evaluation["status"] == "fail"
+    assert evaluation["checks"][0]["metric"] == "max_pixel_mean"
+    assert evaluation["checks"][0]["actual"] == 0.9
+
+
 def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(
     tmp_path, monkeypatch
 ):

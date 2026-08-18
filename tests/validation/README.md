@@ -164,6 +164,24 @@ or repeats samples: when the configured limit exceeds the available count, it
 runs the available samples. `report.json` and the `Samples` column of
 `report.html` record the actual prepared sample count.
 
+Suites with configured gates resolve to `gate_policy: blocking`. A suite with
+no gates must declare `gate_policy: observation_only`; shadow analysis marks an
+empty blocking policy invalid instead of silently describing it as valid.
+Completed Accuracy results preserve the
+resolved gate configuration and publish a non-blocking analysis under
+`comparison.gate_evaluation` in `report.json`. The analysis uses the valid
+paired-sample count when available and expands rate gates into required passes,
+allowed failures, observed passes, and observed failures. For example,
+`min_prediction_agreement: 0.98` requires 20/20 at 20 valid samples and 49/50 at
+50 valid samples. Continuous metrics retain their numeric threshold and do not
+claim an integer failure budget.
+
+This analysis is shadow evidence: it is shown separately in the HTML Metrics
+details and does not change the existing comparison status, traffic light,
+qualification snapshot, or CI disposition. Unsupported gate names, unavailable
+metrics, non-numeric values, and missing sample counts are explicit `issues` in
+the analysis rather than implicit passes.
+
 Override the configured limit for one run, or request the complete dataset
 explicitly:
 

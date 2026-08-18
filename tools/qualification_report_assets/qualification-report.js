@@ -178,13 +178,42 @@
     return control;
   }
 
+  function gateEvaluation(value) {
+    if (!value || !value.schema_version) return null;
+    const control = el("details", "evidence gate-evaluation");
+    const sampleText = value.sample_count === null || value.sample_count === undefined ? "sample count unavailable" : `${value.sample_count} valid samples`;
+    control.append(el("summary", "", `Gate analysis (shadow) · ${String(value.status || "unknown").toUpperCase()} · ${sampleText}`));
+    const body = el("div", "evidence-body");
+    (value.checks || []).forEach((check) => {
+      const effective = check.effective || {};
+      const card = el("section", `gate-check gate-${check.verdict || "unknown"}`);
+      const actual = check.actual && typeof check.actual === "object" ? `${number(check.actual.min, 6)}..${number(check.actual.max, 6)}` : number(check.actual, 6);
+      add(card, el("h4", "", check.gate || "Unnamed gate"), el("div", "gate-fact", `${check.metric || "—"} · actual ${actual} ${check.operator || ""} required ${number(check.required, 6)}`));
+      if (effective.kind === "proportion") add(card, el("div", "gate-fact", `${effective.observed_passes}/${value.sample_count} passed · ${effective.observed_failures} failed · requires ${effective.required_passes}/${value.sample_count} · allows ${effective.allowed_failures} failed`));
+      else if (effective.kind === "proportion_drop") add(card, el("div", "gate-fact", `${effective.observed_drop_count} net samples lost · allows ${effective.allowed_drop_count}`));
+      else if (effective.kind === "exact") add(card, el("div", "gate-fact", `Observed range ${actual} · ${effective.sample_count ?? value.sample_count ?? "—"} valid samples`));
+      else add(card, el("div", "gate-fact", `Continuous metric · ${effective.sample_count ?? value.sample_count ?? "—"} valid samples`));
+      card.append(el("strong", "gate-verdict", String(check.verdict || "unknown").toUpperCase()));
+      body.append(card);
+    });
+    (value.issues || []).forEach((issue) => body.append(el("div", "gate-issue", [issue.code, issue.gate, issue.metric].filter(Boolean).join(" · "))));
+    control.append(body);
+    return control;
+  }
+
   function metrics(row, kind) {
     const records = [];
     if (row.issue) records.push(["Failure", row.issue]);
     if ((row.warnings || []).length) records.push(["Warnings", row.warnings]);
-    if (kind === "accuracy") records.push(["Comparison", row.comparison || {}], ["Validation", row.validation || {}]);
+    let gate = null;
+    if (kind === "accuracy") {
+      const comparison = { ...(row.comparison || {}) };
+      gate = gateEvaluation(comparison.gate_evaluation);
+      delete comparison.gate_evaluation;
+      records.push(["Comparison", comparison], ["Validation", row.validation || {}]);
+    }
     else records.push(["Output validation", row.output_validation || {}], ["Reference samples", row.baseline?.samples_ms || []], ["TRTMC samples", row.candidate?.samples_ms || []], ["Comparison", row.comparison || {}]);
-    return details("Metrics", records);
+    return add(el("div", "metric-evidence"), gate, details("Metrics", records));
   }
 
   function logs(row) {
