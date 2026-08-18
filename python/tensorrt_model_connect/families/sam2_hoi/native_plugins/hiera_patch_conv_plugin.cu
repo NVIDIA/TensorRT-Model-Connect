@@ -32,48 +32,122 @@ constexpr int32_t kKERNEL_SIZE = 7;
 constexpr int32_t kSTRIDE = 4;
 constexpr int32_t kPADDING = 3;
 constexpr int32_t kREDUCTION = kINPUT_CHANNELS * kKERNEL_SIZE * kKERNEL_SIZE;
-constexpr int64_t kOUTPUT_ELEMENTS =
-    static_cast<int64_t>(kOUTPUT_CHANNELS) * kOUTPUT_HEIGHT * kOUTPUT_WIDTH;
+constexpr int32_t kINTERIOR_OUTPUTS_PER_THREAD = 24;
+constexpr int32_t kINTERIOR_CHANNEL_GROUPS = kOUTPUT_CHANNELS / kINTERIOR_OUTPUTS_PER_THREAD;
+static_assert(kOUTPUT_CHANNELS % kINTERIOR_OUTPUTS_PER_THREAD == 0);
 
-__global__ void hiera_patch_conv_kernel(const __nv_bfloat16* input,
-                                        const __nv_bfloat16* weight,
-                                        const __nv_bfloat16* bias,
-                                        __nv_bfloat16* output) {
-    const int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (index >= kOUTPUT_ELEMENTS)
+__device__ __forceinline__ void accumulate_interior_patch(const __nv_bfloat16* input,
+                                                          const __nv_bfloat16* weight,
+                                                          int32_t output_channel_base,
+                                                          int32_t output_y, int32_t output_x,
+                                                          float* accumulators) {
+    const __nv_bfloat16* group_weight = weight + output_channel_base * kREDUCTION;
+    const int32_t input_y_base = output_y * kSTRIDE - kPADDING;
+    const int32_t input_x_base = output_x * kSTRIDE - kPADDING;
+
+#pragma unroll 1
+    for (int32_t input_channel = 0; input_channel < kINPUT_CHANNELS; ++input_channel) {
+#pragma unroll 1
+        for (int32_t kernel_y = 0; kernel_y < kKERNEL_SIZE; ++kernel_y) {
+            const int32_t input_index =
+                (input_channel * kINPUT_HEIGHT + input_y_base + kernel_y) * kINPUT_WIDTH +
+                input_x_base;
+            const __nv_bfloat16* input_row = input + input_index;
+            const int32_t reduction_base = (input_channel * kKERNEL_SIZE + kernel_y) * kKERNEL_SIZE;
+#pragma unroll
+            for (int32_t kernel_x = 0; kernel_x < kKERNEL_SIZE; ++kernel_x) {
+                const float input_value = __bfloat162float(input_row[kernel_x]);
+#pragma unroll
+                for (int32_t output_slot = 0; output_slot < kINTERIOR_OUTPUTS_PER_THREAD;
+                     ++output_slot) {
+                    const int32_t weight_index =
+                        output_slot * kREDUCTION + reduction_base + kernel_x;
+                    accumulators[output_slot] =
+                        fmaf(input_value, __bfloat162float(group_weight[weight_index]),
+                             accumulators[output_slot]);
+                }
+            }
+        }
+    }
+}
+
+__device__ __forceinline__ void accumulate_boundary_patch(const __nv_bfloat16* input,
+                                                          const __nv_bfloat16* weight,
+                                                          int32_t output_channel, int32_t output_y,
+                                                          int32_t output_x, float* accumulator) {
+    const __nv_bfloat16* channel_weight = weight + output_channel * kREDUCTION;
+
+#pragma unroll 1
+    for (int32_t input_channel = 0; input_channel < kINPUT_CHANNELS; ++input_channel) {
+#pragma unroll 1
+        for (int32_t kernel_y = 0; kernel_y < kKERNEL_SIZE; ++kernel_y) {
+            const int32_t input_y = output_y * kSTRIDE + kernel_y - kPADDING;
+            const int32_t reduction_base = (input_channel * kKERNEL_SIZE + kernel_y) * kKERNEL_SIZE;
+#pragma unroll
+            for (int32_t kernel_x = 0; kernel_x < kKERNEL_SIZE; ++kernel_x) {
+                const int32_t input_x = output_x * kSTRIDE + kernel_x - kPADDING;
+                float input_value = 0.0F;
+                if (input_y >= 0 && input_y < kINPUT_HEIGHT && input_x >= 0 &&
+                    input_x < kINPUT_WIDTH) {
+                    const int32_t input_index =
+                        (input_channel * kINPUT_HEIGHT + input_y) * kINPUT_WIDTH + input_x;
+                    input_value = __bfloat162float(input[input_index]);
+                }
+                const int32_t weight_index = reduction_base + kernel_x;
+                // Invalid padding still contributes fmaf(+0.0F, weight, accumulator).
+                // Skipping it would change NaN, infinity, and signed-zero behavior.
+                *accumulator =
+                    fmaf(input_value, __bfloat162float(channel_weight[weight_index]), *accumulator);
+            }
+        }
+    }
+}
+
+__device__ __forceinline__ void store_patch_output(const __nv_bfloat16* bias, __nv_bfloat16* output,
+                                                   int32_t output_channel, int32_t output_y,
+                                                   int32_t output_x, float accumulator) {
+    const int32_t output_index =
+        (output_channel * kOUTPUT_HEIGHT + output_y) * kOUTPUT_WIDTH + output_x;
+    const __nv_bfloat16 unbiased = __float2bfloat16_rn(accumulator);
+    output[output_index] =
+        __float2bfloat16_rn(__bfloat162float(unbiased) + __bfloat162float(bias[output_channel]));
+}
+
+__global__ void hiera_patch_conv_interior_kernel(const __nv_bfloat16* input,
+                                                 const __nv_bfloat16* weight,
+                                                 const __nv_bfloat16* bias, __nv_bfloat16* output) {
+    const int32_t output_x = static_cast<int32_t>(threadIdx.x) + 1;
+    if (output_x >= kOUTPUT_WIDTH)
         return;
 
-    const int32_t output_channel =
-        static_cast<int32_t>(index / (kOUTPUT_HEIGHT * kOUTPUT_WIDTH));
-    const int32_t spatial = static_cast<int32_t>(index % (kOUTPUT_HEIGHT * kOUTPUT_WIDTH));
-    const int32_t output_y = spatial / kOUTPUT_WIDTH;
-    const int32_t output_x = spatial - output_y * kOUTPUT_WIDTH;
-    float accumulator = 0.0F;
-#pragma unroll 1
-    for (int32_t reduction = 0; reduction < kREDUCTION; ++reduction) {
-        const int32_t input_channel = reduction / (kKERNEL_SIZE * kKERNEL_SIZE);
-        const int32_t kernel_offset =
-            reduction - input_channel * kKERNEL_SIZE * kKERNEL_SIZE;
-        const int32_t kernel_y = kernel_offset / kKERNEL_SIZE;
-        const int32_t kernel_x = kernel_offset - kernel_y * kKERNEL_SIZE;
-        const int32_t input_y = output_y * kSTRIDE + kernel_y - kPADDING;
-        const int32_t input_x = output_x * kSTRIDE + kernel_x - kPADDING;
-        float input_value = 0.0F;
-        if (input_y >= 0 && input_y < kINPUT_HEIGHT && input_x >= 0 &&
-            input_x < kINPUT_WIDTH) {
-            const int64_t input_index =
-                (static_cast<int64_t>(input_channel) * kINPUT_HEIGHT + input_y) * kINPUT_WIDTH +
-                input_x;
-            input_value = __bfloat162float(input[input_index]);
-        }
-        const int64_t weight_index =
-            static_cast<int64_t>(output_channel) * kREDUCTION + reduction;
-        accumulator = fmaf(input_value, __bfloat162float(weight[weight_index]), accumulator);
+    const int32_t output_y = static_cast<int32_t>(blockIdx.y) + 1;
+    const int32_t output_channel_base =
+        static_cast<int32_t>(blockIdx.x) * kINTERIOR_OUTPUTS_PER_THREAD;
+    float accumulators[kINTERIOR_OUTPUTS_PER_THREAD]{};
+    accumulate_interior_patch(input, weight, output_channel_base, output_y, output_x, accumulators);
+#pragma unroll
+    for (int32_t output_slot = 0; output_slot < kINTERIOR_OUTPUTS_PER_THREAD; ++output_slot) {
+        store_patch_output(bias, output, output_channel_base + output_slot, output_y, output_x,
+                           accumulators[output_slot]);
+    }
+}
+
+__global__ void hiera_patch_conv_boundary_kernel(const __nv_bfloat16* input,
+                                                 const __nv_bfloat16* weight,
+                                                 const __nv_bfloat16* bias, __nv_bfloat16* output) {
+    int32_t output_y = 0;
+    int32_t output_x = static_cast<int32_t>(threadIdx.x);
+    if (blockIdx.y != 0) {
+        output_y = static_cast<int32_t>(threadIdx.x) + 1;
+        output_x = 0;
+        if (output_y >= kOUTPUT_HEIGHT)
+            return;
     }
 
-    const __nv_bfloat16 unbiased = __float2bfloat16_rn(accumulator);
-    output[index] = __float2bfloat16_rn(__bfloat162float(unbiased) +
-                                        __bfloat162float(bias[output_channel]));
+    const int32_t output_channel = static_cast<int32_t>(blockIdx.x);
+    float accumulator = 0.0F;
+    accumulate_boundary_patch(input, weight, output_channel, output_y, output_x, &accumulator);
+    store_patch_output(bias, output, output_channel, output_y, output_x, accumulator);
 }
 
 bool dimensions_equal(const nvinfer1::Dims& dimensions,
@@ -122,12 +196,11 @@ void HieraPatchConvPlugin::setPluginNamespace(char const* plugin_namespace) noex
 char const* HieraPatchConvPlugin::getPluginNamespace() const noexcept {
     return namespace_.c_str();
 }
-nvinfer1::DataType
-HieraPatchConvPlugin::getOutputDataType(int32_t index, nvinfer1::DataType const* input_types,
-                                       int32_t num_inputs) const noexcept {
+nvinfer1::DataType HieraPatchConvPlugin::getOutputDataType(int32_t index,
+                                                           nvinfer1::DataType const* input_types,
+                                                           int32_t num_inputs) const noexcept {
     if (index == 0 && num_inputs == 3 && input_types[0] == nvinfer1::DataType::kBF16 &&
-        input_types[1] == nvinfer1::DataType::kBF16 &&
-        input_types[2] == nvinfer1::DataType::kBF16)
+        input_types[1] == nvinfer1::DataType::kBF16 && input_types[2] == nvinfer1::DataType::kBF16)
         return nvinfer1::DataType::kBF16;
     return nvinfer1::DataType::kFLOAT;
 }
@@ -136,9 +209,10 @@ HieraPatchConvPlugin* HieraPatchConvPlugin::clone() const noexcept {
     cloned->setPluginNamespace(namespace_.c_str());
     return cloned;
 }
-nvinfer1::DimsExprs HieraPatchConvPlugin::getOutputDimensions(
-    int32_t output_index, nvinfer1::DimsExprs const* inputs, int32_t num_inputs,
-    nvinfer1::IExprBuilder& expression_builder) noexcept {
+nvinfer1::DimsExprs
+HieraPatchConvPlugin::getOutputDimensions(int32_t output_index, nvinfer1::DimsExprs const* inputs,
+                                          int32_t num_inputs,
+                                          nvinfer1::IExprBuilder& expression_builder) noexcept {
     nvinfer1::DimsExprs output{};
     if (output_index != 0 || num_inputs != 3 || inputs[0].nbDims != 4)
         return output;
@@ -166,19 +240,20 @@ void HieraPatchConvPlugin::configurePlugin(nvinfer1::DynamicPluginTensorDesc con
     (void)outputs;
     (void)num_outputs;
 }
-std::size_t HieraPatchConvPlugin::getWorkspaceSize(
-    nvinfer1::PluginTensorDesc const* inputs, int32_t num_inputs,
-    nvinfer1::PluginTensorDesc const* outputs, int32_t num_outputs) const noexcept {
+std::size_t HieraPatchConvPlugin::getWorkspaceSize(nvinfer1::PluginTensorDesc const* inputs,
+                                                   int32_t num_inputs,
+                                                   nvinfer1::PluginTensorDesc const* outputs,
+                                                   int32_t num_outputs) const noexcept {
     (void)inputs;
     (void)num_inputs;
     (void)outputs;
     (void)num_outputs;
     return 0;
 }
-int32_t HieraPatchConvPlugin::enqueue(
-    nvinfer1::PluginTensorDesc const* input_descriptors,
-    nvinfer1::PluginTensorDesc const* output_descriptors, void const* const* inputs,
-    void* const* outputs, void* workspace, cudaStream_t stream) noexcept {
+int32_t HieraPatchConvPlugin::enqueue(nvinfer1::PluginTensorDesc const* input_descriptors,
+                                      nvinfer1::PluginTensorDesc const* output_descriptors,
+                                      void const* const* inputs, void* const* outputs,
+                                      void* workspace, cudaStream_t stream) noexcept {
     (void)workspace;
     if (inputs == nullptr || outputs == nullptr || input_descriptors == nullptr ||
         output_descriptors == nullptr || inputs[0] == nullptr || inputs[1] == nullptr ||
@@ -194,13 +269,15 @@ int32_t HieraPatchConvPlugin::enqueue(
         !dimensions_equal(output_descriptors[0].dims, {1, 96, 256, 256}))
         return 1;
 
-    constexpr int32_t threads = 256;
-    constexpr int32_t blocks = static_cast<int32_t>((kOUTPUT_ELEMENTS + threads - 1) / threads);
-    hiera_patch_conv_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(inputs[0]),
-        static_cast<const __nv_bfloat16*>(inputs[1]),
-        static_cast<const __nv_bfloat16*>(inputs[2]),
-        static_cast<__nv_bfloat16*>(outputs[0]));
+    constexpr int32_t threads = kOUTPUT_WIDTH;
+    const dim3 interior_blocks(kINTERIOR_CHANNEL_GROUPS, kOUTPUT_HEIGHT - 1);
+    hiera_patch_conv_interior_kernel<<<interior_blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(inputs[0]), static_cast<const __nv_bfloat16*>(inputs[1]),
+        static_cast<const __nv_bfloat16*>(inputs[2]), static_cast<__nv_bfloat16*>(outputs[0]));
+    const dim3 boundary_blocks(kOUTPUT_CHANNELS, 2);
+    hiera_patch_conv_boundary_kernel<<<boundary_blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(inputs[0]), static_cast<const __nv_bfloat16*>(inputs[1]),
+        static_cast<const __nv_bfloat16*>(inputs[2]), static_cast<__nv_bfloat16*>(outputs[0]));
     return cudaPeekAtLastError() == cudaSuccess ? 0 : 1;
 }
 
