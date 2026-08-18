@@ -46,7 +46,7 @@ for inclusion and redistribution under the Apache License 2.0:
 - `What-is-MC.png`; SHA-256
   `15e97bc498406629d32eb043e474f835ee88ea6ba4d78cd5ea0cd91c0954b2f4`
 - `TRT-Stack.png`; SHA-256
-  `b4cb34b785ee0f31b3372d221fb9e0483e4237efdb6b866da68fbe783bae7e3e`
+  `de08eb9b63d6d7808bf11c8893005514d26282b4377f1988b2bdc30366ccad16`
 
 ## Maintainer voice recording and derived ASR probes
 

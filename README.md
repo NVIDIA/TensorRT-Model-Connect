@@ -42,7 +42,7 @@ std::cout << pipeline->generate("What is the capital of France? Answer in one wo
   is the priority, start directly with
   [TensorRT Edge-LLM](https://github.com/NVIDIA/TensorRT-Edge-LLM).
 
-<img width="1609" height="977" alt="TensorRT abstraction layers from Model Connect through Edge-LLM to TensorRT" src="TRT-Stack.png" />
+<img width="1606" height="979" alt="TensorRT abstraction layers from Model Connect through Edge-LLM to TensorRT" src="TRT-Stack.png" />
 
 <a id="why-tensorrt-model-connect"></a>
 
