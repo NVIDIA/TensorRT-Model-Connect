@@ -444,20 +444,59 @@ def build_vit_engine(
 
         residual = hidden
         normalized = normalize("norm1", hidden)
-        projections = {}
-        for short, projection in (("q", "q_proj"), ("k", "k_proj"), ("v", "v_proj")):
-            projections[short] = to_heads(project("attention", projection, normalized))
-        for name in ("q", "k"):
-            projections[name] = graph_ops.apply_patch_rope(
+        # A single wide GEMM matches the source checkpoint and avoids three
+        # small projection launches on fixed-shape image tokens.
+        qkv_weight = np.concatenate(
+            [
+                weights[f"{prefix}.attention.{name}_proj.weight"]
+                for name in ("q", "k", "v")
+            ],
+            axis=1,
+        )
+        qkv = graph_ops.linear(network, normalized, qkv_weight, work_dtype)
+        qkv_biases = [
+            weights.get(f"{prefix}.attention.{name}_proj.bias")
+            for name in ("q", "k", "v")
+        ]
+        if any(bias is not None for bias in qkv_biases):
+            zero_bias = np.zeros(hidden_size, dtype=work_dtype)
+            qkv = graph_ops.add_bias(
                 network,
-                projections[name],
-                num_heads=num_heads,
-                num_prefix_tokens=num_prefix,
-                grid_h=grid_h,
-                grid_w=grid_w,
-                head_dim=head_dim,
-                theta=cfg["rope_theta"],
-                dtype=work_dtype,
+                qkv,
+                np.concatenate(
+                    [bias if bias is not None else zero_bias for bias in qkv_biases]
+                ),
+                work_dtype,
+            )
+        projections = {}
+        for index, name in enumerate(("q", "k", "v")):
+            projection = graph_ops.slice_tensor(
+                network,
+                qkv,
+                (0, 0, index * hidden_size),
+                (1, sequence_length, hidden_size),
+            )
+            projections[name] = to_heads(projection)
+        # Q and K use identical RoPE coordinates, so transform them as one batch.
+        qk = network.add_concatenation([projections["q"], projections["k"]])
+        qk.axis = 0
+        qk = graph_ops.apply_patch_rope(
+            network,
+            qk.get_output(0),
+            num_heads=num_heads,
+            num_prefix_tokens=num_prefix,
+            grid_h=grid_h,
+            grid_w=grid_w,
+            head_dim=head_dim,
+            theta=cfg["rope_theta"],
+            dtype=work_dtype,
+        )
+        for index, name in enumerate(("q", "k")):
+            projections[name] = graph_ops.slice_tensor(
+                network,
+                qk,
+                (index, 0, 0, 0),
+                (1, num_heads, sequence_length, head_dim),
             )
         context = graph_ops.attention(
             network,

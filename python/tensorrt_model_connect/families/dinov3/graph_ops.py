@@ -169,15 +169,19 @@ def apply_patch_rope(
     dtype: np.dtype,
 ):
     """Apply HF DINOv3's axial 2D RoPE only to the patch-token suffix."""
+    batch = int(tensor.shape[0])
     num_patches = grid_h * grid_w
     prefix = slice_tensor(
-        network, tensor, (0, 0, 0, 0), (1, num_heads, num_prefix_tokens, head_dim)
+        network,
+        tensor,
+        (0, 0, 0, 0),
+        (batch, num_heads, num_prefix_tokens, head_dim),
     )
     patches = slice_tensor(
         network,
         tensor,
         (0, 0, num_prefix_tokens, 0),
-        (1, num_heads, num_patches, head_dim),
+        (batch, num_heads, num_patches, head_dim),
     )
 
     coords_h = (np.arange(grid_h, dtype=np.float32) + 0.5) / float(grid_h)
@@ -199,7 +203,7 @@ def apply_patch_rope(
     direct = _elementwise(network, patches, cos_tensor, trt.ElementWiseOperation.PROD)
     rotated = _elementwise(
         network,
-        _rotate_half(network, patches, 1, num_heads, num_patches, head_dim),
+        _rotate_half(network, patches, batch, num_heads, num_patches, head_dim),
         sin_tensor,
         trt.ElementWiseOperation.PROD,
     )
