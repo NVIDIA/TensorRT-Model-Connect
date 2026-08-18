@@ -1482,12 +1482,9 @@ class TestNoImpact:
         "path",
         [
             "CODEOWNERS",
-            "hf_links_wave1.txt",
             "ruff.toml",
             "tests/__init__.py",
             "tests/assets/test_image.jpg",
-            "tests/engine_defs/__init__.py",
-            "verify_encoder.py",
         ],
     )
     def test_repo_metadata_and_test_assets_no_impact(self, imap, path):

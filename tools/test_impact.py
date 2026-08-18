@@ -138,10 +138,8 @@ _NO_IMPACT_PATTERNS = [
     r"^LICENSE",
     r"^CLAUDE\.md$",
     r"^CODEOWNERS$",
-    r"^hf_links_wave1\.txt$",
     r"^ruff\.toml$",
-    r"^verify_encoder\.py$",
-    r"^tests/(__init__\.py|engine_defs/__init__\.py)$",
+    r"^tests/__init__\.py$",
     r"^tests/assets/",
     r"^recovery-",
 ]

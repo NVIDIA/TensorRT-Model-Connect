@@ -13,7 +13,6 @@ Key files:
   discovery and NCCL rendezvous.
 - `pipeline_pool.cpp` with `include/trtmc/runtime/pipeline_pool.h`:
   concurrent pipeline leasing and pool-wide LoRA lifecycle.
-- `step_state.h`: generic recurrent-step state interface.
 - `stb_impl.cpp`: stb implementation unit for public image I/O.
 
 On the native path, TensorRT backend DSO loading plus generic engine/context

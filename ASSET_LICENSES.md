@@ -33,8 +33,6 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `tests/assets/test_image.jpg` — synthetic two-color image fixture;
   SHA-256 `d321e0168fc3678faca52c73dffafc80e729f125432cbcaf51f24c5044931c98`
-- `tests/assets/test_scene.jpg` — synthetic geometric scene fixture;
-  SHA-256 `e1d5893d77507c36b5c7703a3ad1532abc7c2f226f1bb121fa44c08797756363`
 - `tests/e2e/models/deepseek_ocr/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing; SHA-256
   `d27d4e33afb8e820916b19bffc4c94f1f626536cc3375b5fafeee684b0a3b9b3`

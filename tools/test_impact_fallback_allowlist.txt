@@ -18,7 +18,6 @@ catch_all conftest.py # tracked path has no precise impact rule yet; catch-all s
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all examples/byok/export_cutedsl_residual_add.py # standalone GPU tutorial exporter has no precise impact rule yet; catch-all stays conservative
 catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all hf_links_wave1.txt # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all NOTICE # top-level legal attribution metadata; conservative full-suite fallback is intentionally retained
 catch_all TRT-Stack.png # root README media asset has no precise impact rule; conservative full-suite fallback is intentionally retained
 catch_all What-is-MC.png # root README media asset has no precise impact rule; conservative full-suite fallback is intentionally retained
@@ -26,7 +25,6 @@ catch_all pyproject.toml # tracked path has no precise impact rule yet; catch-al
 catch_all ruff.toml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/assets/test_image.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/assets/test_scene.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/test_bundle_inspect.py # tracked path has no precise impact rule yet; catch-all stays conservative
@@ -40,13 +38,11 @@ catch_all tests/e2e/test_runner_parity.py # tracked path has no precise impact r
 catch_all tests/e2e/test_vl_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/timing_estimates.json # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e_partition.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/engine_defs/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/runtime_strategy_matrix.yaml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/test_tvm_ffi_e2e.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all third_party/stb/stb_image.h # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all third_party/stb/stb_image_resize2.h # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all third_party/stb/stb_image_write.h # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all verify_encoder.py # tracked path has no precise impact rule yet; catch-all stays conservative
 harness_shared tests/e2e_harness/__init__.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/artifact_sink.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/conftest_gpu.py # shared E2E harness surface; broad E2E impact is intentional

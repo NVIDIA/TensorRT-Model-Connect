@@ -223,10 +223,8 @@ PLATFORM_EXACT = frozenset(
         "conanfile.py",
         "conftest.py",
         "docker-compose.yml",
-        "hf_links_wave1.txt",
         "pyproject.toml",
         "ruff.toml",
-        "verify_encoder.py",
         *MODEL_ROOT_PLATFORM_FILES,
     }
 )

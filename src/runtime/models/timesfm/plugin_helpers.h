@@ -12,8 +12,6 @@
 
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
-#include "runtime/models/timesfm/inference_state.h"
-#include "runtime/models/timesfm/kv_cache.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"

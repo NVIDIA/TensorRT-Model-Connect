@@ -1,5 +1,0 @@
-facebook/dinov2-small
-nvidia/segformer-b0-finetuned-ade-512-512
-facebook/detr-resnet-50
-edbeeching/decision-transformer-gym-hopper-medium
-MCG-NJU/videomae-base
