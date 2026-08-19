@@ -653,7 +653,7 @@ class HfTransformersReference:
             device = torch.device("cuda")
 
             processor = AutoImageProcessor.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code)
+                hf_id, trust_remote_code=trust_remote_code, use_fast=False)
             model = AutoModelForSemanticSegmentation.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
                 torch_dtype=reference_dtype)

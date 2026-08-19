@@ -38,6 +38,14 @@ def _cast_back_to_trt_dtype(
     return network.add_cast(tensor, target_dtype).get_output(0)
 
 
+def begin_fp32_decode_head(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+) -> trt.ITensor:
+    """Enter the stable FP32 boundary used by the SegFormer decode head."""
+    return _cast_back_to_trt_dtype(network, tensor, trt.float32)
+
+
 def add_constant(
     network: trt.INetworkDefinition,
     shape: tuple[int, ...],

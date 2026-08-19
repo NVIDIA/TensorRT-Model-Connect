@@ -537,6 +537,12 @@ class SegformerPlugin:
 
         projected = []
         for i, (feat, feat_H, feat_W, feat_hidden) in enumerate(stage_outputs):
+            # Keep the encoder in the requested precision, but perform the
+            # lightweight decode head in FP32.  Small FP16 tactic differences
+            # near class boundaries otherwise flip argmax labels between
+            # otherwise equivalent engine builds.
+            feat = graph_ops.begin_fp32_decode_head(network, feat)
+
             # Reshape to 2D: [1, C, H, W] -> [H*W, C]
             to_2d = network.add_shuffle(feat)
             to_2d.first_transpose = trt.Permutation([0, 2, 3, 1])
@@ -546,11 +552,11 @@ class SegformerPlugin:
             proj = graph_ops.add_matmul_rhs_constant(
                 network, to_2d.get_output(0), feat_hidden, decoder_hidden_size,
                 weights[f"decode_head.linear_c{i}.weight"],
-                dtype=work_np_dtype)
+                dtype=np.float32)
             proj = graph_ops.add_bias_sum(
                 network, proj, decoder_hidden_size,
                 weights[f"decode_head.linear_c{i}.bias"],
-                dtype=work_np_dtype)
+                dtype=np.float32)
 
             # Reshape to 4D: [H*W, D] -> [1, D, H, W]
             to_4d2 = network.add_shuffle(proj)
@@ -583,9 +589,9 @@ class SegformerPlugin:
             num_output_maps=decoder_hidden_size,
             kernel_shape=(1, 1),
             kernel=trt.Weights(np.ascontiguousarray(
-                fuse_w, dtype=work_np_dtype)),
+                fuse_w, dtype=np.float32)),
             bias=trt.Weights(np.ascontiguousarray(
-                fuse_b, dtype=work_np_dtype)))
+                fuse_b, dtype=np.float32)))
 
         # BatchNorm (fused: gamma * (x - mean) / sqrt(var + eps) + beta)
         bn_w = weights["decode_head.bn.weight"]
@@ -597,10 +603,10 @@ class SegformerPlugin:
 
         bn_scale_t = graph_ops.add_constant(
             network, (1, decoder_hidden_size, 1, 1),
-            bn_scale.reshape(1, -1, 1, 1), dtype=work_np_dtype)
+            bn_scale.reshape(1, -1, 1, 1), dtype=np.float32)
         bn_shift_t = graph_ops.add_constant(
             network, (1, decoder_hidden_size, 1, 1),
-            bn_shift.reshape(1, -1, 1, 1), dtype=work_np_dtype)
+            bn_shift.reshape(1, -1, 1, 1), dtype=np.float32)
 
         bn_scaled = network.add_elementwise(
             fuse_conv.get_output(0), bn_scale_t,
@@ -620,9 +626,9 @@ class SegformerPlugin:
             num_output_maps=num_classes,
             kernel_shape=(1, 1),
             kernel=trt.Weights(np.ascontiguousarray(
-                cls_w, dtype=work_np_dtype)),
+                cls_w, dtype=np.float32)),
             bias=trt.Weights(np.ascontiguousarray(
-                cls_b, dtype=work_np_dtype)))
+                cls_b, dtype=np.float32)))
 
         # Output: [1, num_classes, H/4, W/4]
         logits = cls_conv.get_output(0)

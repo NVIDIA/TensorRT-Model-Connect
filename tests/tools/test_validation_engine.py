@@ -5729,7 +5729,7 @@ def test_fnet_keeps_fp16_candidate_with_declared_fp32_reference(
     assert command[command.index("--precision") + 1] == "fp16"
 
 
-def test_segformer_validation_compares_candidate_and_reference_in_fp16() -> None:
+def test_segformer_validation_keeps_stable_fp32_reference_oracle() -> None:
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(),
         "ade20k_semantic_segmentation",
@@ -5746,7 +5746,7 @@ def test_segformer_validation_compares_candidate_and_reference_in_fp16() -> None
     )
 
     assert model["precision"] == "fp16"
-    assert validation_config["reference_precision"] == "fp16"
+    assert validation_config["reference_precision"] == "fp32"
 
 
 @pytest.mark.parametrize(
