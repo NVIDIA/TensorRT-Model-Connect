@@ -659,7 +659,7 @@ def test_default_suites_include_text_generation_gap_models() -> None:
         ),
         "wikitext103_distilgpt2_continuation_parity": (
             ["distilgpt2"],
-            {"min_tie_adjusted_exact_match_rate": 0.9},
+            {},
         ),
         "newstest2019_en_ru_marian_translation_parity": (["marian-en-ru"], {}),
         "wmt14_en_de_t5_translation_parity": (["t5-small"], {}),
@@ -684,7 +684,11 @@ def test_default_suites_include_text_generation_gap_models() -> None:
     resolved_codegen = validation_engine.resolve_suite_for_model(
         humaneval, codegen
     )
-    assert resolved_codegen["gates"] == {"min_exact_match_rate": 1.0}
+    assert resolved_codegen["gates"] == {}
+    assert resolved_codegen["sample_acceptance"] == {
+        "min_pass_rate": 1.0,
+        "min_allowed_failures": 0,
+    }
     assert resolved_codegen["gate_policy"] == "blocking"
 
     for suite_id in (
@@ -704,6 +708,7 @@ def test_default_suites_classify_every_empty_gate_policy() -> None:
         suite["id"]
         for suite in suites
         if not suite.get("gates")
+        and not suite.get("sample_acceptance")
         and suite.get("gate_policy") != "observation_only"
     ]
 
@@ -720,7 +725,7 @@ def test_asr_similarity_gate_is_not_classified_as_a_sample_pass_rate() -> None:
         }
 
 
-def test_phi_moe_mmlu_uses_model_specific_agreement_gate() -> None:
+def test_phi_moe_mmlu_uses_model_specific_sample_acceptance() -> None:
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(), "mmlu_five_shot_mcq"
     )
@@ -733,8 +738,14 @@ def test_phi_moe_mmlu_uses_model_specific_agreement_gate() -> None:
         suite, models["internlm2-1.8b"]
     )
 
-    assert phi["gates"]["min_prediction_agreement"] == 0.95
-    assert internlm["gates"]["min_prediction_agreement"] == 0.98
+    assert phi["sample_acceptance"] == {
+        "min_pass_rate": 0.95,
+        "min_allowed_failures": 1,
+    }
+    assert internlm["sample_acceptance"] == {
+        "min_pass_rate": 0.98,
+        "min_allowed_failures": 1,
+    }
 
 
 def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
@@ -1101,6 +1112,9 @@ def test_semantic_segmentation_parity_reports_dataset_miou(tmp_path: Path) -> No
     assert summary["hf_mean_iou"] == 1.0
     assert summary["bundle_mean_iou"] == 1.0
     assert summary["backend_pixel_agreement"] == 1.0
+    assert summary["passed_count"] == 1
+    assert summary["sample_pass_rate"] == 1.0
+    assert summary["cases"][0]["passed"] is True
 
 
 def test_semantic_segmentation_uses_postprocessed_hf_map_for_backend_parity(
@@ -1207,6 +1221,9 @@ def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> N
     assert text["status"] == "passed"
     assert point["mean_backend_mask_iou"] == 1.0
     assert point["worst_backend_mask_iou"] == 1.0
+    assert point["passed_count"] == 1
+    assert point["sample_pass_rate"] == 1.0
+    assert point["cases"][0]["passed"] is True
     assert text["mean_backend_mask_iou"] == 1.0
 
 
@@ -1260,6 +1277,9 @@ def test_prompted_segmentation_empty_prediction_is_a_comparison_failure(
 
     assert summary["status"] == "failed"
     assert summary["valid_count"] == 1
+    assert summary["passed_count"] == 0
+    assert summary["sample_pass_rate"] == 0.0
+    assert summary["cases"][0]["passed"] is False
     assert summary["mean_backend_mask_iou"] == 0.0
     assert summary["cases"][0]["bundle_empty_prediction"] is True
 
@@ -3358,6 +3378,9 @@ def test_codegen_humaneval_gate_rejects_qa_accuracy_replays(
     result = {
         "exact_match_rate": summary["exact_match_rate"],
         "token_prefix_agreement": summary["token_prefix_agreement"],
+        "sample_count": summary["count"],
+        "valid_count": summary["count"],
+        "passed_count": summary["tie_adjusted_exact_count"],
     }
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(), "humaneval_code_continuation_parity"
@@ -3369,17 +3392,20 @@ def test_codegen_humaneval_gate_rejects_qa_accuracy_replays(
     )
     suite = validation_engine.resolve_suite_for_model(suite, codegen)
 
-    validation_engine.apply_metric_gates(result, suite["gates"])
+    validation_engine._apply_sample_acceptance(
+        result,
+        suite["sample_acceptance"],
+    )
 
     assert result["exact_match_rate"] == exact_match_rate
     assert result["token_prefix_agreement"] == token_prefix_agreement
     assert result["status"] == "failed"
     assert result["gate_failures"] == [
         {
-            "gate": "min_exact_match_rate",
-            "metric": "exact_match_rate",
-            "actual": exact_match_rate,
-            "required": 1.0,
+            "gate": "sample_acceptance",
+            "metric": "failed_samples",
+            "actual": len(divergences),
+            "required": 0,
         }
     ]
 
@@ -3398,7 +3424,12 @@ def test_codegen_humaneval_gate_accepts_exact_replay() -> None:
     summary = validation_engine.compare_continuation_sets(
         predictions, predictions, require_token_ids=True
     )
-    result = {"exact_match_rate": summary["exact_match_rate"]}
+    result = {
+        "exact_match_rate": summary["exact_match_rate"],
+        "sample_count": summary["count"],
+        "valid_count": summary["count"],
+        "passed_count": summary["tie_adjusted_exact_count"],
+    }
     suite = validation_engine.suite_by_id(
         validation_engine.load_suites(), "humaneval_code_continuation_parity"
     )
@@ -3409,7 +3440,10 @@ def test_codegen_humaneval_gate_accepts_exact_replay() -> None:
     )
     suite = validation_engine.resolve_suite_for_model(suite, codegen)
 
-    validation_engine.apply_metric_gates(result, suite["gates"])
+    validation_engine._apply_sample_acceptance(
+        result,
+        suite["sample_acceptance"],
+    )
 
     assert result["exact_match_rate"] == 1.0
     assert result["status"] == "passed"
@@ -3425,8 +3459,10 @@ def test_validation_suites_keep_continuation_and_drop_trace_cloze() -> None:
     assert continuation["dataset"]["kind"] == "mmlu_five_shot_json"
     assert continuation["scoring"]["scorer"] == "continuation"
     assert continuation["user_contract"] == "continuation_parity"
-    assert continuation["gates"] == {
-        "min_tie_adjusted_exact_match_rate": 0.9
+    assert continuation["gates"] == {}
+    assert continuation["sample_acceptance"] == {
+        "min_pass_rate": 0.9,
+        "min_allowed_failures": 1,
     }
 
 
@@ -7656,9 +7692,20 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
     assert result["prediction_agreement_rate"] == 0.5
     assert result["status"] == "failed"
     assert result["error_type"] == "BenchmarkGateError"
-    assert result["configured_gates"] == {
-        "max_accuracy_drop_from_hf": 0.01,
-        "min_prediction_agreement": 0.98,
+    assert result["configured_gates"] == {"max_accuracy_drop_from_hf": 0.01}
+    assert result["configured_sample_acceptance"] == {
+        "min_pass_rate": 0.98,
+        "min_allowed_failures": 1,
+    }
+    assert result["sample_acceptance"] == {
+        "sample_count": 2,
+        "passed_count": 1,
+        "failed_count": 1,
+        "min_pass_rate": 0.98,
+        "min_allowed_failures": 1,
+        "allowed_failures": 1,
+        "verdict": "pass",
+        "issues": [],
     }
     assert result["gate_metric_kinds"] == {}
     assert result["gate_policy"] == "blocking"
@@ -7669,12 +7716,6 @@ def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
             "actual": 0.5,
             "required": 0.01,
         },
-        {
-            "gate": "min_prediction_agreement",
-            "metric": "prediction_agreement_rate",
-            "actual": 0.5,
-            "required": 0.98,
-        }
     ]
     assert (work_dir / "summary.json").is_file()
 

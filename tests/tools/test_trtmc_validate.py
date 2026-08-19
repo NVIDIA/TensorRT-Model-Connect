@@ -397,7 +397,7 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
         "blocking_variants": 3,
         "observation_only_variants": 1,
         "invalid_variants": 1,
-        "review_required_suites": 2,
+        "review_required_suites": 1,
     }
     quality = next(row for row in census["suites"] if row["id"] == "quality")
     assert quality["owner"] == {"kind": "workload", "id": "quality"}
@@ -407,28 +407,17 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
         ["default-model"],
         ["strict-model"],
     ]
-    assert quality["review"] == [
-        {"code": "minimum_sample_count_unapproved"},
-        {
-            "code": "sample_scaling_policy_unapproved",
-            "gates": ["min_prediction_agreement"],
-        },
-    ]
+    assert quality["review"] == []
     diagnostic = next(row for row in census["suites"] if row["id"] == "diagnostic")
     assert diagnostic["review"] == []
     unbound = next(row for row in census["suites"] if row["id"] == "unbound")
     assert unbound["review"] == [
         {"code": "no_selected_models"},
         {"code": "sample_limit_unconfigured"},
-        {"code": "minimum_sample_count_unapproved"},
-        {
-            "code": "sample_scaling_policy_unapproved",
-            "gates": ["min_sample_pass_rate"],
-        },
     ]
 
 
-def test_gate_census_accepts_an_explicit_sample_policy() -> None:
+def test_gate_census_expands_sample_acceptance_at_configured_count() -> None:
     catalog = {
         "models": {"model-a": {"workloads": ["quality"]}},
         "sample_limits": {"quality": 20},
@@ -437,11 +426,10 @@ def test_gate_census_accepts_an_explicit_sample_policy() -> None:
         "quality": {
             "id": "quality",
             "description": "Sampled quality parity.",
-            "gates": {"min_prediction_agreement": 0.98},
-            "gate_sample_policy": {
-                "minimum_sample_count": 20,
-                "calibration_sample_count": 20,
-                "scaling": {"min_prediction_agreement": "fixed_count"},
+            "gates": {},
+            "sample_acceptance": {
+                "min_pass_rate": 0.98,
+                "min_allowed_failures": 1,
             },
         }
     }
@@ -465,10 +453,13 @@ def test_gate_census_accepts_an_explicit_sample_policy() -> None:
     assert census["summary"]["review_required_suites"] == 0
     quality = census["suites"][0]
     assert quality["review"] == []
-    assert quality["variants"][0]["policy"]["sample_policy"] == {
-        "minimum_sample_count": 20,
-        "calibration_sample_count": 20,
-        "scaling": {"min_prediction_agreement": "fixed_count"},
+    assert quality["variants"][0]["policy"]["policy_mode"] == "blocking"
+    assert quality["variants"][0]["sample_acceptance"] == {
+        "sample_count": 20,
+        "min_pass_rate": 0.98,
+        "min_allowed_failures": 1,
+        "allowed_failures": 1,
+        "issues": [],
     }
 
 
@@ -551,9 +542,13 @@ def test_default_gate_census_covers_every_suite_and_binding() -> None:
     mmlu = next(row for row in census["suites"] if row["id"] == "mmlu_five_shot_mcq")
     assert len(mmlu["variants"]) == 2
     assert [
-        variant["policy"]["gates"][1]["effective"]["allowed_failures"]
+        variant["sample_acceptance"]["min_pass_rate"]
         for variant in mmlu["variants"]
-    ] == [0, 1]
+    ] == [0.98, 0.95]
+    assert [
+        variant["sample_acceptance"]["allowed_failures"]
+        for variant in mmlu["variants"]
+    ] == [1, 1]
     asr = next(row for row in census["suites"] if row["id"] == "librispeech_clean_asr")
     assert asr["variants"][0]["policy"]["gates"][1]["effective"]["kind"] == (
         "continuous"
@@ -1227,7 +1222,7 @@ def test_accuracy_report_is_rebuilt_from_ordered_live_receipts(tmp_path):
     }
 
 
-def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_path):
+def test_accuracy_report_exposes_backend_sample_acceptance(tmp_path):
     cases = [
         {
             "id": "model-a::suite-a",
@@ -1251,7 +1246,10 @@ def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_p
                 "status": "agreement",
                 "mode": "mcq",
                 "primary_metric": None,
-                "metrics": {"prediction_agreement_rate": 0.95},
+                "metrics": {
+                    "prediction_agreement_rate": 0.95,
+                    "accuracy_drop_from_hf": 0.0,
+                },
                 "failures": [],
             },
             "validation": {"status": "passed"},
@@ -1260,12 +1258,17 @@ def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_p
                 "trtmc_base_precision": "fp16",
             },
             "raw_result": {
-                "configured_gates": {"min_prediction_agreement": 0.98},
+                "configured_gates": {"max_accuracy_drop_from_hf": 0.01},
                 "gate_policy": "blocking",
-                "gate_sample_policy": {
-                    "minimum_sample_count": 20,
-                    "calibration_sample_count": 20,
-                    "scaling": {"min_prediction_agreement": "rate"},
+                "sample_acceptance": {
+                    "sample_count": 20,
+                    "passed_count": 19,
+                    "failed_count": 1,
+                    "min_pass_rate": 0.98,
+                    "min_allowed_failures": 1,
+                    "allowed_failures": 1,
+                    "verdict": "pass",
+                    "issues": [],
                 },
             },
             "reproduce": {
@@ -1283,36 +1286,17 @@ def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_p
 
     row = report["results"][0]
     assert row["result"] == "green"
-    assert row["comparison"]["gate_evaluation"] == {
-        "schema_version": "trtmc.validation-gate-evaluation/v1",
-        "status": "fail",
+    assert row["comparison"]["sample_acceptance"] == {
         "sample_count": 20,
-        "checks": [
-            {
-                "gate": "min_prediction_agreement",
-                "metric": "prediction_agreement_rate",
-                "operator": ">=",
-                "actual": 0.95,
-                "required": 0.98,
-                "verdict": "fail",
-                "effective": {
-                    "kind": "proportion",
-                    "scaling": "rate",
-                    "required_passes": 20,
-                    "allowed_failures": 0,
-                    "observed_passes": 19,
-                    "observed_failures": 1,
-                    "resolution": 0.05,
-                },
-            }
-        ],
+        "passed_count": 19,
+        "failed_count": 1,
+        "min_pass_rate": 0.98,
+        "min_allowed_failures": 1,
+        "allowed_failures": 1,
+        "verdict": "pass",
         "issues": [],
-        "sample_policy": {
-            "minimum_sample_count": 20,
-            "calibration_sample_count": 20,
-            "scaling": {"min_prediction_agreement": "rate"},
-        },
     }
+    assert row["comparison"]["gate_evaluation"]["status"] == "pass"
 
 
 def test_accuracy_shadow_gate_uses_valid_pairs_not_prepared_inputs(tmp_path):
@@ -3150,6 +3134,43 @@ def test_accuracy_result_with_unknown_precision_has_no_result_light() -> None:
         "domain": "policy-config",
         "code": "comparison_contract",
         "message": "Reference and TRTMC compute precision were not both recorded",
+    }
+
+
+def test_accuracy_result_with_incomplete_samples_is_white() -> None:
+    result = trtmc_validate._normalize_result(
+        {
+            "raw_result": {
+                "status": "invalid",
+                "error_type": "SampleEvidenceError",
+                "error": "incomplete_samples",
+                "sample_acceptance": {
+                    "sample_count": 19,
+                    "passed_count": 19,
+                    "failed_count": 0,
+                    "min_pass_rate": 0.98,
+                    "min_allowed_failures": 1,
+                    "allowed_failures": 1,
+                    "verdict": "invalid",
+                    "issues": [
+                        {"code": "incomplete_samples", "expected": 20, "actual": 19}
+                    ],
+                },
+                "precision_contract": {
+                    "reference_precision": "fp16",
+                    "trtmc_base_precision": "fp16",
+                },
+            }
+        }
+    )
+
+    assert trtmc_validate._traffic_light_status(result) == "white"
+    assert trtmc_validate._accuracy_issue(result) == {
+        "priority": "P1",
+        "stage": "compare",
+        "domain": "data-artifact",
+        "code": "incomplete_samples",
+        "message": "incomplete_samples",
     }
 
 

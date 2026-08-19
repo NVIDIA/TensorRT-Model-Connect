@@ -48,6 +48,7 @@ from tests.e2e_harness.registry import (  # noqa: E402
 )
 from tools.validation import artifacts as validation_artifacts  # noqa: E402
 from tools.validation import catalog as validation_catalog  # noqa: E402
+from tools.validation.gate_policy import evaluate_sample_acceptance  # noqa: E402
 from tools.validation.model_plugin_contract import (  # noqa: E402
     deserialize_stage_output,
     manifest_path_from_work_manifest,
@@ -5574,11 +5575,15 @@ def prediction_agreement_gate_result(
     gates: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Evaluate task-accuracy and direct prediction-agreement gates."""
-    max_accuracy_drop = float(
-        gates.get("max_accuracy_drop_from_hf", 0.05)
+    max_accuracy_drop = (
+        float(gates["max_accuracy_drop_from_hf"])
+        if "max_accuracy_drop_from_hf" in gates
+        else None
     )
-    min_agreement = float(
-        gates.get("min_prediction_agreement", 0.90)
+    min_agreement = (
+        float(gates["min_prediction_agreement"])
+        if "min_prediction_agreement" in gates
+        else None
     )
     raw_accuracy_drop = (
         float(summary["hf"]["overall_accuracy"])
@@ -5594,7 +5599,7 @@ def prediction_agreement_gate_result(
         accuracy_drop = 0.0
     prediction_agreement = float(summary["prediction_agreement_rate"])
     failures: list[dict[str, Any]] = []
-    if accuracy_drop > max_accuracy_drop:
+    if max_accuracy_drop is not None and accuracy_drop > max_accuracy_drop:
         failures.append(
             {
                 "gate": "max_accuracy_drop_from_hf",
@@ -5603,7 +5608,7 @@ def prediction_agreement_gate_result(
                 "required": max_accuracy_drop,
             }
         )
-    if prediction_agreement < min_agreement:
+    if min_agreement is not None and prediction_agreement < min_agreement:
         failures.append(
             {
                 "gate": "min_prediction_agreement",
@@ -5617,8 +5622,12 @@ def prediction_agreement_gate_result(
         "accuracy_drop_from_hf": accuracy_drop,
         "raw_accuracy_drop_from_hf": raw_accuracy_drop,
         "gates": {
-            "max_accuracy_drop_from_hf": max_accuracy_drop,
-            "min_prediction_agreement": min_agreement,
+            name: value
+            for name, value in (
+                ("max_accuracy_drop_from_hf", max_accuracy_drop),
+                ("min_prediction_agreement", min_agreement),
+            )
+            if value is not None
         },
         "gate_failures": failures,
     }
@@ -5636,11 +5645,15 @@ def tts_intelligibility_gate_result(
     summary: Mapping[str, Any],
     gates: Mapping[str, Any],
 ) -> dict[str, Any]:
-    max_pass_rate_drop = float(
-        gates.get("max_pass_rate_drop_from_hf", 0.05)
+    max_pass_rate_drop = (
+        float(gates["max_pass_rate_drop_from_hf"])
+        if "max_pass_rate_drop_from_hf" in gates
+        else None
     )
-    min_correctness_agreement = float(
-        gates.get("min_correctness_agreement", 0.95)
+    min_correctness_agreement = (
+        float(gates["min_correctness_agreement"])
+        if "min_correctness_agreement" in gates
+        else None
     )
     pass_rate_drop = (
         float(summary["hf"]["overall_accuracy"])
@@ -5650,17 +5663,68 @@ def tts_intelligibility_gate_result(
     return {
         "status": (
             "passed"
-            if pass_rate_drop <= max_pass_rate_drop
-            and correctness_agreement >= min_correctness_agreement
+            if (max_pass_rate_drop is None or pass_rate_drop <= max_pass_rate_drop)
+            and (
+                min_correctness_agreement is None
+                or correctness_agreement >= min_correctness_agreement
+            )
             else "failed"
         ),
         "pass_rate_drop_from_hf": pass_rate_drop,
         "correctness_agreement_rate": correctness_agreement,
         "gates": {
-            "max_pass_rate_drop_from_hf": max_pass_rate_drop,
-            "min_correctness_agreement": min_correctness_agreement,
+            name: value
+            for name, value in (
+                ("max_pass_rate_drop_from_hf", max_pass_rate_drop),
+                ("min_correctness_agreement", min_correctness_agreement),
+            )
+            if value is not None
         },
     }
+
+
+def _apply_sample_acceptance(
+    result: dict[str, Any],
+    policy: Mapping[str, Any] | None,
+) -> None:
+    if not policy:
+        return
+    expected_count = int(result.get("sample_count", 0) or 0)
+    valid_count = int(result.get("valid_count", expected_count) or 0)
+    passed_count = int(result.get("passed_count", 0) or 0)
+    evaluation = evaluate_sample_acceptance(
+        policy=policy,
+        sample_count=valid_count,
+        passed_count=passed_count,
+        expected_count=expected_count,
+    )
+    result["sample_acceptance"] = evaluation
+    if evaluation["verdict"] == "pass":
+        result.setdefault("status", "passed")
+        return
+    if evaluation["verdict"] == "invalid":
+        result["status"] = "invalid"
+        result["error_type"] = "SampleEvidenceError"
+        result["error"] = "; ".join(
+            str(issue.get("code", "invalid_sample_acceptance"))
+            for issue in evaluation["issues"]
+        )
+        return
+    result["status"] = "failed"
+    failure = {
+        "gate": "sample_acceptance",
+        "metric": "failed_samples",
+        "actual": evaluation["failed_count"],
+        "required": evaluation["allowed_failures"],
+    }
+    failures = result.setdefault("gate_failures", [])
+    if failure not in failures:
+        failures.append(failure)
+    result["error_type"] = "BenchmarkGateError"
+    result["error"] = (
+        f"sample_acceptance actual={evaluation['failed_count']} "
+        f"allowed={evaluation['allowed_failures']}"
+    )
 
 
 def _load_diffusion_validation_comparator(work_dir: Path) -> Any:
@@ -10540,8 +10604,16 @@ def compare_semantic_segmentation_prediction_sets(
     min_pixel = float(gates.get("min_backend_pixel_agreement", 0.98))
     min_backend_iou = float(gates.get("min_backend_mean_iou", 0.95))
     max_drop = float(gates.get("max_mean_iou_drop_from_hf", 0.01))
+    for case in cases:
+        if "error" in case:
+            continue
+        case["passed"] = (
+            float(case["backend_pixel_agreement"]) >= min_pixel
+            and float(case["backend_mean_iou"]) >= min_backend_iou
+        )
     mean_iou_drop = hf_metrics["mean_iou"] - bundle_metrics["mean_iou"]
     valid_count = sum("error" not in case for case in cases)
+    passed_count = sum(bool(case.get("passed")) for case in cases)
     status = (
         "passed"
         if valid_count > 0
@@ -10555,6 +10627,8 @@ def compare_semantic_segmentation_prediction_sets(
         "status": status,
         "sample_count": len(cases),
         "valid_count": valid_count,
+        "passed_count": passed_count,
+        "sample_pass_rate": passed_count / valid_count if valid_count else 0.0,
         "hf_mean_iou": hf_metrics["mean_iou"],
         "bundle_mean_iou": bundle_metrics["mean_iou"],
         "mean_iou_drop_from_hf": mean_iou_drop,
@@ -10681,6 +10755,9 @@ def compare_prompted_segmentation_prediction_sets(
     bundle_gt_iou = _mean([float(case["bundle_ground_truth_iou"]) for case in valid])
     min_backend_iou = float(gates.get("min_backend_mask_iou", 0.90))
     max_gt_drop = float(gates.get("max_ground_truth_iou_drop_from_hf", 0.05))
+    for case in valid:
+        case["passed"] = float(case["backend_mask_iou"]) >= min_backend_iou
+    passed_count = sum(bool(case.get("passed")) for case in cases)
     gt_drop = hf_gt_iou - bundle_gt_iou
     status = (
         "passed"
@@ -10694,6 +10771,8 @@ def compare_prompted_segmentation_prediction_sets(
         "status": status,
         "sample_count": len(cases),
         "valid_count": len(valid),
+        "passed_count": passed_count,
+        "sample_pass_rate": passed_count / len(valid) if valid else 0.0,
         "prompt_mode": prompt_mode,
         "mean_backend_mask_iou": mean_backend_iou,
         "worst_backend_mask_iou": worst_backend_iou,
@@ -11499,10 +11578,11 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
             "passed_count": summary["passed_count"],
-            "skipped_count": summary["skipped_count"],
             "sample_pass_rate": summary["sample_pass_rate"],
+            "skipped_count": summary["skipped_count"],
             "metrics": summary["metrics"],
         }
         if summary["execution_errors"]:
@@ -11528,6 +11608,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
             "passed_count": summary["passed_count"],
             "sample_agreement_rate": summary["sample_agreement_rate"],
@@ -11585,7 +11666,10 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "sample_pass_rate": summary["sample_pass_rate"],
             "hf_mean_iou": summary["hf_mean_iou"],
             "bundle_mean_iou": summary["bundle_mean_iou"],
             "mean_iou_drop_from_hf": summary["mean_iou_drop_from_hf"],
@@ -11616,7 +11700,10 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "status": summary["status"],
+            "sample_count": summary["sample_count"],
             "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "sample_pass_rate": summary["sample_pass_rate"],
             "prompt_mode": summary["prompt_mode"],
             "mean_backend_mask_iou": summary["mean_backend_mask_iou"],
             "worst_backend_mask_iou": summary["worst_backend_mask_iou"],
@@ -11812,8 +11899,13 @@ def eval_one_model(
         result = {
             **base_result,
             "mode": "continuation",
+            "sample_count": summary["count"],
+            "valid_count": summary["count"],
+            "passed_count": summary["tie_adjusted_exact_count"],
             "evaluation_policy": (
-                "threshold_gated" if suite.get("gates", {}) else "diagnostic_only"
+                "threshold_gated"
+                if suite.get("gates", {}) or suite.get("sample_acceptance")
+                else "diagnostic_only"
             ),
             "comparison_granularity": summary.get("comparison_granularity", ""),
             "exact_match_rate": summary["exact_match_rate"],
@@ -11916,6 +12008,8 @@ def eval_one_model(
         result = {
             **base_result,
             "mode": scorer,
+            "sample_count": summary["total_count"],
+            "valid_count": summary["total_count"],
             "hf_accuracy": summary["hf"]["overall_accuracy"],
             "bundle_accuracy": summary["bundle"]["overall_accuracy"],
             "accuracy_delta_bundle_minus_hf": summary["accuracy_delta_bundle_minus_hf"],
@@ -11930,6 +12024,10 @@ def eval_one_model(
             "bundle_valid_prediction_rate": summary["bundle"].get("valid_prediction_rate"),
         }
         if scorer in {"grounding_iou", "mcq", "ocrbench_v2", "asr_transcript"}:
+            if scorer != "asr_transcript":
+                result["passed_count"] = summary["total_count"] - len(
+                    summary["disagreements"]
+                )
             result.update(
                 prediction_agreement_gate_result(
                     summary,
@@ -11948,6 +12046,7 @@ def eval_one_model(
                     }
                 )
         elif scorer == "tts_intelligibility":
+            result["passed_count"] = summary["agreement_count"]
             result.update(
                 tts_intelligibility_gate_result(
                     summary,
@@ -11955,13 +12054,18 @@ def eval_one_model(
                 )
             )
     configured_gates = dict(suite.get("gates", {}))
+    sample_acceptance = suite.get("sample_acceptance")
+    _apply_sample_acceptance(
+        result,
+        sample_acceptance if isinstance(sample_acceptance, Mapping) else None,
+    )
     result["configured_gates"] = configured_gates
     result["gate_metric_kinds"] = dict(suite.get("gate_metric_kinds", {}))
-    if suite.get("gate_sample_policy"):
-        result["gate_sample_policy"] = dict(suite["gate_sample_policy"])
+    if isinstance(sample_acceptance, Mapping):
+        result["configured_sample_acceptance"] = dict(sample_acceptance)
     result["gate_policy"] = str(
         suite.get("gate_policy")
-        or ("blocking" if configured_gates else "")
+        or ("blocking" if configured_gates or sample_acceptance else "")
     )
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),

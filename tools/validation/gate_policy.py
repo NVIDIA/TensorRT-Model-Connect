@@ -47,7 +47,6 @@ _DIRECT_GATE_SPECS = {
 }
 
 _METRIC_KINDS = {"continuous", "proportion", "proportion_drop"}
-_SAMPLE_SCALING_MODES = {"fixed_count", "rate"}
 
 
 def _gate_spec(gate: str) -> tuple[str, str] | None:
@@ -133,119 +132,27 @@ def _metric_kind(metric: str, configured: str) -> str:
     return "continuous"
 
 
-def _positive_sample_count(value: Any) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return None
-
-
-def _normalized_sample_policy(
-    *,
-    sample_policy: Mapping[str, Any] | None,
-    configured_gates: Mapping[str, Any],
-    metric_kinds: Mapping[str, str],
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    if sample_policy is None:
-        return None, []
-    if not isinstance(sample_policy, Mapping):
-        return None, [{"code": "invalid_sample_policy"}]
-
-    issues: list[dict[str, Any]] = []
-    supported_fields = {
-        "minimum_sample_count",
-        "calibration_sample_count",
-        "scaling",
-    }
-    unsupported_fields = sorted(str(key) for key in sample_policy if key not in supported_fields)
-    if unsupported_fields:
-        issues.append(
-            {
-                "code": "unsupported_sample_policy_fields",
-                "fields": unsupported_fields,
-            }
-        )
-
-    minimum = _positive_sample_count(sample_policy.get("minimum_sample_count"))
-    if minimum is None:
-        issues.append({"code": "invalid_minimum_sample_count"})
-    calibration = _positive_sample_count(sample_policy.get("calibration_sample_count"))
-    if calibration is None:
-        issues.append({"code": "invalid_calibration_sample_count"})
-
-    raw_scaling = sample_policy.get("scaling", {})
-    if not isinstance(raw_scaling, Mapping):
-        issues.append({"code": "invalid_sample_scaling_policy"})
-        raw_scaling = {}
-    scaling = {str(gate): str(mode) for gate, mode in raw_scaling.items()}
-
-    for gate in configured_gates:
-        gate_name = str(gate)
-        spec = _gate_spec(gate_name)
-        if spec is None:
-            continue
-        metric_name, operator = spec
-        metric_name, _ = _metric_names(gate_name, metric_name, {})
-        configured_kind = str(metric_kinds.get(gate_name, "") or "")
-        kind = "exact" if operator == "==" else _metric_kind(metric_name, configured_kind)
-        if kind not in {"proportion", "proportion_drop"}:
-            continue
-        mode = scaling.get(gate_name)
-        if mode is None:
-            issues.append({"code": "sample_scaling_policy_missing", "gate": gate_name})
-        elif mode not in _SAMPLE_SCALING_MODES:
-            issues.append(
-                {
-                    "code": "unsupported_sample_scaling_policy",
-                    "gate": gate_name,
-                    "value": mode,
-                }
-            )
-
-    return {
-        "minimum_sample_count": minimum,
-        "calibration_sample_count": calibration,
-        "scaling": scaling,
-    }, issues
-
-
 def _effective_gate(
     *,
     kind: str,
     actual: float,
     required: float,
     sample_count: int,
-    scaling: str | None = None,
-    calibration_sample_count: int | None = None,
 ) -> dict[str, Any]:
-    policy_fields: dict[str, Any] = {}
-    if scaling:
-        policy_fields["scaling"] = scaling
-    if scaling == "fixed_count" and calibration_sample_count is not None:
-        policy_fields["calibration_sample_count"] = calibration_sample_count
     if kind == "proportion_drop":
         allowed_drop_count = math.floor(required * sample_count + 1e-12)
-        if scaling == "fixed_count" and calibration_sample_count is not None:
-            allowed_drop_count = math.floor(
-                required * calibration_sample_count + 1e-12
-            )
         return {
             "kind": kind,
-            **policy_fields,
             "allowed_drop_count": allowed_drop_count,
             "observed_drop_count": round(actual * sample_count),
             "resolution": 1 / sample_count,
         }
     if kind == "proportion":
         allowed_failures = sample_count - math.ceil(required * sample_count - 1e-12)
-        if scaling == "fixed_count" and calibration_sample_count is not None:
-            allowed_failures = calibration_sample_count - math.ceil(
-                required * calibration_sample_count - 1e-12
-            )
         required_passes = max(0, sample_count - allowed_failures)
         observed_passes = min(sample_count, max(0, round(actual * sample_count)))
         return {
             "kind": kind,
-            **policy_fields,
             "required_passes": required_passes,
             "allowed_failures": allowed_failures,
             "observed_passes": observed_passes,
@@ -260,16 +167,12 @@ def _effective_target(
     kind: str,
     required: float,
     sample_count: int,
-    scaling: str | None = None,
-    calibration_sample_count: int | None = None,
 ) -> dict[str, Any]:
     effective = _effective_gate(
         kind=kind,
         actual=required,
         required=required,
         sample_count=sample_count,
-        scaling=scaling,
-        calibration_sample_count=calibration_sample_count,
     )
     effective.pop("observed_drop_count", None)
     effective.pop("observed_passes", None)
@@ -285,21 +188,106 @@ def _passed(actual: float, operator: str, required: float) -> bool:
     return actual == required
 
 
-def _effective_passed(
+def evaluate_sample_acceptance(
     *,
-    actual: float,
-    operator: str,
-    required: float,
-    effective: Mapping[str, Any],
-) -> bool:
-    if effective.get("scaling") == "fixed_count":
-        if effective.get("kind") == "proportion":
-            return int(effective["observed_failures"]) <= int(effective["allowed_failures"])
-        if effective.get("kind") == "proportion_drop":
-            return int(effective["observed_drop_count"]) <= int(
-                effective["allowed_drop_count"]
-            )
-    return _passed(actual, operator, required)
+    policy: Mapping[str, Any],
+    sample_count: int,
+    passed_count: int,
+    expected_count: int,
+) -> dict[str, Any]:
+    """Apply one batch-level pass-rate rule to sample-level outcomes."""
+
+    issues: list[dict[str, Any]] = []
+    supported = {"min_pass_rate", "min_allowed_failures"}
+    unknown = sorted(str(name) for name in policy if name not in supported)
+    if unknown:
+        issues.append({"code": "unsupported_sample_acceptance_fields", "fields": unknown})
+    try:
+        min_pass_rate = _finite_number(policy["min_pass_rate"])
+    except (KeyError, TypeError, ValueError):
+        min_pass_rate = 0.0
+        issues.append({"code": "invalid_min_pass_rate"})
+    if not 0.0 < min_pass_rate <= 1.0:
+        issues.append({"code": "min_pass_rate_out_of_range", "value": min_pass_rate})
+    value = policy.get("min_allowed_failures")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        min_allowed_failures = 0
+        issues.append({"code": "invalid_min_allowed_failures", "value": value})
+    else:
+        min_allowed_failures = value
+    if sample_count != expected_count:
+        issues.append(
+            {"code": "incomplete_samples", "expected": expected_count, "actual": sample_count}
+        )
+    if sample_count <= 0 or passed_count < 0 or passed_count > sample_count:
+        issues.append(
+            {
+                "code": "invalid_sample_counts",
+                "sample_count": sample_count,
+                "passed_count": passed_count,
+            }
+        )
+    if sample_count > 0 and min_allowed_failures >= sample_count:
+        issues.append(
+            {
+                "code": "min_allowed_failures_out_of_range",
+                "value": min_allowed_failures,
+                "sample_count": sample_count,
+            }
+        )
+    rate_allowed_failures = max(
+        0,
+        sample_count - math.ceil(min_pass_rate * sample_count - 1e-12),
+    )
+    allowed_failures = max(rate_allowed_failures, min_allowed_failures)
+    failed_count = max(0, sample_count - passed_count)
+    return {
+        "sample_count": sample_count,
+        "passed_count": passed_count,
+        "failed_count": failed_count,
+        "min_pass_rate": min_pass_rate,
+        "min_allowed_failures": min_allowed_failures,
+        "allowed_failures": allowed_failures,
+        "verdict": (
+            "invalid"
+            if issues
+            else "pass"
+            if failed_count <= allowed_failures
+            else "fail"
+        ),
+        "issues": issues,
+    }
+
+
+def describe_sample_acceptance(
+    *,
+    policy: Mapping[str, Any],
+    sample_count: int | None,
+) -> dict[str, Any]:
+    if sample_count is None:
+        return {
+            "sample_count": None,
+            "min_pass_rate": policy.get("min_pass_rate"),
+            "min_allowed_failures": policy.get("min_allowed_failures"),
+            "allowed_failures": None,
+            "issues": [{"code": "sample_count_unavailable"}],
+        }
+    evaluation = evaluate_sample_acceptance(
+        policy=policy,
+        sample_count=sample_count,
+        passed_count=sample_count,
+        expected_count=sample_count,
+    )
+    return {
+        name: evaluation[name]
+        for name in (
+            "sample_count",
+            "min_pass_rate",
+            "min_allowed_failures",
+            "allowed_failures",
+            "issues",
+        )
+    }
 
 
 def describe_shadow_gate_policy(
@@ -308,7 +296,6 @@ def describe_shadow_gate_policy(
     sample_count: int | None,
     policy_mode: str = "blocking",
     metric_kinds: Mapping[str, str] | None = None,
-    sample_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe configured gate targets without requiring runtime metrics."""
 
@@ -326,12 +313,6 @@ def describe_shadow_gate_policy(
     if configured_gates and not sample_count_available:
         issues.append({"code": "sample_count_unavailable"})
     resolved_metric_kinds = metric_kinds or {}
-    normalized_sample_policy, sample_policy_issues = _normalized_sample_policy(
-        sample_policy=sample_policy,
-        configured_gates=configured_gates,
-        metric_kinds=resolved_metric_kinds,
-    )
-    issues.extend(sample_policy_issues)
     for gate_name in resolved_metric_kinds:
         if gate_name not in configured_gates:
             issues.append({"code": "metric_kind_without_gate", "gate": str(gate_name)})
@@ -370,21 +351,10 @@ def describe_shadow_gate_policy(
         elif kind == "exact":
             effective = {"kind": kind, "sample_count": sample_count}
         else:
-            scaling = (
-                normalized_sample_policy["scaling"].get(gate_name)
-                if normalized_sample_policy
-                else None
-            )
             effective = _effective_target(
                 kind=kind,
                 required=required,
                 sample_count=sample_count,
-                scaling=scaling,
-                calibration_sample_count=(
-                    normalized_sample_policy["calibration_sample_count"]
-                    if normalized_sample_policy
-                    else None
-                ),
             )
         gates.append(
             {
@@ -395,16 +365,13 @@ def describe_shadow_gate_policy(
                 "effective": effective,
             }
         )
-    result = {
+    return {
         "schema_version": "trtmc.validation-gate-policy-description/v1",
         "policy_mode": policy_mode,
         "sample_count": sample_count,
         "gates": gates,
         "issues": issues,
     }
-    if normalized_sample_policy is not None:
-        result["sample_policy"] = normalized_sample_policy
-    return result
 
 
 def evaluate_shadow_gates(
@@ -414,7 +381,6 @@ def evaluate_shadow_gates(
     sample_count: int | None,
     policy_mode: str = "blocking",
     metric_kinds: Mapping[str, str] | None = None,
-    sample_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Explain the effective sample-level meaning of existing gate values."""
     checks: list[dict[str, Any]] = []
@@ -432,27 +398,6 @@ def evaluate_shadow_gates(
         issues.append({"code": "sample_count_unavailable"})
     gates_to_evaluate = configured_gates if sample_count_available else {}
     resolved_metric_kinds = metric_kinds or {}
-    normalized_sample_policy, sample_policy_issues = _normalized_sample_policy(
-        sample_policy=sample_policy,
-        configured_gates=configured_gates,
-        metric_kinds=resolved_metric_kinds,
-    )
-    issues.extend(sample_policy_issues)
-    sample_count_insufficient = False
-    if (
-        normalized_sample_policy is not None
-        and sample_count_available
-        and normalized_sample_policy["minimum_sample_count"] is not None
-        and sample_count < normalized_sample_policy["minimum_sample_count"]
-    ):
-        sample_count_insufficient = True
-        issues.append(
-            {
-                "code": "minimum_sample_count_not_met",
-                "actual": sample_count,
-                "required": normalized_sample_policy["minimum_sample_count"],
-            }
-        )
     for gate_name in resolved_metric_kinds:
         if gate_name not in configured_gates:
             issues.append({"code": "metric_kind_without_gate", "gate": str(gate_name)})
@@ -520,22 +465,11 @@ def evaluate_shadow_gates(
                 }
             )
             continue
-        scaling = (
-            normalized_sample_policy["scaling"].get(gate_name)
-            if normalized_sample_policy
-            else None
-        )
         effective = _effective_gate(
             kind=_metric_kind(metric_name, configured_kind),
             actual=actual,
             required=required,
             sample_count=sample_count,
-            scaling=scaling,
-            calibration_sample_count=(
-                normalized_sample_policy["calibration_sample_count"]
-                if normalized_sample_policy
-                else None
-            ),
         )
         checks.append(
             {
@@ -544,29 +478,15 @@ def evaluate_shadow_gates(
                 "operator": operator,
                 "actual": actual,
                 "required": required,
-                "verdict": (
-                    "pass"
-                    if _effective_passed(
-                        actual=actual,
-                        operator=operator,
-                        required=required,
-                        effective=effective,
-                    )
-                    else "fail"
-                ),
+                "verdict": "pass" if _passed(actual, operator, required) else "fail",
                 "effective": effective,
             }
         )
-    configuration_issues = [
-        issue for issue in issues if issue.get("code") != "minimum_sample_count_not_met"
-    ]
-    result = {
+    return {
         "schema_version": "trtmc.validation-gate-evaluation/v1",
         "status": (
             "invalid"
-            if configuration_issues
-            else "insufficient_evidence"
-            if sample_count_insufficient
+            if issues
             else "observation_only"
             if policy_mode == "observation_only"
             else "fail"
@@ -577,6 +497,3 @@ def evaluate_shadow_gates(
         "checks": checks,
         "issues": issues,
     }
-    if normalized_sample_policy is not None:
-        result["sample_policy"] = normalized_sample_policy
-    return result

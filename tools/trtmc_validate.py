@@ -2981,6 +2981,27 @@ def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
     if execution.get("status") == "error":
         raw_result = result.get("raw_result", {})
         raw_result = raw_result if isinstance(raw_result, Mapping) else {}
+        if raw_result.get("error_type") == "SampleEvidenceError":
+            acceptance = raw_result.get("sample_acceptance", {})
+            issues = (
+                acceptance.get("issues", [])
+                if isinstance(acceptance, Mapping)
+                else []
+            )
+            code = str(issues[0].get("code", "invalid_sample_evidence")) if issues else (
+                "invalid_sample_evidence"
+            )
+            return {
+                "priority": "P1",
+                "stage": "compare",
+                "domain": (
+                    "data-artifact"
+                    if code in {"incomplete_samples", "invalid_sample_counts"}
+                    else "policy-config"
+                ),
+                "code": code,
+                "message": str(raw_result.get("error") or code),
+            }
         worker_failure = result.get("executor") == "model_worker"
         return {
             "priority": "P1",
@@ -3274,8 +3295,9 @@ def _public_accuracy_result(
     raw_result = result.get("raw_result", {})
     raw_result = raw_result if isinstance(raw_result, Mapping) else {}
     configured_gates = raw_result.get("configured_gates")
+    sample_acceptance = raw_result.get("sample_acceptance")
     policy_mode = str(raw_result.get("gate_policy", "") or "")
-    if isinstance(configured_gates, Mapping) or policy_mode:
+    if configured_gates or (policy_mode == "observation_only" and not sample_acceptance):
         comparison["gate_evaluation"] = evaluate_shadow_gates(
             metrics=_shadow_gate_metrics(comparison, raw_result),
             configured_gates=(
@@ -3288,13 +3310,9 @@ def _public_accuracy_result(
                 if isinstance(raw_result.get("gate_metric_kinds"), Mapping)
                 else {}
             ),
-            sample_policy=(
-                raw_result.get("gate_sample_policy")
-                if isinstance(raw_result.get("gate_sample_policy"), Mapping)
-                and raw_result.get("gate_sample_policy")
-                else None
-            ),
         )
+    if isinstance(sample_acceptance, Mapping):
+        comparison["sample_acceptance"] = dict(sample_acceptance)
     public.update(
         {
             "id": f"{result.get('model', '')}::{result.get('workload') or 'not-compared'}",

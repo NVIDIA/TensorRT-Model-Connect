@@ -3,6 +3,7 @@
 
 from tools.validation.gate_policy import (
     describe_shadow_gate_policy,
+    evaluate_sample_acceptance,
     evaluate_shadow_gates,
 )
 from tools.validation.catalog import load_suites
@@ -252,121 +253,97 @@ def test_rate_gate_recalculates_for_each_actual_sample_count() -> None:
         assert effective["allowed_failures"] == allowed_failures
 
 
-def test_fixed_count_policy_does_not_expand_failure_budget_with_more_samples() -> None:
-    evaluation = evaluate_shadow_gates(
-        metrics={"prediction_agreement_rate": 0.9},
-        configured_gates={"min_prediction_agreement": 0.9},
-        sample_count=20,
-        sample_policy={
-            "minimum_sample_count": 10,
-            "calibration_sample_count": 10,
-            "scaling": {"min_prediction_agreement": "fixed_count"},
-        },
+def test_sample_acceptance_allows_one_failure_for_small_sample_set() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
+        sample_count=10,
+        passed_count=9,
+        expected_count=10,
     )
 
-    assert evaluation["status"] == "fail"
-    assert evaluation["sample_policy"] == {
-        "minimum_sample_count": 10,
-        "calibration_sample_count": 10,
-        "scaling": {"min_prediction_agreement": "fixed_count"},
-    }
-    assert evaluation["checks"][0]["effective"] == {
-        "kind": "proportion",
-        "scaling": "fixed_count",
-        "calibration_sample_count": 10,
-        "required_passes": 19,
+    assert evaluation == {
+        "sample_count": 10,
+        "passed_count": 9,
+        "failed_count": 1,
+        "min_pass_rate": 0.98,
+        "min_allowed_failures": 1,
         "allowed_failures": 1,
-        "observed_passes": 18,
-        "observed_failures": 2,
-        "resolution": 0.05,
+        "verdict": "pass",
+        "issues": [],
     }
 
 
-def test_rate_policy_recalculates_integer_budget_for_larger_sample() -> None:
-    evaluation = evaluate_shadow_gates(
-        metrics={"prediction_agreement_rate": 0.98},
-        configured_gates={"min_prediction_agreement": 0.98},
-        sample_count=50,
-        sample_policy={
-            "minimum_sample_count": 20,
-            "calibration_sample_count": 20,
-            "scaling": {"min_prediction_agreement": "rate"},
-        },
+def test_sample_acceptance_keeps_rate_budget_for_larger_sample_set() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
+        sample_count=100,
+        passed_count=98,
+        expected_count=100,
     )
 
-    assert evaluation["status"] == "pass"
-    assert evaluation["checks"][0]["effective"] == {
-        "kind": "proportion",
-        "scaling": "rate",
-        "required_passes": 49,
-        "allowed_failures": 1,
-        "observed_passes": 49,
-        "observed_failures": 1,
-        "resolution": 0.02,
-    }
+    assert evaluation["allowed_failures"] == 2
+    assert evaluation["passed_count"] == 98
+    assert evaluation["failed_count"] == 2
+    assert evaluation["verdict"] == "pass"
 
 
-def test_fixed_count_policy_preserves_zero_task_quality_drop_budget() -> None:
-    evaluation = evaluate_shadow_gates(
-        metrics={"pass_rate_drop_from_hf": 0.05},
-        configured_gates={"max_pass_rate_drop_from_hf": 0.05},
+def test_sample_acceptance_fails_above_effective_failure_budget() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
         sample_count=20,
-        sample_policy={
-            "minimum_sample_count": 3,
-            "calibration_sample_count": 3,
-            "scaling": {"max_pass_rate_drop_from_hf": "fixed_count"},
-        },
+        passed_count=18,
+        expected_count=20,
     )
 
-    assert evaluation["status"] == "fail"
-    assert evaluation["checks"][0]["effective"] == {
-        "kind": "proportion_drop",
-        "scaling": "fixed_count",
-        "calibration_sample_count": 3,
-        "allowed_drop_count": 0,
-        "observed_drop_count": 1,
-        "resolution": 0.05,
-    }
+    assert evaluation["allowed_failures"] == 1
+    assert evaluation["passed_count"] == 18
+    assert evaluation["failed_count"] == 2
+    assert evaluation["verdict"] == "fail"
 
 
-def test_sample_policy_marks_too_small_run_as_insufficient_evidence() -> None:
-    evaluation = evaluate_shadow_gates(
-        metrics={"prediction_agreement_rate": 1.0},
-        configured_gates={"min_prediction_agreement": 0.9},
-        sample_count=9,
-        sample_policy={
-            "minimum_sample_count": 10,
-            "calibration_sample_count": 10,
-            "scaling": {"min_prediction_agreement": "fixed_count"},
-        },
+def test_sample_acceptance_rejects_incomplete_evidence() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 1},
+        sample_count=19,
+        passed_count=19,
+        expected_count=20,
     )
 
-    assert evaluation["status"] == "insufficient_evidence"
+    assert evaluation["verdict"] == "invalid"
+    assert evaluation["issues"] == [
+        {"code": "incomplete_samples", "expected": 20, "actual": 19}
+    ]
+
+
+def test_sample_acceptance_rejects_a_failure_allowance_covering_every_sample() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.98, "min_allowed_failures": 3},
+        sample_count=3,
+        passed_count=2,
+        expected_count=3,
+    )
+
+    assert evaluation["verdict"] == "invalid"
     assert evaluation["issues"] == [
         {
-            "code": "minimum_sample_count_not_met",
-            "actual": 9,
-            "required": 10,
+            "code": "min_allowed_failures_out_of_range",
+            "value": 3,
+            "sample_count": 3,
         }
     ]
 
 
-def test_declared_sample_policy_requires_scaling_for_every_rate_gate() -> None:
-    description = describe_shadow_gate_policy(
-        configured_gates={"min_prediction_agreement": 0.9},
+def test_sample_acceptance_rejects_a_zero_pass_rate() -> None:
+    evaluation = evaluate_sample_acceptance(
+        policy={"min_pass_rate": 0.0, "min_allowed_failures": 0},
         sample_count=10,
-        sample_policy={
-            "minimum_sample_count": 10,
-            "calibration_sample_count": 10,
-            "scaling": {},
-        },
+        passed_count=0,
+        expected_count=10,
     )
 
-    assert description["issues"] == [
-        {
-            "code": "sample_scaling_policy_missing",
-            "gate": "min_prediction_agreement",
-        }
+    assert evaluation["verdict"] == "invalid"
+    assert evaluation["issues"] == [
+        {"code": "min_pass_rate_out_of_range", "value": 0.0}
     ]
 
 

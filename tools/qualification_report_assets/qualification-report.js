@@ -184,8 +184,6 @@
     const sampleText = value.sample_count === null || value.sample_count === undefined ? "sample count unavailable" : `${value.sample_count} valid samples`;
     control.append(el("summary", "", `Gate analysis (shadow) · ${String(value.status || "unknown").toUpperCase()} · ${sampleText}`));
     const body = el("div", "evidence-body");
-    const samplePolicy = value.sample_policy || null;
-    if (samplePolicy) add(body, el("div", "gate-fact", `Minimum ${samplePolicy.minimum_sample_count ?? "—"} samples · calibrated at ${samplePolicy.calibration_sample_count ?? "—"}`));
     (value.checks || []).forEach((check) => {
       const effective = check.effective || {};
       const card = el("section", `gate-check gate-${check.verdict || "unknown"}`);
@@ -195,11 +193,23 @@
       else if (effective.kind === "proportion_drop") add(card, el("div", "gate-fact", `${effective.observed_drop_count} net samples lost · allows ${effective.allowed_drop_count}`));
       else if (effective.kind === "exact") add(card, el("div", "gate-fact", `Observed range ${actual} · ${effective.sample_count ?? value.sample_count ?? "—"} valid samples`));
       else add(card, el("div", "gate-fact", `Continuous metric · ${effective.sample_count ?? value.sample_count ?? "—"} valid samples`));
-      if (effective.scaling) add(card, el("div", "gate-fact", `Sample scaling: ${effective.scaling}${effective.calibration_sample_count ? ` · calibration ${effective.calibration_sample_count}` : ""}`));
       card.append(el("strong", "gate-verdict", String(check.verdict || "unknown").toUpperCase()));
       body.append(card);
     });
     (value.issues || []).forEach((issue) => body.append(el("div", "gate-issue", [issue.code, issue.gate, issue.metric].filter(Boolean).join(" · "))));
+    control.append(body);
+    return control;
+  }
+
+  function sampleAcceptance(value) {
+    if (!value) return null;
+    const failed = Number(value.failed_count || 0);
+    const total = Number(value.sample_count || 0);
+    const control = el("details", "evidence sample-acceptance");
+    control.append(el("summary", "", `Sample acceptance · ${String(value.verdict || "unknown").toUpperCase()} · ${failed}/${total} failed`));
+    const body = el("div", "evidence-body");
+    add(body, el("div", "gate-fact", `Pass rate ≥${number(Number(value.min_pass_rate) * 100, 2)}% · minimum allowed failures ${value.min_allowed_failures ?? "—"} · allows ${value.allowed_failures ?? "—"}`));
+    (value.issues || []).forEach((issue) => body.append(el("div", "gate-issue", issue.code || "invalid sample acceptance")));
     control.append(body);
     return control;
   }
@@ -209,14 +219,17 @@
     if (row.issue) records.push(["Failure", row.issue]);
     if ((row.warnings || []).length) records.push(["Warnings", row.warnings]);
     let gate = null;
+    let acceptance = null;
     if (kind === "accuracy") {
       const comparison = { ...(row.comparison || {}) };
       gate = gateEvaluation(comparison.gate_evaluation);
+      acceptance = sampleAcceptance(comparison.sample_acceptance);
       delete comparison.gate_evaluation;
+      delete comparison.sample_acceptance;
       records.push(["Comparison", comparison], ["Validation", row.validation || {}]);
     }
     else records.push(["Output validation", row.output_validation || {}], ["Reference samples", row.baseline?.samples_ms || []], ["TRTMC samples", row.candidate?.samples_ms || []], ["Comparison", row.comparison || {}]);
-    return add(el("div", "metric-evidence"), gate, details("Metrics", records));
+    return add(el("div", "metric-evidence"), acceptance, gate, details("Metrics", records));
   }
 
   function logs(row) {

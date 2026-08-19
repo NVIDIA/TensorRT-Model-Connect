@@ -280,6 +280,22 @@ def resolve_suite_for_model(suite: dict[str, Any], model: dict[str, Any]) -> dic
             raise ValueError(f"Suite {suite['id']} gate profile for {owner} must be a mapping")
         gates.update(profile_gates)
     resolved["gates"] = gates
-    if gates:
+    sample_acceptance = dict(resolved.get("sample_acceptance", {}))
+    for owner, source in (
+        (model.get("family"), family_profile),
+        (model.get("name"), profile),
+    ):
+        profile_acceptance = source.get("sample_acceptance", {})
+        if not isinstance(profile_acceptance, dict):
+            raise ValueError(
+                f"Suite {suite['id']} sample_acceptance profile for {owner} "
+                "must be a mapping"
+            )
+        sample_acceptance.update(profile_acceptance)
+    if sample_acceptance:
+        resolved["sample_acceptance"] = sample_acceptance
+    else:
+        resolved.pop("sample_acceptance", None)
+    if gates or sample_acceptance:
         resolved["gate_policy"] = "blocking"
     return resolved

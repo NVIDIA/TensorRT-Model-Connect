@@ -190,32 +190,25 @@ python tools/trtmc_validate.py --gate-census > gate-census.json
 
 The deterministic JSON groups models that resolve to the same gate variant and
 shows the workload-owned rationale, configured sample count, effective integer
-threshold, and unresolved review items. `minimum_sample_count_unapproved` and
-`sample_scaling_policy_unapproved` are census findings, not runtime failures;
-they keep owner decisions visible without changing current traffic lights or CI
-behavior. A suite that has no selected model or sample limit remains visible in
-the census even though it cannot appear in a model run.
+threshold, and unresolved configuration items. A suite that has no selected
+model or sample limit remains visible in the census even though it cannot
+appear in a model run.
 
-Suites may approve their sample behavior explicitly with
-`gate_sample_policy`. `minimum_sample_count` is the smallest run that can form
-qualification evidence, while `calibration_sample_count` records the slice on
-which the configured threshold was reviewed. Every proportion or proportion-
-drop gate then chooses one scaling rule:
+When a scorer produces one pass/fail outcome per sample, configure the batch
+decision once:
 
 ```yaml
-gate_sample_policy:
-  minimum_sample_count: 20
-  calibration_sample_count: 20
-  scaling:
-    min_prediction_agreement: fixed_count
+sample_acceptance:
+  min_pass_rate: 0.98
+  min_allowed_failures: 1
 ```
 
-`fixed_count` preserves the calibrated number of allowed failures or task-
-quality drops when the sample count changes. `rate` preserves the configured
-percentage and recomputes the integer budget for the actual sample count. Runs
-below the declared minimum are reported as `insufficient_evidence` by the
-shadow analysis. These declarations remain non-blocking: they do not recolor
-the current result or enable a CI lane.
+The batch allows
+`max(floor((1 - min_pass_rate) * sample_count), min_allowed_failures)` failed
+samples. Each scorer still owns the per-sample pass/fail rule (for example, an
+IoU threshold). Missing sample outcomes invalidate the comparison; aggregate
+gates such as task-accuracy drop remain independent. The resolved counts and
+verdict are written to `report.json`; HTML only renders them.
 
 Override the configured limit for one run, or request the complete dataset
 explicitly:
