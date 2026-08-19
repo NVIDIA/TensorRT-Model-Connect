@@ -196,6 +196,27 @@ they keep owner decisions visible without changing current traffic lights or CI
 behavior. A suite that has no selected model or sample limit remains visible in
 the census even though it cannot appear in a model run.
 
+Suites may approve their sample behavior explicitly with
+`gate_sample_policy`. `minimum_sample_count` is the smallest run that can form
+qualification evidence, while `calibration_sample_count` records the slice on
+which the configured threshold was reviewed. Every proportion or proportion-
+drop gate then chooses one scaling rule:
+
+```yaml
+gate_sample_policy:
+  minimum_sample_count: 20
+  calibration_sample_count: 20
+  scaling:
+    min_prediction_agreement: fixed_count
+```
+
+`fixed_count` preserves the calibrated number of allowed failures or task-
+quality drops when the sample count changes. `rate` preserves the configured
+percentage and recomputes the integer budget for the actual sample count. Runs
+below the declared minimum are reported as `insufficient_evidence` by the
+shadow analysis. These declarations remain non-blocking: they do not recolor
+the current result or enable a CI lane.
+
 Override the configured limit for one run, or request the complete dataset
 explicitly:
 

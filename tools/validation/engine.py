@@ -11957,6 +11957,8 @@ def eval_one_model(
     configured_gates = dict(suite.get("gates", {}))
     result["configured_gates"] = configured_gates
     result["gate_metric_kinds"] = dict(suite.get("gate_metric_kinds", {}))
+    if suite.get("gate_sample_policy"):
+        result["gate_sample_policy"] = dict(suite["gate_sample_policy"])
     result["gate_policy"] = str(
         suite.get("gate_policy")
         or ("blocking" if configured_gates else "")

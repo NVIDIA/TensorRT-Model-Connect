@@ -3288,6 +3288,12 @@ def _public_accuracy_result(
                 if isinstance(raw_result.get("gate_metric_kinds"), Mapping)
                 else {}
             ),
+            sample_policy=(
+                raw_result.get("gate_sample_policy")
+                if isinstance(raw_result.get("gate_sample_policy"), Mapping)
+                and raw_result.get("gate_sample_policy")
+                else None
+            ),
         )
     public.update(
         {

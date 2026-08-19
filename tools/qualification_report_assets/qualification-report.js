@@ -184,6 +184,8 @@
     const sampleText = value.sample_count === null || value.sample_count === undefined ? "sample count unavailable" : `${value.sample_count} valid samples`;
     control.append(el("summary", "", `Gate analysis (shadow) · ${String(value.status || "unknown").toUpperCase()} · ${sampleText}`));
     const body = el("div", "evidence-body");
+    const samplePolicy = value.sample_policy || null;
+    if (samplePolicy) add(body, el("div", "gate-fact", `Minimum ${samplePolicy.minimum_sample_count ?? "—"} samples · calibrated at ${samplePolicy.calibration_sample_count ?? "—"}`));
     (value.checks || []).forEach((check) => {
       const effective = check.effective || {};
       const card = el("section", `gate-check gate-${check.verdict || "unknown"}`);
@@ -193,6 +195,7 @@
       else if (effective.kind === "proportion_drop") add(card, el("div", "gate-fact", `${effective.observed_drop_count} net samples lost · allows ${effective.allowed_drop_count}`));
       else if (effective.kind === "exact") add(card, el("div", "gate-fact", `Observed range ${actual} · ${effective.sample_count ?? value.sample_count ?? "—"} valid samples`));
       else add(card, el("div", "gate-fact", `Continuous metric · ${effective.sample_count ?? value.sample_count ?? "—"} valid samples`));
+      if (effective.scaling) add(card, el("div", "gate-fact", `Sample scaling: ${effective.scaling}${effective.calibration_sample_count ? ` · calibration ${effective.calibration_sample_count}` : ""}`));
       card.append(el("strong", "gate-verdict", String(check.verdict || "unknown").toUpperCase()));
       body.append(card);
     });

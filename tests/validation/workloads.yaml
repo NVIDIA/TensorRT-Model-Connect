@@ -84,6 +84,14 @@ suites:
     gates:
       max_accuracy_drop_from_hf: 0.01
       min_prediction_agreement: 0.98
+    gate_sample_policy:
+      # This sampled quality suite keeps its reviewed rates as the slice grows;
+      # the census always expands them into the resulting integer budgets.
+      minimum_sample_count: 20
+      calibration_sample_count: 20
+      scaling:
+        max_accuracy_drop_from_hf: rate
+        min_prediction_agreement: rate
     ci:
       eligible: false
       lane: local_only
@@ -190,6 +198,13 @@ suites:
       # divergence in the default 10-sample smoke. Exact HF argmax ties remain
       # visible in raw divergence diagnostics but are gate-equivalent.
       min_tie_adjusted_exact_match_rate: 0.9
+    gate_sample_policy:
+      # The suite contract is exactly one non-tied divergence, including when
+      # a developer runs more than the default ten samples.
+      minimum_sample_count: 10
+      calibration_sample_count: 10
+      scaling:
+        min_tie_adjusted_exact_match_rate: fixed_count
     ci:
       eligible: false
       lane: local_only
@@ -250,6 +265,13 @@ suites:
           build_generation_headroom: true
     gates: {}
     gate_policy: observation_only
+    gate_sample_policy:
+      # CodeGen activates this deterministic gate through its model profile;
+      # StarCoder2 remains observation-only.
+      minimum_sample_count: 10
+      calibration_sample_count: 10
+      scaling:
+        min_exact_match_rate: fixed_count
     ci:
       eligible: false
       lane: local_only
@@ -301,6 +323,12 @@ suites:
       # Samples are the pass/fail unit. Exact HF argmax ties remain visible in
       # raw diagnostics but are gate-equivalent.
       min_tie_adjusted_exact_match_rate: 0.9
+    gate_sample_policy:
+      # Keep the reviewed two-divergence budget fixed as the slice grows.
+      minimum_sample_count: 20
+      calibration_sample_count: 20
+      scaling:
+        min_tie_adjusted_exact_match_rate: fixed_count
     ci:
       eligible: false
       lane: local_only
@@ -506,6 +534,14 @@ suites:
     gates:
       max_accuracy_drop_from_hf: 0.02
       min_prediction_agreement: 0.95
+    gate_sample_policy:
+      # Five samples can only express a zero-failure result. Larger sampled
+      # quality runs retain the declared rates and expose the new integer budget.
+      minimum_sample_count: 5
+      calibration_sample_count: 5
+      scaling:
+        max_accuracy_drop_from_hf: rate
+        min_prediction_agreement: rate
     ci:
       eligible: false
       lane: local_only
@@ -567,6 +603,12 @@ suites:
     gates:
       max_accuracy_drop_from_hf: 0.02
       min_prediction_agreement: 0.95
+    gate_sample_policy:
+      minimum_sample_count: 5
+      calibration_sample_count: 5
+      scaling:
+        max_accuracy_drop_from_hf: rate
+        min_prediction_agreement: rate
     ci:
       eligible: false
       lane: local_only
@@ -685,6 +727,14 @@ suites:
     gates:
       max_accuracy_drop_from_hf: 0.02
       min_prediction_agreement: 0.95
+    gate_sample_policy:
+      # OCRBench is sampled task quality: retain the declared rates when a
+      # larger representative slice is selected and show its integer budget.
+      minimum_sample_count: 5
+      calibration_sample_count: 5
+      scaling:
+        max_accuracy_drop_from_hf: rate
+        min_prediction_agreement: rate
     ci:
       eligible: false
       lane: local_only
@@ -859,6 +909,14 @@ suites:
     gates:
       max_pass_rate_drop_from_hf: 0.05
       min_correctness_agreement: 0.95
+    gate_sample_policy:
+      # At three samples both nominal 5% margins mean zero failures. Keep that
+      # explicit; this does not claim statistical validation of a 95% rate.
+      minimum_sample_count: 3
+      calibration_sample_count: 3
+      scaling:
+        max_pass_rate_drop_from_hf: fixed_count
+        min_correctness_agreement: fixed_count
     ci:
       eligible: false
       lane: local_only

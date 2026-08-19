@@ -428,6 +428,50 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
     ]
 
 
+def test_gate_census_accepts_an_explicit_sample_policy() -> None:
+    catalog = {
+        "models": {"model-a": {"workloads": ["quality"]}},
+        "sample_limits": {"quality": 20},
+    }
+    suites = {
+        "quality": {
+            "id": "quality",
+            "description": "Sampled quality parity.",
+            "gates": {"min_prediction_agreement": 0.98},
+            "gate_sample_policy": {
+                "minimum_sample_count": 20,
+                "calibration_sample_count": 20,
+                "scaling": {"min_prediction_agreement": "fixed_count"},
+            },
+        }
+    }
+    task_models = {
+        "model-a": {
+            "name": "model-a",
+            "family": "fixture",
+            "task_strategy": "fixture",
+            "runtime_strategy": "fixture",
+            "user_contract": "fixture",
+            "skip": "",
+        }
+    }
+
+    census = trtmc_validate.build_gate_census(
+        catalog=catalog,
+        suites=suites,
+        task_models=task_models,
+    )
+
+    assert census["summary"]["review_required_suites"] == 0
+    quality = census["suites"][0]
+    assert quality["review"] == []
+    assert quality["variants"][0]["policy"]["sample_policy"] == {
+        "minimum_sample_count": 20,
+        "calibration_sample_count": 20,
+        "scaling": {"min_prediction_agreement": "fixed_count"},
+    }
+
+
 def test_gate_census_cli_prints_machine_readable_json(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         trtmc_validate,
@@ -1218,6 +1262,11 @@ def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_p
             "raw_result": {
                 "configured_gates": {"min_prediction_agreement": 0.98},
                 "gate_policy": "blocking",
+                "gate_sample_policy": {
+                    "minimum_sample_count": 20,
+                    "calibration_sample_count": 20,
+                    "scaling": {"min_prediction_agreement": "rate"},
+                },
             },
             "reproduce": {
                 "dataset": {
@@ -1248,6 +1297,7 @@ def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_p
                 "verdict": "fail",
                 "effective": {
                     "kind": "proportion",
+                    "scaling": "rate",
                     "required_passes": 20,
                     "allowed_failures": 0,
                     "observed_passes": 19,
@@ -1257,6 +1307,11 @@ def test_accuracy_report_exposes_shadow_gate_evaluation_without_recoloring(tmp_p
             }
         ],
         "issues": [],
+        "sample_policy": {
+            "minimum_sample_count": 20,
+            "calibration_sample_count": 20,
+            "scaling": {"min_prediction_agreement": "rate"},
+        },
     }
 
 

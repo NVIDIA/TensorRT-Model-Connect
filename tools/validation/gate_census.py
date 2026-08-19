@@ -30,6 +30,11 @@ def _variant(
             sample_count=sample_count,
             policy_mode=str(suite.get("gate_policy", "blocking") or "blocking"),
             metric_kinds={str(name): str(kind) for name, kind in metric_kinds.items()},
+            sample_policy=(
+                suite.get("gate_sample_policy")
+                if isinstance(suite.get("gate_sample_policy"), Mapping)
+                else None
+            ),
         ),
     }
 
@@ -47,7 +52,16 @@ def _review(
         review.append({"code": "sample_limit_unconfigured"})
     if not any(variant.get("policy", {}).get("policy_mode") == "blocking" for variant in variants):
         return review
-    review.append({"code": "minimum_sample_count_unapproved"})
+    blocking_policies = [
+        variant.get("policy", {})
+        for variant in variants
+        if variant.get("policy", {}).get("policy_mode") == "blocking"
+    ]
+    if any(
+        policy.get("sample_policy", {}).get("minimum_sample_count") is None
+        for policy in blocking_policies
+    ):
+        review.append({"code": "minimum_sample_count_unapproved"})
     scaling_gates = sorted(
         {
             str(gate.get("gate"))
@@ -56,11 +70,23 @@ def _review(
             if gate.get("effective", {}).get("kind") in {"proportion", "proportion_drop"}
         }
     )
-    if scaling_gates:
+    unapproved_scaling_gates = [
+        gate
+        for gate in scaling_gates
+        if any(
+            gate not in policy.get("sample_policy", {}).get("scaling", {})
+            for policy in blocking_policies
+            if any(
+                check.get("gate") == gate
+                for check in policy.get("gates", [])
+            )
+        )
+    ]
+    if unapproved_scaling_gates:
         review.append(
             {
                 "code": "sample_scaling_policy_unapproved",
-                "gates": scaling_gates,
+                "gates": unapproved_scaling_gates,
             }
         )
     return review
@@ -79,6 +105,7 @@ def _signature(suite: Mapping[str, Any]) -> str:
             "gates": suite.get("gates", {}),
             "gate_policy": suite.get("gate_policy", "blocking"),
             "gate_metric_kinds": suite.get("gate_metric_kinds", {}),
+            "gate_sample_policy": suite.get("gate_sample_policy", {}),
         },
         sort_keys=True,
         separators=(",", ":"),
