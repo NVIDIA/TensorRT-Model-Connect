@@ -278,7 +278,11 @@ def _claim_build(
         command = json.loads(raw_command) if raw_command else []
     except json.JSONDecodeError:
         command = [raw_command]
-    build_timing_path = str(arguments.get("build_timing_path") or "")
+    raw_build_timing_path = arguments.get("build_timing_path")
+    opaque_options = arguments.get("options")
+    if not raw_build_timing_path and isinstance(opaque_options, dict):
+        raw_build_timing_path = opaque_options.get("build_timing_path")
+    build_timing_path = str(raw_build_timing_path or "")
     source_revision = os.environ.get(_REVISION_ENV, "")
     with _locked_claim(claim_path):
         if recovery is not None:

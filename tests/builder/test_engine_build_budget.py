@@ -150,6 +150,26 @@ def test_guard_allows_one_full_bundle_build_and_rejects_the_second(
     assert record["build_timing_path"] == str(timing_path)
 
 
+def test_guard_reads_build_timing_from_opaque_model_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    guard_dir = _enable_guard(monkeypatch, tmp_path)
+    bundle_path = tmp_path / "unit.bundle"
+    timing_path = tmp_path / "build_timing.json"
+
+    @enforce_single_full_bundle_build
+    def build(model_id_or_path: str, output_path: str, **options: object) -> None:
+        del model_id_or_path
+        Path(output_path).write_bytes(b"bundle")
+        Path(str(options["build_timing_path"])).write_text("{}\n", encoding="utf-8")
+
+    build("unit/model", str(bundle_path), build_timing_path=str(timing_path))
+
+    record = json.loads(next(guard_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert record["build_timing_path"] == str(timing_path)
+
+
 def test_guard_rejects_concurrent_duplicate_builds_atomically(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
