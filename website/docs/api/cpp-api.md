@@ -247,6 +247,7 @@ cfg.temperature = 0.7f;
 cfg.top_k = 50;
 cfg.top_p = 0.9f;
 cfg.min_p = 0.0f;
+cfg.repetition_penalty = 1.05f;
 cfg.seed = 1234;
 cfg.guidance_scale = 3.5f;
 cfg.num_steps = 28;
@@ -259,7 +260,7 @@ The complete field inventory is:
 | Fields | Contract |
 | --- | --- |
 | `max_new_tokens`, `num_samples` | Output limit and non-autoregressive sample count. |
-| `temperature`, `top_k`, `top_p`, `min_p`, `seed`, `eos_token_id` | Token sampling and termination controls. |
+| `temperature`, `top_k`, `top_p`, `min_p`, `repetition_penalty`, `seed`, `eos_token_id` | Token sampling and termination controls. A repetition penalty of `1.0` is disabled; support is model-runtime specific. |
 | `source_language_token_id`, `forced_bos_token_id` | Request-level M2M-100/NLLB language framing. Both default to `-1` (disabled); enabled values must be non-negative. The source token is appended after source EOS, and forced BOS becomes the decoder's first token. |
 | `guidance_scale`, `cfg_scale`, `num_steps`, `sde_gamma` | Diffusion, flow-matching, and conditional-guidance controls; negative sentinel values select model defaults where supported. |
 | `initial_latents`, `condition_latents`, `condition_mask`, `sampling_steps`, `sde_noises` | Optional packed raw-state inputs. Shapes remain model-owned and must match the selected bundle contract. |

@@ -389,9 +389,10 @@ std::string json_escape(const std::string& text) {
     return out.str();
 }
 
-void write_text_sample_jsonl(std::ostream& out, int32_t id, const trtmc::TextResult& result) {
-    out << "{\"id\":" << id << ",\"generated\":\"" << json_escape(result.text)
-        << "\",\"token_ids\":[";
+void write_text_sample_jsonl(std::ostream& out, int32_t id, const std::string& prompt,
+                             const trtmc::TextResult& result) {
+    out << "{\"id\":" << id << ",\"prompt\":\"" << json_escape(prompt) << "\",\"generated\":\""
+        << json_escape(result.text) << "\",\"token_ids\":[";
     for (std::size_t i = 0; i < result.token_ids.size(); ++i) {
         if (i > 0)
             out << ',';
@@ -437,6 +438,7 @@ int cmd_run(const CliArgs& args) {
     cfg.temperature = args.greedy ? 0.0F : args.temperature;
     cfg.top_p = args.top_p;
     cfg.min_p = args.min_p;
+    cfg.repetition_penalty = args.repetition_penalty;
     cfg.top_k = args.top_k;
     cfg.seed = args.seed;
     if (!args.lora_adapter_path.empty()) {
@@ -514,6 +516,10 @@ int cmd_run(const CliArgs& args) {
     }
 
     if (args.benchmark > 0) {
+        if (!args.prompts_file.empty()) {
+            std::cerr << "Error: --benchmark requires one --prompt, not --prompts-file\n";
+            return EXIT_FAILURE;
+        }
         // Benchmark mode: warmup, then N timed iterations.
         const int warmup_n = args.warmup > 0 ? args.warmup : 1;
         const int bench_n = args.benchmark;
@@ -689,8 +695,21 @@ int cmd_run(const CliArgs& args) {
         print_text_timing(result);
         std::cout << result.text << '\n';
     } else {
-        const int samples = std::max(1, cfg.num_samples);
-        if (!cfg.initial_latents.empty() && samples > 1) {
+        std::vector<std::string> text_prompts;
+        if (!args.prompts_file.empty()) {
+            std::string error;
+            text_prompts = trtmc::cli::read_prompts_file(args.prompts_file, error);
+            if (text_prompts.empty()) {
+                std::cerr << "Error: " << error << '\n';
+                return EXIT_FAILURE;
+            }
+        } else {
+            text_prompts.push_back(prompt);
+        }
+
+        const int samples_per_prompt = std::max(1, cfg.num_samples);
+        const int total_samples = static_cast<int>(text_prompts.size()) * samples_per_prompt;
+        if (!cfg.initial_latents.empty() && total_samples > 1) {
             std::cerr << "Error: --initial-latents-raw can only be used with one sample\n";
             return EXIT_FAILURE;
         }
@@ -708,24 +727,27 @@ int cmd_run(const CliArgs& args) {
                 return EXIT_FAILURE;
             }
             jsonl_out = &jsonl_file;
-        } else if (samples > 1) {
+        } else if (trtmc::cli::text_stdout_requires_jsonl(args, total_samples)) {
             jsonl_out = &std::cout;
         }
 
-        for (int i = 0; i < samples; ++i) {
-            trtmc::GenerateConfig sample_cfg = cfg;
-            if (cfg.seed >= 0)
-                sample_cfg.seed = cfg.seed + i;
-            auto result = pipeline->generate(prompt, sample_cfg);
-            print_text_timing(result);
-            if (jsonl_out) {
-                write_text_sample_jsonl(*jsonl_out, i, result);
-            } else {
-                std::cout << result.text << '\n';
+        int sample_id = 0;
+        for (const auto& text_prompt : text_prompts) {
+            for (int i = 0; i < samples_per_prompt; ++i, ++sample_id) {
+                trtmc::GenerateConfig sample_cfg = cfg;
+                if (cfg.seed >= 0)
+                    sample_cfg.seed = cfg.seed + sample_id;
+                auto result = pipeline->generate(text_prompt, sample_cfg);
+                print_text_timing(result);
+                if (jsonl_out) {
+                    write_text_sample_jsonl(*jsonl_out, sample_id, text_prompt, result);
+                } else {
+                    std::cout << result.text << '\n';
+                }
             }
         }
         if (jsonl_file.is_open())
-            std::cout << "Saved " << args.output_dir << " (" << samples << " samples)\n";
+            std::cout << "Saved " << args.output_dir << " (" << total_samples << " samples)\n";
     }
     return EXIT_SUCCESS;
 }

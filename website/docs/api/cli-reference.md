@@ -198,7 +198,7 @@ These shared options have route-specific contracts:
   optimized-runtime route rejects runtime `--config` and `--set` altogether.
 
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`,
-`--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and
+`--top-k`, `--top-p`, `--min-p`, `--repetition-penalty`, `--seed`, `--chat-template`, and
 `--no-thinking`. For M2M-100/NLLB requests, `--source-language-token-id`
 supplies the non-negative language token after the source EOS and
 `--forced-bos-token-id` supplies the non-negative first decoder token. Omitting
@@ -216,7 +216,7 @@ an inventory, not a claim that every option is accepted by every command.
 | Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
 | Output selection | `--output`, `--output-json`, `--audio-out`, `--list-engines` |
 | Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kernel-bindings`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
-| Text generation | `--max-new-tokens`, `--source-language-token-id`, `--forced-bos-token-id`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
+| Text generation | `--prompt` or `--prompts-file`, `--max-new-tokens`, `--source-language-token-id`, `--forced-bos-token-id`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--repetition-penalty`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
 | Diffusion and raw-state generation | `--num-steps`, `--num-inference-steps`, `--guidance-scale`, `--cfg-scale`, `--sde-gamma`, `--initial-latents-raw`, `--condition-latents-raw`, `--condition-mask-raw`, `--sampling-steps-raw`, `--sde-noise-raw`, `--negative-prompt`, `--height`, `--width`, `--num-images` |
 | Dynamic adapters | `--lora-adapter`, `--lora-adapter-id` |
 | Transcription | `--beam-size`, `--language`, `--source-language`, `--target-language`, `--task`, `--punctuation`, `--no-punctuation`, `--timestamps`, `--no-timestamps`, `--max-input-seconds`, `--segment-length-seconds`, `--stream`, `--chunk-ms`, `--att-context-size`, `--pad-and-drop-preencoded` |

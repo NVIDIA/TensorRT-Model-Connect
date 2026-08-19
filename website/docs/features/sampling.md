@@ -2,8 +2,8 @@
 
 Restricts token sampling to the smallest vocabulary prefix whose cumulative
 probability mass is >= `top_p`, then renormalizes and samples from that nucleus.
-Combined with temperature scaling, optional top-k pre-filtering, and optional
-min-p filtering.
+Combined with temperature scaling, optional top-k pre-filtering, optional
+min-p filtering, and model-owned repetition-penalty support.
 
 The CLI example uses the Learning-path selector:
 
@@ -33,6 +33,12 @@ distribution on host before invoking its CUDA multinomial helper.
 6. Renormalize filtered probabilities
 7. Sample using xorshift64 RNG seeded by `seed`
 
+Runtimes that support `repetition_penalty` apply it before candidate sorting:
+for every token already present in the request history, a positive logit is
+divided by the penalty and a negative logit is multiplied by it. `1.0`
+disables the processor. The LFM2 runtime implements this Hugging Face
+convention.
+
 Falls back to argmax (greedy) when all sampling parameters are default, when
 `temperature <= 0`, or when `top_p <= 0`. Values above `top_p=1.0` are clamped
 to disabled top-p behavior.
@@ -42,13 +48,15 @@ to disabled top-p behavior.
 ### CLI
 ```bash
 $TRTMC run bundle.bundle --prompt "Once upon a time" \
-  --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 --seed 42
+  --temperature 0.7 --top-p 0.9 --min-p 0.05 --top-k 50 \
+  --repetition-penalty 1.05 --seed 42
 ```
 
 ### Defaults
 - `temperature`: 1.0 (no scaling)
 - `top_p`: 1.0 (disabled -- use all top_k tokens)
 - `min_p`: 0.0 (disabled)
+- `repetition_penalty`: 1.0 (disabled)
 - `top_k`: 1 (greedy argmax unless `top_p` is active)
 - `seed`: -1 (use deterministic default seed 42)
 

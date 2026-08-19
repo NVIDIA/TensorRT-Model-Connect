@@ -101,6 +101,10 @@ void test_run_parses_common_flags() {
                        "0.5",
                        "--top-p",
                        "0.9",
+                       "--min-p",
+                       "0.15",
+                       "--repetition-penalty",
+                       "1.05",
                        "--top-k",
                        "4",
                        "--seed",
@@ -134,6 +138,9 @@ void test_run_parses_common_flags() {
     check(args.block_length == 32, "run block length");
     check(args.conf_threshold > 0.89F && args.conf_threshold < 0.91F, "run threshold");
     check(args.temperature > 0.49F && args.temperature < 0.51F, "run temperature");
+    check(args.min_p > 0.14F && args.min_p < 0.16F, "run min_p");
+    check(args.repetition_penalty > 1.04F && args.repetition_penalty < 1.06F,
+          "run repetition penalty");
     check(args.top_k == 4, "run top_k");
     check(args.seed == 123, "run seed");
     check(args.greedy, "run greedy");
@@ -398,16 +405,30 @@ void test_invalid_generation_sampling_values_fail() {
     check_message_contains(out_of_range_min_p.error_message,
                            "--min-p expects a finite number in [0, 1]",
                            "out-of-range min-p message");
+
+    auto zero_repetition_penalty =
+        parse({"trtmc", "run", "bundle.bundle", "--prompt", "hello", "--repetition-penalty", "0"});
+    check(zero_repetition_penalty.parse_error, "zero repetition penalty parse error");
+    check_message_contains(zero_repetition_penalty.error_message,
+                           "--repetition-penalty expects a finite number > 0",
+                           "zero repetition penalty message");
+
+    auto nonfinite_repetition_penalty = parse(
+        {"trtmc", "run", "bundle.bundle", "--prompt", "hello", "--repetition-penalty", "nan"});
+    check(nonfinite_repetition_penalty.parse_error, "non-finite repetition penalty parse error");
 }
 
 void test_generation_sampling_boundaries_parse() {
     auto args = parse({"trtmc", "run", "bundle.bundle", "--prompt", "hello", "--max-new-tokens",
-                       "1", "--temperature", "0", "--top-p", "0", "--min-p", "1", "--top-k", "0"});
+                       "1", "--temperature", "0", "--top-p", "0", "--min-p", "1",
+                       "--repetition-penalty", "0.1", "--top-k", "0"});
     check(!args.parse_error, "generation sampling boundary values parse");
     check(args.max_new_tokens == 1, "boundary max tokens");
     check(args.temperature == 0.0F, "boundary temperature");
     check(args.top_p == 0.0F, "boundary top-p");
     check(args.min_p == 1.0F, "boundary min-p");
+    check(args.repetition_penalty > 0.09F && args.repetition_penalty < 0.11F,
+          "boundary repetition penalty");
     check(args.top_k == 0, "boundary top-k");
 }
 
@@ -447,6 +468,22 @@ void test_prompts_file_is_run_input_source() {
     auto args = parse({"trtmc", "run", "bundle.bundle", "--prompts-file", "prompts.txt"});
     check(!args.parse_error, "prompts-file run parses cleanly");
     check(trtmc::cli::has_run_input_source(args), "prompts-file satisfies run input guard");
+    check(trtmc::cli::text_stdout_requires_jsonl(args, 1),
+          "one-row prompts-file keeps stable JSONL output");
+
+    auto prompt = parse({"trtmc", "run", "bundle.bundle", "--prompt", "hello"});
+    check(!trtmc::cli::text_stdout_requires_jsonl(prompt, 1),
+          "one scalar prompt keeps plain-text output");
+    check(trtmc::cli::text_stdout_requires_jsonl(prompt, 2),
+          "multiple scalar samples use JSONL output");
+}
+
+void test_prompts_file_rejects_single_image_input() {
+    auto args = parse(
+        {"trtmc", "run", "bundle.bundle", "--prompts-file", "prompts.txt", "--image", "image.png"});
+    check(args.parse_error, "prompts-file plus image parse error");
+    check(args.error_message == "--prompts-file cannot be combined with --image",
+          "prompts-file plus image error message");
 }
 
 void test_initial_latents_are_run_input_source() {
@@ -482,6 +519,7 @@ int main() {
     test_seed_csv_populates_seed_list();
     test_prompt_and_prompts_file_mutually_exclusive();
     test_prompts_file_is_run_input_source();
+    test_prompts_file_rejects_single_image_input();
     test_initial_latents_are_run_input_source();
 
     if (failures) {

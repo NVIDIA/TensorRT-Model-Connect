@@ -188,8 +188,10 @@ void print_usage() {
         << "Usage:\n"
            "  trtmc build           <hf-model-or-dir> -o <bundle.bundle> [builder args...]\n"
            "  trtmc graph           <inspect|list|recipes|select> [args...]\n"
-           "  trtmc run             <bundle.bundle> --prompt \"text\" [--image PATH] "
+           "  trtmc run             <bundle.bundle> "
+           "(--prompt \"text\" [--image PATH] | --prompts-file PATH) "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
+           "[--repetition-penalty F] "
            "[--source-language-token-id N] [--forced-bos-token-id N] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
            "[--lora-adapter DIR] [--lora-adapter-id ID] "
@@ -428,6 +430,16 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.min_p = *value;
+            continue;
+        }
+        if (arg == "--repetition-penalty" && need_value(arg)) {
+            auto value = parse_float_value(arg, "a finite number > 0");
+            if (!value || *value <= 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number > 0";
+                return args;
+            }
+            args.repetition_penalty = *value;
             continue;
         }
         if (arg == "--top-k" && need_value(arg)) {
@@ -821,6 +833,10 @@ CliArgs parse_args(int argc, char** argv) {
         args.parse_error = true;
         args.error_message =
             "run requires bundle + --prompt, --prompts-file, or --initial-latents-raw";
+    }
+    if (args.command == "run" && !args.prompts_file.empty() && !args.image_path.empty()) {
+        args.parse_error = true;
+        args.error_message = "--prompts-file cannot be combined with --image";
     }
 
     return args;

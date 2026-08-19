@@ -52,6 +52,7 @@ struct CliArgs {
     float temperature{1.0F};
     float top_p{1.0F};
     float min_p{0.0F};
+    float repetition_penalty{1.0F};
     int top_k{1};
     int seed{-1};
     int num_steps{-1};
@@ -112,6 +113,10 @@ struct CliArgs {
 
 inline bool has_run_input_source(const CliArgs& args) {
     return args.prompt_provided || !args.prompts_file.empty() || !args.initial_latents_raw.empty();
+}
+
+inline bool text_stdout_requires_jsonl(const CliArgs& args, int total_samples) {
+    return !args.prompts_file.empty() || total_samples > 1;
 }
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);

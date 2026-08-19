@@ -1,0 +1,10 @@
+{
+  "threshold_overrides": {
+    "logit_cosine_p5": 0.995,
+    "logit_rel_l2_p95": 0.05,
+    "normalized_text_edit_distance": 0.0,
+    "stable_top1_match_rate": 1.0,
+    "token_agreement_rate": 1.0,
+    "unstable_topk_hit_rate": 1.0
+  }
+}

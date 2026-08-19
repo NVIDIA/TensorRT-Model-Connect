@@ -228,6 +228,9 @@ struct GenerateConfig {
     // Empty selects the base model. A non-empty ID selects a LoRA adapter
     // registered with a LoRA-capable runtime before generation.
     std::string lora_adapter_id;
+    // Appended to preserve the offsets of every pre-existing field across the
+    // dynamically loaded model-plugin ABI. 1.0 disables the processor.
+    float repetition_penalty{1.0f};
 };
 
 class ITranscriptionStream {
