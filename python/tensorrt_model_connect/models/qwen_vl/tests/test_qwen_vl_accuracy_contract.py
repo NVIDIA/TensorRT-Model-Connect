@@ -8,7 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tools.validation import engine as validation_engine
+from tools.validation import catalog as validation_catalog
+from tools.validation.gate_policy import evaluate_sample_acceptance
 
 
 def test_qwen25_validation_uses_aligned_fp32_precision() -> None:
@@ -21,43 +22,38 @@ def test_qwen25_validation_uses_aligned_fp32_precision() -> None:
     } == {"fp32"}
 
 
-def test_qwen_vl_rejects_observed_point_eight_prediction_agreement() -> None:
-    suite = validation_engine.suite_by_id(
-        validation_engine.load_suites(),
+def test_qwen_vl_rejects_point_eight_sample_acceptance() -> None:
+    suite = validation_catalog.suite_by_id(
+        validation_catalog.load_suites(
+            _owners={"qwen_vl"},
+            _require_all_suites=False,
+        ),
         "vlm_mmmu_pro_vision_fixed_mcq",
     )
-    gates = suite["gates"]
-    assert gates["min_prediction_agreement"] == 0.95
-
-    observed_summary = {
-        "hf": {"overall_accuracy": 0.0},
-        "bundle": {"overall_accuracy": 0.0},
-        "prediction_agreement_rate": 0.8,
-        "correctness_agreement_rate": 1.0,
+    assert suite["gates"] == {"max_accuracy_drop_from_hf": 0.02}
+    assert suite["sample_acceptance"] == {
+        "min_pass_rate": 0.95,
+        "min_allowed_failures": 0,
     }
-    observed_result = validation_engine.prediction_agreement_gate_result(
-        observed_summary,
-        gates,
+    sample_count = int(suite["sample_limit"])
+    assert sample_count == 5
+
+    observed = evaluate_sample_acceptance(
+        policy=suite["sample_acceptance"],
+        sample_count=sample_count,
+        passed_count=4,
+        expected_count=sample_count,
+    )
+    boundary = evaluate_sample_acceptance(
+        policy=suite["sample_acceptance"],
+        sample_count=sample_count,
+        passed_count=5,
+        expected_count=sample_count,
     )
 
-    assert observed_result["status"] == "failed"
-    assert observed_result["error_type"] == "BenchmarkGateError"
-    assert observed_result["gate_failures"] == [
-        {
-            "gate": "min_prediction_agreement",
-            "metric": "prediction_agreement_rate",
-            "actual": 0.8,
-            "required": 0.95,
-        }
-    ]
-
-    boundary_summary = {
-        **observed_summary,
-        "prediction_agreement_rate": 0.95,
-    }
-    boundary_result = validation_engine.prediction_agreement_gate_result(
-        boundary_summary,
-        gates,
-    )
-    assert boundary_result["status"] == "passed"
-    assert boundary_result["gate_failures"] == []
+    assert observed["passed_count"] / observed["sample_count"] == 0.8
+    assert observed["allowed_failures"] == 0
+    assert observed["verdict"] == "fail"
+    assert boundary["passed_count"] / boundary["sample_count"] == 1.0
+    assert boundary["allowed_failures"] == 0
+    assert boundary["verdict"] == "pass"

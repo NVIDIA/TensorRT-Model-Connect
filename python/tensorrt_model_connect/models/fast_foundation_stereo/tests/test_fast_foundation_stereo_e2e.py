@@ -38,7 +38,10 @@ def test_model_e2e(case_name: str, request) -> None:
 def test_validation_contract_uses_model_plugin_parity() -> None:
     suite = next(
         item
-        for item in validation_catalog.load_suites()
+        for item in validation_catalog.load_suites(
+            _owners={"fast_foundation_stereo"},
+            _require_all_suites=False,
+        )
         if item["id"] == "fast_foundation_stereo_synthetic_parity"
     )
     requests = json.loads(

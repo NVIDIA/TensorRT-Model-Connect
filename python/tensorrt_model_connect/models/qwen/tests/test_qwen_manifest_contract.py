@@ -197,7 +197,10 @@ def test_fp8_and_topp_use_deterministic_mmlu_validation_contract() -> None:
         for name in ("qwen3-0.6b-fp8", "qwen3-0.6b-topp")
     }
     suite = validation_catalog.suite_by_id(
-        validation_catalog.load_suites(),
+        validation_catalog.load_suites(
+            _owners={"qwen"},
+            _require_all_suites=False,
+        ),
         "mmlu_five_shot_mcq",
     )
 
