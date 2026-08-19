@@ -11,6 +11,7 @@ import re
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+PYTHON_ROOT = REPO_ROOT / "python"
 FAMILIES_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models"
 E2E_MODELS_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models"
 ENGINE_BUILDER = REPO_ROOT / "python/tensorrt_model_connect/engine_builder.py"
@@ -49,6 +50,34 @@ def _module_bindings(path: Path) -> set[str]:
     return bindings
 
 
+def _imported_module_path(importer: Path, node: ast.ImportFrom) -> Path:
+    module_parts = tuple((node.module or "").split(".")) if node.module else ()
+    if node.level:
+        importer_parts = importer.relative_to(PYTHON_ROOT).with_suffix("").parts
+        package_parts = importer_parts[:-1]
+        parent_count = node.level - 1
+        if parent_count > len(package_parts):
+            return Path()
+        module_parts = package_parts[: len(package_parts) - parent_count] + module_parts
+    module = PYTHON_ROOT.joinpath(*module_parts)
+    source = module.with_suffix(".py")
+    return source if source.is_file() else module / "__init__.py"
+
+
+def _class_methods(path: Path, class_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    classes = [
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name
+    ]
+    if len(classes) != 1:
+        return set()
+    return {
+        node.name
+        for node in classes[0].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def test_every_family_has_one_required_model_entrypoint() -> None:
     families = _family_dirs()
     assert families
@@ -60,6 +89,47 @@ def test_every_family_has_one_required_model_entrypoint() -> None:
         assert {"matches", "build"} <= functions, (
             f"{family.name}/model.py must define matches() and build()"
         )
+
+
+def test_model_config_from_dir_bindings_are_concrete() -> None:
+    violations: list[str] = []
+    for model in sorted(FAMILIES_ROOT.glob("*/model.py")):
+        tree = ast.parse(model.read_text(encoding="utf-8"), filename=str(model))
+        calls_from_dir = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "from_dir"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "ModelConfig"
+            for node in ast.walk(tree)
+        )
+        if not calls_from_dir:
+            continue
+
+        bindings: list[tuple[Path, str]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "ModelConfig":
+                bindings.append((model, node.name))
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if (alias.asname or alias.name) == "ModelConfig":
+                        bindings.append((_imported_module_path(model, node), alias.name))
+
+        if len(bindings) != 1:
+            violations.append(
+                f"{model.relative_to(REPO_ROOT)}: expected one ModelConfig binding, "
+                f"found {len(bindings)}"
+            )
+            continue
+        source, class_name = bindings[0]
+        if not source.is_file() or "from_dir" not in _class_methods(source, class_name):
+            violations.append(
+                f"{model.relative_to(REPO_ROOT)}: ModelConfig binding "
+                f"{source.relative_to(REPO_ROOT) if source.is_file() else source} "
+                "does not define from_dir"
+            )
+
+    assert not violations, "\n".join(violations)
 
 
 def test_model_owners_have_no_builder_forwarding_shims() -> None:

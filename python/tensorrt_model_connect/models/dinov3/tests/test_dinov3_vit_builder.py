@@ -164,6 +164,41 @@ def _write_tiny_timm_vit(root: Path) -> tuple[dict, dict[str, np.ndarray]]:
     return config, tensors
 
 
+def test_model_owned_build_parses_the_concrete_model_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "dinov3_vit",
+                "architectures": ["DINOv3ViTModel"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class ReachedWeightLoading(Exception):
+        pass
+
+    def stop_after_config_parse(
+        model_dir: str,
+        config: ModelConfig,
+        *,
+        precision: str,
+    ) -> None:
+        assert model_dir == str(tmp_path)
+        assert type(config) is ModelConfig
+        assert config.model_type == "dinov3_vit"
+        assert precision == "fp32"
+        raise ReachedWeightLoading
+
+    monkeypatch.setattr(model, "load_weights", stop_after_config_parse)
+
+    with pytest.raises(ReachedWeightLoading):
+        model.build(str(tmp_path), str(tmp_path / "model.bundle"))
+
+
 @pytest.mark.parametrize("layer_prefix", ["layer", "model.layer"])
 @pytest.mark.parametrize("use_gated_mlp", [False, True])
 def test_vit_loader_accepts_hf_namespaces_and_mlp_variants(

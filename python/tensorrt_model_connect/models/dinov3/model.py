@@ -16,11 +16,11 @@ import time
 from pathlib import Path
 
 import sys
-from typing import Protocol
 
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
+from tensorrt_model_connect.config import ModelConfig
 
 from . import graph_ops
 from .checkpoint_mapper import (
@@ -61,22 +61,6 @@ _TIMM_DINOV3_VIT_CONFIG = {
     "mlp_bias": True,
     "use_gated_mlp": False,
 }
-
-
-class ModelConfig(Protocol):
-    """Structural subset supplied by the repository's model-config loader."""
-
-    model_type: str
-    architectures: list[str]
-    raw: dict
-    hidden_size: int
-    intermediate_size: int
-    num_hidden_layers: int
-    num_attention_heads: int
-    num_key_value_heads: int
-    rms_norm_eps: float
-    rope_theta: float
-    hidden_act: str
 
 
 def _is_timm_dinov3_vit_config(config: ModelConfig) -> bool:
