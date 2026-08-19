@@ -1722,7 +1722,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 {
                     "tools/family_source_isolation.py",
                     "tools/family_specialization.py",
-                    "tools/prune_family_helpers.py",
                 }
             ),
             resolver=_match_result(

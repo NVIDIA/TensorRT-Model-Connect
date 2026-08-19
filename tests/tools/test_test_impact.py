@@ -1899,7 +1899,6 @@ class TestUnitTiers:
         for path in (
             "tools/family_source_isolation.py",
             "tools/family_specialization.py",
-            "tools/prune_family_helpers.py",
         ):
             match = test_impact.classify_file(path, imap)
             assert match.rule == "family_ownership_tool"

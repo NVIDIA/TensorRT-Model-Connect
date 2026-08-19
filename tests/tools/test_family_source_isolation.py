@@ -10,7 +10,6 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from tools import family_source_isolation as isolation
-from tools import prune_family_helpers
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -164,53 +163,3 @@ def test_family_imports_resolve_without_sibling_or_unapproved_shared_modules() -
                     )
 
     assert not violations, "\n".join(violations)
-
-
-def test_helper_pruner_keeps_transitive_and_quantization_dependencies(
-    tmp_path: Path,
-) -> None:
-    family_dir = tmp_path / "demo"
-    family_dir.mkdir(parents=True)
-    (family_dir / "MODEL.toml").write_text('id = "demo"\n', encoding="utf-8")
-    graph_ops = family_dir / "model.py"
-    graph_ops.write_text(
-        "def add_constant():\n"
-        "    return 1\n\n"
-        "def add_matmul_rhs_constant():\n"
-        "    return 2\n\n"
-        "def _helper():\n"
-        "    return 3\n\n"
-        "def used():\n"
-        "    return _helper()\n\n"
-        "def unused():\n"
-        "    return 4\n",
-        encoding="utf-8",
-    )
-    (family_dir / "builder.py").write_text(
-        "from . import model as graph_ops\n\ndef build():\n    return graph_ops.used()\n",
-        encoding="utf-8",
-    )
-
-    result = prune_family_helpers.prune_file(graph_ops, family_dir, write=True)
-
-    assert result.removed_names == ("unused",)
-    updated = graph_ops.read_text(encoding="utf-8")
-    assert "def add_constant" in updated
-    assert "def add_matmul_rhs_constant" in updated
-    assert "def _helper" in updated
-    assert "def used" in updated
-    assert "def unused" not in updated
-
-
-def test_helper_pruner_removes_exact_audited_names(tmp_path: Path) -> None:
-    module = tmp_path / "model.py"
-    module.write_text(
-        "def keep():\n    return 1\n\ndef remove():\n    return 2\n",
-        encoding="utf-8",
-    )
-
-    result = prune_family_helpers.prune_named_definitions(module, {"remove"}, write=True)
-
-    assert result.removed_names == ("remove",)
-    assert "def keep" in module.read_text(encoding="utf-8")
-    assert "def remove" not in module.read_text(encoding="utf-8")
