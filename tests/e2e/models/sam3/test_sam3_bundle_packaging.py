@@ -11,8 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
-from tensorrt_model_connect.engine_builder import build_bundle
-from tensorrt_model_connect.families.sam3.plugin import plugin as production_sam3_plugin
+from tensorrt_model_connect.families.sam3 import model as sam3_model
 
 
 _EXPECTED_SAM3_SECTIONS = {
@@ -98,68 +97,55 @@ def _read_serialized_bundle(path: Path) -> tuple[dict, dict[str, bytes]]:
     return header, sections
 
 
-def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
+def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path, monkeypatch):
     """SAM3 prompted segmentation needs tokenizer provisioning and all TRT plans."""
     model_dir = _make_sam3_model_dir(tmp_path)
     output_path = tmp_path / "sam3.bundle"
 
-    class _Sam3Plugin:
-        name = "sam3"
-        runtime_strategy = "sam3_prompted_segmentation"
-        requires_tokenizer = True
-
-        def load_weights(self, model_dir, config):
-            return {}
-
-        def build_engine(self, config, weights, max_cache_length, *, verbose=False):
-            return b"SAM3_TEXT_PLAN"
-
-        def build_vision_engine(self, model_dir, config, weights, *, verbose=False):
-            return b"SAM3_VISION_PLAN"
-
-        def build_extra_engines(self, config, weights, max_cache_length, *, verbose=False):
-            return {
-                "sam3_core_engine_plan": b"SAM3_CORE_PLAN",
-                "sam3_tracker_init_engine_plan": b"SAM3_TRACKER_INIT_PLAN",
-                "sam3_tracker_step_engine_plan": b"SAM3_TRACKER_STEP_PLAN",
-                "sam3_tracker_step_batch2_engine_plan": b"SAM3_TRACKER_STEP_BATCH2_PLAN",
-                "sam3_tracker_memory_engine_plan": b"SAM3_TRACKER_MEMORY_PLAN",
-                "sam3_tracker_memory_batch2_engine_plan": b"SAM3_TRACKER_MEMORY_BATCH2_PLAN",
-                "sam3_tracker_hard_memory_engine_plan": b"SAM3_TRACKER_HARD_MEMORY_PLAN",
-                "sam3_tracker_hard_memory_batch2_engine_plan": b"SAM3_TRACKER_HARD_MEMORY_BATCH2_PLAN",
-                "sam3_hard_mask_resize_engine_plan": b"SAM3_HARD_MASK_RESIZE_PLAN",
-                "sam3_hard_mask_resize_batch2_engine_plan": b"SAM3_HARD_MASK_RESIZE_BATCH2_PLAN",
-            }
-
-        def get_segmentation_config(self, config):
-            return production_sam3_plugin.get_segmentation_config(config)
-
-        def get_bundle_config_overrides(self, config):
-            return production_sam3_plugin.get_bundle_config_overrides(config)
-
-    plugin = _Sam3Plugin()
-
-    with patch(
-        "tensorrt_model_connect.engine_builder.find_plugin",
-        return_value=plugin,
-    ):
-        with patch(
-            "tensorrt_model_connect.engine_builder._get_trt_version",
+    monkeypatch.setattr(sam3_model, "load_weights", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        sam3_model,
+        "_build_local_engine",
+        lambda *_args, **_kwargs: (b"SAM3_TEXT_PLAN", "single"),
+    )
+    monkeypatch.setattr(
+        sam3_model,
+        "build_vision_engine",
+        lambda *_args, **_kwargs: b"SAM3_VISION_PLAN",
+    )
+    monkeypatch.setattr(
+        sam3_model,
+        "build_extra_engines",
+        lambda *_args, **_kwargs: {
+            "sam3_core_engine_plan": b"SAM3_CORE_PLAN",
+            "sam3_tracker_init_engine_plan": b"SAM3_TRACKER_INIT_PLAN",
+            "sam3_tracker_step_engine_plan": b"SAM3_TRACKER_STEP_PLAN",
+            "sam3_tracker_step_batch2_engine_plan": b"SAM3_TRACKER_STEP_BATCH2_PLAN",
+            "sam3_tracker_memory_engine_plan": b"SAM3_TRACKER_MEMORY_PLAN",
+            "sam3_tracker_memory_batch2_engine_plan": b"SAM3_TRACKER_MEMORY_BATCH2_PLAN",
+            "sam3_tracker_hard_memory_engine_plan": b"SAM3_TRACKER_HARD_MEMORY_PLAN",
+            "sam3_tracker_hard_memory_batch2_engine_plan": b"SAM3_TRACKER_HARD_MEMORY_BATCH2_PLAN",
+            "sam3_hard_mask_resize_engine_plan": b"SAM3_HARD_MASK_RESIZE_PLAN",
+            "sam3_hard_mask_resize_batch2_engine_plan": b"SAM3_HARD_MASK_RESIZE_BATCH2_PLAN",
+        },
+    )
+    with (
+        patch(
+            "tensorrt_model_connect.bundle_writer.tensorrt_version",
             return_value="10.0",
-        ):
-            with patch(
-                "tensorrt_model_connect.engine_builder._get_gpu_name",
-                return_value="",
-            ):
-                with patch(
-                    "tensorrt_model_connect.engine_builder._detect_tokenizer_special_frame",
-                    return_value=None,
-                ):
-                    with patch(
-                        "tensorrt_model_connect.engine_builder._detect_tokenizer_add_special_tokens",
-                        return_value=False,
-                    ):
-                        build_bundle(str(model_dir), str(output_path))
+        ),
+        patch("tensorrt_model_connect.bundle_writer.tensorrt_abi", return_value=""),
+        patch("tensorrt_model_connect.bundle_writer.gpu_name", return_value=""),
+        patch(
+            "tensorrt_model_connect.tokenizer_conversion.prepare_tokenizer_special_frame",
+            return_value=None,
+        ),
+        patch(
+            "tensorrt_model_connect.tvm_ffi.graph_build.kernel_slots_section",
+            return_value=None,
+        ),
+    ):
+        sam3_model.build(str(model_dir), str(output_path))
 
     header, section_map = _read_serialized_bundle(output_path)
     assert set(section_map) == _EXPECTED_SAM3_SECTIONS

@@ -49,24 +49,18 @@ Extend an existing family when model type, checkpoint mapping, graph dataflow,
 runtime strategy, and validation contract fit that owner. Create a new family
 when those contracts materially differ.
 
-For a standard decoder starting point:
-
-```bash
-python3 scripts/new_family.py \
-  --model-type <model-type> \
-  --hf-repo <org/model> \
-  --family-name <family>
-```
-
-The scaffold is only a starting point. It fetches model configuration and emits
-a decoder-oriented Python family. Review every generated match rule, import,
-weight mapping, graph path, and descriptor; do not use it for non-decoder
-architectures without redesigning the generated code.
+Start from the closest existing family-owned `model.py`. Copy only the build
+steps and local helpers the new model needs. Do not generate a generic plugin,
+optional-hook surface, compatibility shim, or manifest-selected Python
+entrypoint.
 
 ## Implement The Smallest Owned Change
 
 ### Python Builder
 
+- Put the complete config → weights → engines → bundle recipe in
+  `families/<family>/model.py` and expose required `matches(config)` and
+  `build(model_dir, output_path, **options)` functions.
 - Parse model configuration without inventing defaults that change semantics.
 - Map checkpoint tensors explicitly, including tied weights, fused/split
   projections, transposes, and expert layouts.

@@ -46,17 +46,10 @@ def test_family_tokenizer_is_model_owned() -> None:
     assert callable(mod.load_tokenizer)
 
 
-def test_magpie_plugin_uses_family_tokenizer_for_ipa_assets() -> None:
+def test_magpie_model_uses_family_tokenizer_for_ipa_assets() -> None:
     root = Path(__file__).resolve().parents[4]
-    plugin_path = (
-        root
-        / "python"
-        / "tensorrt_model_connect"
-        / "families"
-        / "magpie_tts"
-        / "plugin.py"
-    )
-    source = plugin_path.read_text(encoding="utf-8")
+    model_path = root / "python" / "tensorrt_model_connect" / "families" / "magpie_tts" / "model.py"
+    source = model_path.read_text(encoding="utf-8")
 
     assert "from . import magpie_tokenizer" in source
     assert "spec_from_file_location" not in source

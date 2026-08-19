@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "wan2_2_ti2v"
-plugin = "wan2_2_ti2v"
 test_manifests = [
   "manifests/wan22-ti2v-5b-l0.json",
   "manifests/wan22-ti2v-5b.json",

@@ -48,7 +48,7 @@ class TestInternVLPlugin:
         return t
 
     def test_load_text_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.internvl import plugin
+        import tensorrt_model_connect.families.internvl.model as plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -95,7 +95,7 @@ class TestInternVLPlugin:
 
     def test_qkv_biases_loaded(self, tmp_path):
         """InternVL3 (Qwen2) has q/k biases."""
-        from tensorrt_model_connect.families.internvl import plugin
+        import tensorrt_model_connect.families.internvl.model as plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -128,7 +128,7 @@ class TestInternVLPlugin:
 
     def test_vision_weights_not_in_text(self, tmp_path):
         """Vision and projector keys should NOT appear in text weight dict."""
-        from tensorrt_model_connect.families.internvl import plugin
+        import tensorrt_model_connect.families.internvl.model as plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -161,7 +161,7 @@ class TestInternVLPlugin:
 
     def test_transpose_applied(self, tmp_path):
         """Projections should be transposed from [out, in] to [in, out]."""
-        from tensorrt_model_connect.families.internvl import plugin
+        import tensorrt_model_connect.families.internvl.model as plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -195,7 +195,7 @@ class TestInternVLPlugin:
 
     def test_get_vl_config(self, tmp_path):
         """get_vl_config should return correct VL config for InternVL."""
-        from tensorrt_model_connect.families.internvl import plugin
+        import tensorrt_model_connect.families.internvl.model as plugin
 
         config = {
             "model_type": "internvl_chat",
@@ -233,7 +233,7 @@ class TestInternVLPlugin:
 
     def test_no_vl_config_without_vision(self, tmp_path):
         """get_vl_config returns None when no vision_config present."""
-        from tensorrt_model_connect.families.internvl import plugin
+        import tensorrt_model_connect.families.internvl.model as plugin
 
         config = {
             "model_type": "internvl_chat",

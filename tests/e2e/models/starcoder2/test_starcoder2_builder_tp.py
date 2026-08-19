@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import pytest
 
@@ -25,14 +26,16 @@ from tensorrt_model_connect.parallel_config import (
 
 
 FAMILY = 'starcoder2'
-PLUGIN_CLASS = 'StarCoder2Plugin'
 MODEL_TYPE = 'starcoder2'
 TP_SIZE = 2
 RAW = {}
-EXPECTED_KWARGS = {'activation': 'gelu_new',
- 'mlp_type': 'gelu_fc',
- 'norm_type': 'layernorm',
- 'position_type': 'rope'}
+EXPECTED_KWARGS = {}
+SPECIALIZED_SOURCE_MARKERS = (
+    "eps_tensor, 'layernorm', work_np_dtype",
+    "add_activation(network, fc1, 'gelu_new'",
+    "make_rope_table_half_dim(",
+)
+RETIRED_FIXED_PARAMETERS = {"activation", "mlp_type", "norm_type", "position_type"}
 
 
 def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
@@ -51,9 +54,22 @@ def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfi
     )
 
 
-def test_starcoder2_plugin_routes_tp_build(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_starcoder2_tp_builder_owns_fixed_family_contract() -> None:
+    builder_module = importlib.import_module(
+        "tensorrt_model_connect.families.starcoder2.dual_profile_decoder_tp_builder"
+    )
+    parameters = inspect.signature(
+        builder_module.build_dual_profile_tp_decoder_engine
+    ).parameters
+    assert RETIRED_FIXED_PARAMETERS.isdisjoint(parameters)
+    source = inspect.getsource(builder_module)
+    for marker in SPECIALIZED_SOURCE_MARKERS:
+        assert marker in source
+
+
+def test_starcoder2_model_routes_tp_build(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     captured: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -64,18 +80,18 @@ def test_starcoder2_plugin_routes_tp_build(monkeypatch) -> None:
         return b"tp-plan"
 
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "build_dual_profile_tp_decoder_engine",
         fake_build,
     )
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=TP_SIZE, rank=1)
-    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+    plan = model_module.build_engine(
         _config(MODEL_TYPE, TP_SIZE, RAW),
         WeightDict(),
         max_cache_length=17,
@@ -95,17 +111,17 @@ def test_starcoder2_plugin_routes_tp_build(monkeypatch) -> None:
         assert kwargs[key] == expected
 
 
-def test_starcoder2_plugin_rejects_quantized_tp(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_starcoder2_model_rejects_quantized_tp(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+        model_module.build_engine(
             _config(MODEL_TYPE, TP_SIZE, RAW),
             WeightDict(),
             max_cache_length=17,

@@ -19,10 +19,11 @@ import numpy as np
 import pytest
 
 from tests.builder.conftest import requires_trt
-from tests.builder.owned_graph_modules import load_graph_ops
+from tests.builder.owned_graph_modules import load_family_graph_ops, load_graph_ops
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 graph_ops = load_graph_ops()
+qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 
 
 # ===================================================================
@@ -67,7 +68,7 @@ class TestComputeAlibiSlopes:
 
 
 # ===================================================================
-# 3. make_rope_table (pure numpy, no TRT)
+# 3. RoPE reference helpers
 # ===================================================================
 
 def _rotated_half_rope_table(max_len, hidden, num_heads, theta, cosine):
@@ -85,73 +86,6 @@ def _rotated_half_rope_table(max_len, hidden, num_heads, theta, cosine):
                 table[pos, h * head_dim + half + i] = val
     return table
 
-
-def _hf_rope_table_interleaved(max_len, hidden, num_heads, theta, cosine,
-                                partial_factor=1.0):
-    """Interleaved RoPE: repeat_interleave, pairs (d, d+1)."""
-    head_dim = hidden // num_heads
-    rotary_ndims = int(head_dim * partial_factor)
-    half = rotary_ndims // 2
-    inv_freq = 1.0 / (
-        theta ** (np.arange(0, rotary_ndims, 2, dtype=np.float64) / rotary_ndims))
-    table = np.full((max_len, hidden), 1.0 if cosine else 0.0, dtype=np.float32)
-    for pos in range(max_len):
-        for h in range(num_heads):
-            for i in range(half):
-                angle = pos * inv_freq[i]
-                val = float(np.cos(angle) if cosine else np.sin(angle))
-                table[pos, h * head_dim + 2 * i] = val
-                table[pos, h * head_dim + 2 * i + 1] = val
-    return table
-
-
-class TestMakeRopeTable:
-    def test_rotated_half_cos(self):
-        ours = graph_ops.make_rope_table(16, 64, 4, 10000.0, cosine=True)
-        ref = _rotated_half_rope_table(16, 64, 4, 10000.0, True)
-        np.testing.assert_allclose(ours, ref, atol=1e-6)
-
-    def test_rotated_half_sin(self):
-        ours = graph_ops.make_rope_table(16, 64, 4, 10000.0, cosine=False)
-        ref = _rotated_half_rope_table(16, 64, 4, 10000.0, False)
-        np.testing.assert_allclose(ours, ref, atol=1e-6)
-
-    def test_interleaved_cos(self):
-        ours = graph_ops.make_rope_table(
-            16, 64, 4, 10000.0, cosine=True, interleaved=True)
-        ref = _hf_rope_table_interleaved(16, 64, 4, 10000.0, True)
-        np.testing.assert_allclose(ours, ref, atol=1e-6)
-
-    def test_interleaved_sin(self):
-        ours = graph_ops.make_rope_table(
-            16, 64, 4, 10000.0, cosine=False, interleaved=True)
-        ref = _hf_rope_table_interleaved(16, 64, 4, 10000.0, False)
-        np.testing.assert_allclose(ours, ref, atol=1e-6)
-
-    def test_partial_rotary_standard(self):
-        ours = graph_ops.make_rope_table(
-            16, 64, 4, 10000.0, cosine=True, partial_rotary_factor=0.5)
-        head_dim = 16
-        # Non-rotary dims (last 8 per head) should remain cos default (1.0)
-        for h in range(4):
-            np.testing.assert_array_equal(
-                ours[:, h * head_dim + 8 : h * head_dim + 16], 1.0)
-
-    def test_partial_rotary_interleaved(self):
-        ours = graph_ops.make_rope_table(
-            16, 64, 4, 10000.0, cosine=True,
-            partial_rotary_factor=0.5, interleaved=True)
-        ref = _hf_rope_table_interleaved(16, 64, 4, 10000.0, True, 0.5)
-        np.testing.assert_allclose(ours, ref, atol=1e-6)
-
-    def test_edge_empty(self):
-        table = graph_ops.make_rope_table(0, 64, 4, 10000.0, cosine=True)
-        assert table.shape == (0, 64)
-
-
-# ===================================================================
-# 4. RoPE reference helpers
-# ===================================================================
 
 def _hf_rotate_half(x: np.ndarray) -> np.ndarray:
     half = x.shape[-1] // 2
@@ -520,10 +454,13 @@ class TestAddSelfAttentionBlockWithRope:
         w_v = rng.randn(hidden, hidden).astype(np.float32)
         w_o = rng.randn(hidden, hidden).astype(np.float32)
 
-        cos_table = graph_ops.make_rope_table(seq, hidden, heads, 10000.0, True)
-        sin_table = graph_ops.make_rope_table(seq, hidden, heads, 10000.0, False)
+        cos_table = _rotated_half_rope_table(
+            seq, hidden, heads, 10000.0, True)
+        sin_table = _rotated_half_rope_table(
+            seq, hidden, heads, 10000.0, False)
+
         def build(net, inp):
-            out = graph_ops.add_self_attention_block_with_rope(
+            out = qwen_vl_graph_ops.add_self_attention_block_with_rope(
                 net, inp["x"], w_q, w_k, w_v, w_o,
                 hidden, heads, seq,
                 cos_table, sin_table)
@@ -575,18 +512,20 @@ class TestAddWindowedSelfAttentionWithRope:
         w_v = rng.randn(hidden, hidden).astype(np.float32)
         w_o = rng.randn(hidden, hidden).astype(np.float32)
 
-        cos_table = graph_ops.make_rope_table(seq, hidden, heads, 10000.0, True)
-        sin_table = graph_ops.make_rope_table(seq, hidden, heads, 10000.0, False)
+        cos_table = _rotated_half_rope_table(
+            seq, hidden, heads, 10000.0, True)
+        sin_table = _rotated_half_rope_table(
+            seq, hidden, heads, 10000.0, False)
 
         def build_windowed(net, inp):
-            out = graph_ops.add_windowed_self_attention_with_rope(
+            out = qwen_vl_graph_ops.add_windowed_self_attention_with_rope(
                 net, inp["x"], w_q, w_k, w_v, w_o,
                 hidden, heads, seq, num_windows,
                 cos_table, sin_table)
             return {"out": out}
 
         def build_full(net, inp):
-            out = graph_ops.add_self_attention_block_with_rope(
+            out = qwen_vl_graph_ops.add_self_attention_block_with_rope(
                 net, inp["x"], w_q, w_k, w_v, w_o,
                 hidden, heads, seq,
                 cos_table, sin_table)
@@ -666,56 +605,3 @@ class TestAddPatchEmbed3d:
             ref = out_t.permute(0, 2, 3, 1).reshape(-1, embed_dim).numpy()
 
         np.testing.assert_allclose(result["out"], ref, atol=1e-4)
-
-
-# ===================================================================
-# 18. add_spatial_merge (TRT)
-# ===================================================================
-
-@requires_trt
-class TestAddSpatialMerge:
-    def test_vs_manual_mlp(self, trt_runner):
-        """Test spatial_merge LN + 2-layer MLP against manual numpy."""
-        import torch
-        import torch.nn as nn
-
-        rng = np.random.RandomState(42)
-        seq, input_dim = 4, 16
-        hidden_dim = 32
-        output_dim = 16
-        merge_size = 2
-        eps = 1e-6
-
-        x_np = rng.randn(seq, input_dim).astype(np.float32)
-        w_fc1 = rng.randn(input_dim, hidden_dim).astype(np.float32)
-        w_fc2 = rng.randn(hidden_dim, output_dim).astype(np.float32)
-        b_fc1 = rng.randn(hidden_dim).astype(np.float32)
-        b_fc2 = rng.randn(output_dim).astype(np.float32)
-        norm_gamma = rng.randn(input_dim).astype(np.float32)
-
-        def build(net, inp):
-            eps_t = graph_ops.add_constant(
-                net, (1, 1), np.array([eps], dtype=np.float32))
-            out = graph_ops.add_spatial_merge(
-                net, inp["x"], w_fc1, w_fc2, b_fc1, b_fc2,
-                norm_gamma, input_dim, hidden_dim, output_dim,
-                eps_t, seq, merge_size)
-            return {"out": out}
-
-        result = trt_runner(build, {"x": x_np})
-
-        # Reference: LayerNorm + Linear + GELU + Linear
-        x_t = torch.tensor(x_np)
-        # LayerNorm (manual, with zero beta)
-        ln = nn.LayerNorm(input_dim, eps=eps)
-        with torch.no_grad():
-            ln.weight.copy_(torch.tensor(norm_gamma))
-            ln.bias.zero_()
-            normed = ln(x_t)
-        fc1_out = normed @ torch.tensor(w_fc1) + torch.tensor(b_fc1)
-        # GELU (tanh approx)
-        gelu_out = 0.5 * fc1_out * (1.0 + torch.tanh(
-            math.sqrt(2.0 / math.pi) * (fc1_out + 0.044715 * fc1_out ** 3)))
-        ref = (gelu_out @ torch.tensor(w_fc2) + torch.tensor(b_fc2)).numpy()
-
-        np.testing.assert_allclose(result["out"], ref, atol=1e-3)

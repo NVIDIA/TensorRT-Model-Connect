@@ -78,22 +78,28 @@ def _make_whisper_tp_weights(
     def rand(*shape: int) -> np.ndarray:
         return rng.randn(*shape).astype(np.float32)
 
-    weights = WeightDict({
-        "_dec_layers": dec_layers,
-        "_dec_heads": dec_heads,
-        "_dec_ffn": dec_ffn,
-        "_max_source_positions": _MAX_SOURCE_POSITIONS,
-        "dec_embedding": rand(_VOCAB, hidden),
-        "dec_pos_embedding": rand(_MAX_TARGET_POSITIONS, hidden),
-        "final_norm": rand(hidden),
-        "final_norm_beta": rand(hidden),
-        "w_out": rand(hidden, _VOCAB),
-    })
+    weights = WeightDict(
+        {
+            "_dec_layers": dec_layers,
+            "_dec_heads": dec_heads,
+            "_dec_ffn": dec_ffn,
+            "_max_source_positions": _MAX_SOURCE_POSITIONS,
+            "dec_embedding": rand(_VOCAB, hidden),
+            "dec_pos_embedding": rand(_MAX_TARGET_POSITIONS, hidden),
+            "final_norm": rand(hidden),
+            "final_norm_beta": rand(hidden),
+            "w_out": rand(hidden, _VOCAB),
+        }
+    )
     for i in range(dec_layers):
         pfx = f"layer.{i}"
         for key in (
-            "w_q", "w_k", "w_v",
-            "cross_w_q", "cross_w_k", "cross_w_v",
+            "w_q",
+            "w_k",
+            "w_v",
+            "cross_w_q",
+            "cross_w_k",
+            "cross_w_v",
         ):
             weights[f"{pfx}.{key}"] = rand(hidden, hidden)
         for key in ("q_bias", "k_bias", "v_bias"):
@@ -109,9 +115,12 @@ def _make_whisper_tp_weights(
         weights[f"{pfx}.cross_b_o"] = rand(hidden)
         weights[f"{pfx}.fc2_bias"] = rand(hidden)
         for key in (
-            "input_norm", "input_norm_beta",
-            "cross_attn_norm", "cross_attn_norm_beta",
-            "post_attn_norm", "post_attn_norm_beta",
+            "input_norm",
+            "input_norm_beta",
+            "cross_attn_norm",
+            "cross_attn_norm_beta",
+            "post_attn_norm",
+            "post_attn_norm_beta",
         ):
             weights[f"{pfx}.{key}"] = rand(hidden)
     return weights
@@ -133,9 +142,7 @@ def test_whisper_encoder_selector_routes_precision(
     fp32_layers: list[int],
     expected_precision: str,
 ) -> None:
-    plugin_module = pytest.importorskip(
-        "tensorrt_model_connect.families.whisper.plugin"
-    )
+    plugin_module = pytest.importorskip("tensorrt_model_connect.families.whisper.model")
     observed = {}
 
     def fake_build_encoder(config, weights, *, precision, verbose):
@@ -143,29 +150,21 @@ def test_whisper_encoder_selector_routes_precision(
         observed["precision"] = precision
         return b"encoder-plan"
 
-    monkeypatch.setattr(
-        plugin_module, "_build_whisper_encoder", fake_build_encoder
-    )
+    monkeypatch.setattr(plugin_module, "_build_whisper_encoder", fake_build_encoder)
     config = type("Config", (), {"raw": {"_fp32_layers": fp32_layers}})()
 
-    plan = plugin_module.plugin.build_vision_engine(
-        "unused", config, WeightDict(), precision="fp16"
-    )
+    plan = plugin_module.build_vision_engine("unused", config, WeightDict(), precision="fp16")
 
     assert plan == b"encoder-plan"
     assert observed["precision"] == expected_precision
 
 
 def test_whisper_encoder_selector_rejects_unknown_index() -> None:
-    plugin_module = pytest.importorskip(
-        "tensorrt_model_connect.families.whisper.plugin"
-    )
+    plugin_module = pytest.importorskip("tensorrt_model_connect.families.whisper.model")
     config = type("Config", (), {"raw": {"_fp32_layers": [1]}})()
 
     with pytest.raises(ValueError, match="supports only selector 0"):
-        plugin_module.plugin.build_vision_engine(
-            "unused", config, WeightDict(), precision="fp16"
-        )
+        plugin_module.build_vision_engine("unused", config, WeightDict(), precision="fp16")
 
 
 class WhisperPluginTester(FamilyPluginTester):
@@ -181,7 +180,7 @@ class WhisperPluginTester(FamilyPluginTester):
       - HF prefix: model.encoder.layers.{i}.* + model.decoder.layers.{i}.*
     """
 
-    plugin_module = "tensorrt_model_connect.families.whisper.plugin"
+    plugin_module = "tensorrt_model_connect.families.whisper.model"
     model_type = "whisper"
     spec = TinyModelSpec(
         vocab_size=_VOCAB,
@@ -258,8 +257,7 @@ class WhisperPluginTester(FamilyPluginTester):
         t["model.encoder.conv2.bias"] = rand(h)
 
         # Learned positional embedding
-        t["model.encoder.embed_positions.weight"] = rand(
-            _MAX_SOURCE_POSITIONS, h)
+        t["model.encoder.embed_positions.weight"] = rand(_MAX_SOURCE_POSITIONS, h)
 
         # Encoder layers
         for i in range(_ENC_LAYERS):
@@ -284,8 +282,7 @@ class WhisperPluginTester(FamilyPluginTester):
 
         # --- Decoder ---
         t["model.decoder.embed_tokens.weight"] = rand(_VOCAB, h)
-        t["model.decoder.embed_positions.weight"] = rand(
-            _MAX_TARGET_POSITIONS, h)
+        t["model.decoder.embed_positions.weight"] = rand(_MAX_TARGET_POSITIONS, h)
 
         for i in range(_DEC_LAYERS):
             p = f"model.decoder.layers.{i}"
@@ -343,11 +340,15 @@ class WhisperPluginTester(FamilyPluginTester):
         keys: set[str] = set()
 
         # Encoder conv stem
-        keys.update({
-            "enc_conv1_weight", "enc_conv1_bias",
-            "enc_conv2_weight", "enc_conv2_bias",
-            "enc_pos_embedding",
-        })
+        keys.update(
+            {
+                "enc_conv1_weight",
+                "enc_conv1_bias",
+                "enc_conv2_weight",
+                "enc_conv2_bias",
+                "enc_pos_embedding",
+            }
+        )
 
         # Encoder layers
         for i in range(_ENC_LAYERS):
@@ -355,22 +356,35 @@ class WhisperPluginTester(FamilyPluginTester):
             for proj in ("q", "k", "v"):
                 keys.add(f"{pfx}.w_{proj}")
                 keys.add(f"{pfx}.b_{proj}")
-            keys.update({
-                f"{pfx}.w_o", f"{pfx}.b_o",
-                f"{pfx}.attn_norm", f"{pfx}.attn_norm_beta",
-                f"{pfx}.w_fc1", f"{pfx}.b_fc1",
-                f"{pfx}.w_fc2", f"{pfx}.b_fc2",
-                f"{pfx}.ffn_norm", f"{pfx}.ffn_norm_beta",
-            })
+            keys.update(
+                {
+                    f"{pfx}.w_o",
+                    f"{pfx}.b_o",
+                    f"{pfx}.attn_norm",
+                    f"{pfx}.attn_norm_beta",
+                    f"{pfx}.w_fc1",
+                    f"{pfx}.b_fc1",
+                    f"{pfx}.w_fc2",
+                    f"{pfx}.b_fc2",
+                    f"{pfx}.ffn_norm",
+                    f"{pfx}.ffn_norm_beta",
+                }
+            )
 
-        keys.update({
-            "enc_final_norm", "enc_final_norm_beta",
-        })
+        keys.update(
+            {
+                "enc_final_norm",
+                "enc_final_norm_beta",
+            }
+        )
 
         # Decoder embeddings
-        keys.update({
-            "dec_embedding", "dec_pos_embedding",
-        })
+        keys.update(
+            {
+                "dec_embedding",
+                "dec_pos_embedding",
+            }
+        )
 
         # Decoder layers
         for i in range(_DEC_LAYERS):
@@ -379,29 +393,46 @@ class WhisperPluginTester(FamilyPluginTester):
             for proj in ("q", "k", "v"):
                 keys.add(f"{pfx}.w_{proj}")
                 keys.add(f"{pfx}.{proj}_bias")
-            keys.update({
-                f"{pfx}.w_o", f"{pfx}.o_bias",
-                f"{pfx}.input_norm", f"{pfx}.input_norm_beta",
-            })
+            keys.update(
+                {
+                    f"{pfx}.w_o",
+                    f"{pfx}.o_bias",
+                    f"{pfx}.input_norm",
+                    f"{pfx}.input_norm_beta",
+                }
+            )
             # Cross-attention
             for proj in ("q", "k", "v"):
                 keys.add(f"{pfx}.cross_w_{proj}")
                 keys.add(f"{pfx}.cross_b_{proj}")
-            keys.update({
-                f"{pfx}.cross_w_o", f"{pfx}.cross_b_o",
-                f"{pfx}.cross_attn_norm", f"{pfx}.cross_attn_norm_beta",
-            })
+            keys.update(
+                {
+                    f"{pfx}.cross_w_o",
+                    f"{pfx}.cross_b_o",
+                    f"{pfx}.cross_attn_norm",
+                    f"{pfx}.cross_attn_norm_beta",
+                }
+            )
             # MLP
-            keys.update({
-                f"{pfx}.w_fc1", f"{pfx}.fc1_bias",
-                f"{pfx}.w_fc2", f"{pfx}.fc2_bias",
-                f"{pfx}.post_attn_norm", f"{pfx}.post_attn_norm_beta",
-            })
+            keys.update(
+                {
+                    f"{pfx}.w_fc1",
+                    f"{pfx}.fc1_bias",
+                    f"{pfx}.w_fc2",
+                    f"{pfx}.fc2_bias",
+                    f"{pfx}.post_attn_norm",
+                    f"{pfx}.post_attn_norm_beta",
+                }
+            )
 
         # Global
-        keys.update({
-            "final_norm", "final_norm_beta", "w_out",
-        })
+        keys.update(
+            {
+                "final_norm",
+                "final_norm_beta",
+                "w_out",
+            }
+        )
 
         return keys
 
@@ -417,21 +448,15 @@ class TestWhisperEngine(FamilyPluginTestMixin):
     tester_class = WhisperPluginTester
 
     # --- Tier 2 skips ---
-    @pytest.mark.skip(
-        reason="custom builder -- uses non-standard graph construction"
-    )
+    @pytest.mark.skip(reason="custom builder -- uses non-standard graph construction")
     def test_build_engine_succeeds(self, tester, tmp_path):
         pass
 
-    @pytest.mark.skip(
-        reason="custom builder -- uses non-standard graph construction"
-    )
+    @pytest.mark.skip(reason="custom builder -- uses non-standard graph construction")
     def test_engine_io_tensor_names(self, tester, tmp_path):
         pass
 
-    @pytest.mark.skip(
-        reason="custom builder -- uses non-standard graph construction"
-    )
+    @pytest.mark.skip(reason="custom builder -- uses non-standard graph construction")
     def test_engine_logits_output_shape(self, tester, tmp_path):
         pass
 
@@ -455,8 +480,7 @@ class TestWhisperEngine(FamilyPluginTestMixin):
         assert "enc_conv1_bias" in weights
         assert "enc_conv2_weight" in weights
         assert "enc_conv2_bias" in weights
-        assert weights["enc_conv1_weight"].shape == (
-            _HIDDEN, _NUM_MEL_BINS, 3), (
+        assert weights["enc_conv1_weight"].shape == (_HIDDEN, _NUM_MEL_BINS, 3), (
             f"enc_conv1_weight shape {weights['enc_conv1_weight'].shape} != "
             f"expected ({_HIDDEN}, {_NUM_MEL_BINS}, 3)"
         )
@@ -516,11 +540,8 @@ class TestWhisperEngine(FamilyPluginTestMixin):
             2. Verify enc_pos_embedding shape.
         """
         config, weights, _ = tester.prepare_config_and_weights(tmp_path)
-        assert "enc_pos_embedding" in weights, (
-            "Missing enc_pos_embedding key"
-        )
-        assert weights["enc_pos_embedding"].shape == (
-            _MAX_SOURCE_POSITIONS, _HIDDEN), (
+        assert "enc_pos_embedding" in weights, "Missing enc_pos_embedding key"
+        assert weights["enc_pos_embedding"].shape == (_MAX_SOURCE_POSITIONS, _HIDDEN), (
             f"enc_pos_embedding shape {weights['enc_pos_embedding'].shape} != "
             f"expected ({_MAX_SOURCE_POSITIONS}, {_HIDDEN})"
         )
@@ -653,10 +674,13 @@ class TestWhisperEngine(FamilyPluginTestMixin):
     def test_whisper_tp_sharding_returns_original_for_single_device_mode(self):
         decoder_tp_builder = _whisper_tp_builder_module()
         weights = _make_whisper_tp_weights()
-        assert decoder_tp_builder.shard_whisper_decoder_weights(
-            weights,
-            parallel=ParallelConfig(),
-        ) is weights
+        assert (
+            decoder_tp_builder.shard_whisper_decoder_weights(
+                weights,
+                parallel=ParallelConfig(),
+            )
+            is weights
+        )
 
     def test_whisper_tp_shards_rank_local_decoder_weights(self):
         decoder_tp_builder = _whisper_tp_builder_module()
@@ -677,38 +701,38 @@ class TestWhisperEngine(FamilyPluginTestMixin):
 
         np.testing.assert_array_equal(
             shard["layer.0.w_q"],
-            weights["layer.0.w_q"][:, _HIDDEN // 2:],
+            weights["layer.0.w_q"][:, _HIDDEN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.cross_w_v"],
-            weights["layer.0.cross_w_v"][:, _HIDDEN // 2:],
+            weights["layer.0.cross_w_v"][:, _HIDDEN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.q_bias"],
-            weights["layer.0.q_bias"][_HIDDEN // 2:],
+            weights["layer.0.q_bias"][_HIDDEN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.cross_b_k"],
-            weights["layer.0.cross_b_k"][_HIDDEN // 2:],
+            weights["layer.0.cross_b_k"][_HIDDEN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.w_o"],
-            weights["layer.0.w_o"][_HIDDEN // 2:, :],
+            weights["layer.0.w_o"][_HIDDEN // 2 :, :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.cross_w_o"],
-            weights["layer.0.cross_w_o"][_HIDDEN // 2:, :],
+            weights["layer.0.cross_w_o"][_HIDDEN // 2 :, :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.w_fc1"],
-            weights["layer.0.w_fc1"][:, _DEC_FFN // 2:],
+            weights["layer.0.w_fc1"][:, _DEC_FFN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.fc1_bias"],
-            weights["layer.0.fc1_bias"][_DEC_FFN // 2:],
+            weights["layer.0.fc1_bias"][_DEC_FFN // 2 :],
         )
         np.testing.assert_array_equal(
             shard["layer.0.w_fc2"],
-            weights["layer.0.w_fc2"][_DEC_FFN // 2:, :],
+            weights["layer.0.w_fc2"][_DEC_FFN // 2 :, :],
         )
         assert shard["final_norm"] is weights["final_norm"]

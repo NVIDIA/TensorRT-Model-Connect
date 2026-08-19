@@ -41,7 +41,7 @@ and generated inventory rather than copying counts into design claims.
 
 A native model claim spans three ownership roots:
 
-1. the Python family descriptor and builder package;
+1. the Python family descriptor, required `model.py`, and local build helpers;
 2. the C++ model descriptor, DSO, and strategy registration; and
 3. the E2E descriptor and exact model manifest.
 

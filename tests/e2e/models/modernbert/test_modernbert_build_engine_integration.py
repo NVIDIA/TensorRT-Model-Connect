@@ -77,7 +77,7 @@ class TestModernbertBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from tensorrt_model_connect.families.modernbert import plugin
+        import tensorrt_model_connect.families.modernbert.model as plugin
 
         config = {
             "model_type": "modernbert",

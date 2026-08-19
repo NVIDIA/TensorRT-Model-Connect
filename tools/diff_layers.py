@@ -31,13 +31,13 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
     """Build TRT engine with debug layer outputs marked."""
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families import family_has_capability, find_plugin
+    from tensorrt_model_connect.families import family_has_capability, find_model
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
-    plugin = find_plugin(config.model_type)
-    if plugin is None:
-        raise ValueError(f"No plugin for model_type={config.model_type!r}")
+    model = find_model(config)
+    if model is None:
+        raise ValueError(f"No family model for model_type={config.model_type!r}")
     if not family_has_capability(config, "debug_layer_outputs"):
         raise ValueError(
             f"Family for model_type={config.model_type!r} does not declare "
@@ -48,12 +48,12 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
           file=sys.stderr)
 
     print("[diff-layers] Loading weights ...", file=sys.stderr)
-    weights = plugin.load_weights(model_dir, config)
+    weights = model.load_weights(model_dir, config)
 
-    # Build with debug outputs through the family-owned plugin hook.
+    # Build with debug outputs through the family-owned model module.
     print(f"[diff-layers] Building debug TRT engine (cache={max_cache_length}) ...",
           file=sys.stderr)
-    engine_plan = plugin.build_engine(
+    engine_plan = model.build_engine(
         config, weights, max_cache_length,
         verbose=verbose, debug_layer_outputs=True)
     print(f"[diff-layers] Debug engine built ({len(engine_plan) / 1e6:.1f} MB)",

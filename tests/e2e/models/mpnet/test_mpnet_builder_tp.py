@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.mpnet.plugin import MpnetPlugin
+from tensorrt_model_connect.families.mpnet import model as MpnetModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 mpnet_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.mpnet.plugin")
+    "tensorrt_model_connect.families.mpnet.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -238,7 +238,7 @@ def test_mpnet_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_encoder_engine", fake_build)
 
-    plan = MpnetPlugin().build_engine(
+    plan = MpnetModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -260,7 +260,7 @@ def test_mpnet_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        MpnetPlugin().build_engine(
+        MpnetModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

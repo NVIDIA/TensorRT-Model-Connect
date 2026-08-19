@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "qwen_vl"
-plugin = "qwen_vl"
 test_manifests = [
   "manifests/qwen25vl-3b-tp2.json",
   "manifests/qwen25vl-3b.json",

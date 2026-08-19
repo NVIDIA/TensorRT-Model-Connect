@@ -55,9 +55,9 @@ except ImportError:
     print("ERROR: huggingface_hub not available", file=sys.stderr)
     sys.exit(1)
 
-# Keep this intentionally aligned with tensorrt_model_connect.engine_builder._HF_ALLOW_PATTERNS
-# without importing engine_builder here; that import pulls in the whole builder
-# plugin registry before the cache warm script needs it.
+# Keep this intentionally aligned with
+# tensorrt_model_connect.hf_snapshot.hf_snapshot_allow_patterns() without
+# importing the builder package before the cache warm script needs it.
 _HF_ALLOW_PATTERNS = [
     "config.json",
     "generation_config.json",

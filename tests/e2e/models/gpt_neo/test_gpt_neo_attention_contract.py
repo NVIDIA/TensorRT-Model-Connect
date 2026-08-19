@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 def test_plugin_forwards_hf_attention_pattern_to_decoder_builder(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.gpt_neo.plugin"
+        "tensorrt_model_connect.families.gpt_neo.model"
     )
 
     captured = {}
@@ -33,7 +33,7 @@ def test_plugin_forwards_hf_attention_pattern_to_decoder_builder(monkeypatch) ->
         },
     )
 
-    result = plugin_module.GPTNeoPlugin().build_engine(
+    result = plugin_module.build_engine(
         config,
         {},
         max_cache_length=512,

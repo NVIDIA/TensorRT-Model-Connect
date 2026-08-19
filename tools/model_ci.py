@@ -38,8 +38,6 @@ MODEL_ROOTS = (
 MODEL_ROOT_PLATFORM_FILES = frozenset(
     {
         "python/tensorrt_model_connect/families/__init__.py",
-        "python/tensorrt_model_connect/families/_time_series_trt.py",
-        "python/tensorrt_model_connect/families/base.py",
     }
 )
 
@@ -74,9 +72,6 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tests/builder/__init__.py",
         "tests/builder/conftest.py",
         "tests/builder/debug_runner_test_support.py",
-        "tests/builder/family_plugin_test_mixin.py",
-        "tests/builder/family_plugin_test_support.py",
-        "tests/builder/family_plugin_tester.py",
         "tests/e2e_partition.py",
         "tests/runtime_strategy_matrix.yaml",
         "tests/validation/workloads.yaml",
@@ -679,7 +674,7 @@ def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | Non
     if path in MODEL_COUPLED_TEST_EXACT:
         raise ModelCIError(
             "model-coupled test has no isolated model owner; move it into a "
-            f"MODEL.toml contract or use a synthetic plugin before changing it: {path}"
+            f"MODEL.toml contract or use a synthetic family before changing it: {path}"
         )
     if path in UNIT_TEST_ONLY_EXACT:
         return "unit_cli", None

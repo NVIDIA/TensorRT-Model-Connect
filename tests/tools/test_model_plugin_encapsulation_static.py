@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_MODELS = REPO_ROOT / "src" / "runtime" / "models"
 FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 E2E_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
+TOOLS = REPO_ROOT / "tools"
 CMAKE_ROOT = REPO_ROOT / "CMakeLists.txt"
 CONFIG_SCHEMA_CMAKE = REPO_ROOT / "cmake" / "trtmc_config_schemas.cmake"
 SHARED_CONFIG_SCHEMAS = REPO_ROOT / "src" / "runtime" / "config" / "schemas"
@@ -1881,9 +1882,7 @@ def test_model_owned_kv_resets_do_not_clear_reserved_device_capacity() -> None:
             for forbidden in ("cudaMemset", "cudaStreamSynchronize"):
                 if forbidden in body:
                     line = text[: match.start("body")].count("\n") + 1
-                    violations.append(
-                        (source, line, f"{class_name}::reset performs {forbidden}")
-                    )
+                    violations.append((source, line, f"{class_name}::reset performs {forbidden}"))
 
     assert not violations, _format_violations(violations)
 
@@ -3218,12 +3217,10 @@ def test_shared_diff_vl_tool_uses_family_owned_debug_runners() -> None:
         violations.append((SHARED_DIFF_VL_TOOL, 0, "missing family-owned VL debug runner loader"))
 
     vl_families: set[str] = set()
-    for plugin_path in sorted(FAMILIES.glob("*/plugin.py")):
-        plugin_text = plugin_path.read_text(encoding="utf-8")
-        if re.search(
-            r"runtime_strategy\s*=\s*['\"][A-Za-z0-9_]+_vision_language['\"]", plugin_text
-        ):
-            vl_families.add(plugin_path.parent.name)
+    for model_path in sorted(FAMILIES.glob("*/model.py")):
+        model_text = model_path.read_text(encoding="utf-8")
+        if re.search(r"runtime_strategy\s*=\s*['\"][A-Za-z0-9_]+_vision_language['\"]", model_text):
+            vl_families.add(model_path.parent.name)
     for manifest_path in sorted(E2E_MODELS.glob("*/manifests/*.json")):
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -3386,7 +3383,7 @@ def test_shared_diff_layers_tool_uses_family_capability_dispatch() -> None:
         for needle in forbidden
         if needle in text
     ]
-    for needle in ("family_has_capability", "debug_layer_outputs", "plugin.build_engine"):
+    for needle in ("family_has_capability", "debug_layer_outputs", "model.build_engine"):
         if needle not in text:
             violations.append(
                 (
@@ -3790,7 +3787,7 @@ def test_qwen_aime_benchmark_tool_is_family_owned() -> None:
     Postconditions: no root compatibility tool carries model-specific dispatch.
     """
     violations = []
-    owned_tool = FAMILIES / "qwen" / "benchmark_qwen3_8b_aime25_vs_hf.py"
+    owned_tool = TOOLS / "families" / "qwen" / "benchmark_qwen3_8b_aime25_vs_hf.py"
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing Qwen-owned AIME benchmark"))
     if SHARED_QWEN_AIME_BENCHMARK_TOOL.exists():
@@ -3834,7 +3831,7 @@ def test_qwen_flashinfer_benchmark_tool_is_family_owned() -> None:
     Postconditions: no root compatibility tool carries model-specific dispatch.
     """
     violations = []
-    owned_tool = FAMILIES / "qwen" / "bench_flashinfer_e2e.py"
+    owned_tool = TOOLS / "families" / "qwen" / "bench_flashinfer_e2e.py"
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing Qwen-owned FlashInfer benchmark"))
     if SHARED_QWEN_FLASHINFER_BENCHMARK_TOOL.exists():
@@ -4073,12 +4070,27 @@ def test_quantization_uses_family_graph_ops_plumbing() -> None:
         (QUANTIZATION / "context.py", context_text, "graph_ops=graph_ops"),
         (QUANTIZATION / "formats.py", formats_text, "graph_ops: Any"),
         (QUANTIZATION / "__init__.py", init_text, "graph_ops: Any | None = None"),
-        (ENGINE_BUILDER, engine_text, "def _plugin_graph_ops_module(plugin)"),
-        (ENGINE_BUILDER, engine_text, "graph_ops=_plugin_graph_ops_module(plugin)"),
     )
     for path, text, snippet in required_snippets:
         if snippet not in text:
             violations.append((path, 0, f"missing quant graph plumbing: {snippet}"))
+
+    if "quantization" in engine_text or "graph_ops" in engine_text:
+        violations.append(
+            (ENGINE_BUILDER, 0, "thin engine_builder still owns quant graph policy")
+        )
+    for model_path in sorted(FAMILIES.glob("*/model.py")):
+        model_text = model_path.read_text(encoding="utf-8", errors="ignore")
+        if "build_quant_context(" not in model_text:
+            continue
+        if "graph_ops=" not in model_text:
+            violations.append(
+                (model_path, 0, "family quantization does not inject graph_ops")
+            )
+        if "plugin=" in model_text:
+            violations.append(
+                (model_path, 0, "family quantization still passes a plugin object")
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -4087,17 +4099,16 @@ def test_time_series_trt_helpers_are_family_owned() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: keep time-series TRT builder utility behavior in each family.
     Preconditions: time-series families provide local time_series_trt.py files.
-    Postconditions: no model plugin imports the retired shared helper.
+    Postconditions: no family model imports the retired shared helper.
     """
     owners = ("chronos_bolt", "patchtst", "patchtsmixer", "timesfm")
     violations = []
     retired_helper = FAMILIES / "_time_series_trt.py"
-    retired_text = retired_helper.read_text(encoding="utf-8", errors="ignore")
-    if "RetiredSharedFamilyHelperError" not in retired_text:
-        violations.append((retired_helper, 0, "shared time-series helper is not retired"))
+    if retired_helper.exists():
+        violations.append((retired_helper, 0, "retired shared time-series helper still exists"))
     for family in owners:
         helper = FAMILIES / family / "time_series_trt.py"
-        plugin = FAMILIES / family / "plugin.py"
+        model = FAMILIES / family / "model.py"
         if not helper.is_file():
             violations.append((helper, 0, "missing family-owned time-series helper"))
             continue
@@ -4106,11 +4117,11 @@ def test_time_series_trt_helpers_are_family_owned() -> None:
             violations.append((helper, 0, "time-series helper must import local graph_ops"))
         if "from .checkpoint_mapper import" not in helper_text:
             violations.append((helper, 0, "time-series helper must import local checkpoint mapper"))
-        plugin_text = plugin.read_text(encoding="utf-8", errors="ignore")
-        if "from .._time_series_trt import" in plugin_text:
-            violations.append((plugin, 0, "imports retired shared time-series helper"))
-        if "from .time_series_trt import" not in plugin_text:
-            violations.append((plugin, 0, "missing family-owned time-series helper import"))
+        model_text = model.read_text(encoding="utf-8", errors="ignore")
+        if "from .._time_series_trt import" in model_text:
+            violations.append((model, 0, "imports retired shared time-series helper"))
+        if "from .time_series_trt import" not in model_text:
+            violations.append((model, 0, "missing family-owned time-series helper import"))
 
     assert not violations, _format_violations(violations)
 
@@ -5061,15 +5072,14 @@ def test_hf_snapshot_allow_patterns_are_family_owned() -> None:
         "*/diffusion_pytorch_model.safetensors.index.json",
     )
     lora_patterns = ("linear_spec_lora/**",)
-    shared_text = ENGINE_BUILDER.read_text(encoding="utf-8", errors="ignore")
-    allow_match = re.search(
-        r"_HF_ALLOW_PATTERNS\s*=\s*\[(.*?)\]\n",
-        shared_text,
-        flags=re.DOTALL,
+    snapshot_contract = (
+        REPO_ROOT / "python/tensorrt_model_connect/hf_snapshot.py"
     )
-    shared_allow_patterns = allow_match.group(1) if allow_match else shared_text
+    shared_allow_patterns = snapshot_contract.read_text(
+        encoding="utf-8", errors="ignore"
+    )
     violations = [
-        (ENGINE_BUILDER, 0, f"shared builder owns family HF pattern {needle}")
+        (snapshot_contract, 0, f"shared snapshot owns family HF pattern {needle}")
         for needle in diffusion_patterns + lora_patterns
         if needle in shared_allow_patterns
     ]
@@ -5244,7 +5254,7 @@ def test_vision_language_runtime_is_family_owned() -> None:
     for family in VL_RUNTIME_FAMILIES:
         strategy = f"{family}_vision_language"
         runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-        family_plugin = FAMILIES / family / "plugin.py"
+        family_model = FAMILIES / family / "model.py"
         if not runtime_manifest.is_file():
             violations.append((runtime_manifest, 0, "missing family-owned VL runtime manifest"))
             continue
@@ -5256,10 +5266,10 @@ def test_vision_language_runtime_is_family_owned() -> None:
         ):
             if needle not in manifest_text:
                 violations.append((runtime_manifest, 0, f"missing {needle}"))
-        if family_plugin.is_file():
-            plugin_text = family_plugin.read_text(encoding="utf-8", errors="ignore")
-            if f'runtime_strategy = "{strategy}"' not in plugin_text:
-                violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+        if family_model.is_file():
+            model_text = family_model.read_text(encoding="utf-8", errors="ignore")
+            if f'runtime_strategy = "{strategy}"' not in model_text:
+                violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
 
     for manifest_path in sorted(E2E_MODELS.glob("*/manifests/*.json")):
         try:
@@ -5291,7 +5301,7 @@ def test_segmentation_runtime_is_family_owned() -> None:
 
     for family, strategy in SEGMENTATION_RUNTIME_STRATEGIES.items():
         runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-        family_plugin = FAMILIES / family / "plugin.py"
+        family_model = FAMILIES / family / "model.py"
         if not runtime_manifest.is_file():
             violations.append(
                 (runtime_manifest, 0, "missing family-owned segmentation runtime manifest")
@@ -5305,10 +5315,10 @@ def test_segmentation_runtime_is_family_owned() -> None:
         ):
             if needle not in manifest_text:
                 violations.append((runtime_manifest, 0, f"missing {needle}"))
-        if family_plugin.is_file():
-            plugin_text = family_plugin.read_text(encoding="utf-8", errors="ignore")
-            if f'runtime_strategy = "{strategy}"' not in plugin_text:
-                violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+        if family_model.is_file():
+            model_text = family_model.read_text(encoding="utf-8", errors="ignore")
+            if f'runtime_strategy = "{strategy}"' not in model_text:
+                violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
 
     shared_runtime_strategies = {"segmentation", "prompted_segmentation"}
     for manifest_path in sorted(E2E_MODELS.glob("*/manifests/*.json")):
@@ -5360,7 +5370,7 @@ def test_encoder_runtime_is_family_owned() -> None:
     for family, strategies in ENCODER_RUNTIME_STRATEGIES.items():
         expected = (strategies,) if isinstance(strategies, str) else strategies
         runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-        family_plugin = FAMILIES / family / "plugin.py"
+        family_model = FAMILIES / family / "model.py"
         cpp_test_dir = REPO_ROOT / "tests" / "cpp" / "models" / family
         if not runtime_manifest.is_file():
             violations.append(
@@ -5384,13 +5394,13 @@ def test_encoder_runtime_is_family_owned() -> None:
             if strategy not in manifest_text:
                 violations.append((runtime_manifest, 0, f"missing runtime strategy {strategy}"))
 
-        if not family_plugin.is_file():
-            violations.append((family_plugin, 0, "missing family-owned Python plugin"))
+        if not family_model.is_file():
+            violations.append((family_model, 0, "missing family-owned Python model"))
         else:
-            plugin_text = family_plugin.read_text(encoding="utf-8", errors="ignore")
+            model_text = family_model.read_text(encoding="utf-8", errors="ignore")
             for strategy in expected:
-                if strategy not in plugin_text:
-                    violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+                if strategy not in model_text:
+                    violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
 
         if not cpp_test_dir.is_dir():
             violations.append((cpp_test_dir, 0, "missing family-owned encoder C++ test dir"))
@@ -5437,7 +5447,7 @@ def test_recurrent_runtime_is_family_owned() -> None:
 
     for family, strategy in RECURRENT_RUNTIME_STRATEGIES.items():
         runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-        family_plugin = FAMILIES / family / "plugin.py"
+        family_model = FAMILIES / family / "model.py"
         cpp_test_dir = REPO_ROOT / "tests" / "cpp" / "models" / family
         if not runtime_manifest.is_file():
             violations.append(
@@ -5457,12 +5467,12 @@ def test_recurrent_runtime_is_family_owned() -> None:
         if strategy not in matrix_strategies:
             violations.append((RUNTIME_STRATEGY_MATRIX, 0, f"missing matrix strategy {strategy}"))
 
-        if not family_plugin.is_file():
-            violations.append((family_plugin, 0, "missing family-owned Python plugin"))
+        if not family_model.is_file():
+            violations.append((family_model, 0, "missing family-owned Python model"))
         else:
-            plugin_text = family_plugin.read_text(encoding="utf-8", errors="ignore")
-            if strategy not in plugin_text:
-                violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+            model_text = family_model.read_text(encoding="utf-8", errors="ignore")
+            if strategy not in model_text:
+                violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
 
         if not cpp_test_dir.is_dir():
             violations.append((cpp_test_dir, 0, "missing family-owned recurrent C++ test dir"))
@@ -5493,15 +5503,15 @@ def test_timm_vit_runtime_strategy_is_model_owned() -> None:
     retired_strategy = "image_classification"
 
     runtime_manifest = RUNTIME_MODELS / "timm_vit" / "MODEL.toml"
-    family_plugin = FAMILIES / "timm_vit" / "plugin.py"
+    family_model = FAMILIES / "timm_vit" / "model.py"
     matrix = json.loads(RUNTIME_STRATEGY_MATRIX.read_text(encoding="utf-8"))
     guard_strategies = set(matrix.get("new_runtime_guard_strategies", ()))
     matrix_strategies = set(matrix.get("runtime_strategies", {}))
 
     if owned_strategy not in runtime_manifest.read_text(encoding="utf-8"):
         violations.append((runtime_manifest, 0, f"missing {owned_strategy}"))
-    if owned_strategy not in family_plugin.read_text(encoding="utf-8"):
-        violations.append((family_plugin, 0, f"missing {owned_strategy}"))
+    if owned_strategy not in family_model.read_text(encoding="utf-8"):
+        violations.append((family_model, 0, f"missing {owned_strategy}"))
     if owned_strategy not in matrix_strategies:
         violations.append((RUNTIME_STRATEGY_MATRIX, 0, f"missing {owned_strategy}"))
     for strategy_set, label in (
@@ -5541,7 +5551,7 @@ def test_speech_to_text_runtime_is_family_owned() -> None:
 
     for family, strategy in SPEECH_TO_TEXT_RUNTIME_STRATEGIES.items():
         runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-        family_plugin = FAMILIES / family / "plugin.py"
+        family_model = FAMILIES / family / "model.py"
         cpp_test_dir = REPO_ROOT / "tests" / "cpp" / "models" / family
         if not runtime_manifest.is_file():
             violations.append((runtime_manifest, 0, "missing family-owned ASR runtime manifest"))
@@ -5559,12 +5569,12 @@ def test_speech_to_text_runtime_is_family_owned() -> None:
         if strategy not in matrix_strategies:
             violations.append((RUNTIME_STRATEGY_MATRIX, 0, f"missing matrix strategy {strategy}"))
 
-        if not family_plugin.is_file():
-            violations.append((family_plugin, 0, "missing family-owned Python plugin"))
+        if not family_model.is_file():
+            violations.append((family_model, 0, "missing family-owned Python model"))
         else:
-            plugin_text = family_plugin.read_text(encoding="utf-8", errors="ignore")
-            if f'runtime_strategy = "{strategy}"' not in plugin_text:
-                violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+            model_text = family_model.read_text(encoding="utf-8", errors="ignore")
+            if f'runtime_strategy = "{strategy}"' not in model_text:
+                violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
 
         if not cpp_test_dir.is_dir():
             violations.append((cpp_test_dir, 0, "missing family-owned ASR C++ test dir"))
@@ -5620,7 +5630,7 @@ def test_nemotron_speech_streaming_runtime_is_family_owned() -> None:
         violations.append((RUNTIME_STRATEGY_MATRIX, 0, f"missing matrix strategy {strategy}"))
 
     runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-    family_plugin = FAMILIES / family / "plugin.py"
+    family_model = FAMILIES / family / "model.py"
     runner = E2E_MODELS / family / "e2e_plugins" / "runners" / "audio_speech.py"
     manifest_text = runtime_manifest.read_text(encoding="utf-8", errors="ignore")
     for needle in (
@@ -5634,8 +5644,8 @@ def test_nemotron_speech_streaming_runtime_is_family_owned() -> None:
     ):
         if needle not in manifest_text:
             violations.append((runtime_manifest, 0, f"missing {needle}"))
-    if f'runtime_strategy = "{strategy}"' not in family_plugin.read_text(encoding="utf-8"):
-        violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+    if f'runtime_strategy = "{strategy}"' not in family_model.read_text(encoding="utf-8"):
+        violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
     if f'return "{strategy}"' not in runner.read_text(encoding="utf-8", errors="ignore"):
         violations.append((runner, 0, f"runner does not register {strategy}"))
 
@@ -5681,7 +5691,7 @@ def test_personaplex_runtime_is_family_owned() -> None:
         violations.append((RUNTIME_STRATEGY_MATRIX, 0, f"missing matrix strategy {strategy}"))
 
     runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-    family_plugin = FAMILIES / family / "plugin.py"
+    family_model = FAMILIES / family / "model.py"
     runner = E2E_MODELS / family / "e2e_plugins" / "runners" / "audio_speech.py"
     manifest_text = runtime_manifest.read_text(encoding="utf-8", errors="ignore")
     for needle in (
@@ -5700,8 +5710,8 @@ def test_personaplex_runtime_is_family_owned() -> None:
     ):
         if needle not in manifest_text:
             violations.append((runtime_manifest, 0, f"missing {needle}"))
-    if f'runtime_strategy = "{strategy}"' not in family_plugin.read_text(encoding="utf-8"):
-        violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+    if f'runtime_strategy = "{strategy}"' not in family_model.read_text(encoding="utf-8"):
+        violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
     if f'return "{strategy}"' not in runner.read_text(encoding="utf-8", errors="ignore"):
         violations.append((runner, 0, f"runner does not register {strategy}"))
 
@@ -5747,7 +5757,7 @@ def test_qwen3_omni_runtime_is_family_owned() -> None:
         violations.append((RUNTIME_STRATEGY_MATRIX, 0, f"missing matrix strategy {strategy}"))
 
     runtime_manifest = RUNTIME_MODELS / family / "MODEL.toml"
-    family_plugin = FAMILIES / family / "plugin.py"
+    family_model = FAMILIES / family / "model.py"
     runner = E2E_MODELS / family / "e2e_plugins" / "runners" / "omni.py"
     manifest_text = runtime_manifest.read_text(encoding="utf-8", errors="ignore")
     for needle in (
@@ -5760,8 +5770,8 @@ def test_qwen3_omni_runtime_is_family_owned() -> None:
     ):
         if needle not in manifest_text:
             violations.append((runtime_manifest, 0, f"missing {needle}"))
-    if f'runtime_strategy = "{strategy}"' not in family_plugin.read_text(encoding="utf-8"):
-        violations.append((family_plugin, 0, f"missing runtime_strategy {strategy}"))
+    if f'runtime_strategy = "{strategy}"' not in family_model.read_text(encoding="utf-8"):
+        violations.append((family_model, 0, f"missing runtime_strategy {strategy}"))
     if f'return "{strategy}"' not in runner.read_text(encoding="utf-8", errors="ignore"):
         violations.append((runner, 0, f"runner does not register {strategy}"))
 
@@ -6033,15 +6043,15 @@ def test_shared_debug_runner_has_no_model_owned_runners() -> None:
         for path in expected_owned_files
         if not path.is_file()
     )
-    for plugin_path in sorted(FAMILIES.glob("*/plugin.py")):
-        plugin_text = plugin_path.read_text(encoding="utf-8")
-        match = re.search(r"runtime_strategy\s*=\s*['\"]([^'\"]+)['\"]", plugin_text)
+    for model_path in sorted(FAMILIES.glob("*/model.py")):
+        model_text = model_path.read_text(encoding="utf-8")
+        match = re.search(r"runtime_strategy\s*=\s*['\"]([^'\"]+)['\"]", model_text)
         if match is None:
             continue
         strategy = match.group(1)
         if not (strategy.endswith("_decoder_kv_cache") or strategy.endswith("_decoder_moe")):
             continue
-        family_dir = plugin_path.parent
+        family_dir = model_path.parent
         manifest = family_dir / "MODEL.toml"
         debug_runner = family_dir / "debug_runner.py"
         manifest_text = manifest.read_text(encoding="utf-8")
@@ -6989,17 +6999,17 @@ def test_diffusion_bundle_sections_config_and_tokenizers_are_family_owned() -> N
     """Trace: ARCH-MODPLUG-001
     Intent: keep diffusion component-to-bundle-section and component-derived
     config/tokenizer policy with each model family.
-    Preconditions: diffusion family plugins expose diffusion_bundle_sections()
-    diffusion_bundle_config(), and diffusion tokenizer hooks.
-    Postconditions: shared engine_builder only asks the plugin for component
-    sections/config/tokenizers and does not hard-code component names or
-    optional features.
+    Preconditions: each diffusion family model owns its component assembly,
+    runtime config, tokenizer packaging, and final bundle write.
+    Postconditions: engine_builder has no diffusion orchestration and every
+    diffusion model.py contains the complete required build path.
     """
     text = ENGINE_BUILDER.read_text(encoding="utf-8", errors="ignore")
-    start = text.index("def _build_diffusion_bundle(")
-    end = text.index("\ndef build(", start)
-    diffusion_body = text[start:end]
     violations = []
+    if "def _build_diffusion_bundle(" in text:
+        violations.append(
+            (ENGINE_BUILDER, 0, "shared engine_builder still owns diffusion builds")
+        )
     for snippet in (
         'BundleSection("denoiser_plan"',
         'BundleSection("vae_decoder_plan"',
@@ -7022,7 +7032,7 @@ def test_diffusion_bundle_sections_config_and_tokenizers_are_family_owned() -> N
         '"vision_engine" in components',
         '"vae_encoder" in components',
     ):
-        if snippet in diffusion_body:
+        if snippet in text:
             violations.append(
                 (
                     ENGINE_BUILDER,
@@ -7030,74 +7040,38 @@ def test_diffusion_bundle_sections_config_and_tokenizers_are_family_owned() -> N
                     f"shared diffusion builder owns bundle section policy {snippet}",
                 )
             )
-    if "_diffusion_bundle_sections_from_plugin(plugin, components, parallel)" not in diffusion_body:
-        violations.append(
-            (
-                ENGINE_BUILDER,
-                0,
-                "shared diffusion builder does not delegate section assembly to plugin",
-            )
-        )
-    if 'getattr(plugin, "diffusion_bundle_config", None)' not in diffusion_body:
-        violations.append(
-            (
-                ENGINE_BUILDER,
-                0,
-                "shared diffusion builder does not delegate component-derived config to plugin",
-            )
-        )
-    if "_diffusion_tokenizer_add_special_tokens_from_plugin(" not in diffusion_body:
-        violations.append(
-            (
-                ENGINE_BUILDER,
-                0,
-                "shared diffusion builder does not delegate tokenizer add-special policy to plugin",
-            )
-        )
-    if "_diffusion_tokenizer_bundle_sections_from_plugin(" not in diffusion_body:
-        violations.append(
-            (
-                ENGINE_BUILDER,
-                0,
-                "shared diffusion builder does not delegate tokenizer sections to plugin",
-            )
-        )
-
-    for family in ("flux", "ltx_video", "pixart", "qwen_image", "wan_t2v", "z_image"):
-        plugin_path = FAMILIES / family / "plugin.py"
-        plugin_text = plugin_path.read_text(encoding="utf-8", errors="ignore")
-        if "def diffusion_bundle_sections(" not in plugin_text:
+    for family in (
+        "flux",
+        "ltx_video",
+        "minimax_h3",
+        "pixart",
+        "qwen_image",
+        "wan2_2_ti2v",
+        "wan_t2v",
+        "z_image",
+    ):
+        model_path = FAMILIES / family / "model.py"
+        model_text = model_path.read_text(encoding="utf-8", errors="ignore")
+        if "def build(" not in model_text:
             violations.append(
                 (
-                    plugin_path,
+                    model_path,
                     0,
-                    "missing family-owned diffusion_bundle_sections()",
+                    "missing complete family-owned build()",
                 )
             )
-        if "def diffusion_bundle_config(" not in plugin_text:
-            violations.append(
-                (
-                    plugin_path,
-                    0,
-                    "missing family-owned diffusion_bundle_config()",
+        for required in (
+            "def build_components(",
+            "def diffusion_bundle_sections(",
+            "def diffusion_bundle_config(",
+            "def diffusion_tokenizer_add_special_tokens(",
+            "def diffusion_tokenizer_bundle_sections(",
+            "write_bundle(output_path, info, sections)",
+        ):
+            if required not in model_text:
+                violations.append(
+                    (model_path, 0, f"missing family-owned {required}")
                 )
-            )
-        if "def diffusion_tokenizer_add_special_tokens(" not in plugin_text:
-            violations.append(
-                (
-                    plugin_path,
-                    0,
-                    "missing family-owned diffusion_tokenizer_add_special_tokens()",
-                )
-            )
-        if "def diffusion_tokenizer_bundle_sections(" not in plugin_text:
-            violations.append(
-                (
-                    plugin_path,
-                    0,
-                    "missing family-owned diffusion_tokenizer_bundle_sections()",
-                )
-            )
 
     assert not violations, _format_violations(violations)
 
@@ -9051,7 +9025,7 @@ def test_wan22_quick_start_uses_declarative_runtime_settings() -> None:
     quick_start = REPO_ROOT / "website" / "docs" / "getting-started" / "quick-start.md"
     text = quick_start.read_text(encoding="utf-8")
 
-    assert "TRTMC_" "WAN22_" not in text
+    assert "TRTMC_WAN22_" not in text
 
 
 def test_generated_e2e_task_sidecars_are_task_owned() -> None:
@@ -9429,22 +9403,28 @@ def test_model_owned_e2e_assets_are_local_and_complete() -> None:
     assert not violations, _format_violations(violations)
 
 
-def test_lazy_family_packages_preserve_plugin_instance_api() -> None:
-    """Lazy package imports must not replace ``family.plugin`` with a module.
-
-    Importlib publishes a directly imported ``family.plugin`` submodule on the
-    parent package.  Every lazy family initializer must intercept that write so
-    package consumers and registry discovery continue to receive the
-    model-owned ``FamilyPlugin`` instance, independent of test import order.
-    """
+def test_family_packages_do_not_proxy_model_entries() -> None:
+    """Family packages stay inert; the resolver imports ``model`` explicitly."""
     violations: list[tuple[Path, int, str]] = []
-    guard = 'if name == "plugin" and isinstance(value, types.ModuleType):'
 
     for init_path in sorted(FAMILIES.glob("*/__init__.py")):
         source = init_path.read_text(encoding="utf-8")
-        if "_plugin = None" not in source:
-            continue
-        if guard not in source:
-            violations.append((init_path, 0, "lazy package does not preserve plugin instance"))
+        tree = ast.parse(source, filename=str(init_path))
+        executable = [
+            node
+            for node in tree.body
+            if not (
+                isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)
+            )
+        ]
+        if executable:
+            violations.append((init_path, 0, "family package initializer is not inert"))
+        for retired in ("_plugin", "__getattr__", "types.ModuleType"):
+            if retired in source:
+                violations.append(
+                    (init_path, 0, f"family package retains retired proxy {retired}")
+                )
 
     assert not violations, _format_violations(violations)

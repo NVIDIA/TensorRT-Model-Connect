@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "chronos_bolt"
-plugin = "chronos_bolt"
 python_profile_specs = [
   "chronos|families/chronos_bolt/python_profile_requirements/chronos.lock.txt|families/chronos_bolt/python_profile_verify.py|true",
 ]
@@ -14,6 +13,9 @@ aliases = [
   "chronos_bolt",
   "chronos-bolt",
   "chronosbolt",
+]
+architecture_patterns = [
+  "ChronosBoltModelForForecasting",
 ]
 prefixes = [
   "chronos_bolt",

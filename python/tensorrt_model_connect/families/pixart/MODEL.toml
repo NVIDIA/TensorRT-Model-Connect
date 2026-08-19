@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "pixart"
-plugin = "pixart"
-module = "plugin"
 aliases = [
   "pixart",
   "pixart_alpha",

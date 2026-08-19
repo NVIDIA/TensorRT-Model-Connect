@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "whisper"
-plugin = "whisper"
 test_manifests = [
   "manifests/whisper-large-v3-turbo-tp4.json",
   "manifests/whisper-large-v3-turbo.json",

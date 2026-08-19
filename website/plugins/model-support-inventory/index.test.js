@@ -28,8 +28,9 @@ test('collects support inventory from repository metadata', (context) => {
 
   writeFixture(
     repoRoot,
-    'python/tensorrt_model_connect/families/alpha.py'
+    'python/tensorrt_model_connect/families/alpha/model.py'
   );
+  writeFixture(repoRoot, 'python/tensorrt_model_connect/families/alpha/MODEL.toml');
   writeFixture(
     repoRoot,
     'python/tensorrt_model_connect/families/alpha/runtime_config_schema.py',
@@ -88,8 +89,9 @@ test('collects support inventory from repository metadata', (context) => {
   );
   writeFixture(
     repoRoot,
-    'python/tensorrt_model_connect/families/beta/plugin.py'
+    'python/tensorrt_model_connect/families/beta/model.py'
   );
+  writeFixture(repoRoot, 'python/tensorrt_model_connect/families/beta/MODEL.toml');
   writeFixture(
     repoRoot,
     'python/tensorrt_model_connect/families/_private.py'
@@ -187,15 +189,15 @@ test('collects support inventory from repository metadata', (context) => {
   const inventory = collectModelSupportInventory(repoRoot);
   assert.deepEqual(
     {
-      familyPluginCount: inventory.familyPluginCount,
-      familyPluginNames: inventory.familyPluginNames,
+      familyModelCount: inventory.familyModelCount,
+      familyModelNames: inventory.familyModelNames,
       e2eManifestCount: inventory.e2eManifestCount,
       e2eFamilyIndexCount: inventory.e2eFamilyIndexCount,
       runtimeStrategyKeyCount: inventory.runtimeStrategyKeyCount,
     },
     {
-      familyPluginCount: 2,
-      familyPluginNames: ['alpha', 'beta'],
+      familyModelCount: 2,
+      familyModelNames: ['alpha', 'beta'],
       e2eManifestCount: 3,
       e2eFamilyIndexCount: 2,
       runtimeStrategyKeyCount: 3,
@@ -330,7 +332,7 @@ test('fails closed when a source-of-truth directory is missing', (context) => {
 
   assert.throws(
     () => collectModelSupportInventory(repoRoot),
-    /Unable to read Python family plugins/
+    /Unable to read Python family models/
   );
 });
 

@@ -7,9 +7,9 @@ A model family is a model-owned Python build package. Its
 modules own config adaptation, checkpoint mapping, graph construction, and
 bundle metadata.
 
-## What a family plugin does
+## What a family model does
 
-On the native path, family plugins can:
+Every family exposes one required `model.py`. It:
 
 - Match a Hugging Face `model_type` or diffusers pipeline class.
 - Load and normalize weights.
@@ -18,12 +18,13 @@ On the native path, family plugins can:
 - Build engine plan bytes.
 - Add tokenizer, vision, diffusion, or audio metadata.
 - Provide quantization exclusions or calibration data.
+- Own the complete config → weights → engines → bundle sequence.
 
 ## Native TensorRT families
 
 Native family packages live in
 `python/tensorrt_model_connect/families/<family>/`. At this revision there are
-78 package manifests. Use the repository validator for the live inventory:
+80 package manifests. Use the repository validator for the live inventory:
 
 ```bash
 python3 tools/model_ci.py validate
@@ -60,27 +61,24 @@ runtime; they are not silently treated as AR. The model-owned E2E contract
 contains both a box case and a point case, while `refcoco_grounding` supplies
 dataset-backed IoU accuracy validation.
 
-The package-level `plugin` exported by `__init__.py` supplies the Python
-protocol, while `MODEL.toml` indexes discovery. The lookup route depends on
-the input: a full config tries bounded `architecture_patterns` candidates
-before the all-package `pkgutil` compatibility fallback; a string or
-`model_type` tries a direct descriptor ID, then alias/prefix candidates, then
-that fallback; a Diffusers pipeline class uses descriptor
-`diffusion_pipeline_classes` only and never runs the fallback. The descriptor
-`module` field is specialization/tooling metadata, not a runtime import
-selector. Adding only a loose `.py` file can therefore be seen by the two
-compatibility flows, but it does not create a complete current family entry.
+`MODEL.toml` bounds lookup through IDs, aliases, prefixes,
+`architecture_patterns`, and `diffusion_pipeline_classes`. After selecting a
+candidate, the resolver imports exactly
+`tensorrt_model_connect.families.<family>.model`, requires `matches(config)`
+and `build(model_dir, output_path, **options)`, and calls `build()` directly.
+There is no package scan, package-level proxy, compatibility fallback, or
+manifest-configured Python entrypoint.
 
 ## Qualified optimized implementations
 
-After family resolution, a model-owned `default_build_route` may claim the
-native path before provider probing; eligible dense Qwen3 and Llama currently
-do so. Other requests probe optimized implementations only below that family.
+After family resolution, the selected `model.py` owns any native-versus-
+optimized choice. Qwen keeps its exact Edge-LLM profile selection in its own
+module; other families execute their native recipe directly.
 A provider profile must match the exact model ID, immutable revision, active
 target, and requested options and must retain its qualification state and
 semantic-source binding. A successful claim packages its implementation DSO
-and opaque artifact tree into the bundle; no claim continues to the native
-plugin above.
+and opaque artifact tree into the bundle. This is family policy rather than a
+second central router.
 
 The current example is the Qwen TensorRT Edge-LLM adapter with three qualified
 Qwen3/A100 SM80/FP16 profiles. These profiles do not add native strategy keys

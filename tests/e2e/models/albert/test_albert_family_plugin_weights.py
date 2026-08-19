@@ -57,7 +57,7 @@ class TestAlbertPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.albert import plugin
+        import tensorrt_model_connect.families.albert.model as plugin
 
         config = {
             "model_type": "albert",
@@ -85,6 +85,6 @@ class TestAlbertPlugin:
         assert "embed_norm" in weights
 
     def test_matches(self):
-        from tensorrt_model_connect.families.albert import plugin
+        import tensorrt_model_connect.families.albert.model as plugin
         assert plugin.matches("albert")
         assert not plugin.matches("bert")

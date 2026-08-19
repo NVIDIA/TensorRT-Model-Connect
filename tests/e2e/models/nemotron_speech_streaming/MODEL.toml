@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "nemotron_speech_streaming"
-plugin = "nemotron_speech_streaming"
 test_manifests = [
   "manifests/nemotron-speech-streaming-en-0.6b-tp4.json",
   "manifests/nemotron-speech-streaming-en-0.6b.json",

@@ -16,7 +16,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     phi_moe_module = importlib.import_module(
-        "tensorrt_model_connect.families.phi_moe.plugin")
+        "tensorrt_model_connect.families.phi_moe.model")
     from tensorrt_model_connect.families.phi_moe import tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
@@ -136,7 +136,7 @@ def test_phi_moe_plugin_routes_parallel_builds(monkeypatch):
     monkeypatch.setattr(tp_builder, "build_phi_moe_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = phi_moe_module.PhiMoEPlugin().build_engine(
+    result = phi_moe_module.build_engine(
         _config(), _weights(), 17,
         verbose=True,
         debug_layer_outputs=True,

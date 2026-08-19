@@ -451,7 +451,7 @@ def build_qwen25vl_text_encoder_engine(
     if use_dynamic_batch:
         # Diffusion batch-inference RFC, Decision C: kMIN=1, kOPT=min(N,4),
         # kMAX=N. Single wide profile per component (Decision A).
-        from ...engine_builder import add_dynamic_batch_profile
+        from ...tvm_ffi.graph_build import add_dynamic_batch_profile
 
         opt_batch = (
             min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size

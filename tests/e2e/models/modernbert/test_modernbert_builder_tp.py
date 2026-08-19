@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.modernbert.plugin import ModernbertPlugin
+from tensorrt_model_connect.families.modernbert import model as ModernbertModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 modernbert_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.modernbert.plugin")
+    "tensorrt_model_connect.families.modernbert.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -35,7 +35,7 @@ _VOCAB = 24
 
 def _modernbert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.modernbert.model.parallel",
+        "tensorrt_model_connect.families.modernbert.model",
         reason="TensorRT is required for ModernBERT TP builder tests",
     )
 
@@ -212,7 +212,7 @@ def test_modernbert_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_modernbert_engine", fake_build)
 
-    plan = ModernbertPlugin().build_engine(
+    plan = ModernbertModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -234,7 +234,7 @@ def test_modernbert_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        ModernbertPlugin().build_engine(
+        ModernbertModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

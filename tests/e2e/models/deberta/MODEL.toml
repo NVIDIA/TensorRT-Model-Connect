@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "deberta"
-plugin = "deberta"
 test_manifests = [
   "manifests/deberta-base-tp4.json",
   "manifests/deberta-base.json",

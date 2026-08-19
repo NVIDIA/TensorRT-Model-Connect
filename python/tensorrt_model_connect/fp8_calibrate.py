@@ -5,10 +5,10 @@
 
 This module provides the shared infrastructure for FP8 quantization.
 Model-specific logic (input generation, layer exclusion) lives in each
-family plugin's ``fp8_calibrate()`` method.
+family's ``model.py``.
 
 Usage:
-    # From a family plugin:
+    # From a family model:
     from ..fp8_calibrate import run_fp8_calibration, extract_scales_from_state_dict
 
     scales = run_fp8_calibration(model, calibration_loop, exclude_pattern)

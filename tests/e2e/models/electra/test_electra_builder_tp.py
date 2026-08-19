@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.electra.plugin import ElectraPlugin
+from tensorrt_model_connect.families.electra import model as ElectraModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 electra_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.electra.plugin")
+    "tensorrt_model_connect.families.electra.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -220,7 +220,7 @@ def test_electra_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_encoder_engine", fake_build)
 
-    plan = ElectraPlugin().build_engine(
+    plan = ElectraModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -242,7 +242,7 @@ def test_electra_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        ElectraPlugin().build_engine(
+        ElectraModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

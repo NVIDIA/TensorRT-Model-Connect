@@ -272,7 +272,6 @@ def _patch_tensorrt(monkeypatch):
     from tensorrt_model_connect.families.qwen_image import (
         qwen_image_dit_builder as dit_mod,
     )
-    from tensorrt_model_connect import engine_builder
 
     monkeypatch.setattr(dit_mod, "trt", _FakeTRT)
 
@@ -321,7 +320,9 @@ def _patch_tensorrt(monkeypatch):
             opt_batch=opt_batch, static_shape=dict(static_shape),
         ))
 
-    monkeypatch.setattr(engine_builder, "add_dynamic_batch_profile", _record)
+    from tensorrt_model_connect.tvm_ffi import graph_build
+
+    monkeypatch.setattr(graph_build, "add_dynamic_batch_profile", _record)
     return calls
 
 

@@ -19,7 +19,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class InternLMPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.internlm"
+    plugin_module = "tensorrt_model_connect.families.internlm.model"
     model_type = "internlm2"
 
     def make_hf_tensors(self) -> dict[str, np.ndarray]:

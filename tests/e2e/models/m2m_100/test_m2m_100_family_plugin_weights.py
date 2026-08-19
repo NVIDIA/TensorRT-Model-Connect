@@ -19,24 +19,24 @@ class TestM2M100SinusoidalPosEmbed:
     """Test the _make_sinusoidal_pos_embed utility function."""
 
     def test_output_shape(self):
-        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100.model import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 16)
         assert result.shape == (10, 16)
         assert result.dtype == np.float32
 
     def test_padding_idx_zeroed(self):
-        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100.model import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 16, padding_idx=1)
         np.testing.assert_array_equal(result[1], np.zeros(16))
 
     def test_first_position_pattern(self):
-        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100.model import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 16, padding_idx=None)
         # Position 0 should have specific sin/cos pattern
         assert result[0, 0] == pytest.approx(0.0, abs=1e-6)  # sin(0) = 0
 
     def test_odd_dimension(self):
-        from tensorrt_model_connect.families.m2m_100 import _make_sinusoidal_pos_embed
+        from tensorrt_model_connect.families.m2m_100.model import _make_sinusoidal_pos_embed
         result = _make_sinusoidal_pos_embed(10, 17)
         assert result.shape == (10, 17)
 
@@ -99,7 +99,7 @@ class TestM2M100Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.m2m_100 import plugin
+        import tensorrt_model_connect.families.m2m_100.model as plugin
 
         config = {
             "model_type": "m2m_100",
@@ -136,7 +136,7 @@ class TestM2M100Plugin:
                 assert f"enc_layer.{i}.{key}" in weights, f"Missing enc_layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.m2m_100 import plugin
+        import tensorrt_model_connect.families.m2m_100.model as plugin
         assert plugin.matches("m2m_100")
         assert plugin.matches("nllb")
         assert not plugin.matches("bart")

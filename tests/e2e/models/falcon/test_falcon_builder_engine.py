@@ -31,7 +31,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class FalconPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.falcon"
+    plugin_module = "tensorrt_model_connect.families.falcon.model"
     model_type = "falcon"
 
     def get_config_dict(self) -> dict:
@@ -158,7 +158,7 @@ class TestFalconEngine(FamilyPluginTestMixin):
         monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
         from tensorrt_model_connect import trt_compat
         monkeypatch.setattr(trt_compat, "_module", None)
-        from tensorrt_model_connect.families import falcon as falcon_module
+        from tensorrt_model_connect.families.falcon import model as falcon_module
 
         captured = {}
 
@@ -179,7 +179,7 @@ class TestFalconEngine(FamilyPluginTestMixin):
             alibi=True,
         )
 
-        plan = falcon_module.plugin.build_engine(config, {}, 8)
+        plan = falcon_module.build_engine(config, {}, 8)
 
         assert plan == b"plan"
         assert captured["position_type"] == "alibi"

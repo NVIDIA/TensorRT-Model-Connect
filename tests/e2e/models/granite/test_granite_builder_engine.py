@@ -13,7 +13,7 @@ from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
 
 class GranitePluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.granite"
+    plugin_module = "tensorrt_model_connect.families.granite.model"
     model_type = "granite"
 
 

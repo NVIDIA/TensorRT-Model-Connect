@@ -50,7 +50,7 @@ class TestDPRPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.dpr import plugin
+        import tensorrt_model_connect.families.dpr.model as plugin
 
         config = {
             "model_type": "dpr",
@@ -78,6 +78,6 @@ class TestDPRPlugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.dpr import plugin
+        import tensorrt_model_connect.families.dpr.model as plugin
         assert plugin.matches("dpr")
         assert not plugin.matches("bert")

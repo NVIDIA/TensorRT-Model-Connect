@@ -46,7 +46,7 @@ class TestStablelmPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.stablelm import plugin
+        from tensorrt_model_connect.families.stablelm import model as plugin
 
         config = {
             "model_type": "stablelm",
@@ -68,6 +68,6 @@ class TestStablelmPlugin:
         assert "final_norm" in weights
 
     def test_matches(self):
-        from tensorrt_model_connect.families.stablelm import plugin
+        from tensorrt_model_connect.families.stablelm import model as plugin
         assert plugin.matches("stablelm")
         assert not plugin.matches("llama")

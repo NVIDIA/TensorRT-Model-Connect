@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.distilbert.plugin import DistilBertPlugin
+from tensorrt_model_connect.families.distilbert import model as DistilBertModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 distilbert_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.distilbert.plugin")
+    "tensorrt_model_connect.families.distilbert.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -220,7 +220,7 @@ def test_distilbert_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_encoder_engine", fake_build)
 
-    plan = DistilBertPlugin().build_engine(
+    plan = DistilBertModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -242,7 +242,7 @@ def test_distilbert_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        DistilBertPlugin().build_engine(
+        DistilBertModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

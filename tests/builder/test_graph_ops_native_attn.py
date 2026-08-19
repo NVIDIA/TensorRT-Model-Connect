@@ -189,12 +189,26 @@ class TestAddLayerNormNative:
 # 2. make_rope_table_half_dim — pure numpy, no TRT
 # ---------------------------------------------------------------------------
 
+def _rope_table_half_dim_reference(
+    max_cache_length: int,
+    head_dim: int,
+    rope_theta: float,
+    cosine: bool,
+) -> np.ndarray:
+    inv_freq = rope_theta ** -(
+        np.arange(0, head_dim, 2, dtype=np.float64) / head_dim)
+    angles = np.outer(
+        np.arange(max_cache_length, dtype=np.float64), inv_freq)
+    values = np.cos(angles) if cosine else np.sin(angles)
+    return values.astype(np.float32)
+
+
 class TestMakeRopeTableHalfDim:
     """
     Intent: make_rope_table_half_dim produces [max_S, rotary_ndims//2] tables
-            whose values match the corresponding entries from make_rope_table.
+            whose values match the mathematical RoPE definition.
     Preconditions: None (pure numpy).
-    Postconditions: Shapes correct, values match full-dim table for head 0.
+    Postconditions: Shapes and values match an independent NumPy oracle.
     Trace: UT-NATIVE-ATTN-001
     """
 
@@ -215,21 +229,15 @@ class TestMakeRopeTableHalfDim:
         (16, 64, 10000.0),
         (32, 128, 500000.0),
     ])
-    def test_values_match_full_dim_table_head0(self, max_S, head_dim, rope_theta):
-        """Values in half-dim table should match the first head's entries in
-        the full-dim table for both cos and sin."""
-        num_heads = 4
-        hidden_size = num_heads * head_dim
-
+    def test_values_match_numpy_reference(self, max_S, head_dim, rope_theta):
         for cosine in (True, False):
-            full = graph_ops.make_rope_table(
-                max_S, hidden_size, num_heads, rope_theta, cosine)
-            half = graph_ops.make_rope_table_half_dim(
+            actual = graph_ops.make_rope_table_half_dim(
                 max_S, head_dim, rope_theta, cosine)
-            # full[:, 0:head_dim//2] is the first half of head 0
+            expected = _rope_table_half_dim_reference(
+                max_S, head_dim, rope_theta, cosine)
             np.testing.assert_allclose(
-                half, full[:, :head_dim // 2], atol=1e-6,
-                err_msg=f"cosine={cosine}: half-dim mismatch vs full table head-0")
+                actual, expected, atol=1e-6,
+                err_msg=f"cosine={cosine}: half-dim mismatch vs NumPy oracle")
 
     def test_partial_rotary_factor(self):
         max_S, head_dim = 16, 64

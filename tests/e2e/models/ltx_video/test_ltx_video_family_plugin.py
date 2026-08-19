@@ -17,7 +17,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.ltx_video as ltx_mod
+    from tensorrt_model_connect.families.ltx_video import model as ltx_mod
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -40,16 +40,12 @@ def _module(name: str, **attrs) -> types.ModuleType:
     return mod
 
 
-def test_matches_and_build_engine_not_supported() -> None:
-    plugin = ltx_mod.plugin
-    assert plugin.matches("ltx_video")
-    assert plugin.matches("LTXPipeline")
-    assert plugin.matches("ltx-video")
-    assert not plugin.matches("LTXConditionPipeline")
-    assert not plugin.matches("wan_t2v")
-
-    with pytest.raises(NotImplementedError, match="build_components"):
-        plugin.build_engine(_cfg(), {}, 16)
+def test_matches_declared_ltx_video_aliases() -> None:
+    assert ltx_mod.matches("ltx_video")
+    assert ltx_mod.matches("LTXPipeline")
+    assert ltx_mod.matches("ltx-video")
+    assert not ltx_mod.matches("LTXConditionPipeline")
+    assert not ltx_mod.matches("wan_t2v")
 
 
 def test_load_weights_requires_ltx_diffusers_model_index(tmp_path) -> None:
@@ -68,7 +64,7 @@ def test_load_weights_requires_ltx_diffusers_model_index(tmp_path) -> None:
     )
 
     cfg = _cfg()
-    weights = ltx_mod.plugin.load_weights(str(model_dir), cfg)
+    weights = ltx_mod.load_weights(str(model_dir), cfg)
     assert weights["_model_format"] == "diffusers"
     assert weights["_pipeline_class"] == "LTXPipeline"
     assert weights["_text_encoder_dir"].endswith("text_encoder")
@@ -80,7 +76,7 @@ def test_load_weights_requires_ltx_diffusers_model_index(tmp_path) -> None:
     bad_dir = tmp_path / "bad"
     bad_dir.mkdir()
     with pytest.raises(ValueError, match="Expected diffusers format"):
-        ltx_mod.plugin.load_weights(str(bad_dir), _cfg())
+        ltx_mod.load_weights(str(bad_dir), _cfg())
 
     non_ltx = tmp_path / "non_ltx"
     non_ltx.mkdir()
@@ -88,7 +84,7 @@ def test_load_weights_requires_ltx_diffusers_model_index(tmp_path) -> None:
         json.dumps({"_class_name": "WanPipeline"})
     )
     with pytest.raises(ValueError, match="Expected LTX pipeline"):
-        ltx_mod.plugin.load_weights(str(non_ltx), _cfg())
+        ltx_mod.load_weights(str(non_ltx), _cfg())
 
 
 def test_build_components_calls_native_subbuilders(
@@ -139,7 +135,7 @@ def test_build_components_calls_native_subbuilders(
         "_transformer_config": {"in_channels": 128},
     }
 
-    out = ltx_mod.plugin.build_components(
+    out = ltx_mod.build_components(
         "/model",
         _cfg(
             video_height=256,
@@ -198,7 +194,7 @@ def test_get_diffusion_config_uses_ltx_scheduler_fields() -> None:
         },
     )
 
-    out = ltx_mod.plugin.get_diffusion_config(cfg)
+    out = ltx_mod.get_diffusion_config(cfg)
 
     assert out["diffusion_backend_type"] == "ltx_video"
     assert out["video_height"] == 480

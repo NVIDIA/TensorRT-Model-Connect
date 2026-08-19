@@ -39,7 +39,7 @@ class TestModernbertPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.modernbert import plugin
+        import tensorrt_model_connect.families.modernbert.model as plugin
 
         config = {
             "model_type": "modernbert",
@@ -70,7 +70,7 @@ class TestModernbertPlugin:
 
     def test_fused_qkv_split(self, tmp_path):
         """Verify the fused QKV weight is split correctly into Q, K, V."""
-        from tensorrt_model_connect.families.modernbert import plugin
+        import tensorrt_model_connect.families.modernbert.model as plugin
 
         config = {
             "model_type": "modernbert",
@@ -112,7 +112,7 @@ class TestModernbertPlugin:
 
     def test_geglu_split(self, tmp_path):
         """Verify the fused GeGLU Wi weight is split into input and gate."""
-        from tensorrt_model_connect.families.modernbert import plugin
+        import tensorrt_model_connect.families.modernbert.model as plugin
 
         config = {
             "model_type": "modernbert",
@@ -148,11 +148,11 @@ class TestModernbertPlugin:
                                        np.ascontiguousarray(gate_raw.T.astype(np.float32)))
 
     def test_matches(self):
-        from tensorrt_model_connect.families.modernbert import plugin
+        import tensorrt_model_connect.families.modernbert.model as plugin
         assert plugin.matches("modernbert")
         assert plugin.matches("ModernBert")
         assert not plugin.matches("bert")
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.modernbert import plugin
+        import tensorrt_model_connect.families.modernbert.model as plugin
         assert plugin.runtime_strategy == "modernbert_encoder_only"

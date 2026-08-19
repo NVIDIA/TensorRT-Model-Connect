@@ -52,7 +52,7 @@ class GPTNeoXPluginTester(FamilyPluginTester):
       - Non-standard HF prefixes: gpt_neox.embed_in, gpt_neox.layers.*
     """
 
-    plugin_module = "tensorrt_model_connect.families.gpt_neox"
+    plugin_module = "tensorrt_model_connect.families.gpt_neox.model"
     model_type = "gpt_neox"
 
     def get_config_dict(self) -> dict:

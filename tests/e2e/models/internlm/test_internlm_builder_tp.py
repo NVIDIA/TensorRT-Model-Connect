@@ -25,7 +25,6 @@ from tensorrt_model_connect.parallel_config import (
 
 
 FAMILY = 'internlm'
-PLUGIN_CLASS = 'InternLMPlugin'
 MODEL_TYPE = 'internlm2'
 TP_SIZE = 4
 RAW = {}
@@ -48,9 +47,9 @@ def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfi
     )
 
 
-def test_internlm_plugin_routes_tp_build(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_internlm_model_routes_tp_build(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     captured: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -61,18 +60,18 @@ def test_internlm_plugin_routes_tp_build(monkeypatch) -> None:
         return b"tp-plan"
 
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "build_dual_profile_tp_decoder_engine",
         fake_build,
     )
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=TP_SIZE, rank=1)
-    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+    plan = model_module.build_engine(
         _config(MODEL_TYPE, TP_SIZE, RAW),
         WeightDict(),
         max_cache_length=17,
@@ -92,17 +91,17 @@ def test_internlm_plugin_routes_tp_build(monkeypatch) -> None:
         assert kwargs[key] == expected
 
 
-def test_internlm_plugin_rejects_quantized_tp(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_internlm_model_rejects_quantized_tp(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+        model_module.build_engine(
             _config(MODEL_TYPE, TP_SIZE, RAW),
             WeightDict(),
             max_cache_length=17,

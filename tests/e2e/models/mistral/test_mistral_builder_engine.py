@@ -18,7 +18,7 @@ from tests.builder.family_plugin_test_mixin import (
 
 
 class MistralPluginTester(FamilyPluginTester):
-    plugin_module = "tensorrt_model_connect.families.mistral"
+    plugin_module = "tensorrt_model_connect.families.mistral.model"
     model_type = "mistral"
 
 

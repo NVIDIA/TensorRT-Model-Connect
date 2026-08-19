@@ -565,7 +565,7 @@ def build_dual_profile_decoder_engine(
     if verbose:
         mode_label = "prefill-profile" if profile_mode == "prefill" else "dual-profile"
         print(
-            f"[trtmc build] Building {mode_label} engine (layers={num_layers}, hidden={hidden}, attn={attention_size}, kv={kv_attention_size}, mlp={mlp_size}, cache={max_cache_length}, opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, norm={'layernorm'}, mlp_type={'gelu_fc'}, pos={'rope'}, precision={precision}) ...",
+            f"[trtmc build] Building {mode_label} engine (layers={num_layers}, hidden={hidden}, attn={attention_size}, kv={kv_attention_size}, mlp={mlp_size}, cache={max_cache_length}, opt_prefill={opt_prefill_length}, max_prefill={max_prefill_length}, norm=layernorm, mlp_type=gelu_fc, pos=rope, precision={precision}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, trt_config)

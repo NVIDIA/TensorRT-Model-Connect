@@ -45,7 +45,7 @@ class TestXLNetPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.xlnet import plugin
+        import tensorrt_model_connect.families.xlnet.model as plugin
 
         config = {
             "model_type": "xlnet",
@@ -70,6 +70,6 @@ class TestXLNetPlugin:
         assert weights["embedding"].shape == (self.VOCAB, self.HIDDEN)
 
     def test_matches(self):
-        from tensorrt_model_connect.families.xlnet import plugin
+        import tensorrt_model_connect.families.xlnet.model as plugin
         assert plugin.matches("xlnet")
         assert not plugin.matches("bert")

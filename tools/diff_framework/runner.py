@@ -70,7 +70,7 @@ def detect_runtime_strategy(
     *,
     with_status: bool = False,
 ) -> str | StrategyDetection:
-    """Auto-detect runtime_strategy from HF config via family plugin.
+    """Auto-detect runtime_strategy from the family model module.
 
     Default return type is `str` for backward compatibility.
     Set `with_status=True` to receive a StrategyDetection object with explicit
@@ -79,11 +79,11 @@ def detect_runtime_strategy(
     try:
         from tensorrt_model_connect.engine_builder import _resolve_model
         from tensorrt_model_connect.config import ModelConfig
-        from tensorrt_model_connect.families import find_plugin
+        from tensorrt_model_connect.families import find_model
 
         model_dir = _resolve_model(model)
         config = ModelConfig.from_dir(model_dir)
-        plugin = find_plugin(config.model_type)
+        model_module = find_model(config)
     except Exception as exc:
         detection = StrategyDetection(
             runtime_strategy=None,
@@ -95,23 +95,23 @@ def detect_runtime_strategy(
             ),
         )
     else:
-        if plugin is None:
+        if model_module is None:
             detection = StrategyDetection(
                 runtime_strategy=None,
                 status="warning",
                 message=(
-                    f"No family plugin resolved for model {model!r}; "
+                    f"No family model resolved for model {model!r}; "
                     "no default runtime strategy is assumed."
                 ),
             )
         else:
-            strategy = getattr(plugin, "runtime_strategy", None)
+            strategy = getattr(model_module, "runtime_strategy", None)
             if not strategy:
                 detection = StrategyDetection(
                     runtime_strategy=None,
                     status="warning",
                     message=(
-                        f"Family plugin for model {model!r} did not provide "
+                        f"Family model for {model!r} did not provide "
                         "runtime_strategy; no default runtime strategy is assumed."
                     ),
                 )

@@ -70,7 +70,7 @@ class TestT5Plugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.t5 import plugin
+        import tensorrt_model_connect.families.t5.model as plugin
 
         config = {
             "model_type": "t5",
@@ -111,10 +111,10 @@ class TestT5Plugin:
                 assert f"layer.{i}.{key}" in weights, f"Missing layer.{i}.{key}"
 
     def test_matches(self):
-        from tensorrt_model_connect.families.t5 import plugin
+        import tensorrt_model_connect.families.t5.model as plugin
         assert plugin.matches("t5")
         assert not plugin.matches("bart")
 
     def test_runtime_strategy(self):
-        from tensorrt_model_connect.families.t5 import plugin
+        import tensorrt_model_connect.families.t5.model as plugin
         assert plugin.runtime_strategy == "t5_text_to_text"

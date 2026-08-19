@@ -83,7 +83,7 @@ class TestOlmo2BuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from tensorrt_model_connect.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import model as plugin
 
         config = {
             "model_type": "olmo2",
@@ -109,7 +109,7 @@ class TestOlmo2BuildEngine:
     def test_split_prefill_engine_has_dynamic_prompt_profile(self, tmp_path):
         import tensorrt as trt
 
-        from tensorrt_model_connect.families.olmo2 import plugin
+        from tensorrt_model_connect.families.olmo2 import model as plugin
 
         config = {
             "model_type": "olmo2",

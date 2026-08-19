@@ -55,7 +55,7 @@ class TestBloomPlugin:
 
     def test_qkv_interleaved_split(self, tmp_path):
         """BLOOM QKV is per-head interleaved; verify correct split."""
-        from tensorrt_model_connect.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import model as plugin
 
         config = {
             "model_type": "bloom",
@@ -89,7 +89,7 @@ class TestBloomPlugin:
 
     def test_embedding_layernorm(self, tmp_path):
         """BLOOM has an embedding LayerNorm."""
-        from tensorrt_model_connect.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import model as plugin
 
         config = {
             "model_type": "bloom",
@@ -115,7 +115,7 @@ class TestBloomPlugin:
 
     def test_qkv_bias_split(self, tmp_path):
         """QKV biases should be split per-head interleaved just like weights."""
-        from tensorrt_model_connect.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import model as plugin
 
         config = {
             "model_type": "bloom",
@@ -138,7 +138,7 @@ class TestBloomPlugin:
         assert weights["layer.0.q_bias"].shape == (self.HIDDEN,)
 
     def test_all_keys(self, tmp_path):
-        from tensorrt_model_connect.families.bloom import plugin
+        from tensorrt_model_connect.families.bloom import model as plugin
 
         config = {
             "model_type": "bloom",

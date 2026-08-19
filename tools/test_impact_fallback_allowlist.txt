@@ -69,7 +69,6 @@ no_impact scripts/generate_model_proof_report.py # offline model-proof report co
 no_impact scripts/generate_perf_report.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_generate.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact is intentional
-no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
@@ -146,8 +145,6 @@ shared_builder_module python/tensorrt_model_connect/tvm_ffi/graph_build.py # opt
 shared_builder_module python/tensorrt_model_connect/tvm_ffi/graph_cli.py # opt-in raw graph slot CLI; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tvm_ffi/graph_patch.py # opt-in raw graph capture and rewiring; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/hf_snapshot.py # shared HF snapshot selection used by every builder and gated offline preflight; broad all-model impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional

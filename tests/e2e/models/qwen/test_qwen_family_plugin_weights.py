@@ -27,12 +27,12 @@ class TestQwenPlugin:
 
     def test_dense_qwen_matcher_excludes_moe_model_types(self):
         """The dense Qwen owner must not claim Qwen-MoE configurations."""
-        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.families.qwen import model as plugin
 
         assert not plugin.matches("qwen3_moe")
 
     def test_quantized_qwen_uses_single_engine_layout(self):
-        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.families.qwen import model as plugin
 
         config = ModelConfig(
             hidden_size=self.HIDDEN,
@@ -68,7 +68,7 @@ class TestQwenPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.families.qwen import model as plugin
 
         config = {
             "model_type": "qwen3",
@@ -101,7 +101,7 @@ class TestQwenPlugin:
 
     def test_transpose_applied(self, tmp_path):
         """Projections are transposed from [out, in] to [in, out]."""
-        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.families.qwen import model as plugin
 
         config = {
             "model_type": "qwen3",
@@ -128,7 +128,7 @@ class TestQwenPlugin:
 
     def test_tensor_parallel_shards_qwen_projection_weights(self, tmp_path):
         """TP shards attention/MLP inner dims and leaves replicated weights intact."""
-        from tensorrt_model_connect.families.qwen import plugin
+        from tensorrt_model_connect.families.qwen import model as plugin
         from tensorrt_model_connect.parallel_config import (
             ParallelConfig,
             shard_standard_decoder_weights,

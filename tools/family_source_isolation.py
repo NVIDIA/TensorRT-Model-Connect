@@ -34,10 +34,10 @@ E2E_MODELS = PurePosixPath("tests/e2e/models")
 FAMILY_TOOLS = PurePosixPath("tools/families")
 BUILDER_FAMILY_TESTS = PurePosixPath("tests/builder/families")
 
-# These files are registry/protocol infrastructure.  Any additional shared
-# family module must be reviewed and added explicitly instead of silently
-# becoming available to every isolated family.
-APPROVED_SHARED_FAMILY_FILES = frozenset({"__init__.py", "base.py"})
+# This is registry infrastructure. Any additional shared family module must be
+# reviewed and added explicitly instead of silently becoming available to every
+# isolated family.
+APPROVED_SHARED_FAMILY_FILES = frozenset({"__init__.py"})
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ class FamilySourceSelection:
 def resolve_selection(repo_root: Path, family: str) -> FamilySourceSelection:
     repo_root = repo_root.resolve()
     family_dir = repo_root / PYTHON_FAMILIES / family
-    if not (family_dir / "plugin.py").is_file():
+    if not (family_dir / "model.py").is_file():
         raise SystemExit(f"Unknown Python model family: {family}")
 
     manifests = model_plugin_isolation.discover_e2e_manifests(repo_root)

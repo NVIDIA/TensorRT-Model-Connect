@@ -42,9 +42,9 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 
 | Term | Plain meaning | In this project |
 | --- | --- | --- |
-| Python builder | Build-time conversion tool. | `trtmc build` reads checkpoints, honors a family-owned native default route when declared, otherwise tries one exact-qualified optimized provider before the native fallback, and writes `.bundle` bundles. |
+| Python builder | Thin build-time entry point. | `trtmc build` resolves a checkpoint's owning family and calls that family's `model.build()` once. The family writes the complete `.bundle`; Qwen also owns its exact optimized-profile selection locally. |
 | C++ runtime | Request-time execution library and CLI. | `trtmc` and `trtmc::load()` load bundles and run task APIs. Source Build adds its CLI to `PATH`. |
-| Family plugin | Python adapter for a model family. | Examples: `qwen`, `llama`, `whisper`, `flux`, `pixart`. It handles config and weights. |
+| Family model module | Self-contained Python build owner for a model family. | `python/tensorrt_model_connect/families/<id>/model.py` matches the config and owns config → weights → engines/components → bundle. |
 | Runtime strategy | Model-owned native C++ dispatch key in bundle metadata. | Examples: `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux`, `diffusion_pixart`. Optimized-runtime bundles use `optimized_runtime.json` instead. |
 | Optimized-runtime descriptor | Exact delegated implementation contract in a bundle. | `optimized_runtime.json` binds the implementation/profile and embedded artifact tree; it bypasses native strategy, model-plugin, and backend-DSO selection. |
 | Task strategy | E2E/user-contract category shared by models with the same result shape. | Examples: `text_generation_causal`, `speech_to_text`, `vision_language_generation`, `diffusion_media_generation`. It does not select a runtime DSO. |

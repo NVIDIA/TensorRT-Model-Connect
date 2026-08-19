@@ -405,7 +405,6 @@ class VLPipelineTest:
         builders_dir=builders_dir,
         runtime_registry_path=tmp_path / "missing_pipeline_factory.cpp",
         runtime_models_dir=tmp_path / "missing_runtime_models",
-        torchtrt_strategies_dir=tmp_path / "missing_torchtrt_strategies",
         e2e_models_dir=e2e_models_dir,
         diff_checks_dir=diff_checks_dir,
         runners_dir=runners_dir,

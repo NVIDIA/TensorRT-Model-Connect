@@ -16,7 +16,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     shard_standard_decoder_weights,
 )
-from .plugin import _make_llama3_rope_table_half_dim, _resolve_rope_scaling
+from .model import _make_llama3_rope_table_half_dim, _resolve_rope_scaling
 
 if TYPE_CHECKING:
     from .config import ModelConfig

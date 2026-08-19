@@ -1,12 +1,12 @@
 <!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
-<svg width="849" height="286" role="img" aria-labelledby="trtmc-system-map-svg-title trtmc-system-map-svg-description" preserveAspectRatio="xMidYMid meet"
- viewBox="0.00 0.00 849.00 286.00" xmlns="http://www.w3.org/2000/svg">
+<svg width="875" height="286" role="img" aria-labelledby="trtmc-system-map-svg-title trtmc-system-map-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 875.00 286.00" xmlns="http://www.w3.org/2000/svg">
 <title id="trtmc-system-map-svg-title">TensorRT-Model-Connect build and runtime system map</title>
 <desc id="trtmc-system-map-svg-description">A checkpoint is resolved by trtmc build into a native or exact-qualified optimized bundle, then loaded by the C++ runtime and exposed through a typed task API.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 260.52)">
-<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-260.52 823.79,-260.52 823.79,25.2 -25.2,25.2"/>
-<text xml:space="preserve" text-anchor="start" x="215.96" y="-205.32" font-family="Arial" font-weight="bold" font-size="30.00" fill="#111827">Build → bundle → runtime</text>
-<text xml:space="preserve" text-anchor="start" x="108.28" y="-187.02" font-family="Arial" font-size="17.00" fill="#111827">One artifact contract connects Python&#45;first model sources to native task APIs.</text>
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-260.52 849.79,-260.52 849.79,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="228.96" y="-205.32" font-family="Arial" font-weight="bold" font-size="30.00" fill="#111827">Build → bundle → runtime</text>
+<text xml:space="preserve" text-anchor="start" x="121.28" y="-187.02" font-family="Arial" font-size="17.00" fill="#111827">One artifact contract connects Python&#45;first model sources to native task APIs.</text>
 <!-- checkpoint -->
 <g id="node1" class="node">
 <title>checkpoint</title>
@@ -18,16 +18,16 @@
 <!-- build -->
 <g id="node2" class="node">
 <title>build</title>
-<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M490.35,-180.32C490.35,-180.32 310.57,-180.32 310.57,-180.32 304.57,-180.32 298.57,-174.32 298.57,-168.32 298.57,-168.32 298.57,-120.16 298.57,-120.16 298.57,-114.16 304.57,-108.16 310.57,-108.16 310.57,-108.16 490.35,-108.16 490.35,-108.16 496.35,-108.16 502.35,-114.16 502.35,-120.16 502.35,-120.16 502.35,-168.32 502.35,-168.32 502.35,-174.32 496.35,-180.32 490.35,-180.32"/>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M516.13,-180.32C516.13,-180.32 284.78,-180.32 284.78,-180.32 278.78,-180.32 272.78,-174.32 272.78,-168.32 272.78,-168.32 272.78,-120.16 272.78,-120.16 272.78,-114.16 278.78,-108.16 284.78,-108.16 284.78,-108.16 516.13,-108.16 516.13,-108.16 522.13,-108.16 528.13,-114.16 528.13,-120.16 528.13,-120.16 528.13,-168.32 528.13,-168.32 528.13,-174.32 522.13,-180.32 516.13,-180.32"/>
 <text xml:space="preserve" text-anchor="start" x="348.79" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">trtmc build</text>
-<text xml:space="preserve" text-anchor="start" x="331.09" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">native FamilyPlugin</text>
-<text xml:space="preserve" text-anchor="start" x="311.53" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">or exact optimized profile</text>
+<text xml:space="preserve" text-anchor="start" x="294.2" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">resolve → family model.build()</text>
+<text xml:space="preserve" text-anchor="start" x="285.74" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">native or exact optimized artifact</text>
 </g>
 <!-- checkpoint&#45;&gt;build -->
 <g id="edge1" class="edge">
 <title>checkpoint&#45;&gt;build</title>
-<path fill="none" stroke="#64748b" stroke-width="2.5" d="M238.1,-144C238.1,-144 285.92,-144 285.92,-144"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="285.92,-146.8 293.92,-144 285.92,-141.2 285.92,-146.8"/>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M238.1,-144C238.1,-144 260.06,-144 260.06,-144"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="260.06,-146.8 268.06,-144 260.06,-141.2 260.06,-146.8"/>
 </g>
 <!-- result -->
 <g id="node5" class="node">
@@ -41,16 +41,16 @@
 <!-- bundle -->
 <g id="node3" class="node">
 <title>bundle</title>
-<path fill="#fffbeb" stroke="#b45309" stroke-width="3" d="M786.59,-180.32C786.59,-180.32 538.32,-180.32 538.32,-180.32 532.32,-180.32 526.32,-174.32 526.32,-168.32 526.32,-168.32 526.32,-120.16 526.32,-120.16 526.32,-114.16 532.32,-108.16 538.32,-108.16 538.32,-108.16 786.59,-108.16 786.59,-108.16 792.59,-108.16 798.59,-114.16 798.59,-120.16 798.59,-120.16 798.59,-168.32 798.59,-168.32 798.59,-174.32 792.59,-180.32 786.59,-180.32"/>
-<text xml:space="preserve" text-anchor="start" x="590.78" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.bundle artifact</text>
-<text xml:space="preserve" text-anchor="start" x="574.63" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">plans + runtime_strategy</text>
-<text xml:space="preserve" text-anchor="start" x="539.28" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">or embedded implementation DSO</text>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="3" d="M812.59,-180.32C812.59,-180.32 564.32,-180.32 564.32,-180.32 558.32,-180.32 552.32,-174.32 552.32,-168.32 552.32,-168.32 552.32,-120.16 552.32,-120.16 552.32,-114.16 558.32,-108.16 564.32,-108.16 564.32,-108.16 812.59,-108.16 812.59,-108.16 818.59,-108.16 824.59,-114.16 824.59,-120.16 824.59,-120.16 824.59,-168.32 824.59,-168.32 824.59,-174.32 818.59,-180.32 812.59,-180.32"/>
+<text xml:space="preserve" text-anchor="start" x="616.78" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.bundle artifact</text>
+<text xml:space="preserve" text-anchor="start" x="600.63" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">plans + runtime_strategy</text>
+<text xml:space="preserve" text-anchor="start" x="565.28" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">or embedded implementation DSO</text>
 </g>
 <!-- build&#45;&gt;bundle -->
 <g id="edge2" class="edge">
 <title>build&#45;&gt;bundle</title>
-<path fill="none" stroke="#64748b" stroke-width="2.5" d="M503.25,-156C503.25,-156 513.24,-156 513.24,-156"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="513.24,-158.8 521.24,-156 513.24,-153.2 513.24,-158.8"/>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M528.87,-144C528.87,-144 539.23,-144 539.23,-144"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="539.23,-146.8 547.23,-144 539.23,-141.2 539.23,-146.8"/>
 </g>
 <!-- runtime -->
 <g id="node4" class="node">
@@ -64,8 +64,8 @@
 <!-- bundle&#45;&gt;runtime -->
 <g id="edge3" class="edge">
 <title>bundle&#45;&gt;runtime</title>
-<path fill="none" stroke="#64748b" stroke-width="2.5" d="M525.28,-132C518.31,-132 514.13,-132 514.13,-132 514.13,-132 514.13,-84.95 514.13,-84.95"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="516.93,-84.95 514.13,-76.95 511.33,-84.95 516.93,-84.95"/>
+<path fill="none" stroke="#64748b" stroke-width="2.5" d="M688.46,-106.69C688.46,-75.42 688.46,-36 688.46,-36 688.46,-36 538.56,-36 538.56,-36"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.5" points="538.56,-33.2 530.56,-36 538.56,-38.8 538.56,-33.2"/>
 </g>
 <!-- runtime&#45;&gt;result -->
 <g id="edge4" class="edge">

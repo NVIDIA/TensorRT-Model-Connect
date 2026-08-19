@@ -16,11 +16,11 @@ from safetensors.numpy import save_file
 trt = pytest.importorskip("tensorrt", reason="TensorRT is required for DINOv3 builders")
 
 from tensorrt_model_connect.config import ModelConfig  # noqa: E402
-from tensorrt_model_connect.families import find_plugin, resolve_family_id  # noqa: E402
-from tensorrt_model_connect.families.dinov3.plugin import (  # noqa: E402
+from tensorrt_model_connect.families import resolve_family_id  # noqa: E402
+import tensorrt_model_connect.families.dinov3.model as model  # noqa: E402
+from tensorrt_model_connect.families.dinov3.model import (  # noqa: E402
     build_vit_engine,
     load_vit_weights,
-    plugin,
     resolve_vit_config,
 )
 
@@ -242,10 +242,9 @@ def test_timm_dinov3_qkvb_config_normalizes_before_metadata(tmp_path: Path) -> N
     config = ModelConfig.from_dir(tmp_path)
 
     assert resolve_family_id(config) == "dinov3"
-    assert find_plugin(config) is plugin
-    assert plugin.matches(config.model_type)
-    assert not plugin.matches("vit_small_patch16_dinov3_qkvb_classifier")
-    metadata = plugin.get_bundle_config_overrides(config)
+    assert model.matches(config.model_type)
+    assert not model.matches("vit_small_patch16_dinov3_qkvb_classifier")
+    metadata = model.get_bundle_config_overrides(config)
 
     expected = {
         "model_type": "dinov3_vit",
@@ -303,7 +302,7 @@ def test_vit_config_and_bundle_metadata_preserve_hf_contract(tmp_path: Path) -> 
     raw, _ = _write_tiny_vit(tmp_path)
     resolved = resolve_vit_config(raw)
     config = ModelConfig.from_dir(tmp_path)
-    metadata = plugin.get_bundle_config_overrides(config)
+    metadata = model.get_bundle_config_overrides(config)
 
     assert resolved["head_dim"] == 4
     assert resolved["num_register_tokens"] == 2
@@ -316,7 +315,7 @@ def test_vit_config_and_bundle_metadata_preserve_hf_contract(tmp_path: Path) -> 
     assert metadata["image_std"] == [0.229, 0.224, 0.225]
     assert metadata["interpolation"] == "bilinear"
     assert metadata["do_center_crop"] is False
-    assert plugin.default_max_cache_length(config) == 1
+    assert model.default_max_cache_length(config) == 1
 
 
 @pytest.mark.parametrize("precision", ["fp32", "fp16"])

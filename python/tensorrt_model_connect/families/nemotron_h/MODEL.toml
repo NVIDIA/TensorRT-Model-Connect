@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "nemotron_h"
-plugin = "nemotron_h"
-module = "plugin"
 python_profile_specs = [
   "nemotron_h_reference|families/nemotron_h/python_profile_requirements/nemotron_h_reference.lock.txt|families/nemotron_h/python_profile_verify.py|true",
 ]

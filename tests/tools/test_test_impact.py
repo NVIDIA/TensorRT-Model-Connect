@@ -66,7 +66,10 @@ def _write_json(path: Path, data: dict) -> None:
 
 
 def _write_family(families_dir: Path, name: str, imports: str) -> None:
-    (families_dir / f"{name}.py").write_text(imports, encoding="utf-8")
+    family_dir = families_dir / name
+    family_dir.mkdir()
+    (family_dir / "__init__.py").write_text('"""Model family package."""\n', encoding="utf-8")
+    (family_dir / "model.py").write_text(imports, encoding="utf-8")
 
 
 def _write_family_package(families_dir: Path, name: str, files: dict[str, str]) -> None:
@@ -78,7 +81,7 @@ def _write_family_package(families_dir: Path, name: str, files: dict[str, str]) 
 
 @pytest.fixture
 def mock_repo(tmp_path):
-    """Create a minimal mock repo with manifests and family plugins."""
+    """Create a minimal mock repo with manifests and family model entries."""
     models_dir = tmp_path / "tests" / "e2e" / "models"
     models_dir.mkdir(parents=True)
     python_package_dir = tmp_path / "python" / "tensorrt_model_connect"
@@ -440,11 +443,13 @@ class TorchReference:
                     ],
                 },
                 {
-                    "name": "prompt_seg_text_engine_builder_metadata",
-                    "path": "python/tensorrt_model_connect/engine_builder.py",
+                    "name": "prompt_seg_text_family_model_metadata",
+                    "path": (
+                        "python/tensorrt_model_connect/families/"
+                        "prompt_seg_text_family/model.py"
+                    ),
                     "scope": {"owner_family": True},
                     "allowed_tokens": [
-                        "getattr(plugin",
                         "preprocessor_config.json",
                         "processor_config.json",
                         "requires_tokenizer",
@@ -603,15 +608,14 @@ class TorchReference:
         encoding="utf-8",
     )
 
-    # Family plugins
+    # Family model entries
     (families_dir / "__init__.py").write_text("")
-    (families_dir / "base.py").write_text("")
     _write_family_package(
         families_dir,
         "decoder_family",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
@@ -619,8 +623,8 @@ class TorchReference:
         families_dir,
         "decoder_peer_family",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
@@ -628,8 +632,8 @@ class TorchReference:
         families_dir,
         "encoder_family",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .encoder_builder import build\nfrom ...config import C\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .encoder_builder import build\nfrom ...config import C\n",
             "encoder_builder.py": "def build():\n    pass\n",
         },
     )
@@ -644,8 +648,8 @@ class TorchReference:
         families_dir,
         "vision_family",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
@@ -653,8 +657,8 @@ class TorchReference:
         families_dir,
         "audio_family",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
@@ -675,8 +679,8 @@ class TorchReference:
         families_dir,
         "decoder_moe_family",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .standard_decoder_builder import build\nfrom ...config import C\n",
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
@@ -684,8 +688,8 @@ class TorchReference:
         families_dir,
         "encoder_package_family",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .builder import build_encoder_package_engine\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .builder import build_encoder_package_engine\n",
             "builder.py": "from ... import graph_ops\n",
         },
     )
@@ -693,8 +697,8 @@ class TorchReference:
         families_dir,
         "elf_flow",
         {
-            "__init__.py": "from .plugin import plugin\n",
-            "plugin.py": "from .prepare_model_dir import prepare_model_dir\n",
+            "__init__.py": '"""Model family package."""\n',
+            "model.py": "from .prepare_model_dir import prepare_model_dir\n",
             "prepare_model_dir.py": "def prepare_model_dir(args):\n    return {}\n",
         },
     )
@@ -819,12 +823,12 @@ class TestDeclarativeClassificationRules:
         "path,rule_name",
         [
             (
-                "python/tensorrt_model_connect/families/speech_family.py",
-                "family_plugin",
+                "python/tensorrt_model_connect/families/speech_family/model.py",
+                "family_package",
             ),
             (
-                "python/tensorrt_model_connect/families/base.py",
-                "family_base",
+                "python/tensorrt_model_connect/families/__init__.py",
+                "family_registry",
             ),
             ("src/runtime/models/custom_backend/plugin.cpp", "cpp_runtime_model_unknown"),
             ("tests/e2e_harness/runners/__init__.py", "harness_runner_init"),
@@ -930,26 +934,26 @@ class TestModelOwnedAdapterIsolation:
         if expected_tier is not None:
             assert expected_tier in match.unit_tiers
 
-class TestFamilyPlugin:
+class TestFamilyModel:
     def test_family_only_change(self, imap):
-        """families/decoder_family/plugin.py -> exactly decoder_family models."""
+        """families/decoder_family/model.py -> exactly decoder-family models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/plugin.py", imap
+            "python/tensorrt_model_connect/families/decoder_family/model.py", imap
         )
         assert match.rule == "family_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
     def test_family_isolation(self, imap):
-        """families/decoder_family/plugin.py does NOT affect decoder_peer_family models."""
+        """A family model entry does not affect a peer family."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/plugin.py", imap
+            "python/tensorrt_model_connect/families/decoder_family/model.py", imap
         )
         assert "decoder-peer" not in match.models
 
     def test_family_with_no_manifest(self, imap):
         """A family package with no manifest -> empty models, no crash."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/nonexistent_family/plugin.py", imap
+            "python/tensorrt_model_connect/families/nonexistent_family/model.py", imap
         )
         assert match.rule == "family_package"
         assert match.models == []
@@ -962,10 +966,12 @@ class TestFamilyPlugin:
         assert match.rule == "shared_builder_module"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
-    def test_family_base_all_models(self, imap):
-        """families/base.py -> ALL models."""
-        match = test_impact.classify_file("python/tensorrt_model_connect/families/base.py", imap)
-        assert match.rule == "family_base"
+    def test_family_registry_all_models(self, imap):
+        """The family resolver registry affects all models."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/families/__init__.py", imap
+        )
+        assert match.rule == "family_registry"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
     def test_family_init_all_models(self, imap):
@@ -973,7 +979,7 @@ class TestFamilyPlugin:
         match = test_impact.classify_file(
             "python/tensorrt_model_connect/families/__init__.py", imap
         )
-        assert match.rule == "family_base"
+        assert match.rule == "family_registry"
         assert len(match.models) == len(imap.all_model_names)
 
     def test_family_package_file(self, imap):
@@ -984,10 +990,10 @@ class TestFamilyPlugin:
         assert match.rule == "family_package"
         assert match.models == ["encoder-package-core"]
 
-    def test_family_package_plugin(self, imap):
-        """families/encoder_package_family/plugin.py uses the package folder as its impact boundary."""
+    def test_family_package_model(self, imap):
+        """A model.py entry uses its family package as the impact boundary."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/encoder_package_family/plugin.py", imap
+            "python/tensorrt_model_connect/families/encoder_package_family/model.py", imap
         )
         assert match.rule == "family_package"
         assert match.models == ["encoder-package-core"]
@@ -1891,16 +1897,12 @@ class TestUnitTiers:
             assert match.rebuild_cpp is False
 
     def test_family_ownership_tools(self, imap):
-        """Family migration and isolation tools run tools-tier validation."""
+        """Family ownership and isolation tools run tools-tier validation."""
         for path in (
             "tools/families/__init__.py",
             "tools/family_source_isolation.py",
             "tools/family_specialization.py",
-            "tools/migrate_family_layout.py",
             "tools/prune_family_helpers.py",
-            "tools/relocate_family_development.py",
-            "tools/specialize_family.py",
-            "tools/specialize_family_switches.py",
         ):
             match = test_impact.classify_file(path, imap)
             assert match.rule == "family_ownership_tool"
@@ -1950,7 +1952,7 @@ class TestUnitTiers:
     def test_builder_source_implies_unit_tier(self, imap):
         """Python builder source change implies 'builder' unit tier."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/plugin.py", imap
+            "python/tensorrt_model_connect/families/decoder_family/model.py", imap
         )
         assert "builder" in match.unit_tiers
 
@@ -2110,14 +2112,9 @@ class CustomTorchReference:
             "e2e_timing_estimates_known_models",
             "runtime_strategy_matrix_known_strategies",
             "pyproject_known_profiles",
-            "shared_builder_config_lookup_family_registry",
-            "shared_builder_config_lookup_cli",
-            "shared_builder_config_lookup_engine",
             "harness_shared_known_identifiers",
             "e2e_warm_hf_cache_diffusers_components",
             "shared_builder_fp8_scales_cli",
-            "shared_builder_fp8_scales_engine",
-            "shared_builder_diffusion_tokenizer",
             "harness_manifest_diffusion_thresholds",
             "harness_reference_vl_generated_only_decode",
             "harness_reference_known_identifiers",
@@ -2130,7 +2127,7 @@ class CustomTorchReference:
         assert [spec.name for spec in imap.model_owned_diff_rules] == [
             "context_embed_reference_backend",
             "prompt_seg_text_public_prompted_segmentation_api",
-            "prompt_seg_text_engine_builder_metadata",
+            "prompt_seg_text_family_model_metadata",
             "prompt_seg_text_segment_prompted_cli_usage",
             "prompt_seg_text_segment_prompted_cli_runtime",
             "prompt_seg_text_config",
@@ -2190,55 +2187,6 @@ diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.
             "decoder-moe-core",
             "sequence-quantile-core",
         ]
-
-    def test_shared_builder_rules_refine_config_lookup_to_candidate_models(self, imap):
-        """Config-object plugin lookup is scoped to PR-level candidate models."""
-        candidate_models = ["sequence-quantile-core"]
-        init_diff = """
-diff --git a/python/tensorrt_model_connect/families/__init__.py b/python/tensorrt_model_connect/families/__init__.py
-@@ -1 +1 @@
--def find_plugin(model_type: str) -> "FamilyPlugin | None":
--    \"\"\"Find the first plugin that matches the given model_type.\"\"\"
-+def find_plugin(model_type: object) -> "FamilyPlugin | None":
-+    \"\"\"Find the first plugin that matches a model type or config object.\"\"\"
-+    model_type_str = str(getattr(model_type, "model_type", model_type))
--        if p.matches(model_type):
-+        matches_config = getattr(p, "matches_config", None)
-+        if callable(matches_config) and matches_config(model_type):
-+            return p
-+        if p.matches(model_type_str):
-"""
-        broad_init = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/__init__.py", imap
-        )
-        refined_init = test_impact.maybe_refine_match_with_diff(
-            "python/tensorrt_model_connect/families/__init__.py",
-            broad_init,
-            init_diff,
-            imap,
-            candidate_models,
-        )
-        assert refined_init.rule == "shared_builder_config_lookup_family_registry"
-        assert refined_init.models == ["sequence-quantile-core"]
-
-        cli_diff = """
-diff --git a/python/tensorrt_model_connect/build_cli.py b/python/tensorrt_model_connect/build_cli.py
-@@ -1 +1 @@
--    plugin = find_plugin(config.model_type)
-+    plugin = find_plugin(config)
--        raw_plugin = find_plugin(config.model_type)
-+        raw_plugin = find_plugin(config)
-"""
-        broad_cli = test_impact.classify_file("python/tensorrt_model_connect/build_cli.py", imap)
-        refined_cli = test_impact.maybe_refine_match_with_diff(
-            "python/tensorrt_model_connect/build_cli.py",
-            broad_cli,
-            cli_diff,
-            imap,
-            candidate_models,
-        )
-        assert refined_cli.rule == "shared_builder_config_lookup_cli"
-        assert refined_cli.models == ["sequence-quantile-core"]
 
     def test_harness_rules_refine_registry_diffs_for_known_identifiers(self, imap):
         """Harness additions stay scoped to mentioned models and runtime strategies."""
@@ -2445,32 +2393,6 @@ diff --git a/pyproject.toml b/pyproject.toml
 @@ -1 +1 @@
 +sequence_quantile_family = ["sequence-profile-runtime>=2.2.2"]
 """,
-            "python/tensorrt_model_connect/build_cli.py": """
-diff --git a/python/tensorrt_model_connect/build_cli.py b/python/tensorrt_model_connect/build_cli.py
-@@ -1 +1 @@
--    plugin = find_plugin(config.model_type)
-+    plugin = find_plugin(config)
--        raw_plugin = find_plugin(config.model_type)
-+        raw_plugin = find_plugin(config)
-""",
-            "python/tensorrt_model_connect/engine_builder.py": """
-diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_model_connect/engine_builder.py
-@@ -1 +1 @@
--    plugin = find_plugin(config.model_type)
-+    plugin = find_plugin(config)
-""",
-            "python/tensorrt_model_connect/families/__init__.py": """
-diff --git a/python/tensorrt_model_connect/families/__init__.py b/python/tensorrt_model_connect/families/__init__.py
-@@ -1 +1 @@
--def find_plugin(model_type: str) -> "FamilyPlugin | None":
-+def find_plugin(model_type: object) -> "FamilyPlugin | None":
-+    model_type_str = str(getattr(model_type, "model_type", model_type))
--        if p.matches(model_type):
-+        matches_config = getattr(p, "matches_config", None)
-+        if callable(matches_config) and matches_config(model_type):
-+            return p
-+        if p.matches(model_type_str):
-""",
             "python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml": """
 diff --git a/python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml b/python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml
 @@ -1 +1 @@
@@ -2629,23 +2551,24 @@ diff --git a/include/trtmc/pipeline.h b/include/trtmc/pipeline.h
         assert "prompt-seg-core" in refined.models
         assert "decoder-small" not in refined.models
 
-    def test_prompt_seg_text_engine_builder_rule_refines_metadata_diff(self, imap):
+    def test_prompt_seg_text_family_model_rule_refines_metadata_diff(self, imap):
         """text-prompt segmentation bundle metadata plumbing does not select every builder model."""
         diff_text = """
-diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_model_connect/engine_builder.py
+diff --git a/python/tensorrt_model_connect/families/prompt_seg_text_family/model.py b/python/tensorrt_model_connect/families/prompt_seg_text_family/model.py
 @@ -1 +1 @@
 +    "processor_config.json",
 -    if runtime_strategy not in (
-+    requires_tokenizer = bool(getattr(plugin, "requires_tokenizer", False))
++    requires_tokenizer = False
 +    if requires_tokenizer or runtime_strategy not in (
 -                     "preprocessor_config.json"):
 +                     "preprocessor_config.json", "processor_config.json"):
 """
-        broad = test_impact.classify_file("python/tensorrt_model_connect/engine_builder.py", imap)
+        path = "python/tensorrt_model_connect/families/prompt_seg_text_family/model.py"
+        broad = test_impact.classify_file(path, imap)
         refined = test_impact.maybe_refine_match_with_diff(
-            "python/tensorrt_model_connect/engine_builder.py", broad, diff_text, imap
+            path, broad, diff_text, imap
         )
-        assert refined.rule == "prompt_seg_text_engine_builder_metadata"
+        assert refined.rule == "prompt_seg_text_family_model_metadata"
         assert refined.models == ["prompt-seg-text"]
 
     def test_prompt_seg_text_cli_rules_refine_segment_prompted_prompt_diff(self, imap):
@@ -2945,53 +2868,6 @@ diff --git a/python/tensorrt_model_connect/build_cli.py b/python/tensorrt_model_
         assert refined.rule == "shared_builder_fp8_scales_cli"
         assert refined.models == ["media-scale-fp8"]
 
-    def test_shared_builder_fp8_scales_engine_rule_refines_engine_fp8_diff(self, imap):
-        """Diffusion fp8-only engine_builder changes narrow to fp8-scales manifests."""
-        diff_text = """
-diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_model_connect/engine_builder.py
-@@ -1 +1 @@
-+        save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
-+            fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales)
-+    save_fp8_scales: str | None = None,
-+    if save_fp8_scales and isinstance(fp8_scales, dict):
-+    _effective_precision = "bf16" if fp8_scales else precision
--        "precision": precision,
-+        "precision": _effective_precision,
-+        cfg_dict["quantization"] = {"format": "fp8"}
-+    save_fp8_scales: str | None = None,
-+        save_fp8_scales: Path to save calibrated FP8 scales JSON.
-+    build_bundle._save_fp8_scales = save_fp8_scales
-"""
-        broad = test_impact.classify_file("python/tensorrt_model_connect/engine_builder.py", imap)
-        refined = test_impact.maybe_refine_match_with_diff(
-            "python/tensorrt_model_connect/engine_builder.py", broad, diff_text, imap
-        )
-        assert refined.rule == "shared_builder_fp8_scales_engine"
-        assert refined.models == ["media-scale-fp8"]
-
-    def test_shared_builder_diffusion_tokenizer_rule_refines_engine_tokenizer_diff(self, imap):
-        """Diffusion tokenizer metadata plumbing should not select every model."""
-        diff_text = """
-diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_model_connect/engine_builder.py
-@@ -1 +1 @@
-+def _diffusion_tokenizer_add_special_tokens_from_plugin(plugin, model_dir_path: Path) -> bool:
-+    detector = getattr(plugin, "diffusion_tokenizer_add_special_tokens", None)
-+    kwargs["detect_tokenizer_add_special_tokens"] = _detect_tokenizer_add_special_tokens
-+    tokenizer_add_special_tokens = _diffusion_tokenizer_add_special_tokens_from_plugin(plugin, model_dir_path)
-+        "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
-"""
-        broad = test_impact.classify_file("python/tensorrt_model_connect/engine_builder.py", imap)
-        refined = test_impact.maybe_refine_match_with_diff(
-            "python/tensorrt_model_connect/engine_builder.py",
-            broad,
-            diff_text,
-            imap,
-        )
-        assert refined.rule == "shared_builder_diffusion_tokenizer"
-        assert "media-core" in refined.models
-        assert "decoder-small" not in refined.models
-
-
 # ---------------------------------------------------------------------------
 # Aggregation / cap tests
 # ---------------------------------------------------------------------------
@@ -3002,8 +2878,8 @@ class TestAggregation:
         """Multiple family changes -> union of models."""
         result = test_impact.analyze_impact(
             [
-                "python/tensorrt_model_connect/families/decoder_family/plugin.py",
-                "python/tensorrt_model_connect/families/decoder_peer_family/plugin.py",
+                "python/tensorrt_model_connect/families/decoder_family/model.py",
+                "python/tensorrt_model_connect/families/decoder_peer_family/model.py",
             ],
             imap,
         )
@@ -3014,7 +2890,7 @@ class TestAggregation:
     def test_cap_not_applied_when_under(self, imap):
         """Cap not applied when affected models <= cap."""
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"], imap, cap=5
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"], imap, cap=5
         )
         assert not result.cap_applied
         assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
@@ -3038,7 +2914,7 @@ class TestAggregation:
         """Family plugin + unit test -> models + unit tier."""
         result = test_impact.analyze_impact(
             [
-                "python/tensorrt_model_connect/families/decoder_family/plugin.py",
+                "python/tensorrt_model_connect/families/decoder_family/model.py",
                 "tests/builder/test_config.py",
             ],
             imap,
@@ -3057,7 +2933,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"], imap
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"], imap
         )
 
         assert result.e2e_models == ["decoder-small"]
@@ -3095,7 +2971,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"],
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
             imap,
             e2e_suite="nightly",
         )
@@ -3112,7 +2988,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"],
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
             imap,
         )
 
@@ -3131,7 +3007,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"],
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
             imap,
             exclude_ci_tiers=set(),
         )
@@ -3317,7 +3193,7 @@ class TestOutput:
             unit_tiers=["builder"],
             rebuild_cpp=False,
             cap_applied=False,
-            matched_rules=[{"file": "f.py", "rule": "family_plugin", "models": ["decoder-small"]}],
+            matched_rules=[{"file": "f.py", "rule": "family_package", "models": ["decoder-small"]}],
         )
         output = test_impact.format_json(result)
         data = json.loads(output)
@@ -3347,17 +3223,17 @@ class TestCoverageMapIntegration:
     def test_impact_result_has_test_lists(self, imap):
         """ImpactResult with coverage map includes per-tier test lists."""
         coverage_map = {
-            "python/tensorrt_model_connect/families/decoder_family/plugin.py": [
-                "tests/builder/test_engine_decoder_family.py::TestDecoderFamily::test_plugin",
+            "python/tensorrt_model_connect/families/decoder_family/model.py": [
+                "tests/builder/test_engine_decoder_family.py::TestDecoderFamily::test_model",
             ],
         }
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"],
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
             imap,
             coverage_map=coverage_map,
         )
         assert (
-            "tests/builder/test_engine_decoder_family.py::TestDecoderFamily::test_plugin"
+            "tests/builder/test_engine_decoder_family.py::TestDecoderFamily::test_model"
             in result.builder_tests
         )
         assert "builder" not in result.fallback_tiers
@@ -3392,7 +3268,7 @@ class TestCoverageMapIntegration:
         imap = test_impact.build_impact_map(mock_repo)
 
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"],
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
             imap,
             coverage_map={},
             repo_root=mock_repo,
@@ -3476,7 +3352,7 @@ class TestCoverageMapIntegration:
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/plugin.py"],
+            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
             imap,
         )
         assert result.builder_tests == []

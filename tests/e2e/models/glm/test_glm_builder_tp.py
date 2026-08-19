@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import pytest
 
@@ -25,11 +26,16 @@ from tensorrt_model_connect.parallel_config import (
 
 
 FAMILY = 'glm'
-PLUGIN_CLASS = 'GlmPlugin'
 MODEL_TYPE = 'glm'
 TP_SIZE = 2
 RAW = {'partial_rotary_factor': 0.5}
-EXPECTED_KWARGS = {'interleaved_rope': True, 'partial_rotary_factor': 0.5}
+EXPECTED_KWARGS = {'partial_rotary_factor': 0.5}
+SPECIALIZED_DEFAULTS = {
+    "activation": "silu",
+    "mlp_type": "swiglu",
+    "norm_type": "rmsnorm",
+    "position_type": "rope",
+}
 
 
 def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
@@ -48,9 +54,21 @@ def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfi
     )
 
 
-def test_glm_plugin_routes_tp_build(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_glm_tp_builder_owns_fixed_family_contract() -> None:
+    builder_module = importlib.import_module(
+        "tensorrt_model_connect.families.glm.dual_profile_decoder_tp_builder"
+    )
+    parameters = inspect.signature(
+        builder_module.build_dual_profile_tp_decoder_engine
+    ).parameters
+    for name, expected in SPECIALIZED_DEFAULTS.items():
+        assert parameters[name].default == expected
+    assert "interleaved=True" in inspect.getsource(builder_module)
+
+
+def test_glm_model_routes_tp_build(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     captured: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -61,18 +79,18 @@ def test_glm_plugin_routes_tp_build(monkeypatch) -> None:
         return b"tp-plan"
 
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "build_dual_profile_tp_decoder_engine",
         fake_build,
     )
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=TP_SIZE, rank=1)
-    plan = getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+    plan = model_module.build_engine(
         _config(MODEL_TYPE, TP_SIZE, RAW),
         WeightDict(),
         max_cache_length=17,
@@ -92,17 +110,17 @@ def test_glm_plugin_routes_tp_build(monkeypatch) -> None:
         assert kwargs[key] == expected
 
 
-def test_glm_plugin_rejects_quantized_tp(monkeypatch) -> None:
-    plugin_mod = importlib.import_module(
-        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+def test_glm_model_rejects_quantized_tp(monkeypatch) -> None:
+    model_module = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.model")
     monkeypatch.setattr(
-        plugin_mod,
+        model_module,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        getattr(plugin_mod, PLUGIN_CLASS)().build_engine(
+        model_module.build_engine(
             _config(MODEL_TYPE, TP_SIZE, RAW),
             WeightDict(),
             max_cache_length=17,

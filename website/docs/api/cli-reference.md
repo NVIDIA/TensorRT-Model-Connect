@@ -66,17 +66,16 @@ replaces unsafe filename characters with `-`.
 TriAttention options are also exposed for experimental KV compaction: `--triattention-stats`, `--triattention-kv-budget`, `--triattention-divide-length`, `--triattention-recent-window`, score aggregation, prompt-token accounting, prefill protection, and MLR/trig disable flags.
 
 The compatibility option `--max-cache-length N` remains accepted but is hidden
-from `build --help`. Omitting it lets the selected family choose the capacity:
+from `build --help`. Omitting it lets the selected `model.py` choose the capacity:
 eligible dense Qwen3 and Llama builds use the checkpoint's full
-`max_position_embeddings`; other native or legacy paths normally use 256.
+`max_position_embeddings`; other family recipes normally use 256.
 For those Qwen3/Llama models, an explicit value preserves native KV only when it
 equals the full model context and the other native-KV constraints are also met.
 
-Eligible dense Qwen3 and Llama checkpoints declare a model-owned native default
-route. A model-only build skips the optimized-provider probe and selects BF16,
-full-context fixed KV, and split prefill/decode engines. Other families probe
-their exact qualified optimized profiles before falling back to their native
-builder.
+Eligible dense Qwen3 and Llama recipes select BF16, full-context fixed KV, and
+split prefill/decode engines when their family constraints allow it. Qwen's
+`model.py` also owns its exact optimized-profile decision; other family modules
+run their native recipe without a shared provider probe or fallback.
 
 TensorRT is the build backend; there is no public build-method selector. Older
 `--method trt` and `--method auto` spellings remain accepted for compatibility.

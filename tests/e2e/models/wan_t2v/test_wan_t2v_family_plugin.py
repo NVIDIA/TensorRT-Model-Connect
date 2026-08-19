@@ -25,7 +25,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.wan_t2v as wan_mod
+    from tensorrt_model_connect.families.wan_t2v import model as wan_mod
     from tensorrt_model_connect.families.wan_t2v import diffusion_runner as py_diffusion_runner
     from tests.e2e.models.wan_t2v.e2e_plugins.contracts import (
         ensure_initial_latents,
@@ -68,28 +68,27 @@ def _module(name: str, **attrs) -> types.ModuleType:
     return mod
 
 
-def test_matches_and_build_engine_not_supported() -> None:
-    """Intent: validate model-type routing and explicit build_engine rejection.
+def test_matches_declared_wan_model_types() -> None:
+    """Intent: validate model-type routing.
 
-    Preconditions: plugin is imported.
-    Postconditions: supported aliases match and build_engine raises NotImplementedError.
+    Preconditions: the family model module is imported.
+    Postconditions: supported aliases match and a sibling family does not.
     """
-    plugin = wan_mod.plugin
-    assert plugin.matches("wan_t2v")
-    assert plugin.matches("wan")
-    assert plugin.matches("Wan2.1")
-    assert not plugin.matches("flux")
-
-    with pytest.raises(NotImplementedError, match="build_components"):
-        plugin.build_engine(_cfg(), {}, 16)
+    assert wan_mod.matches("wan_t2v")
+    assert wan_mod.matches("wan")
+    assert wan_mod.matches("Wan2.1")
+    assert not wan_mod.matches("flux")
 
 
 def test_wan_pipeline_classes_resolve_to_wan_plugin() -> None:
     """Wan owns the real Diffusers pipeline class mapping for Wan models."""
-    from tensorrt_model_connect.families import find_diffusion_plugin
+    from tensorrt_model_connect.config import ModelConfig as BuildModelConfig
 
     for pipeline_class in ("WanPipeline", "WanVideoToVideoPipeline"):
-        assert find_diffusion_plugin(pipeline_class) is wan_mod.plugin
+        config = BuildModelConfig(
+            model_type="wan_t2v", raw={"_class_name": pipeline_class}
+        )
+        assert wan_mod.matches(config)
 
 
 def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
@@ -102,7 +101,7 @@ def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
     model_dir.mkdir()
     (model_dir / "model_index.json").write_text("{}")
 
-    weights = wan_mod.plugin.load_weights(str(model_dir), _cfg())
+    weights = wan_mod.load_weights(str(model_dir), _cfg())
     assert weights["_model_format"] == "diffusers"
     assert weights["_text_encoder_dir"].endswith("text_encoder")
     assert weights["_transformer_dir"].endswith("transformer")
@@ -111,7 +110,7 @@ def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
     bad_dir = tmp_path / "wan_bad"
     bad_dir.mkdir()
     with pytest.raises(ValueError, match="Expected diffusers format"):
-        wan_mod.plugin.load_weights(str(bad_dir), _cfg())
+        wan_mod.load_weights(str(bad_dir), _cfg())
 
 
 def test_load_weights_preserves_checkpoint_scheduler_config(tmp_path) -> None:
@@ -137,8 +136,8 @@ def test_load_weights_preserves_checkpoint_scheduler_config(tmp_path) -> None:
     )
     config = _cfg()
 
-    wan_mod.plugin.load_weights(str(model_dir), config)
-    diffusion = wan_mod.plugin.get_diffusion_config(config)
+    wan_mod.load_weights(str(model_dir), config)
+    diffusion = wan_mod.get_diffusion_config(config)
 
     assert diffusion["scheduler"] == "unipc_multistep"
     assert diffusion["flow_shift"] == pytest.approx(3.0)
@@ -148,7 +147,7 @@ def test_load_weights_preserves_checkpoint_scheduler_config(tmp_path) -> None:
 
 def test_wan_scheduler_fallback_is_flow_match_euler() -> None:
     """A config without scheduler metadata keeps the generic Wan fallback."""
-    diffusion = wan_mod.plugin.get_diffusion_config(_cfg())
+    diffusion = wan_mod.get_diffusion_config(_cfg())
 
     assert diffusion["scheduler"] == "flow_match_euler"
     assert diffusion["flow_shift"] == pytest.approx(1.0)
@@ -163,14 +162,14 @@ def test_wan_rejects_unsupported_unipc_variant() -> None:
     )
 
     with pytest.raises(ValueError, match="order-2 BH2 UniPC"):
-        wan_mod.plugin.get_diffusion_config(config)
+        wan_mod.get_diffusion_config(config)
 
 
 def test_wan_runtime_owns_t5_special_token_framing(tmp_path) -> None:
     tokenizer_dir = tmp_path / "tokenizer"
     tokenizer_dir.mkdir()
 
-    assert wan_mod.plugin.diffusion_tokenizer_add_special_tokens(
+    assert wan_mod.diffusion_tokenizer_add_special_tokens(
         tmp_path,
         detect_tokenizer_add_special_tokens=lambda _path: True,
     ) is False
@@ -258,7 +257,7 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
         "_vae_dir": "/model/vae",
     }
 
-    out = wan_mod.plugin.build_components(
+    out = wan_mod.build_components(
         "/model", cfg, weights, precision="fp16", verbose=True)
 
     assert out["text_encoders"] == [("t5", b"t5-plan")]
@@ -272,7 +271,7 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
     assert calls["load_t5_weights"]["precision"] == "fp32"
     assert calls["build_t5_encoder_engine"]["precision"] == "fp32"
     assert calls["build_standard_dit_engine"]["num_patches"] == 60
-    assert calls["build_standard_dit_engine"]["context_dim"] == wan_mod.plugin._DIT_DIM
+    assert calls["build_standard_dit_engine"]["context_dim"] == wan_mod._DIT_DIM
     assert calls["build_standard_dit_engine"]["precision"] == "fp16"
     vae_calls = calls["build_causal_vae_3d_engine"]
     assert len(vae_calls) == 2
@@ -291,7 +290,7 @@ def test_build_components_rejects_partial_t5_fp32_selectors() -> None:
     }
 
     with pytest.raises(ValueError, match="supports only selector 24"):
-        wan_mod.plugin.build_components(
+        wan_mod.build_components(
             "/model",
             _cfg(_fp32_layers=[0, 23]),
             weights,
@@ -393,7 +392,7 @@ def test_build_components_tensor_parallel_builds_rank_denoisers(
         "_vae_dir": "/model/vae",
     }
 
-    out = wan_mod.plugin.build_components(
+    out = wan_mod.build_components(
         "/model",
         _cfg(video_height=64, video_width=80, video_num_frames=9),
         weights,
@@ -419,7 +418,7 @@ def test_context_parallel_bundle_packages_one_shared_denoiser() -> None:
     """Wan CP ranks load one rank-dynamic denoiser plan and shared auxiliaries."""
     from tensorrt_model_connect.parallel_config import ParallelConfig
 
-    sections = dict(wan_mod.plugin.diffusion_bundle_sections(
+    sections = dict(wan_mod.diffusion_bundle_sections(
         {
             "text_encoders": [("t5", b"t5-plan")],
             "denoiser": b"dit-cp-plan",
@@ -454,7 +453,7 @@ def test_get_diffusion_config_uses_count_vae_caches(monkeypatch: pytest.MonkeyPa
     )
 
     cfg = _cfg(video_height=96, video_width=160, video_num_frames=13)
-    dc = wan_mod.plugin.get_diffusion_config(cfg)
+    dc = wan_mod.get_diffusion_config(cfg)
 
     assert dc["video_height"] == 96
     assert dc["video_width"] == 160

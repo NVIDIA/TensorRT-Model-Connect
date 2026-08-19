@@ -23,7 +23,6 @@ _BUILDER_MODULES = (
     "components/ltx_video/utils.py",
     "components/ltx_video/t5_encoder_builder.py",
     "components/ltx_video/ltx_vae_builder.py",
-    "components/ltx_video/ltx_dit_builder.py",
 )
 
 

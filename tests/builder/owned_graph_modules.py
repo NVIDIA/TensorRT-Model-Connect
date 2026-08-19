@@ -19,7 +19,7 @@ FAMILIES = ROOT / "python" / "tensorrt_model_connect" / "families"
 
 def _family_dirs():
     for family_dir in sorted(FAMILIES.iterdir()):
-        if not (family_dir / "plugin.py").is_file():
+        if not (family_dir / "model.py").is_file():
             continue
         yield family_dir
 
@@ -46,7 +46,7 @@ def _load_owned_module(
                     f"tensorrt_model_connect.families.{family_dir.name}.{module_name}"
                 )
             except ModuleNotFoundError as exc:
-                if exc.name == "tensorrt":
+                if exc.name and not exc.name.startswith("tensorrt_model_connect"):
                     last_error = exc
                     continue
                 raise
@@ -77,7 +77,7 @@ def load_owned_callable(
                 f"tensorrt_model_connect.families.{family_dir.name}.{module_name}"
             )
         except ModuleNotFoundError as exc:
-            if exc.name == "tensorrt":
+            if exc.name and not exc.name.startswith("tensorrt_model_connect"):
                 last_error = exc
                 continue
             raise
@@ -108,7 +108,7 @@ class _OwnedModuleProxy:
 
 
 def load_graph_ops(*required_symbols: str):
-    module_files = ("model/model.py", "graph_ops.py")
+    module_files = ("graph_ops.py", "model.py")
     if not required_symbols:
         return _OwnedModuleProxy(*module_files)
     return _load_owned_module(module_files, tuple(required_symbols))
@@ -117,16 +117,20 @@ def load_graph_ops(*required_symbols: str):
 def load_family_graph_ops(family: str):
     """Load one family's graph module from either supported layout."""
     family_dir = FAMILIES / family
-    module_file = (
-        "model/model.py"
-        if (family_dir / "model/model.py").is_file()
-        else "graph_ops.py"
-    )
+    module_file = "graph_ops.py" if (family_dir / "graph_ops.py").is_file() else "model.py"
     module_name = ".".join(Path(module_file).with_suffix("").parts)
-    return importlib.import_module(
-        f"tensorrt_model_connect.families.{family}.{module_name}"
-    )
+    try:
+        return importlib.import_module(
+            f"tensorrt_model_connect.families.{family}.{module_name}"
+        )
+    except ModuleNotFoundError as exc:
+        if exc.name and not exc.name.startswith("tensorrt_model_connect"):
+            pytest.skip(
+                f"family {family} graph module requires TensorRT",
+                allow_module_level=True,
+            )
+        raise
 
 
 def load_graph_blocks():
-    return _OwnedModuleProxy("model/model.py", "graph_blocks.py")
+    return _OwnedModuleProxy("graph_blocks.py", "model.py")

@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import importlib
-
 import numpy as np
 import pytest
 
@@ -20,11 +18,8 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.bert.plugin import BertPlugin
+from tensorrt_model_connect.families.bert import model as bert_model
 from tensorrt_model_connect.parallel_config import ParallelConfig
-
-bert_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.bert.plugin")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -35,7 +30,7 @@ _VOCAB = 24
 
 def _bert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.bert.model.model",
+        "tensorrt_model_connect.families.bert.model",
         reason="TensorRT is required for BERT TP builder tests",
     )
 
@@ -202,7 +197,7 @@ def test_bert_tp_shards_rank_local_encoder_weights():
     )
 
 
-def test_bert_plugin_routes_tp_build(monkeypatch):
+def test_bert_model_routes_tp_build(monkeypatch):
     tp_builder = _bert_tp_builder_module()
     captured = {}
 
@@ -214,13 +209,13 @@ def test_bert_plugin_routes_tp_build(monkeypatch):
         return b"bert-tp-plan"
 
     monkeypatch.setattr(
-        bert_plugin,
+        bert_model,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
     monkeypatch.setattr(tp_builder, "build_tp_encoder_engine", fake_build)
 
-    plan = BertPlugin().build_engine(
+    plan = bert_model.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -234,15 +229,15 @@ def test_bert_plugin_routes_tp_build(monkeypatch):
     assert captured["kwargs"]["parallel_config"].rank == 1
 
 
-def test_bert_plugin_rejects_quantized_tp(monkeypatch):
+def test_bert_model_rejects_quantized_tp(monkeypatch):
     monkeypatch.setattr(
-        bert_plugin,
+        bert_model,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        BertPlugin().build_engine(
+        bert_model.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

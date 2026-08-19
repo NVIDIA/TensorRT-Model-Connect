@@ -102,7 +102,7 @@ class TestConvBERTBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
-        from tensorrt_model_connect.families.convbert import plugin
+        import tensorrt_model_connect.families.convbert.model as plugin
 
         config = {
             "model_type": "convbert",

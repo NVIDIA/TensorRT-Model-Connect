@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "internvl"
-plugin = "internvl"
 test_manifests = [
   "manifests/internvl3-2b-tp2.json",
   "manifests/internvl3-2b.json",

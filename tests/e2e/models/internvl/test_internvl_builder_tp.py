@@ -60,7 +60,7 @@ def test_internvl_tp_builder_rejects_single_device_mode() -> None:
 
 def test_internvl_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.internvl.plugin")
+        "tensorrt_model_connect.families.internvl.model")
     from tensorrt_model_connect.families.internvl import tp_builder
 
     calls = {}
@@ -86,7 +86,7 @@ def test_internvl_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
     weights = WeightDict()
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2)
 
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         config,
         weights,
         max_cache_length=384,
@@ -112,7 +112,7 @@ def test_internvl_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
 
 def test_internvl_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.internvl.plugin")
+        "tensorrt_model_connect.families.internvl.model")
 
     monkeypatch.setattr(
         plugin_module,
@@ -121,7 +121,7 @@ def test_internvl_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
     )
 
     with pytest.raises(ValueError, match="debug layer outputs"):
-        plugin_module.plugin.build_engine(
+        plugin_module.build_engine(
             object(),
             WeightDict(),
             max_cache_length=384,
@@ -132,7 +132,7 @@ def test_internvl_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
 
 def test_internvl_non_parallel_build_forwards_precision(monkeypatch) -> None:
     plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.internvl.plugin")
+        "tensorrt_model_connect.families.internvl.model")
     calls = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -148,7 +148,7 @@ def test_internvl_non_parallel_build_forwards_precision(monkeypatch) -> None:
 
     config = object()
     weights = WeightDict()
-    result = plugin_module.plugin.build_engine(
+    result = plugin_module.build_engine(
         config,
         weights,
         max_cache_length=512,

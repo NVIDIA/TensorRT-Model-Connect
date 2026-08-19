@@ -73,7 +73,7 @@ class TestMarianPlugin:
         return t
 
     def test_load_weights_keys(self, tmp_path):
-        from tensorrt_model_connect.families.marian import plugin
+        import tensorrt_model_connect.families.marian.model as plugin
 
         config = {
             "model_type": "marian",
@@ -103,6 +103,6 @@ class TestMarianPlugin:
         assert "enc_pos_embedding" in weights
 
     def test_matches(self):
-        from tensorrt_model_connect.families.marian import plugin
+        import tensorrt_model_connect.families.marian.model as plugin
         assert plugin.matches("marian")
         assert not plugin.matches("bart")

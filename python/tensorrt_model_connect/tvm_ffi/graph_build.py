@@ -108,6 +108,41 @@ def inspection_role() -> str | None:
     return session.role if session is not None and session.mode == "inspect" else None
 
 
+def add_dynamic_batch_profile(
+    builder: Any,
+    config: Any,
+    network: Any,
+    *,
+    input_names: list[str],
+    max_batch: int,
+    opt_batch: int,
+    static_shape: dict[str, tuple[int, ...]],
+) -> None:
+    """Attach a TensorRT profile with a dynamic leading batch dimension."""
+    del network
+    if max_batch < 1:
+        raise ValueError(f"max_batch must be >= 1 (got {max_batch})")
+    if not 1 <= opt_batch <= max_batch:
+        raise ValueError(
+            "opt_batch must satisfy 1 <= opt_batch <= max_batch "
+            f"(got opt_batch={opt_batch}, max_batch={max_batch})"
+        )
+    missing = [name for name in input_names if name not in static_shape]
+    if missing:
+        raise KeyError(f"static_shape missing entries for: {', '.join(missing)}")
+
+    profile = builder.create_optimization_profile()
+    for name in input_names:
+        tail = tuple(static_shape[name])
+        profile.set_shape(
+            name,
+            min=(1, *tail),
+            opt=(opt_batch, *tail),
+            max=(max_batch, *tail),
+        )
+    config.add_optimization_profile(profile)
+
+
 def record_attention(network: Any, attention: Any) -> None:
     session = _ACTIVE.get()
     if session is not None and attention is not None:

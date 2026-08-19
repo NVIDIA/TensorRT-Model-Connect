@@ -14,13 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect.engine_builder import _ensure_tokenizer_json
+from tensorrt_model_connect.tokenizer_conversion import ensure_tokenizer_json
 from tensorrt_model_connect.families import (
     family_hf_warm_file_specs,
     family_hf_warm_files,
 )
-from tensorrt_model_connect.families.internlm.plugin import InternLMPlugin
-
+from tensorrt_model_connect.families.internlm import model as InternLMModel
 tokenizer_json = importlib.import_module(
     "tensorrt_model_connect.families.internlm.tokenizer_json"
 )
@@ -46,6 +45,14 @@ class _InternLMTokenizerPlugin:
             model_dir,
             previous_error=previous_error,
         )
+
+
+def _ensure_tokenizer_json(model_dir: Path, *, plugin) -> None:
+    ensure_tokenizer_json(
+        model_dir,
+        family_ensure=plugin.ensure_tokenizer_json,
+        family_first=True,
+    )
 
 
 def test_internlm_declares_revisioned_official_tokenizer_warm_file() -> None:
@@ -141,7 +148,7 @@ def test_internlm_uses_pinned_tokenizer_before_generic_conversion(
         types.SimpleNamespace(AutoTokenizer=FakeAutoTokenizer),
     )
 
-    _ensure_tokenizer_json(tmp_path, plugin=InternLMPlugin())
+    _ensure_tokenizer_json(tmp_path, plugin=InternLMModel)
 
     assert generic_calls == []
     assert (tmp_path / "tokenizer.json").read_bytes() == official_payload

@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "ltx_video"
-plugin = "ltx_video"
-module = "plugin"
 aliases = [
   "ltx",
   "ltx-video",

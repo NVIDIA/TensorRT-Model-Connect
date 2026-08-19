@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the timm ViT image-classification family plugin."""
+"""Tests for the timm ViT image-classification family model."""
 
 from __future__ import annotations
 
 import json
-import importlib
 from pathlib import Path
 
 import numpy as np
@@ -18,14 +17,10 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 try:
     from safetensors.numpy import save_file
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families.timm_vit import plugin
-    from tensorrt_model_connect.families.timm_vit.model import parallel as tp_builder
+    import tensorrt_model_connect.families.timm_vit.model as model_module
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires TensorRT", allow_module_level=True)
-
-timm_vit_plugin_module = importlib.import_module(
-    "tensorrt_model_connect.families.timm_vit.plugin")
 
 
 def _rand(*shape: int) -> np.ndarray:
@@ -80,7 +75,7 @@ def test_model_config_uses_timm_architecture_when_model_type_absent(tmp_path: Pa
     assert cfg.model_type == "vit_base_patch16_224"
     assert cfg.hidden_size == 8
     assert cfg.architectures == ["vit_base_patch16_224"]
-    assert plugin.matches(cfg.model_type)
+    assert model_module.matches(cfg.model_type)
 
 
 def test_bundle_config_preserves_image_preprocess_contract(tmp_path: Path):
@@ -95,7 +90,7 @@ def test_bundle_config_preserves_image_preprocess_contract(tmp_path: Path):
     (tmp_path / "config.json").write_text(json.dumps(raw))
     cfg = ModelConfig.from_dir(tmp_path)
 
-    bundle_config = plugin.get_bundle_config_overrides(cfg)
+    bundle_config = model_module.get_bundle_config_overrides(cfg)
 
     assert bundle_config["input_image_h"] == 224
     assert bundle_config["input_image_w"] == 224
@@ -109,7 +104,7 @@ def test_load_weights_maps_timm_vit_shapes(tmp_path: Path):
     raw = _write_tiny_vit(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
 
-    weights = plugin.load_weights(str(tmp_path), cfg)
+    weights = model_module.load_weights(str(tmp_path), cfg)
 
     assert weights["patch_embed.proj.weight"].shape == (8, 3, 16, 16)
     assert weights["cls_token"].shape == (1, 1, 8)
@@ -126,14 +121,14 @@ def test_load_weights_maps_timm_vit_shapes(tmp_path: Path):
 def test_timm_vit_tp_slices_mlp_weights_by_rank(tmp_path: Path):
     raw = _write_tiny_vit(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = plugin.load_weights(str(tmp_path), cfg)
+    weights = model_module.load_weights(str(tmp_path), cfg)
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2)
 
-    fc1 = tp_builder._slice_mlp_columns(
+    fc1 = model_module._slice_mlp_columns(
         weights["blocks.0.mlp.fc1.weight"], 16, parallel)
-    fc1_bias = tp_builder._slice_mlp_columns(
+    fc1_bias = model_module._slice_mlp_columns(
         weights["blocks.0.mlp.fc1.bias"], 16, parallel)
-    fc2 = tp_builder._slice_mlp_rows(
+    fc2 = model_module._slice_mlp_rows(
         weights["blocks.0.mlp.fc2.weight"], 16, parallel)
 
     assert fc1.shape == (8, 4)
@@ -149,7 +144,7 @@ def test_timm_vit_tp_validation_requires_concrete_rank(tmp_path: Path):
     cfg = ModelConfig.from_dir(tmp_path)
 
     with pytest.raises(ValueError, match="concrete rank"):
-        tp_builder._validate_timm_vit_tp(
+        model_module._validate_timm_vit_tp(
             cfg,
             ParallelConfig(mode="tensor_parallel", tp_size=4, rank=-1),
         )
@@ -158,7 +153,7 @@ def test_timm_vit_tp_validation_requires_concrete_rank(tmp_path: Path):
 def test_timm_vit_plugin_routes_parallel_builds(monkeypatch, tmp_path: Path):
     _write_tiny_vit(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
-    weights = plugin.load_weights(str(tmp_path), cfg)
+    weights = model_module.load_weights(str(tmp_path), cfg)
     calls: dict[str, object] = {}
 
     def fake_require(parallel, *, feature):
@@ -169,11 +164,11 @@ def test_timm_vit_plugin_routes_parallel_builds(monkeypatch, tmp_path: Path):
         return b"timm-vit-tp-plan"
 
     monkeypatch.setattr(
-        timm_vit_plugin_module, "require_tensorrt_11_for_tensor_parallel", fake_require)
-    monkeypatch.setattr(tp_builder, "build_timm_vit_tp_engine", fake_build)
+        model_module, "require_tensorrt_11_for_tensor_parallel", fake_require)
+    monkeypatch.setattr(model_module, "build_timm_vit_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
-    result = timm_vit_plugin_module.TimmVitPlugin().build_engine(
+    result = model_module.build_engine(
         cfg,
         weights,
         1,

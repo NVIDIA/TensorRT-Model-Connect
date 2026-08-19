@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "sam3"
-plugin = "sam3"
-module = "plugin"
 aliases = [
   "sam3",
   "sam3-video",

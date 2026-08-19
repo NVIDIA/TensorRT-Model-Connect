@@ -22,7 +22,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.gpt_oss as gpt_oss
+    import tensorrt_model_connect.families.gpt_oss.model as gpt_oss
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -123,7 +123,7 @@ def test_load_weights_keeps_kv_biases_compact_and_unpacks_experts(
     call_log: list[dict[str, object]] = []
     _install_fake_hf_loader(monkeypatch, state, call_log)
 
-    weights = gpt_oss.plugin.load_weights("/fake/model", cfg)
+    weights = gpt_oss.load_weights("/fake/model", cfg)
 
     assert call_log[0]["model_dir"] == "/fake/model"
     assert call_log[0]["torch_dtype"] == "fake-bfloat16"
@@ -198,7 +198,7 @@ def test_load_weights_no_kv_expansion_and_output_fallbacks(
     call_log: list[dict[str, object]] = []
     _install_fake_hf_loader(monkeypatch, state, call_log)
 
-    weights = gpt_oss.plugin.load_weights("/fake/model", cfg)
+    weights = gpt_oss.load_weights("/fake/model", cfg)
 
     np.testing.assert_allclose(
         weights["layer.0.k_bias"], state["model.layers.0.self_attn.k_proj.bias"])
@@ -217,6 +217,6 @@ def test_matches_is_case_insensitive_exact():
     Preconditions: candidate model types include exact, case variant, and non-matching names.
     Postconditions: only case-insensitive `gpt_oss` is accepted.
     """
-    assert gpt_oss.plugin.matches("gpt_oss")
-    assert gpt_oss.plugin.matches("GPT_OSS")
-    assert not gpt_oss.plugin.matches("gpt-oss")
+    assert gpt_oss.matches("gpt_oss")
+    assert gpt_oss.matches("GPT_OSS")
+    assert not gpt_oss.matches("gpt-oss")

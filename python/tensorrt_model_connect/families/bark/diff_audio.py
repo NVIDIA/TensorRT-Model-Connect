@@ -70,6 +70,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import numpy as np
 
@@ -87,11 +88,12 @@ def handles_audio_diff_args(argv: list[str]) -> bool:
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def compute_energy(waveform: np.ndarray) -> float:
     """Compute RMS energy of a waveform."""
     if len(waveform) == 0:
         return 0.0
-    return float(np.sqrt(np.mean(waveform ** 2)))
+    return float(np.sqrt(np.mean(waveform**2)))
 
 
 def read_wav_f32(path: str) -> tuple[np.ndarray, int]:
@@ -118,8 +120,7 @@ def read_wav_f32(path: str) -> tuple[np.ndarray, int]:
                 audio_format = struct.unpack("<H", fmt_data[0:2])[0]
                 sample_rate = struct.unpack("<I", fmt_data[4:8])[0]
                 if audio_format != 3:  # IEEE float
-                    raise ValueError(
-                        f"Expected IEEE float (3), got format {audio_format}")
+                    raise ValueError(f"Expected IEEE float (3), got format {audio_format}")
             elif chunk_id == b"data":
                 data_bytes = f.read(chunk_size)
             else:
@@ -138,8 +139,7 @@ def write_wav_f32(path: str, samples: np.ndarray, sample_rate: int = 24000):
         f.write(struct.pack("<I", 36 + data_size))
         f.write(b"WAVE")
         f.write(b"fmt ")
-        f.write(struct.pack("<IHHIIHH", 16, 3, 1, sample_rate,
-                            sample_rate * 4, 4, 32))
+        f.write(struct.pack("<IHHIIHH", 16, 3, 1, sample_rate, sample_rate * 4, 4, 32))
         f.write(b"data")
         f.write(struct.pack("<I", data_size))
         f.write(samples.astype(np.float32).tobytes())
@@ -176,9 +176,11 @@ def token_stats(tokens: np.ndarray, label: str) -> dict:
         "entropy": float(entropy),
         "mean": float(tokens.mean()),
     }
-    print(f"  {label}: count={stats['count']}, range=[{stats['min']}, "
-          f"{stats['max']}], unique={stats['unique']}, "
-          f"entropy={stats['entropy']:.2f} bits")
+    print(
+        f"  {label}: count={stats['count']}, range=[{stats['min']}, "
+        f"{stats['max']}], unique={stats['unique']}, "
+        f"entropy={stats['entropy']:.2f} bits"
+    )
     return stats
 
 
@@ -186,6 +188,7 @@ def find_trt_lib_dir() -> str:
     """Find the TRT library directory from the Python tensorrt_libs package."""
     try:
         import importlib.util
+
         spec = importlib.util.find_spec("tensorrt_libs")
         if spec and spec.submodule_search_locations:
             return spec.submodule_search_locations[0]
@@ -194,23 +197,34 @@ def find_trt_lib_dir() -> str:
     return ""
 
 
-def run_cpp_bark(binary: str, bundle: str, prompt: str, output_wav: str,
-                 hf_python: str, dump_dir: str | None = None,
-                 greedy: bool = False, max_tokens: int = 0) -> bool:
+def run_cpp_bark(
+    binary: str,
+    bundle: str,
+    prompt: str,
+    output_wav: str,
+    hf_python: str,
+    dump_dir: str | None = None,
+    greedy: bool = False,
+    max_tokens: int = 0,
+) -> bool:
     """Run the C++ Bark pipeline and return True on success."""
     env = os.environ.copy()
 
     # Set LD_LIBRARY_PATH for TRT
     trt_lib = find_trt_lib_dir()
     if trt_lib:
-        env["LD_LIBRARY_PATH"] = (
-            f"{trt_lib}:/usr/local/cuda/lib64:"
-            + env.get("LD_LIBRARY_PATH", ""))
+        env["LD_LIBRARY_PATH"] = f"{trt_lib}:/usr/local/cuda/lib64:" + env.get(
+            "LD_LIBRARY_PATH", ""
+        )
 
     cmd = [
-        binary, "generate-audio", bundle,
-        "--prompt", prompt,
-        "--output", output_wav,
+        binary,
+        "generate-audio",
+        bundle,
+        "--prompt",
+        prompt,
+        "--output",
+        output_wav,
     ]
     if hf_python:
         cmd += ["--hf-python", hf_python]
@@ -236,8 +250,9 @@ def run_cpp_bark(binary: str, bundle: str, prompt: str, output_wav: str,
     # Print key info from stderr
     if result.stderr:
         for line in result.stderr.strip().split("\n"):
-            if any(k in line for k in ["semantic:", "coarse:", "codec:",
-                                        "generated", "Audio saved"]):
+            if any(
+                k in line for k in ["semantic:", "coarse:", "codec:", "generated", "Audio saved"]
+            ):
                 print(f"    {line}", file=sys.stderr)
     return True
 
@@ -245,6 +260,7 @@ def run_cpp_bark(binary: str, bundle: str, prompt: str, output_wav: str,
 # ---------------------------------------------------------------------------
 # Stage 1: C++ sampling smoke test
 # ---------------------------------------------------------------------------
+
 
 def stage1_cpp_smoke_test(args) -> bool:
     """Run C++ pipeline with sampling and check output has speech energy."""
@@ -258,8 +274,8 @@ def stage1_cpp_smoke_test(args) -> bool:
         wav_path = os.path.join(tmpdir, "bark_sampled.wav")
 
         ok = run_cpp_bark(
-            args.binary, args.bundle, args.prompt, wav_path,
-            args.hf_python, greedy=False)
+            args.binary, args.bundle, args.prompt, wav_path, args.hf_python, greedy=False
+        )
 
         if not ok:
             print("  FAIL: C++ pipeline returned error", file=sys.stderr)
@@ -272,23 +288,21 @@ def stage1_cpp_smoke_test(args) -> bool:
         waveform, sr = read_wav_f32(wav_path)
         energy = compute_energy(waveform)
 
-        print(f"  Output: {len(waveform)} samples @ {sr} Hz, "
-              f"energy={energy:.6f}", file=sys.stderr)
+        print(f"  Output: {len(waveform)} samples @ {sr} Hz, energy={energy:.6f}", file=sys.stderr)
 
         if energy < args.min_energy:
-            print(f"  FAIL: Output is near-silent "
-                  f"(energy={energy:.6f} < {args.min_energy})",
-                  file=sys.stderr)
+            print(
+                f"  FAIL: Output is near-silent (energy={energy:.6f} < {args.min_energy})",
+                file=sys.stderr,
+            )
 
             # Save for inspection
             save_path = "/tmp/bark_diff_stage1.wav"
             write_wav_f32(save_path, waveform, sr)
-            print(f"  Saved output to {save_path} for inspection",
-                  file=sys.stderr)
+            print(f"  Saved output to {save_path} for inspection", file=sys.stderr)
             return False
 
-        print(f"  PASS: Output has speech-level energy ({energy:.6f})",
-              file=sys.stderr)
+        print(f"  PASS: Output has speech-level energy ({energy:.6f})", file=sys.stderr)
 
         # Save for reference
         save_path = "/tmp/bark_diff_stage1.wav"
@@ -302,13 +316,13 @@ def stage1_cpp_smoke_test(args) -> bool:
 # Stage 2: Token distribution comparison
 # ---------------------------------------------------------------------------
 
+
 def stage2_token_comparison(args) -> bool:
     """Compare token distributions between C++ and HF pipelines."""
     print("\n=== Stage 2: Token Distribution Comparison ===", file=sys.stderr)
 
     if not args.bundle or not args.binary:
-        print("  SKIP: --bundle and --binary required for C++ side",
-              file=sys.stderr)
+        print("  SKIP: --bundle and --binary required for C++ side", file=sys.stderr)
         return True
 
     if not args.model:
@@ -324,8 +338,14 @@ def stage2_token_comparison(args) -> bool:
         dump_prefix = os.path.join(tmpdir, "bark_dump")
 
         ok = run_cpp_bark(
-            args.binary, args.bundle, args.prompt, wav_path,
-            args.hf_python, dump_dir=dump_prefix, greedy=False)
+            args.binary,
+            args.bundle,
+            args.prompt,
+            wav_path,
+            args.hf_python,
+            dump_dir=dump_prefix,
+            greedy=False,
+        )
 
         if not ok:
             print("  FAIL: C++ pipeline failed", file=sys.stderr)
@@ -351,7 +371,8 @@ def stage2_token_comparison(args) -> bool:
     try:
         from transformers import AutoProcessor, BarkModel
         from transformers.models.bark.generation_configuration_bark import (
-            BarkSemanticGenerationConfig, BarkCoarseGenerationConfig,
+            BarkSemanticGenerationConfig,
+            BarkCoarseGenerationConfig,
         )
         import torch
 
@@ -362,10 +383,10 @@ def stage2_token_comparison(args) -> bool:
         inputs = processor(args.prompt, return_tensors="pt")
 
         # Build typed generation configs from the model's config dicts
-        sem_gen_cfg = BarkSemanticGenerationConfig(
-            **model.generation_config.semantic_config)
+        sem_gen_cfg = BarkSemanticGenerationConfig(**model.generation_config.semantic_config)
         coarse_gen_cfg = BarkCoarseGenerationConfig(
-            **model.generation_config.coarse_acoustics_config)
+            **model.generation_config.coarse_acoustics_config
+        )
 
         with torch.no_grad():
             # Step 1: semantic tokens
@@ -388,9 +409,9 @@ def stage2_token_comparison(args) -> bool:
     except Exception as e:
         print(f"  HF generation failed: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc(file=sys.stderr)
-        print("  Skipping HF comparison, showing C++ stats only",
-              file=sys.stderr)
+        print("  Skipping HF comparison, showing C++ stats only", file=sys.stderr)
 
     # --- Compare ---
     passed = True
@@ -401,12 +422,10 @@ def stage2_token_comparison(args) -> bool:
         # Semantic tokens should be in [0, 10000)
         if cpp_sem_stats["count"] > 0:
             if cpp_sem_stats["min"] < 0 or cpp_sem_stats["max"] >= 10000:
-                print("    FAIL: C++ semantic tokens out of range [0, 10000)",
-                      file=sys.stderr)
+                print("    FAIL: C++ semantic tokens out of range [0, 10000)", file=sys.stderr)
                 passed = False
             if cpp_sem_stats["count"] < 10:
-                print("    WARNING: Very few semantic tokens generated",
-                      file=sys.stderr)
+                print("    WARNING: Very few semantic tokens generated", file=sys.stderr)
     if hf_sem is not None:
         token_stats(hf_sem, "HF ")
 
@@ -416,8 +435,7 @@ def stage2_token_comparison(args) -> bool:
         # Coarse tokens: codebook 0 in [10000, 11024), codebook 1 in [11024, 12048)
         if cpp_coarse_stats["count"] > 0:
             if cpp_coarse_stats["min"] < 10000 or cpp_coarse_stats["max"] >= 12048:
-                print("    FAIL: C++ coarse tokens out of range [10000, 12048)",
-                      file=sys.stderr)
+                print("    FAIL: C++ coarse tokens out of range [10000, 12048)", file=sys.stderr)
                 passed = False
 
             # Check interleaving: even indices should be CB0, odd should be CB1
@@ -426,12 +444,10 @@ def stage2_token_comparison(args) -> bool:
             cb0_in_range = np.all((cb0 >= 10000) & (cb0 < 11024))
             cb1_in_range = np.all((cb1 >= 11024) & (cb1 < 12048))
             if not cb0_in_range:
-                print("    FAIL: CB0 (even) tokens not in [10000, 11024)",
-                      file=sys.stderr)
+                print("    FAIL: CB0 (even) tokens not in [10000, 11024)", file=sys.stderr)
                 passed = False
             if not cb1_in_range:
-                print("    FAIL: CB1 (odd) tokens not in [11024, 12048)",
-                      file=sys.stderr)
+                print("    FAIL: CB1 (odd) tokens not in [11024, 12048)", file=sys.stderr)
                 passed = False
     if hf_coarse is not None:
         token_stats(hf_coarse, "HF ")
@@ -447,6 +463,7 @@ def stage2_token_comparison(args) -> bool:
 # ---------------------------------------------------------------------------
 # Stage 3: Codec waveform comparison
 # ---------------------------------------------------------------------------
+
 
 def stage3_codec_comparison(args) -> bool:
     """Compare TRT codec vs HF codec on same coarse tokens."""
@@ -466,8 +483,14 @@ def stage3_codec_comparison(args) -> bool:
         dump_prefix = os.path.join(tmpdir, "bark_dump")
 
         ok = run_cpp_bark(
-            args.binary, args.bundle, args.prompt, wav_path,
-            args.hf_python, dump_dir=dump_prefix, greedy=False)
+            args.binary,
+            args.bundle,
+            args.prompt,
+            wav_path,
+            args.hf_python,
+            dump_dir=dump_prefix,
+            greedy=False,
+        )
 
         if not ok:
             print("  FAIL: C++ pipeline failed", file=sys.stderr)
@@ -497,11 +520,13 @@ def stage3_codec_comparison(args) -> bool:
         # Detect TRT codec frame limit from the wav length
         codec_frames = len(trt_waveform) // 320  # upsample_factor=320
         n_use = min(n_total_frames, codec_frames)
-        coarse_subset = cpp_coarse[:n_use * 2]
+        coarse_subset = cpp_coarse[: n_use * 2]
 
-        print(f"  Total coarse frames: {n_total_frames}, "
-              f"TRT codec limit: {codec_frames}, using: {n_use}",
-              file=sys.stderr)
+        print(
+            f"  Total coarse frames: {n_total_frames}, "
+            f"TRT codec limit: {codec_frames}, using: {n_use}",
+            file=sys.stderr,
+        )
         print("  Running HF codec on C++ coarse tokens...", file=sys.stderr)
         try:
             import torch
@@ -541,24 +566,23 @@ def stage3_codec_comparison(args) -> bool:
         trt_energy = compute_energy(trt_trimmed)
         hf_energy = compute_energy(hf_trimmed)
 
-        print(f"  TRT codec: {len(trt_waveform)} samples, "
-              f"energy={trt_energy:.6f}", file=sys.stderr)
-        print(f"  HF  codec: {len(hf_waveform)} samples, "
-              f"energy={hf_energy:.6f}", file=sys.stderr)
+        print(f"  TRT codec: {len(trt_waveform)} samples, energy={trt_energy:.6f}", file=sys.stderr)
+        print(f"  HF  codec: {len(hf_waveform)} samples, energy={hf_energy:.6f}", file=sys.stderr)
         print(f"  Compared:  {min_len} samples", file=sys.stderr)
-        print(f"  Diff: max={diff.max():.6f}, mean={diff.mean():.6f}, "
-              f"median={np.median(diff):.6f}", file=sys.stderr)
+        print(
+            f"  Diff: max={diff.max():.6f}, mean={diff.mean():.6f}, median={np.median(diff):.6f}",
+            file=sys.stderr,
+        )
 
         # Save files for manual inspection
         write_wav_f32("/tmp/bark_diff_trt_codec.wav", trt_trimmed, trt_sr)
         write_wav_f32("/tmp/bark_diff_hf_codec.wav", hf_trimmed, 24000)
-        print("  Saved TRT codec output: /tmp/bark_diff_trt_codec.wav",
-              file=sys.stderr)
-        print("  Saved HF codec output:  /tmp/bark_diff_hf_codec.wav",
-              file=sys.stderr)
+        print("  Saved TRT codec output: /tmp/bark_diff_trt_codec.wav", file=sys.stderr)
+        print("  Saved HF codec output:  /tmp/bark_diff_hf_codec.wav", file=sys.stderr)
 
         # Spectral similarity: both should have speech-like frequency content
         from numpy.fft import rfft
+
         def _band_energy(wav, lo, hi, sr=24000):
             spec = np.abs(rfft(wav)) ** 2
             freqs = np.arange(len(spec)) * sr / (2 * len(spec))
@@ -566,22 +590,26 @@ def stage3_codec_comparison(args) -> bool:
             return np.sqrt(np.sum(spec[mask]) / (np.sum(spec) + 1e-12))
 
         trt_ratio = _band_energy(trt_trimmed, 0, 4000) / (
-            _band_energy(trt_trimmed, 4000, 12000) + 1e-12)
+            _band_energy(trt_trimmed, 4000, 12000) + 1e-12
+        )
         hf_ratio = _band_energy(hf_trimmed, 0, 4000) / (
-            _band_energy(hf_trimmed, 4000, 12000) + 1e-12)
-        print(f"  Speech band ratio: TRT={trt_ratio:.1f}, HF={hf_ratio:.1f} "
-              f"(>2 = speech-like)", file=sys.stderr)
+            _band_energy(hf_trimmed, 4000, 12000) + 1e-12
+        )
+        print(
+            f"  Speech band ratio: TRT={trt_ratio:.1f}, HF={hf_ratio:.1f} (>2 = speech-like)",
+            file=sys.stderr,
+        )
 
         # Check: codec outputs should be reasonably close (same tokens,
         # same weights, but TRT LSTM unrolling vs PyTorch LSTM may differ)
         atol = args.codec_atol
         if diff.mean() > atol:
-            print(f"  FAIL: Mean diff {diff.mean():.6f} > atol {atol}",
-                  file=sys.stderr)
+            print(f"  FAIL: Mean diff {diff.mean():.6f} > atol {atol}", file=sys.stderr)
             return False
 
-        print(f"  PASS: Codec outputs match (mean diff {diff.mean():.6f} "
-              f"<= {atol})", file=sys.stderr)
+        print(
+            f"  PASS: Codec outputs match (mean diff {diff.mean():.6f} <= {atol})", file=sys.stderr
+        )
 
     return True
 
@@ -589,6 +617,7 @@ def stage3_codec_comparison(args) -> bool:
 # ---------------------------------------------------------------------------
 # Stage 4: Greedy token parity (TRT engine vs HF, per-stage)
 # ---------------------------------------------------------------------------
+
 
 def stage4_greedy_parity(args) -> bool:
     """Build TRT engines from HF, run all 4 Bark stages with greedy decoding,
@@ -609,15 +638,15 @@ def stage4_greedy_parity(args) -> bool:
             BarkSemanticGenerationConfig,
             BarkCoarseGenerationConfig,
         )
+
         try:
             from transformers.models.bark.generation_configuration_bark import (
                 BarkFineGenerationConfig,
             )
         except ImportError:
             BarkFineGenerationConfig = None
-        from tensorrt_model_connect.engine_builder import _resolve_model
         from tensorrt_model_connect.families.bark.config import ModelConfig
-        from tensorrt_model_connect.families import find_plugin
+        from tensorrt_model_connect.families.bark import model as bark_model
         from tensorrt_model_connect.families.bark.debug_runner import (
             TrtRunner,
             VisionTrtRunner,
@@ -633,19 +662,24 @@ def stage4_greedy_parity(args) -> bool:
 
     # --- Build TRT engines from HF weights ---
     print("  Building TRT engines from HF weights...", file=sys.stderr)
-    model_dir = _resolve_model(args.model)
+    local_model = Path(args.model)
+    if local_model.is_dir():
+        model_dir = str(local_model)
+    else:
+        from huggingface_hub import snapshot_download
+
+        model_dir = snapshot_download(repo_id=args.model)
     config = ModelConfig.from_dir(model_dir)
-    plg = find_plugin(config.model_type)
-    weights = plg.load_weights(model_dir, config)
+    weights = bark_model.load_weights(model_dir, config)
     # Bark semantic generation starts after a fixed 256-token text/history
     # prefix plus the semantic infer token. Keep the full diagnostic sequence
     # in cache so Stage 4 compares against HF full-context generation rather
     # than introducing a TRT-only sliding window before the first token.
     max_cache = max(1024, 257 + max_sem_tokens)
 
-    sem_plan = plg.build_engine(config, weights, max_cache)
-    extra = plg.build_extra_engines(config, weights, max_cache)
-    audio_cfg = plg.get_audio_config(config)
+    sem_plan = bark_model.build_engine(config, weights, max_cache)
+    extra = bark_model.build_extra_engines(config, weights, max_cache)
+    audio_cfg = bark_model.get_audio_config(config)
 
     # Sub-model configs
     sem_cfg = weights["_semantic_cfg"]
@@ -653,12 +687,16 @@ def stage4_greedy_parity(args) -> bool:
     fine_cfg = weights["_fine_cfg"]
 
     # Embedding tables
-    sem_embed = np.frombuffer(
-        extra["semantic_embed"], dtype=np.float32
-    ).reshape(sem_cfg["vocab_size"], sem_cfg["hidden_size"]).copy()
-    coarse_embed = np.frombuffer(
-        extra["coarse_embed"], dtype=np.float32
-    ).reshape(coarse_cfg["vocab_size"], coarse_cfg["hidden_size"]).copy()
+    sem_embed = (
+        np.frombuffer(extra["semantic_embed"], dtype=np.float32)
+        .reshape(sem_cfg["vocab_size"], sem_cfg["hidden_size"])
+        .copy()
+    )
+    coarse_embed = (
+        np.frombuffer(extra["coarse_embed"], dtype=np.float32)
+        .reshape(coarse_cfg["vocab_size"], coarse_cfg["hidden_size"])
+        .copy()
+    )
 
     # Audio config constants
     semantic_pad_token = audio_cfg["semantic_pad_token"]
@@ -683,14 +721,12 @@ def stage4_greedy_parity(args) -> bool:
     input_ids = inputs["input_ids"][0].tolist()
 
     # Build generation configs (greedy)
-    sem_gen_cfg = BarkSemanticGenerationConfig(
-        **model.generation_config.semantic_config)
+    sem_gen_cfg = BarkSemanticGenerationConfig(**model.generation_config.semantic_config)
     sem_gen_cfg.do_sample = False
     sem_gen_cfg.temperature = 1.0
     sem_gen_cfg.max_new_tokens = max_sem_tokens
 
-    coarse_gen_cfg = BarkCoarseGenerationConfig(
-        **model.generation_config.coarse_acoustics_config)
+    coarse_gen_cfg = BarkCoarseGenerationConfig(**model.generation_config.coarse_acoustics_config)
     coarse_gen_cfg.do_sample = False
     coarse_gen_cfg.temperature = 1.0
 
@@ -726,21 +762,19 @@ def stage4_greedy_parity(args) -> bool:
             text_tok = input_ids[pos] + text_encoding_offset
         else:
             text_tok = text_pad_token
-        embed = (sem_embed[text_tok] + sem_embed[semantic_pad_token]
-                 ).reshape(1, hidden)
+        embed = (sem_embed[text_tok] + sem_embed[semantic_pad_token]).reshape(1, hidden)
         sem_runner.step(token_id=0, input_embed=embed, use_input_embed=1.0)
 
     # Feed infer token
     embed = sem_embed[semantic_infer_token].reshape(1, hidden)
-    result = sem_runner.step(
-        token_id=0, input_embed=embed, use_input_embed=1.0)
+    result = sem_runner.step(token_id=0, input_embed=embed, use_input_embed=1.0)
 
     # Autoregressive decode (greedy, matching C++ run_semantic)
     trt_sem_tokens = []
     for _ in range(max_sem_tokens):
         logits = result["logits"].flatten().copy()
-        logits[semantic_pad_token + 1:] = -1e9
-        token = int(np.argmax(logits[:semantic_pad_token + 1]))
+        logits[semantic_pad_token + 1 :] = -1e9
+        token = int(np.argmax(logits[: semantic_pad_token + 1]))
         if token == semantic_pad_token:
             break
         trt_sem_tokens.append(token)
@@ -752,23 +786,27 @@ def stage4_greedy_parity(args) -> bool:
 
     # Compare
     sem_n = min(len(hf_sem_tokens), len(trt_sem_tokens))
-    sem_matched = (int(np.sum(hf_sem_tokens[:sem_n] == trt_sem_tokens[:sem_n]))
-                   if sem_n > 0 else 0)
-    sem_pass = (sem_matched == sem_n
-                and len(hf_sem_tokens) == len(trt_sem_tokens))
-    print(f"    semantic:  {sem_matched}/{max(len(hf_sem_tokens), len(trt_sem_tokens))} "
-          f"tokens match   {'PASS' if sem_pass else 'FAIL'}",
-          file=sys.stderr)
+    sem_matched = int(np.sum(hf_sem_tokens[:sem_n] == trt_sem_tokens[:sem_n])) if sem_n > 0 else 0
+    sem_pass = sem_matched == sem_n and len(hf_sem_tokens) == len(trt_sem_tokens)
+    print(
+        f"    semantic:  {sem_matched}/{max(len(hf_sem_tokens), len(trt_sem_tokens))} "
+        f"tokens match   {'PASS' if sem_pass else 'FAIL'}",
+        file=sys.stderr,
+    )
     if not sem_pass:
         all_pass = False
         if len(hf_sem_tokens) != len(trt_sem_tokens):
-            print(f"    Length mismatch: HF={len(hf_sem_tokens)}, "
-                  f"TRT={len(trt_sem_tokens)}", file=sys.stderr)
+            print(
+                f"    Length mismatch: HF={len(hf_sem_tokens)}, TRT={len(trt_sem_tokens)}",
+                file=sys.stderr,
+            )
         for i in range(sem_n):
             if hf_sem_tokens[i] != trt_sem_tokens[i]:
-                print(f"    First mismatch at index {i}: "
-                      f"HF={hf_sem_tokens[i]}, TRT={trt_sem_tokens[i]}",
-                      file=sys.stderr)
+                print(
+                    f"    First mismatch at index {i}: "
+                    f"HF={hf_sem_tokens[i]}, TRT={trt_sem_tokens[i]}",
+                    file=sys.stderr,
+                )
                 break
 
     # =================================================================
@@ -795,19 +833,16 @@ def stage4_greedy_parity(args) -> bool:
 
     # Use HF semantic tokens as input (ensures same input regardless of 4a)
     x_semantic = [
-        coarse_semantic_pad_token if t == semantic_pad_token else int(t)
-        for t in hf_sem_tokens
+        coarse_semantic_pad_token if t == semantic_pad_token else int(t) for t in hf_sem_tokens
     ]
     sem_len = len(x_semantic)
     n_steps = max(
-        int(math.floor(sem_len * coarse_rate_hz / semantic_rate_hz))
-        * n_coarse_codebooks,
+        int(math.floor(sem_len * coarse_rate_hz / semantic_rate_hz)) * n_coarse_codebooks,
         0,
     )
 
     x_coarse = []
-    n_window_steps = (int(math.ceil(n_steps / sliding_window_len))
-                      if n_steps > 0 else 0)
+    n_window_steps = int(math.ceil(n_steps / sliding_window_len)) if n_steps > 0 else 0
 
     for win in range(n_window_steps):
         gen_this_window = min(sliding_window_len, n_steps - len(x_coarse))
@@ -816,10 +851,8 @@ def stage4_greedy_parity(args) -> bool:
 
         # Build semantic context (matching C++ bark_backend.cpp:344-376)
         total_generated = len(x_coarse)
-        max_sem_hist = int(math.floor(
-            max_coarse_history * semantic_rate_hz / coarse_rate_hz))
-        semantic_idx = int(round(
-            total_generated * semantic_rate_hz / coarse_rate_hz))
+        max_sem_hist = int(math.floor(max_coarse_history * semantic_rate_hz / coarse_rate_hz))
+        semantic_idx = int(round(total_generated * semantic_rate_hz / coarse_rate_hz))
         sem_start = max(0, semantic_idx - max_sem_hist)
         sem_context_len = min(sem_len - sem_start, max_coarse_input_length)
 
@@ -844,13 +877,11 @@ def stage4_greedy_parity(args) -> bool:
         # Prefill all but last token
         for i in range(len(input_tokens) - 1):
             embed = coarse_embed[input_tokens[i]].reshape(1, coarse_hidden)
-            coarse_runner.step(
-                token_id=0, input_embed=embed, use_input_embed=1.0)
+            coarse_runner.step(token_id=0, input_embed=embed, use_input_embed=1.0)
 
         # Feed last prefill token and get first logits
         embed = coarse_embed[input_tokens[-1]].reshape(1, coarse_hidden)
-        result = coarse_runner.step(
-            token_id=0, input_embed=embed, use_input_embed=1.0)
+        result = coarse_runner.step(token_id=0, input_embed=embed, use_input_embed=1.0)
 
         # Generate window tokens
         window_start = len(x_coarse)
@@ -870,8 +901,7 @@ def stage4_greedy_parity(args) -> bool:
 
             if step + 1 < gen_this_window:
                 embed = coarse_embed[token].reshape(1, coarse_hidden)
-                result = coarse_runner.step(
-                    token_id=0, input_embed=embed, use_input_embed=1.0)
+                result = coarse_runner.step(token_id=0, input_embed=embed, use_input_embed=1.0)
 
         del coarse_runner
 
@@ -879,25 +909,32 @@ def stage4_greedy_parity(args) -> bool:
 
     # Compare
     coarse_n = min(len(hf_coarse_tokens), len(trt_coarse_tokens))
-    coarse_matched = (int(np.sum(
-        hf_coarse_tokens[:coarse_n] == trt_coarse_tokens[:coarse_n]))
-        if coarse_n > 0 else 0)
-    coarse_pass = (coarse_matched == coarse_n
-                   and len(hf_coarse_tokens) == len(trt_coarse_tokens))
-    print(f"    coarse:    {coarse_matched}/"
-          f"{max(len(hf_coarse_tokens), len(trt_coarse_tokens))} "
-          f"codes match  {'PASS' if coarse_pass else 'FAIL'}",
-          file=sys.stderr)
+    coarse_matched = (
+        int(np.sum(hf_coarse_tokens[:coarse_n] == trt_coarse_tokens[:coarse_n]))
+        if coarse_n > 0
+        else 0
+    )
+    coarse_pass = coarse_matched == coarse_n and len(hf_coarse_tokens) == len(trt_coarse_tokens)
+    print(
+        f"    coarse:    {coarse_matched}/"
+        f"{max(len(hf_coarse_tokens), len(trt_coarse_tokens))} "
+        f"codes match  {'PASS' if coarse_pass else 'FAIL'}",
+        file=sys.stderr,
+    )
     if not coarse_pass:
         all_pass = False
         if len(hf_coarse_tokens) != len(trt_coarse_tokens):
-            print(f"    Length mismatch: HF={len(hf_coarse_tokens)}, "
-                  f"TRT={len(trt_coarse_tokens)}", file=sys.stderr)
+            print(
+                f"    Length mismatch: HF={len(hf_coarse_tokens)}, TRT={len(trt_coarse_tokens)}",
+                file=sys.stderr,
+            )
         for i in range(coarse_n):
             if hf_coarse_tokens[i] != trt_coarse_tokens[i]:
-                print(f"    First mismatch at index {i}: "
-                      f"HF={hf_coarse_tokens[i]}, TRT={trt_coarse_tokens[i]}",
-                      file=sys.stderr)
+                print(
+                    f"    First mismatch at index {i}: "
+                    f"HF={hf_coarse_tokens[i]}, TRT={trt_coarse_tokens[i]}",
+                    file=sys.stderr,
+                )
                 break
 
     # =================================================================
@@ -911,8 +948,7 @@ def stage4_greedy_parity(args) -> bool:
         fine_pass = True
     else:
         # --- HF fine (always deterministic — argmax) ---
-        fine_gen_cfg_dict = getattr(
-            model.generation_config, "fine_acoustics_config", {})
+        fine_gen_cfg_dict = getattr(model.generation_config, "fine_acoustics_config", {})
         if BarkFineGenerationConfig is not None and fine_gen_cfg_dict:
             fine_gen_cfg = BarkFineGenerationConfig(**fine_gen_cfg_dict)
             # BarkFineModel uses argmax only when temperature is exactly 1.0;
@@ -929,8 +965,7 @@ def stage4_greedy_parity(args) -> bool:
             }
             if fine_gen_cfg is not None:
                 generate_kwargs["fine_generation_config"] = fine_gen_cfg
-            hf_fine_output = model.fine_acoustics.generate(
-                hf_coarse_output, **generate_kwargs)
+            hf_fine_output = model.fine_acoustics.generate(hf_coarse_output, **generate_kwargs)
 
         # hf_fine_output: [1, n_codebooks, seq_len]
         hf_fine_codes = hf_fine_output[0].cpu().numpy()  # [8, seq_len]
@@ -942,13 +977,13 @@ def stage4_greedy_parity(args) -> bool:
 
         # Load fine embedding tables
         n_embed_tables = fine_cfg.get("n_embed_tables", 8)
-        fine_embed_flat = np.frombuffer(
-            extra["fine_embed"], dtype=np.float32).copy()
-        fine_embed = fine_embed_flat.reshape(
-            n_embed_tables, fine_cb_size, fine_hidden)
-        fine_pos_embed = np.frombuffer(
-            extra["fine_position_embed"], dtype=np.float32
-        ).reshape(-1, fine_hidden).copy()
+        fine_embed_flat = np.frombuffer(extra["fine_embed"], dtype=np.float32).copy()
+        fine_embed = fine_embed_flat.reshape(n_embed_tables, fine_cb_size, fine_hidden)
+        fine_pos_embed = (
+            np.frombuffer(extra["fine_position_embed"], dtype=np.float32)
+            .reshape(-1, fine_hidden)
+            .copy()
+        )
 
         # De-interleave HF coarse tokens into codes [8, n_frames]
         n_frames_raw = len(hf_coarse_tokens) // n_coarse_codebooks
@@ -960,8 +995,7 @@ def stage4_greedy_parity(args) -> bool:
             cb = t % n_coarse_codebooks
             frame = t // n_coarse_codebooks
             if frame < n_frames:
-                raw = (int(hf_coarse_tokens[t]) - semantic_vocab_size
-                       - cb * codebook_size)
+                raw = int(hf_coarse_tokens[t]) - semantic_vocab_size - cb * codebook_size
                 trt_fine_codes[cb, frame] = max(0, min(raw, codebook_size - 1))
 
         # Run TRT fine engine
@@ -969,13 +1003,13 @@ def stage4_greedy_parity(args) -> bool:
 
         for cb_idx in range(2, 8):
             # Sum embeddings for CB 0..cb_idx + position (matching C++)
-            input_embeds = np.zeros(
-                (fine_seq_length, fine_hidden), dtype=np.float32)
+            input_embeds = np.zeros((fine_seq_length, fine_hidden), dtype=np.float32)
             actual_frames = min(n_frames, fine_seq_length)
             for frame in range(fine_seq_length):
                 for cb in range(cb_idx + 1):
-                    code = (int(trt_fine_codes[cb, frame])
-                            if frame < actual_frames else codebook_size)
+                    code = (
+                        int(trt_fine_codes[cb, frame]) if frame < actual_frames else codebook_size
+                    )
                     input_embeds[frame] += fine_embed[cb, code]
                 input_embeds[frame] += fine_pos_embed[frame]
 
@@ -986,8 +1020,7 @@ def stage4_greedy_parity(args) -> bool:
             # C++ reads head_idx = cb_idx - 1, i.e. logits_cb{cb_idx}.
             head_name = f"logits_cb{cb_idx}"
             if head_name not in outputs:
-                print(f"    WARNING: output {head_name} not found in engine",
-                      file=sys.stderr)
+                print(f"    WARNING: output {head_name} not found in engine", file=sys.stderr)
                 continue
             head_logits = outputs[head_name]  # [seq_length, codebook_size]
             valid_range = min(codebook_size, fine_cb_size)
@@ -1008,19 +1041,23 @@ def stage4_greedy_parity(args) -> bool:
                     fine_matched += 1
 
         fine_pass = fine_total > 0 and fine_matched == fine_total
-        print(f"    fine:      {fine_matched}/{fine_total} codes match "
-              f"(6x{n_compare})  {'PASS' if fine_pass else 'FAIL'}",
-              file=sys.stderr)
+        print(
+            f"    fine:      {fine_matched}/{fine_total} codes match "
+            f"(6x{n_compare})  {'PASS' if fine_pass else 'FAIL'}",
+            file=sys.stderr,
+        )
         if not fine_pass:
             all_pass = False
             # Show first mismatch per codebook
             for cb in range(2, 8):
                 for frame in range(n_compare):
                     if trt_fine_codes[cb, frame] != hf_fine_codes[cb, frame]:
-                        print(f"    CB{cb} mismatch at frame {frame}: "
-                              f"HF={hf_fine_codes[cb, frame]}, "
-                              f"TRT={trt_fine_codes[cb, frame]}",
-                              file=sys.stderr)
+                        print(
+                            f"    CB{cb} mismatch at frame {frame}: "
+                            f"HF={hf_fine_codes[cb, frame]}, "
+                            f"TRT={trt_fine_codes[cb, frame]}",
+                            file=sys.stderr,
+                        )
                         break
 
     # =================================================================
@@ -1032,8 +1069,7 @@ def stage4_greedy_parity(args) -> bool:
     if codec_plan is None:
         print("    SKIP: No codec engine built", file=sys.stderr)
     elif fine_plan is None:
-        print("    SKIP: No fine codes available (fine engine skipped)",
-              file=sys.stderr)
+        print("    SKIP: No fine codes available (fine engine skipped)", file=sys.stderr)
     else:
         codec_seq_length = audio_cfg.get("codec_seq_length", 256)
         upsample = audio_cfg.get("codec_upsample_factor", 320)
@@ -1044,13 +1080,11 @@ def stage4_greedy_parity(args) -> bool:
 
         # --- TRT codec ---
         codec_runner = VisionTrtRunner(codec_plan)
-        audio_codes_input = np.zeros(
-            (1, 8, codec_seq_length), dtype=np.int32)
-        audio_codes_input[0, :, :n_codec_frames] = (
-            hf_fine_codes_np[:, :n_codec_frames])
+        audio_codes_input = np.zeros((1, 8, codec_seq_length), dtype=np.int32)
+        audio_codes_input[0, :, :n_codec_frames] = hf_fine_codes_np[:, :n_codec_frames]
         codec_output = codec_runner.encode(audio_codes=audio_codes_input)
         trt_waveform = codec_output["waveform"].flatten()
-        trt_waveform = trt_waveform[:n_codec_frames * upsample]
+        trt_waveform = trt_waveform[: n_codec_frames * upsample]
         del codec_runner
 
         # --- HF codec ---
@@ -1068,8 +1102,10 @@ def stage4_greedy_parity(args) -> bool:
         if min_len > 0:
             diff = np.abs(trt_waveform[:min_len] - hf_waveform[:min_len])
             cos_num = np.dot(trt_waveform[:min_len], hf_waveform[:min_len])
-            cos_den = (np.linalg.norm(trt_waveform[:min_len])
-                       * np.linalg.norm(hf_waveform[:min_len]) + 1e-12)
+            cos_den = (
+                np.linalg.norm(trt_waveform[:min_len]) * np.linalg.norm(hf_waveform[:min_len])
+                + 1e-12
+            )
             cosine = float(cos_num / cos_den)
             max_diff = float(diff.max())
             codec_pass = cosine > 0.99 and max_diff < 0.5
@@ -1078,8 +1114,11 @@ def stage4_greedy_parity(args) -> bool:
             max_diff = float("inf")
             codec_pass = False
 
-        print(f"    codec:     cos={cosine:.3f} max={max_diff:.3f}  "
-              f"{'PASS' if codec_pass else 'FAIL'}", file=sys.stderr)
+        print(
+            f"    codec:     cos={cosine:.3f} max={max_diff:.3f}  "
+            f"{'PASS' if codec_pass else 'FAIL'}",
+            file=sys.stderr,
+        )
         if not codec_pass:
             all_pass = False
 
@@ -1118,13 +1157,17 @@ def stage4_greedy_parity(args) -> bool:
     json_path = getattr(args, "json", None)
     if json_path:
         with open(json_path, "w") as f:
-            json.dump({
-                "model": args.model,
-                "prompt": args.prompt,
-                "max_semantic_tokens": max_sem_tokens,
-                "all_pass": all_pass,
-                "stages": stage_results,
-            }, f, indent=2)
+            json.dump(
+                {
+                    "model": args.model,
+                    "prompt": args.prompt,
+                    "max_semantic_tokens": max_sem_tokens,
+                    "all_pass": all_pass,
+                    "stages": stage_results,
+                },
+                f,
+                indent=2,
+            )
         print(f"  Results written to {json_path}", file=sys.stderr)
 
     print(file=sys.stderr)
@@ -1139,6 +1182,7 @@ def stage4_greedy_parity(args) -> bool:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1164,30 +1208,40 @@ Examples:
   python3 tools/diff_audio.py --bundle bark.bundle --binary ./build/trtmc \\
     --model suno/bark-small --prompt "Hello, my dog is cute" \\
     --hf-python .venv/bin/python
-""")
-    parser.add_argument("--model", default=None,
-                        help="HF model ID (e.g. suno/bark-small)")
-    parser.add_argument("--bundle", default=None,
-                        help="Path to .bundle artifact")
-    parser.add_argument("--binary", default=None,
-                        help="Path to trtmc binary (e.g. ./build/trtmc)")
-    parser.add_argument("--prompt", default="Hello, my dog is cute.",
-                        help="Text prompt")
-    parser.add_argument("--hf-python", default="",
-                        help="Path to Python with HF tokenizers installed")
-    parser.add_argument("--min-energy", type=float, default=0.005,
-                        help="Min RMS energy for speech detection (stage 1)")
-    parser.add_argument("--codec-atol", type=float, default=0.15,
-                        help="Max mean diff for codec comparison (stage 3). "
-                        "Note: when the bundle has a fine model, TRT feeds "
-                        "8 codebooks while Stage 3 HF reference uses only 2, "
-                        "so larger diffs are expected.")
-    parser.add_argument("--stage", type=int, default=0,
-                        help="Run specific stage (0=all 1-3, 1/2/3/4)")
-    parser.add_argument("--max-semantic-tokens", type=int, default=100,
-                        help="Max semantic tokens for stage 4 (default: 100)")
-    parser.add_argument("--json", default=None,
-                        help="Write stage 4 results to this JSON file")
+""",
+    )
+    parser.add_argument("--model", default=None, help="HF model ID (e.g. suno/bark-small)")
+    parser.add_argument("--bundle", default=None, help="Path to .bundle artifact")
+    parser.add_argument("--binary", default=None, help="Path to trtmc binary (e.g. ./build/trtmc)")
+    parser.add_argument("--prompt", default="Hello, my dog is cute.", help="Text prompt")
+    parser.add_argument(
+        "--hf-python", default="", help="Path to Python with HF tokenizers installed"
+    )
+    parser.add_argument(
+        "--min-energy",
+        type=float,
+        default=0.005,
+        help="Min RMS energy for speech detection (stage 1)",
+    )
+    parser.add_argument(
+        "--codec-atol",
+        type=float,
+        default=0.15,
+        help="Max mean diff for codec comparison (stage 3). "
+        "Note: when the bundle has a fine model, TRT feeds "
+        "8 codebooks while Stage 3 HF reference uses only 2, "
+        "so larger diffs are expected.",
+    )
+    parser.add_argument(
+        "--stage", type=int, default=0, help="Run specific stage (0=all 1-3, 1/2/3/4)"
+    )
+    parser.add_argument(
+        "--max-semantic-tokens",
+        type=int,
+        default=100,
+        help="Max semantic tokens for stage 4 (default: 100)",
+    )
+    parser.add_argument("--json", default=None, help="Write stage 4 results to this JSON file")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 

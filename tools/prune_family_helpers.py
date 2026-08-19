@@ -266,14 +266,14 @@ def family_dirs(repo_root: Path, selected: tuple[str, ...]) -> list[Path]:
     if selected:
         paths = [root / family for family in selected]
         missing = [
-            path.name for path in paths if not (path / "plugin.py").is_file()
+            path.name for path in paths if not (path / "model.py").is_file()
         ]
         if missing:
             raise SystemExit("Unknown model family: " + ", ".join(missing))
         return paths
     else:
         return sorted(
-            path for path in root.iterdir() if (path / "plugin.py").is_file()
+            path for path in root.iterdir() if (path / "model.py").is_file()
         )
 
 

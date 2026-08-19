@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "nemotron_speech_streaming"
-plugin = "nemotron_speech_streaming"
-module = "plugin"
 model_dir_adapter = "nemo_archive.py|resolve_model_dir"
 nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
 nemo_model_type = "nemotron_speech_streaming"
@@ -14,11 +12,19 @@ nemo_target_patterns = [
 ]
 aliases = [
   "enc_dec_rnnt_bpe",
+  "enc_dec_rnnt_bpe_with_prompt",
   "fastconformer_cacheaware_rnnt",
+  "nemotron3_5_asr",
+  "nemotron_3_5_asr_streaming",
   "nemotron_asr_streaming",
   "nemotron_speech_streaming",
+  "nemotron_speech_streaming_rnnt",
   "nemotronspeechstreaming",
   "rnnt_bpe",
+]
+architecture_patterns = [
+  "Nemotron3_5AsrForRNNT",
+  "NemotronAsrStreamingForRNNT",
 ]
 prefixes = [
   "nemotron_speech_streaming",

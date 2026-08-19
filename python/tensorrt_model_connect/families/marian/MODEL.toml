@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "marian"
-plugin = "marian"
-module = "plugin"
 debug_runner = "debug_runner.py|runner_from_bundle"
 debug_runtime_strategies = [
   "marian_translation",

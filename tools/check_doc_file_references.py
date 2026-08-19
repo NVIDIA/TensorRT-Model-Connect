@@ -143,8 +143,15 @@ _CLAIM_PATTERNS: List[Tuple[re.Pattern, str, int]] = [
     (re.compile(r"\b(\d+)\s+(?:per-model\s+)?(?:JSON\s+)?manifest(?:s|[\s-]+file)", re.I), "manifests", 1),
     # "50 models" in E2E context (e.g. "All 50 models")
     (re.compile(r"\b(?:All\s+)?(\d+)\s+models\b", re.I), "models_e2e", 1),
-    # "53 auto-discovered plugins", "50 plugins"
-    (re.compile(r"\b(\d+)\s+(?:auto-discovered\s+)?plugin", re.I), "family_plugins", 1),
+    # "80 family models" or "80 family model build entries".
+    (
+        re.compile(
+            r"\b(\d+)\s+family\s+model",
+            re.I,
+        ),
+        "family_models",
+        1,
+    ),
     # "74 test files" in builder context
     (re.compile(r"\b(\d+)\s+test\s+file", re.I), "test_files_generic", 1),
     # "61 test executables" in C++ context
@@ -180,22 +187,19 @@ def _get_actual_counts(repo_root: Path) -> dict:
     else:
         counts["manifests"] = 0
 
-    # Family plugins (excluding __init__.py and base.py)
+    # Canonical family build entry modules.
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
     if families_dir.is_dir():
-        flat_plugins = [
-            f for f in families_dir.iterdir()
-            if f.is_file() and f.suffix == ".py" and f.name not in ("__init__.py", "base.py")
+        family_models = [
+            directory / "model.py"
+            for directory in families_dir.iterdir()
+            if directory.is_dir()
+            and not directory.name.startswith("_")
+            and (directory / "model.py").is_file()
         ]
-        package_plugins = [
-            d / "plugin.py" for d in families_dir.iterdir()
-            if d.is_dir() and not d.name.startswith("_") and (d / "plugin.py").is_file()
-        ]
-        counts["family_plugins"] = len(
-            flat_plugins + package_plugins
-        )
+        counts["family_models"] = len(family_models)
     else:
-        counts["family_plugins"] = 0
+        counts["family_models"] = 0
 
     # Total family .py files (for "N Python files in the families directory" claims)
     if families_dir.is_dir():
@@ -293,9 +297,9 @@ def extract_numerical_claims(
                     # "N models" claims -- map to manifest count
                     actual_key = "manifests"
                     label = "E2E model manifests (tests/e2e/models/<family>/manifests/*.json)"
-                elif claim_kind == "family_plugins":
-                    actual_key = "family_plugins"
-                    label = "family plugins (excluding __init__.py and base.py)"
+                elif claim_kind == "family_models":
+                    actual_key = "family_models"
+                    label = "family model build entries (<family>/model.py)"
                 elif claim_kind == "cpp_test_executables":
                     actual_key = "cpp_tests"
                     label = "C++ test files (.cpp)"
@@ -313,15 +317,6 @@ def extract_numerical_claims(
                     continue
 
                 if claimed != actual:
-                    # Check if the claim might refer to total py files
-                    # in families dir (including __init__ and base)
-                    if claim_kind == "family_plugins":
-                        total = actual_counts.get("families_total_py", 0)
-                        if claimed == total:
-                            # Claim says "N Python files" which includes
-                            # __init__ + base -- that is correct
-                            continue
-
                     findings.append(
                         Finding(
                             level="WARNING",
@@ -443,7 +438,7 @@ def main() -> int:
     if counts:
         print("=== Actual file counts ===")
         print(f"  E2E manifests (tests/e2e/models/<family>/manifests/*.json): {counts.get('manifests', '?')}")
-        print(f"  Family plugins (excl __init__/base):               {counts.get('family_plugins', '?')}")
+        print(f"  Family model build entries (<family>/model.py):    {counts.get('family_models', '?')}")
         print(f"  Family dir total .py files:                        {counts.get('families_total_py', '?')}")
         print(f"  C++ test files (tests/cpp/*.cpp):                  {counts.get('cpp_tests', '?')}")
         print(f"  Builder test files (tests/builder/test_*.py):      {counts.get('builder_tests', '?')}")

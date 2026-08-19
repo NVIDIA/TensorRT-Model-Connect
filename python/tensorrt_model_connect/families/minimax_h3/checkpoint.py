@@ -24,32 +24,6 @@ class _TensorOwnedArray(np.ndarray):
             self._tensor_owner = getattr(source, "_tensor_owner", None)
 
 
-def load_component_state_dict(component_dir: str | Path) -> dict[str, Any]:
-    """Load a safetensors component without materializing duplicate tensors."""
-
-    from safetensors.torch import load_file
-
-    root = Path(component_dir)
-    indexes = sorted(root.glob("*.safetensors.index.json"))
-    if indexes:
-        if len(indexes) != 1:
-            raise ValueError(f"Expected one safetensors index in {root}, found {len(indexes)}")
-        weight_map = json.loads(indexes[0].read_text())["weight_map"]
-        paths = [root / name for name in sorted(set(weight_map.values()))]
-    else:
-        paths = sorted(root.glob("*.safetensors"))
-    if not paths:
-        raise FileNotFoundError(f"No safetensors checkpoint found in {root}")
-
-    state: dict[str, Any] = {}
-    for path in paths:
-        for name, tensor in load_file(path, device="cpu").items():
-            if name in state:
-                raise ValueError(f"Duplicate MiniMax-H3 tensor {name!r}")
-            state[name] = tensor
-    return state
-
-
 def load_selected_component_state_dict(
     component_dir: str | Path, names: Iterable[str]
 ) -> dict[str, Any]:
@@ -102,12 +76,6 @@ def validate_component_key_partition(
             "MiniMax-H3 checkpoint partition is not exhaustive: "
             f"missing={missing}, unassigned={unassigned}"
         )
-
-
-def require_keys(state: dict[str, Any], names: Iterable[str]) -> None:
-    missing = sorted(set(names) - set(state))
-    if missing:
-        raise ValueError(f"MiniMax-H3 checkpoint is missing tensors: {missing}")
 
 
 def numpy_state(state: dict[str, Any]) -> dict[str, Any]:

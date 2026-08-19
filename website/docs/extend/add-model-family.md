@@ -35,10 +35,9 @@ tests/e2e/models/qwen/
 Copy only the files the new family actually needs. Do not import or include a
 sibling family's model-owned implementation in production code.
 
-`scripts/new_family.py` is only a preliminary Python bootstrap in this
-revision. It creates `plugin.py` and `__init__.py`, but it does not create the
-required `MODEL.toml`, family-local builder modules, runtime DSO, or E2E
-descriptor. It is not a complete onboarding command.
+There is no generic family scaffold. Copy the closest owner's `model.py` and
+only the local helpers the new model actually needs; a generated optional-hook
+surface would recreate the central coupling this layout removes.
 
 ## 2. Add the Python family package
 
@@ -48,7 +47,7 @@ Create:
 python/tensorrt_model_connect/families/<builder-family>/
   MODEL.toml
   __init__.py
-  plugin.py
+  model.py
   config.py
   checkpoint_mapper.py
   <family-owned builders and graph helpers>
@@ -58,45 +57,39 @@ A minimal Python descriptor is:
 
 ```toml
 id = "example"
-plugin = "example"
-# Specialization/tooling metadata; runtime discovery imports the package.
-module = "plugin"
 aliases = ["example", "ExampleModel"]
 prefixes = ["example"]
 ```
 
 Use `architecture_patterns` for architecture-name matching,
 `diffusion_pipeline_classes` for Diffusers discovery, or the other metadata
-fields only when the family needs them. The descriptor's `module` field is
-specialization/tooling metadata; it does not select an arbitrary discovery
-module. Runtime discovery imports the family package and reads the package-level
-`plugin` exported by `__init__.py`.
+fields only when the family needs them. Python entrypoints are convention,
+not manifest configuration: the resolver imports `<family>.model` directly.
+Keep `__init__.py` empty apart from its package docstring so config and profile
+tools do not eagerly import TensorRT or optional model dependencies.
 
-Keep the three discovery flows distinct:
+Keep the discovery inputs distinct:
 
-1. A full config first uses `architecture_patterns` to import bounded
-   descriptor candidates and evaluate `matches_config()`. If that does not
-   resolve a plugin, the compatibility path imports every non-private family
-   module/package with `pkgutil` and evaluates its predicates.
-2. A string or `model_type` first attempts a direct descriptor-ID lookup, then
-   alias/prefix candidates, and finally the same all-package compatibility
-   fallback.
-3. A Diffusers pipeline class uses only
-   `diffusion_pipeline_classes` from descriptors. It imports matching packages
-   and has no `pkgutil` fallback.
+1. A full config uses `architecture_patterns`, aliases, and prefixes to create
+   a bounded candidate list, then calls each candidate's required
+   `matches(config)`.
+2. A string or `model_type` uses the same descriptor index.
+3. A Diffusers pipeline class resolves directly through
+   `diffusion_pipeline_classes`.
+
+Unknown inputs fail closed. The resolver never scans every family package.
 
 See [Build Pipeline](../architecture/build-pipeline.md#2-resolve-the-owning-family)
 for the live flow.
 
-`plugin.py` must provide:
+`model.py` must provide:
 
-- `name`, matching the logical family ID;
 - `runtime_strategy`, matching exactly one strategy in the C++ runtime
   descriptor;
-- `matches(model_type)`;
-- `load_weights(...)`;
-- `build_engine(...)` or the modality-specific component hooks used by the
-  closest family.
+- `matches(config)`;
+- `build(model_dir, output_path, **options)`, owning the complete bundle;
+- local `load_weights(...)`, `build_engine(...)`, or component functions when
+  useful for tests and internal organization.
 
 Keep config adapters, checkpoint mapping, graph helpers, builders, calibration
 policy, and optional debug hooks in this family package. The old repository-root
@@ -106,20 +99,17 @@ model has been retired.
 ### Optional split decoder contract
 
 Opt into separate prefill/decode engines only when the family builder and
-runtime implement both roles. Provide
-`supports_split_decoder_roles(config) -> bool` (or the equivalent
-`split_decoder_roles` family capability) and make the family builder honor the
-internal prefill/decode role passed by the generic engine builder. A family
+runtime implement both roles. Make `model.build()` choose and build the exact
+roles locally. A family
 with `embed_input = True` must also set `supports_split_embed_input = True`
 only after its prefill engine accepts the embedding-input contract and its
 decode engine handles the matching one-token role.
 
-The generic builder does not select split layout for tensor parallelism,
-dynamic KV, or TriAttention. An unsupported split request falls back to the
-family's existing single-engine path. Tests must inspect the emitted
+The shared resolver does not interpret split layout, tensor parallelism,
+dynamic KV, or TriAttention. Tests must inspect the emitted
 `config.json.decoder_engine_layout`: an actual split result must contain both
-`prefill_engine_plan` and decode `engine_plan`, while a fallback must not claim
-split merely because the request asked for it.
+`prefill_engine_plan` and decode `engine_plan`, while a single-engine result
+must not claim split merely because the request asked for it.
 
 ## 3. Add the runtime model DSO
 

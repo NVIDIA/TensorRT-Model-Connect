@@ -16,7 +16,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families.glm import plugin
+    from tensorrt_model_connect.families.glm import model as plugin
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 

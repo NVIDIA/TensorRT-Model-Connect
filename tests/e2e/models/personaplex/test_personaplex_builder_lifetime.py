@@ -24,7 +24,7 @@ pytest.importorskip(
 personaplex_utils = importlib.import_module(
     "tensorrt_model_connect.families.personaplex.utils")
 personaplex_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.personaplex.plugin")
+    "tensorrt_model_connect.families.personaplex.model")
 
 
 @pytest.fixture(autouse=True)
@@ -349,7 +349,7 @@ def test_fp16_bundle_builds_streaming_encoder_in_required_fp32(monkeypatch) -> N
         "_num_depformer_emb": 0,
     }
 
-    extras = personaplex_plugin.PersonaPlexPlugin().build_extra_engines(
+    extras = personaplex_plugin.build_extra_engines(
         config, weights, max_cache_length=512, precision="fp16"
     )
 
@@ -398,7 +398,7 @@ def test_mimi_codec_uses_stable_builder_tactics(
 
 def test_mimi_decoder_workspace_supports_long_form_profile() -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.personaplex.plugin")
+        "tensorrt_model_connect.families.personaplex.model")
     builder_context_options = inspect.getclosurevars(
         module._build_mimi_decoder_engine).nonlocals
 

@@ -62,7 +62,7 @@ class TestGemmaPlugin:
 
     def test_gamma_plus_one(self, tmp_path):
         """RMSNorm weights should have +1.0 added (Gemma offset)."""
-        from tensorrt_model_connect.families.gemma import plugin
+        from tensorrt_model_connect.families.gemma import model as plugin
 
         tensors = self._setup(tmp_path)
         cfg = ModelConfig.from_dir(tmp_path)
@@ -84,7 +84,7 @@ class TestGemmaPlugin:
 
     def test_embedding_scaling(self, tmp_path):
         """Embedding should be scaled by sqrt(hidden_size)."""
-        from tensorrt_model_connect.families.gemma import plugin
+        from tensorrt_model_connect.families.gemma import model as plugin
 
         tensors = self._setup(tmp_path)
         cfg = ModelConfig.from_dir(tmp_path)

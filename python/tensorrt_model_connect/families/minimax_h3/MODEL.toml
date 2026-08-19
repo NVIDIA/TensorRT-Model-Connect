@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "minimax_h3"
-plugin = "minimax_h3"
-module = "plugin"
 aliases = [
   "minimax-h3",
   "minimax_h3",

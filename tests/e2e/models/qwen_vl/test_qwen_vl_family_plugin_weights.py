@@ -43,7 +43,7 @@ class TestQwenVLPlugin:
 
     def test_qwen25_vl_delegates_to_standard(self, tmp_path):
         """Qwen2.5-VL (no deepstack) delegates to load_standard_weights."""
-        from tensorrt_model_connect.families.qwen_vl import plugin
+        import tensorrt_model_connect.families.qwen_vl.model as plugin
 
         config = {
             "model_type": "qwen2_vl",
@@ -71,7 +71,7 @@ class TestQwenVLPlugin:
 
     def test_qwen3_vl_language_model_prefix(self, tmp_path):
         """Qwen3-VL uses model.language_model.layers.{i} prefix."""
-        from tensorrt_model_connect.families.qwen_vl import plugin
+        import tensorrt_model_connect.families.qwen_vl.model as plugin
 
         config = {
             "model_type": "qwen3_vl",
@@ -129,7 +129,7 @@ class TestQwenVLPlugin:
 
     def test_qwen3_vl_vision_weights_not_in_text(self, tmp_path):
         """Vision weights (visual.*) should NOT appear in text weight dict."""
-        from tensorrt_model_connect.families.qwen_vl import plugin
+        import tensorrt_model_connect.families.qwen_vl.model as plugin
 
         config = {
             "model_type": "qwen3_vl",

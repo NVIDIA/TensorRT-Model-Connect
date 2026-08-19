@@ -557,7 +557,7 @@ def build_flux_vae_decoder_engine(
     # treats every dim 0 as dynamic and only the VAE attaches a (1, 1, 1)
     # profile.
     if max_batch_size > 1:
-        from ...engine_builder import add_dynamic_batch_profile
+        from ...tvm_ffi.graph_build import add_dynamic_batch_profile
 
         latents = network.add_input(
             "latents", trt.float32, (-1, latent_channels, h_lat, w_lat))

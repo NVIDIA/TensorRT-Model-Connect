@@ -7,25 +7,25 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("tensorrt", reason="registry contract tests import plugin modules")
+pytest.importorskip("tensorrt", reason="registry contract tests import model modules")
 
-from tensorrt_model_connect.families import find_plugin
+from tensorrt_model_connect.families import find_model
 
 
-def _plugin(model_type: str):
-    plugin = find_plugin(model_type)
-    assert plugin is not None
-    return plugin
+def _model(model_type: str):
+    model = find_model(model_type)
+    assert model is not None
+    return model
 
 def test_runtime_strategy() -> None:
-    plugin = _plugin("chronos_bolt")
-    assert getattr(plugin, "runtime_strategy", None) == "chronos_bolt_trt"
+    model = _model("chronos_bolt")
+    assert getattr(model, "runtime_strategy", None) == "chronos_bolt_trt"
 
 
 def test_matches_official_t5_config() -> None:
     from tensorrt_model_connect.config import ModelConfig
 
-    plugin = find_plugin(ModelConfig(
+    model = find_model(ModelConfig(
         model_type="t5",
         architectures=["ChronosBoltModelForForecasting"],
         raw={
@@ -34,5 +34,5 @@ def test_matches_official_t5_config() -> None:
             "chronos_config": {"context_length": 16},
         },
     ))
-    assert plugin is not None
-    assert plugin.name == "chronos_bolt"
+    assert model is not None
+    assert model.name == "chronos_bolt"

@@ -102,11 +102,11 @@ The shared package under
   quantized and carry their scales;
 - format implementations and scale providers for precomputed, calibrated,
   pre-quantized, and dynamic paths; and
-- family adapter resolution.
+- reusable calibration-adapter primitives.
 
 ### Family agent default scope
 
-The family plugin remains responsible for:
+Each family `model.py` remains responsible for:
 
 - accepted formats and explicit rejection of unsupported combinations;
 - graph locations where `QuantContext` is consumed;
@@ -114,7 +114,7 @@ The family plugin remains responsible for:
 - tensor-parallel compatibility; and
 - parity, output-health, and performance qualification.
 
-Family hooks include:
+Family-local functions may include:
 
 - `quant_exclude_patterns()`
 - `calibration_data()`
@@ -125,9 +125,9 @@ Family hooks include:
 
 The cross-owner invariants are:
 
-- Shared quantization code must not import specific family plugins.
+- Shared quantization code must not import specific family model modules.
 - Shared quantization code must not branch on concrete family names.
-- Family-specific quantization policy belongs in plugin hooks such as
+- Family-specific quantization policy belongs in local functions such as
   `quant_adapter()` and `quant_exclude_patterns()`.
 
 ### Core agent scope
@@ -137,11 +137,10 @@ The core scope is the model-independent implementation under
 change only when it adds or fixes a shared primitive such as a format, scale
 contract, common graph seam, or shared calibration/runtime behavior.
 
-The engine builder passes `quant_ctx` only when a build entry point accepts
-that keyword. A callable that accepts `**kwargs` can also receive and ignore
-it. Tensor-parallel quantization is separately family-gated; for example,
-Qwen currently opts in only for FP8. Do not infer tensor-parallel support from
-the presence of both CLI options.
+The selected `model.py` creates and passes `quant_ctx` only through graph paths
+that support it. Tensor-parallel quantization is separately family-gated; for
+example, Qwen currently opts in only for FP8. Do not infer tensor-parallel
+support from the presence of both CLI options.
 
 ## Test enforcement
 
@@ -150,10 +149,10 @@ not import family modules or branch on family names and that model-specific
 hooks remain family-owned. These static checks protect ownership boundaries;
 they do not replace build, parity, output-health, or performance qualification.
 
-## Legacy FP8 family path
+## Direct FP8 scale path
 
-Some diffusion and family-specific builders still use the established FP8
-hooks instead of `QuantContext`:
+Some diffusion and family-specific recipes use direct FP8 scale functions
+instead of `QuantContext`:
 
 ```bash
 trtmc build /path/to/model \
@@ -161,8 +160,8 @@ trtmc build /path/to/model \
   -o /path/to/model-fp8.bundle
 ```
 
-`--fp8` first asks the family for packaged scales and then calls its
-`fp8_calibrate()` hook if no matching asset exists. A family without either
+`--fp8` first asks the family model for packaged scales and then calls its
+`fp8_calibrate()` function if no matching asset exists. A family without either
 path fails and asks for an explicit scale file.
 
 Load or save scales with:
@@ -186,15 +185,15 @@ native build starts. One valid shape is:
 ```
 
 Prefer `--quantize fp8` when the family graph consumes `QuantContext`. Use the
-legacy flags only when the owning family implements the FP8 hook contract.
+direct scale flags only when the owning family implements that FP8 contract.
 
 ## Build-path selection
 
-`trtmc build` resolves the owning family before it selects an implementation.
-A matching model-owned native default goes directly to the native TensorRT
-builder. Other requests may match one exact qualified optimized-runtime
-profile for the model revision, target, and public options. No profile match
-continues to the native builder; a selected provider failure is terminal.
+`trtmc build` resolves the owning family and calls its `model.build()` once.
+The family owns implementation selection. Qwen may match one exact qualified
+optimized-runtime profile for the model revision, target, and public options;
+no match runs Qwen's native recipe, while a selected provider failure is
+terminal. Other families run their native recipes directly.
 
 Precision, quantization, calibration, and scale options are part of that
 selection tuple. Changing one can therefore change both engine numerics and

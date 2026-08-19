@@ -53,7 +53,7 @@ class TestFalconPlugin:
 
     def test_bias_weights_loaded(self, tmp_path):
         """Falcon uses LayerNorm with bias — verify bias keys present."""
-        from tensorrt_model_connect.families.falcon import plugin
+        from tensorrt_model_connect.families.falcon import model as plugin
 
         config = {
             "model_type": "falcon",
@@ -79,7 +79,7 @@ class TestFalconPlugin:
 
     def test_fc_mlp_keys(self, tmp_path):
         """Falcon uses fc1/fc2 MLP naming (not gate/up/down)."""
-        from tensorrt_model_connect.families.falcon import plugin
+        from tensorrt_model_connect.families.falcon import model as plugin
 
         config = {
             "model_type": "falcon",
@@ -105,7 +105,7 @@ class TestFalconPlugin:
             assert weights[f"layer.{i}.w_fc1"].shape == (self.HIDDEN, self.MLP)
 
     def test_final_norm_beta(self, tmp_path):
-        from tensorrt_model_connect.families.falcon import plugin
+        from tensorrt_model_connect.families.falcon import model as plugin
 
         config = {
             "model_type": "falcon",

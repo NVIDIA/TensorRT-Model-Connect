@@ -22,6 +22,7 @@ import pytest
 try:
     import tensorrt_model_connect.families.qwen_vl.graph_ops as graph_ops
     from tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder import (
+        _add_deepstack_merger,
         _compute_vision_rope_tables,
         build_qwen3_vl_vision_engine,
         build_qwen_vl_vision_engine,
@@ -48,7 +49,8 @@ class TestVisionRopeTablesExtended:
     def test_nonsquare_grid(self):
         """Non-square grid should work (e.g. 4x8)."""
         cos, sin, win_idx, rev_idx = _compute_vision_rope_tables(
-            grid_h=4, grid_w=8, embed_dim=64, num_heads=4)
+            grid_h=4, grid_w=8, embed_dim=64, num_heads=4
+        )
 
         num_patches = 4 * 8  # 32
         num_merged = 32 // 4  # 8
@@ -61,7 +63,8 @@ class TestVisionRopeTablesExtended:
     def test_merge_size_1(self):
         """merge_size=1 means no merging: num_merged == num_patches."""
         cos, sin, win_idx, rev_idx = _compute_vision_rope_tables(
-            grid_h=4, grid_w=4, embed_dim=32, num_heads=2, merge_size=1)
+            grid_h=4, grid_w=4, embed_dim=32, num_heads=2, merge_size=1
+        )
 
         num_patches = 16
         num_merged = 16  # merge_size=1 => no reduction
@@ -73,9 +76,11 @@ class TestVisionRopeTablesExtended:
     def test_different_rope_theta(self):
         """Different rope_theta should produce different tables."""
         cos1, sin1, _, _ = _compute_vision_rope_tables(
-            grid_h=4, grid_w=4, embed_dim=32, num_heads=2, rope_theta=10000.0)
+            grid_h=4, grid_w=4, embed_dim=32, num_heads=2, rope_theta=10000.0
+        )
         cos2, sin2, _, _ = _compute_vision_rope_tables(
-            grid_h=4, grid_w=4, embed_dim=32, num_heads=2, rope_theta=500000.0)
+            grid_h=4, grid_w=4, embed_dim=32, num_heads=2, rope_theta=500000.0
+        )
 
         # Tables should differ (unless all positions are 0, which is only first row)
         assert not np.allclose(cos1, cos2), "Different theta should give different cos tables"
@@ -83,9 +88,11 @@ class TestVisionRopeTablesExtended:
     def test_symmetry_square_grid(self):
         """For a square grid, swapping grid_h/grid_w should give consistent shapes."""
         cos_a, sin_a, win_a, rev_a = _compute_vision_rope_tables(
-            grid_h=8, grid_w=8, embed_dim=64, num_heads=4)
+            grid_h=8, grid_w=8, embed_dim=64, num_heads=4
+        )
         cos_b, sin_b, win_b, rev_b = _compute_vision_rope_tables(
-            grid_h=8, grid_w=8, embed_dim=64, num_heads=4)
+            grid_h=8, grid_w=8, embed_dim=64, num_heads=4
+        )
 
         np.testing.assert_array_equal(cos_a, cos_b)
         np.testing.assert_array_equal(sin_a, sin_b)
@@ -116,22 +123,28 @@ class TestPatchEmbed3D:
 
         pixel_values = np.random.randn(input_channels, 8, 8).astype(np.float32)
         # Conv weight: [embed_dim, T*C, patch_size, patch_size]
-        weight = np.random.randn(embed_dim, input_channels, patch_size, patch_size).astype(np.float32)
+        weight = np.random.randn(embed_dim, input_channels, patch_size, patch_size).astype(
+            np.float32
+        )
         bias = np.random.randn(embed_dim).astype(np.float32)
 
         def build_fn(network, trt_inputs):
             out = graph_ops.add_patch_embed_3d(
-                network, trt_inputs["pixel_values"],
-                weight, bias,
+                network,
+                trt_inputs["pixel_values"],
+                weight,
+                bias,
                 in_channels=in_channels,
                 embed_dim=embed_dim,
                 temporal_patch_size=temporal_patch_size,
-                patch_size=patch_size)
+                patch_size=patch_size,
+            )
             return {"output": out}
 
         results = trt_runner(build_fn, {"pixel_values": pixel_values})
-        assert results["output"].shape == (4, 16), \
+        assert results["output"].shape == (4, 16), (
             f"Expected (4, 16), got {results['output'].shape}"
+        )
 
     @requires_trt
     def test_patch_embed_no_bias(self, trt_runner):
@@ -143,16 +156,21 @@ class TestPatchEmbed3D:
         input_channels = temporal_patch_size * in_channels
 
         pixel_values = np.random.randn(input_channels, 8, 8).astype(np.float32)
-        weight = np.random.randn(embed_dim, input_channels, patch_size, patch_size).astype(np.float32)
+        weight = np.random.randn(embed_dim, input_channels, patch_size, patch_size).astype(
+            np.float32
+        )
 
         def build_fn(network, trt_inputs):
             out = graph_ops.add_patch_embed_3d(
-                network, trt_inputs["pixel_values"],
-                weight, None,
+                network,
+                trt_inputs["pixel_values"],
+                weight,
+                None,
                 in_channels=in_channels,
                 embed_dim=embed_dim,
                 temporal_patch_size=temporal_patch_size,
-                patch_size=patch_size)
+                patch_size=patch_size,
+            )
             return {"output": out}
 
         results = trt_runner(build_fn, {"pixel_values": pixel_values})
@@ -165,76 +183,102 @@ class TestPatchEmbed3D:
 
 
 class TestSpatialMerge:
-    """Tests for add_spatial_merge via TRT execution."""
+    """Tests for the Qwen3-VL family-owned DeepStack merger."""
 
     @requires_trt
-    def test_merge_output_shape(self, trt_runner):
-        """Spatial merge reduces seq_length by merge_size^2."""
-        seq_length = 16
-        input_dim = 8
-        hidden_dim = 32
-        output_dim = 16
-        merge_size = 2
+    def test_merge_matches_torch(self, trt_runner):
+        """The specialized group/LN/MLP/reverse path matches its oracle."""
+        import torch
+        import torch.nn.functional as functional
 
-        inp = np.random.randn(seq_length, input_dim).astype(np.float32)
-        # w_fc1: [input_dim, hidden_dim], w_fc2: [hidden_dim, output_dim]
-        w_fc1 = np.random.randn(input_dim, hidden_dim).astype(np.float32)
-        w_fc2 = np.random.randn(hidden_dim, output_dim).astype(np.float32)
-        b_fc1 = np.random.randn(hidden_dim).astype(np.float32)
-        b_fc2 = np.random.randn(output_dim).astype(np.float32)
-        norm_gamma = np.ones(input_dim, dtype=np.float32)
+        rng = np.random.RandomState(42)
+        num_patches, embed_dim, merge_unit = 4, 4, 2
+        num_merged = num_patches // merge_unit
+        merged_dim = embed_dim * merge_unit
+        fc1_hidden, text_hidden = 7, 5
+        prefix = "visual.deepstack_merger_list.0"
+        inp = rng.randn(num_patches, embed_dim).astype(np.float32)
+        reverse_indices = np.array([1, 0], dtype=np.int32)
+        weights = {
+            f"{prefix}.norm.weight": rng.randn(merged_dim).astype(np.float32),
+            f"{prefix}.norm.bias": rng.randn(merged_dim).astype(np.float32),
+            f"{prefix}.linear_fc1.weight": rng.randn(fc1_hidden, merged_dim).astype(np.float32),
+            f"{prefix}.linear_fc1.bias": rng.randn(fc1_hidden).astype(np.float32),
+            f"{prefix}.linear_fc2.weight": rng.randn(text_hidden, fc1_hidden).astype(np.float32),
+            f"{prefix}.linear_fc2.bias": rng.randn(text_hidden).astype(np.float32),
+        }
 
         def build_fn(network, trt_inputs):
-            eps_tensor = graph_ops.add_constant(
-                network, (1, 1), np.array([1e-6], dtype=np.float32))
-            out = graph_ops.add_spatial_merge(
-                network, trt_inputs["inp"],
-                w_fc1=w_fc1, w_fc2=w_fc2,
-                b_fc1=b_fc1, b_fc2=b_fc2,
-                norm_gamma=norm_gamma,
-                input_dim=input_dim,
-                hidden_dim=hidden_dim,
-                output_dim=output_dim,
-                eps_tensor=eps_tensor,
-                seq_length=seq_length,
-                merge_size=merge_size)
+            eps_tensor = graph_ops.add_constant(network, (1, 1), np.array([1e-6], dtype=np.float32))
+            out = _add_deepstack_merger(
+                network,
+                trt_inputs["inp"],
+                weights,
+                prefix,
+                embed_dim,
+                merge_unit,
+                num_merged,
+                text_hidden,
+                eps_tensor,
+                reverse_indices,
+            )
             return {"output": out}
 
-        results = trt_runner(build_fn, {"inp": inp})
-        # add_spatial_merge applies LN + MLP but doesn't rearrange patches
-        # (spatial rearrangement is done in preprocessing). Output seq == input seq.
-        assert results["output"].shape == (seq_length, output_dim), \
-            f"Expected ({seq_length}, {output_dim}), got {results['output'].shape}"
+        result = trt_runner(build_fn, {"inp": inp})["output"]
+        merged = torch.from_numpy(inp).reshape(num_merged, merged_dim)
+        normed = functional.layer_norm(
+            merged,
+            (merged_dim,),
+            torch.from_numpy(weights[f"{prefix}.norm.weight"]),
+            torch.from_numpy(weights[f"{prefix}.norm.bias"]),
+            1e-6,
+        )
+        fc1 = normed @ torch.from_numpy(
+            weights[f"{prefix}.linear_fc1.weight"]
+        ).T + torch.from_numpy(weights[f"{prefix}.linear_fc1.bias"])
+        activated = functional.gelu(fc1, approximate="tanh")
+        ref = (
+            activated @ torch.from_numpy(weights[f"{prefix}.linear_fc2.weight"]).T
+            + torch.from_numpy(weights[f"{prefix}.linear_fc2.bias"])
+        )[torch.from_numpy(reverse_indices.astype(np.int64))]
+
+        assert result.shape == (num_merged, text_hidden)
+        np.testing.assert_allclose(result, ref.numpy(), atol=2e-3)
 
     @requires_trt
     def test_merge_deterministic(self, trt_runner):
         """Same input produces same output (deterministic)."""
-        seq_length = 4
-        input_dim = 4
-        hidden_dim = 8
-        output_dim = 4
-        merge_size = 2
-
-        np.random.seed(42)
-        inp = np.random.randn(seq_length, input_dim).astype(np.float32)
-        w_fc1 = np.random.randn(input_dim, hidden_dim).astype(np.float32)
-        w_fc2 = np.random.randn(hidden_dim, output_dim).astype(np.float32)
-        norm_gamma = np.ones(input_dim, dtype=np.float32)
+        rng = np.random.RandomState(7)
+        num_patches, embed_dim, merge_unit = 4, 4, 2
+        num_merged = num_patches // merge_unit
+        merged_dim = embed_dim * merge_unit
+        hidden_dim, output_dim = 8, 4
+        prefix = "visual.deepstack_merger_list.0"
+        inp = rng.randn(num_patches, embed_dim).astype(np.float32)
+        weights = {
+            f"{prefix}.norm.weight": np.ones(merged_dim, dtype=np.float32),
+            f"{prefix}.norm.bias": np.zeros(merged_dim, dtype=np.float32),
+            f"{prefix}.linear_fc1.weight": rng.randn(hidden_dim, merged_dim).astype(np.float32),
+            f"{prefix}.linear_fc1.bias": np.zeros(hidden_dim, dtype=np.float32),
+            f"{prefix}.linear_fc2.weight": rng.randn(output_dim, hidden_dim).astype(np.float32),
+            f"{prefix}.linear_fc2.bias": np.zeros(output_dim, dtype=np.float32),
+        }
+        reverse_indices = np.arange(num_merged, dtype=np.int32)
 
         def build_fn(network, trt_inputs):
-            eps_tensor = graph_ops.add_constant(
-                network, (1, 1), np.array([1e-6], dtype=np.float32))
-            out = graph_ops.add_spatial_merge(
-                network, trt_inputs["inp"],
-                w_fc1=w_fc1, w_fc2=w_fc2,
-                b_fc1=None, b_fc2=None,
-                norm_gamma=norm_gamma,
-                input_dim=input_dim,
-                hidden_dim=hidden_dim,
-                output_dim=output_dim,
-                eps_tensor=eps_tensor,
-                seq_length=seq_length,
-                merge_size=merge_size)
+            eps_tensor = graph_ops.add_constant(network, (1, 1), np.array([1e-6], dtype=np.float32))
+            out = _add_deepstack_merger(
+                network,
+                trt_inputs["inp"],
+                weights,
+                prefix,
+                embed_dim,
+                merge_unit,
+                num_merged,
+                output_dim,
+                eps_tensor,
+                reverse_indices,
+            )
             return {"output": out}
 
         results1 = trt_runner(build_fn, {"inp": inp})
@@ -259,8 +303,7 @@ class TestDeepStackConfig:
         }
         num_layers = vision_config["depth"]
         for idx in vision_config["deepstack_visual_indexes"]:
-            assert 0 <= idx < num_layers, \
-                f"DeepStack index {idx} out of range [0, {num_layers})"
+            assert 0 <= idx < num_layers, f"DeepStack index {idx} out of range [0, {num_layers})"
 
     def test_deepstack_empty_indexes(self):
         """Empty deepstack_visual_indexes means no DeepStack outputs."""
@@ -323,7 +366,8 @@ class TestVisionEncoderGraphConstruction:
         # Build minimal weights dict
         weights = {
             "visual.patch_embed.proj.weight": np.random.randn(
-                embed_dim, input_channels, patch_size, patch_size).astype(np.float32),
+                embed_dim, input_channels, patch_size, patch_size
+            ).astype(np.float32),
             "visual.patch_embed.proj.bias": np.random.randn(embed_dim).astype(np.float32),
         }
 
@@ -331,31 +375,37 @@ class TestVisionEncoderGraphConstruction:
             prefix = f"visual.blocks.{layer}"
             weights[f"{prefix}.norm1.weight"] = np.ones(embed_dim, dtype=np.float32)
             weights[f"{prefix}.norm2.weight"] = np.ones(embed_dim, dtype=np.float32)
-            weights[f"{prefix}.attn.qkv.weight"] = np.random.randn(
-                3 * embed_dim, embed_dim).astype(np.float32)
-            weights[f"{prefix}.attn.qkv.bias"] = np.random.randn(
-                3 * embed_dim).astype(np.float32)
-            weights[f"{prefix}.attn.proj.weight"] = np.random.randn(
-                embed_dim, embed_dim).astype(np.float32)
+            weights[f"{prefix}.attn.qkv.weight"] = np.random.randn(3 * embed_dim, embed_dim).astype(
+                np.float32
+            )
+            weights[f"{prefix}.attn.qkv.bias"] = np.random.randn(3 * embed_dim).astype(np.float32)
+            weights[f"{prefix}.attn.proj.weight"] = np.random.randn(embed_dim, embed_dim).astype(
+                np.float32
+            )
             weights[f"{prefix}.attn.proj.bias"] = np.random.randn(embed_dim).astype(np.float32)
             weights[f"{prefix}.mlp.gate_proj.weight"] = np.random.randn(
-                mlp_hidden, embed_dim).astype(np.float32)
+                mlp_hidden, embed_dim
+            ).astype(np.float32)
             weights[f"{prefix}.mlp.gate_proj.bias"] = np.random.randn(mlp_hidden).astype(np.float32)
-            weights[f"{prefix}.mlp.up_proj.weight"] = np.random.randn(
-                mlp_hidden, embed_dim).astype(np.float32)
+            weights[f"{prefix}.mlp.up_proj.weight"] = np.random.randn(mlp_hidden, embed_dim).astype(
+                np.float32
+            )
             weights[f"{prefix}.mlp.up_proj.bias"] = np.random.randn(mlp_hidden).astype(np.float32)
             weights[f"{prefix}.mlp.down_proj.weight"] = np.random.randn(
-                embed_dim, mlp_hidden).astype(np.float32)
+                embed_dim, mlp_hidden
+            ).astype(np.float32)
             weights[f"{prefix}.mlp.down_proj.bias"] = np.random.randn(embed_dim).astype(np.float32)
 
         # Merger weights
         fc1_hidden = 64
         weights["visual.merger.ln_q.weight"] = np.ones(embed_dim, dtype=np.float32)
-        weights["visual.merger.mlp.0.weight"] = np.random.randn(
-            fc1_hidden, merged_dim).astype(np.float32)
+        weights["visual.merger.mlp.0.weight"] = np.random.randn(fc1_hidden, merged_dim).astype(
+            np.float32
+        )
         weights["visual.merger.mlp.0.bias"] = np.random.randn(fc1_hidden).astype(np.float32)
-        weights["visual.merger.mlp.2.weight"] = np.random.randn(
-            text_hidden, fc1_hidden).astype(np.float32)
+        weights["visual.merger.mlp.2.weight"] = np.random.randn(text_hidden, fc1_hidden).astype(
+            np.float32
+        )
         weights["visual.merger.mlp.2.bias"] = np.random.randn(text_hidden).astype(np.float32)
 
         vision_config = {
@@ -375,9 +425,8 @@ class TestVisionEncoderGraphConstruction:
 
         # This should build without exceptions
         plan_bytes = build_qwen_vl_vision_engine(
-            vision_config, weights,
-            fixed_image_size=fixed_image_size,
-            verbose=False)
+            vision_config, weights, fixed_image_size=fixed_image_size, verbose=False
+        )
 
         assert isinstance(plan_bytes, bytes)
         assert len(plan_bytes) > 0
@@ -407,11 +456,11 @@ class TestVisionEncoderGraphConstruction:
 
         weights = {
             "visual.patch_embed.proj.weight": np.random.randn(
-                embed_dim, input_channels, patch_size, patch_size).astype(np.float32),
+                embed_dim, input_channels, patch_size, patch_size
+            ).astype(np.float32),
             "visual.patch_embed.proj.bias": np.random.randn(embed_dim).astype(np.float32),
             # Learned position embedding
-            "visual.pos_embed.weight": np.random.randn(
-                grid * grid, embed_dim).astype(np.float32),
+            "visual.pos_embed.weight": np.random.randn(grid * grid, embed_dim).astype(np.float32),
         }
 
         for layer in range(num_layers):
@@ -420,29 +469,36 @@ class TestVisionEncoderGraphConstruction:
             weights[f"{prefix}.norm1.bias"] = np.zeros(embed_dim, dtype=np.float32)
             weights[f"{prefix}.norm2.weight"] = np.ones(embed_dim, dtype=np.float32)
             weights[f"{prefix}.norm2.bias"] = np.zeros(embed_dim, dtype=np.float32)
-            weights[f"{prefix}.attn.qkv.weight"] = np.random.randn(
-                3 * embed_dim, embed_dim).astype(np.float32)
-            weights[f"{prefix}.attn.qkv.bias"] = np.random.randn(
-                3 * embed_dim).astype(np.float32)
-            weights[f"{prefix}.attn.proj.weight"] = np.random.randn(
-                embed_dim, embed_dim).astype(np.float32)
+            weights[f"{prefix}.attn.qkv.weight"] = np.random.randn(3 * embed_dim, embed_dim).astype(
+                np.float32
+            )
+            weights[f"{prefix}.attn.qkv.bias"] = np.random.randn(3 * embed_dim).astype(np.float32)
+            weights[f"{prefix}.attn.proj.weight"] = np.random.randn(embed_dim, embed_dim).astype(
+                np.float32
+            )
             weights[f"{prefix}.attn.proj.bias"] = np.random.randn(embed_dim).astype(np.float32)
             # GELU FC MLP (Qwen3-VL uses linear_fc1/linear_fc2)
             weights[f"{prefix}.mlp.linear_fc1.weight"] = np.random.randn(
-                mlp_hidden, embed_dim).astype(np.float32)
-            weights[f"{prefix}.mlp.linear_fc1.bias"] = np.random.randn(mlp_hidden).astype(np.float32)
+                mlp_hidden, embed_dim
+            ).astype(np.float32)
+            weights[f"{prefix}.mlp.linear_fc1.bias"] = np.random.randn(mlp_hidden).astype(
+                np.float32
+            )
             weights[f"{prefix}.mlp.linear_fc2.weight"] = np.random.randn(
-                embed_dim, mlp_hidden).astype(np.float32)
+                embed_dim, mlp_hidden
+            ).astype(np.float32)
             weights[f"{prefix}.mlp.linear_fc2.bias"] = np.random.randn(embed_dim).astype(np.float32)
 
         # Main merger
         weights["visual.merger.norm.weight"] = np.ones(embed_dim, dtype=np.float32)
         weights["visual.merger.norm.bias"] = np.zeros(embed_dim, dtype=np.float32)
-        weights["visual.merger.linear_fc1.weight"] = np.random.randn(
-            fc1_hidden, merged_dim).astype(np.float32)
+        weights["visual.merger.linear_fc1.weight"] = np.random.randn(fc1_hidden, merged_dim).astype(
+            np.float32
+        )
         weights["visual.merger.linear_fc1.bias"] = np.random.randn(fc1_hidden).astype(np.float32)
         weights["visual.merger.linear_fc2.weight"] = np.random.randn(
-            text_hidden, fc1_hidden).astype(np.float32)
+            text_hidden, fc1_hidden
+        ).astype(np.float32)
         weights["visual.merger.linear_fc2.bias"] = np.random.randn(text_hidden).astype(np.float32)
 
         # DeepStack mergers (one per deepstack index)
@@ -450,11 +506,13 @@ class TestVisionEncoderGraphConstruction:
             prefix = f"visual.deepstack_merger_list.{ds_idx}"
             weights[f"{prefix}.norm.weight"] = np.ones(merged_dim, dtype=np.float32)
             weights[f"{prefix}.norm.bias"] = np.zeros(merged_dim, dtype=np.float32)
-            weights[f"{prefix}.linear_fc1.weight"] = np.random.randn(
-                fc1_hidden, merged_dim).astype(np.float32)
+            weights[f"{prefix}.linear_fc1.weight"] = np.random.randn(fc1_hidden, merged_dim).astype(
+                np.float32
+            )
             weights[f"{prefix}.linear_fc1.bias"] = np.random.randn(fc1_hidden).astype(np.float32)
             weights[f"{prefix}.linear_fc2.weight"] = np.random.randn(
-                text_hidden, fc1_hidden).astype(np.float32)
+                text_hidden, fc1_hidden
+            ).astype(np.float32)
             weights[f"{prefix}.linear_fc2.bias"] = np.random.randn(text_hidden).astype(np.float32)
 
         vision_config = {
@@ -473,9 +531,8 @@ class TestVisionEncoderGraphConstruction:
         }
 
         plan_bytes = build_qwen3_vl_vision_engine(
-            vision_config, weights,
-            fixed_image_size=fixed_image_size,
-            verbose=False)
+            vision_config, weights, fixed_image_size=fixed_image_size, verbose=False
+        )
 
         assert isinstance(plan_bytes, bytes)
         assert len(plan_bytes) > 0
@@ -495,8 +552,7 @@ class TestVisionEncoderGraphConstruction:
         assert "image_features" in output_names, "Missing main image_features output"
         for ds_idx in range(len(deepstack_indexes)):
             expected_name = f"deepstack_features_{ds_idx}"
-            assert expected_name in output_names, \
-                f"Missing DeepStack output {expected_name}"
+            assert expected_name in output_names, f"Missing DeepStack output {expected_name}"
 
     @requires_trt
     def test_qwen3_vl_no_deepstack(self):
@@ -521,10 +577,10 @@ class TestVisionEncoderGraphConstruction:
 
         weights = {
             "visual.patch_embed.proj.weight": np.random.randn(
-                embed_dim, input_channels, patch_size, patch_size).astype(np.float32),
+                embed_dim, input_channels, patch_size, patch_size
+            ).astype(np.float32),
             "visual.patch_embed.proj.bias": np.random.randn(embed_dim).astype(np.float32),
-            "visual.pos_embed.weight": np.random.randn(
-                grid * grid, embed_dim).astype(np.float32),
+            "visual.pos_embed.weight": np.random.randn(grid * grid, embed_dim).astype(np.float32),
         }
 
         for layer in range(num_layers):
@@ -533,27 +589,34 @@ class TestVisionEncoderGraphConstruction:
             weights[f"{prefix}.norm1.bias"] = np.zeros(embed_dim, dtype=np.float32)
             weights[f"{prefix}.norm2.weight"] = np.ones(embed_dim, dtype=np.float32)
             weights[f"{prefix}.norm2.bias"] = np.zeros(embed_dim, dtype=np.float32)
-            weights[f"{prefix}.attn.qkv.weight"] = np.random.randn(
-                3 * embed_dim, embed_dim).astype(np.float32)
-            weights[f"{prefix}.attn.qkv.bias"] = np.random.randn(
-                3 * embed_dim).astype(np.float32)
-            weights[f"{prefix}.attn.proj.weight"] = np.random.randn(
-                embed_dim, embed_dim).astype(np.float32)
+            weights[f"{prefix}.attn.qkv.weight"] = np.random.randn(3 * embed_dim, embed_dim).astype(
+                np.float32
+            )
+            weights[f"{prefix}.attn.qkv.bias"] = np.random.randn(3 * embed_dim).astype(np.float32)
+            weights[f"{prefix}.attn.proj.weight"] = np.random.randn(embed_dim, embed_dim).astype(
+                np.float32
+            )
             weights[f"{prefix}.attn.proj.bias"] = np.random.randn(embed_dim).astype(np.float32)
             weights[f"{prefix}.mlp.linear_fc1.weight"] = np.random.randn(
-                mlp_hidden, embed_dim).astype(np.float32)
-            weights[f"{prefix}.mlp.linear_fc1.bias"] = np.random.randn(mlp_hidden).astype(np.float32)
+                mlp_hidden, embed_dim
+            ).astype(np.float32)
+            weights[f"{prefix}.mlp.linear_fc1.bias"] = np.random.randn(mlp_hidden).astype(
+                np.float32
+            )
             weights[f"{prefix}.mlp.linear_fc2.weight"] = np.random.randn(
-                embed_dim, mlp_hidden).astype(np.float32)
+                embed_dim, mlp_hidden
+            ).astype(np.float32)
             weights[f"{prefix}.mlp.linear_fc2.bias"] = np.random.randn(embed_dim).astype(np.float32)
 
         weights["visual.merger.norm.weight"] = np.ones(embed_dim, dtype=np.float32)
         weights["visual.merger.norm.bias"] = np.zeros(embed_dim, dtype=np.float32)
-        weights["visual.merger.linear_fc1.weight"] = np.random.randn(
-            fc1_hidden, merged_dim).astype(np.float32)
+        weights["visual.merger.linear_fc1.weight"] = np.random.randn(fc1_hidden, merged_dim).astype(
+            np.float32
+        )
         weights["visual.merger.linear_fc1.bias"] = np.random.randn(fc1_hidden).astype(np.float32)
         weights["visual.merger.linear_fc2.weight"] = np.random.randn(
-            text_hidden, fc1_hidden).astype(np.float32)
+            text_hidden, fc1_hidden
+        ).astype(np.float32)
         weights["visual.merger.linear_fc2.bias"] = np.random.randn(text_hidden).astype(np.float32)
 
         vision_config = {
@@ -572,9 +635,8 @@ class TestVisionEncoderGraphConstruction:
         }
 
         plan_bytes = build_qwen3_vl_vision_engine(
-            vision_config, weights,
-            fixed_image_size=fixed_image_size,
-            verbose=False)
+            vision_config, weights, fixed_image_size=fixed_image_size, verbose=False
+        )
 
         assert isinstance(plan_bytes, bytes)
 
@@ -588,5 +650,6 @@ class TestVisionEncoderGraphConstruction:
             if mode == trt.TensorIOMode.OUTPUT:
                 output_names.add(name)
 
-        assert output_names == {"image_features"}, \
+        assert output_names == {"image_features"}, (
             f"Expected only image_features output, got {output_names}"
+        )

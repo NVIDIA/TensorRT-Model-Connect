@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 id = "t5"
-plugin = "t5"
-module = "plugin"
 debug_runner = "debug_runner.py|runner_from_bundle"
 debug_runtime_strategies = [
   "t5_text_to_text",

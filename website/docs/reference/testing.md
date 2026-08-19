@@ -289,7 +289,7 @@ time is used instead, label the metric and measurement boundary explicitly.
 
 | Change | Minimum useful evidence |
 | --- | --- |
-| Python family plugin | Focused builder tests and one representative E2E case |
+| Python family `model.py` | Focused builder tests and one representative E2E case |
 | Native runtime model DSO | Focused C++ tests, strategy/descriptor checks, backend-load evidence, and matching E2E |
 | Optimized implementation | Source implementation/profile/bundle contract tests and embedded-DSO host tests, plus target-environment parity/performance proof when required; Source CI does not supply that hardware proof |
 | Shared runtime/config | Focused unit tests plus affected-model selection |

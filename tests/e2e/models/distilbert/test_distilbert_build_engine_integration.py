@@ -88,7 +88,7 @@ class TestDistilBERTBuildEngine:
         return t
 
     def _prepare_model(self, tmp_path):
-        from tensorrt_model_connect.families.distilbert import plugin
+        import tensorrt_model_connect.families.distilbert.model as plugin
 
         config = {
             "model_type": "distilbert",

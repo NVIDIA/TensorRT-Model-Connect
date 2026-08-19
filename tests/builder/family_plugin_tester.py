@@ -91,7 +91,7 @@ class FamilyPluginTester:
     spec: TinyModelSpec = TinyModelSpec()
 
     def get_plugin(self) -> Any:
-        """Import the plugin module dynamically and return its ``plugin`` attribute.
+        """Import and return the family-owned model module under test.
 
         Skips the test with pytest.skip() if the module cannot be imported
         due to missing dependencies (e.g. tensorrt not installed).
@@ -100,7 +100,7 @@ class FamilyPluginTester:
             mod = importlib.import_module(self.plugin_module)
         except (ImportError, ModuleNotFoundError) as exc:
             pytest.skip(f"Cannot import {self.plugin_module}: {exc}")
-        return mod.plugin
+        return mod
 
     def get_config_dict(self) -> dict:
         """Return a minimal HF config.json dict for this family.

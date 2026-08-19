@@ -889,7 +889,7 @@ def build_qwen_image_vae_decoder_engine(
             per latent. The leading batch dim stays statically baked at 1
             regardless of the requested cap, so no dynamic TRT profile is
             attached. Values >1 are accepted but logged-and-clamped so the
-            family plugin can pass the same cap through to every builder
+            family model can pass the same cap through to every builder
             without special-casing the VAE.
         opt_batch_size: Accepted for API uniformity; unused (see
             ``max_batch_size``).

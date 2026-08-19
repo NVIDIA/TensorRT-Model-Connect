@@ -9,7 +9,7 @@ then convert to a TensorRT engine via trt.OnnxParser.
 Works for simple ViTs (CLIP, SigLIP, DINOv2, etc.) that can be cleanly
 exported to ONNX without custom ops.
 
-Usage from a family plugin:
+Usage from a family model:
     def build_vision_engine(self, model_dir, config, weights, *, verbose=False):
         return trace_hf_vision_encoder(model_dir, config, verbose=verbose)
 """

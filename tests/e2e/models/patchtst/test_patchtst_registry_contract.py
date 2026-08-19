@@ -7,21 +7,21 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("tensorrt", reason="registry contract tests import plugin modules")
+pytest.importorskip("tensorrt", reason="registry contract tests import model modules")
 
-from tensorrt_model_connect.families import find_plugin
+from tensorrt_model_connect.families import find_model
 
 
-def _plugin(model_type: str):
-    plugin = find_plugin(model_type)
-    assert plugin is not None
-    return plugin
+def _model(model_type: str):
+    model = find_model(model_type)
+    assert model is not None
+    return model
 
 
 def test_runtime_strategy() -> None:
-    plugin = _plugin("patchtst")
-    assert getattr(plugin, "runtime_strategy", None) == "patchtst_trt"
+    model = _model("patchtst")
+    assert getattr(model, "runtime_strategy", None) == "patchtst_trt"
 
 
 def test_registry_routes_supported_prefix() -> None:
-    assert _plugin("patchtstforprediction").name == "patchtst"
+    assert _model("patchtstforprediction").name == "patchtst"

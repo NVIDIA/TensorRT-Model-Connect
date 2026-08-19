@@ -20,9 +20,9 @@ Both build and runtime CLIs expose a generic config surface:
 ```
 
 The goal is to add native build/runtime feature knobs through registered
-schemas instead of growing custom CLI flags for every feature. Optimized
-implementations receive the public option tuple through their family-owned
-adapter contract; the generic router does not reinterpret those options.
+schemas instead of growing custom CLI flags for every feature. An optimized
+implementation receives the public option tuple through its family-owned
+adapter contract; the thin resolver does not reinterpret those options.
 
 Schema sources live under:
 
@@ -86,14 +86,13 @@ These are build settings even though the build CLI currently contributes
 them to the family builder. They do not imply that a loaded optimized runtime
 accepts runtime config overrides.
 
-Build routing happens before the native schema-driven builder: `trtmc build`
-first resolves the family and asks whether its model-owned
-`default_build_route` accepts the checkpoint. Eligible dense Qwen3 and Llama
-take that native route directly. Otherwise the model, revision, target, and
-public option tuple is offered to the family's exact qualified optimized
-profiles. One claim owns the option semantics; no claim continues to the native
-builder, which resolves registered schemas and rejects unknown namespaces,
-fields, or invalid values.
+`trtmc build` first resolves the family and calls its `model.build()` once.
+That function consumes the resolved schema values and owns all subsequent
+policy. Qwen may offer the model, revision, target, and public option tuple to
+its exact qualified optimized profiles; no claim continues through Qwen's
+native recipe, while one claim owns the option semantics. Other families run
+their native recipes directly. Unknown namespaces, fields, and invalid values
+are rejected before family construction proceeds.
 
 At runtime, the two paths differ:
 

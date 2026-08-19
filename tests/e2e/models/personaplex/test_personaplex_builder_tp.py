@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.personaplex.plugin import PersonaPlexPlugin
+from tensorrt_model_connect.families.personaplex import model as PersonaPlexModel
 from tensorrt_model_connect.parallel_config import ParallelConfig, shard_standard_decoder_weights
 
 personaplex_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.personaplex.plugin")
+    "tensorrt_model_connect.families.personaplex.model")
 personaplex_mimi_weights = importlib.import_module(
     "tensorrt_model_connect.families.personaplex.mimi_weights")
 
@@ -216,7 +216,7 @@ def test_personaplex_plugin_routes_temporal_tp_build(monkeypatch):
         "temporal.w_out": np.zeros((_HIDDEN, _VOCAB), dtype=np.float32),
     })
 
-    plan = PersonaPlexPlugin().build_engine(
+    plan = PersonaPlexModel.build_engine(
         _make_config(),
         weights,
         max_cache_length=8,
@@ -256,7 +256,7 @@ def test_personaplex_plugin_forwards_fp16_to_temporal_builder(monkeypatch):
     for key, value in decoder_weights.items():
         weights[f"temporal.{key}"] = value
 
-    plan = PersonaPlexPlugin().build_engine(
+    plan = PersonaPlexModel.build_engine(
         _make_config(), weights, max_cache_length=8, precision="fp16")
 
     assert plan == b"plan"
@@ -286,7 +286,7 @@ def test_personaplex_plugin_can_keep_temporal_component_in_fp32(monkeypatch):
     for key, value in _make_temporal_weights().items():
         weights[f"temporal.{key}"] = value
 
-    plan = PersonaPlexPlugin().build_engine(
+    plan = PersonaPlexModel.build_engine(
         config, weights, max_cache_length=8, precision="fp16")
 
     assert plan == b"plan"
@@ -316,7 +316,7 @@ def test_personaplex_plugin_routes_temporal_block_selectors(monkeypatch):
     for key, value in _make_temporal_weights().items():
         weights[f"temporal.{key}"] = value
 
-    plan = PersonaPlexPlugin().build_engine(
+    plan = PersonaPlexModel.build_engine(
         config, weights, max_cache_length=8, precision="fp16")
 
     assert plan == b"plan"
@@ -346,7 +346,7 @@ def test_personaplex_plugin_routes_final_temporal_block_selector(monkeypatch):
     for key, value in _make_temporal_weights().items():
         weights[f"temporal.{key}"] = value
 
-    plan = PersonaPlexPlugin().build_engine(
+    plan = PersonaPlexModel.build_engine(
         config, weights, max_cache_length=8, precision="fp16")
 
     assert plan == b"plan"
@@ -528,7 +528,7 @@ def test_personaplex_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        PersonaPlexPlugin().build_engine(
+        PersonaPlexModel.build_engine(
             _make_config(),
             WeightDict({
                 "_hidden_size": _HIDDEN,

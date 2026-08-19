@@ -1,33 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Auto-discover family plugins from this package.
-
-Any .py file or package in this directory (excluding _-prefixed and base.py)
-that exposes a module-level ``plugin`` attribute is automatically registered.
-Adding a new family = drop a .py file or package, zero edits to shared files.
-"""
+"""Resolve model-owned family modules from their local metadata."""
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
-import pkgutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from types import ModuleType
+from typing import Any
 
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
     tomllib = None
 
-if TYPE_CHECKING:
-    from .base import FamilyPlugin
-
-
-_PLUGINS_DISCOVERED = False
-_PLUGIN_CACHE: dict[str, "FamilyPlugin | None"] = {}
 _METADATA_CACHE: list["_FamilyMetadata"] | None = None
 _METADATA_INDEX_CACHE: "_FamilyMetadataIndex | None" = None
 
@@ -52,7 +41,6 @@ class _FamilyMetadata:
     hf_warm_files: tuple[str, ...] = ()
     config_adapter: str = ""
     model_dir_adapter: str = ""
-    default_build_route: str = ""
     debug_runner: str = ""
     debug_runtime_strategies: frozenset[str] = frozenset()
     python_profile_specs: tuple[str, ...] = ()
@@ -71,38 +59,6 @@ class _FamilyMetadataIndex:
     compact_aliases: dict[str, tuple[_ModuleCandidate, ...]]
     prefixes: dict[str, tuple[_ModuleCandidate, ...]]
     compact_prefixes: dict[str, tuple[_ModuleCandidate, ...]]
-
-
-class _LazyPluginList(list["FamilyPlugin"]):
-    def _materialize(self) -> None:
-        _ensure_discovered()
-
-    def __iter__(self):
-        self._materialize()
-        return super().__iter__()
-
-    def __len__(self):
-        self._materialize()
-        return super().__len__()
-
-    def __getitem__(self, index):
-        self._materialize()
-        return super().__getitem__(index)
-
-    def __bool__(self):
-        self._materialize()
-        return super().__len__() != 0
-
-    def __eq__(self, other):
-        self._materialize()
-        return super().__eq__(other)
-
-    def __repr__(self):
-        self._materialize()
-        return super().__repr__()
-
-
-_ALL_PLUGINS: list["FamilyPlugin"] = _LazyPluginList()
 
 
 def _normalize_key(value: str) -> str:
@@ -175,12 +131,12 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
     pkg_dir = Path(__file__).parent
     for index_path in sorted(pkg_dir.glob("*/MODEL.toml")):
         raw = _read_model_toml(index_path)
-        plugin_id = raw.get("id") or raw.get("plugin") or index_path.parent.name
-        if not isinstance(plugin_id, str) or not plugin_id:
+        family_id = raw.get("id") or index_path.parent.name
+        if not isinstance(family_id, str) or not family_id:
             continue
 
         aliases = set(_metadata_strings(raw.get("aliases")))
-        aliases.add(plugin_id)
+        aliases.add(family_id)
         aliases.add(index_path.parent.name)
         normalized_aliases = frozenset(_normalize_key(value) for value in aliases)
         compact_aliases = frozenset(_compact_key(value) for value in aliases)
@@ -190,7 +146,7 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
         compact_prefixes = frozenset(_compact_key(value) for value in prefixes)
 
         metadata.append(_FamilyMetadata(
-            id=plugin_id,
+            id=family_id,
             import_module=index_path.parent.name,
             aliases=normalized_aliases,
             compact_aliases=compact_aliases,
@@ -222,8 +178,6 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
             if isinstance(raw.get("config_adapter"), str) else "",
             model_dir_adapter=raw.get("model_dir_adapter", "")
             if isinstance(raw.get("model_dir_adapter"), str) else "",
-            default_build_route=raw.get("default_build_route", "")
-            if isinstance(raw.get("default_build_route"), str) else "",
             debug_runner=raw.get("debug_runner", "")
             if isinstance(raw.get("debug_runner"), str) else "",
             debug_runtime_strategies=_metadata_strings(
@@ -335,22 +289,9 @@ def _candidate_module_names(model_type: str) -> list[str]:
     return modules
 
 
-def _load_plugin_from_module(module_name: str) -> "FamilyPlugin | None":
-    if module_name in _PLUGIN_CACHE:
-        return _PLUGIN_CACHE[module_name]
-    try:
-        mod = importlib.import_module(f"{__name__}.{module_name}")
-        plugin = getattr(mod, "plugin", None)
-    except ImportError:
-        _PLUGIN_CACHE[module_name] = None
-        return None
-    _PLUGIN_CACHE[module_name] = plugin
-    return plugin
-
-
-def load_plugin_by_id(plugin_id: str) -> "FamilyPlugin | None":
-    """Load one family plugin by model-owned id without scanning all metadata."""
-    module_name = _normalize_key(plugin_id)
+def load_model_by_id(family_id: str) -> ModuleType | None:
+    """Load one required ``families.<id>.model`` module."""
+    module_name = _normalize_key(family_id)
     if not module_name:
         return None
 
@@ -359,10 +300,16 @@ def load_plugin_by_id(plugin_id: str) -> "FamilyPlugin | None":
         return None
 
     raw = _read_model_toml(index_path)
-    declared_id = raw.get("id") or raw.get("plugin") or index_path.parent.name
+    declared_id = raw.get("id") or index_path.parent.name
     if not isinstance(declared_id, str) or _normalize_key(declared_id) != module_name:
         return None
-    return _load_plugin_from_module(index_path.parent.name)
+    model = importlib.import_module(f"{__name__}.{index_path.parent.name}.model")
+    for required in ("matches", "build"):
+        if not callable(getattr(model, required, None)):
+            raise TypeError(
+                f"Family {declared_id!r} model.py must define {required}()"
+            )
+    return model
 
 
 def _architecture_values(config: object) -> list[str]:
@@ -398,8 +345,8 @@ def _candidate_module_names_from_config(config: object) -> list[str]:
     return modules
 
 
-def available_plugin_ids() -> list[str]:
-    """Return declared family ids without importing family plugin modules."""
+def available_family_ids() -> list[str]:
+    """Return declared family ids without importing model modules."""
     return sorted(meta.id for meta in _load_family_metadata())
 
 
@@ -659,26 +606,6 @@ def resolve_family_model_dir(model_dir: str | Path) -> str | None:
     return None
 
 
-def family_prefers_native_default_build(
-    config: object,
-) -> bool:
-    """Ask model-owned metadata whether this family owns the native build."""
-    metadata = _matching_family_metadata(config)
-    if not metadata or not metadata[0].default_build_route:
-        return False
-    route = _load_metadata_callable_from_file(
-        metadata[0],
-        metadata[0].default_build_route,
-    )
-    result = route(config)
-    if not isinstance(result, bool):
-        raise TypeError(
-            f"Default build route {metadata[0].default_build_route!r} for "
-            f"family {metadata[0].id} must return bool"
-        )
-    return result
-
-
 def resolve_nemo_archive_model_dir(nemo_path: str | Path) -> str | None:
     """Ask family-owned NeMo archive adapters to synthesize a model dir."""
     path = Path(nemo_path)
@@ -784,8 +711,32 @@ def resolve_family_id(model_type: object) -> str | None:
     return metadata[0].id
 
 
-def _resolve_diffusion_family_id(pipeline_class: str) -> str | None:
-    """Return the owning diffusion family without importing its native plugin."""
+def resolve_family_id_from_config(config: object) -> str | None:
+    """Resolve one family from config metadata without importing model code."""
+    model_type = str(getattr(config, "model_type", config))
+    modules: list[str] = []
+    for module in (
+        *_candidate_module_names_from_config(config),
+        *_candidate_module_names(model_type),
+    ):
+        if module not in modules:
+            modules.append(module)
+    by_module = {
+        metadata.import_module: metadata
+        for metadata in _load_family_metadata()
+    }
+    return next(
+        (
+            by_module[module].id
+            for module in modules
+            if module in by_module
+        ),
+        None,
+    )
+
+
+def resolve_diffusion_family_id(pipeline_class: str) -> str | None:
+    """Return the family declaring one diffusion pipeline class."""
 
     for metadata in _load_family_metadata():
         if pipeline_class in metadata.diffusion_pipeline_classes:
@@ -814,94 +765,22 @@ def resolve_nemo_model_type(config: dict) -> str:
     return "unknown"
 
 
-def _discover_plugins() -> None:
-    # Scan every .py module or package in this directory.
-    _pkg_dir = str(Path(__file__).parent)
-    for _finder, _name, _ispkg in pkgutil.iter_modules([_pkg_dir]):
-        # Skip private modules and the base protocol definition.
-        if _name.startswith("_") or _name == "base":
-            continue
-        try:
-            _mod = importlib.import_module(f"{__name__}.{_name}")
-            _plugin = getattr(_mod, "plugin", None)
-        except ImportError:
-            # Skip plugins whose dependencies (e.g. tensorrt) are not installed.
-            continue
-        if _plugin is not None:
-            list.append(_ALL_PLUGINS, _plugin)
+def find_model(config: object) -> ModuleType | None:
+    """Return the metadata-bounded family module that claims ``config``."""
+    if isinstance(config, str):
+        family_id = resolve_family_id(config)
+        return load_model_by_id(family_id) if family_id else None
 
-
-def _ensure_discovered() -> None:
-    global _PLUGINS_DISCOVERED
-    if _PLUGINS_DISCOVERED or not isinstance(_ALL_PLUGINS, _LazyPluginList):
-        return
-    _PLUGINS_DISCOVERED = True
-    _discover_plugins()
-
-
-def find_plugin(model_type: object) -> "FamilyPlugin | None":
-    """Find the first plugin that matches a model type or config object."""
-    model_type_str = str(getattr(model_type, "model_type", model_type))
-    if not isinstance(_ALL_PLUGINS, _LazyPluginList):
-        for p in _ALL_PLUGINS:
-            matches_config = getattr(p, "matches_config", None)
-            if callable(matches_config) and matches_config(model_type):
-                return p
-            if p.matches(model_type_str):
-                return p
-        return None
-
-    for module_name in _candidate_module_names_from_config(model_type):
-        plugin = _load_plugin_from_module(module_name)
-        matches_config = getattr(plugin, "matches_config", None)
-        if plugin is not None and callable(matches_config) and matches_config(model_type):
-            return plugin
-
-    if hasattr(model_type, "raw") or hasattr(model_type, "architectures"):
-        _ensure_discovered()
-        for plugin in _ALL_PLUGINS:
-            matches_config = getattr(plugin, "matches_config", None)
-            if callable(matches_config) and matches_config(model_type):
-                return plugin
-
-    plugin = load_plugin_by_id(model_type_str)
-    if plugin is not None and plugin.matches(model_type_str):
-        return plugin
-
-    for module_name in _candidate_module_names(model_type_str):
-        plugin = _load_plugin_from_module(module_name)
-        if plugin is not None and plugin.matches(model_type_str):
-            return plugin
-
-    _ensure_discovered()
-    for plugin in _ALL_PLUGINS:
-        matches_config = getattr(plugin, "matches_config", None)
-        if callable(matches_config) and matches_config(model_type):
-            return plugin
-        if plugin.matches(model_type_str):
-            return plugin
-    return None
-
-
-def find_diffusion_plugin(pipeline_class: str) -> "FamilyPlugin | None":
-    """Find the first plugin that handles the given diffusers pipeline class.
-
-    Plugins declare supported pipeline classes via a ``pipeline_classes``
-    attribute (list of class name strings). This enables auto-discovery
-    without a hardcoded mapping dict.
-    """
-    if not isinstance(_ALL_PLUGINS, _LazyPluginList):
-        for p in _ALL_PLUGINS:
-            classes = getattr(p, 'pipeline_classes', None)
-            if classes and pipeline_class in classes:
-                return p
-        return None
-
-    for meta in _load_family_metadata():
-        if pipeline_class not in meta.diffusion_pipeline_classes:
-            continue
-        plugin = _load_plugin_from_module(meta.import_module)
-        classes = getattr(plugin, 'pipeline_classes', None) if plugin is not None else None
-        if classes and pipeline_class in classes:
-            return plugin
+    model_type = str(getattr(config, "model_type", config))
+    candidates: list[str] = []
+    for family_id in (
+        *_candidate_module_names_from_config(config),
+        *_candidate_module_names(model_type),
+    ):
+        if family_id not in candidates:
+            candidates.append(family_id)
+    for family_id in candidates:
+        model = load_model_by_id(family_id)
+        if model is not None and model.matches(config):
+            return model
     return None

@@ -31,7 +31,7 @@ def test_chronos_fp16_gemms_use_fp32_accumulation() -> None:
         / "tensorrt_model_connect"
         / "families"
         / "chronos_bolt"
-        / "plugin.py"
+        / "model.py"
     ).read_text(encoding="utf-8")
 
     assert source.count("fp32_accumulation=(hidden.dtype == trt.float16)") == 1

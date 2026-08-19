@@ -20,11 +20,11 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.deberta.plugin import DebertaPlugin
+from tensorrt_model_connect.families.deberta import model as DebertaModel
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
 deberta_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.deberta.plugin")
+    "tensorrt_model_connect.families.deberta.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -35,7 +35,7 @@ _VOCAB = 24
 
 def _deberta_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.deberta.model.parallel",
+        "tensorrt_model_connect.families.deberta.model",
         reason="TensorRT is required for DeBERTa TP builder tests",
     )
 
@@ -236,7 +236,7 @@ def test_deberta_plugin_routes_tp_build(monkeypatch):
     )
     monkeypatch.setattr(tp_builder, "build_tp_deberta_encoder_engine", fake_build)
 
-    plan = DebertaPlugin().build_engine(
+    plan = DebertaModel.build_engine(
         _make_config(),
         _make_encoder_weights(),
         max_cache_length=8,
@@ -258,7 +258,7 @@ def test_deberta_plugin_rejects_quantized_tp(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="do not support quantization"):
-        DebertaPlugin().build_engine(
+        DebertaModel.build_engine(
             _make_config(),
             _make_encoder_weights(),
             max_cache_length=8,

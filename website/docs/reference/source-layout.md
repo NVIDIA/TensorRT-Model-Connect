@@ -7,7 +7,7 @@ deliberately split across three linked, model-owned descriptors:
 
 | Path | Authority |
 | --- | --- |
-| `python/tensorrt_model_connect/families/<builder-family>/MODEL.toml` | Python family discovery, aliases, capabilities, and adapters |
+| `python/tensorrt_model_connect/families/<builder-family>/MODEL.toml` | Python family discovery metadata; build code is the required sibling `model.py` |
 | `src/runtime/models/<runtime-owner>/MODEL.toml` | Runtime DSO name, plugin entry points, strategy keys, config schemas, and C++ tests |
 | `tests/e2e/models/<e2e-family>/MODEL.toml` | E2E manifests, model-local plugins, defaults, and test ownership |
 
@@ -15,8 +15,8 @@ Each directory name must agree with the `id` in its own descriptor. The three
 physical names usually match, but their link is the exact
 `runtime_strategy`, not filename equality: current builder/E2E owners
 `magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
-respectively. At this revision, all three trees contain 79 descriptors. The E2E
-descriptors declare 209 JSON manifests; runtime descriptors declare 80 unique
+respectively. At this revision, all three trees contain 80 descriptors. The E2E
+descriptors declare 212 JSON manifests; runtime descriptors declare 81 unique
 strategy keys because one runtime owner exposes two strategies. Treat these
 numbers as a checked snapshot, not a constant: the descriptor files are the
 source of truth.

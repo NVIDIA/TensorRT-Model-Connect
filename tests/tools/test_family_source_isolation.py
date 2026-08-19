@@ -23,21 +23,20 @@ def _module_exists(family_dir: Path, parts: tuple[str, ...]) -> bool:
 
 
 def test_resolve_selection_uses_manifest_runtime_owner() -> None:
-    selection = isolation.resolve_selection(REPO_ROOT, "magpie_tts")
+    selection = isolation.resolve_selection(REPO_ROOT, "wan_t2v")
 
-    assert selection.family == "magpie_tts"
-    assert selection.runtime_models == ("magpie",)
-    assert "magpie-tts-357m" in selection.e2e_models
+    assert selection.family == "wan_t2v"
+    assert selection.runtime_models == ("wan",)
+    assert "wan21-t2v-1.3b" in selection.e2e_models
 
 
 @pytest.mark.parametrize(
     ("path", "included"),
     [
         ("python/tensorrt_model_connect/families/__init__.py", True),
-        ("python/tensorrt_model_connect/families/base.py", True),
-        ("python/tensorrt_model_connect/families/_time_series_trt.py", False),
-        ("python/tensorrt_model_connect/families/qwen/plugin.py", True),
-        ("python/tensorrt_model_connect/families/llama/plugin.py", False),
+        ("python/tensorrt_model_connect/families/base.py", False),
+        ("python/tensorrt_model_connect/families/qwen/model.py", True),
+        ("python/tensorrt_model_connect/families/llama/model.py", False),
         ("src/runtime/models/qwen/plugin.cpp", True),
         ("src/runtime/models/llama/plugin.cpp", False),
         ("tests/cpp/models/qwen/test_qwen_tensor_names.cpp", True),
@@ -70,12 +69,10 @@ def test_materialize_contains_only_selected_owned_directories(tmp_path: Path) ->
 
     assert copied > 0
     assert (output / "CMakeLists.txt").is_file()
-    assert (output / "python/tensorrt_model_connect/families/base.py").is_file()
-    assert (output / "python/tensorrt_model_connect/families/qwen/plugin.py").is_file()
+    assert not (output / "python/tensorrt_model_connect/families/base.py").exists()
+    assert (output / "python/tensorrt_model_connect/families/qwen/model.py").is_file()
     qwen_family = output / "python/tensorrt_model_connect/families/qwen"
-    assert any(
-        path.is_file() for path in (qwen_family / "model/model.py", qwen_family / "graph_ops.py")
-    )
+    assert (qwen_family / "model.py").is_file()
     assert not (output / "python/tensorrt_model_connect/families/llama").exists()
     assert any(
         path.is_file()
@@ -85,7 +82,6 @@ def test_materialize_contains_only_selected_owned_directories(tmp_path: Path) ->
         )
     )
     assert not (output / "tools/families/flux").exists()
-    assert not (output / "python/tensorrt_model_connect/families/_time_series_trt.py").exists()
     assert (output / "src/runtime/models/qwen/MODEL.toml").is_file()
     assert not (output / "src/runtime/models/llama").exists()
     assert (output / "tests/cpp/models/qwen").is_dir()
@@ -109,7 +105,7 @@ def test_family_imports_resolve_without_sibling_or_unapproved_shared_modules() -
     families_prefix = "tensorrt_model_connect.families"
 
     for family_dir in sorted(FAMILIES_ROOT.iterdir()):
-        if not (family_dir / "plugin.py").is_file():
+        if not (family_dir / "model.py").is_file():
             continue
         family = family_dir.name
         for path in sorted(family_dir.rglob("*.py")):
@@ -135,11 +131,10 @@ def test_family_imports_resolve_without_sibling_or_unapproved_shared_modules() -
                     module = node.module or ""
                     if module == families_prefix:
                         names = {alias.name for alias in node.names}
-                        unsupported = names - {"find_plugin"}
-                        if unsupported:
+                        if names:
                             violations.append(
                                 f"{relative}:{node.lineno}: imports unapproved families "
-                                f"surface {sorted(unsupported)}"
+                                f"surface {sorted(names)}"
                             )
                     elif module.startswith(f"{families_prefix}."):
                         owner = module[len(families_prefix) + 1 :].split(".", 1)[0]
@@ -166,17 +161,10 @@ def test_family_imports_resolve_without_sibling_or_unapproved_shared_modules() -
                                 )
                     continue
 
-                # Escaping exactly one package reaches families/.  Only its
-                # registry function and protocol module are approved shared
-                # infrastructure.  Escaping farther reaches generic package
-                # infrastructure such as parallel_config and quantization.
+                # Escaping exactly one package reaches families/. Family models
+                # may use generic package leaves, but never a shared family
+                # protocol or sibling-dispatch surface.
                 if parents == len(package_parts) + 1:
-                    if node.module == "base":
-                        continue
-                    if node.module is None and {alias.name for alias in node.names} <= {
-                        "find_plugin"
-                    }:
-                        continue
                     violations.append(
                         f"{relative}:{node.lineno}: imports unapproved families-root "
                         f"module {node.module or [a.name for a in node.names]}"
@@ -189,10 +177,9 @@ def test_helper_pruner_keeps_transitive_and_quantization_dependencies(
     tmp_path: Path,
 ) -> None:
     family_dir = tmp_path / "demo"
-    model_dir = family_dir / "model"
-    model_dir.mkdir(parents=True)
+    family_dir.mkdir(parents=True)
     (family_dir / "MODEL.toml").write_text('id = "demo"\n', encoding="utf-8")
-    graph_ops = model_dir / "model.py"
+    graph_ops = family_dir / "model.py"
     graph_ops.write_text(
         "def add_constant():\n"
         "    return 1\n\n"
@@ -206,7 +193,7 @@ def test_helper_pruner_keeps_transitive_and_quantization_dependencies(
         "    return 4\n",
         encoding="utf-8",
     )
-    (model_dir / "builder.py").write_text(
+    (family_dir / "builder.py").write_text(
         "from . import model as graph_ops\n\ndef build():\n    return graph_ops.used()\n",
         encoding="utf-8",
     )

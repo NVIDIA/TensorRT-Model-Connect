@@ -32,19 +32,6 @@ def _get_version() -> str:
 __version__ = _get_version()
 
 
-_OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
-    "active_python_profile",
-    "command",
-    "graph_patch",
-    "graph_role",
-    "graph_snapshot",
-    "kernel",
-    "model",
-    "model_revision",
-    "output",
-    "recipe",
-})
-
 _PROFILE_REEXEC_BOOTSTRAP = (
     "import runpy, sys; "
     "sys.path.append(sys.argv.pop(1)); "
@@ -68,36 +55,6 @@ def _graph_metadata(args: argparse.Namespace) -> dict[str, object]:
             getattr(args, "tensor_parallel_size", 1) or 1
         ),
     }
-
-
-def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
-    """Return the effective public CLI options for model-owned policy.
-
-    The generic router does not interpret these fields. The selected
-    model-owned adapter decides whether and how they map to its runtime.
-    Preserve the established optimized-runtime precision default while native
-    families continue to resolve an omitted precision from ``args``.
-    """
-
-    public_options = {
-        name: value
-        for name, value in vars(args).items()
-        if not name.startswith("_")
-        and name not in _OPTIMIZED_ROUTING_INTERNAL_FIELDS
-    }
-    context_parallel_size = public_options.get("context_parallel_size")
-    # One context-parallel rank is the parser's no-op default. Keep requested
-    # non-default values visible to model-owned fail-closed policy.
-    if type(context_parallel_size) is int and context_parallel_size == 1:
-        public_options.pop("context_parallel_size")
-    if public_options.get("precision") is None:
-        public_options["precision"] = "fp32"
-    # Keep the existing optimized-runtime request contract unchanged. Native
-    # builders may derive an omitted capacity from model-owned configuration,
-    # while legacy capsules still own their established 256-token profile.
-    if public_options.get("max_cache_length") is None:
-        public_options["max_cache_length"] = 256
-    return public_options
 
 
 def _load_fp8_scales(path: str | Path) -> dict[str, object]:
@@ -184,57 +141,17 @@ def _cmd_build(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    # Optimized dispatch resolves the model family internally and scans only
-    # that family's Builder folder. The current platform remains implicit; no
-    # public API or CLI option is added for runtime selection.
-    try:
-        from .engine_builder import _try_build_optimized_runtime
-
-        model_revision = getattr(args, "model_revision", None)
-        revision_kwargs = (
-            {"model_revision": model_revision} if model_revision else {}
-        )
-        optimized = None
-        if not graph_mode:
-            optimized = _try_build_optimized_runtime(
-                args.model,
-                args.output,
-                _optimized_cli_public_options(args),
-                **revision_kwargs,
-            )
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        if getattr(args, "verbose", False):
-            import traceback
-
-            traceback.print_exc()
-        return 1
-    if optimized is not None:
-        return 0
-
     build_model_ref = args.model
-
-    # Backend dispatch: default to auto-selection of the native TRT backend.
-    method_name = getattr(args, 'method', 'auto')
-    if method_name == 'auto':
-        try:
-            method_name, build_model_ref = _auto_select_build_backend(
-                args.model,
-                **revision_kwargs,
-            )
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            if args.verbose:
-                import traceback
-                traceback.print_exc()
-            return 1
+    model_revision = getattr(args, "model_revision", None)
+    revision_kwargs = (
+        {"model_revision": model_revision} if model_revision else {}
+    )
 
     build_family = ""
     if not getattr(args, "_skip_profile_resolution", False):
         try:
             build_model_ref, build_family = _resolve_build_model_metadata(
                 build_model_ref,
-                method_name,
                 **revision_kwargs,
             )
         except Exception as e:
@@ -274,16 +191,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     else:
         parallel_config = None
 
-    # RTX selection MUST happen before any TensorRT API is touched.
-    if getattr(args, 'rtx', False):
-        from . import trt_compat
-        trt_compat.configure_backend(rtx=True)
-        print("[trtmc build] Using TensorRT-RTX backend", file=sys.stderr)
-
-    # Delegation was already resolved above. Enter the native builder directly
-    # so a native CLI build does not rediscover and reprobe every installed
-    # optimized-runtime capsule a second time.
-    from .engine_builder import _build_native_impl as build
+    from .engine_builder import build
     from .quantization import canonicalize_quant_format
 
     # FP8 quantization: explicit scales or family-provided/live calibration.
@@ -298,7 +206,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"[trtmc build] Loaded FP8 scales from {args.fp8_scales} "
               f"({len(fp8_scales)} layers)", file=sys.stderr)
     elif fp8_auto:
-        # Sentinel: engine_builder resolves packaged scales before calibration.
+        # Sentinel: the selected family resolves packaged scales before calibration.
         fp8_scales = "auto"
         print("[trtmc build] FP8 scale resolution enabled", file=sys.stderr)
 
@@ -437,14 +345,16 @@ def _resolved_config_values(bundle) -> dict:
 
 def _resolve_build_model_metadata(
     model_ref: str,
-    method_name: str,
     *,
     model_revision: str | None = None,
 ) -> tuple[str, str]:
-    """Return (resolved_model_ref, family_name) for the selected build backend."""
-    del method_name
+    """Return model path and metadata candidate for profile selection."""
     from .config import ModelConfig
-    from .engine_builder import _resolve_model, find_diffusion_plugin, find_plugin
+    from .engine_builder import _resolve_model
+    from .families import (
+        resolve_diffusion_family_id,
+        resolve_family_id_from_config,
+    )
 
     revision_kwargs = {"revision": model_revision} if model_revision else {}
     resolved_model_ref = _resolve_model(model_ref, **revision_kwargs)
@@ -452,12 +362,13 @@ def _resolve_build_model_metadata(
 
     if (model_dir / "model_index.json").exists():
         model_index = json.loads((model_dir / "model_index.json").read_text())
-        plugin = find_diffusion_plugin(str(model_index.get("_class_name", "") or ""))
-        return resolved_model_ref, getattr(plugin, "name", "")
+        family = resolve_diffusion_family_id(
+            str(model_index.get("_class_name", "") or "")
+        )
+        return resolved_model_ref, family or ""
 
     config = ModelConfig.from_dir(model_dir)
-    plugin = find_plugin(config)
-    return resolved_model_ref, getattr(plugin, "name", "")
+    return resolved_model_ref, resolve_family_id_from_config(config) or ""
 
 
 def _resolve_build_profile_name(family_name: str) -> str:
@@ -507,47 +418,6 @@ def _maybe_reexec_build_in_profile(
         file=sys.stderr,
     )
     return subprocess.run(cmd, env=env).returncode
-
-
-def _auto_select_build_backend(
-    model_ref: str,
-    *,
-    model_revision: str | None = None,
-) -> tuple[str, str]:
-    """Return (method_name, resolved_model_ref) for the best available backend.
-
-    The selection rule is:
-      1. Use the raw TensorRT Network API backend when a native family plugin
-         exists for the model.
-    """
-    from .config import ModelConfig
-    from .engine_builder import _resolve_model, find_plugin, find_diffusion_plugin
-
-    revision_kwargs = {"revision": model_revision} if model_revision else {}
-    resolved_model_ref = _resolve_model(model_ref, **revision_kwargs)
-    model_dir = Path(resolved_model_ref)
-
-    if (model_dir / "model_index.json").exists():
-        model_index = json.loads((model_dir / "model_index.json").read_text())
-        pipeline_class = str(model_index.get("_class_name", "") or "")
-        raw_supported = (
-            find_diffusion_plugin(pipeline_class) is not None
-            or find_plugin(pipeline_class.lower()) is not None
-        )
-    else:
-        config = ModelConfig.from_dir(model_dir)
-        raw_plugin = find_plugin(config)
-        raw_supported = raw_plugin is not None
-
-    if raw_supported:
-        print("[trtmc build] Auto-selected backend: trt", file=sys.stderr)
-        return "trt", resolved_model_ref
-
-    raise RuntimeError(
-        "No native TRT family plugin matched this model. "
-        "Choose a model with native TRT support."
-    )
-
 
 
 def _parse_profile_rows(value: str) -> list[int]:
@@ -723,18 +593,6 @@ def cmd_build(args: argparse.Namespace) -> int:
     return _cmd_build(args)
 
 
-def cmd_inspect(args: argparse.Namespace) -> int:
-    """Compatibility wrapper accepting both historic ``bundle`` and ``bundle_path`` args."""
-    if not hasattr(args, "bundle_path") and hasattr(args, "bundle"):
-        args.bundle_path = args.bundle
-    return _cmd_inspect(args)
-
-
-def cmd_version(args: argparse.Namespace) -> int:
-    """Compatibility wrapper for tests and callers that import command handlers."""
-    return _cmd_version(args)
-
-
 def _cmd_graph(args: argparse.Namespace) -> int:
     from .tvm_ffi.graph_cli import run
 
@@ -742,18 +600,6 @@ def _cmd_graph(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
-    # RTX selection MUST happen before ANY tensorrt_model_connect module touches TRT.
-    # We do an early argv scan before argparse touches anything.
-    if "--rtx" in sys.argv:
-        try:
-            from . import trt_compat
-            trt_compat.configure_backend(rtx=True)
-            print("[trtmc build] Using TensorRT-RTX backend", file=sys.stderr)
-        except ImportError:
-            print("Error: --rtx requires tensorrt_rtx. Install: pip install tensorrt-rtx",
-                  file=sys.stderr)
-            sys.exit(1)
-
     parser = argparse.ArgumentParser(
         prog="trtmc",
         description="Build .bundle artifacts from HuggingFace models",
@@ -876,9 +722,6 @@ def main() -> None:
     build_p.add_argument("--quant-calibration-samples",
                          type=int, default=512,
                          help="Number of calibration samples for PTQ (default: 512)")
-    build_p.add_argument("--method", type=str, default="auto",
-                         choices=["auto", "trt"],
-                         help=argparse.SUPPRESS)
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
     build_p.add_argument("--fp8", action="store_true",
@@ -958,14 +801,7 @@ def main() -> None:
     # python -m tensorrt_model_connect version
     subparsers.add_parser("version", help="Show version info")
 
-    # Keep direct module compatibility: `python -m tensorrt_model_connect
-    # <model-dir> -o out.bundle` still means build. The public native CLI uses
-    # explicit `trtmc build`.
-    command_names = {"build", "graph", "inspect", "version"}
-    cli_argv = sys.argv[1:]
-    if cli_argv and cli_argv[0] not in command_names and cli_argv[0] not in ("--help", "-h"):
-        cli_argv = ["build"] + cli_argv
-    args = parser.parse_args(cli_argv)
+    args = parser.parse_args()
 
     if args.command is None:
         parser.print_help()

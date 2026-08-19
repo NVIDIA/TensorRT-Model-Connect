@@ -149,7 +149,7 @@ class TestNemotronSpeechStreamingPlugin:
         except ImportError:
             pytest.skip("torch required for synthetic NeMo archive test")
 
-        from tensorrt_model_connect.families.nemotron_speech_streaming import plugin
+        from tensorrt_model_connect.families.nemotron_speech_streaming import model as plugin
 
         sd = self._build_state_dict(with_prompt_kernel=False)
         nemo_cfg = self._build_nemo_cfg()
@@ -186,7 +186,7 @@ class TestNemotronSpeechStreamingPlugin:
         except ImportError:
             pytest.skip("torch required for synthetic NeMo archive test")
 
-        from tensorrt_model_connect.families.nemotron_speech_streaming import plugin
+        from tensorrt_model_connect.families.nemotron_speech_streaming import model as plugin
 
         sd = self._build_state_dict(with_prompt_kernel=True)
         nemo_cfg = self._build_nemo_cfg(
@@ -228,7 +228,7 @@ class TestNemotronSpeechStreamingPlugin:
         except ImportError:
             pytest.skip("torch required for synthetic NeMo archive test")
 
-        from tensorrt_model_connect.families.nemotron_speech_streaming import plugin
+        from tensorrt_model_connect.families.nemotron_speech_streaming import model as plugin
 
         sd = self._build_state_dict(with_prompt_kernel=True)
         nemo_cfg = self._build_nemo_cfg(

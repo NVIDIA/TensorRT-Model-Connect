@@ -107,7 +107,7 @@ class TestM2M100BuildEngine:
 
     @pytest.mark.parametrize("precision", ["fp32", "fp16"])
     def test_build_engine(self, tmp_path, precision):
-        from tensorrt_model_connect.families.m2m_100 import plugin
+        import tensorrt_model_connect.families.m2m_100.model as plugin
         config = {
             "model_type": "m2m_100",
             "vocab_size": self.VOCAB, "hidden_size": self.HIDDEN,

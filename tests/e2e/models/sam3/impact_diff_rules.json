@@ -23,13 +23,13 @@
     ]
   },
   {
-    "name": "sam3_engine_builder_metadata",
-    "path": "python/tensorrt_model_connect/engine_builder.py",
+    "name": "sam3_model_build_metadata",
+    "path": "python/tensorrt_model_connect/families/sam3/model.py",
     "scope": {
       "owner_family": true
     },
     "allowed_tokens": [
-      "getattr(plugin",
+      "build_extra_engines",
       "preprocessor_config.json",
       "processor_config.json",
       "requires_tokenizer",

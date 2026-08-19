@@ -16,7 +16,7 @@ import pytest
 from tensorrt_model_connect.families.m2m_100 import graph_ops
 
 
-plugin = importlib.import_module("tensorrt_model_connect.families.m2m_100.plugin")
+plugin = importlib.import_module("tensorrt_model_connect.families.m2m_100.model")
 
 
 class _FakeLayer:

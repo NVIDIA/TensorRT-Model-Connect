@@ -58,8 +58,10 @@ def _add_model(
     )
     _write(
         repo,
-        f"python/tensorrt_model_connect/families/{logical_id}/plugin.py",
-        f'MODEL = "{logical_id}"\n',
+        f"python/tensorrt_model_connect/families/{logical_id}/model.py",
+        f'MODEL = "{logical_id}"\n\n'
+        "def matches(config):\n    return True\n\n"
+        "def build(model_dir, output_path, **options):\n    pass\n",
     )
     _write(
         repo,
@@ -128,9 +130,6 @@ def _make_repo(
     for support_path in (
         "tests/builder/conftest.py",
         "tests/builder/debug_runner_test_support.py",
-        "tests/builder/family_plugin_test_mixin.py",
-        "tests/builder/family_plugin_test_support.py",
-        "tests/builder/family_plugin_tester.py",
     ):
         _write(repo, support_path, "# shared test support\n")
     _write(repo, "tests/builder/test_checkpoint_mapper.py", "# unrelated test suite\n")
@@ -410,7 +409,7 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(
         repo,
-        "python/tensorrt_model_connect/families/model_a/plugin.py",
+        "python/tensorrt_model_connect/families/model_a/model.py",
         'MODEL = "model_a_changed"\n',
     )
     head = _commit(repo, "change a")
@@ -965,7 +964,7 @@ def test_impact_includes_deletions_and_both_sides_of_rename(tmp_path: Path) -> N
     _git(
         repo,
         "mv",
-        "python/tensorrt_model_connect/families/model_a/plugin.py",
+        "python/tensorrt_model_connect/families/model_a/model.py",
         "python/tensorrt_model_connect/families/model_b/from_a.py",
     )
     head = _commit(repo, "delete and rename")
@@ -1150,7 +1149,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     tmp_path: Path,
 ) -> None:
     repo, revision = _make_repo(tmp_path)
-    source = repo / "python/tensorrt_model_connect/families/model_a/plugin.py"
+    source = repo / "python/tensorrt_model_connect/families/model_a/model.py"
     expected = source.read_bytes()
     source.write_text('MODEL = "dirty_worktree_value"\n', encoding="utf-8")
     output = tmp_path / "projection"
@@ -1168,7 +1167,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         ).stdout
     )
 
-    copied = output / "python/tensorrt_model_connect/families/model_a/plugin.py"
+    copied = output / "python/tensorrt_model_connect/families/model_a/model.py"
     assert copied.read_bytes() == expected
     assert not (output / "python/tensorrt_model_connect/families/model_b").exists()
     assert not (output / "src/runtime/models/model_b").exists()
@@ -1183,9 +1182,6 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     for support_path in (
         "tests/builder/conftest.py",
         "tests/builder/debug_runner_test_support.py",
-        "tests/builder/family_plugin_test_mixin.py",
-        "tests/builder/family_plugin_test_support.py",
-        "tests/builder/family_plugin_tester.py",
     ):
         assert (output / support_path).is_file()
     for unrelated_path in (

@@ -48,7 +48,7 @@ class TestPhiPlugin:
 
     def test_qkv_split(self, tmp_path):
         """Fused QKV should be correctly split into Q, K, V."""
-        from tensorrt_model_connect.families.phi import plugin
+        from tensorrt_model_connect.families.phi import model as plugin
 
         config = {
             "model_type": "phi3",
@@ -85,7 +85,7 @@ class TestPhiPlugin:
 
     def test_gate_up_split(self, tmp_path):
         """Fused gate_up should be correctly split into gate and up."""
-        from tensorrt_model_connect.families.phi import plugin
+        from tensorrt_model_connect.families.phi import model as plugin
 
         config = {
             "model_type": "phi3",
@@ -115,7 +115,7 @@ class TestPhiPlugin:
             up_raw.T.astype(np.float32), atol=1e-6)
 
     def test_all_keys_present(self, tmp_path):
-        from tensorrt_model_connect.families.phi import plugin
+        from tensorrt_model_connect.families.phi import model as plugin
 
         config = {
             "model_type": "phi3",

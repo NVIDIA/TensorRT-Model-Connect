@@ -317,29 +317,6 @@ def add_activation(
         raise ValueError(f"Unsupported activation: {activation_type}")
 
 
-def compute_alibi_slopes(num_heads: int) -> np.ndarray:
-    """Compute ALiBi slopes for each attention head (from the ALiBi paper).
-
-    For power-of-2 num_heads: geometric sequence 2^(-8/n * i), i in 1..n.
-    For non-power-of-2: interleave two geometric sequences.
-
-    Returns: [num_heads] float32 array.
-    """
-    def _get_slopes_power_of_2(n: int) -> list[float]:
-        start = 2 ** (-(2 ** -(np.log2(n) - 3)))
-        return [start * (start ** i) for i in range(n)]
-
-    if num_heads > 0 and (num_heads & (num_heads - 1)) == 0:
-        # Power of 2
-        return np.array(_get_slopes_power_of_2(num_heads), dtype=np.float32)
-    else:
-        closest_power_of_2 = 2 ** int(np.floor(np.log2(num_heads)))
-        slopes_a = _get_slopes_power_of_2(closest_power_of_2)
-        slopes_b = _get_slopes_power_of_2(2 * closest_power_of_2)
-        slopes_b = slopes_b[0::2][: num_heads - closest_power_of_2]
-        return np.array(slopes_a + slopes_b, dtype=np.float32)
-
-
 # Alias: add_gelu_tanh is the same as add_gelu_new (tanh approximation)
 add_gelu_tanh = add_gelu_new
 
@@ -401,67 +378,6 @@ def add_layer_norm_native(
     if hasattr(norm, "compute_precision"):
         norm.compute_precision = trt.float32
     return norm.get_output(0)
-
-
-def validate_native_rope_dim(
-    rotary_embedding_dim: int,
-    *,
-    field_name: str = "rotary_embedding_dim",
-) -> int:
-    """Validate the dimension contract required by TRT native RoPE."""
-    rotary_embedding_dim = int(rotary_embedding_dim)
-    if rotary_embedding_dim < 2 or rotary_embedding_dim % 2 != 0:
-        raise ValueError(
-            f"TRT native RoPE requires {field_name} to be an even value >= 2; "
-            f"got {rotary_embedding_dim}")
-    return rotary_embedding_dim
-
-
-def make_rope_table_half_dim(
-    max_cache_length: int,
-    head_dim: int,
-    rope_theta: float,
-    cosine: bool,
-    partial_rotary_factor: float = 1.0,
-    interleaved: bool = False,
-) -> np.ndarray:
-    """Build a RoPE cos/sin table of shape [max_cache_length, rotary_ndims // 2].
-
-    IRotaryEmbeddingLayer expects the cos/sin cache with only the *half*
-    rotary dimension (it internally handles both halves).  This is different
-    from make_rope_table which produces [max_cache_length, hidden_size] by
-    repeating the per-head values across all heads.
-
-    Args:
-        max_cache_length: Number of positions (rows in the table).
-        head_dim:         Full head dimension (D).
-        rope_theta:       Base frequency for inverse-frequency computation.
-        cosine:           True → cos table, False → sin table.
-        partial_rotary_factor: Fraction of head dims that rotate (default 1.0).
-        interleaved:      If True, adjacent-pair frequencies (CodeGen/GPT-J).
-                          If False, half-split frequencies (LLaMA/Qwen).
-
-    Returns:
-        Float32 array [max_cache_length, rotary_ndims // 2].
-    """
-    rotary_ndims = int(head_dim * partial_rotary_factor)
-    rotary_ndims = validate_native_rope_dim(rotary_ndims)
-    half = rotary_ndims // 2
-    default = 1.0 if cosine else 0.0
-    if max_cache_length <= 0 or rope_theta <= 0.0:
-        return np.full((max(max_cache_length, 1), max(half, 1)),
-                       default, dtype=np.float32)
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            # For both interleaved and rotate-half the frequency index is d
-            # (the distinction only affects which input pair is rotated; the
-            # freq assignment per half-dim is the same).
-            exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
 
 
 def reshape_rows_to_heads_4d(
@@ -602,69 +518,6 @@ def add_alibi_mask_4d(
     combined = network.add_elementwise(
         mask_4d, alibi_bias_t, trt.ElementWiseOperation.SUM)
     return combined.get_output(0)
-
-
-def add_apply_rope_native(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    num_heads: int,
-    head_dim: int,
-    cos_cache_2d: trt.ITensor,
-    sin_cache_2d: trt.ITensor,
-    position_id: trt.ITensor,
-    rotary_embedding_dim: int,
-    interleaved: bool = False,
-    sequence_length: int | None = 1,
-) -> trt.ITensor:
-    """Apply RoPE via TRT native IRotaryEmbeddingLayer.
-
-    Handles both single-token decoder steps and dynamic-Sq prefill/decode
-    graphs without a manual rotate-half matmul chain.
-
-    Shape contract (IRotaryEmbeddingLayer with position_ids):
-      input:           [1, num_heads, Sq, head_dim]  (reshaped internally)
-      cos_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
-      sin_cache_2d:    [max_S, rotary_embedding_dim // 2]  (2-D constant)
-      position_id:     [Sq] int32, reshaped to [1, Sq] internally
-      interleaved:     False → rotate-half (LLaMA/Qwen)
-                       True  → adjacent-pair (CodeGen/GPT-J)
-
-    Args:
-        inp:                  [Sq, num_heads * head_dim].
-        num_heads:            Number of attention heads.
-        head_dim:             Per-head dimension.
-        cos_cache_2d:         Pre-built 2-D cos table constant.
-        sin_cache_2d:         Pre-built 2-D sin table constant.
-        position_id:          Runtime position indices, shape [Sq] int32.
-        rotary_embedding_dim: Number of head dims that participate in RoPE.
-        interleaved:          Frequency layout (see above).
-        sequence_length:      Static Sq, or None for runtime-dynamic Sq.
-
-    Returns:
-        [Sq, num_heads * head_dim] with RoPE applied.
-    """
-    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
-    attention_size = num_heads * head_dim
-
-    inp_4d = reshape_rows_to_heads_4d(
-        network, inp, num_heads, head_dim, sequence_length)
-
-    # Reshape position_id [Sq] -> [1, Sq] (batch=1).
-    seq_dim = -1 if sequence_length is None else sequence_length
-    pos_2d = network.add_shuffle(position_id)
-    pos_2d.reshape_dims = (1, seq_dim)
-
-    rope = network.add_rotary_embedding(
-        inp_4d,
-        cos_cache_2d,
-        sin_cache_2d,
-        interleaved,
-        rotary_embedding_dim,
-    )
-    rope.set_input(3, pos_2d.get_output(0))
-
-    return reshape_heads_4d_to_rows(
-        network, rope.get_output(0), attention_size, sequence_length)
 
 
 def add_attention_core(

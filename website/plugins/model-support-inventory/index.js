@@ -1355,26 +1355,18 @@ function collectModelSupportInventory(repoRoot) {
     'tensorrt_model_connect',
     'families'
   );
-  const familyEntries = readDirectory(familiesDirectory, 'Python family plugins');
+  const familyEntries = readDirectory(familiesDirectory, 'Python family models');
   const hfMetadataById = collectHfModelMetadata(repoRoot);
-  const flatFamilies = familyEntries
-    .filter(
-      (entry) =>
-        entry.isFile() &&
-        entry.name.endsWith('.py') &&
-        !entry.name.startsWith('_') &&
-        entry.name !== 'base.py'
-    )
-    .map((entry) => path.basename(entry.name, '.py'));
   const packageFamilies = familyEntries
     .filter(
       (entry) =>
         entry.isDirectory() &&
         !entry.name.startsWith('_') &&
-        fs.existsSync(path.join(familiesDirectory, entry.name, 'plugin.py'))
+        fs.existsSync(path.join(familiesDirectory, entry.name, 'MODEL.toml')) &&
+        fs.existsSync(path.join(familiesDirectory, entry.name, 'model.py'))
     )
     .map((entry) => entry.name);
-  const familyPluginNames = [...new Set([...flatFamilies, ...packageFamilies])].sort();
+  const familyModelNames = [...new Set(packageFamilies)].sort();
 
   const e2eModelsDirectory = path.join(repoRoot, 'tests', 'e2e', 'models');
   const e2eEntries = readDirectory(e2eModelsDirectory, 'E2E model metadata');
@@ -1493,8 +1485,8 @@ function collectModelSupportInventory(repoRoot) {
     );
   }
   return {
-    familyPluginCount: familyPluginNames.length,
-    familyPluginNames,
+    familyModelCount: familyModelNames.length,
+    familyModelNames,
     e2eManifestCount: manifestPaths.length,
     e2eFamilyIndexCount,
     runtimeStrategyKeyCount: runtimeStrategyKeys.size,
