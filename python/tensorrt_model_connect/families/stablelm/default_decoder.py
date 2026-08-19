@@ -65,6 +65,7 @@ def build_standard_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    fp32_attention_accumulation: bool = False,
     embed_input: bool = False,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
@@ -89,6 +90,8 @@ def build_standard_decoder_engine(
             rotated-half (LLaMA/Qwen) where (d, d+half) share frequencies.
         scale_attn_weights: Whether to scale attention scores by 1/sqrt(head_dim).
             Most models use this (True, default). GPT-Neo does NOT scale (False).
+        fp32_attention_accumulation: Compute the attention core in FP32 and
+            cast its context back to the model dtype.
         embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
             engine inputs. When use_input_embed==1, the decoder uses input_embed
             directly instead of the embedding lookup. Used for VL models where
@@ -119,21 +122,38 @@ def build_standard_decoder_engine(
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
     #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
+    #   - FP32 precision boundaries    (decode only; the split prefill graph
+    #                                    remains homogeneous FP16)
     #
     # ``TRTMC_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
     # bisects against the legacy graph). It is *not* intended as a
     # supported user-facing flag.
+    requested_fp32_layers = (
+        ()
+        if decoder_engine_role == "prefill"
+        else tuple(config.raw.get("_fp32_layers", ()))
+    )
+    has_fp32_boundary = bool(requested_fp32_layers) or fp32_attention_accumulation
     _dual_profile_disabled_for = (
         embed_input
         or debug_layer_outputs
         or hidden_state_output
         or bool(config.raw.get("dynamic_kv_cache", False))
+        or has_fp32_boundary
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
     if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
         raise NotImplementedError(
             "split prefill engine is not supported for this standard decoder "
             "configuration")
+    if (
+        config.raw.get("_decoder_engine_role") == "dual_profile"
+        and has_fp32_boundary
+    ):
+        raise NotImplementedError(
+            "dual-profile StableLM engines do not support FP32 precision "
+            "boundaries; use the split layout with a homogeneous prefill "
+            "engine and a precision-stabilized decode engine")
     if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
@@ -158,6 +178,16 @@ def build_standard_decoder_engine(
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
+    fp32_layers = frozenset(int(layer) for layer in requested_fp32_layers)
+    invalid_fp32_layers = sorted(
+        layer for layer in fp32_layers if layer < 0 or layer >= num_layers)
+    if invalid_fp32_layers:
+        raise ValueError(
+            f"fp32_layers contains out-of-range indices: {invalid_fp32_layers}")
+    if precision == "fp32":
+        fp32_layers = frozenset()
+    if fp32_layers and quant_ctx is not None:
+        raise ValueError("fp32_layers is not supported with quantized builds")
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
@@ -410,16 +440,24 @@ def build_standard_decoder_engine(
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
+        layer_is_fp32 = layer_idx in fp32_layers
+        layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
+        layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
+
+        def _cast_layer_dtype(tensor: trt.ITensor | None) -> trt.ITensor | None:
+            if tensor is None or tensor.dtype == layer_trt_dtype:
+                return tensor
+            return network.add_cast(tensor, layer_trt_dtype).get_output(0)
 
         result = _add_decoder_layer(
             network=network,
-            hidden=hidden_state,
-            cache_k=cache_k_inputs[layer_idx],
-            cache_v=cache_v_inputs[layer_idx],
-            attention_mask=attention_mask,
+            hidden=_cast_layer_dtype(hidden_state),
+            cache_k=_cast_layer_dtype(cache_k_inputs[layer_idx]),
+            cache_v=_cast_layer_dtype(cache_v_inputs[layer_idx]),
+            attention_mask=_cast_layer_dtype(attention_mask),
             position_id=position_id,
             attention_scale=attn_scale,
-            eps_tensor=eps_tensor,
+            eps_tensor=_cast_layer_dtype(eps_tensor),
             eps=config.rms_norm_eps,
             weights=weights,
             prefix=prefix,
@@ -438,19 +476,20 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             alibi_slopes_tensor=alibi_slopes_tensor,
             alibi_indices_tensor=alibi_indices_tensor,
-            dtype=work_np_dtype,
+            dtype=layer_np_dtype,
             quant_ctx=quant_ctx,
-            cos_half_tensor=cos_half_tensor,
-            sin_half_tensor=sin_half_tensor,
+            cos_half_tensor=_cast_layer_dtype(cos_half_tensor),
+            sin_half_tensor=_cast_layer_dtype(sin_half_tensor),
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
+            fp32_attention_accumulation=fp32_attention_accumulation,
         )
 
-        hidden_state = result["hidden"]
-        present_k_outputs.append(result["present_k"])
-        present_v_outputs.append(result["present_v"])
+        hidden_state = _cast_work_dtype(result["hidden"])
+        present_k_outputs.append(_cast_work_dtype(result["present_k"]))
+        present_v_outputs.append(_cast_work_dtype(result["present_v"]))
 
         if debug_layer_outputs:
             _mark_debug_output(network, result["post_attn"], f"debug_post_attn_{layer_idx}")
@@ -578,6 +617,7 @@ def _add_decoder_layer(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    fp32_attention_accumulation: bool = False,
     eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
@@ -604,6 +644,7 @@ def _add_decoder_layer(
         interleaved_rope=interleaved_rope,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
+        fp32_attention_accumulation=fp32_attention_accumulation,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

@@ -43,6 +43,10 @@ class StableLMPlugin:
         mt = model_type.lower()
         return mt == "stablelm" or mt.startswith("stablelm")
 
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        del config
+        return True
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
@@ -191,6 +195,7 @@ class StableLMPlugin:
                 verbose=verbose,
                 parallel_config=parallel)
 
+        decoder_engine_role = config.raw.get("_decoder_engine_role")
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
             precision=precision, quant_ctx=quant_ctx,
@@ -198,6 +203,9 @@ class StableLMPlugin:
             mlp_type="swiglu",
             position_type="rope",
             partial_rotary_factor=partial_rotary,
+            fp32_attention_accumulation=(
+                precision == "fp16" and decoder_engine_role != "prefill"
+            ),
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
 

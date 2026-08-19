@@ -22,28 +22,31 @@ _MODEL_DIR = Path(__file__).resolve().parent
 _MANIFEST_PATH = _MODEL_DIR / "manifests" / "stablelm2-1.6b.json"
 _THRESHOLD_PATH = _MODEL_DIR / "thresholds" / "stablelm2-1.6b.json"
 _STABLELM_REVISION = "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef"
-_MMLU_000002_PROMPT_SHA256 = (
-    "de28bf6b76387fa017c1ffa8e379f87c46439a0b0fc0186798c0f7b4b6a17330"
+_MMLU_000001_PROMPT_SHA256 = (
+    "2885f321f1938150f73629d8cfbbe63944e1aa460d0d37f47683c5c75a41d18f"
 )
 _QA_COMMON_PREFIX = [
-    362,
+    423,
     271,
     10086,
-    682,
-    10105,
-    311,
     279,
-    24524,
-    304,
-    1901,
-    62,
-    18,
-    13,
-    865,
-    61,
-    17,
-    489,
+    2015,
+    315,
+    279,
+    81215,
+    8066,
+    555,
+    320,
+    16,
+    11,
     220,
+    17,
+    11,
+    220,
+    18,
+    11,
+    220,
+    19,
 ]
 
 
@@ -78,17 +81,18 @@ def test_stablelm_premerge_case_replays_the_published_accuracy_signal():
         _THRESHOLD_PATH.read_text(encoding="utf-8"))["threshold_overrides"]
 
     assert manifest["hf_revision"] == _STABLELM_REVISION
-    assert prompt_sha256 == _MMLU_000002_PROMPT_SHA256
-    assert testcase["max_new_tokens"] >= 19
+    assert prompt_sha256 == _MMLU_000001_PROMPT_SHA256
+    assert testcase["max_new_tokens"] >= 22
     assert testcase["reference_precision"] == manifest["precision"] == "fp16"
+    assert manifest["fp32_layers"] == [23]
     assert manifest["max_cache_length"] >= 384
     assert thresholds["contract_token_agreement_rate"] == 1.0
 
 
-def test_stablelm_contract_rejects_the_published_token_18_divergence():
+def test_stablelm_contract_rejects_the_published_token_21_divergence():
     result = plugin.verify(
-        _output("same decoded continuation", [*_QA_COMMON_PREFIX, 17]),
-        _output("same decoded continuation", [*_QA_COMMON_PREFIX, 16]),
+        _output("same decoded continuation", [*_QA_COMMON_PREFIX, 11]),
+        _output("same decoded continuation", [*_QA_COMMON_PREFIX, 2432]),
         _case(),
         _threshold(),
     )
@@ -100,7 +104,7 @@ def test_stablelm_contract_rejects_the_published_token_18_divergence():
 
 
 def test_stablelm_contract_accepts_exact_generated_tokens():
-    exact_tokens = [*_QA_COMMON_PREFIX, 16]
+    exact_tokens = [*_QA_COMMON_PREFIX, 11]
     result = plugin.verify(
         _output("same decoded continuation", exact_tokens),
         _output("same decoded continuation", exact_tokens),
@@ -114,7 +118,7 @@ def test_stablelm_contract_accepts_exact_generated_tokens():
 
 
 def test_stablelm_contract_requires_reference_token_ids_for_strict_gate():
-    trt_output = _output("same decoded continuation", [*_QA_COMMON_PREFIX, 16])
+    trt_output = _output("same decoded continuation", [*_QA_COMMON_PREFIX, 11])
     reference_output = StageOutput(
         stage_name="full_generation",
         data={},

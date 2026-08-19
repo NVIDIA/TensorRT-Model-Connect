@@ -148,6 +148,7 @@ def add_attention_block(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    fp32_attention_accumulation: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
@@ -280,6 +281,7 @@ def add_attention_block(
             causal=False,
             mask=mask_4d,
             scale=attention_scale,
+            fp32_accumulation=fp32_attention_accumulation,
         )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:
