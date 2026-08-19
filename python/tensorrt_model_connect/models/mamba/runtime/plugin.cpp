@@ -6,8 +6,8 @@
 // MambaPlugin: handles the Mamba-owned recurrent strategy.
 // Mamba/SSM models with conv_state + ssm_state recurrent state.
 
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "recurrent_state.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

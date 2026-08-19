@@ -6,8 +6,8 @@
 // Qwen3OmniPlugin: handles "qwen3_omni_multimodal" strategy.
 // Omni pipeline with TensorRT Thinker/Code2Wav and the official model-owned Talker bridge.
 
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

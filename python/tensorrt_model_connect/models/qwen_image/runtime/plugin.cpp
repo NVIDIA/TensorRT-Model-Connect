@@ -15,8 +15,8 @@
 // Trace: ARCH-FAM-001, UD-FAM-QWEN-IMAGE-01.
 
 #include "diffusion_helpers.h"
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "qwen_image_types.h"
 #include "trtmc/runtime/pipeline_registry.h"
 

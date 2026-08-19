@@ -6,9 +6,9 @@
 // Olmo2DecoderPlugin: OLMo-2-owned decoder runtime.
 // Standard attention-based decoder with device-resident KV cache.
 
-#include "plugin_helpers.h"
 #include "chat_templates.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "tensor_names.h"
 #include "triattention_kv_cache.h"
 #include "trtmc/config/config_bundle.h"

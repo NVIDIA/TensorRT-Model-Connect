@@ -5,15 +5,15 @@
 
 #include "pipeline.h"
 
-#include "plugin_helpers.h"
 #include "decode_runtime.h"
+#include "plugin_helpers.h"
+#include "trtmc/tokenizer.h"
+#include "utils/wav_reader.h"
 #include "whisper_cross_kv_apply.h"
 #include "whisper_cross_kv_plan.h"
 #include "whisper_decode_policy.h"
 #include "whisper_host_plan.h"
 #include "whisper_mel_spectrogram.h"
-#include "trtmc/tokenizer.h"
-#include "utils/wav_reader.h"
 
 #include <chrono>
 #include <cstdlib>

@@ -23,20 +23,17 @@ import math
 import numpy as np
 import pytest
 
+from tests.builder.conftest import requires_trt, run_trt_graph
+
 try:
-    from tests.builder.owned_graph_modules import (
-        load_graph_blocks,
-        load_graph_ops,
-        load_owned_callable,
-    )
-    graph_blocks = load_graph_blocks()
-    graph_ops = load_graph_ops()
-    add_configurable_gelu_fc_mlp = load_owned_callable(
-        "graph_blocks.py", "add_gelu_fc_mlp", "activation")
+    from tensorrt_model_connect.models.qwen import graph_blocks, graph_ops
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
-from tests.builder.conftest import requires_trt
+
+@pytest.fixture
+def trt_runner():
+    return run_trt_graph
 
 
 class TestInferKvAttentionSize:
@@ -388,7 +385,7 @@ class TestAddGeluFcMlp:
         }
 
         def build(net, inp):
-            out = add_configurable_gelu_fc_mlp(
+            out = graph_blocks.add_gelu_fc_mlp(
                 net, inp["x"],
                 weights=weights, prefix="mlp",
                 hidden_size=hidden_size, mlp_size=mlp_size,

@@ -6,8 +6,8 @@
 // LTXVideoPlugin: handles native TensorRT LTX-Video bundles.
 
 #include "diffusion_helpers.h"
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 #include <memory>

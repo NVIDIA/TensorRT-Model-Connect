@@ -3,14 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "support/mock_trt_engines.h"
-#include "runtime/backend/trt_module_impl.h"
 #include "canary_config.h"
 #include "canary_cross_kv_apply.h"
 #include "canary_cross_kv_plan.h"
 #include "kv_cache.h"
 #include "pipeline.h"
 #include "plugin_helpers.h"
+#include "runtime/backend/trt_module_impl.h"
+#include "support/mock_trt_engines.h"
 
 #include <cuda_runtime_api.h>
 #include <iostream>

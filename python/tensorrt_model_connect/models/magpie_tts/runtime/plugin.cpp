@@ -7,8 +7,8 @@
 // Magpie TTS encoder-decoder pipeline with IPA tokenizer and optional CFG.
 
 #include "audio_helpers.h"
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

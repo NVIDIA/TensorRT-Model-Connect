@@ -6,10 +6,10 @@
 // VLPlugin: handles "lance_vision_language" strategy.
 // Two-engine pipeline: vision encoder + text decoder with KV cache.
 
-#include "plugin_helpers.h"
 #include "cuda_stream.h"
 #include "image_preprocessor.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "tensor_names.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

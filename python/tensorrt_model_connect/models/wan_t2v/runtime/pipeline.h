@@ -8,11 +8,11 @@
 // WanPipeline: Wan2.1 diffusion pipeline with T5 text encoder, denoiser, and VAE.
 // Uses TrtModule::forward() for all GPU work.
 
-#include "wan_diffusion_types.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
+#include "wan_diffusion_types.h"
 
 #include <cstdint>
 #include <memory>

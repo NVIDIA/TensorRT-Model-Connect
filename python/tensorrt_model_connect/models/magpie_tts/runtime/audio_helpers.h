@@ -4,9 +4,9 @@
  */
 
 #pragma once
-#include "plugin_helpers.h"
 #include "cuda_common.h"
 #include "magpie_config.h"
+#include "plugin_helpers.h"
 #include "utils/json_helpers.h"
 
 namespace trtmc {

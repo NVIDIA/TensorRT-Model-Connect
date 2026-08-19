@@ -6,8 +6,8 @@
 // BarkPlugin: handles "text_to_audio_bark" strategy.
 // Bark semantic + coarse pipeline with optional codec and fine engines.
 
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"

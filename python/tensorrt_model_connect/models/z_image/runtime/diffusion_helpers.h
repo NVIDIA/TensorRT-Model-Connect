@@ -6,8 +6,8 @@
 #pragma once
 #include "plugin_helpers.h"
 #include "preprocessor_weights_helpers.h"
-#include "z_image_diffusion_types.h"
 #include "utils/json_helpers.h"
+#include "z_image_diffusion_types.h"
 
 namespace trtmc {
 

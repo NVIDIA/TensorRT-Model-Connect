@@ -3,10 +3,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "native_kv_cache_contract_test.h"
-#include "runtime/backend/trt_module_impl.h"
 #include "kv_cache.h"
+#include "native_kv_cache_contract_test.h"
 #include "pipeline.h"
+#include "runtime/backend/trt_module_impl.h"
 
 #include <NvInfer.h>
 #include <cstring>

@@ -6,8 +6,8 @@
 // PatchTSMixerPlugin: handles "patchtsmixer_trt" strategy.
 // Loads a single TRT engine and dispatches to PatchTSMixerPipeline.
 
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

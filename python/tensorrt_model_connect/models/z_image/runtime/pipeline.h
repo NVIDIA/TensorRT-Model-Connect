@@ -8,10 +8,10 @@
 // ZImagePipeline: Z-Image diffusion pipeline with Qwen3 text encoder,
 // denoiser, and VAE. Uses TrtModule::forward() for all GPU work.
 
-#include "z_image_diffusion_types.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
+#include "z_image_diffusion_types.h"
 
 #include <cstdint>
 #include <memory>

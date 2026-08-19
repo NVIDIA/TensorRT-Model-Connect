@@ -6,8 +6,8 @@
 // NemotronSpeechStreamingPlugin: handles
 // "nemotron_speech_streaming_speech_to_text_rnnt" strategy.
 
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"

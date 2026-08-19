@@ -184,7 +184,6 @@ UNIT_TEST_ONLY_PREFIXES = (
 # uses a synthetic CPU fixture.
 MODEL_COUPLED_TEST_EXACT = frozenset(
     {
-        "tests/builder/test_dynamic_batch_profile.py",
         "tests/builder/test_flashinfer_benchmark.py",
         "tests/builder/test_graph_blocks.py",
         "tests/builder/test_tvm_ffi_plugin.py",
@@ -910,6 +909,14 @@ def calculate_impact(
     serialized_changes: list[dict[str, object]] = []
     for change in _diff_entries(repo_root, comparison_base, head_sha):
         classifications: list[dict[str, object]] = []
+        owned_model_test_rename = False
+        if (
+            change.status.startswith("R")
+            and change.old_path in MODEL_COUPLED_TEST_EXACT
+            and change.new_path is not None
+        ):
+            renamed_owner, _ = _owner_for_path(change.new_path, head_catalog)
+            owned_model_test_rename = renamed_owner is not None
         paths = (change.old_path, change.new_path)
         seen_paths: set[str] = set()
         for path in paths:
@@ -917,7 +924,13 @@ def calculate_impact(
                 continue
             seen_paths.add(path)
             try:
-                kind, owner = _classify_path(path, head_catalog)
+                if path == change.old_path and owned_model_test_rename:
+                    # The fail-closed shared-test rule has served its purpose:
+                    # this exact rename places the test under a concrete model
+                    # owner. Keep ordinary edits and deletions rejected.
+                    kind, owner = "unit_tests", None
+                else:
+                    kind, owner = _classify_path(path, head_catalog)
             except ModelCIError:
                 if path != change.old_path or not path.startswith(f"{MODEL_ROOT}/"):
                     raise

@@ -6,8 +6,8 @@
 // TimesFmPlugin: handles "timesfm_trt" bundles.
 // Loads a single TRT engine and routes solve() through TimesFmPipeline.
 
-#include "plugin_helpers.h"
 #include "pipeline.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

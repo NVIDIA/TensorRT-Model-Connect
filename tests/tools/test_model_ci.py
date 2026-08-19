@@ -1111,7 +1111,6 @@ def test_impact_rejects_unowned_path_below_model_root(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "path",
     (
-        "tests/builder/test_dynamic_batch_profile.py",
         "tests/builder/test_flashinfer_benchmark.py",
         "tests/builder/test_graph_blocks.py",
         "tests/builder/test_tvm_ffi_plugin.py",
@@ -1151,6 +1150,72 @@ def test_model_coupled_shared_tests_fail_closed_until_owned(
 
     assert result.returncode == 2
     assert "model-coupled test has no isolated model owner" in result.stderr
+
+
+def test_model_coupled_shared_test_can_move_to_a_concrete_owner(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    shared = repo / "tests/builder/test_flashinfer_benchmark.py"
+    _write(repo, shared.relative_to(repo).as_posix(), "# model-coupled fixture\n")
+    base = _commit(repo, "add shared model-coupled test")
+
+    owned = (
+        repo
+        / "python/tensorrt_model_connect/models/model_a/tests/test_flashinfer_benchmark.py"
+    )
+    owned.parent.mkdir(parents=True, exist_ok=True)
+    shared.rename(owned)
+    head = _commit(repo, "move model-coupled test to owner")
+
+    result = _run(
+        repo,
+        "impact",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--platform-change-policy",
+        "fallback",
+        "--fallback-model",
+        "model_b",
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["affected_models"] == ["model_a"]
+    assert payload["direct_models"] == ["model_a"]
+    assert payload["fallback_models"] == []
+    assert payload["unit_scope"] == "all"
+
+
+def test_synthetic_gpu_builder_test_remains_a_shared_unit_contract(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "tests/builder/test_dynamic_batch_profile.py",
+        "def test_synthetic_profile():\n    pass\n",
+    )
+    head = _commit(repo, "add synthetic GPU builder contract")
+
+    result = _run(
+        repo,
+        "impact",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--platform-change-policy",
+        "fallback",
+        "--fallback-model",
+        "model_a",
+    )
+
+    payload = json.loads(result.stdout)
+    assert payload["affected_models"] == []
+    assert payload["mode"] == "unit"
+    assert payload["unit_scope"] == "all"
 
 
 @pytest.mark.parametrize(

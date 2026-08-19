@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "runtime/backend/trt_logger.h"
 #include "pipeline.h"
+#include "runtime/backend/trt_logger.h"
 #include "vae_cache_storage.h"
 
 #include <NvInfer.h>

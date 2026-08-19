@@ -5,7 +5,6 @@
 
 #include "pipeline.h"
 
-#include "plugin_helpers.h"
 #include "canary_cross_kv_apply.h"
 #include "canary_cross_kv_plan.h"
 #include "canary_decode_policy.h"
@@ -14,6 +13,7 @@
 #include "canary_request.h"
 #include "canary_segment_utils.h"
 #include "decode_runtime.h"
+#include "plugin_helpers.h"
 #include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 

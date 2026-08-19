@@ -10,10 +10,10 @@
 
 #include "inference_state.h"
 #include "kv_cache.h"
-#include "whisper_config.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
+#include "whisper_config.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>

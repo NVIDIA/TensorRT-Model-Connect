@@ -6,9 +6,9 @@
 // BartPlugin: handles "bart_seq2seq_encoder_decoder" strategy.
 // Encoder-decoder text-to-text pipeline for BART models.
 
-#include "plugin_helpers.h"
 #include "decode_runtime.h"
 #include "kv_cache.h"
+#include "plugin_helpers.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/pipeline_registry.h"

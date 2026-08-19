@@ -429,6 +429,17 @@ class UnitTestRunner:
 
     def graph_ops(self) -> None:
         self.context.run(["nvidia-smi"])
+        owned_graph_block_tests = sorted(
+            path.relative_to(self.context.repository).as_posix()
+            for path in (
+                self.context.repository
+                / "python"
+                / "tensorrt_model_connect"
+                / "models"
+            ).glob("*/tests/test_graph_blocks.py")
+        )
+        if not owned_graph_block_tests:
+            raise CiError("no model owns the graph-block GPU contract tests")
         self.context.run(
             [
                 "python",
@@ -436,7 +447,7 @@ class UnitTestRunner:
                 "pytest",
                 "tests/builder/test_graph_ops.py",
                 "tests/builder/test_graph_ops_extended.py",
-                "tests/builder/test_graph_blocks.py",
+                *owned_graph_block_tests,
                 "-v",
                 "-n",
                 "auto",

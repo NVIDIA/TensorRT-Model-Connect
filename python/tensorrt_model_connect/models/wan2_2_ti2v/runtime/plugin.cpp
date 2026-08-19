@@ -5,8 +5,8 @@
 
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
-#include "runtime/backend/prebound_backend.h"
 #include "pipeline.h"
+#include "runtime/backend/prebound_backend.h"
 #include "runtime_config.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"

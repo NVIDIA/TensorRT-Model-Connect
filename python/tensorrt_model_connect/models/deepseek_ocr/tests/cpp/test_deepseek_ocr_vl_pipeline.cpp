@@ -30,10 +30,10 @@
 // Test suite: DeepseekOcrPipeline — vision-language generation
 // =============================================================================
 
-#include "runtime/backend/trt_module_impl.h"
-#include "runtime/core/trt_common.h"
 #include "kv_cache.h"
 #include "pipeline.h"
+#include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/trt_common.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 

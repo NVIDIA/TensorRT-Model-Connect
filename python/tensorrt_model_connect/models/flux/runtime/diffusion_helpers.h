@@ -4,9 +4,9 @@
  */
 
 #pragma once
+#include "flux_diffusion_types.h"
 #include "plugin_helpers.h"
 #include "preprocessor_weights_helpers.h"
-#include "flux_diffusion_types.h"
 #include "utils/json_helpers.h"
 
 namespace trtmc {

@@ -30,11 +30,11 @@
 // Test suite: QwenVlPipeline — vision-language generation
 // =============================================================================
 
-#include "runtime/backend/trt_module_impl.h"
-#include "runtime/core/trt_common.h"
 #include "kv_cache.h"
 #include "lora_peft_loader.h"
 #include "pipeline.h"
+#include "runtime/backend/trt_module_impl.h"
+#include "runtime/core/trt_common.h"
 #include "trtmc/runtime/pipeline_pool.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"

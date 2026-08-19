@@ -3,12 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "support/mock_trt_engines.h"
-#include "runtime/backend/trt_module_impl.h"
 #include "audio_helpers.h"
 #include "kv_cache.h"
 #include "pipeline.h"
+#include "runtime/backend/trt_module_impl.h"
 #include "speech_config.h"
+#include "support/mock_trt_engines.h"
 
 #include <cuda_runtime_api.h>
 #include <iostream>
