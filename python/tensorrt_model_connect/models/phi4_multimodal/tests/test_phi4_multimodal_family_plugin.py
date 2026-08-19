@@ -18,6 +18,7 @@ Postconditions: Plugin correctly splits fused weights and produces expected per-
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 from pathlib import Path
 
@@ -38,7 +39,7 @@ except (ImportError, ModuleNotFoundError):
 RNG = np.random.RandomState(42)
 
 
-def test_phi4_multimodal_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_phi4_multimodal_decode_dispatches_to_dual_profile_builder(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.models.phi4_multimodal.default_decoder")
     calls: dict[str, object] = {}
@@ -50,13 +51,25 @@ def test_phi4_multimodal_embed_input_dispatches_to_dual_profile_builder(monkeypa
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
     config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
     result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True,
-        partial_rotary_factor=0.75)
+        config, {}, 31, precision="fp16", partial_rotary_factor=0.75
+    )
 
     assert result == b"phi4-multimodal-dual-profile-plan"
     kwargs = calls["build"][3]
-    assert kwargs["embed_input"] is True
+    assert "embed_input" not in kwargs
     assert kwargs["partial_rotary_factor"] == 0.75
+
+
+def test_phi4_multimodal_decoder_always_exposes_embed_inputs() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.models.phi4_multimodal.default_decoder"
+    )
+    builder = module.build_standard_decoder_engine
+
+    assert "embed_input" not in inspect.signature(builder).parameters
+    source = inspect.getsource(builder)
+    assert "network.add_input('input_embed'" in source
+    assert "network.add_input('use_input_embed'" in source
 
 
 def test_phi4_fp16_matmul_can_request_fp32_accumulation(monkeypatch) -> None:

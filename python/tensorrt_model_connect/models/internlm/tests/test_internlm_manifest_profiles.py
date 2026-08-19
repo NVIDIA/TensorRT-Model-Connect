@@ -21,7 +21,9 @@ _FAMILY_DIR = (
 def _write_manifest(tmp_path, data: dict) -> str:
     path = tmp_path / "manifest.json"
     model_fields = {
-        key: data[key] for key in ("name", "hf_id", "family", "runtime_strategy") if key in data
+        key: data[key]
+        for key in ("name", "hf_id", "family", "runtime_strategy", "task_strategy")
+        if key in data
     }
     testcase = {
         key: value for key, value in data.items() if key not in model_fields or key == "name"
@@ -39,6 +41,7 @@ def test_load_manifest_applies_internlm_default_execution_profiles(tmp_path) -> 
             "hf_id": "internlm/internlm-test",
             "family": "internlm",
             "runtime_strategy": "internlm_decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
             "reference_backend": "torch_reference",
         },
     )
@@ -57,6 +60,7 @@ def test_load_manifest_preserves_internlm_execution_profile_overrides(tmp_path) 
             "hf_id": "internlm/internlm-test",
             "family": "internlm",
             "runtime_strategy": "internlm_decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
             "reference_backend": "torch_reference",
             "execution_profiles": {"runtime": "custom-runtime"},
         },

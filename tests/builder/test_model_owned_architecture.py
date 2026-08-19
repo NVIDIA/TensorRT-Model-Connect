@@ -31,9 +31,7 @@ def _family_dirs() -> list[Path]:
 def _top_level_functions(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     return {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
 
 
@@ -45,9 +43,7 @@ def _module_bindings(path: Path) -> set[str]:
             bindings.add(node.name)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            bindings.update(
-                target.id for target in targets if isinstance(target, ast.Name)
-            )
+            bindings.update(target.id for target in targets if isinstance(target, ast.Name))
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             bindings.update(alias.asname or alias.name for alias in node.names)
     return bindings
@@ -69,9 +65,7 @@ def test_every_family_has_one_required_model_entrypoint() -> None:
 def test_model_owners_have_no_builder_forwarding_shims() -> None:
     forwarding_imports = {
         "standard_decoder_builder.py": "from .default_decoder import",
-        "dual_profile_decoder_tp_builder.py": (
-            "from .default_dual_profile_decoder_tp import"
-        ),
+        "dual_profile_decoder_tp_builder.py": ("from .default_dual_profile_decoder_tp import"),
     }
     violations = []
     for filename, marker in forwarding_imports.items():
@@ -80,6 +74,28 @@ def test_model_owners_have_no_builder_forwarding_shims() -> None:
                 violations.append(path.relative_to(REPO_ROOT).as_posix())
 
     assert not violations, f"obsolete model-owned builder forwarding shims: {violations}"
+
+
+def test_model_owned_functions_have_no_duplicate_decorators() -> None:
+    violations: list[str] = []
+    for module in sorted(FAMILIES_ROOT.rglob("*.py")):
+        if "tests" in module.relative_to(FAMILIES_ROOT).parts:
+            continue
+        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            decorators = [
+                ast.dump(decorator, include_attributes=False) for decorator in node.decorator_list
+            ]
+            duplicates = sorted(
+                decorator for decorator in set(decorators) if decorators.count(decorator) > 1
+            )
+            if duplicates:
+                relative = module.relative_to(REPO_ROOT).as_posix()
+                violations.append(f"{relative}:{node.lineno}:{node.name}")
+
+    assert not violations, f"duplicate model-owned decorators: {violations}"
 
 
 def test_dense_kv_caches_have_no_deprecated_mask_forwarder() -> None:
@@ -110,16 +126,13 @@ def test_model_entries_are_direct_module_functions() -> None:
     for path in sorted(FAMILIES_ROOT.rglob("model.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         assert not any(
-            isinstance(node, ast.ClassDef) and node.name.endswith("Model")
-            for node in tree.body
+            isinstance(node, ast.ClassDef) and node.name.endswith("Model") for node in tree.body
         ), path
         assert not any(
             isinstance(node, (ast.Assign, ast.AnnAssign))
             and any(
                 isinstance(target, ast.Name) and target.id == "_model"
-                for target in (
-                    node.targets if isinstance(node, ast.Assign) else [node.target]
-                )
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
             )
             for node in tree.body
         ), path
@@ -133,9 +146,7 @@ def test_model_entries_are_direct_module_functions() -> None:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         matches = functions["matches"].args
-        assert [arg.arg for arg in (*matches.posonlyargs, *matches.args)] == [
-            "config"
-        ], path
+        assert [arg.arg for arg in (*matches.posonlyargs, *matches.args)] == ["config"], path
         assert matches.vararg is None and matches.kwarg is None, path
 
         build = functions["build"].args
@@ -149,9 +160,7 @@ def test_model_entries_are_direct_module_functions() -> None:
 
 def test_model_consumers_do_not_restore_object_forwarding_or_missing_imports() -> None:
     module_bindings = {
-        f"tensorrt_model_connect.models.{family.name}.model": _module_bindings(
-            family / "model.py"
-        )
+        f"tensorrt_model_connect.models.{family.name}.model": _module_bindings(family / "model.py")
         for family in _family_dirs()
     }
     violations: list[str] = []
@@ -184,8 +193,7 @@ def test_model_consumers_do_not_restore_object_forwarding_or_missing_imports() -
                 for alias in node.names:
                     if alias.name != "*" and alias.name not in available:
                         violations.append(
-                            f"{path}:{node.lineno}: {node.module} has no "
-                            f"{alias.name!r} binding"
+                            f"{path}:{node.lineno}: {node.module} has no {alias.name!r} binding"
                         )
 
     assert not violations, "\n".join(violations)
@@ -209,9 +217,7 @@ def test_engine_builder_is_only_a_resolver_and_dispatcher() -> None:
     source = ENGINE_BUILDER.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(ENGINE_BUILDER))
     functions = {
-        node.name
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     assert "_build_diffusion_bundle" not in functions
     assert "_build_native_impl" not in functions

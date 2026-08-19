@@ -25,6 +25,7 @@ def test_canary_mono_audio_is_written_beside_case_artifacts(
         hf_transformers, "run_reference_subprocess", fake_subprocess
     )
     source_audio = tmp_path / "read-only-source.wav"
+    source_audio.write_bytes(b"test audio fixture")
     case = E2ECase(
         name="canary-reference-path",
         hf_id="nvidia/canary-1b-v2",

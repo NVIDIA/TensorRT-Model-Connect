@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -72,5 +73,18 @@ def test_falcon_plugin_routes_parallel_builds(
     assert kwargs["position_type"] == position_type
     assert kwargs["alibi_bias_scale"] == pytest.approx(alibi_bias_scale)
     assert kwargs["activation"] == "gelu"
-    assert kwargs["mlp_type"] == "gelu_fc"
+    assert "mlp_type" not in kwargs
     assert kwargs["verbose"] is True
+
+
+def test_falcon_tp_builder_keeps_fixed_gelu_fc_mlp() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.models.falcon.dual_profile_decoder_tp_builder"
+    )
+
+    assert "mlp_type" not in inspect.signature(
+        module.build_dual_profile_tp_decoder_engine
+    ).parameters
+    source = inspect.getsource(module._gelu_fc_mlp)
+    assert ".w_fc1" in source and ".w_fc2" in source
+    assert "add_activation" in source and "activation" in source

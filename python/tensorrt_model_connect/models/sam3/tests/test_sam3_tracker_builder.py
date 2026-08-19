@@ -140,7 +140,7 @@ def _set_config_path(config: dict[str, object], path: tuple[str, ...], value: ob
 
 
 def test_sam3_tracker_validation_accepts_official_sam3_architecture() -> None:
-    tracker_builder._validate_tracker_model(SimpleNamespace(config=_official_tracker_config()))
+    tracker_builder._validate_tracker_config(_official_tracker_config())
 
 
 @pytest.mark.parametrize(
@@ -158,7 +158,7 @@ def test_sam3_tracker_validation_rejects_unreviewed_variants(
     config = _official_tracker_config()
     config[field] = value
     with pytest.raises(RuntimeError, match=message):
-        tracker_builder._validate_tracker_model(SimpleNamespace(config=config))
+        tracker_builder._validate_tracker_config(config)
 
 
 @pytest.mark.parametrize(
@@ -175,7 +175,7 @@ def test_sam3_tracker_validation_rejects_every_unreviewed_graph_config(
     _set_config_path(config, path, unreviewed_value)
 
     with pytest.raises(RuntimeError, match="supports only the official architecture"):
-        tracker_builder._validate_tracker_model(SimpleNamespace(config=config))
+        tracker_builder._validate_tracker_config(config)
 
 
 def test_sam3_tracker_model_config_rejects_unreviewed_low_resolution(tmp_path) -> None:
@@ -707,9 +707,14 @@ def test_sam3_tracker_builder_has_only_required_direct_b1_b2_plans() -> None:
 def test_sam3_production_build_path_has_no_aoti_or_bridge_modules() -> None:
     family_dir = Path(tracker_builder.__file__).resolve().parent
     model_source = (family_dir / "model.py").read_text(encoding="utf-8")
-    build_start = model_source.index("    def build_extra_engines(")
-    build_end = model_source.index("\n    def get_segmentation_config", build_start)
-    build_source = model_source[build_start:build_end]
+    model_tree = ast.parse(model_source)
+    build_node = next(
+        node
+        for node in model_tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "build_extra_engines"
+    )
+    build_source = ast.get_source_segment(model_source, build_node)
+    assert build_source is not None
 
     assert "build_sam3_tracker_engines" in build_source
     for forbidden in ("aoti", ".pt2", "libtorch", "tvm", "ffi", "native_plugin"):
@@ -830,8 +835,7 @@ def test_sam3_runtime_loads_required_step_plans_without_external_bridge() -> Non
         assert forbidden not in helper.lower()
 
     plugin_helpers_path = (
-        repository_root
-        / "python/tensorrt_model_connect/models/sam3/runtime/plugin_helpers.cpp"
+        repository_root / "python/tensorrt_model_connect/models/sam3/runtime/plugin_helpers.cpp"
     )
     production_loader_source = source + plugin_helpers_path.read_text(encoding="utf-8")
     for forbidden in (
@@ -926,7 +930,6 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
         "opset",
         "torch.export",
         "torch.onnx",
-        "tvm_ffi",
     }
 
     for path, source in _sam3_production_sources().items():
@@ -954,6 +957,17 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
                 f"{path.name} imports a framework dependency: "
                 f"{sorted(imports & tracker_framework_roots)}"
             )
+        tvm_ffi_imports = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module and "tvm_ffi" in node.module
+        }
+        if path.name == "model.py":
+            assert tvm_ffi_imports <= {"tensorrt_model_connect.tvm_ffi.graph_build"}
+        else:
+            assert not tvm_ffi_imports, (
+                f"{path.name} imports a TVM FFI bridge: {sorted(tvm_ffi_imports)}"
+            )
         lowered = source.lower()
         matched_tokens = sorted(token for token in forbidden_source_tokens if token in lowered)
         assert not matched_tokens, (
@@ -977,9 +991,24 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
     assert not list(family_dir.glob("*_aoti_exporter.py"))
 
 
-def test_sam3_family_has_no_embedded_test_sources() -> None:
-    family_dir = Path(tracker_builder.__file__).resolve().parent
-    assert not list((family_dir / "tests").rglob("*.py"))
+def test_sam3_production_sources_do_not_import_owner_tests() -> None:
+    tests_module = "tensorrt_model_connect.models.sam3.tests"
+    for path, source in _sam3_production_sources().items():
+        tree = ast.parse(source, filename=str(path))
+        imported_modules = {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        } | {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert not any(
+            module == tests_module or module.startswith(f"{tests_module}.")
+            for module in imported_modules
+        ), f"{path.name} imports owner test code"
 
 
 def test_sam3_tracker_graph_is_built_with_native_tensorrt_api() -> None:

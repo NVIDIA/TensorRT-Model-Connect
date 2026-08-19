@@ -12,13 +12,16 @@ from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput, StageS
 
 
 def test_nemo_reference_writes_derived_audio_under_artifacts(monkeypatch, tmp_path) -> None:
+    source_audio = tmp_path / "read-only-source" / "Recording.wav"
+    source_audio.parent.mkdir()
+    source_audio.write_bytes(b"test audio fixture")
     case = E2ECase(
         name="nemotron-case",
         hf_id="nvidia/nemotron-speech-streaming-en-0.6b",
         family="nemotron_speech_streaming",
         runtime_strategy="nemotron_speech_streaming_speech_to_text_rnnt",
         task_strategy="speech_to_text",
-        inputs={"audio": "/read-only-source/Recording.wav"},
+        inputs={"audio": str(source_audio)},
     )
     ctx = RunContext(case=case, artifacts_dir=str(tmp_path))
     captured: dict[str, object] = {}

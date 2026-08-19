@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,7 +15,7 @@ import pytest
 pytest.importorskip("tensorrt", reason="TensorRT is required for family builder tests")
 
 
-def test_lance_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_lance_decoder_dispatches_fixed_specialization(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.models.lance.default_decoder")
     calls: dict[str, object] = {}
@@ -26,10 +27,44 @@ def test_lance_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> No
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
     config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
     result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+        config, {}, 31, precision="fp16")
 
     assert result == b"lance-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
+    assert calls["build"][3] == {
+        "precision": "fp16",
+        "quant_ctx": None,
+        "norm_type": "rmsnorm",
+        "mlp_type": "swiglu",
+        "position_type": "rope",
+        "activation": "silu",
+        "partial_rotary_factor": 1.0,
+        "interleaved_rope": False,
+        "parallel_residual": False,
+        "scale_attn_weights": True,
+        "round_rope_inv_freq_to_bf16": False,
+        "verbose": False,
+        "profile_mode": "dual_profile",
+    }
+
+
+def test_lance_decoder_specialization_always_owns_embed_inputs() -> None:
+    modules_and_builders = (
+        (
+            "tensorrt_model_connect.models.lance.default_decoder",
+            "build_standard_decoder_engine",
+        ),
+        (
+            "tensorrt_model_connect.models.lance.default_dual_profile_decoder",
+            "build_dual_profile_decoder_engine",
+        ),
+    )
+
+    for module_name, builder_name in modules_and_builders:
+        builder = getattr(importlib.import_module(module_name), builder_name)
+        assert "embed_input" not in inspect.signature(builder).parameters
+        source = inspect.getsource(builder)
+        assert "network.add_input('input_embed'" in source
+        assert "network.add_input('use_input_embed'" in source
 
 
 def test_lance_bf16_build_rounds_rope_inv_freq_like_official_reference(

@@ -157,7 +157,7 @@ def test_sam3_reference_propagates_pinned_snapshot(monkeypatch) -> None:
         hf_id="facebook/sam3",
         hf_revision=SAM3_REVISION,
         inputs={
-            "image": "/data/coco.jpg",
+            "image": "data/test_img.jpeg",
             "text_prompt": "car",
         },
         metadata={

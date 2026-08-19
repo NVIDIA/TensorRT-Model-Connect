@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -67,10 +68,14 @@ def test_qwen_vl_plugin_routes_parallel_builds(
     assert result == b"qwen-vl-tp-plan"
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 23
-    assert kwargs["parallel_config"] == parallel
-    assert kwargs["embed_input"] is True
-    assert kwargs["deepstack_num_levels"] == deepstack_num_levels
-    assert kwargs["verbose"] is True
+    assert kwargs == {
+        "precision": "fp32",
+        "quant_ctx": None,
+        "deepstack_num_levels": deepstack_num_levels,
+        "verbose": True,
+        "debug_layer_outputs": False,
+        "parallel_config": parallel,
+    }
 
 
 def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) -> None:
@@ -95,9 +100,12 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
     assert result == b"qwen-vl-plan"
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 31
-    assert kwargs["precision"] == "bf16"
-    assert kwargs["embed_input"] is True
-    assert kwargs["verbose"] is True
+    assert kwargs == {
+        "precision": "bf16",
+        "verbose": True,
+        "quant_ctx": None,
+        "debug_layer_outputs": False,
+    }
 
 
 def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
@@ -121,13 +129,13 @@ def test_qwen25_vl_split_decode_uses_decode_profile(monkeypatch) -> None:
     }
     assert plugin.supports_split_embed_input is True
     assert plugin.supports_split_decoder_roles(config) is True
-    result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+    result = module.build_standard_decoder_engine(config, {}, 31, precision="fp16")
 
     assert result == b"qwen-vl-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
-    assert calls["build"][3]["force_decomposed_attention"] is True
-    assert calls["build"][3]["profile_mode"] == "decode"
+    kwargs = calls["build"][3]
+    assert "embed_input" not in kwargs
+    assert kwargs["force_decomposed_attention"] is True
+    assert kwargs["profile_mode"] == "decode"
 
 
 def test_qwen25_vl_split_prefill_forwards_build_options(monkeypatch) -> None:
@@ -151,11 +159,11 @@ def test_qwen25_vl_split_prefill_forwards_build_options(monkeypatch) -> None:
         },
     }
 
-    result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+    result = module.build_standard_decoder_engine(config, {}, 31, precision="fp16")
 
     assert result == b"qwen-vl-prefill-plan"
     kwargs = calls["build"][3]
+    assert "embed_input" not in kwargs
     assert kwargs["profile_mode"] == "prefill"
     assert kwargs["max_prefill_length"] == 24
     assert kwargs["opt_prefill_length"] == 12
@@ -182,11 +190,53 @@ def test_qwen25_vl_lora_keeps_dual_profile_prefill(monkeypatch) -> None:
         }
     }
 
-    result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+    result = module.build_standard_decoder_engine(config, {}, 31, precision="fp16")
 
     assert result == b"qwen-vl-lora-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
+    kwargs = calls["build"][3]
+    assert "embed_input" not in kwargs
+    assert kwargs["profile_mode"] == "dual_profile"
+
+
+@pytest.mark.parametrize(
+    ("module_name", "builder_name"),
+    [
+        (
+            "tensorrt_model_connect.models.qwen_vl.default_decoder",
+            "build_standard_decoder_engine",
+        ),
+        (
+            "tensorrt_model_connect.models.qwen_vl.decoder_tp_builder",
+            "build_qwen_vl_tp_decoder_engine",
+        ),
+        (
+            "tensorrt_model_connect.models.qwen_vl.model",
+            "_build_qwen3_vl_decoder",
+        ),
+    ],
+)
+def test_qwen_vl_specialized_decoders_always_expose_embed_inputs(
+    module_name: str,
+    builder_name: str,
+) -> None:
+    builder = getattr(importlib.import_module(module_name), builder_name)
+
+    assert "embed_input" not in inspect.signature(builder).parameters
+    source = inspect.getsource(builder)
+    assert any(
+        marker in source
+        for marker in (
+            "network.add_input('input_embed'",
+            'network.add_input("input_embed"',
+        )
+    )
+    assert any(
+        marker in source
+        for marker in (
+            "network.add_input('use_input_embed'",
+            'network.add_input("use_input_embed"',
+        )
+    )
 
 
 def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:

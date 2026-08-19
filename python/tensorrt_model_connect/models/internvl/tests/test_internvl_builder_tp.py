@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import numpy as np
 import pytest
@@ -22,7 +23,7 @@ class _Config:
     raw = {}
 
 
-def test_internvl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_internvl_decoder_dispatches_fixed_specialization(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.models.internvl.default_decoder")
     calls: dict[str, object] = {}
@@ -35,10 +36,47 @@ def test_internvl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) ->
     config = _Config()
     config.raw = {"_decoder_engine_role": "decode"}
     result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+        config, {}, 31, precision="fp16")
 
     assert result == b"internvl-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
+    assert calls["build"][3] == {
+        "precision": "fp16",
+        "quant_ctx": None,
+        "norm_type": "rmsnorm",
+        "mlp_type": "swiglu",
+        "position_type": "rope",
+        "activation": "silu",
+        "partial_rotary_factor": 1.0,
+        "interleaved_rope": False,
+        "parallel_residual": False,
+        "scale_attn_weights": True,
+        "verbose": False,
+        "profile_mode": "dual_profile",
+    }
+
+
+def test_internvl_decoder_specialization_always_owns_embed_inputs() -> None:
+    modules_and_builders = (
+        (
+            "tensorrt_model_connect.models.internvl.default_decoder",
+            "build_standard_decoder_engine",
+        ),
+        (
+            "tensorrt_model_connect.models.internvl.default_dual_profile_decoder",
+            "build_dual_profile_decoder_engine",
+        ),
+        (
+            "tensorrt_model_connect.models.internvl.tp_builder",
+            "build_dual_profile_tp_decoder_engine",
+        ),
+    )
+
+    for module_name, builder_name in modules_and_builders:
+        builder = getattr(importlib.import_module(module_name), builder_name)
+        assert "embed_input" not in inspect.signature(builder).parameters
+        source = inspect.getsource(builder)
+        assert "network.add_input('input_embed'" in source
+        assert "network.add_input('use_input_embed'" in source
 
 
 def test_internvl_tp_builder_rejects_single_device_mode() -> None:
@@ -100,14 +138,12 @@ def test_internvl_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
     assert calls["build"]["weights"] is weights
     assert calls["build"]["max_cache_length"] == 384
 
-    kwargs = calls["build"]["kwargs"]
-    assert kwargs["precision"] == "fp16"
-    assert kwargs["parallel_config"] == parallel
-    assert kwargs["embed_input"] is True
-    assert kwargs["norm_type"] == "rmsnorm"
-    assert kwargs["mlp_type"] == "swiglu"
-    assert kwargs["position_type"] == "rope"
-    assert kwargs["activation"] == "silu"
+    assert calls["build"]["kwargs"] == {
+        "precision": "fp16",
+        "quant_ctx": None,
+        "verbose": False,
+        "parallel_config": parallel,
+    }
 
 
 def test_internvl_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
@@ -160,7 +196,9 @@ def test_internvl_non_parallel_build_forwards_precision(monkeypatch) -> None:
     assert calls["build"]["config"] is config
     assert calls["build"]["weights"] is weights
     assert calls["build"]["max_cache_length"] == 512
-    kwargs = calls["build"]["kwargs"]
-    assert kwargs["precision"] == "bf16"
-    assert kwargs["embed_input"] is True
-    assert kwargs["verbose"] is True
+    assert calls["build"]["kwargs"] == {
+        "precision": "bf16",
+        "verbose": True,
+        "quant_ctx": None,
+        "debug_layer_outputs": False,
+    }

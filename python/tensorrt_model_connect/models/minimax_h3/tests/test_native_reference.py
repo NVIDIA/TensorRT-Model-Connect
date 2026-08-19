@@ -27,7 +27,7 @@ def test_cache_threshold_cli_args_are_model_namespaced() -> None:
 
 
 def test_canonical_build_selects_first_block_cache() -> None:
-    model_config = tomllib.loads(SCRIPT.with_name("MODEL.toml").read_text())
+    model_config = tomllib.loads((SCRIPT.parent.parent / "MODEL.toml").read_text())
     assert {
         "flag": "--set",
         "value": "minimax_h3.first_block_cache=true",

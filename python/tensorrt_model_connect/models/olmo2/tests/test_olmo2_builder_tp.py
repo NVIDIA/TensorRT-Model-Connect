@@ -164,7 +164,7 @@ def test_olmo2_plugin_routes_split_prefill_builds(monkeypatch) -> None:
         precision="fp32",
     )
 
-    assert plugin_module.supports_split_decoder_roles is True
+    assert plugin_module.supports_split_decoder_roles(config) is True
     assert result == b"olmo2-prefill-plan"
     assert calls["build"]["max_cache_length"] == 352
     assert calls["build"]["kwargs"] == {

@@ -286,7 +286,9 @@ def test_reference_uses_the_declared_checkout_when_output_cache_is_separate(
 
 
 def test_family_declares_the_official_source_environment_variable() -> None:
-    manifest = tomllib.loads((_MODEL_DIR / "MODEL.toml").read_text(encoding="utf-8"))
+    manifest = tomllib.loads(
+        (_MODEL_DIR.parent / "MODEL.toml").read_text(encoding="utf-8")
+    )
 
     assert manifest["model_reference_cache"]["environment_variable"] == (
         "TRTMC_WAN_REFERENCE_REPO"

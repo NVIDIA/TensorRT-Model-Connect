@@ -313,7 +313,10 @@ def test_build_clip_encoder_engine_success_uses_fake_builder_and_marks_outputs(m
         return _FakeTensor(f"const_{len(constant_payloads)}")
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_add_constant)
-    monkeypatch.setattr(mod.graph_ops, "add_layer_norm", _fake_tensor_fn("ln"))
+    monkeypatch.setattr(mod.graph_ops, "add_layer_norm_native", _fake_tensor_fn("ln"))
+    monkeypatch.setattr(
+        mod.graph_ops, "add_attention_from_rows", _fake_tensor_fn("attention")
+    )
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
     monkeypatch.setattr(mod.graph_ops, "add_bias_sum", _fake_tensor_fn("bias"))
 
@@ -349,7 +352,10 @@ def test_build_clip_encoder_engine_raises_when_builder_returns_none(monkeypatch:
     mod = _import_with_fake_trt("tensorrt_model_connect.models.flux.clip_encoder_builder", fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
-    monkeypatch.setattr(mod.graph_ops, "add_layer_norm", _fake_tensor_fn("ln"))
+    monkeypatch.setattr(mod.graph_ops, "add_layer_norm_native", _fake_tensor_fn("ln"))
+    monkeypatch.setattr(
+        mod.graph_ops, "add_attention_from_rows", _fake_tensor_fn("attention")
+    )
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
     monkeypatch.setattr(mod.graph_ops, "add_bias_sum", _fake_tensor_fn("bias"))
 

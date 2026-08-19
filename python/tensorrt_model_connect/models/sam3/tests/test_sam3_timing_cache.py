@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import inspect
 import json
@@ -11,6 +12,7 @@ from pathlib import Path
 import sys
 from types import ModuleType
 from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 
@@ -200,6 +202,29 @@ def _graph_contracts(
     }
 
 
+@contextmanager
+def _policy_scope(policy: timing_cache.Sam3TimingCachePolicy) -> Iterator[None]:
+    """Exercise the owner-private policy state without restoring its retired API."""
+
+    policy.validate()
+    token = timing_cache._POLICY.set(policy)
+    try:
+        yield
+    finally:
+        timing_cache._POLICY.reset(token)
+
+
+def _qualify_current_builtin_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make a synthetic packaged contract exact for the current test graph."""
+
+    contract_id = timing_cache._BUILTIN_TARGETS[_L4_RUNTIME.signature]
+    monkeypatch.setattr(
+        timing_cache,
+        "_BUILTIN_GRAPH_FINGERPRINTS",
+        {contract_id: dict(_graph_contracts()["engines"])},
+    )
+
+
 def _write_contract(
     root: Path,
     *,
@@ -264,6 +289,7 @@ def _install_builtin_contract(
             }
         },
     )
+    _qualify_current_builtin_graphs(monkeypatch)
 
 
 def _build(
@@ -425,11 +451,28 @@ def test_default_l4_qualified_vision_noncanonical_graph_builds_normally(
     assert config.created_payloads == []
 
 
-def test_default_matching_target_missing_assets_fails_closed(
+def test_default_matching_target_current_unqualified_graph_builds_normally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(timing_cache, "_runtime_metadata", lambda: _L4_RUNTIME)
     monkeypatch.setattr(timing_cache_data, "CONTRACTS", {})
+    builder = _FakeBuilder()
+    config = _FakeConfig()
+
+    plan = _build(builder, config)
+
+    assert plan == b"plan"
+    assert builder.calls == 1
+    assert config.flags == []
+    assert config.created_payloads == []
+
+
+def test_default_matching_target_qualified_graph_missing_assets_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(timing_cache, "_runtime_metadata", lambda: _L4_RUNTIME)
+    monkeypatch.setattr(timing_cache_data, "CONTRACTS", {})
+    _qualify_current_builtin_graphs(monkeypatch)
 
     with pytest.raises(RuntimeError, match="packaged.*contract is missing"):
         _build(_FakeBuilder(), _FakeConfig())
@@ -464,7 +507,7 @@ def test_verified_cache_rejects_digest_before_tensorrt_attach(
     config = _FakeConfig()
     policy = timing_cache.Sam3TimingCachePolicy("verified", directory)
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         with pytest.raises(RuntimeError, match="SHA-256 mismatch"):
             _build(_FakeBuilder(), config)
 
@@ -481,7 +524,7 @@ def test_verified_cache_rejects_tactic_fingerprint(
     config = _FakeConfig()
     policy = timing_cache.Sam3TimingCachePolicy("verified", directory)
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         with pytest.raises(RuntimeError, match="tactic fingerprint mismatch"):
             _build(_FakeBuilder(), config)
 
@@ -498,7 +541,7 @@ def test_verified_cache_preserves_tensorrt_native_compatibility_rejection(
     config = _FakeConfig(accept_cache=False)
     policy = timing_cache.Sam3TimingCachePolicy("verified", directory)
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         with pytest.raises(RuntimeError, match="TensorRT rejected verified"):
             _build(_FakeBuilder(), config)
 
@@ -514,7 +557,7 @@ def test_verified_cache_rejects_post_build_tactic_change(
     monkeypatch.setattr(timing_cache, "_runtime_metadata", lambda: _L4_RUNTIME)
     policy = timing_cache.Sam3TimingCachePolicy("verified", directory)
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         with pytest.raises(RuntimeError, match=r"added=0, removed=0, changed=1"):
             _build(_FakeBuilder(mutate_tactic=True), _FakeConfig())
 
@@ -526,7 +569,7 @@ def test_verified_cache_rejects_graph_profile_change(
     monkeypatch.setattr(timing_cache, "_runtime_metadata", lambda: _L4_RUNTIME)
     policy = timing_cache.Sam3TimingCachePolicy("verified", directory)
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         with pytest.raises(RuntimeError, match="graph contract mismatch"):
             timing_cache.build_sam3_serialized_network(
                 _FakeBuilder(),
@@ -554,7 +597,7 @@ def test_verified_isolated_vision_inventory_replays_strictly(
     config = _FakeConfig()
     policy = timing_cache.Sam3TimingCachePolicy("verified", directory)
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         plan = _build(builder, config, engine_kind="vision-encoder")
 
     assert plan == b"plan"
@@ -599,7 +642,7 @@ def test_explicit_verified_policy_rejects_target_mismatch(
     monkeypatch.setattr(timing_cache, "_runtime_metadata", lambda: _RTX_5090_RUNTIME)
     policy = timing_cache.Sam3TimingCachePolicy("verified", directory)
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         with pytest.raises(RuntimeError, match="target mismatch"):
             _build(_FakeBuilder(), _FakeConfig(), engine_kind="core")
 
@@ -619,16 +662,16 @@ def test_context_override_disables_and_restores_default(
     builder = _FakeBuilder()
     policy = timing_cache.Sam3TimingCachePolicy("off")
 
-    with timing_cache.use_sam3_timing_cache(policy):
+    with _policy_scope(policy):
         assert _build(builder, _FakeConfig(), engine_kind="core") == b"plan"
     assert runtime_calls == 0
 
-    with pytest.raises(RuntimeError, match="packaged.*contract is missing"):
-        _build(builder, _FakeConfig(), engine_kind="core")
+    assert _build(builder, _FakeConfig(), engine_kind="core") == b"plan"
     assert runtime_calls == 1
 
 
 def test_policy_validation_and_engine_inventory_are_fail_closed() -> None:
+    assert not hasattr(timing_cache, "use_sam3_timing_cache")
     with pytest.raises(ValueError, match="requires a directory"):
         timing_cache.Sam3TimingCachePolicy("verified").validate()
     with pytest.raises(ValueError, match="unknown.*mode"):
@@ -948,7 +991,7 @@ def test_packaged_cache_payloads_match_manifest_hashes() -> None:
     assert len(provenance["qualified_source_base_commit"]) == 40
     assert provenance["qualified_target"] == contract["manifest"]["target"]
     assert provenance["qualified_graph_contract"] == contract["manifest"]["graph_contract"]
-    assert contract["manifest"]["graph_contract"] == {
+    current_graph_contract = {
         "algorithm": timing_cache._GRAPH_CONTRACT_ALGORITHM,
         "engines": {
             engine_kind: timing_cache._graph_contract_fingerprint(engine_kind, graph_profile)
@@ -958,6 +1001,7 @@ def test_packaged_cache_payloads_match_manifest_hashes() -> None:
     assert contract["manifest"]["graph_contract"]["engines"] == dict(
         timing_cache._BUILTIN_GRAPH_FINGERPRINTS[contract_id]
     )
+    assert current_graph_contract["engines"] != contract["manifest"]["graph_contract"]["engines"]
     for engine_kind in timing_cache._BUILTIN_ENGINE_KINDS[contract_id]:
         payload = base64.b64decode(contract["payloads"][engine_kind], validate=True)
         manifest_entry = contract["manifest"]["engines"][engine_kind]

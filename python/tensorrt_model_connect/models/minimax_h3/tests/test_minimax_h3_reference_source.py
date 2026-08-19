@@ -57,7 +57,7 @@ def _git_checkout(tmp_path: Path) -> tuple[Path, str]:
 
 
 def test_minimax_h3_declares_exact_diffusers_reference_cache() -> None:
-    manifest_path = MODEL_DIR / "MODEL.toml"
+    manifest_path = MODEL_DIR.parent / "MODEL.toml"
     manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["model_reference_cache"] == {

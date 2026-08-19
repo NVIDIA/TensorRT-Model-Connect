@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -57,6 +58,24 @@ def test_gpt_neo_plugin_routes_parallel_builds(monkeypatch) -> None:
     assert result == b"gpt-tp-plan"
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 23
-    assert kwargs["parallel_config"] == parallel
-    assert kwargs["mlp_type"] == "gelu_fc"
-    assert kwargs["verbose"] is True
+    assert kwargs == {
+        "precision": "fp32",
+        "quant_ctx": None,
+        "attention_layer_types": ("global",),
+        "local_attention_window": 0,
+        "verbose": True,
+        "parallel_config": parallel,
+    }
+
+
+def test_gpt_neo_tp_builder_keeps_fixed_gelu_new_fc_mlp() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.models.gpt_neo.default_dual_profile_decoder_tp"
+    )
+
+    assert "mlp_type" not in inspect.signature(
+        module.build_dual_profile_tp_decoder_engine
+    ).parameters
+    source = inspect.getsource(module._gelu_fc_mlp)
+    assert ".w_fc1" in source and ".w_fc2" in source
+    assert "add_activation" in source and "'gelu_new'" in source

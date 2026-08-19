@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -58,6 +59,41 @@ def test_olmo_plugin_routes_parallel_builds(monkeypatch) -> None:
     assert result == b"olmo-tp-plan"
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 23
-    assert kwargs["parallel_config"] == parallel
-    assert kwargs["norm_type"] == "layernorm"
-    assert kwargs["verbose"] is True
+    assert kwargs == {
+        "precision": "fp32",
+        "quant_ctx": None,
+        "verbose": True,
+        "parallel_config": parallel,
+    }
+
+
+def test_olmo_builders_use_fixed_layernorm_specialization() -> None:
+    modules_and_builders = (
+        (
+            "tensorrt_model_connect.models.olmo.default_decoder",
+            "build_standard_decoder_engine",
+            "graph_ops.add_layer_norm_native(",
+            None,
+        ),
+        (
+            "tensorrt_model_connect.models.olmo.default_dual_profile_decoder",
+            "build_dual_profile_decoder_engine",
+            "_norm_multi(",
+            "'layernorm'",
+        ),
+        (
+            "tensorrt_model_connect.models.olmo.dual_profile_decoder_tp_builder",
+            "build_dual_profile_tp_decoder_engine",
+            "_norm_multi(",
+            "'layernorm'",
+        ),
+    )
+
+    for module_name, builder_name, layernorm_call, fixed_argument in modules_and_builders:
+        builder = getattr(importlib.import_module(module_name), builder_name)
+        assert "norm_type" not in inspect.signature(builder).parameters
+        source = inspect.getsource(builder)
+        assert layernorm_call in source
+        if fixed_argument is not None:
+            assert fixed_argument in source
+        assert "'rmsnorm'" not in source
