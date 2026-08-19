@@ -21,7 +21,7 @@ trt = pytest.importorskip(
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.models.qwen3_5 as qwen3_5
+    import tensorrt_model_connect.models.qwen3_5.model as qwen3_5
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 

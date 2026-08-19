@@ -19,7 +19,6 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.models.nemotron_h as nemotron_h
     import tensorrt_model_connect.models.nemotron_h.model as plugin
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
@@ -32,16 +31,16 @@ def _seq(*shape: int, start: int = 0) -> np.ndarray:
 
 def _patch_tensor_io(monkeypatch: pytest.MonkeyPatch,
                      tensor_map: dict[str, np.ndarray]) -> None:
-    monkeypatch.setattr(nemotron_h, "_open_safetensors", lambda _: ["reader"])
+    monkeypatch.setattr(plugin, "_open_safetensors", lambda _: ["reader"])
     monkeypatch.setattr(
-        nemotron_h, "_has_tensor", lambda _readers, name: name in tensor_map)
+        plugin, "_has_tensor", lambda _readers, name: name in tensor_map)
 
     def _load(_readers, name: str):
         if name not in tensor_map:
             raise KeyError(name)
         return tensor_map[name]
 
-    monkeypatch.setattr(nemotron_h, "_load_tensor", _load)
+    monkeypatch.setattr(plugin, "_load_tensor", _load)
 
 
 def test_parse_layer_types_maps_and_filters_pattern_chars():
@@ -49,7 +48,7 @@ def test_parse_layer_types_maps_and_filters_pattern_chars():
     Preconditions: pattern includes valid markers and unrelated characters.
     Postconditions: only valid markers are retained and mapped to canonical layer names.
     """
-    parsed = nemotron_h._parse_layer_types("M-x*-M")
+    parsed = plugin._parse_layer_types("M-x*-M")
     assert parsed == ["mamba2", "mlp", "attention", "mlp", "mamba2"]
 
 
@@ -163,7 +162,7 @@ def test_load_weights_raises_for_pattern_length_mismatch(
         num_key_value_heads=2,
         raw={"hybrid_override_pattern": "M-"},
     )
-    monkeypatch.setattr(nemotron_h, "_open_safetensors", lambda _: ["reader"])
+    monkeypatch.setattr(plugin, "_open_safetensors", lambda _: ["reader"])
 
     with pytest.raises(AssertionError, match="Pattern length"):
         plugin.load_weights("/unused", cfg)
