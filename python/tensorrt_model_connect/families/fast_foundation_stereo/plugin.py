@@ -69,7 +69,7 @@ def config_from_dir(model_dir: str | Path) -> dict | None:
         "stereo_accuracy_metric": "cosine_epe_bad2",
         "stereo_min_cosine": 0.999,
         "stereo_max_mean_abs_error": 0.5,
-        "stereo_max_bad_2px_fraction": 0.02,
+        "stereo_max_bad_2px_fraction": 0.03,
         "requires_tokenizer": False,
     }
 

@@ -209,7 +209,8 @@ class ImageFeatureExtractionComparator:
             composite_rule=(
                 "exact shapes/counts/pooler invariant and finite tensors; "
                 "full, CLS, register, mean-patch cosine >= 0.999; "
-                "p01 patch cosine >= 0.995; relative Frobenius <= 0.01"
+                "p01 patch cosine >= 0.995; relative Frobenius <= "
+                f"{_threshold(threshold, 'relative_frobenius'):g}"
             ),
             message=(
                 f"DINOv3 semantic parity: full_cos={full_cosine:.8f}, "

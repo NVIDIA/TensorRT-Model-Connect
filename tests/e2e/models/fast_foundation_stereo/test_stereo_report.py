@@ -91,7 +91,7 @@ def _result(artifact_dir: Path, *, status: str = "pass") -> dict:
                     },
                     "bad_2px_fraction": {
                         "value": 0.0,
-                        "threshold": 0.02,
+                        "threshold": 0.03,
                         "operator": "<=",
                         "passed": True,
                     },
@@ -138,7 +138,7 @@ def test_stereo_report_is_deterministic_and_marks_failed_metrics(tmp_path: Path)
     assert first == second
     assert "FAIL" in first
     assert 'class="fail"' in first
-    assert "bad-2px 0.5 &lt;= 0.02" in first
+    assert "bad-2px 0.5 &lt;= 0.03" in first
 
 
 def test_stereo_report_fails_closed_for_missing_or_malformed_artifacts(

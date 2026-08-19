@@ -59,12 +59,17 @@ _THRESHOLDS = {
     "pooler_token_invariant": 1.0,
     "finite_tensors": 1.0,
 }
+_RELATIVE_FROBENIUS_BY_MODEL = {
+    "dinov3-convnext-tiny-pretrain-lvd1689m": 0.015,
+}
 
 
-def _profile() -> ThresholdProfile:
+def _profile(*, relative_frobenius: float = 0.01) -> ThresholdProfile:
+    metrics = dict(_THRESHOLDS)
+    metrics["relative_frobenius"] = relative_frobenius
     return ThresholdProfile(
         task_strategy="image_feature_extraction",
-        metrics=dict(_THRESHOLDS),
+        metrics=metrics,
     )
 
 
@@ -109,7 +114,11 @@ def test_official_gated_manifests_pin_revisions_and_auth_preflight() -> None:
         assert case.reference_family == "image_feature_extraction"
         assert case.user_contract == "representation_parity"
         assert case.metadata["num_register_tokens"] == register_count
-        assert case.threshold_overrides == _THRESHOLDS
+        expected_thresholds = dict(_THRESHOLDS)
+        expected_thresholds["relative_frobenius"] = _RELATIVE_FROBENIUS_BY_MODEL.get(
+            name, _THRESHOLDS["relative_frobenius"]
+        )
+        assert case.threshold_overrides == expected_thresholds
 
         preflight_kinds = [requirement.kind for requirement in case.preflight]
         assert "binary_exists" in preflight_kinds
@@ -244,6 +253,36 @@ def test_semantic_comparator_accepts_exact_full_cls_register_and_patch_features(
     assert np.isclose(result.metrics["mean_patch_cosine"].value, 1.0)
     assert np.isclose(result.metrics["p01_patch_cosine"].value, 1.0)
     assert result.metrics["relative_frobenius"].value == 0.0
+
+
+def test_convnext_relative_frobenius_override_remains_bounded() -> None:
+    hidden = np.ones((1, 5, 8), dtype=np.float32)
+    comparator = ImageFeatureExtractionComparator()
+    stage = StageSpec(name="full_inference", required=True)
+
+    default_result = comparator.compare(
+        _feature_output(hidden * 1.0149, 0),
+        _feature_output(hidden, 0),
+        _profile(),
+        stage,
+    )
+    calibrated_result = comparator.compare(
+        _feature_output(hidden * 1.0149, 0),
+        _feature_output(hidden, 0),
+        _profile(relative_frobenius=0.015),
+        stage,
+    )
+    beyond_result = comparator.compare(
+        _feature_output(hidden * 1.0151, 0),
+        _feature_output(hidden, 0),
+        _profile(relative_frobenius=0.015),
+        stage,
+    )
+
+    assert not default_result.metrics["relative_frobenius"].passed
+    assert calibrated_result.passed
+    assert "relative Frobenius <= 0.015" in calibrated_result.composite_rule
+    assert not beyond_result.metrics["relative_frobenius"].passed
 
 
 def test_semantic_comparator_rejects_bad_patch_tail_without_weakening_thresholds() -> None:

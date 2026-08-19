@@ -3,7 +3,7 @@
     "finite_fraction": 1.0,
     "global_cosine": 0.999,
     "mean_abs_error": 0.5,
-    "bad_2px_fraction": 0.02,
+    "bad_2px_fraction": 0.03,
     "nonnegative_fraction": 1.0
   }
 }

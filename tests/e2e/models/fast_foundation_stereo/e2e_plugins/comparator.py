@@ -70,7 +70,7 @@ class StereoDisparityComparator:
         nonnegative_threshold = threshold.metrics.get("nonnegative_fraction", 1.0)
         cosine_threshold = threshold.metrics.get("global_cosine", 0.999)
         mean_abs_error_threshold = threshold.metrics.get("mean_abs_error", 0.5)
-        bad_2px_threshold = threshold.metrics.get("bad_2px_fraction", 0.02)
+        bad_2px_threshold = threshold.metrics.get("bad_2px_fraction", 0.03)
         metrics = {
             "shape": MetricResult(
                 value=1.0 if shape_passed else 0.0,

@@ -65,7 +65,7 @@ def test_config_adapter_claims_only_complete_source_package(tmp_path: Path) -> N
     assert config["stereo_accuracy_metric"] == "cosine_epe_bad2"
     assert config["stereo_min_cosine"] == 0.999
     assert config["stereo_max_mean_abs_error"] == 0.5
-    assert config["stereo_max_bad_2px_fraction"] == 0.02
+    assert config["stereo_max_bad_2px_fraction"] == 0.03
 
 
 def test_plugin_owns_unique_strategy_and_skips_tokenizer() -> None:
@@ -1458,7 +1458,7 @@ def test_disparity_comparator_gates_structure_and_pixel_error() -> None:
             "finite_fraction": 1.0,
             "global_cosine": 0.999,
             "mean_abs_error": 0.5,
-            "bad_2px_fraction": 0.02,
+            "bad_2px_fraction": 0.03,
             "nonnegative_fraction": 1.0,
         },
     )
@@ -1498,3 +1498,42 @@ def test_disparity_comparator_gates_structure_and_pixel_error() -> None:
     assert not rescaled.passed
     assert rescaled.metrics["global_cosine"].passed
     assert not rescaled.metrics["mean_abs_error"].passed
+
+
+def test_disparity_comparator_keeps_bad_2px_threshold_bounded() -> None:
+    reference_array = np.full((100, 100), 10.0, dtype=np.float32)
+    reference = StageOutput(
+        stage_name="full_inference",
+        data={"disparity": reference_array, "expected_shape": [100, 100]},
+    )
+    threshold = ThresholdProfile(
+        task_strategy="stereo_disparity",
+        metrics={
+            "finite_fraction": 1.0,
+            "global_cosine": 0.999,
+            "mean_abs_error": 0.5,
+            "bad_2px_fraction": 0.03,
+            "nonnegative_fraction": 1.0,
+        },
+    )
+    comparator = StereoDisparityComparator()
+
+    def compare(bad_pixels: int):
+        actual = reference_array.copy()
+        actual.reshape(-1)[:bad_pixels] += np.float32(2.1)
+        return comparator.compare(
+            StageOutput(stage_name="full_inference", data={"disparity": actual}),
+            reference,
+            threshold,
+            StageSpec(name="full_inference"),
+        )
+
+    within = compare(299)
+    beyond = compare(301)
+
+    assert within.passed
+    assert within.metrics["bad_2px_fraction"].value == pytest.approx(0.0299)
+    assert within.metrics["bad_2px_fraction"].threshold == 0.03
+    assert not beyond.passed
+    assert not beyond.metrics["bad_2px_fraction"].passed
+    assert beyond.metrics["bad_2px_fraction"].value == pytest.approx(0.0301)

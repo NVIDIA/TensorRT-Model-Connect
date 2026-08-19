@@ -52,7 +52,9 @@ def test_native_plugin_builder_caches_the_standalone_dso(
     assert first == second
     assert first.read_bytes() == b"plugin"
     assert [command[1] for command in calls] == ["-S", "--build"]
-    assert Path(calls[0][2]) == _PLUGIN_DIR
+    plugin_source = Path(calls[0][2])
+    assert plugin_source.name == "native_plugins"
+    assert (plugin_source / "CMakeLists.txt").is_file()
     assert f"-DCMAKE_CUDA_ARCHITECTURES={cuda_architectures}" in calls[0]
 
 
