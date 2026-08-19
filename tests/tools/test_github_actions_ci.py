@@ -27,6 +27,26 @@ from tools.ci.stage import ContainerStageRunner
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def test_ci_module_bootstraps_the_source_python_package() -> None:
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import tools.ci.__main__; import tensorrt_model_connect",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def _write_fake_jq(fake_bin: Path) -> None:
     fake_jq = fake_bin / "jq"
     fake_jq.write_text(

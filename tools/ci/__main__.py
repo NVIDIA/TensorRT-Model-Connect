@@ -16,6 +16,12 @@ from pathlib import Path
 from .process import CiError
 
 
+REPOSITORY = Path(__file__).resolve().parents[2]
+PYTHON_ROOT = REPOSITORY / "python"
+if str(PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(PYTHON_ROOT))
+
+
 class CiCommand:
     """Parse a small, explicit command tree and dispatch to the matching class."""
 
