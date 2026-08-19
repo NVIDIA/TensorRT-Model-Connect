@@ -1365,26 +1365,36 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert entry["sha256"] == hashlib.sha256(expected).hexdigest()
 
 
-def test_projection_closes_validation_module_imports() -> None:
-    projected = set(model_ci.PLATFORM_PROJECTION_EXACT)
-    dependencies = {"tools/validation/__init__.py"}
+def test_projection_closes_shared_tool_imports() -> None:
+    projected_python = [
+        source
+        for source in REPO_ROOT.rglob("*.py")
+        if model_ci._is_platform_projection_path(
+            source.relative_to(REPO_ROOT).as_posix()
+        )
+    ]
+    missing: set[str] = set()
 
-    for relative in projected:
-        source = REPO_ROOT / relative
-        if source.suffix != ".py" or not source.is_file():
-            continue
+    for source in projected_python:
         for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.ImportFrom) or node.module is None:
-                continue
-            if node.module == "tools.validation":
-                for imported in node.names:
-                    candidate = f"tools/validation/{imported.name}.py"
-                    if (REPO_ROOT / candidate).is_file():
-                        dependencies.add(candidate)
-            elif node.module.startswith("tools.validation."):
-                dependencies.add(node.module.replace(".", "/") + ".py")
+            modules: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                if node.module == "tools":
+                    modules.extend(f"tools.{item.name}" for item in node.names)
+                elif node.module.startswith("tools."):
+                    modules.append(node.module)
+            elif isinstance(node, ast.Import):
+                modules.extend(
+                    item.name for item in node.names if item.name.startswith("tools.")
+                )
+            for module in modules:
+                candidate = module.replace(".", "/") + ".py"
+                if (REPO_ROOT / candidate).is_file() and not model_ci._is_platform_projection_path(
+                    candidate
+                ):
+                    missing.add(candidate)
 
-    assert dependencies <= projected
+    assert missing == set()
 
 
 def test_projection_includes_only_the_selected_family_adapter_subtrees(
