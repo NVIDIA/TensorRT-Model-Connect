@@ -168,6 +168,7 @@ test('collects support inventory from repository metadata', (context) => {
       'TextResult AlphaPipeline::generate(const std::string& prompt, const GenerateConfig& cfg) {',
       '  auto token_limit = cfg.max_new_tokens;',
       '  auto temperature = cfg.temperature;',
+      '  auto repetition_penalty = cfg.repetition_penalty;',
       '  return {};',
       '}',
       '',
@@ -308,14 +309,15 @@ test('collects support inventory from repository metadata', (context) => {
   assert.equal(alphaContract.command, 'run');
   assert.equal(
     alphaContract.syntax,
-    'trtmc run <bundle.bundle> --prompt "<text>" [generation options]'
+    'trtmc run <bundle.bundle> (--prompt "<text>" | --prompts-file <PATH>) [generation options]'
   );
   assert.ok(!alphaContract.syntax.includes('--image'));
   assert.deepEqual(
     alphaContract.options.map((entry) => entry.flag),
     [
-      '--prompt <TEXT>', '--max-new-tokens <N>', '--temperature <F>', '--greedy',
-      '--num-samples <N>', '--output <PATH>', '--benchmark <N>', '--warmup <N>',
+      '--prompt <TEXT>', '--prompts-file <PATH>', '--max-new-tokens <N>',
+      '--temperature <F>', '--repetition-penalty <F>', '--greedy', '--num-samples <N>',
+      '--output <PATH>', '--benchmark <N>', '--warmup <N>',
     ]
   );
   assert.deepEqual(alphaContract.runtimeOwners, ['alpha']);
@@ -370,4 +372,110 @@ test('derives image input and generation options from runtime code', (context) =
   assert.deepEqual(textOnly.generateConfigFields, ['max_new_tokens']);
   assert.equal(visionLanguage.textImageInput, true);
   assert.deepEqual(visionLanguage.generateConfigFields, []);
+});
+
+test('publishes LFM2 profiles in model recipes and the website sidebar', () => {
+  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+  const inventory = collectModelSupportInventory(repoRoot);
+  const family = inventory.familyRecipes.find((entry) => entry.family === 'lfm2');
+
+  assert.ok(family, 'missing LFM2 family recipe');
+  assert.equal(family.slug, 'lfm2');
+  assert.deepEqual(
+    family.profiles.map((profile) => profile.profile),
+    [
+      'lfm2-1.2b',
+      'lfm2-2.6b',
+      'lfm2-350m-bf16-model-card',
+      'lfm2-350m-fp16',
+      'lfm2-700m',
+    ]
+  );
+  assert.deepEqual(
+    [...new Set(family.profiles.map((profile) => profile.hfId))].sort(),
+    [
+      'LiquidAI/LFM2-1.2B',
+      'LiquidAI/LFM2-2.6B',
+      'LiquidAI/LFM2-350M',
+      'LiquidAI/LFM2-700M',
+    ]
+  );
+  assert.ok(
+    family.profiles.every(
+      (profile) =>
+        profile.hfModelType === 'lfm2' &&
+        profile.hfArchitectures.includes('Lfm2ForCausalLM') &&
+        profile.runtimeStrategy === 'lfm2_hybrid_conv_attention' &&
+        /^[0-9a-f]{40}$/.test(profile.revision)
+    )
+  );
+
+  const textGeneration = inventory.taskRecipes.find(
+    (task) => task.slug === 'text-generation'
+  );
+  const taskFamily = textGeneration?.families.find(
+    (entry) => entry.family === 'lfm2'
+  );
+  assert.deepEqual(taskFamily, {
+    family: 'lfm2',
+    slug: 'lfm2',
+    recipeCount: 5,
+    hfIds: [
+      'LiquidAI/LFM2-1.2B',
+      'LiquidAI/LFM2-2.6B',
+      'LiquidAI/LFM2-350M',
+      'LiquidAI/LFM2-700M',
+    ],
+    cliCommands: ['run'],
+  });
+
+  const runContract = family.commandContracts.find(
+    (contract) => contract.command === 'run'
+  );
+  assert.equal(
+    runContract?.syntax,
+    'trtmc run <bundle.bundle> (--prompt "<text>" | --prompts-file <PATH>) [generation options]'
+  );
+  assert.ok(
+    runContract.options.some(
+      (entry) => entry.flag === '--repetition-penalty <F>'
+    )
+  );
+  assert.ok(
+    runContract.options.some((entry) => entry.flag === '--prompts-file <PATH>')
+  );
+  assert.ok(
+    !runContract.options.some((entry) => entry.flag === '--no-thinking')
+  );
+
+  const depthEstimation = inventory.taskRecipes.find(
+    (task) => task.slug === 'depth-estimation'
+  );
+  assert.ok(
+    depthEstimation?.families.some(
+      (entry) =>
+        entry.family === 'fast_foundation_stereo' &&
+        entry.cliCommands.includes('disparity')
+    )
+  );
+
+  const sidebar = require(path.join(repoRoot, 'website', 'sidebars.js'));
+  const modelsCategory = sidebar.docs.find(
+    (item) => item && typeof item === 'object' && item.label === 'Models & Recipes'
+  );
+  const recipesCategory = modelsCategory?.items.find(
+    (item) => item.label === 'Model Recipes'
+  );
+  const textGenerationCategory = recipesCategory?.items.find(
+    (item) => item.label === 'Text Generation'
+  );
+  const lfm2Link = textGenerationCategory?.items.find(
+    (item) => item.label === 'lfm2'
+  );
+  assert.deepEqual(lfm2Link, {
+    type: 'link',
+    label: 'lfm2',
+    href: '/models-recipes/model-recipes/families/lfm2',
+    autoAddBaseUrl: true,
+  });
 });

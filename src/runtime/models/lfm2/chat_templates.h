@@ -10,7 +10,6 @@
 namespace trtmc {
 
 std::string lfm2_detect_chat_template_format(const std::string& jinja_template);
-std::string lfm2_apply_chat_template(const std::string& format, const std::string& prompt,
-                                     bool enable_thinking = true);
+std::string lfm2_apply_chat_template(const std::string& format, const std::string& prompt);
 
 } // namespace trtmc

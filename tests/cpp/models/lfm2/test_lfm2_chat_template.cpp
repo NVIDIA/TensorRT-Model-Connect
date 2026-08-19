@@ -30,12 +30,9 @@ int main() {
 
     const std::string expected = "<|startoftext|><|im_start|>user\nWho are you?<|im_end|>\n"
                                  "<|im_start|>assistant\n";
-    check(trtmc::lfm2_apply_chat_template("chatml", "Who are you?", true) == expected,
+    check(trtmc::lfm2_apply_chat_template("chatml", "Who are you?") == expected,
           "renders exact official single-user template");
-    check(trtmc::lfm2_apply_chat_template("chatml", "Who are you?", false) == expected,
-          "does not inject thinking markup");
     check(expected.find("system") == std::string::npos, "does not inject a system prompt");
-    check(trtmc::lfm2_apply_chat_template("", "raw", false) == "raw",
-          "leaves raw prompts unchanged");
+    check(trtmc::lfm2_apply_chat_template("", "raw") == "raw", "leaves raw prompts unchanged");
     return failures;
 }

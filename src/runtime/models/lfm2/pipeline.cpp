@@ -58,8 +58,7 @@ std::vector<int32_t> Lfm2TextGenerationPipeline::encode_prompt(const std::string
         throw std::runtime_error("Lfm2TextGenerationPipeline: no native tokenizer configured");
     std::string effective = prompt;
     if (cfg.use_chat_template && !config_.chat_template_format.empty()) {
-        effective =
-            lfm2_apply_chat_template(config_.chat_template_format, prompt, cfg.enable_thinking);
+        effective = lfm2_apply_chat_template(config_.chat_template_format, prompt);
     }
     auto ids = tokenizer_->encode(effective);
 

@@ -64,6 +64,13 @@ const HF_TASKS = [
     hfUrl: 'https://huggingface.co/tasks/image-feature-extraction',
   },
   {
+    slug: 'depth-estimation',
+    label: 'Depth Estimation',
+    category: 'Computer Vision',
+    description: 'Stereo models that estimate dense disparity or depth from image pairs.',
+    hfUrl: 'https://huggingface.co/tasks/depth-estimation',
+  },
+  {
     slug: 'image-segmentation',
     label: 'Image Segmentation',
     category: 'Computer Vision',
@@ -148,6 +155,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   segmentation: ['segment'],
   speech_to_speech: ['speak'],
   speech_to_text: ['transcribe'],
+  stereo_disparity: ['disparity'],
   text_generation_causal: ['run'],
   text_to_audio: ['generate-audio'],
   vision_language_generation: ['run'],
@@ -314,6 +322,8 @@ function hfTasksForManifest(manifest) {
       return ['image-classification'];
     case 'image_feature_extraction':
       return ['image-feature-extraction'];
+    case 'stereo_disparity':
+      return ['depth-estimation'];
     case 'segmentation':
       return ['image-segmentation'];
     case 'prompted_segmentation':
@@ -547,6 +557,10 @@ const GENERATE_CONFIG_OPTIONS = {
     flag: '--min-p <F>',
     description: 'Filter tokens below min-p times the maximum probability.',
   },
+  repetition_penalty: {
+    flag: '--repetition-penalty <F>',
+    description: 'Penalize tokens that already appear in the prompt or generated sequence.',
+  },
   seed: {
     flag: '--seed <N>',
     description: 'Set the sampling or diffusion seed.',
@@ -642,7 +656,7 @@ const GENERATE_CONFIG_OPTIONS = {
 };
 
 const CAUSAL_GENERATION_FIELDS = [
-  'max_new_tokens', 'temperature', 'top_k', 'top_p', 'min_p', 'seed',
+  'max_new_tokens', 'temperature', 'top_k', 'top_p', 'min_p', 'repetition_penalty', 'seed',
   'use_chat_template', 'enable_thinking', 'lora_adapter_id',
   'source_language_token_id', 'forced_bos_token_id',
 ];
@@ -937,16 +951,17 @@ function commandContractForProfile(profile, capability) {
       return {
         command: 'run',
         purpose: 'Generate text from a text prompt.',
-        syntax: 'trtmc run <bundle.bundle> --prompt "<text>" [generation options]',
+        syntax: 'trtmc run <bundle.bundle> (--prompt "<text>" | --prompts-file <PATH>) [generation options]',
         options: [
-          option('--prompt <TEXT>', 'Required', 'Text input for this causal language-model recipe.'),
+          option('--prompt <TEXT>', 'Required unless --prompts-file is set', 'One text input for this causal language-model recipe.'),
+          option('--prompts-file <PATH>', 'Required unless --prompt is set', 'Read one text prompt per line and emit one JSON Lines record per sample.'),
           ...generateOptions(capability, CAUSAL_GENERATION_FIELDS),
           ...(capability.generateConfigFields.includes('temperature')
             ? [option('--greedy', 'Optional', 'Select deterministic greedy decoding by setting temperature to zero.')]
             : []),
-          option('--num-samples <N>', 'Optional', 'Run N independent text generations.'),
+          option('--num-samples <N>', 'Optional', 'Run N independent generations for each prompt.'),
           option('--output <PATH>', 'Optional', 'Write generated samples as JSON Lines.'),
-          option('--benchmark <N>', 'Optional', 'Run N timed generation iterations.'),
+          option('--benchmark <N>', 'Optional with --prompt only', 'Run N timed generation iterations.'),
           option('--warmup <N>', 'Optional with --benchmark', 'Warm-up iterations before generation timing.'),
         ],
         evidence,
@@ -1070,6 +1085,18 @@ function commandContractForProfile(profile, capability) {
         options: [
           option('--image <PATH>', 'Required', 'Image input consumed by extract_image_features().'),
           option('--output-json <PATH>', 'Optional', 'Write feature tensors and shapes as JSON.'),
+        ],
+        evidence,
+      };
+    case 'stereo_disparity':
+      return {
+        command: 'disparity',
+        purpose: 'Estimate dense disparity from a rectified stereo image pair.',
+        syntax: 'trtmc disparity <bundle.bundle> --image <left.png> --right-image <right.png> [--output <disparity.f32>]',
+        options: [
+          option('--image <PATH>', 'Required', 'Left rectified stereo image.'),
+          option('--right-image <PATH>', 'Required', 'Right rectified stereo image.'),
+          option('--output <PATH>', 'Optional', 'Output path for row-major float32 disparity values.'),
         ],
         evidence,
       };

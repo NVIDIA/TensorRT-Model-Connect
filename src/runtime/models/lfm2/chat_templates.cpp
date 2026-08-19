@@ -15,9 +15,7 @@ std::string lfm2_detect_chat_template_format(const std::string& jinja_template) 
     return {};
 }
 
-std::string lfm2_apply_chat_template(const std::string& format, const std::string& prompt,
-                                     bool enable_thinking) {
-    (void)enable_thinking;
+std::string lfm2_apply_chat_template(const std::string& format, const std::string& prompt) {
     if (format != "chatml")
         return prompt;
     // The source template supplies bos_token before the first role. Native

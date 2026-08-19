@@ -21,9 +21,9 @@ const BUNDLE_CLI_REFERENCE = {
 };
 
 const COMMAND_ORDER = [
-  'build', 'run', 'encode', 'embed', 'rerank', 'classify', 'segment',
-  'segment-prompted', 'generate-audio', 'generate-video', 'transcribe',
-  'speak', 'solve', 'inspect',
+  'build', 'run', 'encode', 'embed', 'rerank', 'classify', 'extract-features',
+  'disparity', 'segment', 'segment-prompted', 'generate-audio', 'generate-video',
+  'transcribe', 'speak', 'solve', 'inspect',
 ];
 
 function parallelLabel(profile) {

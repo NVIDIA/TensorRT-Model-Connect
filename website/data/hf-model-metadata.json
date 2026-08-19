@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "snapshot_date": "2026-08-17",
+  "snapshot_date": "2026-08-19",
   "purpose": "Documentation metadata only; checkpoint qualification remains defined by the README release row and E2E manifest.",
   "checkpoints": [
     {
@@ -101,6 +101,50 @@
         "LTXPipeline"
       ],
       "architecture_source": "model_index._class_name"
+    },
+    {
+      "hf_id": "LiquidAI/LFM2-1.2B",
+      "revision": "40f3da0d0164913923aee9462c23077868b816a3",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "lfm2",
+      "architectures": [
+        "Lfm2ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "LiquidAI/LFM2-2.6B",
+      "revision": "36ed799f7024ef169ba92ffe184821835e15cc66",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "lfm2",
+      "architectures": [
+        "Lfm2ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "LiquidAI/LFM2-350M",
+      "revision": "f37d3f5c8c5484bc01dad379a595cf4c68c4e70e",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "lfm2",
+      "architectures": [
+        "Lfm2ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "LiquidAI/LFM2-700M",
+      "revision": "86f49fc9a3800c3a325b7320bde179c318062583",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "lfm2",
+      "architectures": [
+        "Lfm2ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
     },
     {
       "hf_id": "MiniMaxAI/MiniMax-H3",
@@ -631,6 +675,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "facebook/sam2.1-hiera-small",
+      "revision": "6c381d9c16faed5e8a7c4a2cd99918bdca8316e4",
+      "revision_source": "declared",
+      "metadata_file": "sam2.1_hiera_s.yaml",
+      "model_type": null,
+      "architectures": [
+        "sam2.modeling.sam2_base.SAM2Base"
+      ],
+      "architecture_source": "model._target_"
+    },
+    {
       "hf_id": "facebook/sam3",
       "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
       "revision_source": "resolved",
@@ -948,6 +1003,15 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "nvidia/c-fast-foundationstereo",
+      "revision": "9b446878c81ddb27593036767b29b2859d46103e",
+      "revision_source": "declared",
+      "metadata_file": "cfg.yaml",
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "nvidia/canary-1b-v2",
       "revision": "87bc52657add533cd0156b3fc1aef027280754bf",
       "revision_source": "resolved",
@@ -1184,6 +1248,17 @@
       "model_type": null,
       "architectures": [
         "vit_base_patch16_224"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/vit_small_patch16_dinov3_qkvb.lvd1689m",
+      "revision": "2c7705788ac282557562465d6443606664a55f05",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "vit_small_patch16_dinov3_qkvb"
       ],
       "architecture_source": "config.architecture"
     },
