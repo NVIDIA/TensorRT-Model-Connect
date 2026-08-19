@@ -1836,6 +1836,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_local_qwen3_fixture_scopes_to_qwen3",),
         ),
         ClassificationRule(
+            priority=454,
+            name="cosmos3_story_scene_example",
+            matcher=_path_startswith("examples/cosmos3_story_scene/"),
+            resolver=_match_result(
+                "cosmos3_story_scene_example",
+                _no_models,
+                ["tools"],
+                False,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_cosmos3_story_scene_example_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
             priority=455,
             name="cpp_example_tool",
             matcher=_regex_rule(r"examples/.+\.cpp$"),

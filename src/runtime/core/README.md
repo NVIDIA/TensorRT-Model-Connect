@@ -10,7 +10,10 @@ Key files:
   GPU-resident tensor allocation and copies.
 - `distributed_runtime.cpp` with
   `include/trtmc/runtime/distributed_runtime.h`: tensor-parallel environment
-  discovery and NCCL rendezvous.
+  discovery, local CUDA-device binding, and NCCL rendezvous. Global rank drives
+  collective position while launcher local rank selects the visible CUDA
+  device. Multi-node jobs require a unique, shared
+  `TRTMC_NCCL_RENDEZVOUS` path.
 - `pipeline_pool.cpp` with `include/trtmc/runtime/pipeline_pool.h`:
   concurrent pipeline leasing and pool-wide LoRA lifecycle.
 - `stb_impl.cpp`: stb implementation unit for public image I/O.

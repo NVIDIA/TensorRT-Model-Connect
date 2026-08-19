@@ -1,0 +1,361 @@
+<!--
+  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#090a10" />
+    <meta
+      name="description"
+      content="Cosmos Story Scene turns one creative brief into a 7.9-second social video using Cosmos 3 and TensorRT Model Connect."
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'"
+    />
+    <title>Cosmos Story Scene</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#story-form">Skip to the creative brief</a>
+
+    <div class="page-noise" aria-hidden="true"></div>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Cosmos Story Scene home">
+        <svg class="brand-mark" viewBox="0 0 44 44" aria-hidden="true">
+          <circle cx="22" cy="22" r="7"></circle>
+          <ellipse cx="22" cy="22" rx="19" ry="8"></ellipse>
+          <ellipse cx="22" cy="22" rx="8" ry="19" transform="rotate(42 22 22)"></ellipse>
+        </svg>
+        <span class="brand-type"><b>Cosmos</b> Story Scene</span>
+      </a>
+      <div class="system-pill" title="Generation runs on the server-side TensorRT pipeline">
+        <span class="system-dot" aria-hidden="true"></span>
+        <span>Cosmos 3 · TRT-MC</span>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span>01</span> One brief. One vivid story scene.</p>
+          <h1 id="hero-title">Direct the scene.<br /><em>Tell</em> the story.</h1>
+          <p class="hero-intro">
+            Direct a micro-story, hand it to Cosmos 3, and leave with a clean
+            landscape master plus a social-ready vertical cut.
+          </p>
+          <a class="text-link" href="#presets">Start with a creative spark <span aria-hidden="true">↘</span></a>
+        </div>
+
+        <div class="hero-orbit" aria-hidden="true">
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="planet">
+            <span class="planet-label">7.9</span>
+            <span class="planet-unit">seconds</span>
+          </div>
+          <span class="orbit-note note-one">1280 × 720 source</span>
+          <span class="orbit-note note-two">9:16 derived cut</span>
+          <span class="spark spark-one"></span>
+          <span class="spark spark-two"></span>
+          <span class="spark spark-three"></span>
+        </div>
+      </section>
+
+      <aside class="format-note" aria-label="Output format note">
+        <span class="format-note-mark" aria-hidden="true">✦</span>
+        <p>
+          <strong>Know the frame.</strong> Cosmos 3 generates one fixed
+          <b>7.9-second, 1280×720</b> landscape clip. Story Scene then derives the
+          9:16 social edit by reframing that source—it is not native vertical generation.
+        </p>
+      </aside>
+
+      <section class="preset-section" id="presets" aria-labelledby="preset-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow"><span>02</span> Creative jump-starts</p>
+            <h2 id="preset-title">Pick a story pattern. Shape the scene.</h2>
+          </div>
+          <p>Each preset rewrites the direction fields. Make it yours after the spark lands.</p>
+        </div>
+
+        <div class="preset-grid">
+          <button class="preset-card preset-lime" type="button" data-preset="impossible-asmr" aria-pressed="false">
+            <span class="preset-index">A / 01</span>
+            <span class="preset-art art-ripple" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="preset-name">Impossible<br />ASMR</span>
+            <span class="preset-description">Textures that should not make a sound—but somehow do.</span>
+            <span class="preset-action">Use recipe <span aria-hidden="true">→</span></span>
+          </button>
+
+          <button class="preset-card preset-violet" type="button" data-preset="pocket-universe" aria-pressed="false">
+            <span class="preset-index">B / 02</span>
+            <span class="preset-art art-orb" aria-hidden="true"><i></i></span>
+            <span class="preset-name">Pocket<br />Universe</span>
+            <span class="preset-description">A whole cosmos hiding inside an everyday object.</span>
+            <span class="preset-action">Use recipe <span aria-hidden="true">→</span></span>
+          </button>
+
+          <button class="preset-card preset-coral" type="button" data-preset="product-metamorphosis" aria-pressed="false">
+            <span class="preset-index">C / 03</span>
+            <span class="preset-art art-morph" aria-hidden="true"><i></i><i></i></span>
+            <span class="preset-name">Product<br />Metamorphosis</span>
+            <span class="preset-description">One satisfying transformation, built for the replay.</span>
+            <span class="preset-action">Use recipe <span aria-hidden="true">→</span></span>
+          </button>
+
+          <button class="preset-card preset-blue" type="button" data-preset="plot-twist" aria-pressed="false">
+            <span class="preset-index">D / 04</span>
+            <span class="preset-art art-door" aria-hidden="true"><i></i></span>
+            <span class="preset-name">Plot<br />Twist</span>
+            <span class="preset-description">Set the expectation, then flip reality at second six.</span>
+            <span class="preset-action">Use recipe <span aria-hidden="true">→</span></span>
+          </button>
+
+          <button class="preset-card preset-amber" type="button" data-preset="nature-glitch" aria-pressed="false">
+            <span class="preset-index">E / 05</span>
+            <span class="preset-art art-petal" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="preset-name">Nature<br />Glitch</span>
+            <span class="preset-description">Organic beauty behaving with impossible digital logic.</span>
+            <span class="preset-action">Use recipe <span aria-hidden="true">→</span></span>
+          </button>
+        </div>
+      </section>
+
+      <section class="studio-section" aria-labelledby="studio-title">
+        <div class="section-heading studio-heading">
+          <div>
+            <p class="eyebrow"><span>03</span> Director’s console</p>
+            <h2 id="studio-title">Build the 7.9-second story.</h2>
+          </div>
+          <div class="draft-indicator" id="draft-indicator" aria-live="polite">
+            <span aria-hidden="true">✓</span> Draft stays in this browser
+          </div>
+        </div>
+
+        <div class="studio-grid">
+          <form id="story-form" class="story-form" novalidate>
+            <div class="form-intro">
+              <div class="selected-recipe">
+                <span>Recipe</span>
+                <strong id="selected-preset-label">Custom direction</strong>
+              </div>
+              <button type="button" class="quiet-button" id="clear-draft">Clear brief</button>
+            </div>
+
+            <div class="field field-wide">
+              <label for="subject">Hero subject <span aria-hidden="true">*</span></label>
+              <input
+                id="subject"
+                name="subject"
+                type="text"
+                maxlength="180"
+                minlength="3"
+                required
+                autocomplete="off"
+                placeholder="e.g. A translucent mechanical strawberry"
+                aria-describedby="subject-help"
+              />
+              <div class="field-meta">
+                <small id="subject-help">The one thing the viewer follows.</small>
+                <small><span data-count-for="subject">0</span>/180</small>
+              </div>
+            </div>
+
+            <div class="field field-wide">
+              <label for="hook">Opening hook <span aria-hidden="true">*</span></label>
+              <input
+                id="hook"
+                name="hook"
+                type="text"
+                maxlength="220"
+                minlength="3"
+                required
+                autocomplete="off"
+                placeholder="e.g. It looks ordinary until the first slice"
+                aria-describedby="hook-help"
+              />
+              <div class="field-meta">
+                <small id="hook-help">What earns the first two seconds?</small>
+                <small><span data-count-for="hook">0</span>/220</small>
+              </div>
+            </div>
+
+            <div class="field field-wide">
+              <label for="visual-twist">Visual twist <span aria-hidden="true">*</span></label>
+              <textarea
+                id="visual-twist"
+                name="visual_twist"
+                rows="3"
+                maxlength="240"
+                minlength="3"
+                required
+                placeholder="Describe the impossible reveal or transformation."
+                aria-describedby="twist-help"
+              ></textarea>
+              <div class="field-meta">
+                <small id="twist-help">Make the last beat worth replaying.</small>
+                <small><span data-count-for="visual-twist">0</span>/240</small>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="camera">Camera language</label>
+              <select id="camera" name="camera">
+                <option value="Macro push-in">Macro push-in</option>
+                <option value="Locked symmetrical frame">Locked symmetrical frame</option>
+                <option value="Slow orbit">Slow orbit</option>
+                <option value="Handheld discovery">Handheld discovery</option>
+                <option value="Overhead precision">Overhead precision</option>
+                <option value="Whip-pan reveal">Whip-pan reveal</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="lighting">Lighting mood</label>
+              <select id="lighting" name="lighting">
+                <option value="Iridescent studio glow">Iridescent studio glow</option>
+                <option value="Golden-hour haze">Golden-hour haze</option>
+                <option value="Midnight bioluminescence">Midnight bioluminescence</option>
+                <option value="Hard flash editorial">Hard flash editorial</option>
+                <option value="Soft window daylight">Soft window daylight</option>
+                <option value="Neon noir contrast">Neon noir contrast</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="cta">End-card CTA <span class="optional">Optional</span></label>
+              <input
+                id="cta"
+                name="cta"
+                type="text"
+                maxlength="90"
+                autocomplete="off"
+                placeholder="e.g. Would you take a bite?"
+              />
+              <div class="field-meta field-meta-right">
+                <small><span data-count-for="cta">0</span>/90</small>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="seed">Seed <span class="optional">Optional</span></label>
+              <input
+                id="seed"
+                name="seed"
+                type="number"
+                min="0"
+                max="2147483647"
+                step="1"
+                inputmode="numeric"
+                placeholder="Random"
+                aria-describedby="seed-help"
+              />
+              <div class="field-meta">
+                <small id="seed-help">Reuse a seed to revisit a direction.</small>
+              </div>
+            </div>
+
+            <div class="prompt-preview field-wide">
+              <div class="prompt-preview-heading">
+                <span>Compiled direction</span>
+                <button type="button" class="copy-button" id="copy-prompt" disabled>
+                  Copy prompt
+                </button>
+              </div>
+              <p id="compiled-prompt">Your production-ready prompt will appear here.</p>
+            </div>
+
+            <div class="validation-message field-wide" id="form-error" role="alert" hidden></div>
+
+            <div class="story-action field-wide">
+              <button class="story-button" id="story-button" type="submit">
+                <span class="story-button-label">Generate my scene</span>
+                <span class="story-button-icon" aria-hidden="true">↗</span>
+              </button>
+              <p>
+                One request creates the landscape source and derived vertical edit.
+                No credentials are entered or stored here.
+              </p>
+            </div>
+          </form>
+
+          <aside class="output-console" aria-labelledby="output-title">
+            <div class="console-header">
+              <div>
+                <span class="console-kicker">Output monitor</span>
+                <h3 id="output-title">Your clip will land here.</h3>
+              </div>
+              <span class="job-badge" id="job-badge">Idle</span>
+            </div>
+
+            <div class="preview-stage" id="preview-stage">
+              <div class="preview-empty" id="preview-empty">
+                <div class="empty-glyph" aria-hidden="true">
+                  <span></span><span></span><span></span>
+                </div>
+                <p>Frame a strange idea.<br />Let the machine dream it.</p>
+                <small>1280 × 720 · 7.9 s</small>
+              </div>
+              <video id="video-preview" controls playsinline preload="metadata" hidden>
+                Sorry, your browser does not support embedded video.
+              </video>
+              <div class="frame-labels" id="frame-labels" hidden>
+                <span id="preview-format-label">Social · derived 9:16</span>
+                <span>7.9 s</span>
+              </div>
+            </div>
+
+            <div class="progress-panel" id="progress-panel" hidden>
+              <div class="progress-copy" aria-live="polite" aria-atomic="true">
+                <strong id="progress-title">Queued</strong>
+                <span id="progress-detail">Waiting for the generation worker.</span>
+              </div>
+              <progress id="job-progress" max="100" value="0">0%</progress>
+              <ol class="stage-list" aria-label="Generation stages">
+                <li data-stage="queued"><span></span>Queued</li>
+                <li data-stage="generating"><span></span>Generating</li>
+                <li data-stage="packaging"><span></span>Packaging</li>
+              </ol>
+              <small class="progress-truth">Status comes directly from the server; timing varies by GPU and queue.</small>
+              <button type="button" class="retry-button" id="retry-status" hidden>Retry status check</button>
+            </div>
+
+            <div class="result-panel" id="result-panel" hidden>
+              <div class="output-switcher" role="group" aria-label="Preview output format">
+                <button type="button" class="output-tab is-active" data-output="social" aria-pressed="true">
+                  Social cut <small>9:16 derived</small>
+                </button>
+                <button type="button" class="output-tab" data-output="clean" aria-pressed="false">
+                  Clean master <small>16:9 source</small>
+                </button>
+              </div>
+              <div class="download-grid">
+                <a class="download-link" id="download-social" href="#" download hidden>
+                  <span><b>Social cut</b><small>Derived vertical edit</small></span>
+                  <span aria-hidden="true">↓</span>
+                </a>
+                <a class="download-link" id="download-clean" href="#" download hidden>
+                  <span><b>Clean master</b><small>1280×720 source</small></span>
+                  <span aria-hidden="true">↓</span>
+                </a>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>Cosmos Story Scene</p>
+      <p>Cosmos 3 inference via TensorRT Model Connect</p>
+    </footer>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

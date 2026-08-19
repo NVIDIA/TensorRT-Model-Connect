@@ -889,6 +889,7 @@ add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
 trtmc_add_test(test_runtime_measurement)
+trtmc_add_test(test_distributed_runtime)
 
 trtmc_add_test(test_optimized_runtime_host)
 add_dependencies(test_optimized_runtime_host
