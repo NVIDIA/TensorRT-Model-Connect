@@ -120,7 +120,6 @@ def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
 
 
 @with_builder_context(workspace_bytes=1 << 30)
-@with_builder_context(workspace_bytes=1 << 30)
 def build_dual_profile_decoder_engine(config: 'ModelConfig', weights: 'WeightDict', max_cache_length: int, *, precision: str='fp16', opt_prefill_length: int=64, max_prefill_length: int | None=None, quant_ctx: 'QuantContext | None'=None, position_type: str='rope', activation: str='silu', partial_rotary_factor: float=1.0, interleaved_rope: bool=False, parallel_residual: bool=False, scale_attn_weights: bool=True, verbose: bool=False, dynamic_kv_profile_rows: list[int] | None=None, profile_mode: str='dual_profile', _builder_context_factory: BuilderContextFactory) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 

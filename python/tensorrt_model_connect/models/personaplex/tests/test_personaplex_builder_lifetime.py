@@ -379,7 +379,7 @@ def test_standard_decoder_uses_stable_fp32_tactics() -> None:
     ("module_name", "function_name"),
     (
         ("mimi_streaming_encoder", "_build_mimi_streaming_encoder_engine"),
-        ("plugin", "_build_mimi_decoder_engine"),
+        ("model", "_build_mimi_decoder_engine"),
     ),
 )
 def test_mimi_codec_uses_stable_builder_tactics(
@@ -413,7 +413,7 @@ def test_mimi_decoder_workspace_supports_long_form_profile() -> None:
         ("default_dual_profile_decoder_tp", "build_dual_profile_tp_decoder_engine"),
         ("decoder_tp_builder", "build_personaplex_tp_decoder_engine"),
         ("mimi_streaming_encoder", "_build_mimi_streaming_encoder_engine"),
-        ("plugin", "_build_mimi_decoder_engine"),
+        ("model", "_build_mimi_decoder_engine"),
     ),
 )
 def test_personaplex_builders_use_ordered_context_cleanup(

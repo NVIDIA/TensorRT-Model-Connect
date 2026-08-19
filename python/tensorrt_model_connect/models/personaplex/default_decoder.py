@@ -60,7 +60,6 @@ def _mark_debug_output(
     builder_optimization_level=1,
     max_num_tactics=1,
 )
-@with_builder_context(workspace_bytes=1 << 30, disable_tf32=True, builder_optimization_level=1, max_num_tactics=1)
 def build_standard_decoder_engine(config: ModelConfig, weights: WeightDict, max_cache_length: int, *, precision: str='fp32', quant_ctx: QuantContext | None=None, position_type: str='rope', activation: str='silu', partial_rotary_factor: float=1.0, interleaved_rope: bool=False, parallel_residual: bool=False, scale_attn_weights: bool=True, verbose: bool=False, debug_layer_outputs: bool=False, hidden_state_output: bool=False, fp32_layers: tuple[int, ...]=(), _builder_context_factory: BuilderContextFactory) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import numpy as np
 import pytest
@@ -184,6 +185,9 @@ def test_personaplex_tp_shards_rank_local_temporal_weights():
 def test_personaplex_plugin_routes_temporal_tp_build(monkeypatch):
     decoder_tp_builder = _personaplex_tp_builder_module()
     captured = {}
+    builder_source = inspect.getsource(
+        decoder_tp_builder.build_personaplex_tp_decoder_engine
+    )
 
     def fake_build(config, weights, max_cache_length, **kwargs):
         captured["config"] = config
@@ -227,11 +231,22 @@ def test_personaplex_plugin_routes_temporal_tp_build(monkeypatch):
     assert captured["config"].num_attention_heads == _HEADS
     assert captured["weights"]["_kv_attention_size"] == _HIDDEN
     assert captured["max_cache_length"] == 8
-    assert captured["kwargs"]["mlp_type"] == "swiglu"
-    assert captured["kwargs"]["position_type"] == "rope"
-    assert captured["kwargs"]["embed_input"] is True
-    assert captured["kwargs"]["hidden_state_output"] is True
-    assert captured["kwargs"]["parallel_config"].tp_size == 4
+    assert captured["kwargs"] == {
+        "precision": "fp32",
+        "quant_ctx": None,
+        "verbose": False,
+        "debug_layer_outputs": False,
+        "parallel_config": ParallelConfig(
+            mode="tensor_parallel", tp_size=4, rank=1
+        ),
+    }
+
+    source = inspect.getsource(decoder_tp_builder._add_tp_decoder_layer)
+    assert "position_type='rope'" in source
+    assert "interleaved_rope=True" in source
+    assert "graph_blocks.add_swiglu_mlp" in source
+    assert "network.add_input('input_embed'" in builder_source
+    assert "hs_out.name = 'hidden_state'" in builder_source
 
 
 def test_personaplex_plugin_forwards_fp16_to_temporal_builder(monkeypatch):
@@ -461,6 +476,10 @@ def test_personaplex_mimi_mapping_uses_checkpoint_owned_layout():
 
 
 def test_personaplex_mimi_transformer_uses_causal_attention(monkeypatch):
+    rope_source = inspect.getsource(
+        personaplex_plugin.graph_ops.add_self_attention_block_with_rope
+    )
+
     class Tensor:
         pass
 
@@ -517,7 +536,7 @@ def test_personaplex_mimi_transformer_uses_causal_attention(monkeypatch):
         Network(), Tensor(), 2, hidden, 1, hidden, 8, 1e-5, weights)
 
     assert captured["causal"] is True
-    assert captured["interleaved_rope"] is True
+    assert rope_source.count("interleaved=True") == 2
 
 
 def test_personaplex_plugin_rejects_quantized_tp(monkeypatch):

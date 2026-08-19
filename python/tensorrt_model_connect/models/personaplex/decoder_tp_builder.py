@@ -65,7 +65,6 @@ def _apply_norm(
 
 
 @with_builder_context(workspace_bytes=1 << 30)
-@with_builder_context(workspace_bytes=1 << 30)
 def build_personaplex_tp_decoder_engine(config: 'ModelConfig', weights: 'WeightDict', max_cache_length: int, *, precision: str='fp32', quant_ctx=None, activation: str='silu', partial_rotary_factor: float=1.0, parallel_residual: bool=False, scale_attn_weights: bool=True, verbose: bool=False, debug_layer_outputs: bool=False, parallel_config=None, _builder_context_factory: BuilderContextFactory) -> bytes:
     """Build one rank-local PersonaPlex temporal decoder engine."""
     if quant_ctx is not None:
