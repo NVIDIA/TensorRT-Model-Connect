@@ -30,10 +30,19 @@ void test_decode_mask_uses_numerically_safe_sentinel() {
     trtmc::GptNeoxKvCache cache(0, 4, 2, nullptr);
     cache.set_position(2);
 
-    std::vector<float> mask;
-    cache.build_attention_mask(mask);
+    trtmc::TensorMap inputs;
+    cache.prepare_step(inputs);
 
-    check(mask.size() == 5, "decode mask has cache rows plus current token");
+    const auto it = inputs.find("attention_mask");
+    check(it != inputs.end(), "decode emits an attention mask");
+    if (it == inputs.end())
+        return;
+
+    const auto& tensor = it->second;
+    check(tensor.shape == std::vector<int64_t>({5}),
+          "decode mask has cache rows plus current token");
+    const auto* mask = static_cast<const float*>(tensor.data);
+
     check(mask[0] == 0.0F && mask[1] == 0.0F, "valid decode cache rows are visible");
     check_masked(mask[2], "first stale decode cache row uses -1e9");
     check_masked(mask[3], "last stale decode cache row uses -1e9");
