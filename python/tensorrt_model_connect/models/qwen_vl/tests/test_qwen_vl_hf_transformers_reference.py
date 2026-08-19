@@ -74,9 +74,19 @@ def test_image_path_resolution_is_owner_local_and_fail_closed() -> None:
         )
         == str(expected)
     )
+    assert (
+        qwen_vl_hf_transformers.HfTransformersReference._resolve_image_path(
+            str(qwen_vl_hf_transformers._MODEL_TEST_RELATIVE / "data/test_img.jpeg")
+        )
+        == str(expected)
+    )
     with pytest.raises(FileNotFoundError, match="Model-owned image asset"):
         qwen_vl_hf_transformers.HfTransformersReference._resolve_image_path(
             "data/missing.jpeg"
+        )
+    with pytest.raises(FileNotFoundError, match="Model-owned image asset"):
+        qwen_vl_hf_transformers.HfTransformersReference._resolve_image_path(
+            "../data/test_img.jpeg"
         )
 
     assert expected.is_file()

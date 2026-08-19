@@ -136,6 +136,9 @@ def test_model_owned_e2e_assets_never_probe_the_shared_legacy_tree() -> None:
     for path in hf_references:
         source = path.read_text(encoding="utf-8")
         assert "_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]" in source, path
+        assert "_MODEL_TEST_RELATIVE = (" in source, path
+        assert "path = path.relative_to(_MODEL_TEST_RELATIVE)" in source, path
+        assert 'if ".." in path.parts:' in source, path
         assert "Model-owned image asset not found" in source, path
 
 
