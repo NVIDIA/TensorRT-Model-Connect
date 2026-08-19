@@ -120,9 +120,10 @@ def test_deepseek_ocr_declares_model_owned_bf16_reference(
         "reference_dtype": "bfloat16",
         "comparison": "reference_defined",
     }
-    assert suite["gates"] == {
-        "max_accuracy_drop_from_hf": 0.02,
-        "min_prediction_agreement": 0.95,
+    assert suite["gates"] == {"max_accuracy_drop_from_hf": 0.02}
+    assert suite["sample_acceptance"] == {
+        "min_pass_rate": 0.95,
+        "min_allowed_failures": 0,
     }
     assert (
         validation_engine.resolve_hf_reference_dtype(
@@ -149,10 +150,16 @@ def test_c829_deepseek_ocr_receipt_passes_declared_parity_gates() -> None:
         },
         suite["gates"],
     )
+    result.update({"sample_count": 5, "valid_count": 5, "passed_count": 5})
+    validation_engine._apply_sample_acceptance(
+        result,
+        suite["sample_acceptance"],
+    )
 
     assert result["status"] == "passed"
     assert result["accuracy_drop_from_hf"] == 0.0
     assert result["gate_failures"] == []
+    assert result["sample_acceptance"]["verdict"] == "pass"
 
 
 def test_deepseek_ocr_bad_receipt_fails_both_parity_gates() -> None:
@@ -168,13 +175,18 @@ def test_deepseek_ocr_bad_receipt_fails_both_parity_gates() -> None:
         },
         suite["gates"],
     )
+    result.update({"sample_count": 5, "valid_count": 5, "passed_count": 4})
+    validation_engine._apply_sample_acceptance(
+        result,
+        suite["sample_acceptance"],
+    )
 
     assert result["status"] == "failed"
     assert result["error_type"] == "BenchmarkGateError"
     assert result["accuracy_drop_from_hf"] == pytest.approx(0.2)
     assert [failure["gate"] for failure in result["gate_failures"]] == [
         "max_accuracy_drop_from_hf",
-        "min_prediction_agreement",
+        "sample_acceptance",
     ]
 
 

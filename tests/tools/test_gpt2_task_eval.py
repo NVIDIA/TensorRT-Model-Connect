@@ -45,6 +45,14 @@ def _suite() -> dict[str, Any]:
 def _apply_suite_gates(receipt: dict[str, Any]) -> dict[str, Any]:
     result = dict(receipt)
     validation_engine.apply_metric_gates(result, _suite()["gates"])
+    result["valid_count"] = int(result["sample_count"])
+    result["passed_count"] = int(result["sample_count"]) - int(
+        result["divergent_count"]
+    )
+    validation_engine._apply_sample_acceptance(
+        result,
+        _suite()["sample_acceptance"],
+    )
     return result
 
 
@@ -53,7 +61,11 @@ def test_distilgpt2_suite_owns_sample_level_continuation_gate() -> None:
 
     assert suite["selectors"]["model_names"] == ["distilgpt2"]
     assert suite["scoring"]["scorer"] == "continuation"
-    assert suite["gates"] == {"min_tie_adjusted_exact_match_rate": 0.9}
+    assert suite["gates"] == {}
+    assert suite["sample_acceptance"] == {
+        "min_pass_rate": 0.9,
+        "min_allowed_failures": 0,
+    }
     assert suite["ci"]["eligible"] is False
     assert suite["ci"]["lane"] == "local_only"
 
@@ -91,9 +103,9 @@ def test_distilgpt2_regressed_receipt_fails_closed() -> None:
     assert result["error_type"] == "BenchmarkGateError"
     assert result["gate_failures"] == [
         {
-            "gate": "min_tie_adjusted_exact_match_rate",
-            "metric": "tie_adjusted_exact_match_rate",
-            "actual": 0.85,
-            "required": 0.9,
+            "gate": "sample_acceptance",
+            "metric": "failed_samples",
+            "actual": 3,
+            "required": 2,
         }
     ]

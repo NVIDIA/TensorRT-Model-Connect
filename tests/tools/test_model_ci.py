@@ -173,6 +173,7 @@ def _make_repo(
         "tools/validation/artifacts.py",
         "tools/validation/catalog.py",
         "tools/validation/engine.py",
+        "tools/validation/gate_policy.py",
         "tools/validation/model_plugin_contract.py",
     ):
         _write(repo, validation_module, "# validation module\n")
@@ -1226,6 +1227,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "tools/validation/artifacts.py",
         "tools/validation/catalog.py",
         "tools/validation/engine.py",
+        "tools/validation/gate_policy.py",
         "tools/validation/model_plugin_contract.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",

@@ -102,6 +102,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tools/validation/artifacts.py",
         "tools/validation/catalog.py",
         "tools/validation/engine.py",
+        "tools/validation/gate_policy.py",
         "tools/validation/model_plugin_contract.py",
         *MODEL_ROOT_PLATFORM_FILES,
     }
