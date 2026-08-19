@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -46,6 +48,25 @@ def test_matches_declared_ltx_video_aliases() -> None:
     assert ltx_mod.matches("ltx-video")
     assert not ltx_mod.matches("LTXConditionPipeline")
     assert not ltx_mod.matches("wan_t2v")
+
+
+def test_owner_builders_only_call_concrete_graph_ops() -> None:
+    from tensorrt_model_connect.models.ltx_video import graph_ops, ltx_dit_builder
+
+    required: set[str] = set()
+    for path in Path(ltx_dit_builder.__file__).parent.glob("*.py"):
+        if path.name == "graph_ops.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        required.update(
+            node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "graph_ops"
+        )
+
+    assert sorted(name for name in required if not hasattr(graph_ops, name)) == []
 
 
 def test_load_weights_requires_ltx_diffusers_model_index(tmp_path) -> None:

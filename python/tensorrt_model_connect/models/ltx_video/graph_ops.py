@@ -91,6 +91,23 @@ def add_matmul_rhs_constant(
     return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
 
 
+def add_bias_sum(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    width: int,
+    bias: np.ndarray,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Element-wise add a bias broadcast over all non-feature axes."""
+    rank = len(tuple(inp.shape))
+    bias_shape = (width,) if rank <= 1 else (1,) * (rank - 1) + (width,)
+    bias_t = add_constant(
+        network, bias_shape, np.asarray(bias).reshape(bias_shape), dtype=dtype)
+    bias_t = _cast_back_to_trt_dtype(network, bias_t, inp.dtype)
+    s = network.add_elementwise(inp, bias_t, trt.ElementWiseOperation.SUM)
+    return _cast_back_to_trt_dtype(network, s.get_output(0), inp.dtype)
+
+
 def add_rms_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -125,6 +142,59 @@ def add_rms_norm(
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
     result = scaled.get_output(0)
+    if need_cast:
+        result = _cast_back_to_trt_dtype(network, result, output_dtype)
+    return result
+
+
+def add_layer_norm(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    gamma: np.ndarray,
+    beta: np.ndarray,
+    eps_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """LayerNorm: gamma * ((x - mean) / sqrt(var + eps)) + beta.
+
+    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    norm computation for numerical stability, then casts back.
+    """
+    need_cast = (dtype != np.float32)
+    output_dtype = inp.dtype
+    if need_cast:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
+    # mean = reduce_mean(x)
+    mean = network.add_reduce(
+        inp, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    # x - mean
+    centered = network.add_elementwise(
+        inp, mean.get_output(0), trt.ElementWiseOperation.SUB)
+    # variance = mean((x - mean)^2)
+    sq = network.add_elementwise(
+        centered.get_output(0), centered.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    var = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    # sqrt(var + eps)
+    denom_in = network.add_elementwise(
+        var.get_output(0), eps_tensor, trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    # normalized = (x - mean) / sqrt(var + eps)
+    normalized = network.add_elementwise(
+        centered.get_output(0), recip.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    # gamma * normalized + beta
+    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
+    scaled = network.add_elementwise(
+        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+    beta_t = add_constant(network, (1, hidden_size), beta, dtype=np.float32)
+    result = network.add_elementwise(
+        scaled.get_output(0), beta_t, trt.ElementWiseOperation.SUM)
+    result = result.get_output(0)
     if need_cast:
         result = _cast_back_to_trt_dtype(network, result, output_dtype)
     return result
@@ -181,6 +251,41 @@ def add_gelu_new(
         half_x.get_output(0), one_plus_tanh.get_output(0),
         trt.ElementWiseOperation.PROD)
     return result.get_output(0)
+
+
+def add_silu(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+) -> trt.ITensor:
+    """SiLU (Swish): x * sigmoid(x)."""
+    sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
+    return network.add_elementwise(
+        inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
+
+
+def add_timestep_embedding(
+    network: trt.INetworkDefinition,
+    timestep: trt.ITensor,
+    dim: int,
+    freq_dim: int = 256,
+    max_period: float = 10000.0,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Build the sinusoidal frequency embedding for a dynamic timestep."""
+    half = freq_dim // 2
+    freqs = np.exp(-np.log(max_period) * np.arange(half, dtype=np.float32) / half)
+    freqs_const = add_constant(
+        network, (1, half), freqs.reshape(1, -1), dtype=dtype)
+    ts_reshaped = network.add_shuffle(timestep)
+    ts_reshaped.reshape_dims = (1, 1)
+    args = network.add_elementwise(
+        ts_reshaped.get_output(0), freqs_const, trt.ElementWiseOperation.PROD)
+    cos_part = network.add_unary(args.get_output(0), trt.UnaryOperation.COS)
+    sin_part = network.add_unary(args.get_output(0), trt.UnaryOperation.SIN)
+    embed = network.add_concatenation(
+        [cos_part.get_output(0), sin_part.get_output(0)])
+    embed.axis = 1
+    return embed.get_output(0)
 
 
 def make_t5_relative_position_bias(
