@@ -12,7 +12,7 @@
   "e2e_parallel_resource": "exclusive_gpu",
   "testcases": [
     {
-      "name": "lfm2-350m-greedy",
+      "name": "lfm2-350m-fp16",
       "trace_id": "IT-E2E-LFM2-001",
       "reference_precision": "bf16",
       "reference_family": "lfm2_greedy_continuation",
@@ -30,6 +30,7 @@
     {
       "name": "lfm2-350m-chat",
       "trace_id": "IT-E2E-LFM2-002",
+      "ci_tier": "nightly_only",
       "reference_precision": "bf16",
       "reference_family": "lfm2_chat_template",
       "user_contract": "chat_response",

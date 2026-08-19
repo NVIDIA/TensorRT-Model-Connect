@@ -10,6 +10,8 @@ from pathlib import Path
 import tomllib
 
 from tests.e2e_harness.manifest_loader import load_model_manifest
+from tools.ci.model_proof_selection import ModelProofSelector
+from tools.model_plugin_isolation import discover_e2e_manifests
 
 _ROOT = Path(__file__).resolve().parent
 _PINNED_350M_REVISION = "f37d3f5c8c5484bc01dad379a595cf4c68c4e70e"
@@ -53,13 +55,14 @@ def test_core_fp16_and_model_card_bf16_are_revision_pinned() -> None:
 def test_core_cases_cover_exact_continuation_and_chat_template() -> None:
     manifest = _read_manifest("lfm2-350m-fp16.json")
     cases = {case["name"]: case for case in manifest["testcases"]}
-    assert set(cases) == {"lfm2-350m-greedy", "lfm2-350m-chat"}
+    assert set(cases) == {"lfm2-350m-fp16", "lfm2-350m-chat"}
 
-    greedy = cases["lfm2-350m-greedy"]
+    greedy = cases["lfm2-350m-fp16"]
     assert greedy["reference_family"] == "lfm2_greedy_continuation"
     assert greedy["inputs"]["do_sample"] is False
 
     chat = cases["lfm2-350m-chat"]
+    assert chat["ci_tier"] == "nightly_only"
     assert chat["reference_family"] == "lfm2_chat_template"
     assert chat["contract_config"]["use_chat_template"] is True
     assert chat["expected_prompt_token_ids"] == [
@@ -87,6 +90,22 @@ def test_core_cases_cover_exact_continuation_and_chat_template() -> None:
     ]
     assert chat["expected_continuation_token_ids"] == [41677, 7]
     assert chat["expected_continuation_text"] == "Paris"
+
+
+def test_core_ci_selection_matches_result_artifact_identity() -> None:
+    repo_root = _ROOT.parents[3]
+    manifest = discover_e2e_manifests(repo_root)["lfm2-350m-fp16"]
+    loaded = load_model_manifest(manifest.path)
+    premerge_selector = ModelProofSelector("lfm2", "premerge", "HEAD", repo_root)
+    premerge = premerge_selector._select_cases(premerge_selector._cases(_ROOT), "lfm2")
+    selected_smoke = [case["name"] for case in premerge if case["test_category"] != "regression"]
+    nightly_selector = ModelProofSelector("lfm2", "nightly", "HEAD", repo_root)
+    nightly = nightly_selector._select_cases(nightly_selector._cases(_ROOT), "lfm2")
+
+    assert manifest.result_case == manifest.name == "lfm2-350m-fp16"
+    assert loaded.build_case.name == manifest.result_case
+    assert selected_smoke == [manifest.result_case]
+    assert manifest.result_case in {case["name"] for case in nightly}
 
 
 def test_bf16_case_matches_documented_sampling_recipe() -> None:
