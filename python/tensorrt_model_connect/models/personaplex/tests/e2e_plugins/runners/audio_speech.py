@@ -30,7 +30,7 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
 
-PROJECT_DIR = Path(__file__).resolve().parents[7]
+_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]
 
 
 def _find_trt_lib_dir() -> str:
@@ -178,9 +178,15 @@ class SpeechToSpeechRunner:
         # Resolve audio input path
         audio_input = (case.inputs.get("audio") or case.inputs.get("audio_path")
                        or case.metadata.get("test_input_audio", ""))
-        if audio_input and not os.path.isabs(audio_input):
-            e2e_dir = Path(__file__).resolve().parents[2] / "e2e"
-            audio_input = str(e2e_dir / audio_input)
+        if audio_input:
+            audio_path = Path(audio_input)
+            if not audio_path.is_absolute():
+                audio_path = _MODEL_TEST_DIR / audio_path
+            if not audio_path.is_file():
+                raise FileNotFoundError(
+                    f"Model-owned audio asset not found: {audio_path}"
+                )
+            audio_input = str(audio_path)
 
         max_frames = case.inputs.get(
             "speech_test_max_frames",

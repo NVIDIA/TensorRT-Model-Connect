@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 import numpy as np
 
@@ -53,7 +52,6 @@ def main():
 
     if args.bundle:
         # TRT comparison via bundle
-        sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
         from tensorrt_model_connect.models.segformer.debug_runner import (
             VisionTrtRunner,
             load_section_from_bundle,

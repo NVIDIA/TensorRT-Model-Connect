@@ -11,9 +11,9 @@ import re
 import tomllib
 
 
-REPO_ROOT = Path(__file__).resolve().parents[6]
-PRODUCTION_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models/wan2_2_ti2v"
-RUNTIME_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models/wan2_2_ti2v/runtime"
+REPO_ROOT = Path(__file__).resolve().parents[5]
+PRODUCTION_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_ROOT = PRODUCTION_ROOT / "runtime"
 FORBIDDEN_WAN21 = re.compile(
     r"models/wan_t2v/runtime(?![A-Za-z0-9_])"
     r"|libtrtmc_model_wan\.so"
@@ -88,8 +88,9 @@ def test_wan22_runtime_settings_are_declarative_and_model_owned() -> None:
     ]
     assert not leftovers
 
-    manifest = (RUNTIME_ROOT / "MODEL.toml").read_text(encoding="utf-8")
-    assert (
-        'runtime_config_schemas = '
-        '["config_schema.cpp|register_wan2_2_ti2v_schema"]'
-    ) in manifest
+    manifest = tomllib.loads(
+        (PRODUCTION_ROOT / "MODEL.toml").read_text(encoding="utf-8")
+    )
+    assert manifest["runtime_config_schemas"] == [
+        "config_schema.cpp|register_wan2_2_ti2v_schema"
+    ]

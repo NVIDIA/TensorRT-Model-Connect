@@ -10,8 +10,31 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e_harness.manifest_loader import load_manifest
+from tests.e2e_harness import model_runner
+from tests.e2e_harness.contracts import RunContext
+from tests.e2e_harness.manifest_loader import get_model_by_name, load_manifest
+from tests.e2e_harness.orchestrator import _build_repro_commands
+from tests.e2e_harness.registry import reset
 from tools.validation import catalog as validation_catalog
+
+
+MODEL_DIR = Path(__file__).parent
+
+
+class _Config:
+    def __init__(self, **options):
+        self._options = options
+
+    def getoption(self, name: str, default=None):
+        return self._options.get(name, default)
+
+
+def _case_matches(_case, _filters) -> bool:
+    return True
+
+
+def _is_multi_device(case) -> bool:
+    return case.metadata.get("ci_tier") == "multi_device"
 
 
 def test_premerge_native_manifest_uses_family_build_defaults() -> None:
@@ -85,6 +108,68 @@ def test_native_kv_regression_exceeds_one_prefill_profile() -> None:
             "before decode and clean teardown."
         ),
     }
+
+
+def test_native_kv_repro_preserves_model_only_build(tmp_path) -> None:
+    reset()
+    manifest = (
+        MODEL_DIR
+        / "manifests"
+        / "qwen3-0.6b-regression-native-kv-chunked-prefill.json"
+    )
+    case = load_manifest(manifest)
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "artifacts"),
+        binary_path="./build/trtmc",
+        hf_python="/usr/bin/python3",
+        engine_dir=str(tmp_path),
+    )
+    bundle = str(tmp_path / case.bundle)
+
+    repro = _build_repro_commands(case, ctx, bundle, {})
+
+    assert "--max-cache-length" not in repro["build_bundle"]
+    assert "--precision" not in repro["build_bundle"]
+    assert f"--model-revision {case.hf_revision}" in repro["build_bundle"]
+    resolved_prompt = tmp_path / "artifacts" / case.name / "resolved_prompt.txt"
+    assert f"--prompts-file {resolved_prompt}" in repro["trt_inference"]
+    assert "--max-new-tokens 2" in repro["trt_inference"]
+    assert "--temperature 0.0" in repro["trt_inference"]
+    assert "--e2e-category regression" in repro["rerun_test_rebuild"]
+
+
+def test_category_filter_separates_e2e_from_historical_regressions() -> None:
+    regression = get_model_by_name(
+        "qwen3-0.6b-regression-native-kv-chunked-prefill", MODEL_DIR
+    )
+    ordinary = get_model_by_name("qwen3-0.6b-fp16", MODEL_DIR)
+    assert regression is not None
+    assert ordinary is not None
+
+    config = _Config(
+        **{
+            "--e2e-category": "regression",
+            "--e2e-exclude-ci-tier": [],
+        }
+    )
+    selected_regressions = model_runner.selected_testcases(
+        regression,
+        config=config,
+        case_matches_model=_case_matches,
+        is_multi_device_case=_is_multi_device,
+    )
+    selected_ordinary = model_runner.selected_testcases(
+        ordinary,
+        config=config,
+        case_matches_model=_case_matches,
+        is_multi_device_case=_is_multi_device,
+    )
+
+    assert [case.name for case in selected_regressions] == [
+        "qwen3-0.6b-regression-native-kv-chunked-prefill"
+    ]
+    assert selected_ordinary == []
 
 
 @pytest.mark.parametrize(

@@ -196,6 +196,7 @@ def test_manifest_loader_keeps_text_prompt_contract(tmp_path) -> None:
                 "bundle": "sam3.bundle",
                 "family": "sam3",
                 "runtime_strategy": "sam3_prompted_segmentation",
+                "task_strategy": "prompted_segmentation",
                 "testcases": [
                     {
                         "name": "sam3",

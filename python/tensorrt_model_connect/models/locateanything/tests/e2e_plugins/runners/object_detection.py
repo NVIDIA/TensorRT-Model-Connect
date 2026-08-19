@@ -25,7 +25,7 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
 
-PROJECT_DIR = Path(__file__).resolve().parents[7]
+_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]
 
 
 class ObjectDetectionRunner:
@@ -59,12 +59,14 @@ class ObjectDetectionRunner:
             return None
         p = Path(image)
         if p.is_absolute():
-            return str(p)
-        for base in [ctx.engine_dir, str(PROJECT_DIR), str(PROJECT_DIR / "tests" / "e2e")]:
-            candidate = os.path.join(base, image)
-            if os.path.isfile(candidate):
-                return candidate
-        return str(p)
+            if p.is_file():
+                return str(p)
+            raise FileNotFoundError(f"Model-owned image asset not found: {p}")
+        for base in (Path(ctx.engine_dir), _MODEL_TEST_DIR):
+            candidate = base / p
+            if candidate.is_file():
+                return str(candidate)
+        raise FileNotFoundError(f"Model-owned image asset not found: {p}")
 
     def _run_full_inference(
         self, case: E2ECase, ctx: RunContext

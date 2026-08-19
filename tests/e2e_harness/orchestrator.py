@@ -161,26 +161,16 @@ def _check_hf_auth(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, st
 
 def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
     """Check that a required asset file exists."""
+    del ctx
     asset_path = req.args.get("path", "")
     if not asset_path:
         return False, "Asset path not specified"
-    # Resolve relative paths against the project root. Model-owned manifests are
-    # normalized to absolute model-local asset paths by manifest_loader.
     p = Path(asset_path)
     if not p.is_absolute():
-        project_root = Path(__file__).resolve().parent.parent.parent
-        candidate = project_root / asset_path
-        if candidate.is_file():
-            p = candidate
-        else:
-            e2e_dir = project_root / "tests" / "e2e"
-            candidate = e2e_dir / asset_path
-            if candidate.is_file():
-                p = candidate
-            else:
-                # Backward-compatible fallback for older manifests that
-                # provided bare filenames for assets under tests/e2e/data/.
-                p = e2e_dir / "data" / Path(asset_path).name
+        return False, (
+            "Asset path must be absolute after model-owned manifest normalization: "
+            f"{asset_path}"
+        )
     if p.is_file():
         return True, f"Asset found: {p}"
     return False, f"Asset not found: {p}"

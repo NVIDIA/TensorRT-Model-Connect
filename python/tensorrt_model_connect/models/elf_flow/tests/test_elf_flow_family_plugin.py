@@ -120,7 +120,7 @@ def _find_trtmc_binary() -> Path | None:
     env_path = os.environ.get("TRTMC_BINARY")
     candidates = [
         Path(env_path) if env_path else None,
-        Path(__file__).resolve().parents[2] / "build" / "trtmc",
+        Path(__file__).resolve().parents[5] / "build" / "trtmc",
         Path("/tmp/trtmc-elf-build/trtmc"),
     ]
     for candidate in candidates:
@@ -146,6 +146,16 @@ def _find_elf_model_plugin_dir(trtmc_binary: Path) -> Path | None:
         if (candidate / "libtrtmc_model_elf_flow.so").is_file():
             return candidate
     return None
+
+
+def test_find_trtmc_binary_checks_the_repository_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = Path(__file__).resolve().parents[5] / "build" / "trtmc"
+    monkeypatch.delenv("TRTMC_BINARY", raising=False)
+    monkeypatch.setattr(Path, "exists", lambda candidate: candidate == expected)
+
+    assert _find_trtmc_binary() == expected
 
 
 def _tiny_unigram_tokenizer_json(vocab_size: int) -> bytes:

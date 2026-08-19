@@ -308,7 +308,9 @@ class TestClassifyModality:
         mod = _import_report()
         repo_root = Path(__file__).resolve().parents[2]
         strategies = set()
-        for path in (repo_root / "python/tensorrt_model_connect/models").glob("*/manifests/*.json"):
+        for path in (repo_root / "python/tensorrt_model_connect/models").glob(
+            "*/tests/manifests/*.json"
+        ):
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("task_strategy"):
                 strategies.add(payload["task_strategy"])

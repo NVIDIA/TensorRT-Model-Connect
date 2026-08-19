@@ -56,6 +56,12 @@ class TestModuleStructure:
         mod = _import_diff_segmentation()
         assert mod is not None
 
+    def test_bundle_path_uses_the_installed_package_without_sys_path_mutation(self):
+        module_path = Path(__file__).resolve().parents[1] / "diff_segmentation.py"
+        source = module_path.read_text(encoding="utf-8")
+
+        assert "sys.path.insert" not in source
+
 
 # ---------------------------------------------------------------------------
 # Argument parser

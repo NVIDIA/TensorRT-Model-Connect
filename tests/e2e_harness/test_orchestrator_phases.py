@@ -569,6 +569,38 @@ def test_hf_auth_preflight_rejects_a_missing_offline_snapshot(
     assert "snapshot is unavailable offline" in message
 
 
+def test_asset_preflight_accepts_only_an_existing_absolute_path(
+    tmp_path: Path,
+) -> None:
+    case = _make_case("absolute-asset")
+    ctx = _make_ctx(tmp_path, case)
+    asset = tmp_path / "asset.bin"
+    asset.write_bytes(b"asset")
+
+    passed, message = orchestrator._check_asset_exists(
+        ctx,
+        PreflightRequirement(kind="asset_exists", args={"path": str(asset)}),
+    )
+
+    assert passed is True
+    assert message == f"Asset found: {asset}"
+
+
+def test_asset_preflight_rejects_legacy_shared_e2e_fallback(
+    tmp_path: Path,
+) -> None:
+    case = _make_case("relative-asset")
+    ctx = _make_ctx(tmp_path, case)
+
+    passed, message = orchestrator._check_asset_exists(
+        ctx,
+        PreflightRequirement(kind="asset_exists", args={"path": "waives.txt"}),
+    )
+
+    assert passed is False
+    assert "must be absolute" in message
+
+
 def test_bundle_build_honors_manifest_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

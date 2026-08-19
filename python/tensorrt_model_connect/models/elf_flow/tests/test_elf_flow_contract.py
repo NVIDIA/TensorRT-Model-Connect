@@ -17,7 +17,11 @@ from tests.e2e_harness.contracts import (
     StageSpec,
     ThresholdProfile,
 )
-from tests.e2e_harness.manifest_loader import find_manifest_path, load_manifest
+from tests.e2e_harness.manifest_loader import (
+    find_manifest_path,
+    get_model_by_name,
+    load_manifest,
+)
 from tests.e2e_harness.plugins import find_plugin
 from tests.e2e_harness.registry import (
     activate_model_plugins,
@@ -53,6 +57,17 @@ def _case(reference_family: str, inputs: dict | None = None) -> E2ECase:
         user_contract="diffusion_text_generation",
         inputs=inputs or {},
     )
+
+
+def test_thor_threshold_override_keeps_default_contract() -> None:
+    model = get_model_by_name("elf-b-owt-l0", ELF_MODEL_DIR)
+    assert model is not None
+    case = model.testcases[0]
+
+    assert case.threshold_overrides["contract_max_upstream_text_ned"] == 0.01
+    assert case.metadata["platform_threshold_overrides"]["THOR"] == {
+        "contract_max_upstream_text_ned": 0.011
+    }
 
 
 def test_elf_contract_plugin_discovers_for_unconditional_and_conditional() -> None:

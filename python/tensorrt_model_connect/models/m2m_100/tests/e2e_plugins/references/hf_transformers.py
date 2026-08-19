@@ -26,8 +26,7 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
 
-PROJECT_DIR = Path(__file__).resolve().parents[7]
-E2E_DIR = PROJECT_DIR / "tests" / "e2e"
+_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]
 
 
 _PRECISION_TO_TORCH_DTYPE = {
@@ -582,17 +581,13 @@ class HfTransformersReference:
         """Resolve image path, handling relative paths from manifests."""
         if not image_path:
             return image_path
-        if os.path.isabs(image_path):
-            return image_path
-        # Resolve relative to tests/e2e/ directory
-        resolved = E2E_DIR / image_path
-        if resolved.exists():
-            return str(resolved)
-        # Also try relative to project root
-        resolved2 = PROJECT_DIR / image_path
-        if resolved2.exists():
-            return str(resolved2)
-        return image_path
+        path = Path(image_path)
+        resolved = path if path.is_absolute() else _MODEL_TEST_DIR / path
+        if not resolved.is_file():
+            raise FileNotFoundError(
+                "Model-owned image asset not found: " + str(resolved)
+            )
+        return str(resolved)
 
     def _run_embedding_ref(
         self, case: E2ECase, stage: StageSpec, ctx: RunContext

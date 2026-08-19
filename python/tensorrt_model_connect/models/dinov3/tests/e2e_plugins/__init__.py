@@ -24,8 +24,14 @@ def resolve_image_path(case, roots: tuple[Path, ...], error: str) -> str:
         raise ValueError(error)
     path = Path(image)
     if path.is_absolute():
-        return str(path)
-    return str(next((root / path for root in roots if (root / path).is_file()), path))
+        if path.is_file():
+            return str(path)
+        raise FileNotFoundError(f"{error}: {path}")
+    for root in roots:
+        candidate = root / path
+        if candidate.is_file():
+            return str(candidate)
+    raise FileNotFoundError(f"{error}: {path}")
 
 
 def case_artifact_dir(artifacts_dir: str, case_name: str) -> str:

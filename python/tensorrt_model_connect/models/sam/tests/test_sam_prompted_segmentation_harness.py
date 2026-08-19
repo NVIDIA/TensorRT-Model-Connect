@@ -194,6 +194,7 @@ def test_manifest_loader_promotes_num_expected_masks_into_inputs(tmp_path) -> No
                 "bundle": "sam-vit-base.bundle",
                 "family": "sam",
                 "runtime_strategy": "sam_prompted_segmentation",
+                "task_strategy": "prompted_segmentation",
                 "testcases": [
                     {
                         "name": "sam-vit-base",

@@ -93,6 +93,41 @@ def test_descriptors_have_no_legacy_layout_or_runtime_identity() -> None:
         assert "families/" not in source, owner.name
 
 
+def test_model_owned_e2e_assets_never_probe_the_shared_legacy_tree() -> None:
+    plugin_sources = sorted(MODELS_ROOT.glob("*/tests/e2e_plugins/**/*.py"))
+    assert plugin_sources
+
+    forbidden = (
+        'PROJECT_DIR / "tests" / "e2e"',
+        'Path(__file__).resolve().parents[2] / "e2e"',
+    )
+    for path in plugin_sources:
+        source = path.read_text(encoding="utf-8")
+        assert not [token for token in forbidden if token in source], path
+
+    hf_references = sorted(
+        path
+        for path in MODELS_ROOT.glob(
+            "*/tests/e2e_plugins/references/hf_transformers.py"
+        )
+        if "def _resolve_image_path" in path.read_text(encoding="utf-8")
+    )
+    assert hf_references
+    for path in hf_references:
+        source = path.read_text(encoding="utf-8")
+        assert "_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]" in source, path
+        assert "Model-owned image asset not found" in source, path
+
+
+def test_active_report_guard_scans_owner_test_manifests() -> None:
+    source = (REPO_ROOT / "tests/tools/test_generate_report.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert '.glob("*/manifests/*.json")' not in source
+    assert '"*/tests/manifests/*.json"' in source
+
+
 def test_optional_kernel_projects_are_owner_local_and_discovered_generically() -> None:
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     kernel_projects = sorted(MODELS_ROOT.glob("*/runtime/kernels/CMakeLists.txt"))

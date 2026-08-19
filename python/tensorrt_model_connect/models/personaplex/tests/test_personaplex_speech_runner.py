@@ -80,3 +80,31 @@ def test_runner_uses_total_frame_budget_without_adding_tail_frames(
         tmp_path / "artifacts" / case.name / "trt_speech_out.wav"
     )
     assert Path(output.data["wav_path"]).is_file()
+
+
+def test_runner_rejects_a_missing_relative_model_owned_audio_asset(
+    tmp_path: Path,
+) -> None:
+    case = E2ECase(
+        name="personaplex-missing-audio",
+        hf_id="nvidia/personaplex-7b-v1",
+        family="personaplex",
+        runtime_strategy="personaplex_speech_to_speech",
+        task_strategy="speech_to_speech",
+        bundle="personaplex.bundle",
+        inputs={"audio": "data/missing.wav"},
+    )
+    ctx = RunContext(
+        case=case,
+        binary_path="/runtime/trtmc",
+        engine_dir=str(tmp_path / "engines"),
+        artifacts_dir=str(tmp_path / "artifacts"),
+        model_plugin_dir="/runtime/models",
+    )
+
+    with pytest.raises(FileNotFoundError, match="Model-owned audio asset"):
+        audio_speech.SpeechToSpeechRunner().run_stage(
+            case,
+            StageSpec(name="full_generation"),
+            ctx,
+        )

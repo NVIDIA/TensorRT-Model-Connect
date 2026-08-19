@@ -1123,6 +1123,11 @@ def test_image_classification_runner_forwards_model_plugin_dir(monkeypatch) -> N
         case, case.stages[0], context
     )
 
+    expected_image = (
+        Path(image_classification.__file__).resolve().parents[2]
+        / "data/test_img.jpeg"
+    )
+    assert commands[0][commands[0].index("--image") + 1] == str(expected_image)
     assert commands[0][-2:] == ["--model-plugin-dir", "/tmp/plugins/timm_vit"]
 
 

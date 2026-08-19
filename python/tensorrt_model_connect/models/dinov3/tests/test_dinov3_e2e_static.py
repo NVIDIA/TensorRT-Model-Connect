@@ -10,11 +10,14 @@ import json
 import subprocess
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from tensorrt_model_connect.models.dinov3.tests.e2e_plugins.comparator import ImageFeatureExtractionComparator
 from tensorrt_model_connect.models.dinov3.tests.e2e_plugins import runner as runner_module
+from tensorrt_model_connect.models.dinov3.tests.e2e_plugins import resolve_image_path
 from tensorrt_model_connect.models.dinov3.tests.e2e_plugins.runner import Dinov3ReproCommandProvider
 from tests.e2e_harness.contracts import RunContext, StageOutput, StageSpec, ThresholdProfile
 from tests.e2e_harness.manifest_loader import load_model_manifest
@@ -162,6 +165,17 @@ def test_public_timm_l0_is_secretless_full_scale_premerge_parity() -> None:
 def test_owned_image_is_exact() -> None:
     owned_image = _MODEL_DIR / "data" / "test_img.jpeg"
     assert hashlib.sha256(owned_image.read_bytes()).hexdigest() == _OWNED_IMAGE_SHA256
+
+
+def test_image_resolution_is_owner_local_and_fail_closed() -> None:
+    case = SimpleNamespace(inputs={"image": "data/test_img.jpeg"})
+
+    assert resolve_image_path(case, (_MODEL_DIR,), "image required") == str(
+        _MODEL_DIR / "data/test_img.jpeg"
+    )
+    case.inputs["image"] = "data/missing.jpeg"
+    with pytest.raises(FileNotFoundError, match="image required"):
+        resolve_image_path(case, (_MODEL_DIR,), "image required")
 
 
 def test_model_owned_plugins_register_complete_feature_path() -> None:

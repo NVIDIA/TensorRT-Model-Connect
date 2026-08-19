@@ -22,7 +22,7 @@ from tests.e2e_harness.contracts import (
 
 from . import case_artifact_dir, image_input, resolve_image_path, save_full_stderr
 
-PROJECT_DIR = Path(__file__).resolve().parents[6]
+_MODEL_TEST_DIR = Path(__file__).resolve().parents[1]
 
 
 class ImageFeatureExtractionRunner:
@@ -52,7 +52,7 @@ class ImageFeatureExtractionRunner:
             "--image",
             resolve_image_path(
                 case,
-                (Path(ctx.engine_dir), PROJECT_DIR, PROJECT_DIR / "tests" / "e2e"),
+                (Path(ctx.engine_dir), _MODEL_TEST_DIR),
                 "DINOv3 E2E requires an image input",
             ),
             "--output-json",

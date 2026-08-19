@@ -30,6 +30,15 @@ _DEFAULT_CUDA_ARCHITECTURES = "89-real;89-virtual"
 _PLUGIN_HANDLES: dict[Path, Any] = {}
 
 
+def _native_plugin_source_dir() -> Path:
+    source_dir = Path(__file__).with_name("native_plugins")
+    if not source_dir.is_dir():
+        raise FileNotFoundError(
+            f"Model-owned native plugin sources are missing: {source_dir}"
+        )
+    return source_dir
+
+
 def _source_digest(source_dir: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(source_dir.iterdir()):
@@ -155,12 +164,7 @@ def ensure_native_plugin(*, verbose: bool = False) -> Path:
     from tensorrt_model_connect import trt_compat
 
     trt_compat.load_module()
-    source_dir = Path(__file__).with_name("native_plugins")
-    if not source_dir.is_dir():
-        source_dir = (
-            Path(__file__).resolve().parents[4]
-            / "src/native_plugins"
-        )
+    source_dir = _native_plugin_source_dir()
     default_build_base = Path(tempfile.gettempdir()) / (
         f"trtmc-fast-foundation-stereo-native-plugin-{os.geteuid()}"
     )

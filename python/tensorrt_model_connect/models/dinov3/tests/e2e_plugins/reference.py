@@ -18,7 +18,7 @@ from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput, StageS
 
 from . import case_artifact_dir, resolve_image_path, save_full_stderr
 
-PROJECT_DIR = Path(__file__).resolve().parents[6]
+_MODEL_TEST_DIR = Path(__file__).resolve().parents[1]
 _TIMM_VIT_LAYOUT = "timm_dinov3_vit"
 _TIMM_VIT_ARCHITECTURE = "vit_small_patch16_dinov3_qkvb"
 _TIMM_REFERENCE_VERSION = "1.0.28"
@@ -177,7 +177,7 @@ class Dinov3Reference:
             self.backend_name,
             resolve_image_path(
                 case,
-                (PROJECT_DIR, PROJECT_DIR / "tests" / "e2e"),
+                (_MODEL_TEST_DIR,),
                 "DINOv3 reference requires an image input",
             ),
             output_path,

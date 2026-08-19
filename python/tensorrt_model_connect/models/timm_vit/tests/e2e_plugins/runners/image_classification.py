@@ -18,7 +18,7 @@ from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
-PROJECT_DIR = Path(__file__).resolve().parents[7]
+_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]
 _MPI_TAGGED_STDOUT_RE = re.compile(
     r"^\[[^\]]+,(?P<rank>\d+)\]<stdout>:\s?(?P<text>.*)$")
 _MPI_STREAM_TAG_RE = re.compile(r"\[[^\]]+,\d+\]<(?:stdout|stderr)>:\s?")
@@ -180,12 +180,25 @@ class ImageClassificationRunner:
             return None
         path = Path(image)
         if path.is_absolute():
-            return str(path)
-        for base in (ctx.engine_dir, str(PROJECT_DIR), str(PROJECT_DIR / "tests" / "e2e")):
-            candidate = Path(base) / image
+            if path.is_file():
+                return str(path)
+            raise FileNotFoundError(f"Model-owned image asset not found: {path}")
+        model_test_dir = case.metadata.get("model_test_dir")
+        search_roots = (Path(ctx.engine_dir), _MODEL_TEST_DIR)
+        if model_test_dir:
+            try:
+                path = path.relative_to(Path(str(model_test_dir)))
+            except ValueError:
+                pass
+            else:
+                search_roots = (_MODEL_TEST_DIR,)
+        if ".." in path.parts:
+            raise FileNotFoundError(f"Model-owned image asset not found: {path}")
+        for base in search_roots:
+            candidate = base / path
             if candidate.is_file():
                 return str(candidate)
-        return str(path)
+        raise FileNotFoundError(f"Model-owned image asset not found: {path}")
 
 
 plugin = ImageClassificationRunner()

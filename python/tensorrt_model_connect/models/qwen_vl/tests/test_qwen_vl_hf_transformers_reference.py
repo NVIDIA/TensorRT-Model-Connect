@@ -56,13 +56,30 @@ def test_owner_reference_uses_qa_cuda_device_contract() -> None:
 def test_qwen3_manifest_pins_qa_reference_precision() -> None:
     manifest = json.loads(
         (
-            qwen_vl_hf_transformers.PROJECT_DIR
-            / "python/tensorrt_model_connect/models/qwen_vl/tests/manifests/qwen3-vl-2b.json"
+            qwen_vl_hf_transformers._MODEL_TEST_DIR
+            / "manifests/qwen3-vl-2b.json"
         ).read_text(encoding="utf-8")
     )
 
     assert manifest["precision"] == "bf16"
     assert manifest["reference_precision"] == "bf16"
+
+
+def test_image_path_resolution_is_owner_local_and_fail_closed() -> None:
+    expected = qwen_vl_hf_transformers._MODEL_TEST_DIR / "data/test_img.jpeg"
+
+    assert (
+        qwen_vl_hf_transformers.HfTransformersReference._resolve_image_path(
+            "data/test_img.jpeg"
+        )
+        == str(expected)
+    )
+    with pytest.raises(FileNotFoundError, match="Model-owned image asset"):
+        qwen_vl_hf_transformers.HfTransformersReference._resolve_image_path(
+            "data/missing.jpeg"
+        )
+
+    assert expected.is_file()
 
 
 def test_vl_decode_uses_generated_suffix_for_full_sequences() -> None:

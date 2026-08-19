@@ -19,8 +19,7 @@ from .. import _case_artifact_dir, save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 
-PROJECT_DIR = Path(__file__).resolve().parents[7]
-E2E_DIR = PROJECT_DIR / "tests" / "e2e"
+_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]
 MIMI_MODEL_ID = "kyutai/mimi"
 REFERENCE_SAMPLE_RATE = 24_000
 
@@ -108,12 +107,7 @@ class TorchReference:
             )
 
         if not os.path.isabs(ref_tokens_path):
-            project_relative = PROJECT_DIR / ref_tokens_path
-            ref_tokens_path = str(
-                project_relative
-                if project_relative.exists()
-                else E2E_DIR / ref_tokens_path
-            )
+            ref_tokens_path = str(_MODEL_TEST_DIR / ref_tokens_path)
 
         if not os.path.exists(ref_tokens_path):
             return StageOutput(

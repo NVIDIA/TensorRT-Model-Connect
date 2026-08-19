@@ -65,6 +65,20 @@ def test_native_plugin_builder_defaults_to_l4_cuda_architectures(monkeypatch) ->
     assert native_plugin_builder._cuda_architectures() == "89-real;89-virtual"
 
 
+def test_native_plugin_builder_requires_model_owned_sources(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "__file__",
+        str(tmp_path / "native_plugin_builder.py"),
+    )
+
+    with pytest.raises(FileNotFoundError, match="Model-owned native plugin sources"):
+        native_plugin_builder._native_plugin_source_dir()
+
+
 def test_native_plugin_cmake_requires_exact_header_runtime_release() -> None:
     cmake = (_PLUGIN_DIR / "CMakeLists.txt").read_text(encoding="utf-8")
 
