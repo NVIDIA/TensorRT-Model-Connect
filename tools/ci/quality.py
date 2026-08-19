@@ -22,10 +22,17 @@ from .process import CiError
 from .selected_wheel import SelectedWheelRuntime
 
 
-_BYTE_PINNED_CPP_VENDOR_ROOTS = (
-    "python/tensorrt_model_connect/families/sam2_hoi/native_plugins/vendor/cutlass/",
-    "python/tensorrt_model_connect/families/sam2_hoi/native_plugins/vendor/flash_attention/",
-)
+def _byte_pinned_cpp_vendor_roots(repository: Path) -> tuple[str, ...]:
+    """Discover manifest-owned vendor roots without naming a model family."""
+
+    families = repository / "python/tensorrt_model_connect/families"
+    return tuple(
+        sorted(
+            manifest.parent.relative_to(repository).as_posix() + "/"
+            for manifest in families.glob("*/native_plugins/vendor/*/MANIFEST.sha256")
+            if manifest.is_file() and not manifest.is_symlink()
+        )
+    )
 
 
 def _load_byte_pinned_vendor_files(repository: Path, root_relative: str) -> frozenset[str]:
@@ -82,7 +89,7 @@ def _partition_cpp_format_inputs(
     """Separate only manifest-verified vendor bytes from clang-format inputs."""
     format_files = list(changed_files)
     skipped: list[str] = []
-    for root_relative in _BYTE_PINNED_CPP_VENDOR_ROOTS:
+    for root_relative in _byte_pinned_cpp_vendor_roots(repository):
         candidates = [path for path in format_files if path.startswith(root_relative)]
         if not candidates:
             continue

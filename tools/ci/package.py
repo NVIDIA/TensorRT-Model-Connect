@@ -34,7 +34,50 @@ WHEEL_INSTALL_STATE = "wheel-installed.json"
 RELEASE_LEGAL_FILES = ("LICENSE", "NOTICE", "ASSET_LICENSES.md")
 PACKAGE_TENSORRT_VERSION_ENV = "TRTMC_PACKAGE_TENSORRT_VERSION"
 EXACT_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
-SAM2_HOI_RUNTIME_LIBRARY = "libtrtmc_model_sam2_hoi.so"
+_SUPPORTED_PRIVATE_STATIC_LIBRARIES = frozenset({"jpeg"})
+
+
+def runtime_dso_private_static_policies(
+    repository: Path,
+) -> dict[str, tuple[str, ...]]:
+    """Read model-DSO linkage policies from runtime ownership manifests."""
+
+    policies: dict[str, tuple[str, ...]] = {}
+    for manifest in sorted((repository / "src/runtime/models").glob("*/MODEL.toml")):
+        with manifest.open("rb") as source:
+            raw = tomllib.load(source)
+        model_id = raw.get("id")
+        runtime_library = raw.get("runtime_library") or (
+            f"libtrtmc_model_{model_id}.so" if isinstance(model_id, str) else None
+        )
+        linked_libraries = raw.get("runtime_link_libraries", [])
+        libraries = raw.get("runtime_private_static_libraries", [])
+        if not isinstance(linked_libraries, list) or any(
+            not isinstance(name, str) or not name for name in linked_libraries
+        ):
+            raise CiError(f"invalid runtime_link_libraries in {manifest}")
+        if (
+            not isinstance(libraries, list)
+            or len(libraries) != len(set(libraries))
+            or any(
+            not isinstance(name, str) or name not in _SUPPORTED_PRIVATE_STATIC_LIBRARIES
+            for name in libraries
+            )
+            or not set(libraries).issubset(linked_libraries)
+        ):
+            raise CiError(f"invalid runtime_private_static_libraries in {manifest}")
+        if not libraries:
+            continue
+        if (
+            not isinstance(runtime_library, str)
+            or not runtime_library
+            or Path(runtime_library).name != runtime_library
+        ):
+            raise CiError(f"invalid runtime_library in {manifest}")
+        if runtime_library in policies:
+            raise CiError(f"duplicate private-static runtime policy for {runtime_library}")
+        policies[runtime_library] = tuple(sorted(set(libraries)))
+    return policies
 
 
 def _target_tensorrt_version(
@@ -194,54 +237,59 @@ def _validate_archive_backend_identity(
     _validate_backend_identity(location, tensorrt_version, backend_abi, runtime_version)
 
 
-def validate_sam2_hoi_release_dso(
+def validate_private_static_runtime_dso(
     context: CiContext,
     location: str,
     path: Path,
+    libraries: tuple[str, ...],
 ) -> tuple[str, str]:
-    """Require SAM2-HOI's release DSO to own a private static libjpeg copy."""
+    """Require manifest-declared libraries to be private-static in one model DSO."""
 
     dynamic = context.output(["readelf", "--wide", "-d", path])
     needed = re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", dynamic)
-    jpeg_dependencies = sorted(name for name in needed if "jpeg" in name.lower())
-    if jpeg_dependencies:
-        raise CiError(
-            f"{location}: {SAM2_HOI_RUNTIME_LIBRARY} has external libjpeg DT_NEEDED "
-            f"entries: {jpeg_dependencies}"
-        )
-
     symbols = context.output(["readelf", "--wide", "--dyn-syms", path])
-    jpeg_exports = set()
-    for line in symbols.splitlines():
-        fields = line.split()
-        if len(fields) < 8 or not fields[0].endswith(":"):
-            continue
-        bind, visibility, index = fields[4:7]
-        name = fields[7].split("@", maxsplit=1)[0]
-        if (
-            bind == "GLOBAL"
-            and visibility == "DEFAULT"
-            and index != "UND"
-            and name.startswith("jpeg_")
-        ):
-            jpeg_exports.add(name)
-    if jpeg_exports:
-        raise CiError(
-            f"{location}: {SAM2_HOI_RUNTIME_LIBRARY} exports global/default libjpeg "
-            f"symbols: {sorted(jpeg_exports)}"
-        )
+    for library in libraries:
+        if library == "jpeg":
+            jpeg_dependencies = sorted(name for name in needed if "jpeg" in name.lower())
+            if jpeg_dependencies:
+                raise CiError(
+                    f"{location}: {path.name} has external libjpeg DT_NEEDED entries: "
+                    f"{jpeg_dependencies}"
+                )
+
+            jpeg_exports = set()
+            for line in symbols.splitlines():
+                fields = line.split()
+                if len(fields) < 8 or not fields[0].endswith(":"):
+                    continue
+                bind, visibility, index = fields[4:7]
+                name = fields[7].split("@", maxsplit=1)[0]
+                if (
+                    bind == "GLOBAL"
+                    and visibility == "DEFAULT"
+                    and index != "UND"
+                    and name.startswith("jpeg_")
+                ):
+                    jpeg_exports.add(name)
+            if jpeg_exports:
+                raise CiError(
+                    f"{location}: {path.name} exports global/default libjpeg symbols: "
+                    f"{sorted(jpeg_exports)}"
+                )
     return dynamic, symbols
 
 
-def _validate_archive_sam2_hoi_release_dso(
+def _validate_archive_private_static_runtime_dso(
     context: CiContext,
     location: str,
+    runtime_library: str,
     payload: bytes,
+    libraries: tuple[str, ...],
 ) -> None:
-    with tempfile.TemporaryDirectory(prefix="trtmc-wheel-sam2-hoi-") as directory:
-        path = Path(directory) / SAM2_HOI_RUNTIME_LIBRARY
+    with tempfile.TemporaryDirectory(prefix="trtmc-wheel-model-dso-") as directory:
+        path = Path(directory) / runtime_library
         path.write_bytes(payload)
-        validate_sam2_hoi_release_dso(context, location, path)
+        validate_private_static_runtime_dso(context, location, path, libraries)
 
 
 class InstalledWheelValidator:
@@ -426,14 +474,20 @@ class WheelArchiveValidator:
                 for name in names
                 if "/bin/libtrtmc_model_" in name and name.endswith(".so")
             )
-            sam2_hoi_plugins = [
-                name for name in model_plugins if Path(name).name == SAM2_HOI_RUNTIME_LIBRARY
-            ]
-            if len(sam2_hoi_plugins) != 1:
-                raise CiError(
-                    f"{wheel}: expected exactly one packaged {SAM2_HOI_RUNTIME_LIBRARY}, "
-                    f"found {len(sam2_hoi_plugins)}"
-                )
+            private_static_policies = runtime_dso_private_static_policies(
+                self.context.repository
+            )
+            private_static_plugins: dict[str, str] = {}
+            for runtime_library in private_static_policies:
+                matches = [
+                    name for name in model_plugins if Path(name).name == runtime_library
+                ]
+                if len(matches) != 1:
+                    raise CiError(
+                        f"{wheel}: expected exactly one packaged {runtime_library}, "
+                        f"found {len(matches)}"
+                    )
+                private_static_plugins[runtime_library] = matches[0]
             metadata_entries = sorted(
                 name for name in names if name.endswith(".dist-info/METADATA")
             )
@@ -467,11 +521,14 @@ class WheelArchiveValidator:
                 tensorrt_version,
                 native_payloads,
             )
-            _validate_archive_sam2_hoi_release_dso(
-                self.context,
-                str(wheel),
-                archive.read(sam2_hoi_plugins[0]),
-            )
+            for runtime_library, libraries in private_static_policies.items():
+                _validate_archive_private_static_runtime_dso(
+                    self.context,
+                    str(wheel),
+                    runtime_library,
+                    archive.read(private_static_plugins[runtime_library]),
+                    libraries,
+                )
             wheel_metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/WHEEL"))
             ).decode()

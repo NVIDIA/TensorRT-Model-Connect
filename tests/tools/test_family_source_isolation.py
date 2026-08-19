@@ -28,6 +28,7 @@ def test_resolve_selection_uses_manifest_runtime_owner() -> None:
     assert selection.family == "magpie_tts"
     assert selection.runtime_models == ("magpie",)
     assert "magpie-tts-357m" in selection.e2e_models
+    assert selection.public_headers == ()
 
 
 @pytest.mark.parametrize(
@@ -45,6 +46,7 @@ def test_resolve_selection_uses_manifest_runtime_owner() -> None:
         ("tests/e2e_harness/model_runner.py", True),
         ("tests/e2e/models/qwen/MODEL.toml", True),
         ("tests/e2e/models/llama/MODEL.toml", False),
+        ("include/trtmc/models/sam2_video.h", False),
         ("tools/families/qwen/bench_flashinfer_e2e.py", True),
         ("tools/families/llama/example.py", False),
         ("tests/builder/families/qwen/test_family.py", True),
@@ -57,6 +59,7 @@ def test_include_path_enforces_family_boundaries(path: str, included: bool) -> N
         family="qwen",
         runtime_models=("qwen",),
         e2e_models=("qwen3-0.6b-fp16",),
+        public_headers=(),
     )
 
     assert isolation.include_path(PurePosixPath(path), selection) is included
@@ -96,7 +99,29 @@ def test_materialize_contains_only_selected_owned_directories(tmp_path: Path) ->
     metadata = json.loads((output / ".trtmc-family-source.json").read_text(encoding="utf-8"))
     assert metadata["family"] == "qwen"
     assert metadata["runtime_models"] == ["qwen"]
+    assert metadata["public_headers"] == []
     assert metadata["copied_files"] == copied
+
+
+@pytest.mark.parametrize(
+    ("family", "included", "excluded"),
+    [
+        ("sam2", "sam2_video.h", "sam2_hoi_video.h"),
+        ("sam2_hoi", "sam2_hoi_video.h", "sam2_video.h"),
+    ],
+)
+def test_model_public_headers_follow_exact_family_ownership(
+    family: str, included: str, excluded: str, tmp_path: Path
+) -> None:
+    selection = isolation.resolve_selection(REPO_ROOT, family)
+    output = tmp_path / family
+
+    assert selection.public_headers == (included,)
+    isolation.materialize(REPO_ROOT, output, selection)
+
+    headers = output / "include/trtmc/models"
+    assert (headers / included).is_file()
+    assert not (headers / excluded).exists()
 
 
 def test_resolve_selection_rejects_unknown_family() -> None:

@@ -18,9 +18,30 @@ namespace trtmc::sam2_hoi {
 
 class IPafpnComposite;
 
-class Sam2HoiPipeline final : public IPipeline,
-                              public IVideoTrackingPipeline,
-                              public IVideoFrameBatchLoader {
+// Model-owned decoded-frame types. They intentionally stay behind the
+// SAM2-HOI runtime DSO instead of extending the shared pipeline surface.
+struct Sam2HoiVideoFrameView {
+    const float* pixels{nullptr};
+    int32_t height{0};
+    int32_t width{0};
+};
+
+struct Sam2HoiVideoFrame {
+    std::vector<float> pixels;
+    int32_t height{0};
+    int32_t width{0};
+
+    bool empty() const { return pixels.empty(); }
+    Sam2HoiVideoFrameView view() const { return {pixels.data(), height, width}; }
+};
+
+// Validate the complete model-owned output-path contract before JPEG decode or
+// inference begins. The C ABI uses this seam to keep argument failures from
+// poisoning a reusable session.
+void validateVideoOutputPaths(const std::string& output_json, const std::string& output_masks_dir,
+                              std::size_t input_frame_count);
+
+class Sam2HoiPipeline final : public IPipeline {
   public:
     // Legacy six-plan bundles keep the monolithic image feature engine and
     // its original explicit image-engine synchronization boundary.
@@ -40,12 +61,12 @@ class Sam2HoiPipeline final : public IPipeline,
                     std::unique_ptr<ITrtModule> memory_encoder, std::string model_id);
     ~Sam2HoiPipeline() override;
 
-    VideoFrame load_video_frame(const std::string& path) override;
-    std::vector<VideoFrame> load_video_frames(const std::vector<std::string>& paths) override;
-    std::size_t max_video_frame_load_concurrency() const noexcept override;
+    Sam2HoiVideoFrame load_video_frame(const std::string& path);
+    std::vector<Sam2HoiVideoFrame> load_video_frames(const std::vector<std::string>& paths);
+    std::size_t max_video_frame_load_concurrency() const noexcept;
 
-    int32_t track_video(const std::vector<VideoFrameView>& frames, const std::string& output_json,
-                        const std::string& output_masks_dir) override;
+    int32_t track_video(const std::vector<Sam2HoiVideoFrameView>& frames,
+                        const std::string& output_json, const std::string& output_masks_dir);
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "Sam2HoiPipeline"; }

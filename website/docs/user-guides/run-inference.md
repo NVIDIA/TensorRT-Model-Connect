@@ -15,7 +15,7 @@ The CLI is task-oriented; it is not one generic tensor runner.
 | Text-to-audio / speech-to-speech | `trtmc generate-audio`, `trtmc speak` | Audio file or stream |
 | Image/video diffusion | `trtmc generate-video` | One or more frames |
 | Segmentation / classification | `trtmc segment`, `segment-prompted`, `classify` | Mask, prompted result, or class scores |
-| HOI video tracking | `trtmc track-hoi` | Ordered detections, interaction pairs, IDs, and binary masks |
+| SAM2-HOI video tracking | Model-owned C ABI | Ordered detections, interaction pairs, IDs, and binary masks |
 | Time-series / neural operator | `trtmc solve` | Numeric output vector |
 
 Example deterministic text request:
@@ -32,23 +32,11 @@ Shared loading controls such as `--backend-dir`, `--model-plugin-dir`,
 meaning. Read [Configure Runtime Behavior](configure-runtime.md) before using
 one as a generic fix.
 
-Example HOI tracking request:
-
-```bash
-trtmc track-hoi sam2-hoi-tracking.bundle \
-  --frames-dir ./frames \
-  --output-json ./tracking.json \
-  --output-masks-dir ./masks
-```
-
-Use naturally sortable frame names. The command fails if the bundle does not
-provide the generic video-tracking capability; it does not infer support from
-the model or family name.
-
-For benchmark receipts, add `--benchmark N --warmup N --benchmark-json PATH`.
-The default `predecoded` scope excludes enumeration and decode; select
-`--benchmark-scope loaded-request` to include fresh enumeration and decode in
-each measured request. Both scopes write the normal tracking artifacts only in
-one final untimed correctness call.
+SAM2-HOI is an explicit exception to the task-oriented CLI. Its family DSO
+exports `trtmc_sam2_hoi_video_run_jpeg_files_v1`, which accepts exactly five
+JPEG paths and separate JSON/mask destinations. Use the public
+`trtmc/models/sam2_hoi_video.h` contract described under
+[SAM2-HOI video C ABI](../api/cpp-api.md#sam2-hoi-video-c-abi); do not infer this
+entrypoint from another family or from the task name.
 
 {/* Collaborative review anchor: batch 2. */}

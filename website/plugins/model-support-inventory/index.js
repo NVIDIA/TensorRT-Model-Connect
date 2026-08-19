@@ -144,7 +144,6 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   neural_operator: ['solve'],
   omni_multimodal: ['generate-audio'],
   prompted_segmentation: ['segment-prompted'],
-  hoi_video_tracking: ['track-hoi'],
   reranking: ['rerank'],
   segmentation: ['segment'],
   speech_to_speech: ['speak'],
@@ -361,7 +360,30 @@ function localSourceMetadataFields() {
   };
 }
 
+function runtimeApiForManifest(manifest) {
+  const api = manifest.runtime_api;
+  if (api === undefined) return null;
+  if (
+    !api ||
+    api.kind !== 'model_owned_c_abi' ||
+    !['library', 'header', 'entrypoint'].every(
+      (field) => typeof api[field] === 'string' && api[field]
+    )
+  ) {
+    throw new Error(
+      `Malformed model-owned C ABI declaration for profile ${manifest.name}`
+    );
+  }
+  return {
+    kind: api.kind,
+    library: api.library,
+    header: api.header,
+    entrypoint: api.entrypoint,
+  };
+}
+
 function cliCommandsForManifest(manifest, hfTasks) {
+  if (runtimeApiForManifest(manifest)) return [];
   if (manifest.task_strategy === 'diffusion_media_generation') {
     const commands = new Set();
     if (hfTasks.some((task) => task.endsWith('-video'))) commands.add('generate-video');
@@ -1131,18 +1153,6 @@ function commandContractForProfile(profile, capability) {
         evidence,
       };
     }
-    case 'hoi_video_tracking':
-      return {
-        command: 'track-hoi',
-        purpose: 'Detect human-object interactions and propagate object masks through an ordered frame sequence.',
-        syntax: 'trtmc track-hoi <bundle.bundle> --frames-dir <frames-dir> --output-json <tracking.json> --output-masks-dir <masks-dir>',
-        options: [
-          option('--frames-dir <DIR>', 'Required', 'Directory of naturally ordered JPEG, PNG, or BMP video frames.'),
-          option('--output-json <PATH>', 'Required', 'Write ordered detections, object IDs, interaction pairs, and mask paths as JSON.'),
-          option('--output-masks-dir <DIR>', 'Required', 'Write one uint8 NPY mask tensor per produced frame.'),
-        ],
-        evidence,
-      };
     case 'text_to_audio':
     case 'omni_multimodal':
       return {
@@ -1227,6 +1237,7 @@ function collectFamilyCommandContracts(repoRoot, profiles, runtimeOwnersByStrate
   const capabilityByOwner = new Map();
   const grouped = new Map();
   for (const profile of profiles) {
+    if (profile.cliCommands.length === 0) continue;
     const owners = runtimeOwnersByStrategy.get(profile.runtimeStrategy) || [];
     const capabilities = owners.map((owner) => {
       if (!capabilityByOwner.has(owner)) {
@@ -1445,6 +1456,7 @@ function collectModelSupportInventory(repoRoot) {
         );
       }
       const hfTasks = hfTasksForManifest(manifest);
+      const runtimeApi = runtimeApiForManifest(manifest);
       return {
         profile: manifest.name,
         hfId: manifest.hf_id,
@@ -1454,6 +1466,7 @@ function collectModelSupportInventory(repoRoot) {
         family: manifest.family,
         runtimeStrategy: manifest.runtime_strategy || 'not declared',
         taskStrategy: manifest.task_strategy,
+        ...(runtimeApi ? {runtimeApi} : {}),
         hfTasks,
         cliCommands: cliCommandsForManifest(manifest, hfTasks),
         testcases: Array.isArray(manifest.testcases)
@@ -1598,3 +1611,4 @@ function modelSupportInventoryPlugin(context) {
 module.exports = modelSupportInventoryPlugin;
 module.exports.collectModelSupportInventory = collectModelSupportInventory;
 module.exports.collectRuntimeCapabilities = collectRuntimeCapabilities;
+module.exports.runtimeApiForManifest = runtimeApiForManifest;

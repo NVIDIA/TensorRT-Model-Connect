@@ -609,6 +609,26 @@ def test_sam2_hoi_selects_the_real_local_source_contract(tmp_path: Path, suite: 
     }
 
 
+def test_selector_rejects_huggingface_manifest_without_hf_id_or_model_id(
+    tmp_path: Path,
+) -> None:
+    def remove_model_identity(source: Path, _projection: dict[str, object]) -> None:
+        manifests = source / "tests/e2e/models/sam2/manifests"
+        for path in manifests.glob("*.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.pop("hf_id", None)
+            payload.pop("model_id", None)
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CiError, match="no hf_id/model_id"):
+        _run_test_selection(
+            tmp_path,
+            "sam2",
+            "premerge",
+            projection_setup=remove_model_identity,
+        )
+
+
 @pytest.mark.parametrize("mutation", ["remove-contract", "mismatch-path", "wrong-suite"])
 def test_selector_rejects_an_unprovisionable_local_source_case(
     tmp_path: Path, mutation: str

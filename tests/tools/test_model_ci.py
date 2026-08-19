@@ -66,6 +66,7 @@ def _add_model(
         f"src/runtime/models/{runtime_id}/MODEL.toml",
         f'id = "{runtime_id}"\n'
         f'runtime_library = "libtrtmc_model_{runtime_id}.so"\n'
+        f'public_headers = ["{runtime_id}.h"]\n'
         f'runtime_strategies = ["{strategy}"]\n',
     )
     _write(
@@ -73,6 +74,7 @@ def _add_model(
         f"src/runtime/models/{runtime_id}/plugin.cpp",
         f"// {runtime_id}\n",
     )
+    _write(repo, f"include/trtmc/models/{runtime_id}.h", f"// {runtime_id} API\n")
     _write(
         repo,
         f"tests/e2e/models/{logical_id}/MODEL.toml",
@@ -1173,6 +1175,8 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert not (output / "src/runtime/models/model_b").exists()
     assert not (output / "tests/e2e/models/model_b").exists()
     assert not (output / "tests/cpp/models/model_b").exists()
+    assert (output / "include/trtmc/models/model_a.h").is_file()
+    assert not (output / "include/trtmc/models/model_b.h").exists()
     assert (output / "tests/cpp/models/model_a/test_model_a.cpp").is_file()
     assert (output / "src/runtime/core/core.cpp").is_file()
     assert (output / "examples/byok/identity_copy_kernel.cpp").is_file()
@@ -1245,6 +1249,28 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         item for item in manifest["files"] if item["path"] == copied.relative_to(output).as_posix()
     )
     assert entry["sha256"] == hashlib.sha256(expected).hexdigest()
+
+
+@pytest.mark.parametrize("mutation", ["missing", "shared"])
+def test_runtime_public_header_ownership_fails_closed(
+    tmp_path: Path, mutation: str
+) -> None:
+    repo, _revision = _make_repo(tmp_path)
+    if mutation == "missing":
+        (repo / "include/trtmc/models/model_a.h").unlink()
+    else:
+        runtime_manifest = repo / "src/runtime/models/model_b/MODEL.toml"
+        text = runtime_manifest.read_text(encoding="utf-8")
+        runtime_manifest.write_text(
+            text.replace('public_headers = ["model_b.h"]', 'public_headers = ["model_a.h"]'),
+            encoding="utf-8",
+        )
+    _commit(repo, f"{mutation} public header")
+
+    result = _run(repo, "validate", check=False)
+
+    assert result.returncode == 2
+    assert "public model header" in result.stderr or "missing public header" in result.stderr
 
 
 def test_projection_closes_validation_module_imports() -> None:

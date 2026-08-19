@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 import _pyproject_backend as backend
-from tensorrt_model_connect.families.sam2_hoi import native_image_builder, source_package
 from tools import model_ci
 from tools.ci.package import RELEASE_LEGAL_FILES, WheelArchiveValidator
 from tools.ci.process import CiError
@@ -27,6 +26,10 @@ SAM2_HOI_NATIVE_PLUGINS = (
 )
 SAM2_HOI_PAFPN_BN_HELPER = (
     REPOSITORY_ROOT / "python/tensorrt_model_connect/families/sam2_hoi/pafpn_bn_invstd_helper.cu"
+)
+requires_sam2_hoi = pytest.mark.skipif(
+    not SAM2_HOI_NATIVE_PLUGINS.is_dir(),
+    reason="SAM2-HOI-owned legal closure is absent from this family projection",
 )
 
 
@@ -142,6 +145,7 @@ def test_libjpeg_turbo_conan_dependency_has_notice_attribution() -> None:
     assert "3. This notice may not be removed or altered from any source distribution" in section
 
 
+@requires_sam2_hoi
 def test_sam2_hoi_pytorch_native_operators_have_notice_attribution() -> None:
     notice = (REPOSITORY_ROOT / "NOTICE").read_text()
 
@@ -154,6 +158,7 @@ def test_sam2_hoi_pytorch_native_operators_have_notice_attribution() -> None:
     assert "aten/src/ATen/native/cuda/UpSample.cuh" in notice
 
 
+@requires_sam2_hoi
 def test_exact_hiera_dependencies_have_complete_notice_attribution() -> None:
     notice = (REPOSITORY_ROOT / "NOTICE").read_text(encoding="utf-8")
 
@@ -171,6 +176,7 @@ def test_exact_hiera_dependencies_have_complete_notice_attribution() -> None:
     assert "do not redistribute any cuBLASLt binary" in notice
 
 
+@requires_sam2_hoi
 def test_exact_hiera_release_member_closure_is_under_declared_package_roots() -> None:
     with (REPOSITORY_ROOT / "pyproject.toml").open("rb") as source:
         package = tomllib.load(source)["tool"]["conan-py-build"]
@@ -196,6 +202,7 @@ def test_exact_hiera_release_member_closure_is_under_declared_package_roots() ->
 
 
 @pytest.mark.slow
+@requires_sam2_hoi
 def test_built_wheel_and_sdist_contain_exact_hiera_closure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,6 +301,7 @@ def test_built_wheel_and_sdist_contain_exact_hiera_closure(
     assert not any(name.name.startswith(cuda_library_prefixes) for name in sdist_names)
 
 
+@requires_sam2_hoi
 def test_exact_hiera_sources_exclude_cuda_dsos_and_gate_build_process_identity() -> None:
     packaged_files = [path for path in SAM2_HOI_NATIVE_PLUGINS.rglob("*") if path.is_file()]
     assert not any(
@@ -320,7 +328,13 @@ def test_exact_hiera_sources_exclude_cuda_dsos_and_gate_build_process_identity()
     assert dependency_load < plugin_load
 
 
+@requires_sam2_hoi
 def test_sam2_hoi_tracker_position_has_sam2_notice_attribution() -> None:
+    from tensorrt_model_connect.families.sam2_hoi import (
+        native_image_builder,
+        source_package,
+    )
+
     builder = (
         REPOSITORY_ROOT / Path(native_image_builder.__file__).relative_to(REPOSITORY_ROOT)
     ).read_text()

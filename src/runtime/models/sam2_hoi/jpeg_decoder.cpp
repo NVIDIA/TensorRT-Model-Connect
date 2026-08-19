@@ -62,9 +62,9 @@ void read_rgb_scanlines(jpeg_decompress_struct& decoder, std::uint8_t* pixels,
     }
 }
 
-VideoFrame make_video_frame(std::unique_ptr<std::uint8_t, decltype(&std::free)> pixels,
-                            std::size_t width, std::size_t height, std::size_t value_count) {
-    VideoFrame frame;
+Sam2HoiVideoFrame make_video_frame(std::unique_ptr<std::uint8_t, decltype(&std::free)> pixels,
+                                   std::size_t width, std::size_t height, std::size_t value_count) {
+    Sam2HoiVideoFrame frame;
     frame.height = static_cast<int32_t>(height);
     frame.width = static_cast<int32_t>(width);
     frame.pixels.resize(value_count);
@@ -74,8 +74,9 @@ VideoFrame make_video_frame(std::unique_ptr<std::uint8_t, decltype(&std::free)> 
 }
 
 void decode_worker(const std::vector<std::string>& paths,
-                   const std::function<VideoFrame(const std::string&)>& decoder,
-                   std::vector<VideoFrame>& frames, std::vector<std::exception_ptr>& failures,
+                   const std::function<Sam2HoiVideoFrame(const std::string&)>& decoder,
+                   std::vector<Sam2HoiVideoFrame>& frames,
+                   std::vector<std::exception_ptr>& failures,
                    std::atomic<std::size_t>& next_index) {
     while (true) {
         const std::size_t index = next_index.fetch_add(1U, std::memory_order_relaxed);
@@ -136,7 +137,7 @@ void rethrow_decode_failure(const std::vector<std::exception_ptr>& failures,
 
 } // namespace
 
-VideoFrame decode_jpeg_pillow_rgb(const std::string& path) {
+Sam2HoiVideoFrame decode_jpeg_pillow_rgb(const std::string& path) {
     std::FILE* input = std::fopen(path.c_str(), "rb");
     if (input == nullptr)
         return {};
@@ -206,15 +207,15 @@ VideoFrame decode_jpeg_pillow_rgb(const std::string& path) {
     return make_video_frame(std::move(owned_pixels), width, height, value_count);
 }
 
-std::vector<VideoFrame>
+std::vector<Sam2HoiVideoFrame>
 decode_jpeg_paths_bounded(const std::vector<std::string>& paths, std::size_t max_concurrency,
-                          const std::function<VideoFrame(const std::string&)>& decoder) {
+                          const std::function<Sam2HoiVideoFrame(const std::string&)>& decoder) {
     if (max_concurrency == 0U)
         throw std::invalid_argument("SAM2 HOI JPEG decode concurrency must be positive");
     if (!decoder)
         throw std::invalid_argument("SAM2 HOI JPEG decoder callback is empty");
 
-    std::vector<VideoFrame> frames(paths.size());
+    std::vector<Sam2HoiVideoFrame> frames(paths.size());
     if (paths.empty())
         return frames;
 
@@ -231,7 +232,7 @@ decode_jpeg_paths_bounded(const std::vector<std::string>& paths, std::size_t max
     return frames;
 }
 
-std::vector<VideoFrame> decode_jpeg_pillow_rgb_batch(const std::vector<std::string>& paths) {
+std::vector<Sam2HoiVideoFrame> decode_jpeg_pillow_rgb_batch(const std::vector<std::string>& paths) {
     return decode_jpeg_paths_bounded(paths, kMaxConcurrentJpegDecodes, decode_jpeg_pillow_rgb);
 }
 

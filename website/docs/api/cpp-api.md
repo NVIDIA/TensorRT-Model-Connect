@@ -6,9 +6,11 @@ The public C++ API is centered on `include/trtmc/pipeline.h`.
 
 :::note C-linkage status
 
-The C++ API is the primary native interface. The C-linkage header exposes a
-useful C++-compatible subset for shims and FFI experiments, but it is not yet a
-complete stable pure-C ownership API.
+The C++ API is the primary native interface. The shared pipeline C-linkage
+header exposes a useful C++-compatible subset for shims and FFI experiments,
+but it is not yet a complete stable pure-C ownership API. Separately versioned
+model headers, such as SAM2 and SAM2-HOI video, define their own ownership and
+compatibility contracts.
 
 :::
 
@@ -66,43 +68,55 @@ schema-driven JSON file on the C++ path. `set_tokens` supplies repeatable
 The current Qwen Edge-LLM optimized implementation rejects both runtime config
 surfaces instead of silently ignoring them.
 
-## Video tracking capability
+## SAM2-HOI video C ABI
 
-Video tracking is an optional capability interface, separate from
-`IPipeline`, so adding it does not shift the base pipeline ABI. Test for the
-capability after loading a bundle:
+SAM2-HOI owns a versioned, fixed five-JPEG API in
+`include/trtmc/models/sam2_hoi_video.h`. The symbols are exported by
+`libtrtmc_model_sam2_hoi.so`; they are not methods on the shared `IPipeline`
+interface and there is no generic `trtmc` video-tracking command.
 
 ```cpp
-auto pipe = trtmc::load("/tmp/sam2-hoi.bundle", options);
-auto* tracker = dynamic_cast<trtmc::IVideoTrackingPipeline*>(pipe.get());
-if (tracker == nullptr) {
-    throw std::runtime_error("bundle does not support video tracking");
+#include <trtmc/models/sam2_hoi_video.h>
+
+#include <cstdio>
+
+int main() {
+    TrtmcSam2HoiVideoSession* session =
+        trtmc_sam2_hoi_video_create_from_bundle_v1(
+            "/tmp/sam2-hoi-tracking.bundle",
+            "/opt/trtmc/models",
+            "/opt/trtmc/backends");
+    if (session == nullptr) {
+        std::fprintf(stderr, "%s\n", trtmc_sam2_hoi_video_last_error());
+        return 1;
+    }
+
+    TrtmcSam2HoiVideoRunResultV1 result{};
+    const int32_t status = trtmc_sam2_hoi_video_run_jpeg_files_v1(
+        session,
+        "000000.jpg", "000001.jpg", "000002.jpg", "000003.jpg", "000004.jpg",
+        "/tmp/tracking.json", "/tmp/tracking-masks",
+        &result, sizeof(result));
+    if (status != TRTMC_SAM2_HOI_VIDEO_STATUS_OK) {
+        std::fprintf(stderr, "%s\n", trtmc_sam2_hoi_video_last_error());
+    }
+    trtmc_sam2_hoi_video_session_destroy(session);
+    return status == TRTMC_SAM2_HOI_VIDEO_STATUS_OK ? 0 : 1;
 }
-
-std::vector<trtmc::VideoFrame> owned;
-owned.push_back(tracker->load_video_frame("000000.jpg"));
-owned.push_back(tracker->load_video_frame("000001.jpg"));
-
-std::vector<trtmc::VideoFrameView> views;
-for (const auto& frame : owned) {
-    views.push_back(frame.view());
-}
-
-const int32_t produced = tracker->track_video(
-    views, "/tmp/tracking.json", "/tmp/tracking-masks");
 ```
 
-`VideoFrame` owns RGB HWC float32 pixels in `[0, 1]` and its `view()` returns a
-borrowed `VideoFrameView`. Keep every owner and its pixel storage alive and
-unmodified for the complete `track_video()` call. `load_video_frame()` lets a
-family select a source-compatible decoder; this matters when small JPEG pixel
-differences can change detector postprocessing. The call is one-shot and owns
-the model-specific session/state internally. Its return value is the number of
-produced frames, while the selected family defines the JSON schema and assets
-written under the output directory. Passing both output paths as empty strings
-runs the complete synchronous capability call but discards JSON and per-frame
-assets. This supports in-process timing without file I/O. Exactly one empty
-output path is invalid.
+The caller owns the bundle and session. Supply exactly five nonempty JPEG file
+paths in temporal order. Both output paths must be nonempty to materialize the
+schema-version-1 tracking JSON and per-frame uint8 NumPy masks; pass two empty
+strings for the benchmark discard path. Exactly one empty output path is an
+invalid argument. Successful version-1 calls report a 64-byte scalar result
+with the produced frame count; the current E2E profile requires that count to
+be five. No output allocation crosses the ABI.
+
+Calls on one session must be serialized. An argument or ABI preflight failure
+does not poison the session, while a failure after JPEG processing begins does.
+Always read `trtmc_sam2_hoi_video_last_error()` on a nonzero status and destroy
+the session, including after failure.
 
 ## Inspect a bundle without loading it
 

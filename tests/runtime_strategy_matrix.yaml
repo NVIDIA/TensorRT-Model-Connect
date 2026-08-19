@@ -876,13 +876,12 @@
     },
     "sam2_hoi_video_tracking": {
       "task_strategy": "hoi_video_tracking",
-      "cli_commands": [
-        "track-hoi"
-      ],
+      "cli_commands": [],
+      "cli_exemption": "SAM2-HOI uses its model-owned fixed five-JPEG public C ABI instead of a generic IPipeline CLI operation.",
       "runner_class": "video_tracking.HoiVideoTrackingRunner",
       "comparator_class": "video_tracking.HoiVideoTrackingComparator",
       "diff_framework_check_classes": [],
-      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sam2_hoi_video_tracking']; the model-owned five-frame comparator gates exact identities and strict detection, interaction, and mask parity.",
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sam2_hoi_video_tracking']; the model-owned five-frame comparator gates exact IDs, labels, and interaction pairs plus bounded detector and mask metrics.",
       "performance_mode": "multi_stage"
     },
     "timm_vit_image_classification": {

@@ -587,14 +587,14 @@ void validate_phase_a_streams(ITrtModule& image_front, IPafpnComposite& pafpn,
         throw std::runtime_error("SAM2 HOI front/PAFPN/detector stream contract failed");
 }
 
-void validate_video_frame(const VideoFrameView& frame, int32_t height, int32_t width) {
+void validate_video_frame(const Sam2HoiVideoFrameView& frame, int32_t height, int32_t width) {
     if (frame.pixels == nullptr || frame.height <= 0 || frame.width <= 0)
         throw std::invalid_argument("SAM2 HOI decoded frame is invalid");
     if (frame.height != height || frame.width != width)
         throw std::invalid_argument("SAM2 HOI video frames must have a fixed resolution");
 }
 
-bool validate_video_request(const std::vector<VideoFrameView>& frames,
+bool validate_video_request(const std::vector<Sam2HoiVideoFrameView>& frames,
                             const std::string& output_json, const std::string& output_masks_dir) {
     if (frames.empty())
         throw std::invalid_argument("SAM2 HOI video must contain at least one frame");
@@ -689,7 +689,7 @@ void record_tracker_memory(ITrtModule& memory_encoder, TrackerOutput& tracker_ou
 }
 
 void process_video_frame(std::size_t input_frame_index, std::size_t total_frames,
-                         const VideoFrameView& frame, std::vector<float>& pixels,
+                         const Sam2HoiVideoFrameView& frame, std::vector<float>& pixels,
                          ITrtModule& image_front, IPafpnComposite* pafpn, ITrtModule& detector,
                          ITrtModule& interaction, ITrtModule& prompt_tracker,
                          ITrtModule& recurrent_tracker, ITrtModule& memory_encoder,
@@ -727,6 +727,11 @@ void process_video_frame(std::size_t input_frame_index, std::size_t total_frames
 }
 
 } // namespace
+
+void validateVideoOutputPaths(const std::string& output_json, const std::string& output_masks_dir,
+                              std::size_t input_frame_count) {
+    validate_output_paths(output_json, output_masks_dir, input_frame_count);
+}
 
 Sam2HoiPipeline::Sam2HoiPipeline(std::unique_ptr<ITrtModule> image_features,
                                  std::unique_ptr<ITrtModule> detector,
@@ -791,7 +796,7 @@ Sam2HoiPipeline::~Sam2HoiPipeline() {
     }
 }
 
-VideoFrame Sam2HoiPipeline::load_video_frame(const std::string& path) {
+Sam2HoiVideoFrame Sam2HoiPipeline::load_video_frame(const std::string& path) {
     if (is_jpeg_path(path))
         return decode_jpeg_pillow_rgb(path);
 
@@ -799,7 +804,8 @@ VideoFrame Sam2HoiPipeline::load_video_frame(const std::string& path) {
     return {std::move(image.pixels), image.height, image.width};
 }
 
-std::vector<VideoFrame> Sam2HoiPipeline::load_video_frames(const std::vector<std::string>& paths) {
+std::vector<Sam2HoiVideoFrame>
+Sam2HoiPipeline::load_video_frames(const std::vector<std::string>& paths) {
     if (!std::all_of(paths.begin(), paths.end(), is_jpeg_path)) {
         throw std::invalid_argument("SAM2 HOI batch frame loading requires only JPEG paths");
     }
@@ -810,7 +816,7 @@ std::size_t Sam2HoiPipeline::max_video_frame_load_concurrency() const noexcept {
     return kMaxConcurrentJpegDecodes;
 }
 
-int32_t Sam2HoiPipeline::track_video(const std::vector<VideoFrameView>& frames,
+int32_t Sam2HoiPipeline::track_video(const std::vector<Sam2HoiVideoFrameView>& frames,
                                      const std::string& output_json,
                                      const std::string& output_masks_dir) {
     const bool discard_outputs = validate_video_request(frames, output_json, output_masks_dir);

@@ -8,6 +8,8 @@
 #include "runtime/models/sam2_hoi/cuda_stream.h"
 #include "runtime/models/sam2_hoi/pafpn_composite.h"
 #include "runtime/models/sam2_hoi/pipeline.h"
+#include "runtime/models/sam2_hoi/sam2_hoi_video_session.h"
+#include "trtmc/models/sam2_hoi_video.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
@@ -356,3 +358,33 @@ REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_sam2_hoi_plugin, Sam2HoiPlugin,
                                        "sam2_hoi_video_tracking");
 
 } // namespace trtmc
+
+extern "C" TrtmcSam2HoiVideoSession*
+trtmc_sam2_hoi_video_create_from_bundle_v1(const char* bundle_path, const char* plugin_dir,
+                                           const char* backend_dir) noexcept {
+    trtmc::sam2_hoi::c_api_internal::clearLastError();
+    try {
+        if (bundle_path == nullptr || plugin_dir == nullptr || backend_dir == nullptr ||
+            *bundle_path == '\0' || *plugin_dir == '\0' || *backend_dir == '\0') {
+            throw std::invalid_argument("SAM2 HOI bundle, plugin, and backend paths are required");
+        }
+
+        trtmc::LoadOptions options;
+        options.model_plugin_search_paths.emplace_back(plugin_dir);
+        options.backend_search_paths.emplace_back(backend_dir);
+        auto pipeline = trtmc::load(bundle_path, options);
+        auto* sam2_hoi_pipeline = dynamic_cast<trtmc::sam2_hoi::Sam2HoiPipeline*>(pipeline.get());
+        if (sam2_hoi_pipeline == nullptr) {
+            throw std::runtime_error(
+                "loaded bundle did not create a SAM2 HOI native-video pipeline");
+        }
+        std::unique_ptr<trtmc::sam2_hoi::Sam2HoiPipeline> owned_pipeline(
+            static_cast<trtmc::sam2_hoi::Sam2HoiPipeline*>(pipeline.release()));
+        return trtmc::sam2_hoi::makeVideoSessionHandle(std::move(owned_pipeline));
+    } catch (const std::exception& error) {
+        trtmc::sam2_hoi::c_api_internal::setLastError(error.what());
+    } catch (...) {
+        trtmc::sam2_hoi::c_api_internal::setLastError("unknown native exception");
+    }
+    return nullptr;
+}

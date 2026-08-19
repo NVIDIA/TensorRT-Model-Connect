@@ -3,9 +3,11 @@
 
 id = "sam2_hoi"
 runtime_library = "libtrtmc_model_sam2_hoi.so"
+public_headers = ["sam2_hoi_video.h"]
 runtime_plugins = ["plugin.cpp|register_sam2_hoi_plugin"]
 runtime_strategies = ["sam2_hoi_video_tracking"]
 runtime_link_libraries = ["jpeg"]
+runtime_private_static_libraries = ["jpeg"]
 runtime_tests = [
   "test_hoi_postprocess|test_hoi_postprocess.cpp|_|hoi_postprocess.cpp|_",
   "test_sam2_hoi_engine_timing|test_sam2_hoi_engine_timing.cpp|_|_|REQUIRES_TRT,REQUIRES_GPU",
@@ -13,4 +15,5 @@ runtime_tests = [
   "test_sam2_hoi_jpeg|test_sam2_hoi_jpeg.cpp|trtmc_jpeg,Threads::Threads|jpeg_decoder.cpp|_",
   "test_sam2_hoi_io|test_sam2_hoi_io.cpp|_|sam2_hoi_io.cpp|_",
   "test_sam2_hoi_pipeline|test_sam2_hoi_pipeline.cpp|trtmc_model_sam2_hoi|_|_",
+  "test_sam2_hoi_video_session|test_sam2_hoi_video_session.cpp|trtmc_model_sam2_hoi|_|_",
 ]

@@ -189,7 +189,7 @@ void test_bounded_decode_joins_all_work_and_reports_lowest_failure() {
         completed.fetch_add(1U, std::memory_order_relaxed);
         if (index == 1U || index == 7U)
             throw std::runtime_error("decode failure " + std::to_string(index));
-        return trtmc::VideoFrame{{static_cast<float>(index)}, 1, 1};
+        return trtmc::sam2_hoi::Sam2HoiVideoFrame{{static_cast<float>(index)}, 1, 1};
     };
 
     bool reported_lowest_failure = false;

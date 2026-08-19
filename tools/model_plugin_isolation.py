@@ -21,7 +21,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
@@ -41,6 +41,7 @@ class RuntimePlugin:
     model_id: str
     library: str
     strategies: tuple[str, ...]
+    public_headers: tuple[str, ...] = ()
 
     @property
     def target(self) -> str:
@@ -54,6 +55,7 @@ _MODEL_OWNED_ROOTS = {
     Path("src/runtime/models"): "runtime_plugins",
     Path("tests/e2e/models"): "e2e_families",
     Path("tests/cpp/models"): "runtime_plugins",
+    Path("include/trtmc/models"): "public_model_headers",
 }
 
 _MODEL_OWNED_IMPACT_RULES = frozenset(
@@ -180,11 +182,14 @@ def discover_runtime_plugins(repo_root: Path) -> dict[str, RuntimePlugin]:
         model_id = _toml_string(text, "id") or manifest.parent.name
         library = _toml_string(text, "runtime_library") or f"libtrtmc_model_{model_id}.so"
         strategies = _toml_list(text, "runtime_strategies")
+        public_headers = _toml_list(text, "public_headers")
         single_strategy = _toml_string(text, "runtime_strategy")
         if not strategies and single_strategy:
             strategies = (single_strategy,)
         if strategies:
-            plugins[model_id] = RuntimePlugin(model_id, library, strategies)
+            plugins[model_id] = RuntimePlugin(
+                model_id, library, strategies, public_headers
+            )
     return plugins
 
 
@@ -314,6 +319,7 @@ def isolation_groups(
                     "library": plugin.library,
                     "strategies": list(plugin.strategies),
                     "target": plugin.target,
+                    "public_headers": list(plugin.public_headers),
                 },
                 "models": models,
             }
@@ -366,6 +372,8 @@ def _owner_under(path: Path, root: Path) -> str | None:
         relative = path.relative_to(root)
     except ValueError:
         return None
+    if root == Path("include/trtmc/models"):
+        return relative.parts[0] if relative.parts else ""
     if len(relative.parts) <= 1:
         return ""
     return relative.parts[0]
@@ -466,6 +474,9 @@ def command_stage_source(args: argparse.Namespace) -> int:
         "builder_families": set(families),
         "runtime_plugins": runtime_ids,
         "e2e_families": set(families),
+        "public_model_headers": {
+            header for plugin in selected_plugins for header in plugin.public_headers
+        },
     }
 
     for family in sorted(families):
@@ -479,6 +490,18 @@ def command_stage_source(args: argparse.Namespace) -> int:
         runtime_dir = repo_root / "src" / "runtime" / "models" / runtime_id
         if not runtime_dir.is_dir():
             raise SystemExit(f"Selected runtime plugin directory does not exist: {runtime_dir}")
+    for header in sorted(owners["public_model_headers"]):
+        pure_header = PurePosixPath(header)
+        header_path = repo_root / "include/trtmc/models" / header
+        if (
+            not header
+            or pure_header.is_absolute()
+            or len(pure_header.parts) != 1
+            or header in {".", ".."}
+            or header_path.is_symlink()
+            or not header_path.is_file()
+        ):
+            raise SystemExit(f"Selected runtime plugin has invalid public header: {header!r}")
 
     _prepare_output_dir(output_dir, clean=args.clean)
     paths = _git_paths(repo_root, include_untracked=args.include_untracked)
@@ -499,6 +522,7 @@ def command_stage_source(args: argparse.Namespace) -> int:
                 "library": plugin.library,
                 "strategies": list(plugin.strategies),
                 "target": plugin.target,
+                "public_headers": list(plugin.public_headers),
             }
             for plugin in selected_plugins
         ],

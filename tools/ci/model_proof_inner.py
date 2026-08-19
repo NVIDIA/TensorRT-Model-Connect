@@ -25,7 +25,10 @@ from .model_source_cache import (
     MODEL_SOURCE_CACHE_ROOT_ENV,
     materialized_tree_sha256,
 )
-from .package import SAM2_HOI_RUNTIME_LIBRARY, validate_sam2_hoi_release_dso
+from .package import (
+    runtime_dso_private_static_policies,
+    validate_private_static_runtime_dso,
+)
 from .process import CiError
 from .selected_wheel import SelectedWheelRuntime
 from .validation import ValidationRunner
@@ -791,15 +794,15 @@ class ModelProofInnerPipeline:
                     f"selected wheel model DSO is missing or unsafe: {runtime_library}"
                 )
             runtime_library_source = "selected-wheel"
-            if runtime_model == "sam2_hoi":
-                if runtime_library != SAM2_HOI_RUNTIME_LIBRARY:
-                    raise CiError(
-                        f"SAM2-HOI selected an unexpected runtime library: {runtime_library}"
-                    )
-                wheel_dynamic, wheel_symbols = validate_sam2_hoi_release_dso(
+            private_static = runtime_dso_private_static_policies(self.source).get(
+                runtime_library, ()
+            )
+            if private_static:
+                wheel_dynamic, wheel_symbols = validate_private_static_runtime_dso(
                     self.context,
                     "selected wheel",
                     runtime_dso,
+                    private_static,
                 )
                 (self.artifacts / "selected-wheel-model-dso.dynamic.txt").write_text(
                     wheel_dynamic + "\n", encoding="utf-8"
@@ -807,7 +810,9 @@ class ModelProofInnerPipeline:
                 (self.artifacts / "selected-wheel-model-dso.dyn-syms.txt").write_text(
                     wheel_symbols + "\n", encoding="utf-8"
                 )
-                self.status.fact("sam2_hoi_libjpeg_linkage", "private-static")
+                self.status.fact(
+                    "runtime_private_static_libraries", ",".join(private_static)
+                )
 
         plugin_dir = self.work / "model-plugins" / runtime_model
         plugin_dir.mkdir(parents=True)

@@ -45,9 +45,13 @@ def _make_repo(tmp_path: Path) -> Path:
     (runtime_dir / "MODEL.toml").write_text(
         'id = "llama"\n'
         'runtime_library = "libtrtmc_model_llama.so"\n'
+        'public_headers = ["llama.h"]\n'
         'runtime_strategies = ["llama_decoder_kv_cache"]\n',
         encoding="utf-8",
     )
+    header = repo_root / "include/trtmc/models/llama.h"
+    header.parent.mkdir(parents=True)
+    header.write_text("// llama public API\n", encoding="utf-8")
     return repo_root
 
 
@@ -231,10 +235,12 @@ def _add_projection_fixture_files(repo_root: Path) -> None:
         "src/runtime/models/sibling/MODEL.toml": (
             'id = "sibling"\n'
             'runtime_library = "libtrtmc_model_sibling.so"\n'
+            'public_headers = ["sibling.h"]\n'
             'runtime_plugins = ["plugin.cpp|register_sibling"]\n'
             'runtime_strategies = ["sibling_runtime"]\n'
         ),
         "src/runtime/models/sibling/plugin.cpp": "// sibling runtime\n",
+        "include/trtmc/models/sibling.h": "// sibling public API\n",
         "tests/e2e_harness/contracts.py": "# shared harness\n",
         "tests/e2e/models/decoder_family/MODEL.toml": (
             'id = "decoder_family"\n'
@@ -287,6 +293,8 @@ def test_stage_source_masks_sibling_model_roots(tmp_path: Path) -> None:
     ).exists()
     assert (output_dir / "src/runtime/models/llama/plugin.cpp").is_file()
     assert not (output_dir / "src/runtime/models/sibling").exists()
+    assert (output_dir / "include/trtmc/models/llama.h").is_file()
+    assert not (output_dir / "include/trtmc/models/sibling.h").exists()
     assert (
         output_dir / "tests/e2e/models/decoder_family/runner.py"
     ).is_file()
@@ -308,6 +316,7 @@ def test_stage_source_masks_sibling_model_roots(tmp_path: Path) -> None:
             "library": "libtrtmc_model_llama.so",
             "strategies": ["llama_decoder_kv_cache"],
             "target": "trtmc_model_llama",
+            "public_headers": ["llama.h"],
         }
     ]
     assert all(value > 0 for value in manifest["excluded_model_files"].values())

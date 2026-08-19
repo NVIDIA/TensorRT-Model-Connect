@@ -995,6 +995,7 @@ class TestFamilyPlugin:
     @pytest.mark.parametrize(
         "relative_path",
         [
+            ".gitattributes",
             "native_plugins/CMakeLists.txt",
             "native_plugins/custom_plugin.cpp",
             "native_plugins/custom_plugin.cu",
@@ -1481,7 +1482,6 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
-            ".gitattributes",
             "CODEOWNERS",
             "ruff.toml",
             "tests/__init__.py",

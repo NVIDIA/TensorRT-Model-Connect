@@ -143,9 +143,17 @@ is:
 ```toml
 id = "example"
 runtime_library = "libtrtmc_model_example.so"
+public_headers = ["example.h"]
 runtime_plugins = ["plugin.cpp|register_example_plugin"]
 runtime_strategies = ["example_decoder_kv_cache"]
 ```
+
+Use one family with multiple runtime strategies or public capabilities when
+the operations share the same model ID and checkpoint/weight contract. Use
+separate families when those identities differ; their builder, runtime, E2E,
+public-header, and asset roots must not import, include, link, or read files
+owned by the sibling family. `public_headers` makes model-owned headers follow
+the same positive source-projection boundary.
 
 The plugin source registers the same key:
 
@@ -163,6 +171,19 @@ the strategy-to-DSO index used by the loader.
 If the runtime needs model-owned C++ tests or a model-owned config schema,
 declare them in this same `MODEL.toml` with `runtime_tests` or
 `runtime_config_schemas`.
+
+When a runtime dependency must be linked privately and statically in release
+model DSOs, declare both the build dependency and packaging policy. The
+currently supported policy is `jpeg`:
+
+```toml
+runtime_link_libraries = ["jpeg"]
+runtime_private_static_libraries = ["jpeg"]
+```
+
+Release validation then rejects an external libjpeg dependency or exported
+default-visibility libjpeg symbols without naming the owning model family in
+shared CI code.
 
 ## 4. Add the E2E ownership root
 

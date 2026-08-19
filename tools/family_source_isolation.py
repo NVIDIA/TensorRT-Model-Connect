@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
@@ -31,6 +32,7 @@ PYTHON_FAMILIES = PurePosixPath("python/tensorrt_model_connect/families")
 RUNTIME_MODELS = PurePosixPath("src/runtime/models")
 CPP_MODEL_TESTS = PurePosixPath("tests/cpp/models")
 E2E_MODELS = PurePosixPath("tests/e2e/models")
+PUBLIC_MODEL_HEADERS = PurePosixPath("include/trtmc/models")
 FAMILY_TOOLS = PurePosixPath("tools/families")
 BUILDER_FAMILY_TESTS = PurePosixPath("tests/builder/families")
 
@@ -45,6 +47,7 @@ class FamilySourceSelection:
     family: str
     runtime_models: tuple[str, ...]
     e2e_models: tuple[str, ...]
+    public_headers: tuple[str, ...]
 
 
 def resolve_selection(repo_root: Path, family: str) -> FamilySourceSelection:
@@ -75,10 +78,31 @@ def resolve_selection(repo_root: Path, family: str) -> FamilySourceSelection:
             f"Family {family!r} has no E2E runtime mapping or same-named runtime plugin"
         )
 
+    public_headers: set[str] = set()
+    for owner in owners:
+        manifest = repo_root / RUNTIME_MODELS / owner / "MODEL.toml"
+        with manifest.open("rb") as source:
+            declared = tomllib.load(source).get("public_headers", [])
+        if not isinstance(declared, list) or any(
+            not isinstance(name, str)
+            or not name
+            or PurePosixPath(name).is_absolute()
+            or len(PurePosixPath(name).parts) != 1
+            or name in {".", ".."}
+            for name in declared
+        ):
+            raise SystemExit(f"Runtime model {owner!r} has invalid public_headers")
+        for name in declared:
+            header = repo_root / PUBLIC_MODEL_HEADERS / name
+            if header.is_symlink() or not header.is_file():
+                raise SystemExit(f"Runtime model {owner!r} has missing public header {name!r}")
+            public_headers.add(name)
+
     return FamilySourceSelection(
         family=family,
         runtime_models=tuple(sorted(owners)),
         e2e_models=tuple(sorted(selected_models)),
+        public_headers=tuple(sorted(public_headers)),
     )
 
 
@@ -91,6 +115,15 @@ def _owned_child(path: PurePosixPath, root: PurePosixPath) -> str | None:
 
 
 def include_path(path: PurePosixPath, selection: FamilySourceSelection) -> bool:
+    try:
+        public_header = path.relative_to(PUBLIC_MODEL_HEADERS)
+    except ValueError:
+        public_header = None
+    if public_header is not None:
+        if not public_header.parts:
+            return True
+        return len(public_header.parts) == 1 and public_header.name in selection.public_headers
+
     child = _owned_child(path, PYTHON_FAMILIES)
     if child is not None:
         if not child:
@@ -149,6 +182,7 @@ def selected_worktree_files(
         E2E_MODELS / selection.family,
         *(RUNTIME_MODELS / model for model in selection.runtime_models),
         *(CPP_MODEL_TESTS / model for model in selection.runtime_models),
+        *(PUBLIC_MODEL_HEADERS / name for name in selection.public_headers),
     )
     files: set[PurePosixPath] = set()
     for relative_root in roots:

@@ -1188,17 +1188,6 @@
       "architecture_source": "config.architecture"
     },
     {
-      "hf_id": "timm/vit_small_patch16_dinov3_qkvb.lvd1689m",
-      "revision": "2c7705788ac282557562465d6443606664a55f05",
-      "revision_source": "resolved",
-      "metadata_file": "config.json",
-      "model_type": null,
-      "architectures": [
-        "vit_small_patch16_dinov3_qkvb"
-      ],
-      "architecture_source": "config.architecture"
-    },
-    {
       "hf_id": "xlnet/xlnet-base-cased",
       "revision": "ceaa69c7bc5e512b5007106a7ccbb7daf24b2c79",
       "revision_source": "resolved",

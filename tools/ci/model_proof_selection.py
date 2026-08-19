@@ -288,9 +288,14 @@ class ModelProofSelector:
             source_kind = str(data.get("model_source_kind") or "huggingface")
             if source_kind not in {"huggingface", "local_source_package"}:
                 raise CiError(f"E2E manifest has an invalid model_source_kind: {path}")
-            hf_id = data.get("hf_id")
+            hf_id = (
+                data.get("hf_id")
+                if source_kind == "local_source_package"
+                else data.get("hf_id", data.get("model_id"))
+            )
             if not isinstance(hf_id, str) or not hf_id:
-                raise CiError(f"E2E manifest has no hf_id: {path}")
+                field = "hf_id" if source_kind == "local_source_package" else "hf_id/model_id"
+                raise CiError(f"E2E manifest has no {field}: {path}")
             testcases = data.get("testcases")
             if not isinstance(testcases, list) or not testcases:
                 raise CiError(f"E2E manifest has no testcases: {path}")

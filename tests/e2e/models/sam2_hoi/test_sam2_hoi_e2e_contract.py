@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import ast
+import ctypes
 import json
-import subprocess
+import os
 from pathlib import Path
 import tomllib
 
@@ -123,8 +124,12 @@ def _case(
     )
 
 
-def _runtime_json(path: Path, arrays: dict[str, np.ndarray]) -> Path:
-    masks_dir = path.parent / "masks"
+def _runtime_json(
+    path: Path,
+    arrays: dict[str, np.ndarray],
+    masks_dir: Path | None = None,
+) -> Path:
+    masks_dir = masks_dir or path.parent / "masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
     frames = []
     for frame in range(FRAME_COUNT):
@@ -145,6 +150,55 @@ def _runtime_json(path: Path, arrays: dict[str, np.ndarray]) -> Path:
     return path
 
 
+class _FakeFunction:
+    def __init__(self, implementation):
+        self.implementation = implementation
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *arguments):
+        return self.implementation(*arguments)
+
+
+class _FakeSam2HoiLibrary:
+    def __init__(self, captured: dict[str, object], *, run_status: int = 0) -> None:
+        self.trtmc_sam2_hoi_video_abi_version = _FakeFunction(lambda: 1)
+        self.trtmc_sam2_hoi_video_last_error = _FakeFunction(lambda: b"fixture C ABI error")
+        self.trtmc_sam2_hoi_video_create_from_bundle_v1 = _FakeFunction(
+            lambda bundle, plugins, backend: self._create(captured, bundle, plugins, backend)
+        )
+        self.trtmc_sam2_hoi_video_session_destroy = _FakeFunction(
+            lambda session: captured.update(destroyed_session=session)
+        )
+        self.trtmc_sam2_hoi_video_run_jpeg_files_v1 = _FakeFunction(
+            lambda *arguments: self._run(captured, run_status, *arguments)
+        )
+
+    @staticmethod
+    def _create(captured: dict[str, object], bundle, plugins, backend) -> int:
+        captured["create_paths"] = tuple(os.fsdecode(value) for value in (bundle, plugins, backend))
+        return 17
+
+    @staticmethod
+    def _run(captured: dict[str, object], status: int, *arguments) -> int:
+        captured["frame_paths"] = tuple(os.fsdecode(value) for value in arguments[1:6])
+        captured["output_json"] = os.fsdecode(arguments[6])
+        captured["output_masks_dir"] = os.fsdecode(arguments[7])
+        captured["result_size"] = arguments[9]
+        if status != 0:
+            return status
+        result = ctypes.cast(arguments[8], ctypes.POINTER(video_tracking._RunResult)).contents
+        result.struct_size = ctypes.sizeof(result)
+        result.abi_version = 1
+        result.produced_frame_count = FRAME_COUNT
+        _runtime_json(
+            Path(captured["output_json"]),
+            _arrays(),
+            Path(captured["output_masks_dir"]),
+        )
+        return 0
+
+
 def test_manifest_declares_distinct_archive_backed_tracking_contract() -> None:
     manifest = FAMILY_DIR / "manifests" / "sam2-hoi-tracking.json"
     raw_manifest = json.loads(manifest.read_text(encoding="utf-8"))
@@ -157,6 +211,13 @@ def test_manifest_declares_distinct_archive_backed_tracking_contract() -> None:
     assert case.reference_backend == "sam2_hoi_archive_reference"
     assert case.oracle_level == "L3_snapshot_regression"
     assert raw_manifest["model_source_kind"] == "local_source_package"
+    assert raw_manifest["runtime_api"] == {
+        "kind": "model_owned_c_abi",
+        "library": "libtrtmc_model_sam2_hoi.so",
+        "header": "trtmc/models/sam2_hoi_video.h",
+        "entrypoint": "trtmc_sam2_hoi_video_run_jpeg_files_v1",
+    }
+    assert "fixed five-JPEG public C ABI" in raw_manifest["benchmark_exclusion_reason"]
     assert "ci_tier" not in raw_manifest["testcases"][0]
     assert [stage.name for stage in case.stages] == ["full_tracking"]
     assert case.inputs["expected_frame_count"] == 5
@@ -361,7 +422,20 @@ def test_archive_reference_requires_exact_source_commit(tmp_path: Path) -> None:
         )
 
 
-def test_runner_invokes_only_track_hoi_and_exposes_all_frames(
+def test_runtime_library_accepts_model_proof_parent_or_leaf(tmp_path: Path) -> None:
+    parent = tmp_path / "model-plugins"
+    leaf = parent / "sam2_hoi"
+    leaf.mkdir(parents=True)
+    nested = leaf / "libtrtmc_model_sam2_hoi.so"
+    nested.touch()
+    assert video_tracking._runtime_library(parent) == nested
+    assert video_tracking._runtime_library(leaf) == nested
+    (parent / nested.name).touch()
+    with pytest.raises(RuntimeError, match="resolve exactly once"):
+        video_tracking._runtime_library(parent)
+
+
+def test_runner_invokes_only_model_owned_c_abi_and_exposes_all_frames(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,18 +449,20 @@ def test_runner_invokes_only_track_hoi_and_exposes_all_frames(
     engine_dir = tmp_path / "engines"
     engine_dir.mkdir()
     (engine_dir / case.bundle).write_bytes(b"synthetic bundle")
-    binary = tmp_path / "trtmc"
+    backend_dir = tmp_path / "backends"
+    backend_dir.mkdir()
+    binary = backend_dir / "trtmc"
     binary.write_bytes(b"synthetic binary")
-    captured: dict[str, list[str]] = {}
-
-    def fake_run(command, **kwargs):
-        del kwargs
-        captured["command"] = command
-        output_json = Path(command[command.index("--output-json") + 1])
-        _runtime_json(output_json, _arrays())
-        return subprocess.CompletedProcess(command, 0, "tracked five frames", "")
-
-    monkeypatch.setattr(video_tracking.subprocess, "run", fake_run)
+    plugin_dir = tmp_path / "model-plugins"
+    plugin_dir.mkdir()
+    runtime_library = plugin_dir / "libtrtmc_model_sam2_hoi.so"
+    runtime_library.write_bytes(b"synthetic DSO")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        video_tracking,
+        "_load_library",
+        lambda path: _FakeSam2HoiLibrary(captured),
+    )
     output = HoiVideoTrackingRunner().run_stage(
         case,
         StageSpec(name="full_tracking"),
@@ -395,14 +471,31 @@ def test_runner_invokes_only_track_hoi_and_exposes_all_frames(
             binary_path=str(binary),
             engine_dir=str(engine_dir),
             artifacts_dir=str(tmp_path / "artifacts"),
+            model_plugin_dir=str(plugin_dir),
         ),
     )
-    assert captured["command"][1] == "track-hoi"
+    assert captured["create_paths"] == (
+        str(engine_dir / case.bundle),
+        str(plugin_dir),
+        str(backend_dir),
+    )
+    assert captured["frame_paths"] == tuple(
+        str(frames_dir / f"{frame:06d}.jpg") for frame in range(FRAME_COUNT)
+    )
+    assert captured["output_json"] == str(tmp_path / "artifacts" / case.name / "trt_tracking.json")
+    assert captured["output_masks_dir"] == str(tmp_path / "artifacts" / case.name / "trt_masks")
+    assert captured["result_size"] == 64
+    assert captured["destroyed_session"] == 17
     assert output.data["frame_count"] == 5
     assert [frame["frame_index"] for frame in output.data["frames"]] == list(range(5))
+    assert len(list(Path(captured["output_masks_dir"]).glob("*.npy"))) == FRAME_COUNT
+    assert output.metadata == {
+        "runtime_library": str(runtime_library),
+        "runtime_entrypoint": "trtmc_sam2_hoi_video_run_jpeg_files_v1",
+    }
 
 
-def test_runner_fails_closed_when_track_hoi_cli_is_absent(
+def test_runner_fails_closed_when_model_owned_c_abi_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -416,17 +509,20 @@ def test_runner_fails_closed_when_track_hoi_cli_is_absent(
     engine_dir = tmp_path / "engines"
     engine_dir.mkdir()
     (engine_dir / case.bundle).write_bytes(b"synthetic bundle")
-    binary = tmp_path / "trtmc"
+    backend_dir = tmp_path / "backends"
+    backend_dir.mkdir()
+    binary = backend_dir / "trtmc"
     binary.write_bytes(b"synthetic binary")
-
+    plugin_dir = tmp_path / "model-plugins"
+    plugin_dir.mkdir()
+    (plugin_dir / "libtrtmc_model_sam2_hoi.so").write_bytes(b"synthetic DSO")
+    captured: dict[str, object] = {}
     monkeypatch.setattr(
-        video_tracking.subprocess,
-        "run",
-        lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 2, "", "unknown command: track-hoi"
-        ),
+        video_tracking,
+        "_load_library",
+        lambda path: _FakeSam2HoiLibrary(captured, run_status=3),
     )
-    with pytest.raises(RuntimeError, match="requires the native track-hoi CLI"):
+    with pytest.raises(RuntimeError, match="status 3: fixture C ABI error"):
         HoiVideoTrackingRunner().run_stage(
             case,
             StageSpec(name="full_tracking"),
@@ -435,16 +531,20 @@ def test_runner_fails_closed_when_track_hoi_cli_is_absent(
                 binary_path=str(binary),
                 engine_dir=str(engine_dir),
                 artifacts_dir=str(tmp_path / "artifacts"),
+                model_plugin_dir=str(plugin_dir),
             ),
         )
+    assert captured["destroyed_session"] == 17
 
 
-def test_runtime_strategy_matrix_declares_track_hoi_contract() -> None:
+def test_runtime_strategy_matrix_declares_model_owned_c_abi_exemption() -> None:
     matrix = json.loads(
         (FAMILY_DIR.parents[2] / "runtime_strategy_matrix.yaml").read_text(encoding="utf-8")
     )
     entry = matrix["runtime_strategies"]["sam2_hoi_video_tracking"]
     assert entry["task_strategy"] == "hoi_video_tracking"
-    assert entry["cli_commands"] == ["track-hoi"]
+    assert entry["cli_commands"] == []
+    assert "model-owned" in entry["cli_exemption"]
+    assert "C ABI" in entry["cli_exemption"]
     assert entry["runner_class"].endswith("HoiVideoTrackingRunner")
     assert entry["comparator_class"].endswith("HoiVideoTrackingComparator")

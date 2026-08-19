@@ -173,25 +173,6 @@ struct PromptedSegmentationResult {
     int32_t width{0};
 };
 
-struct VideoFrameView {
-    // Borrowed RGB HWC float32 storage in [0,1]. It must remain valid for the
-    // complete IVideoTrackingPipeline::track_video() call.
-    const float* pixels{nullptr};
-    int32_t height{0};
-    int32_t width{0};
-};
-
-struct VideoFrame {
-    // Owned RGB HWC float32 storage in [0,1]. Model capabilities may use a
-    // family-specific decoder when source-framework pixel parity requires it.
-    std::vector<float> pixels;
-    int32_t height{0};
-    int32_t width{0};
-
-    bool empty() const { return pixels.empty(); }
-    VideoFrameView view() const { return {pixels.data(), height, width}; }
-};
-
 struct ClassificationResult {
     std::vector<float> logits; // [num_classes]
     int32_t top_class{-1};
@@ -265,42 +246,6 @@ class ITranscriptionStream {
     virtual void reset() = 0;
 
     virtual TranscriptionStreamConfig config() const = 0;
-};
-
-class IVideoTrackingPipeline {
-  public:
-    virtual ~IVideoTrackingPipeline() = default;
-
-    // Decode one frame according to the owning model's source-framework
-    // contract. Keeping this on the capability avoids model checks in shared
-    // CLI code while allowing exact family-local decoding where required.
-    virtual VideoFrame load_video_frame(const std::string& path) = 0;
-
-    // The owning model defines the JSON schema and any per-frame assets written
-    // below output_assets_dir. Pass both output paths empty to discard outputs,
-    // for example during an in-process benchmark. Supplying exactly one empty
-    // output path is invalid. The return value is the number of produced frames.
-    // The call is synchronous: all capability work and requested output writes
-    // complete before return, and the borrowed frame storage is no longer used.
-    virtual int32_t track_video(const std::vector<VideoFrameView>& frames,
-                                const std::string& output_json,
-                                const std::string& output_assets_dir) = 0;
-};
-
-// Optional capability for pipelines that can decode an ordered frame batch.
-// Keeping this separate from IVideoTrackingPipeline preserves that interface's
-// vtable while allowing the CLI to cross-cast across the core and model DSOs.
-class IVideoFrameBatchLoader {
-  public:
-    virtual ~IVideoFrameBatchLoader();
-
-    // Results correspond one-for-one with paths and retain the exact input
-    // order. Implementations must finish all work before returning or throwing.
-    virtual std::vector<VideoFrame> load_video_frames(const std::vector<std::string>& paths) = 0;
-
-    // Maximum number of frame decodes that load_video_frames() may execute at
-    // once. The CLI records this as request-loading provenance.
-    virtual std::size_t max_video_frame_load_concurrency() const noexcept = 0;
 };
 
 // --- Pipeline interface ---

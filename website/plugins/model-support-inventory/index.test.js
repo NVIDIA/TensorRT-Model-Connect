@@ -12,6 +12,7 @@ const test = require('node:test');
 const {
   collectModelSupportInventory,
   collectRuntimeCapabilities,
+  runtimeApiForManifest,
 } = require('./index');
 
 function writeFixture(repoRoot, relativePath, content = '') {
@@ -326,8 +327,111 @@ test('collects support inventory from repository metadata', (context) => {
   ]);
 });
 
-test('publishes the local SAM2 HOI source-package recipe without fake HF metadata', () => {
-  const repoRoot = path.resolve(__dirname, '..', '..', '..');
+test('validates the model-owned C ABI inventory declaration', () => {
+  assert.equal(runtimeApiForManifest({name: 'none'}), null);
+  assert.deepEqual(
+    runtimeApiForManifest({
+      name: 'sam2-hoi-tracking',
+      runtime_api: {
+        kind: 'model_owned_c_abi',
+        library: 'libtrtmc_model_sam2_hoi.so',
+        header: 'trtmc/models/sam2_hoi_video.h',
+        entrypoint: 'trtmc_sam2_hoi_video_run_jpeg_files_v1',
+      },
+    }),
+    {
+      kind: 'model_owned_c_abi',
+      library: 'libtrtmc_model_sam2_hoi.so',
+      header: 'trtmc/models/sam2_hoi_video.h',
+      entrypoint: 'trtmc_sam2_hoi_video_run_jpeg_files_v1',
+    }
+  );
+  assert.throws(
+    () => runtimeApiForManifest({name: 'broken', runtime_api: {kind: 'model_owned_c_abi'}}),
+    /Malformed model-owned C ABI declaration/
+  );
+});
+
+test('publishes the local SAM2 HOI source-package recipe without fake HF metadata', (context) => {
+  const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'trtmc-sam2-hoi-support-'));
+  context.after(() => fs.rmSync(repoRoot, {recursive: true, force: true}));
+  const alphaRevision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  writeFixture(repoRoot, 'python/tensorrt_model_connect/families/alpha.py');
+  writeFixture(repoRoot, 'python/tensorrt_model_connect/families/sam2_hoi/plugin.py');
+  writeFixture(
+    repoRoot,
+    'website/data/model-support-matrix.md',
+    [
+      '| Hugging Face model ID (`hf_id`, CLI input) | TRTMC profile | Build precision | Quantization | Platform specialization runtime provider | GB300 |',
+      '| --- | --- | --- | --- | --- | --- |',
+      `| \`example/alpha\`<br />Revision: \`${alphaRevision}\` | \`alpha\` | \`FP16\` | None | — | 🟢 Green |`,
+      '',
+    ].join('\n')
+  );
+  writeFixture(
+    repoRoot,
+    'website/data/hf-model-metadata.json',
+    JSON.stringify({
+      schema_version: 1,
+      checkpoints: [{
+        hf_id: 'example/alpha',
+        revision: alphaRevision,
+        revision_source: 'declared',
+        metadata_file: 'config.json',
+        model_type: 'alpha',
+        architectures: ['AlphaModel'],
+        architecture_source: 'config.architectures',
+      }],
+    })
+  );
+  writeFixture(repoRoot, 'tests/e2e/models/alpha/MODEL.toml');
+  writeFixture(
+    repoRoot,
+    'tests/e2e/models/alpha/manifests/alpha.json',
+    JSON.stringify({
+      name: 'alpha',
+      hf_id: 'example/alpha',
+      hf_revision: alphaRevision,
+      family: 'alpha',
+      runtime_strategy: 'alpha_runtime',
+      task_strategy: 'encoder_only_nlp',
+    })
+  );
+  writeFixture(repoRoot, 'tests/e2e/models/sam2_hoi/MODEL.toml');
+  writeFixture(
+    repoRoot,
+    'tests/e2e/models/sam2_hoi/manifests/sam2-hoi.json',
+    JSON.stringify({
+      name: 'sam2-hoi-tracking',
+      hf_id: 'artifacts/sam2_hoi/hoi',
+      model_source_kind: 'local_source_package',
+      family: 'sam2_hoi',
+      runtime_strategy: 'sam2_hoi_video_tracking',
+      task_strategy: 'hoi_video_tracking',
+      runtime_api: {
+        kind: 'model_owned_c_abi',
+        library: 'libtrtmc_model_sam2_hoi.so',
+        header: 'trtmc/models/sam2_hoi_video.h',
+        entrypoint: 'trtmc_sam2_hoi_video_run_jpeg_files_v1',
+      },
+    })
+  );
+  writeFixture(
+    repoRoot,
+    'src/runtime/models/alpha/MODEL.toml',
+    'runtime_strategies = ["alpha_runtime"]\n'
+  );
+  writeFixture(
+    repoRoot,
+    'src/runtime/models/sam2_hoi/MODEL.toml',
+    'runtime_strategies = ["sam2_hoi_video_tracking"]\n'
+  );
+  writeFixture(
+    repoRoot,
+    'src/cli/args.cpp',
+    'static const char* known_cmds[] = {"run", "inspect", "encode", nullptr};\n'
+  );
+
   const inventory = collectModelSupportInventory(repoRoot);
   const profile = inventory.modelProfiles.find(
     (candidate) => candidate.profile === 'sam2-hoi-tracking'
@@ -338,24 +442,20 @@ test('publishes the local SAM2 HOI source-package recipe without fake HF metadat
   assert.equal(profile.hfId, 'artifacts/sam2_hoi/hoi');
   assert.equal(profile.hfMetadataFile, 'not applicable');
   assert.deepEqual(profile.hfTasks, ['mask-generation']);
-  assert.deepEqual(profile.cliCommands, ['track-hoi']);
+  assert.deepEqual(profile.cliCommands, []);
+  assert.deepEqual(profile.runtimeApi, {
+    kind: 'model_owned_c_abi',
+    library: 'libtrtmc_model_sam2_hoi.so',
+    header: 'trtmc/models/sam2_hoi_video.h',
+    entrypoint: 'trtmc_sam2_hoi_video_run_jpeg_files_v1',
+  });
 
   const family = inventory.familyRecipes.find(
     (candidate) => candidate.family === 'sam2_hoi'
   );
   assert.ok(family);
-  const contract = family.commandContracts.find(
-    (candidate) => candidate.command === 'track-hoi'
-  );
-  assert.ok(contract);
-  assert.equal(
-    contract.syntax,
-    'trtmc track-hoi <bundle.bundle> --frames-dir <frames-dir> --output-json <tracking.json> --output-masks-dir <masks-dir>'
-  );
-  assert.deepEqual(
-    contract.options.map((entry) => entry.flag),
-    ['--frames-dir <DIR>', '--output-json <PATH>', '--output-masks-dir <DIR>']
-  );
+  assert.deepEqual(family.cliCommands, ['build', 'inspect']);
+  assert.deepEqual(family.commandContracts, []);
 });
 
 test('fails closed when a source-of-truth directory is missing', (context) => {

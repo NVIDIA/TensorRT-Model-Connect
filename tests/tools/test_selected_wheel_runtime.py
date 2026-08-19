@@ -446,6 +446,15 @@ def test_model_proof_rejects_nonhermetic_sam2_hoi_selected_wheel_dso(
 ) -> None:
     source = tmp_path / "source"
     source.mkdir()
+    manifest = source / "src/runtime/models/sam2_hoi/MODEL.toml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        'id = "sam2_hoi"\n'
+        'runtime_library = "libtrtmc_model_sam2_hoi.so"\n'
+        'runtime_link_libraries = ["jpeg"]\n'
+        'runtime_private_static_libraries = ["jpeg"]\n',
+        encoding="utf-8",
+    )
     work = tmp_path / "work"
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()

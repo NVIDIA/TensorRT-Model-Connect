@@ -283,6 +283,7 @@ class OwnershipCatalog:
     owners_by_root: dict[str, dict[str, str]]
     runtime_models: dict[str, tuple[str, ...]]
     e2e_families: dict[str, tuple[str, ...]]
+    public_header_owners: dict[str, str]
     legacy_shared_runtime: tuple[str, ...]
 
 
@@ -599,6 +600,31 @@ def discover_catalog(
         runtime_models.setdefault(logical, ())
         runtime_models[logical] = tuple(sorted({*runtime_models[logical], runtime_id}))
     e2e_families = {model: (model,) for model in sorted(e2e_ids) if model in models}
+    entry_paths = {entry.path for entry in entries}
+    public_header_owners: dict[str, str] = {}
+    for runtime_id, logical in runtime_to_logical.items():
+        text = manifest_text[(runtime_root, runtime_id)]
+        for name in _toml_strings(text, "public_headers"):
+            if (
+                not name
+                or PurePosixPath(name).is_absolute()
+                or len(PurePosixPath(name).parts) != 1
+                or name in {".", ".."}
+            ):
+                raise ModelCIError(
+                    f"runtime model {runtime_id!r} has unsafe public header {name!r}"
+                )
+            path = f"include/trtmc/models/{name}"
+            if path not in entry_paths:
+                raise ModelCIError(
+                    f"runtime model {runtime_id!r} has missing public header {path!r}"
+                )
+            previous = public_header_owners.get(path)
+            if previous is not None and previous != logical:
+                raise ModelCIError(
+                    f"public model header {path!r} is owned by both {previous!r} and {logical!r}"
+                )
+            public_header_owners[path] = logical
     return OwnershipCatalog(
         resolved,
         entries,
@@ -607,12 +633,17 @@ def discover_catalog(
         owners_by_root,
         runtime_models,
         e2e_families,
+        public_header_owners,
         tuple(sorted(legacy_shared_runtime)),
     )
 
 
 def _owner_for_path(path: str, catalog: OwnershipCatalog) -> tuple[str | None, bool]:
     """Return (owner, under_model_root). An unregistered child has no owner."""
+    public_model_prefix = "include/trtmc/models/"
+    if path.startswith(public_model_prefix):
+        return catalog.public_header_owners.get(path), True
+
     matches: list[str] = []
     under_model_root = False
     for root in MODEL_ROOTS:

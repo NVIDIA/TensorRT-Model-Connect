@@ -3,6 +3,7 @@
 
 id = "sam2"
 runtime_library = "libtrtmc_model_sam2.so"
+public_headers = ["sam2_video.h"]
 runtime_plugins = ["plugin.cpp|register_sam2_plugin"]
 runtime_strategies = ["sam2_bbox_video_tracking"]
 runtime_tests = [

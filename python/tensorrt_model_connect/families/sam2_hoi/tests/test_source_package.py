@@ -69,14 +69,27 @@ def _accept_fixture_patch_digests(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_family_selection_is_standalone() -> None:
-    assert find_plugin("sam2_hoi").name == "sam2_hoi"
-    assert find_plugin("sam2-hoi").name == "sam2_hoi"
-    assert find_plugin("sam2.1-hoi").name == "sam2_hoi"
-    sam = find_plugin("sam2")
-    sam3 = find_plugin("sam3")
-    assert sam is None or sam.name != "sam2_hoi"
-    assert sam3 is None or sam3.name != "sam2_hoi"
+@pytest.mark.parametrize(
+    ("model_type", "family"),
+    [
+        ("sam2_hoi", "sam2_hoi"),
+        ("sam2-hoi", "sam2_hoi"),
+        ("sam2.1-hoi", "sam2_hoi"),
+        ("sam2_1_hoi", "sam2_hoi"),
+    ],
+)
+def test_family_resolver_accepts_every_sam2_hoi_alias(model_type: str, family: str) -> None:
+    resolved = find_plugin(model_type)
+    assert resolved is not None
+    assert resolved.name == family
+
+
+def test_family_matcher_does_not_claim_standard_sam2_model_types() -> None:
+    sam2_hoi = find_plugin("sam2_hoi")
+    assert sam2_hoi is not None
+    assert not sam2_hoi.matches("sam2")
+    assert not sam2_hoi.matches("sam2_video_tracking")
+    assert not sam2_hoi.matches("sam2_bbox_video_tracking")
 
 
 def test_config_adapter_ignores_unrelated_directory(tmp_path: Path) -> None:

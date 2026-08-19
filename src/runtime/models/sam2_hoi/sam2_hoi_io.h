@@ -20,7 +20,7 @@ namespace detail {
 // Keep the production float multiply, then widen before adding 0.5 so the
 // truncation remains exactly equivalent to std::lround at every uint8 decision
 // boundary. Adding 0.5 in float can prematurely round a value onto the next
-// integer and is not equivalent for all valid VideoFrame inputs.
+// integer and is not equivalent for all valid decoded-frame inputs.
 static inline uint8_t round_unit_float_to_u8(float value) {
     const float scaled = value * 255.0F;
     return static_cast<uint8_t>(static_cast<double>(scaled) + 0.5);

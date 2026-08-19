@@ -106,6 +106,7 @@ models/hf/*/.cache/
 !.agents/plugins/marketplace.json
 !plugins/trtmc-agent-skills/.codex-plugin/
 !plugins/trtmc-agent-skills/.codex-plugin/**
+!python/tensorrt_model_connect/families/sam2_hoi/.gitattributes
 config
 HEAD
 hooks

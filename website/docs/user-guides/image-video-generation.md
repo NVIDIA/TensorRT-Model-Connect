@@ -41,34 +41,19 @@ Hugging Face image or video task.
 
 ## HOI video tracking
 
-For a bundle that declares the `hoi_video_tracking` task contract, pass an
-ordered frame directory and separate metadata/mask destinations:
+The current SAM2-HOI recipe is a local source-package build, not a Hugging Face
+checkpoint. It deliberately exposes no generic video CLI or shared
+`IPipeline` extension. Load `libtrtmc_model_sam2_hoi.so` and invoke
+`trtmc_sam2_hoi_video_run_jpeg_files_v1` through the model-owned public header
+`trtmc/models/sam2_hoi_video.h`; see the
+[SAM2-HOI video C ABI](../api/cpp-api.md#sam2-hoi-video-c-abi).
 
-```bash
-trtmc track-hoi sam2-hoi-tracking.bundle \
-  --frames-dir frames \
-  --output-json tracking.json \
-  --output-masks-dir masks
-```
-
-For repeatable in-process timings, add `--benchmark N --warmup N` and write a
-raw-sample receipt with `--benchmark-json`. The default `predecoded` scope
-reuses decoded frame views; `--benchmark-scope loaded-request` instead includes
-fresh directory enumeration and frame decode in every measured request. Both
-discard JSON/NPY outputs during warmup and timing, then run one final untimed
-request that writes the normal accuracy artifacts. Consult the receipt's
-`timing_boundary` fields before comparing measurements from different scopes.
-The top-level `frame_loading` object's `frame_decode_mode` and
-`frame_decode_max_concurrency` record whether materialization used the serial
-loader or the model's bounded batch loader.
-
-`track-hoi` uses the generic `IVideoTrackingPipeline` capability. The current
-SAM2-HOI recipe is a local source-package build, not a Hugging Face checkpoint;
-its family recipe page records the exact source and nightly validation contract.
-One request requires fixed-resolution frames, and the first frame with any HOI
-detections must select exactly two tracked objects. Leading frames with no
-detections are scanned but omitted; a nonempty frame with another selection
-count fails instead of being skipped.
+One request supplies exactly five nonempty JPEG paths in temporal order. Use
+two nonempty output paths to materialize the ordered JSON plus uint8 NPY masks,
+or two empty strings for a synchronous benchmark-discard call. The recipe's E2E
+runner uses the same C ABI and compares all five frames against its frozen L3
+snapshot, including exact object identities, labels, and interaction pairs plus
+bounded boxes, scores, and binary-mask metrics.
 
 For the denoising-loop and task-result mental model, follow the
 [Diffusion, Vision, and Time-Series Tutorial](../tutorials/intermediate/diffusion-and-time-series.md).

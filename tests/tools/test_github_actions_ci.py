@@ -1366,11 +1366,13 @@ def test_sam2_hoi_release_dso_uses_private_static_libjpeg() -> None:
     assert "find_package(JPEG REQUIRED)" in cmake
     assert '"LINKER:--exclude-libs,ALL"' in cmake
     assert 'runtime_link_libraries = ["jpeg"]' in manifest
+    assert 'runtime_private_static_libraries = ["jpeg"]' in manifest
     assert (
         "test_sam2_hoi_jpeg.cpp|trtmc_jpeg,Threads::Threads|jpeg_decoder.cpp" in manifest
     )
-    assert "_validate_archive_sam2_hoi_release_dso(" in package
-    assert "validate_sam2_hoi_release_dso(" in model_proof
+    assert "runtime_dso_private_static_policies(" in package
+    assert "_validate_archive_private_static_runtime_dso(" in package
+    assert "validate_private_static_runtime_dso(" in model_proof
 
 
 def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
@@ -1385,6 +1387,8 @@ def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
     assert 'toolchain.cache_variables["TRTMC_DISTRIBUTABLE_BUILD"]' in conanfile
     assert "BUILD_RPATH_USE_ORIGIN TRUE" in cmake
     assert 'INSTALL_RPATH "\\$ORIGIN"' in cmake
+    assert 'BUILD_RPATH "\\$ORIGIN/../.."' in cmake
+    assert 'INSTALL_RPATH "\\$ORIGIN/../../.."' in cmake
     assert '"libtrtmc_core.so*"' in conanfile
     assert "for destination in (package_bin, wheel_data_scripts):" in conanfile
     assert "TRTMC core DSO was not staged beside the wheel script" in conanfile

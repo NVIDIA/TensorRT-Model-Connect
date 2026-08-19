@@ -224,7 +224,6 @@ add_library(trtmc_core SHARED
   src/runtime/core/image_features.cpp
   src/runtime/core/measurement.cpp
   src/runtime/core/pipeline_pool.cpp
-  src/runtime/core/video_frame_batch_loader.cpp
   src/runtime/core/stb_impl.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
@@ -539,7 +538,7 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}"
     BUILD_RPATH "\$ORIGIN/../.."
-    INSTALL_RPATH "\$ORIGIN/../.."
+    INSTALL_RPATH "\$ORIGIN/../../.."
   )
   install(TARGETS trtmc_model_${_trtmc_model}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
@@ -706,8 +705,6 @@ endif()
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
-  src/cli/track_hoi_benchmark.cpp
-  src/cli/video_frame_loader.cpp
 )
 target_link_libraries(trtmc PRIVATE trtmc_core Threads::Threads)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -965,14 +962,7 @@ trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
-target_sources(test_cli_args PRIVATE
-  src/cli/args.cpp
-  src/cli/track_hoi_benchmark.cpp
-)
-trtmc_add_test(test_cli_video_frame_loader)
-target_sources(test_cli_video_frame_loader PRIVATE
-  src/cli/video_frame_loader.cpp
-)
+target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)

@@ -6,6 +6,13 @@
   "family": "sam2_hoi",
   "runtime_strategy": "sam2_hoi_video_tracking",
   "task_strategy": "hoi_video_tracking",
+  "runtime_api": {
+    "kind": "model_owned_c_abi",
+    "library": "libtrtmc_model_sam2_hoi.so",
+    "header": "trtmc/models/sam2_hoi_video.h",
+    "entrypoint": "trtmc_sam2_hoi_video_run_jpeg_files_v1"
+  },
+  "benchmark_exclusion_reason": "Requires the model-owned fixed five-JPEG public C ABI",
   "precision": "bf16",
   "max_cache_length": 7,
   "trust_remote_code": false,

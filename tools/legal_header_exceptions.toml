@@ -29,7 +29,7 @@ path = "tests/runtime_strategy_matrix.yaml"
 reason = "JSON-formatted test data is consumed by strict JSON parsers; comments would change parse behavior."
 license = "Apache-2.0"
 source = "https://github.com/NVIDIA/TensorRT-Model-Connect/blob/76c8164d97e645a996a210219ba635c8ec9a3453/tests/runtime_strategy_matrix.yaml"
-sha256 = "1ce3695447cfe64e4fe29d29ed98b20c975f5b44f58846a08edfe154ce2c34da"
+sha256 = "2659b9c7f95f8f9e3c5cc888c60affa3159588e79b4bba5a795d58f2a6ec4c67"
 
 [[exceptions]]
 path = "python/tensorrt_model_connect/families/sam2_hoi/native_plugins/vendor/cutlass/MANIFEST.sha256"

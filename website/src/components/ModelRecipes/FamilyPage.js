@@ -22,7 +22,7 @@ const BUNDLE_CLI_REFERENCE = {
 
 const COMMAND_ORDER = [
   'build', 'run', 'encode', 'embed', 'rerank', 'classify', 'segment',
-  'segment-prompted', 'track-hoi', 'generate-audio', 'generate-video', 'transcribe',
+  'segment-prompted', 'generate-audio', 'generate-video', 'transcribe',
   'speak', 'solve', 'inspect',
 ];
 
@@ -170,6 +170,9 @@ export default function ModelFamilyRecipePage({familySlug}) {
   const taskBySlug = new Map(taskRecipes.map((task) => [task.slug, task]));
   const commands = COMMAND_ORDER.filter((command) => family.cliCommands.includes(command));
   const architectureContracts = collectArchitectureContracts(family.profiles);
+  const cAbiProfiles = family.profiles.filter(
+    (profile) => profile.runtimeApi?.kind === 'model_owned_c_abi'
+  );
 
   return (
     <RecipePageLayout title={`${family.family} model recipes`} description={`Declared recipes, CLI commands, and configuration keys for the ${family.family} model family.`}>
@@ -247,6 +250,7 @@ export default function ModelFamilyRecipePage({familySlug}) {
               <th>Exact model source</th>
               <th>Task</th>
               <th>Build configuration</th>
+              <th>Runtime interface</th>
               <th>Declared E2E cases</th>
               <th>Manifest</th>
             </tr>
@@ -278,6 +282,14 @@ export default function ModelFamilyRecipePage({familySlug}) {
                   {profile.fp32Layers.length > 0 && <><br /><small>FP32 layers: {profile.fp32Layers.join(', ')}</small></>}
                   {profile.quantization !== 'not declared' && <><br /><small>Quantization: {profile.quantization}</small></>}
                 </td>
+                <td>
+                  {profile.runtimeApi?.kind === 'model_owned_c_abi' ? (
+                    <>
+                      Model-owned C ABI<br />
+                      <small><code>{profile.runtimeApi.entrypoint}</code></small>
+                    </>
+                  ) : 'Task-specific CLI'}
+                </td>
                 <td>{profile.testcases.length > 0 ? profile.testcases.join(', ') : 'No named testcase'}</td>
                 <td><code>{profile.sourcePath}</code></td>
               </tr>
@@ -287,13 +299,37 @@ export default function ModelFamilyRecipePage({familySlug}) {
 
         <FamilyConfigReference family={family} commands={commands} />
 
+        {cAbiProfiles.length > 0 && (
+          <>
+            <h2>Model-owned C ABI</h2>
+            <p>
+              These recipes intentionally have no generic task CLI command. The
+              E2E runner loads the family DSO directly and calls its versioned C ABI.
+            </p>
+            {cAbiProfiles.map((profile) => (
+              <section key={`${profile.profile}-${profile.runtimeApi.entrypoint}`}>
+                <h3><code>{profile.runtimeApi.entrypoint}</code></h3>
+                <p>
+                  Recipe: <code>{profile.profile}</code><br />
+                  Runtime library: <code>{profile.runtimeApi.library}</code><br />
+                  Public header: <code>{profile.runtimeApi.header}</code>
+                </p>
+              </section>
+            ))}
+          </>
+        )}
+
         <h2>Family-specific CLI contracts</h2>
-        <p>
-          Inputs and options below are filtered by the declared E2E task and
-          the methods and configuration fields used by that family&apos;s native
-          runtime implementation. The global CLI parser accepts a wider union
-          of flags; flags absent here are not declared for this family.
-        </p>
+        {family.commandContracts.length === 0 ? (
+          <p>No task-specific CLI contract is declared for this family.</p>
+        ) : (
+          <p>
+            Inputs and options below are filtered by the declared E2E task and
+            the methods and configuration fields used by that family&apos;s native
+            runtime implementation. The global CLI parser accepts a wider union
+            of flags; flags absent here are not declared for this family.
+          </p>
+        )}
         {family.commandContracts.map((contract, index) => (
           <section key={`${contract.command}-${contract.profileNames.join('-')}-${index}`}>
             <h3><code>trtmc {contract.command}</code></h3>

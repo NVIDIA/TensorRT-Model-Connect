@@ -770,11 +770,8 @@ void test_direct_prebinding_and_one_frame_tracking() {
         "sam2-hoi-test");
 
     check(std::string(pipeline.model_id()) == "sam2-hoi-test", "pipeline retains model id");
-    trtmc::IVideoTrackingPipeline* tracker_capability = &pipeline;
-    auto* batch_capability = dynamic_cast<trtmc::IVideoFrameBatchLoader*>(tracker_capability);
-    check(batch_capability != nullptr && batch_capability->max_video_frame_load_concurrency() ==
-                                             trtmc::sam2_hoi::kMaxConcurrentJpegDecodes,
-          "pipeline publicly exposes the internal bounded batch loader capability");
+    check(pipeline.max_video_frame_load_concurrency() == trtmc::sam2_hoi::kMaxConcurrentJpegDecodes,
+          "pipeline preserves the model-owned bounded batch decoder");
     check(detector_raw->external_binding_count() == 3,
           "detector receives three direct feature bindings");
     check(prompt_raw->external_binding_count() == 3,
@@ -805,7 +802,7 @@ void test_direct_prebinding_and_one_frame_tracking() {
     const auto output_json = temporary.path / "tracking.json";
     const auto mask_directory = temporary.path / "masks";
     const std::array<float, 3> pixel{0.0F, 0.5F, 1.0F};
-    const std::vector<trtmc::VideoFrameView> frames{{pixel.data(), 1, 1}};
+    const std::vector<trtmc::sam2_hoi::Sam2HoiVideoFrameView> frames{{pixel.data(), 1, 1}};
 
     bool rejected_partial_output = false;
     try {
@@ -1075,7 +1072,7 @@ void test_prompt_can_start_after_empty_detection_frame() {
     const std::array<float, 3> second_pixel{1.0F, 0.5F, 0.0F};
     const std::array<float, 3> third_pixel{0.25F, 0.5F, 0.75F};
     const std::array<float, 3> fourth_pixel{0.75F, 0.5F, 0.25F};
-    const std::vector<trtmc::VideoFrameView> frames{
+    const std::vector<trtmc::sam2_hoi::Sam2HoiVideoFrameView> frames{
         {first_pixel.data(), 1, 1},
         {second_pixel.data(), 1, 1},
         {third_pixel.data(), 1, 1},
@@ -1188,7 +1185,7 @@ void test_legacy_six_plan_sync_boundary() {
     }
 
     const std::array<float, 3> pixel{0.0F, 0.5F, 1.0F};
-    const std::vector<trtmc::VideoFrameView> frames{{pixel.data(), 1, 1}};
+    const std::vector<trtmc::sam2_hoi::Sam2HoiVideoFrameView> frames{{pixel.data(), 1, 1}};
     bool rejected_empty_detection = false;
     try {
         (void)pipeline.track_video(frames, "", "");
