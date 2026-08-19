@@ -934,6 +934,10 @@ def build_bundle(
             low-VRAM single-engine/multi-profile layout.
         verbose: Print detailed logs.
     """
+    owner_options = dict(locals())
+    owner_options.pop("model_dir")
+    owner_options.pop("output_path")
+
     if decoder_engine_layout not in ("split", "dual_profile"):
         raise ValueError(
             "decoder_engine_layout must be 'split' or 'dual_profile', "
@@ -1013,6 +1017,26 @@ def build_bundle(
         raise ValueError(
             f"No family plugin for model_type={config.model_type!r}. "
             f"Supported: {supported}")
+
+    if family_has_capability(config, "model_owned_build"):
+        missing = object()
+        declared_build = inspect.getattr_static(plugin, "build", missing)
+        if declared_build is missing:
+            raise TypeError(
+                f"Family {plugin.name} declares model_owned_build without "
+                "a concrete build binding"
+            )
+        if not callable(declared_build):
+            raise TypeError(
+                f"Family {plugin.name} model-owned build binding is not callable"
+            )
+        owner_build = getattr(plugin, "build")
+        if not callable(owner_build):
+            raise TypeError(
+                f"Family {plugin.name} model-owned build binding is not callable"
+            )
+        owner_build(str(model_dir_path), output_path, **owner_options)
+        return
 
     print(f"[trtmc build] Family: {plugin.name}", file=sys.stderr)
     default_precision = getattr(plugin, "default_build_precision", "fp32")

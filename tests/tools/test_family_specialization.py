@@ -73,6 +73,92 @@ def _demo_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def _root_model_repo(tmp_path: Path) -> Path:
+    family = (
+        tmp_path
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / "demo"
+    )
+    _write(
+        family / "MODEL.toml",
+        'id = "demo"\nplugin = "demo"\nmodule = "plugin"\n'
+        'capabilities = ["model_owned_build"]\n',
+    )
+    _write(
+        family / "__init__.py",
+        'from .plugin import plugin\n\n__all__ = ["plugin"]\n',
+    )
+    _write(
+        family / "plugin.py",
+        "from . import model\n\n"
+        "class DemoPlugin:\n"
+        "    build = staticmethod(model.build)\n\n"
+        "plugin = DemoPlugin()\n",
+    )
+    _write(family / "model.py", "def build():\n    return 'bundle'\n")
+    return tmp_path
+
+
+def test_model_owned_build_uses_root_model_layout_and_metrics(tmp_path: Path) -> None:
+    repo = _root_model_repo(tmp_path)
+
+    family = specialization.audit_repo(repo, ("demo",))["families"][0]
+
+    assert family["noncanonical_model_paths"] == []
+    assert family["metrics"]["model_files"] == 1
+    assert family["metrics"]["model_lines"] == 2
+    assert family["metrics"]["model_bytes"] > 0
+    assert not [
+        item
+        for item in family["violations"]
+        if item["kind"] == "noncanonical_model_path"
+    ]
+
+
+def test_model_owned_build_requires_root_model_file(tmp_path: Path) -> None:
+    repo = _root_model_repo(tmp_path)
+    family_dir = (
+        repo
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / "demo"
+    )
+    (family_dir / "model.py").unlink()
+
+    family = specialization.audit_repo(repo, ("demo",))["families"][0]
+
+    assert family["noncanonical_model_paths"] == ["model.py"]
+    assert family["metrics"]["model_files"] == 0
+    assert {
+        "kind": "noncanonical_model_path",
+        "path": "model.py",
+    } in family["violations"]
+
+
+def test_model_owned_build_rejects_legacy_model_directory(tmp_path: Path) -> None:
+    repo = _root_model_repo(tmp_path)
+    family_dir = (
+        repo
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / "demo"
+    )
+    _write(family_dir / "model/__init__.py", '"""Legacy model package."""\n')
+
+    family = specialization.audit_repo(repo, ("demo",))["families"][0]
+
+    assert family["noncanonical_model_paths"] == ["model/"]
+    assert family["metrics"]["model_files"] == 1
+    assert {
+        "kind": "noncanonical_model_path",
+        "path": "model/",
+    } in family["violations"]
+
+
 def test_audit_classifies_production_tool_and_unreachable_modules(
     tmp_path: Path,
 ) -> None:

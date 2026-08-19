@@ -6,18 +6,33 @@
 from __future__ import annotations
 
 
+import json
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
-from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
-from ..config import ModelConfig
+from ...parallel_config import (
+    add_all_reduce_sum,
+    normalize_parallel_config,
+    rank_engine_section,
+    require_tensorrt_11_for_tensor_parallel,
+)
+from .config import ModelConfig
+
+try:
+    from cuda.bindings import runtime as _cuda_runtime
+except ImportError:
+    try:
+        from cuda import cudart as _cuda_runtime
+    except ImportError:  # pragma: no cover - environment dependent
+        _cuda_runtime = None
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from ....parallel_config import ParallelConfig
-    from ..weights import WeightDict
+    from ...parallel_config import ParallelConfig
+    from .weights import WeightDict
 
 
 def _cast_back_to_trt_dtype(
@@ -147,14 +162,10 @@ def add_activation(
         return network.add_activation(inp, trt.ActivationType.RELU).get_output(0)
     if activation_type in ("relu2", "squared_relu"):
         relu = network.add_activation(inp, trt.ActivationType.RELU).get_output(0)
-        return network.add_elementwise(
-            relu, relu, trt.ElementWiseOperation.PROD
-        ).get_output(0)
+        return network.add_elementwise(relu, relu, trt.ElementWiseOperation.PROD).get_output(0)
     if activation_type == "silu":
         sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID).get_output(0)
-        return network.add_elementwise(
-            inp, sigmoid, trt.ElementWiseOperation.PROD
-        ).get_output(0)
+        return network.add_elementwise(inp, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
     raise ValueError(f"Unsupported activation: {activation_type}")
 
 
@@ -438,15 +449,12 @@ def build_encoder_engine(
     intermediate = config.intermediate_size // tp_size
     eps = config.rms_norm_eps
     type_vocab_size = config.raw.get("type_vocab_size", 2)
-    requested_fp32_layers = frozenset(
-        int(layer) for layer in config.raw.get("_fp32_layers", ()))
+    requested_fp32_layers = frozenset(int(layer) for layer in config.raw.get("_fp32_layers", ()))
     invalid_fp32_layers = sorted(
-        layer for layer in requested_fp32_layers
-        if layer < 0 or layer >= num_layers)
+        layer for layer in requested_fp32_layers if layer < 0 or layer >= num_layers
+    )
     if invalid_fp32_layers:
-        raise ValueError(
-            "fp32_layers contains out-of-range indices: "
-            f"{invalid_fp32_layers}")
+        raise ValueError(f"fp32_layers contains out-of-range indices: {invalid_fp32_layers}")
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
     elif precision == "bf16":
@@ -486,15 +494,16 @@ def build_encoder_engine(
     # Shared constants
     # -------------------------------------------------------------------
     embedding_table = add_constant(
-        network, weights["embedding"].shape, weights["embedding"],
-        dtype=work_np_dtype)
+        network, weights["embedding"].shape, weights["embedding"], dtype=work_np_dtype
+    )
     position_embed_table = add_constant(
-        network, weights["position_embedding"].shape,
-        weights["position_embedding"], dtype=work_np_dtype
+        network,
+        weights["position_embedding"].shape,
+        weights["position_embedding"],
+        dtype=work_np_dtype,
     )
     token_type_table = add_constant(
-        network, (type_vocab_size, hidden), weights["token_type_embedding"],
-        dtype=work_np_dtype
+        network, (type_vocab_size, hidden), weights["token_type_embedding"], dtype=work_np_dtype
     )
 
     # Build additive attention mask from attention_mask input:
@@ -502,12 +511,12 @@ def build_encoder_engine(
     # Convert to [1, 1, seq_len] additive mask: 0.0 for real, -1e10 for padding.
     mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
     ones_mask = add_constant(
-        network, (1,), np.array([1.0], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+        network, (1,), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+    )
     mask_penalty = -1e4 if precision in {"fp16", "bf16"} else -1e10
     neg_large = add_constant(
-        network, (1,), np.array([mask_penalty], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+        network, (1,), np.array([mask_penalty], dtype=work_np_dtype), dtype=work_np_dtype
+    )
     inv_mask = network.add_elementwise(
         ones_mask, mask_float.get_output(0), trt.ElementWiseOperation.SUB
     )  # 0 for real, 1 for pad
@@ -520,15 +529,14 @@ def build_encoder_engine(
 
     # Position indices: [0, 1, 2, ..., max_seq_length-1]
     position_indices = network.add_constant(
-        (max_seq_length,),
-        trt.Weights(np.arange(max_seq_length, dtype=np.int32)))
+        (max_seq_length,), trt.Weights(np.arange(max_seq_length, dtype=np.int32))
+    )
 
     # -------------------------------------------------------------------
     # Embedding: word + position + token_type + LayerNorm
     # -------------------------------------------------------------------
     word_embed = network.add_gather(embedding_table, input_ids, 0)
-    pos_embed = network.add_gather(
-        position_embed_table, position_indices.get_output(0), 0)
+    pos_embed = network.add_gather(position_embed_table, position_indices.get_output(0), 0)
     tt_embed = network.add_gather(token_type_table, token_type_ids, 0)
 
     # Sum all three embedding types
@@ -581,16 +589,14 @@ def build_encoder_engine(
             dtype=layer_np_dtype,
         )
         if hidden_state.dtype != work_trt_dtype:
-            hidden_state = network.add_cast(
-                hidden_state, work_trt_dtype).get_output(0)
+            hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
 
     # -------------------------------------------------------------------
     # Output
     # -------------------------------------------------------------------
     public_output = hidden_state
     if public_output.dtype != trt.float32:
-        public_output = network.add_cast(
-            public_output, trt.float32).get_output(0)
+        public_output = network.add_cast(public_output, trt.float32).get_output(0)
     public_output.name = "hidden_states"
     network.mark_output(public_output)
 
@@ -643,8 +649,7 @@ def _add_seq_layer_norm(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """LayerNorm over the hidden dimension of each sequence row."""
-    return add_layer_norm_native(
-        network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
+    return add_layer_norm_native(network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
 def _add_encoder_layer(
@@ -677,28 +682,19 @@ def _add_encoder_layer(
     # --- Self-attention (no causal mask, bidirectional) ---
     # QKV projections
     q = add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"], dtype=dtype
+        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
     )
     k = add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size,
-        weights[f"{prefix}.w_k"], dtype=dtype
+        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_k"], dtype=dtype
     )
     v = add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size,
-        weights[f"{prefix}.w_v"], dtype=dtype
+        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype
     )
 
     # QKV biases
-    q = add_bias_sum(
-        network, q, attention_size, weights[f"{prefix}.q_bias"],
-        dtype=dtype)
-    k = add_bias_sum(
-        network, k, attention_size, weights[f"{prefix}.k_bias"],
-        dtype=dtype)
-    v = add_bias_sum(
-        network, v, attention_size, weights[f"{prefix}.v_bias"],
-        dtype=dtype)
+    q = add_bias_sum(network, q, attention_size, weights[f"{prefix}.q_bias"], dtype=dtype)
+    k = add_bias_sum(network, k, attention_size, weights[f"{prefix}.k_bias"], dtype=dtype)
+    v = add_bias_sum(network, v, attention_size, weights[f"{prefix}.v_bias"], dtype=dtype)
 
     mask_4d = network.add_shuffle(attn_mask)
     mask_4d.reshape_dims = (1, 1, 1, seq_length)
@@ -717,14 +713,13 @@ def _add_encoder_layer(
 
     # Output projection
     attn_out = add_matmul_rhs_constant(
-        network, context_flat, attention_size, hidden_size,
-        weights[f"{prefix}.w_o"], dtype=dtype
+        network, context_flat, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype
     )
     if tp_size > 1:
         attn_out = add_all_reduce_sum(network, attn_out, tp_size)
     attn_out = add_bias_sum(
-        network, attn_out, hidden_size, weights[f"{prefix}.o_bias"],
-        dtype=dtype)
+        network, attn_out, hidden_size, weights[f"{prefix}.o_bias"], dtype=dtype
+    )
 
     # POST-norm: LayerNorm(hidden + attn_out)
     residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
@@ -740,22 +735,16 @@ def _add_encoder_layer(
 
     # --- FFN: fc1 -> GELU -> fc2 ---
     fc1 = add_matmul_rhs_constant(
-        network, normed1, hidden_size, intermediate_size,
-        weights[f"{prefix}.w_fc1"], dtype=dtype
+        network, normed1, hidden_size, intermediate_size, weights[f"{prefix}.w_fc1"], dtype=dtype
     )
-    fc1 = add_bias_sum(
-        network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"],
-        dtype=dtype)
+    fc1 = add_bias_sum(network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"], dtype=dtype)
     activated = add_activation(network, fc1, hidden_act, dtype=dtype)
     fc2 = add_matmul_rhs_constant(
-        network, activated, intermediate_size, hidden_size,
-        weights[f"{prefix}.w_fc2"], dtype=dtype
+        network, activated, intermediate_size, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype
     )
     if tp_size > 1:
         fc2 = add_all_reduce_sum(network, fc2, tp_size)
-    fc2 = add_bias_sum(
-        network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"],
-        dtype=dtype)
+    fc2 = add_bias_sum(network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"], dtype=dtype)
 
     # POST-norm: LayerNorm(normed1 + ffn_out)
     residual2 = network.add_elementwise(normed1, fc2, trt.ElementWiseOperation.SUM)
@@ -770,3 +759,430 @@ def _add_encoder_layer(
     )
 
     return normed2
+
+
+name = "bert"
+runtime_strategy = "bert_encoder_only"
+
+
+def matches(config: object) -> bool:
+    """Return whether this module owns the parsed model config."""
+    return str(getattr(config, "model_type", config)).lower() == name
+
+
+def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
+    """Load BERT checkpoint weights through the owner-local mapper."""
+    from .weights import load_bert_weights
+
+    return load_bert_weights(model_dir, config)
+
+
+def build_engine(
+    config: ModelConfig,
+    weights: WeightDict,
+    max_cache_length: int,
+    *,
+    precision: str = "fp32",
+    quant_ctx=None,
+    verbose: bool = False,
+    parallel_config=None,
+) -> bytes:
+    """Build one single-device or rank-local BERT encoder engine."""
+    if quant_ctx is not None:
+        raise ValueError("BERT builds do not support quantization")
+
+    parallel = normalize_parallel_config(parallel_config)
+    if parallel.enabled:
+        require_tensorrt_11_for_tensor_parallel(
+            parallel,
+            feature="BERT tensor-parallel builds",
+        )
+        if precision != "fp32":
+            raise ValueError("BERT tensor-parallel builds currently support only fp32")
+        return build_tp_encoder_engine(
+            config,
+            weights,
+            max_seq_length=max_cache_length,
+            verbose=verbose,
+            parallel_config=parallel,
+        )
+
+    return build_encoder_engine(
+        config,
+        weights,
+        max_seq_length=max_cache_length,
+        precision=precision,
+        verbose=verbose,
+    )
+
+
+def _detect_tokenizer_frame(
+    source: str,
+    *,
+    revision: str | None = None,
+) -> tuple[list[int], list[int]] | None:
+    """Return the exact BERT special-token prefix and suffix, when detectable."""
+    try:
+        from transformers import AutoTokenizer
+
+        kwargs = {"trust_remote_code": True}
+        if revision:
+            kwargs["revision"] = revision
+        if not Path(source).is_dir():
+            kwargs["local_files_only"] = True
+        tokenizer = AutoTokenizer.from_pretrained(source, **kwargs)
+        default_ids = list(tokenizer.encode("hello"))
+        plain_ids = list(tokenizer.encode("hello", add_special_tokens=False))
+    except Exception:
+        return None
+
+    if default_ids == plain_ids:
+        return [], []
+    if not plain_ids:
+        return default_ids, []
+    for start in range(len(default_ids) - len(plain_ids) + 1):
+        if default_ids[start : start + len(plain_ids)] == plain_ids:
+            return default_ids[:start], default_ids[start + len(plain_ids) :]
+    return None
+
+
+def _wordpiece_tokenizer_needs_rebuild(model_dir: Path) -> bool:
+    """Detect an existing WordPiece tokenizer that omits source vocabulary IDs."""
+    tokenizer_path = model_dir / "tokenizer.json"
+    vocab_path = model_dir / "vocab.txt"
+    config_path = model_dir / "config.json"
+    if not (tokenizer_path.is_file() and vocab_path.is_file() and config_path.is_file()):
+        return False
+    try:
+        tokenizer = json.loads(tokenizer_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        tokenizer_model = tokenizer.get("model", {})
+        vocab = tokenizer_model.get("vocab", {})
+        expected_vocab_size = int(config.get("vocab_size", 0))
+        if tokenizer_model.get("type") != "WordPiece":
+            return False
+        if not isinstance(vocab, dict) or not vocab or expected_vocab_size <= 0:
+            return False
+        tokenizer_id_space = max(int(token_id) for token_id in vocab.values()) + 1
+        source_id_space = len(vocab_path.read_text(encoding="utf-8").splitlines())
+        return tokenizer_id_space < expected_vocab_size and source_id_space >= expected_vocab_size
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _ensure_tokenizer_json(model_dir: Path) -> None:
+    """Create or repair BERT tokenizer.json without rewriting sibling metadata."""
+    import tempfile
+
+    tokenizer_path = model_dir / "tokenizer.json"
+    rebuild = _wordpiece_tokenizer_needs_rebuild(model_dir)
+    if tokenizer_path.is_file() and not rebuild:
+        return
+
+    temporary_path: Path | None = None
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(str(model_dir), use_fast=True)
+        with tempfile.TemporaryDirectory(prefix="trtmc-bert-tokenizer-") as temporary:
+            generated = Path(temporary) / "tokenizer.json"
+            backend = getattr(tokenizer, "backend_tokenizer", None)
+            if backend is None:
+                backend = getattr(tokenizer, "_tokenizer", None)
+            if backend is not None and hasattr(backend, "save"):
+                backend.save(str(generated))
+            if not generated.is_file():
+                tokenizer.save_pretrained(temporary)
+            if not generated.is_file():
+                raise RuntimeError("tokenizer conversion did not create tokenizer.json")
+            with tempfile.NamedTemporaryFile(
+                dir=model_dir,
+                prefix=".trtmc-bert-tokenizer-",
+                suffix=".json",
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+                output.write(generated.read_bytes())
+            temporary_path.replace(tokenizer_path)
+            temporary_path = None
+    except Exception as exc:
+        print(
+            "[trtmc build] Warning: could not generate BERT tokenizer.json "
+            f"(C++ runtime may fail to create tokenizer): {exc}",
+            file=sys.stderr,
+        )
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _tokenizer_adds_special_tokens(model_dir: Path) -> bool:
+    tokenizer_config = model_dir / "tokenizer_config.json"
+    if not tokenizer_config.is_file():
+        return False
+    try:
+        config = json.loads(tokenizer_config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(config.get("add_bos_token") or config.get("add_eos_token"))
+
+
+def _gpu_name() -> str:
+    """Read the active CUDA device name, returning empty on unavailable runtimes."""
+    if _cuda_runtime is None:
+        return ""
+    try:
+        success = (
+            _cuda_runtime.cudaError_t.cudaSuccess if hasattr(_cuda_runtime, "cudaError_t") else 0
+        )
+        status, device = _cuda_runtime.cudaGetDevice()
+        if status != success:
+            return ""
+        status, properties = _cuda_runtime.cudaGetDeviceProperties(device)
+        if status != success:
+            return ""
+        device_name = properties.name
+        if isinstance(device_name, bytes):
+            return device_name.decode("utf-8", errors="replace").rstrip("\x00")
+        return str(device_name).rstrip("\x00")
+    except Exception:
+        return ""
+
+
+def build(model_dir: str, output_path: str, **options: object) -> None:
+    """Build a complete BERT bundle without shared build orchestration."""
+    import time
+    from datetime import datetime, timezone
+
+    from ...build_timing import (
+        new_build_timing,
+        timed_build_phase,
+        timed_trt_compile,
+        write_build_timing,
+    )
+    from ...bundle_writer import BundleInfo, BundleSection, write_bundle
+
+    model_path = Path(model_dir)
+    parallel = normalize_parallel_config(options.get("parallel_config"))
+    if parallel.cp_enabled:
+        raise NotImplementedError("BERT does not support context-parallel builds")
+
+    precision = str(options.get("precision") or "fp32").lower()
+    if precision not in {"fp16", "bf16", "fp32"}:
+        raise ValueError(f"Unsupported BERT precision: {precision}")
+    if parallel.enabled and precision != "fp32":
+        raise ValueError("BERT tensor-parallel builds currently support only fp32")
+    if (
+        options.get("quantize")
+        or options.get("quant_scales")
+        or (
+            options.get("quant_calibration_samples") is not None
+            and int(options["quant_calibration_samples"]) != 512
+        )
+        or options.get("fp8_scales")
+        or options.get("save_fp8_scales")
+    ):
+        raise ValueError("BERT builds do not support quantization")
+    if options.get("dynamic_kv_cache") or options.get("triattention_stats_path"):
+        raise ValueError("BERT does not use a decoder KV-cache runtime")
+    if options.get("dynamic_kv_profile_rows_override"):
+        raise ValueError("BERT does not support dynamic KV profile rows")
+    if options.get("family_build_options"):
+        raise ValueError("BERT does not support family build options")
+    if options.get("diffusion_overrides"):
+        raise ValueError("BERT does not support diffusion overrides")
+    if options.get("rtx"):
+        raise ValueError("BERT does not support TensorRT-RTX builds")
+    requested_batch_size = options.get("max_batch_size")
+    max_batch_size = 1 if requested_batch_size is None else int(requested_batch_size)
+    if max_batch_size != 1:
+        raise ValueError("BERT supports only max_batch_size=1")
+    decoder_engine_layout = str(options.get("decoder_engine_layout") or "split")
+    if decoder_engine_layout != "split":
+        raise ValueError(
+            "BERT supports only the default decoder_engine_layout='split', "
+            f"got {decoder_engine_layout!r}"
+        )
+    requested_cache_length = options.get("max_cache_length")
+    max_cache_length = 256 if requested_cache_length is None else int(requested_cache_length)
+    if max_cache_length < 1:
+        raise ValueError("max_cache_length must be >= 1")
+
+    config = ModelConfig.from_dir(model_path)
+    if max_cache_length > config.max_position_embeddings:
+        raise ValueError(
+            "max_cache_length exceeds BERT max_position_embeddings "
+            f"({max_cache_length} > {config.max_position_embeddings})"
+        )
+    fp32_layers = sorted(set(options.get("fp32_layers") or ()))
+    config.raw["_model_dir"] = str(model_path)
+    config.raw["_decoder_engine_layout"] = decoder_engine_layout
+    config.raw["_fp32_layers"] = fp32_layers
+    config.raw["_family_build_options"] = {}
+    config.raw["_parallel_build_enabled"] = bool(parallel.enabled)
+    config.raw["_rtx_build_requested"] = False
+    config.raw["_runtime_dynamic_kv_requested"] = False
+    config.raw["_quantized_build_requested"] = False
+    config.raw["_resolved_build_precision"] = precision
+
+    timing = new_build_timing(options.get("build_timing_path"))
+    timing["model_dir"] = str(model_path)
+    timing["output_path"] = str(output_path)
+    started = time.monotonic()
+    write_build_timing(timing)
+
+    with timed_build_phase(timing, "weights_loading_s"):
+        weights = load_weights(str(model_path), config)
+
+    from ...tvm_ffi.graph_build import engine_role, inspection_role, kernel_slots_section
+
+    target_inspection_role = inspection_role()
+    if target_inspection_role is not None and parallel.enabled:
+        raise NotImplementedError("BERT tensor-parallel graph inspection is not supported")
+
+    verbose = bool(options.get("verbose"))
+    with timed_trt_compile(timing, "main_engine"):
+        if parallel.enabled:
+            plans = {
+                rank: build_engine(
+                    config,
+                    weights,
+                    max_cache_length,
+                    precision=precision,
+                    verbose=verbose,
+                    parallel_config=parallel.for_rank(rank),
+                )
+                for rank in range(parallel.tp_size)
+            }
+            sections = [
+                BundleSection(rank_engine_section(rank), plan)
+                for rank, plan in sorted(plans.items())
+            ]
+            decoder_layout = "dual_profile"
+        else:
+
+            def build_role(role: str) -> bytes:
+                with engine_role(role):
+                    return build_engine(
+                        config,
+                        weights,
+                        max_cache_length,
+                        precision=precision,
+                        verbose=verbose,
+                        parallel_config=parallel,
+                    )
+
+            if target_inspection_role is not None:
+                build_role(target_inspection_role)
+                raise RuntimeError("graph inspection did not reach TensorRT serialization")
+            plan = build_role("decode")
+            sections = [BundleSection("engine_plan", plan)]
+            decoder_layout = "single"
+
+    tokenizer_source = str(options.get("tokenizer_source_model_id_or_path") or model_path)
+    tokenizer_revision = (
+        str(options["tokenizer_source_revision"])
+        if options.get("tokenizer_source_revision")
+        else None
+    )
+    with timed_build_phase(timing, "tokenizer_json_ensure_s"):
+        tokenizer_frame = _detect_tokenizer_frame(
+            tokenizer_source,
+            revision=tokenizer_revision,
+        )
+        _ensure_tokenizer_json(model_path)
+        if tokenizer_frame is None:
+            tokenizer_frame = _detect_tokenizer_frame(str(model_path))
+    prefix_ids, suffix_ids = tokenizer_frame or ([], [])
+    add_special_tokens = bool(prefix_ids or suffix_ids)
+    if tokenizer_frame is None:
+        add_special_tokens = _tokenizer_adds_special_tokens(model_path)
+
+    trt_version = trt_compat.tensorrt_version() or "unknown"
+    trt_abi = trt_compat.tensorrt_abi(trt_version)
+    info = BundleInfo(
+        model_id=model_path.name,
+        model_type=config.model_type,
+        family=name,
+        trt_version=trt_version,
+        trt_abi=trt_abi,
+        gpu_name=_gpu_name(),
+        created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        vocab_size=config.vocab_size,
+        hidden_size=config.hidden_size,
+        num_layers=config.num_hidden_layers,
+        num_attention_heads=config.num_attention_heads,
+        num_key_value_heads=config.num_key_value_heads,
+        max_cache_length=max_cache_length,
+        runtime_strategy=runtime_strategy,
+        precision=precision,
+        tokenizer_add_special_tokens=add_special_tokens,
+    )
+
+    source_config = json.loads((model_path / "config.json").read_text(encoding="utf-8"))
+    if not isinstance(source_config, dict):
+        raise ValueError("BERT config.json must contain a JSON object")
+    runtime_config = {
+        key: value for key, value in source_config.items() if not str(key).startswith("_")
+    }
+    runtime_config.update(
+        {
+            "runtime_strategy": runtime_strategy,
+            "engine_backend": "trt",
+            "trt_version": trt_version,
+            "precision": precision,
+            "tokenizer_add_special_tokens": int(add_special_tokens),
+            "decoder_engine_layout": decoder_layout,
+        }
+    )
+    if trt_abi:
+        runtime_config["trt_abi"] = trt_abi
+    if fp32_layers:
+        runtime_config["fp32_layers"] = fp32_layers
+    if tokenizer_frame is not None:
+        runtime_config["tokenizer_special_prefix_ids"] = prefix_ids
+        runtime_config["tokenizer_special_suffix_ids"] = suffix_ids
+    runtime_config.update(parallel.to_bundle_config_fields())
+
+    slot_section = kernel_slots_section()
+    if slot_section is not None:
+        sections.append(BundleSection("kernel_slots.json", slot_section))
+
+    sections.append(
+        BundleSection(
+            "config.json",
+            json.dumps(runtime_config, indent=2).encode("utf-8"),
+        )
+    )
+    for filename in (
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ):
+        path = model_path / filename
+        if path.is_file():
+            sections.append(BundleSection(filename, path.read_bytes()))
+
+    kernel_manifest = []
+    for global_name, library in options.get("kernel_artifacts") or ():
+        section_name = f"kernel_{str(global_name).replace('.', '_')}.so"
+        sections.append(BundleSection(section_name, Path(library).read_bytes()))
+        kernel_manifest.append(
+            {
+                "global_name": str(global_name),
+                "func_name": "run",
+                "section": section_name,
+            }
+        )
+    if kernel_manifest:
+        sections.append(
+            BundleSection(
+                "kernel_manifest.json",
+                json.dumps({"kernels": kernel_manifest}).encode("utf-8"),
+            )
+        )
+
+    with timed_build_phase(timing, "bundle_write_s"):
+        write_bundle(output_path, info, sections)
+    timing["total_s"] = time.monotonic() - started
+    write_build_timing(timing)

@@ -26,6 +26,7 @@ from typing import Any, Iterable
 SCHEMA_VERSION = 1
 FAMILIES_PACKAGE = "tensorrt_model_connect.families"
 APPROVED_FAMILIES_ROOT_IMPORTS = frozenset({"base"})
+MODEL_OWNED_BUILD_CAPABILITY = "model_owned_build"
 MODEL_ROOT_FILES = frozenset({"__init__.py", "model.py", "parallel.py", "runtime.py"})
 MODEL_ROOT_DIRECTORIES = frozenset({"components"})
 MISPLACED_MODEL_PATHS = frozenset(
@@ -687,8 +688,31 @@ def _sibling_imports(family: str, modules: dict[str, ModuleInfo]) -> list[dict[s
     return sorted(violations, key=lambda item: (item["path"], item["line"]))
 
 
-def _noncanonical_model_paths(family_dir: Path) -> list[str]:
+def _uses_root_model_layout(family_dir: Path) -> bool:
+    manifest = tomllib.loads(
+        (family_dir / "MODEL.toml").read_text(encoding="utf-8")
+    )
+    capabilities = manifest.get("capabilities", ())
+    if isinstance(capabilities, str):
+        capabilities = (capabilities,)
+    if not isinstance(capabilities, (list, tuple)):
+        return False
+    return MODEL_OWNED_BUILD_CAPABILITY in capabilities
+
+
+def _noncanonical_model_paths(
+    family_dir: Path,
+    *,
+    root_model_layout: bool,
+) -> list[str]:
     model_dir = family_dir / "model"
+    if root_model_layout:
+        result = []
+        if not (family_dir / "model.py").is_file():
+            result.append("model.py")
+        if model_dir.exists():
+            result.append("model/")
+        return result
     if not model_dir.is_dir():
         return ["model/"]
     result: list[str] = []
@@ -702,13 +726,20 @@ def _noncanonical_model_paths(family_dir: Path) -> list[str]:
     return result
 
 
-def _source_metrics(family_dir: Path) -> dict[str, int]:
+def _source_metrics(
+    family_dir: Path,
+    *,
+    root_model_layout: bool,
+) -> dict[str, int]:
     files = [
         path
         for path in family_dir.rglob("*")
         if path.is_file() and "__pycache__" not in path.parts
     ]
-    model_files = [path for path in files if (family_dir / "model") in path.parents]
+    if root_model_layout:
+        model_files = [path for path in files if path == family_dir / "model.py"]
+    else:
+        model_files = [path for path in files if (family_dir / "model") in path.parents]
 
     def lines(paths: list[Path]) -> int:
         total = 0
@@ -738,6 +769,7 @@ def audit_family(
     repo_root = repo_root.resolve()
     family_dir = family_dir.resolve()
     family = family_dir.name
+    root_model_layout = _uses_root_model_layout(family_dir)
     modules = _family_modules(repo_root, family_dir)
     package_module = f"{FAMILIES_PACKAGE}.{family}"
     dynamic_entries, dynamic_roots, dynamic_symbols = _dynamic_entrypoints(
@@ -786,7 +818,10 @@ def audit_family(
         symbol_roots,
     )
     sibling_imports = _sibling_imports(family, modules)
-    noncanonical = _noncanonical_model_paths(family_dir)
+    noncanonical = _noncanonical_model_paths(
+        family_dir,
+        root_model_layout=root_model_layout,
+    )
     misplaced = sorted(
         path
         for path in noncanonical
@@ -855,7 +890,10 @@ def audit_family(
 
     return {
         "family": family,
-        "metrics": _source_metrics(family_dir),
+        "metrics": _source_metrics(
+            family_dir,
+            root_model_layout=root_model_layout,
+        ),
         "entrypoints": {
             "production_modules": sorted(production_seeds),
             "dynamic": [

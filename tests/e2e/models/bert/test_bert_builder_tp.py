@@ -18,13 +18,12 @@ pytest.importorskip(
     reason="tensorrt_model_connect requires tensorrt",
 )
 
-from tensorrt_model_connect.checkpoint_mapper import WeightDict
-from tensorrt_model_connect.config import ModelConfig
+from tensorrt_model_connect.families.bert.config import ModelConfig
 from tensorrt_model_connect.families.bert.plugin import BertPlugin
+from tensorrt_model_connect.families.bert.weights import WeightDict
 from tensorrt_model_connect.parallel_config import ParallelConfig
 
-bert_plugin = importlib.import_module(
-    "tensorrt_model_connect.families.bert.plugin")
+bert_model = importlib.import_module("tensorrt_model_connect.families.bert.model")
 
 _LAYERS = 1
 _HIDDEN = 16
@@ -35,7 +34,7 @@ _VOCAB = 24
 
 def _bert_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.bert.model.model",
+        "tensorrt_model_connect.families.bert.model",
         reason="TensorRT is required for BERT TP builder tests",
     )
 
@@ -214,7 +213,7 @@ def test_bert_plugin_routes_tp_build(monkeypatch):
         return b"bert-tp-plan"
 
     monkeypatch.setattr(
-        bert_plugin,
+        bert_model,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )
@@ -236,7 +235,7 @@ def test_bert_plugin_routes_tp_build(monkeypatch):
 
 def test_bert_plugin_rejects_quantized_tp(monkeypatch):
     monkeypatch.setattr(
-        bert_plugin,
+        bert_model,
         "require_tensorrt_11_for_tensor_parallel",
         lambda parallel, *, feature: None,
     )

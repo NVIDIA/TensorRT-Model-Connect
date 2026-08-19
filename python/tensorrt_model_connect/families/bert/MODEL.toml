@@ -4,6 +4,7 @@
 id = "bert"
 plugin = "bert"
 module = "plugin"
+capabilities = ["model_owned_build"]
 aliases = [
   "bert",
 ]
