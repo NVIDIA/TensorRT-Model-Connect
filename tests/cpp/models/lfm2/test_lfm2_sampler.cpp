@@ -21,6 +21,12 @@ void check(bool condition, const char* message) {
     }
 }
 
+trtmc::Lfm2SampleResult sample_once(const std::vector<float>& logits,
+                                    const trtmc::Lfm2SamplingParams& params) {
+    auto sampler = trtmc::create_lfm2_sampler(params);
+    return sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params, {});
+}
+
 void test_hf_repetition_penalty() {
     const float logits[] = {0.5F, 4.0F, -1.0F, 3.5F};
     const auto adjusted = trtmc::lfm2_apply_repetition_penalty(logits, 4, 2.0F, {1, 2, 1, -1, 99});
@@ -80,11 +86,80 @@ void test_eos_and_seeded_sampling() {
           "all configured EOS ids stop generation");
 }
 
+void test_distribution_filters_and_temperature() {
+    const std::vector<float> logits = {2.0F, 1.0F, 0.0F};
+    trtmc::Lfm2SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 2;
+    params.seed = 3;
+
+    const auto unfiltered = sample_once(logits, params);
+    check(unfiltered.token_id == 1, "seed samples the second top-k candidate");
+    check(std::abs(unfiltered.logprob + 1.3132617F) < 1.0e-6F,
+          "sample log probability uses the filtered distribution");
+
+    params.temperature = 0.5F;
+    check(sample_once(logits, params).token_id == 0, "temperature scales logits before sampling");
+
+    params.temperature = 1.0F;
+    params.top_k = 1;
+    const auto top_k = sample_once(logits, params);
+    check(top_k.token_id == 0, "top-k limits the candidate set");
+    check(std::abs(top_k.logprob) < 1.0e-6F, "single-candidate top-k is renormalized");
+
+    params.top_k = 2;
+    params.min_p = 0.4F;
+    check(sample_once(logits, params).token_id == 0,
+          "min-p filters relative to the maximum probability");
+
+    params.min_p = 0.0F;
+    params.top_p = 0.7F;
+    check(sample_once(logits, params).token_id == 0,
+          "top-p retains the smallest prefix that reaches the threshold");
+}
+
+void test_seed_fallback_and_reset() {
+    const std::vector<float> logits = {2.0F, 1.0F, 0.0F};
+    trtmc::Lfm2SamplingParams params;
+    params.temperature = 1.0F;
+    params.top_k = 2;
+    params.seed = 3;
+
+    auto sampler = trtmc::create_lfm2_sampler(params);
+    const auto first = sampler->sample(logits.data(), 3, params, {});
+    (void)sampler->sample(logits.data(), 3, params, {});
+    sampler->reset();
+    const auto replay = sampler->sample(logits.data(), 3, params, {});
+    check(first.token_id == replay.token_id && std::abs(first.logprob - replay.logprob) < 1.0e-6F,
+          "reset restores the initial seeded sequence");
+
+    params.seed = 1;
+    check(sample_once(logits, params).token_id == 0, "the request seed controls sampling");
+
+    params.seed = -1;
+    const auto fallback = sample_once(logits, params);
+    params.seed = 42;
+    const auto explicit_fallback = sample_once(logits, params);
+    check(fallback.token_id == explicit_fallback.token_id &&
+              std::abs(fallback.logprob - explicit_fallback.logprob) < 1.0e-6F,
+          "an unspecified seed uses the documented deterministic fallback");
+
+    params.seed = 0;
+    const auto zero_seed = sample_once(logits, params);
+    params.seed = 1;
+    const auto nonzero_state = sample_once(logits, params);
+    check(zero_seed.token_id == nonzero_state.token_id &&
+              std::abs(zero_seed.logprob - nonzero_state.logprob) < 1.0e-6F,
+          "zero seed maps to a nonzero generator state");
+}
+
 } // namespace
 
 int main() {
     test_hf_repetition_penalty();
     test_lfm2_top_k_default_resolution();
     test_eos_and_seeded_sampling();
+    test_distribution_filters_and_temperature();
+    test_seed_fallback_and_reset();
     return failures;
 }

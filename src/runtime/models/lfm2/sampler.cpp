@@ -46,6 +46,84 @@ struct FilteredDistribution {
     int32_t keep{0};
 };
 
+std::vector<int32_t> make_candidate_indices(const std::vector<float>& logits,
+                                            int32_t candidate_count) {
+    std::vector<int32_t> indices(logits.size());
+    std::iota(indices.begin(), indices.end(), 0);
+    std::partial_sort(indices.begin(), indices.begin() + candidate_count, indices.end(),
+                      [&](int32_t lhs, int32_t rhs) {
+                          return logits[static_cast<std::size_t>(lhs)] >
+                                 logits[static_cast<std::size_t>(rhs)];
+                      });
+    indices.resize(static_cast<std::size_t>(candidate_count));
+    return indices;
+}
+
+std::vector<float> make_candidate_probabilities(const std::vector<float>& logits,
+                                                const std::vector<int32_t>& indices,
+                                                float temperature) {
+    const float maximum = logits[static_cast<std::size_t>(indices.front())];
+    std::vector<float> probabilities(indices.size());
+    float total = 0.0F;
+    for (std::size_t index = 0; index < indices.size(); ++index) {
+        const float scaled =
+            (logits[static_cast<std::size_t>(indices[index])] - maximum) / temperature;
+        const float probability = std::isfinite(scaled) ? std::exp(scaled) : 0.0F;
+        probabilities[index] = probability;
+        total += probability;
+    }
+
+    if (total <= 0.0F) {
+        const float uniform = 1.0F / static_cast<float>(indices.size());
+        std::fill(probabilities.begin(), probabilities.end(), uniform);
+        return probabilities;
+    }
+    for (float& probability : probabilities)
+        probability /= total;
+    return probabilities;
+}
+
+void renormalize_prefix(std::vector<float>& probabilities, int32_t count) {
+    float prefix_total = 0.0F;
+    for (int32_t index = 0; index < count; ++index)
+        prefix_total += probabilities[static_cast<std::size_t>(index)];
+    if (prefix_total > 0.0F) {
+        for (int32_t index = 0; index < count; ++index)
+            probabilities[static_cast<std::size_t>(index)] /= prefix_total;
+    }
+}
+
+int32_t apply_min_p_filter(std::vector<float>& probabilities, int32_t candidate_count,
+                           float min_p) {
+    if (min_p <= 0.0F)
+        return candidate_count;
+
+    const float threshold = min_p * probabilities.front();
+    int32_t keep = 0;
+    while (keep < candidate_count && probabilities[static_cast<std::size_t>(keep)] >= threshold) {
+        ++keep;
+    }
+    keep = std::max(keep, 1);
+    if (keep < candidate_count)
+        renormalize_prefix(probabilities, keep);
+    return keep;
+}
+
+int32_t apply_top_p_filter(const std::vector<float>& probabilities, int32_t keep, float top_p) {
+    if (!top_p_enabled(top_p))
+        return keep;
+
+    float cumulative = 0.0F;
+    int32_t nucleus = 0;
+    while (nucleus < keep) {
+        cumulative += probabilities[static_cast<std::size_t>(nucleus)];
+        ++nucleus;
+        if (cumulative >= top_p)
+            break;
+    }
+    return std::max(nucleus, 1);
+}
+
 Lfm2SampleResult argmax(const std::vector<float>& logits, const Lfm2SamplingParams& params) {
     Lfm2SampleResult result;
     if (logits.empty()) {
@@ -70,71 +148,12 @@ FilteredDistribution make_distribution(const std::vector<float>& logits,
         resolved_top_k <= 0 ? vocab_size : std::min(resolved_top_k, vocab_size);
 
     FilteredDistribution distribution;
-    distribution.indices.resize(static_cast<std::size_t>(vocab_size));
-    std::iota(distribution.indices.begin(), distribution.indices.end(), 0);
-    std::partial_sort(distribution.indices.begin(), distribution.indices.begin() + candidate_count,
-                      distribution.indices.end(), [&](int32_t lhs, int32_t rhs) {
-                          return logits[static_cast<std::size_t>(lhs)] >
-                                 logits[static_cast<std::size_t>(rhs)];
-                      });
-    distribution.indices.resize(static_cast<std::size_t>(candidate_count));
-
-    const float maximum = logits[static_cast<std::size_t>(distribution.indices.front())];
-    distribution.probabilities.resize(static_cast<std::size_t>(candidate_count));
-    float total = 0.0F;
-    for (int32_t index = 0; index < candidate_count; ++index) {
-        const float scaled = (logits[static_cast<std::size_t>(
-                                  distribution.indices[static_cast<std::size_t>(index)])] -
-                              maximum) /
-                             temperature;
-        const float probability = std::isfinite(scaled) ? std::exp(scaled) : 0.0F;
-        distribution.probabilities[static_cast<std::size_t>(index)] = probability;
-        total += probability;
-    }
-    if (total <= 0.0F) {
-        const float uniform = 1.0F / static_cast<float>(candidate_count);
-        std::fill(distribution.probabilities.begin(), distribution.probabilities.end(), uniform);
-    } else {
-        for (float& probability : distribution.probabilities)
-            probability /= total;
-    }
-
-    const auto renormalize_prefix = [&](int32_t count) {
-        float prefix_total = 0.0F;
-        for (int32_t index = 0; index < count; ++index)
-            prefix_total += distribution.probabilities[static_cast<std::size_t>(index)];
-        if (prefix_total > 0.0F) {
-            for (int32_t index = 0; index < count; ++index)
-                distribution.probabilities[static_cast<std::size_t>(index)] /= prefix_total;
-        }
-    };
-
-    int32_t keep = candidate_count;
-    if (min_p > 0.0F) {
-        const float threshold = min_p * distribution.probabilities.front();
-        keep = 0;
-        while (keep < candidate_count &&
-               distribution.probabilities[static_cast<std::size_t>(keep)] >= threshold) {
-            ++keep;
-        }
-        keep = std::max(keep, 1);
-        if (keep < candidate_count)
-            renormalize_prefix(keep);
-    }
-    if (top_p_enabled(top_p)) {
-        float cumulative = 0.0F;
-        int32_t nucleus = 0;
-        while (nucleus < keep) {
-            cumulative += distribution.probabilities[static_cast<std::size_t>(nucleus)];
-            ++nucleus;
-            if (cumulative >= top_p)
-                break;
-        }
-        keep = std::max(nucleus, 1);
-    }
-
-    renormalize_prefix(keep);
-    distribution.keep = keep;
+    distribution.indices = make_candidate_indices(logits, candidate_count);
+    distribution.probabilities =
+        make_candidate_probabilities(logits, distribution.indices, temperature);
+    distribution.keep = apply_min_p_filter(distribution.probabilities, candidate_count, min_p);
+    distribution.keep = apply_top_p_filter(distribution.probabilities, distribution.keep, top_p);
+    renormalize_prefix(distribution.probabilities, distribution.keep);
     return distribution;
 }
 
@@ -197,6 +216,20 @@ class Lfm2DistributionSampler final : public Lfm2ISampler {
     std::uint64_t state_;
 };
 
+void apply_repetition_penalty_to_history(std::vector<float>& logits, int32_t vocab_size,
+                                         float penalty, const std::vector<int32_t>& token_history) {
+    std::unordered_set<int32_t> seen;
+    seen.reserve(token_history.size());
+    for (int32_t token : token_history) {
+        if (token < 0 || token >= vocab_size)
+            continue;
+        if (!seen.insert(token).second)
+            continue;
+        float& score = logits[static_cast<std::size_t>(token)];
+        score = score < 0.0F ? score * penalty : score / penalty;
+    }
+}
+
 } // namespace
 
 bool lfm2_is_eos_token(const Lfm2SamplingParams& params, int32_t token_id) {
@@ -216,14 +249,7 @@ std::vector<float> lfm2_apply_repetition_penalty(const float* logits, int32_t vo
     if (std::abs(penalty - 1.0F) < kSamplingEpsilon)
         return adjusted;
 
-    std::unordered_set<int32_t> seen;
-    seen.reserve(token_history.size());
-    for (int32_t token : token_history) {
-        if (token < 0 || token >= vocab_size || !seen.insert(token).second)
-            continue;
-        float& score = adjusted[static_cast<std::size_t>(token)];
-        score = score < 0.0F ? score * penalty : score / penalty;
-    }
+    apply_repetition_penalty_to_history(adjusted, vocab_size, penalty, token_history);
     return adjusted;
 }
 

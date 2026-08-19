@@ -1,0 +1,14 @@
+{
+  "schema_version": "trtmc.model-plugin-validation/v1",
+  "dataset": "LFM2-350M pinned BF16 model-card sampling recipe",
+  "version": "1",
+  "requests": [
+    {
+      "sample_id": "lfm2-350m-bf16-model-card-sampling",
+      "testcase": "lfm2-350m-bf16-model-card-sampling",
+      "stage": "full_generation",
+      "category": "model-card-sampling",
+      "inputs": {}
+    }
+  ]
+}

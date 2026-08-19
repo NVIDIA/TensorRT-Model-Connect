@@ -1823,6 +1823,35 @@ suites:
         GB300-only full-profile validation. The model-owned comparator keeps
         the checked-in visual thresholds; this suite adds no threshold override.
 
+  - id: lfm2_model_card_sampling_parity
+    description: >
+      Fixed-seed parity for the pinned LFM2-350M BF16 model-card sampling
+      recipe. The model-owned runner and comparator preserve the documented
+      temperature, min-p, top-k, repetition penalty, chat template, and
+      512-token limit without overriding the manifest contract.
+    user_contract: sampling
+    task_type: Text → Text
+    default_model_names: [lfm2-350m-bf16-model-card]
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/lfm2/validation/lfm2-350m-bf16-model-card.json
+    selectors:
+      model_names: [lfm2-350m-bf16-model-card]
+      task_strategies: [text_generation_causal]
+      runtime_strategies: [lfm2_hybrid_conv_attention]
+      user_contracts: [sampling]
+      families: [lfm2]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Single-GPU model-card reference consistency. Sampling parameters and
+        comparison semantics remain owned by the pinned LFM2 manifest.
+
   - id: mmlu_generation_mode_parity
     description: >
       Deterministic MMLU-Pro output consistency across AR, diffusion,

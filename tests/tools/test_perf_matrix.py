@@ -38,6 +38,10 @@ FAST_FOUNDATION_STEREO_EXCLUSION_REASON = (
     "archive and model-local L4 harness; the public release runner does not "
     "yet provide an equivalent redistributable stereo reference workload."
 )
+LFM2_EXCLUSION_REASON = (
+    "Dense LFM2 functional and reference-parity qualification is present, but "
+    "this change does not add a matching release-performance workload or receipt."
+)
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
     "canary.transcribe": "nemo-asr",
@@ -266,6 +270,11 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert len(raw_additional) == 29
     assert excluded_profiles == {
         "fast-foundation-stereo": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
+        "lfm2-1.2b": LFM2_EXCLUSION_REASON,
+        "lfm2-2.6b": LFM2_EXCLUSION_REASON,
+        "lfm2-350m-bf16-model-card": LFM2_EXCLUSION_REASON,
+        "lfm2-350m-fp16": LFM2_EXCLUSION_REASON,
+        "lfm2-700m": LFM2_EXCLUSION_REASON,
         "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
     }
     assert all(
@@ -1856,17 +1865,37 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 2,
-        "explicitly_excluded_profiles": 2,
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 7,
+        "explicitly_excluded_profiles": 7,
         "explicit_exclusions": [
             {
                 "model": "fast-foundation-stereo",
                 "reason": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
             },
             {
+                "model": "lfm2-1.2b",
+                "reason": LFM2_EXCLUSION_REASON,
+            },
+            {
+                "model": "lfm2-2.6b",
+                "reason": LFM2_EXCLUSION_REASON,
+            },
+            {
+                "model": "lfm2-350m-bf16-model-card",
+                "reason": LFM2_EXCLUSION_REASON,
+            },
+            {
+                "model": "lfm2-350m-fp16",
+                "reason": LFM2_EXCLUSION_REASON,
+            },
+            {
+                "model": "lfm2-700m",
+                "reason": LFM2_EXCLUSION_REASON,
+            },
+            {
                 "model": "minimax-h3-768p",
                 "reason": MINIMAX_H3_EXCLUSION_REASON,
-            }
+            },
         ],
         "excluded_l0_profiles": excluded_l0_profiles,
         "distributed_profiles": catalog_counts["distributed"],

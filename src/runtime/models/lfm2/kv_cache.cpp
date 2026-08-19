@@ -27,37 +27,51 @@ void validate_scalar(TrtModule& module, const std::string& name) {
     }
 }
 
+void validate_geometry(int32_t num_layers, int32_t max_length, int32_t num_kv_heads,
+                       int32_t head_dim) {
+    if (num_layers <= 0 || max_length <= 0 || num_kv_heads <= 0 || head_dim <= 0 ||
+        num_kv_heads > std::numeric_limits<int32_t>::max() / head_dim) {
+        throw std::invalid_argument("Lfm2KvCache requires positive, representable geometry");
+    }
+}
+
+void populate_default_names(Lfm2KvCacheNames& names, int32_t num_layers) {
+    if (!names.cache_k.empty())
+        return;
+
+    names.cache_k.reserve(static_cast<std::size_t>(num_layers));
+    names.cache_v.reserve(static_cast<std::size_t>(num_layers));
+    names.present_k.reserve(static_cast<std::size_t>(num_layers));
+    names.present_v.reserve(static_cast<std::size_t>(num_layers));
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const auto suffix = "_" + std::to_string(layer);
+        names.cache_k.push_back("cache_k" + suffix);
+        names.cache_v.push_back("cache_v" + suffix);
+        names.present_k.push_back("present_k" + suffix);
+        names.present_v.push_back("present_v" + suffix);
+    }
+}
+
+void validate_name_counts(const Lfm2KvCacheNames& names, std::size_t expected) {
+    if (names.cache_k.size() != expected || names.cache_v.size() != expected ||
+        names.present_k.size() != expected || names.present_v.size() != expected) {
+        throw std::invalid_argument(
+            "Lfm2KvCache tensor-name count does not match attention layers");
+    }
+}
+
 } // namespace
 
 Lfm2KvCache::Lfm2KvCache(int32_t num_layers, int32_t max_length, int32_t num_kv_heads,
                          int32_t head_dim, cudaStream_t stream, DType dtype, Lfm2KvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), num_kv_heads_(num_kv_heads),
       head_dim_(head_dim), stream_(stream), dtype_(dtype), names_(std::move(names)) {
-    if (num_layers_ <= 0 || max_length_ <= 0 || num_kv_heads_ <= 0 || head_dim_ <= 0 ||
-        num_kv_heads_ > std::numeric_limits<int32_t>::max() / head_dim_) {
-        throw std::invalid_argument("Lfm2KvCache requires positive, representable geometry");
-    }
+    validate_geometry(num_layers_, max_length_, num_kv_heads_, head_dim_);
     kv_dim_ = num_kv_heads_ * head_dim_;
 
-    if (names_.cache_k.empty()) {
-        names_.cache_k.reserve(static_cast<std::size_t>(num_layers_));
-        names_.cache_v.reserve(static_cast<std::size_t>(num_layers_));
-        names_.present_k.reserve(static_cast<std::size_t>(num_layers_));
-        names_.present_v.reserve(static_cast<std::size_t>(num_layers_));
-        for (int32_t layer = 0; layer < num_layers_; ++layer) {
-            const auto suffix = "_" + std::to_string(layer);
-            names_.cache_k.push_back("cache_k" + suffix);
-            names_.cache_v.push_back("cache_v" + suffix);
-            names_.present_k.push_back("present_k" + suffix);
-            names_.present_v.push_back("present_v" + suffix);
-        }
-    }
+    populate_default_names(names_, num_layers_);
     const auto expected = static_cast<std::size_t>(num_layers_);
-    if (names_.cache_k.size() != expected || names_.cache_v.size() != expected ||
-        names_.present_k.size() != expected || names_.present_v.size() != expected) {
-        throw std::invalid_argument(
-            "Lfm2KvCache tensor-name count does not match attention layers");
-    }
+    validate_name_counts(names_, expected);
 
     cache_k_.reserve(expected);
     cache_v_.reserve(expected);

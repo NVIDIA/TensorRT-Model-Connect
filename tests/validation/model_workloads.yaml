@@ -20,6 +20,7 @@ sample_limits:
   gedit_bench_image_edit: 5
   humaneval_code_continuation_parity: 10
   imagenette_image_classification: 100
+  lfm2_model_card_sampling_parity: 1
   librispeech_clean_asr: 10
   librispeech_clean_asr_streaming: 5
   flores200_en_fr_seq2seq_parity: 10
@@ -141,6 +142,16 @@ models:
     workloads: [vlm_mmmu_pro_vision_fixed_mcq]
   lance-3b-x2t-image:
     workloads: [mmmu_pro_vision_square_plugin_parity]
+  lfm2-1.2b:
+    workloads: [mmlu_continuation_parity]
+  lfm2-2.6b:
+    workloads: [mmlu_continuation_parity]
+  lfm2-350m-bf16-model-card:
+    workloads: [lfm2_model_card_sampling_parity]
+  lfm2-350m-fp16:
+    workloads: [mmlu_continuation_parity]
+  lfm2-700m:
+    workloads: [mmlu_continuation_parity]
   magpie-tts-357m:
     workloads: [seedtts_en_tts_intelligibility]
   mamba-130m:

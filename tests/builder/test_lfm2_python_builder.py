@@ -474,6 +474,7 @@ def test_implicit_cache_default_never_exceeds_a_shorter_model_limit() -> None:
 
 
 @pytest.mark.parametrize("precision", ["fp16", "bf16"])
+@pytest.mark.trt
 def test_tiny_real_trt_builder_emits_native_state_contract(precision: str) -> None:
     trt = pytest.importorskip("tensorrt")
     model = importlib.import_module("tensorrt_model_connect.families.lfm2.model")
@@ -643,6 +644,7 @@ def test_tiny_real_trt_builder_emits_native_state_contract(precision: str) -> No
 
 
 @pytest.mark.parametrize("precision", ["fp16", "bf16"])
+@pytest.mark.trt
 def test_nonzero_native_attention_matches_hf_two_step_oracle(precision: str) -> None:
     trt = pytest.importorskip("tensorrt")
     torch = pytest.importorskip("torch")

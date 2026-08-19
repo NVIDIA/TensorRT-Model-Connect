@@ -12,6 +12,34 @@
 #include <utility>
 
 namespace trtmc {
+namespace {
+
+void validate_conv_state_contract(TrtModule& module, const std::string& input,
+                                  const std::string& output,
+                                  const std::vector<int64_t>& expected_shape, DType dtype) {
+    if (!module.has_input(input) || !module.has_output(output)) {
+        throw std::runtime_error("LFM2 engine is missing convolution state pair '" + input + "'/'" +
+                                 output + "'");
+    }
+    if (module.tensor_shape(input) != expected_shape ||
+        module.tensor_shape(output) != expected_shape) {
+        throw std::runtime_error("LFM2 convolution state has unexpected shape");
+    }
+    if (module.tensor_dtype(input) != dtype || module.tensor_dtype(output) != dtype)
+        throw std::runtime_error("LFM2 convolution state dtype does not match precision");
+}
+
+void bind_conv_state_pair(TrtModule& module, const std::string& input, const std::string& output,
+                          DeviceTensor& state, DeviceTensor& present) {
+    module.bind_external(input, state.data());
+    module.bind_external(output, present.data());
+    if (module.device_ptr(input) != state.data() || module.device_ptr(output) != present.data() ||
+        state.data() == present.data()) {
+        throw std::runtime_error("LFM2 convolution state requires stable double buffers");
+    }
+}
+
+} // namespace
 
 Lfm2ConvState::Lfm2ConvState(int32_t num_layers, int32_t state_dim, int32_t cache_length,
                              cudaStream_t stream, DType dtype, std::string input_prefix,
@@ -45,25 +73,9 @@ void Lfm2ConvState::bind_to(TrtModule& module) {
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
         const auto input = input_name(layer);
         const auto output = output_name(layer);
-        if (!module.has_input(input) || !module.has_output(output)) {
-            throw std::runtime_error("LFM2 engine is missing convolution state pair '" + input +
-                                     "'/'" + output + "'");
-        }
-        if (module.tensor_shape(input) != expected_shape ||
-            module.tensor_shape(output) != expected_shape) {
-            throw std::runtime_error("LFM2 convolution state has unexpected shape");
-        }
-        if (module.tensor_dtype(input) != dtype_ || module.tensor_dtype(output) != dtype_) {
-            throw std::runtime_error("LFM2 convolution state dtype does not match precision");
-        }
+        validate_conv_state_contract(module, input, output, expected_shape, dtype_);
         const auto index = static_cast<std::size_t>(layer);
-        module.bind_external(input, state_[index].data());
-        module.bind_external(output, present_[index].data());
-        if (module.device_ptr(input) != state_[index].data() ||
-            module.device_ptr(output) != present_[index].data() ||
-            state_[index].data() == present_[index].data()) {
-            throw std::runtime_error("LFM2 convolution state requires stable double buffers");
-        }
+        bind_conv_state_pair(module, input, output, state_[index], present_[index]);
     }
 }
 

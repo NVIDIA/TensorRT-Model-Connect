@@ -71,6 +71,58 @@ tokenizer_special_frame(const BundleFile& bundle) {
             extract_json_int_array(text, "tokenizer_special_suffix_ids", 32)};
 }
 
+const std::vector<char>& require_lfm2_tokenizer_section(const BundleFile& bundle) {
+    const auto* section = find_section(bundle, "tokenizer.json");
+    if (section == nullptr || section->empty())
+        throw std::runtime_error("LFM2 bundle is missing tokenizer.json");
+    return *section;
+}
+
+std::unique_ptr<ITokenizer> create_lfm2_native_bpe(const std::vector<char>& section,
+                                                   bool add_special, bool has_explicit_frame,
+                                                   bool use_pinned_pretokenizer) {
+    auto tokenizer =
+        CreateBpeTokenizer(section.data(), section.size(),
+                           add_special && !has_explicit_frame && !use_pinned_pretokenizer);
+    if (!tokenizer)
+        throw std::runtime_error("native BPE tokenizer factory returned null");
+    return tokenizer;
+}
+
+std::unique_ptr<ITokenizer> apply_lfm2_tokenizer_wrappers(std::unique_ptr<ITokenizer> tokenizer,
+                                                          const std::vector<char>& section,
+                                                          bool use_pinned_pretokenizer,
+                                                          bool add_special,
+                                                          bool& has_explicit_frame,
+                                                          std::vector<int32_t>& prefix) {
+    if (lfm2_uses_sequence_byte_level_decoder(section.data(), section.size()))
+        tokenizer = lfm2_wrap_byte_level_decoder(std::move(tokenizer));
+    if (!use_pinned_pretokenizer)
+        return tokenizer;
+
+    tokenizer = lfm2_wrap_pinned_pretokenizer(
+        std::move(tokenizer), lfm2_tokenizer_added_tokens(section.data(), section.size()));
+    if (add_special && !has_explicit_frame) {
+        const int32_t bos = tokenizer->id_for_token("<|startoftext|>");
+        if (bos < 0)
+            throw std::runtime_error("pinned LFM2 tokenizer has no BOS token");
+        prefix = {bos};
+        has_explicit_frame = true;
+    }
+    return tokenizer;
+}
+
+std::shared_ptr<ITokenizer> finalize_lfm2_tokenizer(std::unique_ptr<ITokenizer> tokenizer,
+                                                    bool add_special, bool has_explicit_frame,
+                                                    std::vector<int32_t> prefix,
+                                                    std::vector<int32_t> suffix) {
+    if (add_special && has_explicit_frame) {
+        return std::make_shared<SpecialFrameTokenizer>(std::move(tokenizer), std::move(prefix),
+                                                       std::move(suffix));
+    }
+    return std::shared_ptr<ITokenizer>(std::move(tokenizer));
+}
+
 } // namespace
 
 std::unique_ptr<ITrtModule> load_lfm2_module(IBackend* backend, const std::vector<char>* plan,
@@ -92,42 +144,21 @@ std::unique_ptr<ITrtModule> load_lfm2_module(IBackend* backend, const std::vecto
 }
 
 std::shared_ptr<ITokenizer> create_lfm2_tokenizer(const BundleFile& bundle) {
-    const auto* section = find_section(bundle, "tokenizer.json");
-    if (section == nullptr || section->empty())
-        throw std::runtime_error("LFM2 bundle is missing tokenizer.json");
-
+    const auto& section = require_lfm2_tokenizer_section(bundle);
     const bool add_special = tokenizer_add_special_tokens(bundle);
     auto [prefix, suffix] = tokenizer_special_frame(bundle);
     bool has_explicit_frame = !prefix.empty() || !suffix.empty();
     const bool use_pinned_pretokenizer =
-        lfm2_uses_pinned_split_byte_level_pretokenizer(section->data(), section->size());
+        lfm2_uses_pinned_split_byte_level_pretokenizer(section.data(), section.size());
     try {
-        auto tokenizer =
-            CreateBpeTokenizer(section->data(), section->size(),
-                               add_special && !has_explicit_frame && !use_pinned_pretokenizer);
-        if (!tokenizer)
-            throw std::runtime_error("native BPE tokenizer factory returned null");
-        if (lfm2_uses_sequence_byte_level_decoder(section->data(), section->size())) {
-            tokenizer = lfm2_wrap_byte_level_decoder(std::move(tokenizer));
-        }
-        if (use_pinned_pretokenizer) {
-            tokenizer = lfm2_wrap_pinned_pretokenizer(
-                std::move(tokenizer),
-                lfm2_tokenizer_added_tokens(section->data(), section->size()));
-            if (add_special && !has_explicit_frame) {
-                const int32_t bos = tokenizer->id_for_token("<|startoftext|>");
-                if (bos < 0)
-                    throw std::runtime_error("pinned LFM2 tokenizer has no BOS token");
-                prefix = {bos};
-                has_explicit_frame = true;
-            }
-        }
+        auto tokenizer = create_lfm2_native_bpe(section, add_special, has_explicit_frame,
+                                                use_pinned_pretokenizer);
+        tokenizer =
+            apply_lfm2_tokenizer_wrappers(std::move(tokenizer), section, use_pinned_pretokenizer,
+                                          add_special, has_explicit_frame, prefix);
         std::cerr << "[trtmc] Using native LFM2 BPE tokenizer\n";
-        if (add_special && has_explicit_frame) {
-            return std::make_shared<SpecialFrameTokenizer>(std::move(tokenizer), std::move(prefix),
-                                                           std::move(suffix));
-        }
-        return std::shared_ptr<ITokenizer>(std::move(tokenizer));
+        return finalize_lfm2_tokenizer(std::move(tokenizer), add_special, has_explicit_frame,
+                                       std::move(prefix), std::move(suffix));
     } catch (const std::exception& error) {
         throw std::runtime_error(std::string("LFM2 native BPE tokenizer failed: ") + error.what());
     }

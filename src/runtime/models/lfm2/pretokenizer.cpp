@@ -27,45 +27,62 @@ bool is_continuation(unsigned char byte) {
     return (byte & 0xC0U) == 0x80U;
 }
 
+std::size_t utf8_sequence_size(unsigned char first) {
+    if (first < 0x80U)
+        return 1;
+    if (first >= 0xC2U && first <= 0xDFU)
+        return 2;
+    if (first >= 0xE0U && first <= 0xEFU)
+        return 3;
+    if (first >= 0xF0U && first <= 0xF4U)
+        return 4;
+    return 0;
+}
+
+bool is_valid_three_byte_prefix(unsigned char first, unsigned char second) {
+    return (first != 0xE0U || second >= 0xA0U) && (first != 0xEDU || second <= 0x9FU);
+}
+
+bool is_valid_four_byte_prefix(unsigned char first, unsigned char second) {
+    return (first != 0xF0U || second >= 0x90U) && (first != 0xF4U || second <= 0x8FU);
+}
+
+bool is_valid_scalar_prefix(unsigned char first, unsigned char second, std::size_t size) {
+    if (size == 3)
+        return is_valid_three_byte_prefix(first, second);
+    if (size == 4)
+        return is_valid_four_byte_prefix(first, second);
+    return true;
+}
+
+bool is_valid_utf8_sequence(std::string_view text, std::size_t offset, std::size_t size,
+                            unsigned char first) {
+    if (size == 0 || size > text.size() - offset)
+        return false;
+    if (size > 1 &&
+        !is_valid_scalar_prefix(first, static_cast<unsigned char>(text[offset + 1]), size))
+        return false;
+    for (std::size_t index = 1; index < size; ++index) {
+        if (!is_continuation(static_cast<unsigned char>(text[offset + index])))
+            return false;
+    }
+    return true;
+}
+
+char32_t decode_utf8_codepoint(std::string_view text, std::size_t offset, std::size_t size) {
+    static constexpr std::array<unsigned char, 5> masks{0, 0x7FU, 0x1FU, 0x0FU, 0x07U};
+    char32_t codepoint = static_cast<unsigned char>(text[offset]) & masks[size];
+    for (std::size_t index = 1; index < size; ++index) {
+        codepoint = (codepoint << 6U) | (static_cast<unsigned char>(text[offset + index]) & 0x3FU);
+    }
+    return codepoint;
+}
+
 Utf8Unit decode_utf8_unit(std::string_view text, std::size_t offset) {
     const auto first = static_cast<unsigned char>(text[offset]);
-    if (first < 0x80U)
-        return {first, 1};
-    if (first >= 0xC2U && first <= 0xDFU && offset + 1 < text.size()) {
-        const auto second = static_cast<unsigned char>(text[offset + 1]);
-        if (is_continuation(second)) {
-            return {static_cast<char32_t>((first & 0x1FU) << 6U) |
-                        static_cast<char32_t>(second & 0x3FU),
-                    2};
-        }
-    }
-    if (first >= 0xE0U && first <= 0xEFU && offset + 2 < text.size()) {
-        const auto second = static_cast<unsigned char>(text[offset + 1]);
-        const auto third = static_cast<unsigned char>(text[offset + 2]);
-        const bool scalar_prefix =
-            (first != 0xE0U || second >= 0xA0U) && (first != 0xEDU || second <= 0x9FU);
-        if (scalar_prefix && is_continuation(second) && is_continuation(third)) {
-            return {static_cast<char32_t>((first & 0x0FU) << 12U) |
-                        static_cast<char32_t>((second & 0x3FU) << 6U) |
-                        static_cast<char32_t>(third & 0x3FU),
-                    3};
-        }
-    }
-    if (first >= 0xF0U && first <= 0xF4U && offset + 3 < text.size()) {
-        const auto second = static_cast<unsigned char>(text[offset + 1]);
-        const auto third = static_cast<unsigned char>(text[offset + 2]);
-        const auto fourth = static_cast<unsigned char>(text[offset + 3]);
-        const bool scalar_prefix =
-            (first != 0xF0U || second >= 0x90U) && (first != 0xF4U || second <= 0x8FU);
-        if (scalar_prefix && is_continuation(second) && is_continuation(third) &&
-            is_continuation(fourth)) {
-            return {static_cast<char32_t>((first & 0x07U) << 18U) |
-                        static_cast<char32_t>((second & 0x3FU) << 12U) |
-                        static_cast<char32_t>((third & 0x3FU) << 6U) |
-                        static_cast<char32_t>(fourth & 0x3FU),
-                    4};
-        }
-    }
+    const std::size_t size = utf8_sequence_size(first);
+    if (is_valid_utf8_sequence(text, offset, size, first))
+        return {decode_utf8_codepoint(text, offset, size), size};
     return {first, 1};
 }
 
@@ -168,6 +185,82 @@ void append_piece(std::string_view text, std::size_t begin, std::size_t end,
         pieces.emplace_back(text.substr(begin, end - begin));
 }
 
+std::size_t contraction_piece_end(std::string_view text, std::size_t offset) {
+    const std::size_t size = contraction_size(text, offset);
+    return size == 0 ? offset : offset + size;
+}
+
+std::size_t letter_piece_end(std::string_view text, std::size_t offset, const Utf8Unit& first) {
+    if (is_letter(first.codepoint))
+        return consume_while(text, offset, is_letter);
+    if (is_newline(first.codepoint) || is_number(first.codepoint))
+        return offset;
+
+    const std::size_t after_prefix = offset + first.size;
+    if (after_prefix >= text.size())
+        return offset;
+    if (!is_letter(decode_utf8_unit(text, after_prefix).codepoint))
+        return offset;
+    return consume_while(text, after_prefix, is_letter);
+}
+
+std::size_t number_piece_end(std::string_view text, std::size_t offset, const Utf8Unit& first) {
+    if (!is_number(first.codepoint))
+        return offset;
+    return consume_while(text, offset, is_number, 3);
+}
+
+std::size_t other_piece_end(std::string_view text, std::size_t offset, const Utf8Unit& first) {
+    std::size_t other_begin = offset;
+    if (first.codepoint == ' ')
+        other_begin += first.size;
+    if (other_begin >= text.size())
+        return offset;
+    if (!is_other(decode_utf8_unit(text, other_begin).codepoint))
+        return offset;
+
+    const std::size_t other_end = consume_while(text, other_begin, is_other);
+    return consume_while(text, other_end, is_newline);
+}
+
+std::size_t whitespace_piece_end(std::string_view text, std::size_t offset, const Utf8Unit& first) {
+    if (!is_whitespace(first.codepoint))
+        return offset;
+
+    std::size_t scan = offset;
+    std::size_t last_newline_end = offset;
+    while (scan < text.size()) {
+        const auto unit = decode_utf8_unit(text, scan);
+        if (!is_whitespace(unit.codepoint))
+            break;
+        scan += unit.size;
+        if (is_newline(unit.codepoint))
+            last_newline_end = scan;
+    }
+    return last_newline_end > offset ? last_newline_end : scan;
+}
+
+std::size_t next_pretoken_end(std::string_view text, std::size_t offset) {
+    std::size_t end = contraction_piece_end(text, offset);
+    if (end != offset)
+        return end;
+
+    const auto first = decode_utf8_unit(text, offset);
+    end = letter_piece_end(text, offset, first);
+    if (end != offset)
+        return end;
+    end = number_piece_end(text, offset, first);
+    if (end != offset)
+        return end;
+    end = other_piece_end(text, offset, first);
+    if (end != offset)
+        return end;
+    end = whitespace_piece_end(text, offset, first);
+    if (end != offset)
+        return end;
+    return offset + first.size;
+}
+
 class Lfm2PinnedPretokenizer final : public ITokenizer {
   public:
     Lfm2PinnedPretokenizer(std::unique_ptr<ITokenizer> inner, std::vector<std::string> added_tokens)
@@ -246,6 +339,44 @@ class Lfm2PinnedPretokenizer final : public ITokenizer {
     std::vector<std::string> added_tokens_;
 };
 
+bool json_has_type(const nlohmann::json& value, std::string_view type) {
+    return value.is_object() && value.value("type", std::string{}) == type;
+}
+
+bool is_pinned_split_pattern(const nlohmann::json& split) {
+    const auto pattern = split.find("pattern");
+    if (pattern == split.end() || !pattern->is_object())
+        return false;
+    return pattern->value("Regex", std::string{}) == kPinnedSplitRegex;
+}
+
+bool is_pinned_split(const nlohmann::json& split) {
+    if (!json_has_type(split, "Split"))
+        return false;
+    if (split.value("behavior", std::string{}) != "Isolated")
+        return false;
+    if (split.value("invert", true))
+        return false;
+    return is_pinned_split_pattern(split);
+}
+
+bool is_pinned_byte_level(const nlohmann::json& byte_level) {
+    if (!json_has_type(byte_level, "ByteLevel"))
+        return false;
+    if (byte_level.value("add_prefix_space", true))
+        return false;
+    return !byte_level.value("use_regex", true);
+}
+
+bool is_pinned_pretokenizer(const nlohmann::json& pretokenizer) {
+    if (!json_has_type(pretokenizer, "Sequence"))
+        return false;
+    const auto children = pretokenizer.find("pretokenizers");
+    if (children == pretokenizer.end() || !children->is_array() || children->size() != 2)
+        return false;
+    return is_pinned_split((*children)[0]) && is_pinned_byte_level((*children)[1]);
+}
+
 } // namespace
 
 bool lfm2_uses_pinned_split_byte_level_pretokenizer(const char* tokenizer_json, std::size_t size) {
@@ -254,19 +385,7 @@ bool lfm2_uses_pinned_split_byte_level_pretokenizer(const char* tokenizer_json, 
     try {
         const auto root = nlohmann::json::parse(tokenizer_json, tokenizer_json + size);
         const auto pre = root.find("pre_tokenizer");
-        if (pre == root.end() || !pre->is_object() || pre->value("type", "") != "Sequence")
-            return false;
-        const auto children = pre->find("pretokenizers");
-        if (children == pre->end() || !children->is_array() || children->size() != 2)
-            return false;
-        const auto& split = (*children)[0];
-        const auto& byte_level = (*children)[1];
-        return split.is_object() && split.value("type", "") == "Split" &&
-               split.value("behavior", "") == "Isolated" && !split.value("invert", true) &&
-               split.contains("pattern") && split["pattern"].is_object() &&
-               split["pattern"].value("Regex", "") == kPinnedSplitRegex && byte_level.is_object() &&
-               byte_level.value("type", "") == "ByteLevel" &&
-               !byte_level.value("add_prefix_space", true) && !byte_level.value("use_regex", true);
+        return pre != root.end() && is_pinned_pretokenizer(*pre);
     } catch (const nlohmann::json::exception&) {
         return false;
     }
@@ -295,63 +414,7 @@ std::vector<std::string> lfm2_split_pretokens(std::string_view text) {
     std::vector<std::string> pieces;
     for (std::size_t offset = 0; offset < text.size();) {
         const std::size_t begin = offset;
-
-        if (const std::size_t size = contraction_size(text, offset); size > 0) {
-            offset += size;
-            append_piece(text, begin, offset, pieces);
-            continue;
-        }
-
-        const auto first = decode_utf8_unit(text, offset);
-        if (is_letter(first.codepoint)) {
-            offset = consume_while(text, offset, is_letter);
-            append_piece(text, begin, offset, pieces);
-            continue;
-        }
-        if (!is_newline(first.codepoint) && !is_letter(first.codepoint) &&
-            !is_number(first.codepoint)) {
-            const std::size_t after_prefix = offset + first.size;
-            if (after_prefix < text.size() &&
-                is_letter(decode_utf8_unit(text, after_prefix).codepoint)) {
-                offset = consume_while(text, after_prefix, is_letter);
-                append_piece(text, begin, offset, pieces);
-                continue;
-            }
-        }
-
-        if (is_number(first.codepoint)) {
-            offset = consume_while(text, offset, is_number, 3);
-            append_piece(text, begin, offset, pieces);
-            continue;
-        }
-
-        std::size_t other_begin = offset;
-        if (first.codepoint == ' ')
-            other_begin += first.size;
-        if (other_begin < text.size() && is_other(decode_utf8_unit(text, other_begin).codepoint)) {
-            offset = consume_while(text, other_begin, is_other);
-            offset = consume_while(text, offset, is_newline);
-            append_piece(text, begin, offset, pieces);
-            continue;
-        }
-
-        if (is_whitespace(first.codepoint)) {
-            std::size_t scan = offset;
-            std::size_t last_newline_end = offset;
-            while (scan < text.size()) {
-                const auto unit = decode_utf8_unit(text, scan);
-                if (!is_whitespace(unit.codepoint))
-                    break;
-                scan += unit.size;
-                if (is_newline(unit.codepoint))
-                    last_newline_end = scan;
-            }
-            offset = last_newline_end > begin ? last_newline_end : scan;
-            append_piece(text, begin, offset, pieces);
-            continue;
-        }
-
-        offset += first.size;
+        offset = next_pretoken_end(text, offset);
         append_piece(text, begin, offset, pieces);
     }
     return pieces;

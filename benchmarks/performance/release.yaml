@@ -23,6 +23,18 @@ excluded_profiles:
       The exact baseline is owned by the supplied rectified-stereo fixture
       archive and model-local L4 harness; the public release runner does not
       yet provide an equivalent redistributable stereo reference workload.
+  - model: lfm2-1.2b
+    reason: &lfm2_performance_exclusion >-
+      Dense LFM2 functional and reference-parity qualification is present, but
+      this change does not add a matching release-performance workload or receipt.
+  - model: lfm2-2.6b
+    reason: *lfm2_performance_exclusion
+  - model: lfm2-350m-bf16-model-card
+    reason: *lfm2_performance_exclusion
+  - model: lfm2-350m-fp16
+    reason: *lfm2_performance_exclusion
+  - model: lfm2-700m
+    reason: *lfm2_performance_exclusion
   - model: minimax-h3-768p
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated

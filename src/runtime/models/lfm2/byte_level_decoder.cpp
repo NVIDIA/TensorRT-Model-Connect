@@ -25,48 +25,62 @@ bool is_continuation(unsigned char byte) {
     return (byte & 0xC0U) == 0x80U;
 }
 
+std::size_t utf8_sequence_size(unsigned char first) {
+    if (first < 0x80U)
+        return 1;
+    if (first >= 0xC2U && first <= 0xDFU)
+        return 2;
+    if (first >= 0xE0U && first <= 0xEFU)
+        return 3;
+    if (first >= 0xF0U && first <= 0xF4U)
+        return 4;
+    return 0;
+}
+
+bool is_valid_three_byte_prefix(unsigned char first, unsigned char second) {
+    return (first != 0xE0U || second >= 0xA0U) && (first != 0xEDU || second <= 0x9FU);
+}
+
+bool is_valid_four_byte_prefix(unsigned char first, unsigned char second) {
+    return (first != 0xF0U || second >= 0x90U) && (first != 0xF4U || second <= 0x8FU);
+}
+
+bool is_valid_scalar_prefix(unsigned char first, unsigned char second, std::size_t size) {
+    if (size == 3)
+        return is_valid_three_byte_prefix(first, second);
+    if (size == 4)
+        return is_valid_four_byte_prefix(first, second);
+    return true;
+}
+
+bool is_valid_utf8_sequence(std::string_view text, std::size_t offset, std::size_t size,
+                            unsigned char first) {
+    if (size == 0 || size > text.size() - offset)
+        return false;
+    if (size > 1 &&
+        !is_valid_scalar_prefix(first, static_cast<unsigned char>(text[offset + 1]), size))
+        return false;
+    for (std::size_t index = 1; index < size; ++index) {
+        if (!is_continuation(static_cast<unsigned char>(text[offset + index])))
+            return false;
+    }
+    return true;
+}
+
+char32_t decode_utf8_codepoint(std::string_view text, std::size_t offset, std::size_t size) {
+    static constexpr std::array<unsigned char, 5> masks{0, 0x7FU, 0x1FU, 0x0FU, 0x07U};
+    char32_t codepoint = static_cast<unsigned char>(text[offset]) & masks[size];
+    for (std::size_t index = 1; index < size; ++index) {
+        codepoint = (codepoint << 6U) | (static_cast<unsigned char>(text[offset + index]) & 0x3FU);
+    }
+    return codepoint;
+}
+
 Utf8Unit decode_utf8_unit(std::string_view text, std::size_t offset) {
     const auto first = static_cast<unsigned char>(text[offset]);
-    if (first < 0x80U)
-        return {first, 1, true};
-
-    if (first >= 0xC2U && first <= 0xDFU && offset + 1 < text.size()) {
-        const auto second = static_cast<unsigned char>(text[offset + 1]);
-        if (is_continuation(second)) {
-            return {static_cast<char32_t>((first & 0x1FU) << 6U) |
-                        static_cast<char32_t>(second & 0x3FU),
-                    2, true};
-        }
-    }
-
-    if (first >= 0xE0U && first <= 0xEFU && offset + 2 < text.size()) {
-        const auto second = static_cast<unsigned char>(text[offset + 1]);
-        const auto third = static_cast<unsigned char>(text[offset + 2]);
-        const bool scalar_prefix =
-            (first != 0xE0U || second >= 0xA0U) && (first != 0xEDU || second <= 0x9FU);
-        if (scalar_prefix && is_continuation(second) && is_continuation(third)) {
-            return {static_cast<char32_t>((first & 0x0FU) << 12U) |
-                        static_cast<char32_t>((second & 0x3FU) << 6U) |
-                        static_cast<char32_t>(third & 0x3FU),
-                    3, true};
-        }
-    }
-
-    if (first >= 0xF0U && first <= 0xF4U && offset + 3 < text.size()) {
-        const auto second = static_cast<unsigned char>(text[offset + 1]);
-        const auto third = static_cast<unsigned char>(text[offset + 2]);
-        const auto fourth = static_cast<unsigned char>(text[offset + 3]);
-        const bool scalar_prefix =
-            (first != 0xF0U || second >= 0x90U) && (first != 0xF4U || second <= 0x8FU);
-        if (scalar_prefix && is_continuation(second) && is_continuation(third) &&
-            is_continuation(fourth)) {
-            return {static_cast<char32_t>((first & 0x07U) << 18U) |
-                        static_cast<char32_t>((second & 0x3FU) << 12U) |
-                        static_cast<char32_t>((third & 0x3FU) << 6U) |
-                        static_cast<char32_t>(fourth & 0x3FU),
-                    4, true};
-        }
-    }
+    const std::size_t size = utf8_sequence_size(first);
+    if (is_valid_utf8_sequence(text, offset, size, first))
+        return {decode_utf8_codepoint(text, offset, size), size, true};
 
     // Preserve malformed input one byte at a time. This also makes the inverse
     // safe for arbitrary byte strings rather than only well-formed user text.
@@ -120,6 +134,19 @@ class Lfm2ByteLevelDecoderTokenizer final : public ITokenizer {
     std::unique_ptr<ITokenizer> inner_;
 };
 
+bool json_has_type(const nlohmann::json& value, std::string_view type) {
+    return value.is_object() && value.value("type", std::string{}) == type;
+}
+
+bool is_sequence_byte_level_decoder(const nlohmann::json& decoder) {
+    if (!json_has_type(decoder, "Sequence"))
+        return false;
+    const auto children = decoder.find("decoders");
+    if (children == decoder.end() || !children->is_array() || children->size() != 1)
+        return false;
+    return json_has_type((*children)[0], "ByteLevel");
+}
+
 } // namespace
 
 bool lfm2_uses_sequence_byte_level_decoder(const char* tokenizer_json, std::size_t size) {
@@ -128,13 +155,7 @@ bool lfm2_uses_sequence_byte_level_decoder(const char* tokenizer_json, std::size
     try {
         const auto root = nlohmann::json::parse(tokenizer_json, tokenizer_json + size);
         const auto decoder = root.find("decoder");
-        if (decoder == root.end() || !decoder->is_object() ||
-            decoder->value("type", "") != "Sequence") {
-            return false;
-        }
-        const auto children = decoder->find("decoders");
-        return children != decoder->end() && children->is_array() && children->size() == 1 &&
-               (*children)[0].is_object() && (*children)[0].value("type", "") == "ByteLevel";
+        return decoder != root.end() && is_sequence_byte_level_decoder(*decoder);
     } catch (const nlohmann::json::exception&) {
         return false;
     }

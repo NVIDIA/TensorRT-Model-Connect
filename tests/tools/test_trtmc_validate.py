@@ -45,7 +45,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 109
+    assert len(catalog["models"]) == len(ready_models) == 114
     assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 0
     assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
@@ -64,7 +64,24 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 109
+    assert len(bindings) == 114
+    assert {
+        binding.model
+        for binding in bindings
+        if binding.workload == "mmlu_continuation_parity"
+    } >= {
+        "lfm2-1.2b",
+        "lfm2-2.6b",
+        "lfm2-350m-fp16",
+        "lfm2-700m",
+    }
+    assert trtmc_validate.resolve_binding(
+        catalog,
+        "lfm2-350m-bf16-model-card",
+    ) == trtmc_validate.Binding(
+        "lfm2-350m-bf16-model-card",
+        "lfm2_model_card_sampling_parity",
+    )
     assert [
         binding.workload for binding in bindings if binding.model == "personaplex-7b"
     ] == ["full_duplex_bench_behavior_parity"]
@@ -192,6 +209,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     assert {workload for workload, limit in catalog["sample_limits"].items() if limit == 1} == {
         "dinov3_image_feature_extraction_parity",
         "fast_foundation_stereo_synthetic_parity",
+        "lfm2_model_card_sampling_parity",
         "minimax_h3_official_profile_parity",
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
@@ -228,7 +246,7 @@ def test_every_dataset_backed_validation_binding_has_native_reference_runner():
             missing.append((model_name, workload, dataset_kind))
 
     assert not missing
-    assert len({model for model, _workload in bindings}) == 109
+    assert len({model for model, _workload in bindings}) == 114
 
 
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
