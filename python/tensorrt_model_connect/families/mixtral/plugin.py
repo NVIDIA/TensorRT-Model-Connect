@@ -445,13 +445,24 @@ def _add_mixtral_moe_block(
       5. Compute ALL expert SwiGLU outputs -> [num_experts, hidden]
       6. Gather selected experts, scale, and sum -> [1, hidden]
     """
-    # 1. Router logits
+    # 1. Router logits. HF's linear projection returns the model dtype; the
+    # FP32 routing boundary starts after that output has been quantized.
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts,
         weights[f"{prefix}.router"], dtype=dtype)
 
+    # HF Mixtral deliberately performs the numerically sensitive routing
+    # operations in FP32, even when the model weights and hidden states are
+    # FP16/BF16.  Keeping softmax/top-k in the model dtype can change the
+    # selected expert for close router scores, making generation depend on the
+    # tactic selected for an otherwise equivalent engine build.
+    routing_logits = router_logits
+    if routing_logits.dtype != trt.float32:
+        routing_logits = network.add_cast(
+            routing_logits, trt.float32).get_output(0)
+
     # 2. Softmax over router logits
-    sm = network.add_softmax(router_logits)
+    sm = network.add_softmax(routing_logits)
     sm.axes = 1 << 1
 
     # 3. TopK selection
@@ -502,16 +513,28 @@ def _add_mixtral_moe_block(
         expert_out = network.add_gather(
             stacked_out, idx_flat.get_output(0), 0)
 
+        # HF multiplies the model-dtype expert output by the FP32 routing
+        # weight, then converts that contribution back to the hidden-state
+        # dtype before accumulating it into the output tensor.
+        expert_value = expert_out.get_output(0)
+        if expert_value.dtype != trt.float32:
+            expert_value = network.add_cast(
+                expert_value, trt.float32).get_output(0)
+
         # Scale
         scaled_expert = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
+            expert_value, w_slice.get_output(0),
             trt.ElementWiseOperation.PROD)
+        scaled_value = scaled_expert.get_output(0)
+        if scaled_value.dtype != inp.dtype:
+            scaled_value = network.add_cast(
+                scaled_value, inp.dtype).get_output(0)
 
         if result is None:
-            result = scaled_expert.get_output(0)
+            result = scaled_value
         else:
             sum_layer = network.add_elementwise(
-                result, scaled_expert.get_output(0),
+                result, scaled_value,
                 trt.ElementWiseOperation.SUM)
             result = sum_layer.get_output(0)
 

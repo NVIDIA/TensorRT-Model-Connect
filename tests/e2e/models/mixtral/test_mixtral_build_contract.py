@@ -16,9 +16,10 @@ def test_acceptance_build_reserves_gpu_for_stable_tactic_selection() -> None:
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
 
 
-def test_acceptance_build_keeps_penultimate_decoder_layer_in_fp32() -> None:
+def test_mmlu_continuation_build_stabilizes_first_divergence() -> None:
+    """Keep the layers required for exact mmlu_000003 token-33 parity."""
     manifest_path = Path(__file__).parent / "manifests" / "mixtral-stories-15m.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["precision"] == "fp16"
-    assert manifest["fp32_layers"] == [4]
+    assert manifest["fp32_layers"] == [3, 4, 5]

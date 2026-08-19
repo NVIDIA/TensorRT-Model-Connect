@@ -8,7 +8,9 @@
   "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp16",
   "fp32_layers": [
-    4
+    3,
+    4,
+    5
   ],
   "max_cache_length": 256,
   "trust_remote_code": false,
