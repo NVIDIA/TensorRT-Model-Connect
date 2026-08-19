@@ -51,7 +51,7 @@ test_manifests = [
 repository = "https://github.com/lillian039/ELF.git"
 revision = "b29d8833609e9ab7f67cd9da39435ac5cea04837"
 relative_path = "elf_flow/reference/ELF-b29d8833609e"
-entrypoint = "src"
+entrypoint = "src/eval.py"
 comparison_argument = "--elf-reference-repo"
 
 [e2e_defaults.diffusion_text_generation]

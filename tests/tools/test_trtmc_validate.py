@@ -2859,6 +2859,7 @@ def test_elf_reference_source_is_pinned_to_upstream_pytorch_implementation() -> 
     contract = _owner_reference_contract("elf_flow")
     assert contract["revision"] == "b29d8833609e9ab7f67cd9da39435ac5cea04837"
     assert contract["relative_path"] == "elf_flow/reference/ELF-b29d8833609e"
+    assert contract["entrypoint"] == "src/eval.py"
 
 
 def test_reference_sources_select_model_specific_inputs(
