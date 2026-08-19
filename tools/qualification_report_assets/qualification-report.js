@@ -214,6 +214,27 @@
     return control;
   }
 
+  function timingStability(value) {
+    if (!value) return null;
+    const labels = { stable: "Stable", retry_recommended: "Retry recommended", not_evaluated: "Not evaluated", unstable: "Unstable" };
+    const control = el("details", "gate-evidence");
+    control.append(el("summary", "", `Timing stability (shadow) · ${labels[value.status] || value.status}`));
+    const body = el("div", "evidence-body");
+    const policy = value.policy || {};
+    add(body, el("div", "gate-fact", `${policy.required_samples ?? 10} samples · first/last half ≤${number(policy.max_half_median_change_percent ?? 5, 2)}% · at least ${policy.minimum_samples_within_band ?? 8}/${policy.required_samples ?? 10} within median ±${number(policy.median_band_percent ?? 5, 2)}%`));
+    [["Reference", value.reference], ["TRTMC", value.trtmc]].forEach(([name, side]) => {
+      if (!side) return;
+      if (side.status === "not_evaluated") {
+        body.append(el("div", "gate-fact", `${name} · Not evaluated · ${side.sample_count ?? 0} samples`));
+        return;
+      }
+      body.append(el("div", "gate-fact", `${name} · ${labels[side.status] || side.status} · first 5 ${number(side.first_half_median_ms, 3)} ms · last 5 ${number(side.second_half_median_ms, 3)} ms · ${side.samples_within_band}/${side.sample_count} within band`));
+    });
+    body.append(el("div", "detail", "Shadow evidence only; the current result is unchanged."));
+    control.append(body);
+    return control;
+  }
+
   function metrics(row, kind) {
     const records = [];
     if (row.issue) records.push(["Failure", row.issue]);
@@ -229,7 +250,7 @@
       records.push(["Comparison", comparison], ["Validation", row.validation || {}]);
     }
     else records.push(["Output validation", row.output_validation || {}], ["Reference samples", row.baseline?.samples_ms || []], ["TRTMC samples", row.candidate?.samples_ms || []], ["Comparison", row.comparison || {}]);
-    return add(el("div", "metric-evidence"), acceptance, gate, details("Metrics", records));
+    return add(el("div", "metric-evidence"), timingStability(row.measurement_stability), acceptance, gate, details("Metrics", records));
   }
 
   function logs(row) {

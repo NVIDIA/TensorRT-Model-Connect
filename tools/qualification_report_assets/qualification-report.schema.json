@@ -95,6 +95,19 @@
             }
           },
           "precision": {"type": "object"},
+          "measurement_stability": {
+            "type": ["object", "null"],
+            "required": ["mode", "status", "policy", "reference", "trtmc"],
+            "properties": {
+              "mode": {"const": "shadow"},
+              "status": {
+                "enum": ["stable", "retry_recommended", "not_evaluated"]
+              },
+              "policy": {"type": "object"},
+              "reference": {"type": "object"},
+              "trtmc": {"type": "object"}
+            }
+          },
           "samples": {
             "type": "object",
             "required": ["planned", "evaluated"],

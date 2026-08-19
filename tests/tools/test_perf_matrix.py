@@ -634,6 +634,54 @@ def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
     assert "mode" in comparison["reason"]
 
 
+def test_timing_stability_shadow_accepts_a_settled_measurement() -> None:
+    stability = perf_matrix._timing_stability_shadow(
+        [100.0, 101.0, 99.0, 100.0, 100.0, 101.0, 100.0, 99.0, 100.0, 100.0]
+    )
+
+    assert stability["status"] == "stable"
+    assert stability["sample_count"] == 10
+    assert stability["samples_within_band"] == 10
+
+
+def test_timing_stability_shadow_flags_a_measurement_that_is_still_falling() -> None:
+    stability = perf_matrix._timing_stability_shadow(
+        [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
+    )
+
+    assert stability["status"] == "unstable"
+    assert stability["half_median_change_percent"] > 5.0
+
+
+def test_timing_stability_shadow_rejects_scattered_samples_even_without_drift() -> None:
+    stability = perf_matrix._timing_stability_shadow(
+        [100.0, 80.0, 120.0, 100.0, 100.0, 100.0, 80.0, 120.0, 100.0, 100.0]
+    )
+
+    assert stability["half_median_change_percent"] == 0.0
+    assert stability["samples_within_band"] == 6
+    assert stability["status"] == "unstable"
+
+
+def test_timing_stability_shadow_accepts_exactly_eight_samples_in_band() -> None:
+    stability = perf_matrix._timing_stability_shadow(
+        [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 120.0, 120.0]
+    )
+
+    assert stability["samples_within_band"] == 8
+    assert stability["status"] == "stable"
+
+
+def test_timing_stability_shadow_does_not_judge_a_nonstandard_sample_count() -> None:
+    stability = perf_matrix._timing_stability_shadow([10.0, 11.0])
+
+    assert stability == {
+        "status": "not_evaluated",
+        "sample_count": 2,
+        "reason": "requires_10_samples",
+    }
+
+
 def test_suite_timing_contract_drift_is_rejected_before_execution() -> None:
     case = next(
         value
@@ -1689,6 +1737,77 @@ def test_public_perf_result_surfaces_quantized_candidate_precision() -> None:
     }
 
 
+def test_public_perf_result_publishes_timing_stability_as_shadow_evidence() -> None:
+    row = {
+        "id": "model.generate",
+        "status": "yellow",
+        "resolved_settings": {
+            "baseline_precision": "fp16",
+            "model": {"precision": "fp16"},
+            "output_contract": "exact-token-ids",
+        },
+        "candidate": {
+            "precision": "fp16",
+            "samples_ms": [
+                3.7,
+                3.4,
+                3.0,
+                2.7,
+                2.3,
+                1.9,
+                1.6,
+                1.4,
+                1.2,
+                1.0,
+            ],
+        },
+        "baseline": {
+            "precision": "fp16",
+            "samples_ms": [
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+                2.0,
+            ],
+        },
+        "comparison": {},
+    }
+
+    public = perf_matrix._public_perf_result(row)
+
+    assert public["result"] == "yellow"
+    assert public["measurement_stability"]["mode"] == "shadow"
+    assert public["measurement_stability"]["status"] == "retry_recommended"
+    assert public["measurement_stability"]["reference"]["status"] == "stable"
+    assert public["measurement_stability"]["trtmc"]["status"] == "unstable"
+
+
+def test_public_perf_result_does_not_evaluate_stability_without_valid_comparison() -> None:
+    row = {
+        "id": "model.generate",
+        "status": "contract-mismatch",
+        "resolved_settings": {
+            "baseline_precision": "fp16",
+            "model": {"precision": "fp16"},
+            "output_contract": "exact-token-ids",
+        },
+        "candidate": {"precision": "fp16", "samples_ms": [10.0] * 10},
+        "baseline": {"precision": "fp16", "samples_ms": [10.0] * 10},
+        "comparison": {"reason": "outputs differ"},
+    }
+
+    public = perf_matrix._public_perf_result(row)
+
+    assert public["result"] == "white"
+    assert public["measurement_stability"] is None
+
+
 def test_command_diagnostic_materializes_nested_build_logs(tmp_path: Path) -> None:
     build_stderr = tmp_path / "bundle-cache" / "build.stderr.log"
     build_stderr.parent.mkdir()
@@ -1981,6 +2100,8 @@ def test_run_consolidates_results_and_records_replayable_commands(
         "reference_ms": 20.45,
         "candidate_ms": 10.45,
     }
+    assert public_row["measurement_stability"]["mode"] == "shadow"
+    assert public_row["measurement_stability"]["status"] == "stable"
     assert public_row["issue"] is None
     assert all(
         "stdout_tail" not in command and "stderr_tail" not in command
@@ -2011,6 +2132,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "Failures" in frontend
     assert "Reference latency" in frontend
     assert "TRTMC latency" in frontend
+    assert "Timing stability (shadow)" in frontend
 
     baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
     request = baseline_argv[baseline_argv.index("--request-json") + 1]

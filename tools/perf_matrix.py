@@ -1979,6 +1979,99 @@ def _median(result: Mapping[str, Any]) -> float:
     return float(statistics.median(float(value) for value in values))
 
 
+_TIMING_STABILITY_SAMPLE_COUNT = 10
+_TIMING_STABILITY_MAX_HALF_CHANGE_PERCENT = 5.0
+_TIMING_STABILITY_MEDIAN_BAND_PERCENT = 5.0
+_TIMING_STABILITY_MIN_IN_BAND = 8
+
+
+def _timing_stability_shadow(values: Sequence[Any]) -> dict[str, Any]:
+    """Describe timing stability without changing the qualification result."""
+
+    if len(values) != _TIMING_STABILITY_SAMPLE_COUNT:
+        return {
+            "status": "not_evaluated",
+            "sample_count": len(values),
+            "reason": "requires_10_samples",
+        }
+    try:
+        samples = [float(value) for value in values]
+    except (TypeError, ValueError):
+        return {
+            "status": "not_evaluated",
+            "sample_count": len(values),
+            "reason": "invalid_samples",
+        }
+    if not all(math.isfinite(value) and value > 0.0 for value in samples):
+        return {
+            "status": "not_evaluated",
+            "sample_count": len(samples),
+            "reason": "invalid_samples",
+        }
+
+    middle = len(samples) // 2
+    median_ms = float(statistics.median(samples))
+    first_half_median_ms = float(statistics.median(samples[:middle]))
+    second_half_median_ms = float(statistics.median(samples[middle:]))
+    half_change_percent = (
+        abs(second_half_median_ms - first_half_median_ms)
+        / first_half_median_ms
+        * 100.0
+    )
+    samples_within_band = sum(
+        abs(sample - median_ms) / median_ms * 100.0
+        <= _TIMING_STABILITY_MEDIAN_BAND_PERCENT
+        for sample in samples
+    )
+    stable = (
+        half_change_percent <= _TIMING_STABILITY_MAX_HALF_CHANGE_PERCENT
+        and samples_within_band >= _TIMING_STABILITY_MIN_IN_BAND
+    )
+    return {
+        "status": "stable" if stable else "unstable",
+        "sample_count": len(samples),
+        "median_ms": median_ms,
+        "first_half_median_ms": first_half_median_ms,
+        "second_half_median_ms": second_half_median_ms,
+        "half_median_change_percent": half_change_percent,
+        "samples_within_band": samples_within_band,
+    }
+
+
+def _measurement_stability_shadow(
+    row: Mapping[str, Any], result: str | None
+) -> dict[str, Any] | None:
+    if result not in qualification_report.RGB_RESULTS:
+        return None
+    baseline = row.get("baseline", {})
+    candidate = row.get("candidate", {})
+    baseline = baseline if isinstance(baseline, Mapping) else {}
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    reference = _timing_stability_shadow(baseline.get("samples_ms", []))
+    trtmc = _timing_stability_shadow(candidate.get("samples_ms", []))
+    side_statuses = {reference["status"], trtmc["status"]}
+    if side_statuses == {"stable"}:
+        status = "stable"
+    elif "unstable" in side_statuses:
+        status = "retry_recommended"
+    else:
+        status = "not_evaluated"
+    return {
+        "mode": "shadow",
+        "status": status,
+        "policy": {
+            "required_samples": _TIMING_STABILITY_SAMPLE_COUNT,
+            "max_half_median_change_percent": (
+                _TIMING_STABILITY_MAX_HALF_CHANGE_PERCENT
+            ),
+            "median_band_percent": _TIMING_STABILITY_MEDIAN_BAND_PERCENT,
+            "minimum_samples_within_band": _TIMING_STABILITY_MIN_IN_BAND,
+        },
+        "reference": reference,
+        "trtmc": trtmc,
+    }
+
+
 def _normalized_text(value: Any) -> str:
     return " ".join(str(value or "").split()).strip().casefold()
 
@@ -2809,6 +2902,7 @@ def _public_perf_result(row: Mapping[str, Any]) -> dict[str, Any]:
             "precision": _perf_precision(row),
             "output_validation": _perf_output_validation(row, result),
             "latency": _perf_latency(row, result),
+            "measurement_stability": _measurement_stability_shadow(row, result),
             "issue": _perf_issue(row, result),
             "debug": {
                 "logs": [dict(record) for record in row.get("logs", [])],

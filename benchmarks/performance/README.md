@@ -314,6 +314,14 @@ latencies are separate fields. Metrics, Logs, and Commands remain separate
 report entries. The run environment snapshot is published at
 `artifacts/run/environment.json`.
 
+For valid comparisons, `report.json` also publishes a non-blocking
+`measurement_stability` shadow analysis. It checks the existing ten raw samples
+on each side: the first-five and last-five medians must differ by at most 5%,
+and at least eight samples must lie within 5% of that side's median. The report
+shows `Stable`, `Retry recommended`, or `Not evaluated` in Metrics. This shadow
+evidence does not trigger a retry, change the traffic light, or affect the run
+exit code.
+
 The preparation receipt uses schema `trtmc.perf-bundle-preparation/v1`, scope
 `test_task`, and the performance run's exact `git_commit`. Each entry under
 `bundles` records `model`, the final `bundle` path used by the campaign,
