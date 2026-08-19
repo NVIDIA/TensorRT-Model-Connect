@@ -8,10 +8,11 @@ from pathlib import Path
 
 RUNTIME_DIR = (
     Path(__file__).resolve().parents[2]
-    / "src"
-    / "runtime"
+    / "python"
+    / "tensorrt_model_connect"
     / "models"
     / "personaplex"
+    / "runtime"
 )
 
 

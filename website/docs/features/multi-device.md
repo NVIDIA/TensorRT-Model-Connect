@@ -134,7 +134,7 @@ multi-device profiles. Query the executable manifests:
 
 ```bash
 rg -l '"ci_tier"\s*:\s*"multi_device"' \
-  tests/e2e/models --glob '*.json' | sort
+  python/tensorrt_model_connect/models --glob '*/tests/manifests/*.json' | sort
 ```
 
 To print model, topology, and world size together:
@@ -142,7 +142,7 @@ To print model, topology, and world size together:
 ```bash
 for manifest in $(
   rg -l '"ci_tier"\s*:\s*"multi_device"' \
-    tests/e2e/models --glob '*.json' | sort
+    python/tensorrt_model_connect/models --glob '*/tests/manifests/*.json' | sort
 ); do
   jq -r '[
     .name,

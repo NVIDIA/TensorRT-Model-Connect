@@ -4,8 +4,8 @@
 
 """Denoiser validation entrypoint.
 
-Concrete validation behavior is owned by model-family modules under
-``tools/families/*/validate_dit.py``. This shared tool
+Concrete validation behavior is owned by model modules under
+``python/tensorrt_model_connect/models/*/validate_dit.py``. This shared tool
 only discovers and dispatches to those handlers.
 """
 
@@ -22,10 +22,7 @@ from typing import Any
 
 def _family_roots() -> tuple[Path, ...]:
     repo_root = Path(__file__).resolve().parents[1]
-    return (
-        Path(__file__).resolve().parent / "families",
-        repo_root / "python/tensorrt_model_connect/families",
-    )
+    return (repo_root / "python/tensorrt_model_connect/models",)
 
 
 def _family_handler_paths(filename: str) -> list[Path]:

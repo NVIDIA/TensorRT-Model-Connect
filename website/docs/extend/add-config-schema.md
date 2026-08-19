@@ -23,7 +23,7 @@ bespoke flag. `--set` is repeatable, and it overrides the same field from
 | Kind | Python source | C++ source | Registration |
 | --- | --- | --- | --- |
 | Shared platform/runtime feature | `python/tensorrt_model_connect/runtime_config/schemas/<namespace>.py` | `include/trtmc/config/schemas/<namespace>.h` and `src/runtime/config/schemas/<namespace>.cpp` | `cmake/trtmc_config_schemas.cmake` |
-| One model family | `python/tensorrt_model_connect/families/<family>/runtime_config_schema.py` | `src/runtime/models/<owner>/config_schema.h` and `.cpp` | `runtime_config_schemas` in `src/runtime/models/<owner>/MODEL.toml` |
+| One model family | `python/tensorrt_model_connect/models/<family>/runtime_config_schema.py` | `python/tensorrt_model_connect/models/<owner>/runtime/config_schema.h` and `.cpp` | `runtime_config_schemas` in `python/tensorrt_model_connect/models/<owner>/MODEL.toml` |
 
 Do not put a single-model namespace in the shared schema directories. The
 Python loader discovers family sidecars without importing family `model.py`
@@ -43,12 +43,12 @@ Both definitions must use the same:
 
 Use `audio_bark` as a complete model-owned example:
 
-- `python/tensorrt_model_connect/families/bark/runtime_config_schema.py`
-- `src/runtime/models/bark/config_schema.h`
-- `src/runtime/models/bark/config_schema.cpp`
-- `src/runtime/models/bark/MODEL.toml`
+- `python/tensorrt_model_connect/models/bark/runtime_config_schema.py`
+- `python/tensorrt_model_connect/models/bark/runtime/config_schema.h`
+- `python/tensorrt_model_connect/models/bark/runtime/config_schema.cpp`
+- `python/tensorrt_model_connect/models/bark/MODEL.toml`
 
-Its runtime manifest declares:
+Its owner descriptor declares:
 
 ```toml
 runtime_config_schemas = [
@@ -63,19 +63,17 @@ load.
 
 ## Consume resolved values
 
-Build-time code receives values from the Python `ConfigBundle`. A migrated C++
-model plugin reads typed values from `ctx.runtime_config`:
+Build-time code receives values from the Python `ConfigBundle`. A C++ model
+plugin reads typed values from `ctx.runtime_config`:
 
 ```cpp
-if (ctx.runtime_config != nullptr) {
-    const bool greedy =
-        ctx.runtime_config->get<bool>("audio_bark", "greedy");
-    // Pass greedy into the model-owned pipeline configuration.
-}
+const bool greedy =
+    ctx.runtime_config->get<bool>("audio_bark", "greedy");
+// Pass greedy into the model-owned pipeline configuration.
 ```
 
-Handle the nullable pointer. It is non-null after successful runtime config
-resolution.
+The native `PipelineFactory` supplies a non-null pointer. Resolution and schema
+validation complete before the model plugin is constructed.
 
 ## Error behavior
 
@@ -83,15 +81,14 @@ resolution.
   invalid types, and invalid values, and exits nonzero.
 - The C++ CLI resolves explicit `--config`/`--set` input before dispatch and
   also exits nonzero when that validation fails.
-- Direct `PipelineFactory` callers currently get best-effort behavior: a
-  runtime-config resolution exception prints
-  `[trtmc.config] Failed to resolve runtime config`, returns a null config to
-  the plugin, and continues with that plugin's local fallback behavior.
+- Direct `PipelineFactory` callers get the same fail-closed behavior. Missing
+  or malformed native `config.json`, missing `runtime_strategy`, and all
+  runtime-config parsing or schema-validation errors terminate loading.
 
-Successful resolution writes `<bundle>.effective_config.json` beside the
-bundle. Failed factory resolution does not write a new file. Check stderr and
-the freshly written effective-config artifact when proving an override took
-effect.
+Successful resolution attempts to write `<bundle>.effective_config.json`
+beside the bundle. A sidecar write failure is reported but does not invalidate
+the already-resolved configuration. Check stderr and the freshly written
+effective-config artifact when proving an override took effect.
 
 ## Validation checklist
 
@@ -100,8 +97,8 @@ effect.
 2. Add CLI tests for `--config` and repeated `--set`.
 3. Test that the owning family `model.py` or C++ runtime plugin consumes the
    resolved value; registration alone is not feature coverage.
-4. For a model-owned C++ schema, add the source/registrar entry to the runtime
-   `MODEL.toml` and build that model DSO.
+4. For a model-owned C++ schema, add the source/registrar entry to the owner's
+   root `MODEL.toml` and build that model DSO.
 5. Verify the effective-config artifact and the user-visible behavior.
 
 {/* Collaborative review anchor: batch 2. */}

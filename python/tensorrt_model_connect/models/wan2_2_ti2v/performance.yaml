@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: wan2_2_ti2v.generate_image
+  operation: generate_image
+  model: wan22-ti2v-5b
+  workload:
+    testcase: wan22-ti2v-5b
+    request:
+      negative_prompt: "\u8272\u8C03\u8273\u4E3D\uFF0C\u8FC7\u66DD\uFF0C\u9759\u6001\uFF0C\u7EC6\u8282\u6A21\u7CCA\u4E0D\u6E05\uFF0C\u5B57\u5E55\uFF0C\u98CE\u683C\uFF0C\u4F5C\u54C1\uFF0C\u753B\u4F5C\uFF0C\u753B\u9762\uFF0C\u9759\u6B62\uFF0C\u6574\u4F53\u53D1\u7070\uFF0C\u6700\u5DEE\u8D28\u91CF\uFF0C\u4F4E\u8D28\u91CF\uFF0CJPEG\u538B\u7F29\u6B8B\u7559\uFF0C\u4E11\u964B\u7684\uFF0C\u6B8B\u7F3A\u7684\uFF0C\u591A\u4F59\u7684\u624B\u6307\uFF0C\u753B\u5F97\u4E0D\u597D\u7684\u624B\u90E8\uFF0C\u753B\u5F97\u4E0D\u597D\u7684\u8138\u90E8\uFF0C\u7578\u5F62\u7684\uFF0C\u6BC1\u5BB9\u7684\uFF0C\u5F62\u6001\u7578\u5F62\u7684\u80A2\u4F53\uFF0C\u624B\u6307\u878D\u5408\uFF0C\u9759\u6B62\u4E0D\u52A8\u7684\u753B\u9762\uFF0C\u6742\u4E71\u7684\u80CC\u666F\uFF0C\u4E09\u6761\u817F\uFF0C\u80CC\u666F\u4EBA\u5F88\u591A\uFF0C\u5012\u7740\u8D70"
+  baseline:
+    runner: task-reference
+    adapter: hf-diffusers
+    mode: hf-eager
+    reference_backend: hf_diffusers
+    timing_scope: task-pipeline-call-wall
+    output_contract: media-shape
+    adapter_options:
+      model_id: Wan-AI/Wan2.2-TI2V-5B-Diffusers
+      model_revision: b8fff7315c768468a5333511427288870b2e9635

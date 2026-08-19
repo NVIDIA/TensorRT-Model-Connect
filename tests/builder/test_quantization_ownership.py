@@ -107,7 +107,7 @@ class TestQuantizationSharedCoreBoundary:
 
 class TestFamilyLocalQuantHooks:
     def test_qwen_quant_policy_lives_in_family_model(self):
-        text = _read("python/tensorrt_model_connect/families/qwen/model.py")
+        text = _read("python/tensorrt_model_connect/models/qwen/model.py")
         assert "def quant_exclude_patterns" in text
         assert "def quant_adapter" in text
 

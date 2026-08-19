@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+excluded_profiles:
+- model: minimax-h3-768p
+  reason: The pinned Diffusers reference for MiniMax-H3 has not yet been integrated into the release performance runner.

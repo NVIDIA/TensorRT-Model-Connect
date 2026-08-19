@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "roberta"
+aliases = [
+  "camembert",
+  "roberta",
+  "xlm-roberta",
+]
+prefixes = [
+  "roberta",
+]
+runtime_plugins = [
+  "plugin.cpp|register_roberta_plugin",
+]
+runtime_strategies = [
+  "roberta_encoder_only",
+]
+test_manifests = [
+  "tests/manifests/camembert-base-tp4.json",
+  "tests/manifests/camembert-base.json",
+  "tests/manifests/roberta-base-tp4.json",
+  "tests/manifests/roberta-base.json",
+  "tests/manifests/roberta-large-tp4.json",
+  "tests/manifests/roberta-large.json",
+  "tests/manifests/xlm-roberta-base-tp4.json",
+  "tests/manifests/xlm-roberta-base.json",
+]
+
+[e2e_defaults.encoder_only_nlp]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]

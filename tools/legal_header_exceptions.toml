@@ -23,10 +23,3 @@ reason = "Vendored third-party source; preserve the upstream notices and bytes u
 license = "MIT OR Public Domain"
 source = "https://github.com/nothings/stb/blob/cf79a4819767b5c136712221be78c83e28c54a6a/stb_image_resize2.h"
 sha256 = "dfedfff91c3de652969fc0a5919ada367c2f3709f435c6c0275044b2c39d9f2e"
-
-[[exceptions]]
-path = "tests/runtime_strategy_matrix.yaml"
-reason = "JSON-formatted test data is consumed by strict JSON parsers; comments would change parse behavior."
-license = "Apache-2.0"
-source = "https://github.com/NVIDIA/TensorRT-Model-Connect/blob/76c8164d97e645a996a210219ba635c8ec9a3453/tests/runtime_strategy_matrix.yaml"
-sha256 = "1ce3695447cfe64e4fe29d29ed98b20c975f5b44f58846a08edfe154ce2c34da"

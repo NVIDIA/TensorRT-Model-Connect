@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_continuation_parity:
+    models:
+    - gpt-neo-125m
+    - gpt-neo-125m-tp4
+    default_models:
+    - gpt-neo-125m
+    model_overrides:
+      gpt-neo-125m:
+        # Reserve the suite's 64 generated tokens inside its 2048 limit.
+        prompt_token_limit: 1984
+        prompt_truncation_side: left
+    qualification:
+      gpt-neo-125m: {}

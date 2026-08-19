@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import yaml
 from PIL import Image
 
 from tools import prepare_media_validation_datasets as prepare_media
@@ -26,6 +27,69 @@ from tools import prepare_full_duplex_bench_validation as prepare_fdb
 from tools import trtmc_reference
 from tools.reference import plugin_reference
 from tools.validation import engine as validation_engine
+
+
+def test_validation_control_plane_is_model_owned() -> None:
+    central = validation_engine.load_structured_file(validation_engine.DEFAULT_SUITES)
+    fragments = sorted(validation_engine.DEFAULT_MODELS_DIR.glob("*/validation.yaml"))
+    owners = {
+        descriptor.parent
+        for descriptor in validation_engine.DEFAULT_MODELS_DIR.glob("*/MODEL.toml")
+    }
+
+    assert central["schema_version"] == validation_engine.validation_catalog.SUITES_SCHEMA
+    assert {fragment.parent for fragment in fragments} == owners
+    for suite in central["suites"]:
+        assert not (
+            set(suite)
+            & {
+                "default_model_names",
+                "family_profiles",
+                "model_profiles",
+                "model_overrides",
+            }
+        )
+        assert not (
+            set(suite.get("selectors", {}))
+            & {
+                "model_names",
+                "exclude_model_names",
+                "runtime_strategies",
+                "families",
+                "exclude_families",
+            }
+        )
+    assert all(
+        validation_engine.load_structured_file(fragment)["schema_version"]
+        == validation_engine.validation_catalog.OWNER_VALIDATION_SCHEMA
+        for fragment in fragments
+    )
+    assert not any(
+        "python/tensorrt_model_connect/models/"
+        in str(suite.get("dataset", {}).get("default_path", ""))
+        for suite in central["suites"]
+    )
+
+
+def test_validation_central_suite_rejects_model_owned_fields(tmp_path: Path) -> None:
+    suites = tmp_path / "workloads.json"
+    suites.write_text(
+        json.dumps(
+            {
+                "schema_version": validation_engine.validation_catalog.SUITES_SCHEMA,
+                "suites": [
+                    {
+                        "id": "shared-suite",
+                        "default_model_names": ["model-a"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="contains model-owned fields"):
+        validation_engine.load_suites(suites, tmp_path / "models")
 
 
 def test_native_validation_contexts_preserve_runtime_library_path() -> None:
@@ -566,8 +630,9 @@ def test_default_suites_include_ocrbench_v2_unified() -> None:
 
     assert suite["dataset"]["kind"] == "vlm_unified_json"
     assert suite["scoring"]["scorer"] == "ocrbench_v2"
-    assert suite["selectors"]["runtime_strategies"] == ["deepseek_ocr_vision_language"]
-    assert suite["selectors"]["families"] == ["deepseek_ocr"]
+    assert set(suite["default_model_names"]) <= set(
+        suite["selectors"]["model_names"]
+    )
 
 
 def test_default_suites_include_refcoco_grounding() -> None:
@@ -581,10 +646,7 @@ def test_default_suites_include_refcoco_grounding() -> None:
     )
     assert suite["dataset"]["source_license_status"] == "not-declared-by-source-card"
     assert suite["scoring"] == {"scorer": "grounding_iou", "iou_threshold": 0.5}
-    assert suite["selectors"]["runtime_strategies"] == [
-        "locateanything_vision_language"
-    ]
-    assert suite["selectors"]["families"] == ["locateanything"]
+    assert suite["default_model_names"] == suite["selectors"]["model_names"]
 
 
 def test_default_suites_include_librispeech_clean_asr() -> None:
@@ -593,11 +655,9 @@ def test_default_suites_include_librispeech_clean_asr() -> None:
 
     assert suite["dataset"]["kind"] == "asr_chat_json"
     assert suite["scoring"]["scorer"] == "asr_transcript"
-    assert suite["selectors"]["runtime_strategies"] == [
-        "whisper_speech_to_text",
-        "canary_speech_to_text",
-    ]
-    assert suite["selectors"]["families"] == ["whisper", "canary"]
+    assert set(suite["default_model_names"]) <= set(
+        suite["selectors"]["model_names"]
+    )
 
 
 def test_default_suites_do_not_split_librispeech_asr_by_family() -> None:
@@ -630,10 +690,9 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
         "nemotron-3.5-asr-streaming-0.6b",
         "nemotron-speech-streaming-en-0.6b",
     ]
-    assert suite["selectors"]["runtime_strategies"] == [
-        "nemotron_speech_streaming_speech_to_text_rnnt"
-    ]
-    assert suite["selectors"]["families"] == ["nemotron_speech_streaming"]
+    assert set(suite["default_model_names"]) <= set(
+        suite["selectors"]["model_names"]
+    )
     model = next(
         model
         for model in validation_engine.load_manifest_records()
@@ -647,7 +706,9 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
         "att_context_size": [56, 13],
     }
     non_streaming = validation_engine.suite_by_id(suites, "librispeech_clean_asr")
-    assert "nemotron_speech_streaming" in non_streaming["selectors"]["exclude_families"]
+    assert not any(
+        "streaming" in name for name in non_streaming["selectors"]["model_names"]
+    )
 
 
 def test_default_suites_include_text_generation_gap_models() -> None:
@@ -754,23 +815,8 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
 
     assert suite["dataset"]["kind"] == "diffusion_prompt_json"
     assert suite["selectors"]["task_strategies"] == ["diffusion_media_generation"]
-    assert len(suite["selectors"]["families"]) == 4
-    assert {"flux", "pixart", "z_image"} < set(suite["selectors"]["families"])
-    assert len(suite["selectors"]["runtime_strategies"]) == 4
-    assert {
-        "diffusion_flux", "diffusion_pixart", "diffusion_zimage"
-    } < set(suite["selectors"]["runtime_strategies"])
-    expected_non_neutral_models = {
-        "flux-schnell-l0",
-        "flux-2-dev-l0",
-        "flux-2-dev-fp8-l0",
-        "pixart-sigma-1024",
-        "z-image-turbo",
-    }
-    assert len(suite["default_model_names"]) == 7
-    assert expected_non_neutral_models < set(suite["default_model_names"])
-    assert len(suite["selectors"]["exclude_model_names"]) == 1
-    assert suite["selectors"]["exclude_model_names"][0].endswith("image-edit-2511")
+    bound_models = set(suite["selectors"]["model_names"])
+    assert set(suite["default_model_names"]) <= bound_models
     assert suite["scoring"]["scorer"] == "diffusion_image_clip_parity"
     assert suite["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
     assert suite["ci"] == {
@@ -784,11 +830,9 @@ def test_default_suites_include_media_generation_gap_models() -> None:
     suites = validation_engine.load_suites()
 
     video = validation_engine.suite_by_id(suites, "vbench_t2v_diffusion_video")
-    assert video["default_model_names"] == [
-        "ltx-video-l0",
-        "wan21-t2v-1.3b-l0",
-        "wan21-t2v-1.3b",
-    ]
+    assert set(video["default_model_names"]) <= set(
+        video["selectors"]["model_names"]
+    )
     assert video["dataset"]["default_path"] == (
         "/mnt/data/VBench/vbench_t2v_task_eval.json"
     )
@@ -833,7 +877,7 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
     )
     assert features["dataset"] == {
         "kind": "model_plugin_json",
-        "default_path": "tests/e2e/models/dinov3/data/validation.json",
+        "default_path": "python/tensorrt_model_connect/models/dinov3/tests/data/validation.json",
         "input_asset_fields": ["image"],
     }
     assert features["scoring"] == {"scorer": "model_plugin_parity"}
@@ -920,7 +964,7 @@ def test_prepare_reranking_dataset_preserves_query_documents_and_gold(
 
 
 def test_reranking_parity_records_each_low_agreement_sample() -> None:
-    from tests.e2e.models.eagle_vlm.e2e_plugins.comparators.reranking import (
+    from tensorrt_model_connect.models.eagle_vlm.tests.e2e_plugins.comparators.reranking import (
         RerankingComparator,
     )
 
@@ -1052,12 +1096,12 @@ def test_image_classification_parity_separates_accuracy_and_agreement() -> None:
 def test_image_classification_runner_forwards_model_plugin_dir(monkeypatch) -> None:
     from types import SimpleNamespace
 
-    from tests.e2e.models.timm_vit.e2e_plugins.runners import image_classification
+    from tensorrt_model_connect.models.timm_vit.tests.e2e_plugins.runners import image_classification
     from tests.e2e_harness.contracts import RunContext
 
     case = validation_engine.load_manifest(
         Path(
-            "tests/e2e/models/timm_vit/manifests/"
+            "python/tensorrt_model_connect/models/timm_vit/tests/manifests/"
             "timm-vit-base-p16-224-augreg-in21k-ft-in1k.json"
         )
     )
@@ -1464,11 +1508,16 @@ def test_compare_encoder_embedding_predictions_gates_vector_and_pair_parity() ->
 
 
 def test_encoder_reference_uses_dpr_context_classes() -> None:
-    assert validation_engine.encoder_reference_class_names("dpr_context_embed") == (
+    assert validation_engine.encoder_reference_class_names(
+        {
+            "encoder_model_class": "DPRContextEncoder",
+            "encoder_tokenizer_class": "DPRContextEncoderTokenizerFast",
+        }
+    ) == (
         "DPRContextEncoder",
         "DPRContextEncoderTokenizerFast",
     )
-    assert validation_engine.encoder_reference_class_names("encoder_base_features") == (
+    assert validation_engine.encoder_reference_class_names({}) == (
         "AutoModel",
         "AutoTokenizer",
     )
@@ -1567,9 +1616,46 @@ def test_partiprompts_has_no_family_specific_suite_ids() -> None:
 
 def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
     custom = tmp_path / "suites.json"
+    owner = tmp_path / "models" / "custom"
+    manifests = owner / "tests" / "manifests"
+    manifests.mkdir(parents=True)
+    (owner / "MODEL.toml").write_text(
+        'id = "custom"\ntest_manifests = ["tests/manifests/custom-model.json"]\n',
+        encoding="utf-8",
+    )
+    (manifests / "custom-model.json").write_text(
+        json.dumps(
+            {
+                "name": "custom-model",
+                "family": "custom",
+                "hf_id": "example/custom-model",
+                "runtime_strategy": "custom_runtime",
+                "task_strategy": "custom_task",
+                "user_contract": "custom_contract",
+                "reference_backend": "hf_transformers",
+                "bundle": "custom-model.bundle",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (owner / "validation.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": validation_engine.validation_catalog.OWNER_VALIDATION_SCHEMA,
+                "bindings": {
+                    "custom_only": {
+                        "models": ["custom-model"],
+                        "default_models": ["custom-model"],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     custom.write_text(
         json.dumps(
             {
+                "schema_version": validation_engine.validation_catalog.SUITES_SCHEMA,
                 "suites": [
                     {
                         "id": "custom_only",
@@ -1581,13 +1667,26 @@ def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    suites = validation_engine.load_suites(custom)
+    suites = validation_engine.load_suites(custom, tmp_path / "models")
 
     assert [suite["id"] for suite in suites] == ["custom_only"]
 
 
 def test_plan_selects_chat_text_generation_manifests() -> None:
-    suites = validation_engine.load_suites()
+    suite = dict(
+        validation_engine.suite_by_id(
+            validation_engine.load_suites(), "mmlu_five_shot_mcq"
+        )
+    )
+    suite["selectors"] = {
+        **suite["selectors"],
+        "model_names": ["decoder-chat", "decoder-continuation"],
+    }
+    suite["default_model_names"] = ["decoder-chat"]
+    suite["qualification_models"] = {
+        "decoder-chat": {},
+        "decoder-continuation": {},
+    }
     models = [
         {
             "name": "decoder-chat",
@@ -1600,7 +1699,7 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
             "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/decoder_family/decoder-chat.json",
+            "manifest": "python/tensorrt_model_connect/models/decoder_family/tests/decoder-chat.json",
             "skip": "",
         },
         {
@@ -1614,13 +1713,13 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
             "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/decoder_family/decoder-continuation.json",
+            "manifest": "python/tensorrt_model_connect/models/decoder_family/tests/decoder-continuation.json",
             "skip": "",
         },
     ]
 
     rows = validation_engine.build_plan(
-        suites,
+        [suite],
         models,
         suite_id="mmlu_five_shot_mcq",
         use_default_models=False,
@@ -1638,12 +1737,13 @@ def test_plan_selects_chat_text_generation_manifests() -> None:
 
 def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -> None:
     family_dir = tmp_path / "example_decoder"
-    manifest_dir = family_dir / "manifests"
+    manifest_dir = family_dir / "tests" / "manifests"
     manifest_dir.mkdir(parents=True)
     (family_dir / "MODEL.toml").write_text(
         "\n".join(
             (
-                'test_manifests = ["manifests/example-decoder.json"]',
+                'id = "example_decoder"',
+                'test_manifests = ["tests/manifests/example-decoder.json"]',
                 "",
                 "[model_reference_cache]",
                 'repository = "https://example.invalid/reference.git"',
@@ -1678,7 +1778,9 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
     records = validation_engine.load_manifest_records(tmp_path)
 
     assert [record["name"] for record in records] == ["example-decoder"]
-    assert records[0]["manifest"].endswith("example_decoder/manifests/example-decoder.json")
+    assert records[0]["manifest"].endswith(
+        "example_decoder/tests/manifests/example-decoder.json"
+    )
     assert records[0]["hf_revision"] == "0123456789abcdef"
     assert records[0]["task_eval"] == {
         "vlm_fallback_prompt_template": "<image>{prompt}",
@@ -1707,7 +1809,11 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
     suite = dict(validation_engine.suite_by_id(suites, "vlm_mmmu_pro_vision_mcq"))
     suite.pop("default_model_names")
     suite["selectors"] = {
-        **suite["selectors"],
+        **{
+            key: value
+            for key, value in suite["selectors"].items()
+            if key != "model_names"
+        },
         "runtime_strategies": ["vision_family_vision_language"],
         "families": ["vl_family_primary", "vl_family_secondary"],
         "exclude_families": ["excluded_vl_family"],
@@ -1724,7 +1830,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "family": "vl_family_primary",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/vl_family_primary/manifests/vl-primary.json",
+            "manifest": "python/tensorrt_model_connect/models/vl_family_primary/tests/manifests/vl-primary.json",
             "skip": "",
         },
         {
@@ -1738,7 +1844,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "family": "vl_family_secondary",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/vl_family_secondary/manifests/vl-secondary.json",
+            "manifest": "python/tensorrt_model_connect/models/vl_family_secondary/tests/manifests/vl-secondary.json",
             "skip": "",
         },
         {
@@ -1752,7 +1858,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "family": "excluded_vl_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/excluded_vl_family/manifests/vl-excluded.json",
+            "manifest": "python/tensorrt_model_connect/models/excluded_vl_family/tests/manifests/vl-excluded.json",
             "skip": "",
         },
         {
@@ -1766,7 +1872,7 @@ def test_plan_selects_vlm_mmmu_pro_vision_models() -> None:
             "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/decoder_family/manifests/text-decoder.json",
+            "manifest": "python/tensorrt_model_connect/models/decoder_family/tests/manifests/text-decoder.json",
             "skip": "",
         },
     ]
@@ -2269,7 +2375,7 @@ def test_run_model_plugin_bundle_preserves_runtime_library_path(
         bundle="model.bundle",
         task_strategy="custom_strategy",
         metadata={
-            "model_test_dir": "tests/e2e/models/custom",
+            "model_test_dir": "python/tensorrt_model_connect/models/custom/tests",
             "validation_manifest_case_name": "custom-case",
         },
     )
@@ -2336,7 +2442,7 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
         comparison_profile="default",
         threshold_overrides={"score": 0.9},
         metadata={
-            "model_test_dir": "tests/e2e/models/custom",
+            "model_test_dir": "python/tensorrt_model_connect/models/custom/tests",
             "validation_manifest_case_name": "custom-case",
         },
     )
@@ -2435,7 +2541,7 @@ def test_compare_model_plugin_marks_native_returncode_as_execution_error(
         comparison_profile="default",
         threshold_overrides={},
         metadata={
-            "model_test_dir": "tests/e2e/models/custom",
+            "model_test_dir": "python/tensorrt_model_connect/models/custom/tests",
             "validation_manifest_case_name": "custom-case",
         },
     )
@@ -2639,7 +2745,7 @@ def test_model_plugin_reference_cache_key_tracks_resolved_source_revision(
                         "prompts": str(work_dir / "prompts.jsonl"),
                     },
                     "task_eval": {
-                        "model_manifest": "tests/e2e/models/example.json",
+                        "model_manifest": "python/tensorrt_model_connect/models/example/tests.json",
                         "reference_source_revision": revision,
                     },
                 }
@@ -3144,6 +3250,7 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     rc = validation_engine.cmd_prepare(
         argparse.Namespace(
             suites=str(validation_engine.DEFAULT_SUITES),
+            models_dir=str(validation_engine.DEFAULT_MODELS_DIR),
             suite="vlm_mmmu_pro_vision_mcq",
             dataset=str(dataset),
             work_dir=str(work_dir),
@@ -4034,6 +4141,7 @@ def test_run_tts_bundle_generates_audio_and_batches_asr(tmp_path: Path, monkeypa
         validation_config={
             "family": "bark",
             "model_max_new_tokens": 12,
+            "runtime_seed_parameter": "audio_bark.seed",
             "runtime_config": {"audio_magpie": {"seed": 42}},
         },
     )
@@ -4337,7 +4445,14 @@ def test_asr_transcript_agreement_uses_direct_transcript_similarity() -> None:
 
 
 def test_selected_models_for_suite_accepts_manifest_name() -> None:
-    suite = validation_engine.suite_by_id(validation_engine.load_suites(), "mmlu_five_shot_mcq")
+    suite = dict(
+        validation_engine.suite_by_id(
+            validation_engine.load_suites(), "mmlu_five_shot_mcq"
+        )
+    )
+    suite["selectors"] = {**suite["selectors"], "model_names": ["decoder-chat"]}
+    suite["default_model_names"] = ["decoder-chat"]
+    suite["qualification_models"] = {"decoder-chat": {}}
     models = [
         {
             "name": "decoder-chat",
@@ -4350,7 +4465,7 @@ def test_selected_models_for_suite_accepts_manifest_name() -> None:
             "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/decoder_family/decoder-chat.json",
+            "manifest": "python/tensorrt_model_connect/models/decoder_family/tests/decoder-chat.json",
             "skip": "",
         }
     ]
@@ -4415,7 +4530,7 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
             "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/decoder-waived.json",
+            "manifest": "python/tensorrt_model_connect/models/decoder/tests-waived.json",
             "skip": "",
         },
         {
@@ -4429,7 +4544,7 @@ def test_waives_exclude_default_selection_but_explicit_model_can_debug(tmp_path:
             "family": "decoder_family",
             "ci_tier": "default",
             "requires_multi_device": False,
-            "manifest": "tests/e2e/models/decoder-active.json",
+            "manifest": "python/tensorrt_model_connect/models/decoder/tests-active.json",
             "skip": "",
         },
     ]
@@ -6204,52 +6319,14 @@ def test_run_hf_reference_subprocess_passes_asr_family_metadata(
     assert captured["cmd"][captured["cmd"].index("--reference-family") + 1] == "asr_canary"
 
 
-def test_asr_reference_detection_identifies_canary() -> None:
-    assert validation_engine._is_canary_asr_reference(
-        argparse.Namespace(
-            model="nvidia/canary-1b-v2",
-            family="",
-            reference_family="",
-        )
-    )
-    assert validation_engine._is_canary_asr_reference(
-        argparse.Namespace(
-            model="nvidia/other",
-            family="canary",
-            reference_family="",
-        )
-    )
-    assert validation_engine._is_canary_asr_reference(
-        argparse.Namespace(
-            model="nvidia/other",
-            family="",
-            reference_family="asr_canary",
-        )
-    )
+@pytest.mark.parametrize("owner", ("canary", "nemotron_speech_streaming"))
+def test_asr_reference_is_declared_by_its_model_owner(owner: str) -> None:
+    from tools.model_entrypoint import load_model_entrypoint
 
+    entrypoint = load_model_entrypoint(owner, "reference_entrypoint")
 
-def test_nemo_asr_reference_detection_identifies_streaming() -> None:
-    assert validation_engine._is_nemo_asr_reference(
-        argparse.Namespace(
-            model="nvidia/nemotron-speech-streaming-en-0.6b",
-            family="",
-            reference_family="",
-        )
-    )
-    assert validation_engine._is_nemo_asr_reference(
-        argparse.Namespace(
-            model="nvidia/other",
-            family="nemotron_speech_streaming",
-            reference_family="",
-        )
-    )
-    assert validation_engine._is_nemo_asr_reference(
-        argparse.Namespace(
-            model="nvidia/canary-1b-v2",
-            family="canary",
-            reference_family="asr_canary",
-        )
-    )
+    assert callable(entrypoint)
+    assert entrypoint.__module__.startswith(f"_trtmc_{owner}_reference_entrypoint")
 
 
 def test_nemotron_35_runtime_flags_enable_language_and_streaming() -> None:
@@ -6330,7 +6407,7 @@ def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
             "image_width": 384,
             "num_inference_steps": 20,
         },
-        "task_eval": {"model_manifest": "tests/e2e/models/flux/manifests/flux-schnell-l0.json"},
+        "task_eval": {"model_manifest": "python/tensorrt_model_connect/models/flux/tests/manifests/flux-schnell-l0.json"},
     }), encoding="utf-8")
     (work_dir / "prompts.jsonl").write_text(
         json.dumps({"sample_id": "partiprompts_000000", "prompt": "a red cube"}) + "\n"
@@ -6517,7 +6594,7 @@ def test_run_diffusion_bundle_writes_image_artifact_predictions(
     (work_dir / "manifest.json").write_text(json.dumps({
         "dataset_kind": "diffusion_prompt_tsv",
         "generation": {"seed": 7, "num_inference_steps": 20},
-        "task_eval": {"model_manifest": "tests/e2e/models/flux/manifests/flux-schnell-l0.json"},
+        "task_eval": {"model_manifest": "python/tensorrt_model_connect/models/flux/tests/manifests/flux-schnell-l0.json"},
     }), encoding="utf-8")
     (work_dir / "prompts.jsonl").write_text(
         json.dumps({"sample_id": "partiprompts_000000", "prompt": "a red cube"}) + "\n",
@@ -7073,7 +7150,7 @@ def test_compare_diffusion_image_predictions_adds_generic_clip_metrics(
     monkeypatch.setattr(
         validation_engine,
         "_compute_validation_clip_metrics",
-        lambda trt_dir, ref_dir, prompt: SimpleNamespace(
+        lambda work_dir, trt_dir, ref_dir, prompt: SimpleNamespace(
             trt_prompt_clipscore=24.0,
             hf_prompt_clipscore=25.0,
             prompt_clipscore_delta=-1.0,
@@ -7170,7 +7247,7 @@ def test_eval_one_model_passes_model_manifest_to_diffusion_prepare(
     )
     model = {
         "name": "flux-schnell-l0",
-        "manifest": "tests/e2e/models/flux/manifests/flux-schnell-l0.json",
+        "manifest": "python/tensorrt_model_connect/models/flux/tests/manifests/flux-schnell-l0.json",
         "hf_id": "black-forest-labs/FLUX.1-schnell",
         "bundle": "flux-schnell-l0.bundle",
         "family": "flux",
@@ -7219,7 +7296,7 @@ def test_eval_resolves_reference_source_revision_before_preparing_cache_inputs(
     )
     model = {
         "name": "minimax-h3-768p",
-        "manifest": "tests/e2e/models/minimax_h3/manifests/minimax-h3-768p.json",
+        "manifest": "python/tensorrt_model_connect/models/minimax_h3/tests/manifests/minimax-h3-768p.json",
         "hf_id": "MiniMaxAI/MiniMax-H3",
         "bundle": "minimax-h3-768p.bundle",
         "family": "minimax_h3",
@@ -7293,7 +7370,7 @@ def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> N
     scales = Path(command[command.index("--fp8-scales") + 1])
     assert scales == (
         validation_engine.REPO_ROOT
-        / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
+        / "python/tensorrt_model_connect/models/flux/tests/data/flux2-fp8-scales.json"
     )
     assert scales.is_file()
 
@@ -7515,7 +7592,9 @@ def test_vlm_chat_text_falls_back_when_chat_template_missing() -> None:
     )
 
 
-def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> None:
+def test_deepseek_ocr_owner_reference_returns_prediction(tmp_path: Path) -> None:
+    from tensorrt_model_connect.models.deepseek_ocr.tools import reference
+
     calls: list[dict[str, str]] = []
 
     class Model:
@@ -7528,27 +7607,22 @@ def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> Non
             assert text == "enabled"
             return argparse.Namespace(input_ids=[1, 2])
 
-    validation_engine._run_deepseek_ocr_hf_reference(
+    response = reference._response(
         model=Model(),
-        tokenizer=Tokenizer(),
-        answers={"requests": [{"answer": "enabled"}]},
-        prompt_rows=[
-            {
-                "sample_id": "ocrbench_v2_000000",
-                "prompt": "What is shown?",
-                "images": ["/tmp/image.jpg"],
-            }
-        ],
-        work_dir=tmp_path,
+        processor=Tokenizer(),
+        prompt_row={
+            "sample_id": "ocrbench_v2_000000",
+            "prompt": "What is shown?",
+            "images": ["/tmp/image.jpg"],
+        },
+        output_root=tmp_path,
     )
-
-    payload = json.loads((tmp_path / "hf_predictions.json").read_text(encoding="utf-8"))
 
     assert calls[0]["prompt"] == "<image>\nWhat is shown?"
     assert calls[0]["image_file"] == "/tmp/image.jpg"
     assert calls[0]["eval_mode"] is True
-    assert payload["responses"][0]["output_text"] == "enabled"
-    assert payload["responses"][0]["generated_token_ids"] == [1, 2]
+    assert response["output_text"] == "enabled"
+    assert response["generated_token_ids"] == [1, 2]
 
 
 def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_bundle(
@@ -8182,10 +8256,12 @@ def test_eval_parser_accepts_explicit_model_plugin_dir() -> None:
         "--work-root",
         "/work",
         "--model-plugin-dir",
-        "/runtime/models/pixart",
+        "/repo/python/tensorrt_model_connect/models/example/runtime",
     ])
 
-    assert args.model_plugin_dir == "/runtime/models/pixart"
+    assert args.model_plugin_dir == (
+        "/repo/python/tensorrt_model_connect/models/example/runtime"
+    )
 
 
 def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> None:

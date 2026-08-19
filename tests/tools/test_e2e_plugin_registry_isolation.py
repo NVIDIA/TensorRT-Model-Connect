@@ -26,10 +26,12 @@ def test_shared_e2e_discovery_registers_no_concrete_behavior() -> None:
 
 
 def test_model_activation_registers_only_model_owned_behavior() -> None:
-    model_dir = REPO_ROOT / "tests" / "e2e" / "models" / "qwen"
+    model_dir = (
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "models" / "qwen" / "tests"
+    )
     activate_model_plugins(model_dir)
 
-    prefix = "tests.e2e.models.qwen.e2e_plugins."
+    prefix = "tensorrt_model_connect.models.qwen.tests.e2e_plugins."
     plugins = [
         *list_runners().values(),
         *list_references().values(),

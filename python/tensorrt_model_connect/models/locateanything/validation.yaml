@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  refcoco_grounding:
+    models:
+    - locateanything-3b
+    default_models:
+    - locateanything-3b
+    model_overrides:
+      locateanything-3b:
+        reference_precision: bf16
+        allow_reference_precision_mismatch: true

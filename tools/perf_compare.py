@@ -96,10 +96,7 @@ def _get_peak_memory_mb() -> float | None:
 def _family_perf_modules() -> tuple[ModuleType, ...]:
     """Load optional model-owned performance hooks from family folders."""
     repo_root = Path(__file__).resolve().parents[1]
-    roots = (
-        Path(__file__).resolve().parent / "families",
-        repo_root / "python/tensorrt_model_connect/families",
-    )
+    roots = (repo_root / "python/tensorrt_model_connect/models",)
     handlers: dict[str, Path] = {}
     for root in reversed(roots):
         handlers.update(
@@ -151,7 +148,7 @@ def build_trt_engine(model_id_or_path: str, max_cache_length: int,
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families import find_model
+    from tensorrt_model_connect.models import find_model
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)

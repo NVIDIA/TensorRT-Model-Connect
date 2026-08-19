@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: t5.generate
+  operation: generate
+  model: t5-small
+  workload:
+    testcase: t5-small
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward
+    output_token_policy: strip-start

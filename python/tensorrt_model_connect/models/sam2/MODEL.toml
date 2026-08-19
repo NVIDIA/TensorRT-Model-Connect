@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sam2"
+config_adapter = "model_config.py|config_from_dir"
+performance_mode = "multi_stage"
+cli_exemption = "SAM2 executes its model-owned five-frame C ABI tracking contract."
+aliases = [
+  "sam2",
+  "sam2_video_tracking",
+  "sam2_bbox_video_tracking",
+]
+prefixes = [
+  "sam2",
+]
+architecture_patterns = ["Sam2BBoxVideoTracking"]
+hf_allow_patterns = [
+  "sam2.1_hiera_s.yaml",
+  "sam2.1_hiera_small.pt",
+]
+hf_required_files = [
+  "facebook/sam2.1-hiera-small|sam2.1_hiera_s.yaml",
+  "facebook/sam2.1-hiera-small|sam2.1_hiera_small.pt",
+]
+runtime_plugins = ["plugin.cpp|register_sam2_plugin"]
+runtime_strategies = ["sam2_bbox_video_tracking"]
+test_manifests = [
+  "tests/manifests/sam2-public-core-l0.json",
+  "tests/manifests/sam2-l4-local.json",
+]
+
+[e2e_defaults.prompted_segmentation]
+reference_backend = "sam2_local_golden"
+oracle_level = "L3_snapshot_regression"
+stages = [
+  { name = "five_frame_tracking", required = true },
+]

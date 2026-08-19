@@ -4,7 +4,7 @@
 """Shared omni runner placeholder.
 
 Concrete omni runner behavior belongs in
-``tests/e2e/models/<family>/e2e_plugins/runners/``.
+``python/tensorrt_model_connect/models/<family>/e2e_plugins/runners/``.
 """
 
 from __future__ import annotations

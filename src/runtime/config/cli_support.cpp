@@ -695,33 +695,15 @@ LayerContribution bundle_defaults_contribution(const std::string& header_json) {
     return out;
 }
 
-std::vector<std::string> filter_to_registered_namespaces(LayerContribution& contrib,
-                                                         const SchemaRegistry& registry) {
-    std::vector<std::string> dropped;
-    for (auto it = contrib.values.begin(); it != contrib.values.end();) {
-        if (registry.lookup(it->first) == nullptr) {
-            std::cerr << "[trtmc.config] dropping bundle default for "
-                      << "unregistered namespace: " << it->first << " (layer "
-                      << layer_name(contrib.layer) << ")\n";
-            dropped.push_back(it->first);
-            it = contrib.values.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    return dropped;
-}
-
 PipelineConfigResolution resolve_pipeline_config(const std::string& header_json,
                                                  const std::string& config_path,
                                                  const std::vector<std::string>& set_tokens,
                                                  const SchemaRegistry& registry) {
     PipelineConfigResolution out;
 
-    // BundleDefault layer. Filter unknown namespaces so old bundles whose
-    // clusters haven't been migrated yet don't fail-fast at load time.
+    // BundleDefault values are validated as-is. Unknown namespaces or fields
+    // are authoring errors and must fail the load rather than disappear.
     LayerContribution bundle_defaults = bundle_defaults_contribution(header_json);
-    filter_to_registered_namespaces(bundle_defaults, registry);
     if (!bundle_defaults.values.empty())
         out.contributions.push_back(bundle_defaults);
 

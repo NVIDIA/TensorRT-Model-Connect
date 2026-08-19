@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_five_shot_mcq:
+    models:
+    - internlm2-1.8b
+    - internlm2-1.8b-tp4
+    default_models:
+    - internlm2-1.8b
+    family_override:
+      # InternLM2 remote code is incompatible with the Transformers 5.x
+      # generation cache API (attention length N+1 vs mask length N).
+      hf_use_cache: false
+    qualification:
+      internlm2-1.8b: {}

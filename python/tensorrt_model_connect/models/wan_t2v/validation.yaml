@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  vbench_t2v_diffusion_video:
+    models:
+    - wan21-t2v-1.3b
+    - wan21-t2v-1.3b-l0
+    default_models:
+    - wan21-t2v-1.3b
+    - wan21-t2v-1.3b-l0
+    family_profile:
+      generation:
+        text_max_length: 226
+      gates:
+        psnr: 2.0
+        ssim: -1.0
+    qualification:
+      wan21-t2v-1.3b: {}

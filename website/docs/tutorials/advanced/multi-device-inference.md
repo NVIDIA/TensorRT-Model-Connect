@@ -262,7 +262,7 @@ Start from an exact multi-device manifest:
 
 ```bash
 rg -l '"ci_tier"\s*:\s*"multi_device"' \
-  tests/e2e/models --glob '*.json' | sort
+  python/tensorrt_model_connect/models --glob '*/tests/manifests/*.json' | sort
 ```
 
 Representative contracts in the current tree include:

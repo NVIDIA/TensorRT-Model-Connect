@@ -167,14 +167,8 @@ void preload_cli_config_schema_owner(const CliArgs& args) {
 
     const auto info = trtmc::InspectBundle(args.bundle_path);
     std::string strategy = info.runtime_strategy;
-    if (strategy.empty()) {
-        auto fallback = trtmc::default_runtime_strategy();
-        if (!fallback || fallback->empty())
-            return;
-        strategy = *fallback;
-    }
-    if (auto alias = trtmc::legacy_runtime_strategy_alias_target(strategy, ""))
-        strategy = *alias;
+    if (strategy.empty())
+        return;
 
     trtmc::load_model_plugin_for_strategy(strategy, args.model_plugin_search_paths);
 }

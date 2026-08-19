@@ -17,7 +17,7 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose, *, tag="diff")
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families import find_model
+    from tensorrt_model_connect.models import find_model
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)
@@ -39,7 +39,7 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose, *, tag="diff")
 
 def runtime_strategy_from_config(config) -> str:
     """Return the family-owned runtime strategy for a ModelConfig-like object."""
-    from tensorrt_model_connect.families import find_model
+    from tensorrt_model_connect.models import find_model
 
     model = find_model(config)
     strategy = str(getattr(model, "runtime_strategy", "") or "")
@@ -80,7 +80,7 @@ def make_family_debug_runner(
     profiler=None,
 ):
     """Instantiate the debug runner owned by runtime_strategy's family."""
-    from tensorrt_model_connect.families import resolve_debug_runner
+    from tensorrt_model_connect.models import resolve_debug_runner
 
     strategy = str(runtime_strategy or "")
     if not strategy:

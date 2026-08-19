@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: bark.generate_audio
+  operation: generate_audio
+  model: bark-small
+  workload:
+    testcase: bark-small
+    request:
+      # Stop before either backend's sampled EOS so both execute 128 semantic
+      # generation steps.
+      max_new_tokens: 128
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-tts
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+    output_contract: audio-shape
+additional_profiles:
+- model: bark-large
+  inherit: bark.generate_audio

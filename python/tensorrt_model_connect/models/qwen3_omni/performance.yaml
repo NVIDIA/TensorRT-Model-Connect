@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: qwen3_omni.generate_audio
+  operation: generate_audio
+  model: qwen3-omni-30b-a3b-instruct
+  workload:
+    testcase: qwen3-omni-30b-a3b-instruct
+  baseline:
+    runner: task-reference
+    adapter: hf-qwen3-omni
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+    output_contract: audio-shape
+    adapter_options:
+      device_map: cuda:0
+      speaker: Ethan
+      talker_max_new_tokens: 32

@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "phi_moe"
+capabilities = [
+  "disable_dual_profile_decoder",
+]
+aliases = [
+  "phi_moe",
+  "phimoe",
+]
+prefixes = [
+  "phi_moe",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "phi_moe_decoder_kv_cache",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_phi_moe_plugin",
+]
+runtime_strategies = [
+  "phi_moe_decoder_kv_cache",
+]
+test_manifests = [
+  "tests/manifests/phi-moe-l0-tp4.json",
+  "tests/manifests/phi-moe-l0.json",
+  "tests/manifests/phi-moe.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "phi_moe_decoder_kv_cache",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

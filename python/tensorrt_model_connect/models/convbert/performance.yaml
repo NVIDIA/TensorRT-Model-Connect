@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: convbert.encode
+  operation: encode
+  model: convbert-base
+  workload:
+    testcase: convbert-base
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward

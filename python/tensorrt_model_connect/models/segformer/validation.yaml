@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  ade20k_semantic_segmentation:
+    models:
+    - segformer-b0-ade
+    - segformer-b0-ade-tp4
+    default_models:
+    - segformer-b0-ade
+    model_overrides:
+      segformer-b0-ade:
+        # E2E keeps a stable FP32 oracle. Validation compares the FP16 bundle
+        # with an FP16 reference to measure equal-precision backend parity.
+        reference_precision: fp16
+    qualification:
+      segformer-b0-ade: {}

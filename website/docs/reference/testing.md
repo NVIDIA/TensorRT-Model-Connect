@@ -49,24 +49,20 @@ environment does not provide them. `npm ci` uses
 `website/package-lock.json` and replaces that workspace's installed dependency
 tree; use Node 20 to match `.github/workflows/pages.yml`. The reference checker
 validates repository-relative paths and selected numeric claims. The
-runtime-strategy checker compares native descriptors, source, tests, and runner
-commands. A successful Docusaurus build proves that this site is buildable; it
+runtime-strategy checker joins each owner descriptor to its declared E2E
+manifests, owner-local runner/comparator plugins, shared task defaults, and
+local diff checks. A successful Docusaurus build proves that this site is buildable; it
 does not by itself prove every documented behavior or command.
 
-The runtime-strategy checker is a useful drift diagnostic, but it is not green
-on this snapshot:
+Run the owner-derived control-plane check directly:
 
 ```bash
 PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
 ```
 
-At commit `e6b798cdb145c38caf1ede8eda7f5ce83f894138`, it exits nonzero because
-`diffusion_sana_wm` is absent from both
-`tests/runtime_strategy_matrix.yaml` and the E2E manifests. It also finds no
-discoverable runner class for Canary and Whisper speech-to-text, Nemotron
-streaming speech-to-text, PersonaPlex speech-to-speech, or Qwen3-Omni
-omni-multimodal. Treat these as codebase validation gaps; a documentation-only
-change must not claim that this checker passes.
+There is no runtime- or family-keyed central matrix. Unknown tasks, strategies
+without an owner manifest, cross-owner manifest bindings, missing
+runner/comparator plugins, and unknown local diff checks fail closed.
 
 ## Active workflow inventory
 
@@ -109,9 +105,9 @@ one TRTMC model agrees with its original reference implementation. The shared
 execution implementation now lives in `tools/validation/engine.py`; the former
 task-eval executable has been retired. Prepared manifests retain the `task_eval`
 metadata key only as a stable artifact and reference-cache schema.
-Model-to-workload ownership is declared in
-`tests/validation/model_workloads.yaml`; the command does not infer a generic
-task from the model name.
+Model-to-workload ownership is declared in each
+`python/tensorrt_model_connect/models/<family>/validation.yaml`; the command
+does not infer a generic task from the model name.
 
 Run a model's default binding, choose another declared workload, inspect the
 current all-model plan without executing it, or run every validation-eligible
@@ -210,7 +206,7 @@ literal family and manifest values when validating another owner:
 
 ```bash
 PYTHONPATH=python:. python3 -m pytest \
-  tests/e2e/models/qwen \
+  python/tensorrt_model_connect/models/qwen/tests \
   --e2e-model qwen3-0.6b-native-l0 \
   --engine-dir /path/to/engines \
   --trtmc-binary ./build/trtmc \
@@ -227,18 +223,17 @@ artifact tree, and embedded implementation DSO. Target-environment parity and
 performance proof is a separate evidence layer.
 
 `tests/test_e2e.py` is the repository-wide compatibility entry point. Model
-work should normally select the owning `tests/e2e/models/<family>/` tree so
+work should normally select the owning `python/tensorrt_model_connect/models/<family>/tests/` tree so
 collection, defaults, waives, artifacts, and impact remain model-local.
 
 ## Native manifest and optimized-provider contracts
 
-Each `tests/e2e/models/<family>/MODEL.toml` declares that family's JSON
+Each `python/tensorrt_model_connect/models/<family>/MODEL.toml` declares that family's JSON
 manifests. Each buildable **native** JSON manifest requires:
 
 - `name`, `hf_id`, `bundle`, and `family`
 - an exact family-owned `runtime_strategy`
-- a `task_strategy` or a runtime-strategy mapping from
-  `tests/runtime_strategy_matrix.yaml`
+- an explicit `task_strategy` backed by shared task defaults
 - a non-empty `testcases` array
 
 Each testcase carries the request and oracle contract, including fields such

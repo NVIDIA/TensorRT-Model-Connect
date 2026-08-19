@@ -231,7 +231,11 @@ class IsolatedModelRunner:
             output,
         )
         family = str(group["family"])
-        test_files = sorted((source / "tests/e2e/models" / family).glob("test_*_e2e.py"))
+        test_files = sorted(
+            (source / "python/tensorrt_model_connect/models" / family / "tests").glob(
+                "test_*_e2e.py"
+            )
+        )
         if len(test_files) != 1:
             raise CiError(f"{group['id']} has {len(test_files)} canonical E2E files; expected 1")
         selected = [

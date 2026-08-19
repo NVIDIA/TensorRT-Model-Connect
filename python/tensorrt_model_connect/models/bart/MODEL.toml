@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "bart"
+aliases = [
+  "bart",
+  "mbart",
+]
+prefixes = [
+  "bart",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "bart_seq2seq_encoder_decoder",
+]
+performance_mode = "enc_dec"
+runtime_plugins = [
+  "plugin.cpp|register_bart_plugin",
+]
+runtime_strategies = [
+  "bart_seq2seq_encoder_decoder",
+]
+test_manifests = [
+  "tests/manifests/bart-base-tp4.json",
+  "tests/manifests/bart-base.json",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

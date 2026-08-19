@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: lance.generate
+  operation: generate
+  model: lance-3b-x2t-image
+  workload:
+    testcase: lance-3b-x2t-image
+  baseline:
+    runner: task-reference
+    adapter: upstream-lance
+    mode: pytorch-eager
+    reference_backend: upstream_lance
+    timing_scope: task-pipeline-call-wall
+    asset_loading_included: true
+    output_contract: exact-text
+    python_profile: lance_reference
+    adapter_options:
+      reference_commit: 4baeee086648996f6ab12e673cbe461b0b149997
+      model_subdir: Lance_3B
+      vit_subdir: Qwen2.5-VL-ViT
+      resolution: image_768res

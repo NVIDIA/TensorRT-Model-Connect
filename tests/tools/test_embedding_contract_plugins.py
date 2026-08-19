@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 
-from tests.e2e.models.bert.e2e_plugins.contract import (
+from tensorrt_model_connect.models.bert.tests.e2e_plugins.contract import (
     BertEmbeddingPlugin,
     BertEncoderFeaturesPlugin,
 )

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: xlnet.encode
+  operation: encode
+  model: xlnet-base
+  workload:
+    testcase: xlnet-base
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward

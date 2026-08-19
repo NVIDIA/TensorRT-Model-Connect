@@ -91,7 +91,7 @@ def _config(family: str) -> types.SimpleNamespace:
 
 
 def _load_model(family: str):
-    return importlib.import_module(f"tensorrt_model_connect.families.{family}.model")
+    return importlib.import_module(f"tensorrt_model_connect.models.{family}.model")
 
 
 @pytest.mark.parametrize("family", FAMILY_EXTRA_KWARGS)

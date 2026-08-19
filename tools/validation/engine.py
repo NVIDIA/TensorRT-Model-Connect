@@ -46,6 +46,7 @@ from tests.e2e_harness.registry import (  # noqa: E402
     get_reference,
     get_runner,
 )
+from tools.model_entrypoint import load_model_entrypoint  # noqa: E402
 from tools.validation import artifacts as validation_artifacts  # noqa: E402
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tools.validation.gate_policy import evaluate_sample_acceptance  # noqa: E402
@@ -370,7 +371,9 @@ def configure_ci_eval(args: argparse.Namespace, suite: dict[str, Any]) -> list[s
 
 
 def cmd_prepare_ci_dataset(args: argparse.Namespace) -> int:
-    suite = suite_by_id(load_suites(Path(args.suites)), args.suite)
+    suite = suite_by_id(
+        load_suites(Path(args.suites), Path(args.models_dir)), args.suite
+    )
     validate_ci_suite(suite, args.ci_lane)
     dataset = ensure_ci_dataset(
         suite,
@@ -3495,7 +3498,7 @@ def is_correct_for_request(
 
 
 def normalize_asr_transcript(text: str) -> str:
-    # Prompt-conditioned Nemotron ASR can append its detected/selected locale.
+    # Prompt-conditioned ASR can append its detected or selected locale.
     # The model card treats this as metadata and strips it for clean transcript
     # scoring, matching HF decoding with skip_special_tokens=True.
     text = re.sub(r"<[a-z]{2,3}(?:-[a-z]{2})?>", " ", str(text or ""), flags=re.IGNORECASE)
@@ -5755,13 +5758,18 @@ def _model_owned_diffusion_native_acceptance(work_dir: Path) -> Any:
 
 
 def _compute_validation_clip_metrics(
-    trt_frames_dir: str, hf_frames_dir: str, prompt: str
+    work_dir: Path,
+    trt_frames_dir: str,
+    hf_frames_dir: str,
+    prompt: str,
 ) -> Any:
-    from tests.e2e.models.flux.e2e_plugins.comparators.clip_metrics import (
-        compute_clip_metrics,
-    )
-
-    return compute_clip_metrics(trt_frames_dir, hf_frames_dir, prompt)
+    task_config = work_manifest(work_dir).get("task_eval", {})
+    task_config = task_config if isinstance(task_config, Mapping) else {}
+    family = str(task_config.get("family", "") or "")
+    compute_metrics = load_model_entrypoint(family, "validation_entrypoint")
+    if compute_metrics is None:
+        return None
+    return compute_metrics(trt_frames_dir, hf_frames_dir, prompt)
 
 
 def _first_generated_image(frames_dir: str) -> Path | None:
@@ -6011,6 +6019,7 @@ def compare_diffusion_image_predictions(
             from tests.e2e_harness.contracts import MetricResult
 
             clip = _compute_validation_clip_metrics(
+                work_dir,
                 str(trt_output.data["frames_dir"]),
                 str(hf_output.data["frames_dir"]),
                 str(trt_output.data["prompt"]),
@@ -6368,23 +6377,43 @@ def _tts_response_row(
     }
 
 
-def _is_canary_asr_reference(args: argparse.Namespace) -> bool:
-    reference_family = str(getattr(args, "reference_family", "") or "").lower()
-    family = str(getattr(args, "family", "") or "").lower()
-    model = str(getattr(args, "model", "") or "").lower()
-    return reference_family == "asr_canary" or family == "canary" or "canary" in model
+def _run_model_owned_reference(
+    args: argparse.Namespace,
+    *,
+    vision_language: bool,
+) -> bool:
+    """Run one owner-declared reference inside the legacy direct-call path."""
 
-
-def _is_nemo_asr_reference(args: argparse.Namespace) -> bool:
-    reference_family = str(getattr(args, "reference_family", "") or "").lower()
-    family = str(getattr(args, "family", "") or "").lower()
-    model = str(getattr(args, "model", "") or "").lower()
-    return (
-        _is_canary_asr_reference(args)
-        or family == "nemotron_speech_streaming"
-        or "nemotron-speech-streaming" in model
-        or reference_family == "asr_nemo"
+    work_dir = Path(args.work_dir)
+    manifest = work_manifest(work_dir)
+    task_config = manifest.get("task_eval", {})
+    task_config = task_config if isinstance(task_config, Mapping) else {}
+    family = str(task_config.get("family", getattr(args, "family", "")) or "")
+    runner = load_model_entrypoint(family, "reference_entrypoint")
+    if runner is None:
+        return False
+    owner_values = vars(args).copy()
+    owner_values.update(
+        model_revision=str(getattr(args, "model_revision", "") or ""),
+        sample_id="",
+        predictions=work_dir
+        / (getattr(args, "predictions", "") or "hf_predictions.json"),
+        raw_output=work_dir
+        / (getattr(args, "raw_output", "") or "hf_raw.jsonl"),
     )
+    owner_args = argparse.Namespace(**owner_values)
+    prompts = load_jsonl(work_dir / "prompts.jsonl")
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    responses = (
+        runner(owner_args, manifest, answers, prompts)
+        if vision_language
+        else runner(owner_args, manifest, prompts)
+    )
+    write_predictions(owner_args.predictions, responses)
+    with owner_args.raw_output.open("w", encoding="utf-8") as raw_file:
+        for row in responses:
+            raw_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+    return True
 
 
 def _model_dtype(torch_mod: Any, dtype_name: str) -> Any:
@@ -6595,75 +6624,10 @@ def _to_device(batch: Any, device: Any) -> Any:
     }
 
 
-def _is_deepseek_ocr_hf_model(model_id: str, model: Any) -> bool:
-    return "deepseek-ocr" in model_id.lower() and hasattr(model, "infer")
-
-
-def _deepseek_ocr_prompt(prompt: str) -> str:
-    if "<image>" in prompt:
-        return prompt
-    return f"<image>\n{prompt}"
-
-
-def _run_deepseek_ocr_hf_reference(
-    *,
-    model: Any,
-    tokenizer: Any,
-    answers: dict[str, Any],
-    prompt_rows: list[dict[str, Any]],
-    work_dir: Path,
-) -> None:
-    raw_path = work_dir / "hf_raw.jsonl"
-    pred_path = work_dir / "hf_predictions.json"
-    output_root = work_dir / "hf_deepseek_ocr_outputs"
-    responses: list[dict[str, Any]] = []
-    with raw_path.open("w", encoding="utf-8") as raw_f:
-        for idx, _request in enumerate(answers["requests"]):
-            prompt_row = prompt_rows[idx]
-            image_paths = [str(path) for path in prompt_row.get("images", [])]
-            if len(image_paths) != 1:
-                raise ValueError(
-                    f"DeepSeek-OCR HF reference expects exactly one image for sample {idx}"
-                )
-            sample_id = str(prompt_row.get("sample_id", f"vlm_{idx:06d}"))
-            output_path = output_root / sample_id
-            start = time.perf_counter()
-            output_text = model.infer(
-                tokenizer,
-                prompt=_deepseek_ocr_prompt(str(prompt_row.get("prompt", ""))),
-                image_file=image_paths[0],
-                output_path=str(output_path),
-                save_results=False,
-                eval_mode=True,
-            )
-            wall_ms = (time.perf_counter() - start) * 1000.0
-            output_text = "" if output_text is None else str(output_text)
-            generated_token_ids = []
-            try:
-                generated_token_ids = [
-                    int(token_id)
-                    for token_id in tokenizer(output_text, add_special_tokens=False).input_ids
-                ]
-            except Exception:
-                generated_token_ids = []
-            row = {
-                "sample_id": sample_id,
-                "output_text": output_text,
-                "generated_tokens": len(generated_token_ids),
-                "generated_token_ids": generated_token_ids,
-                "wall_ms": wall_ms,
-                "source": "hf",
-            }
-            responses.append(row)
-            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            raw_f.flush()
-            print(
-                f"[validation.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
-            )
-    write_predictions(pred_path, responses)
-
 
 def run_vlm_hf_reference(args: argparse.Namespace) -> None:
+    if _run_model_owned_reference(args, vision_language=True):
+        return
     try:
         import torch
         import transformers
@@ -6719,20 +6683,6 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
         model.to(device)
     else:
         device = model.device
-
-    if _is_deepseek_ocr_hf_model(args.model, model):
-        _run_deepseek_ocr_hf_reference(
-            model=model,
-            tokenizer=processor,
-            answers=answers,
-            prompt_rows=prompt_rows,
-            work_dir=work_dir,
-        )
-        del model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return
 
     tokenizer = getattr(processor, "tokenizer", None)
     pad_token_id = getattr(tokenizer, "pad_token_id", None)
@@ -6817,8 +6767,7 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
 
 
 def run_asr_hf_reference(args: argparse.Namespace) -> None:
-    if _is_nemo_asr_reference(args):
-        _run_nemo_asr_hf_reference(args)
+    if _run_model_owned_reference(args, vision_language=False):
         return
 
     try:
@@ -6916,240 +6865,6 @@ def run_asr_hf_reference(args: argparse.Namespace) -> None:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-
-def _is_prompt_conditioned_nemo_asr(model_id: str) -> bool:
-    return "nemotron-3.5-asr-streaming" in model_id.lower()
-
-
-def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
-    work_dir = Path(args.work_dir)
-    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
-    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    if len(prompt_rows) != len(answers["requests"]):
-        raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
-    defaults = generation_defaults(work_dir)
-    target_sr = int(defaults.get("sample_rate", 16000) or 16000)
-
-    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "hf_predictions.json")
-    canary_audio_dir = work_dir / "hf_canary_audio"
-
-    # The model card requires Transformers >=5.13 for Nemotron 3.5. The
-    # standard NeMo transcribe path in older environments cannot keep the
-    # prompt feature aligned with cache-aware encoder frames.
-    if _is_prompt_conditioned_nemo_asr(args.model):
-        _run_nemotron35_transformers_reference(
-            args=args,
-            prompt_rows=prompt_rows,
-            raw_path=raw_path,
-            pred_path=pred_path,
-            target_sr=target_sr,
-            canary_audio_dir=canary_audio_dir,
-        )
-        return
-
-    try:
-        import nemo.collections.asr as nemo_asr
-    except ImportError:
-        _run_nemo_asr_hf_pipeline_reference(
-            args=args,
-            prompt_rows=prompt_rows,
-            raw_path=raw_path,
-            pred_path=pred_path,
-            target_sr=target_sr,
-            canary_audio_dir=canary_audio_dir,
-        )
-        return
-
-    map_location = str(getattr(args, "device", "") or "cpu")
-    model = nemo_asr.models.ASRModel.from_pretrained(
-        args.model, map_location=map_location
-    )
-    try:
-        if map_location and map_location != "cpu" and hasattr(model, "to"):
-            model = model.to(map_location)
-    except Exception:
-        pass
-    model.eval()
-
-    responses: list[dict[str, Any]] = []
-    with raw_path.open("w", encoding="utf-8") as raw_f:
-        for idx, prompt_row in enumerate(prompt_rows):
-            sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
-            audio_path = str(prompt_row.get("audio", ""))
-            if not audio_path:
-                raise ValueError(f"NeMo ASR HF reference expects an audio path for sample {idx}")
-            audio, sample_rate = _read_wav_float32(audio_path)
-            audio = _resample_audio(audio, sample_rate, target_sr)
-            mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
-            _write_wav_pcm16(mono_path, audio, target_sr)
-            start = time.perf_counter()
-            transcriptions = model.transcribe([str(mono_path)], batch_size=1)
-            wall_ms = (time.perf_counter() - start) * 1000.0
-            row = {
-                "sample_id": sample_id,
-                "output_text": _transcription_text(transcriptions),
-                "generated_tokens": None,
-                "generated_token_ids": None,
-                "wall_ms": wall_ms,
-                "source": "hf",
-            }
-            responses.append(row)
-            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            raw_f.flush()
-            print(f"[validation.nemo_asr_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
-    write_predictions(pred_path, responses)
-    del model
-    gc.collect()
-
-
-def _run_nemotron35_transformers_reference(
-    *,
-    args: argparse.Namespace,
-    prompt_rows: list[dict[str, Any]],
-    raw_path: Path,
-    pred_path: Path,
-    target_sr: int,
-    canary_audio_dir: Path,
-) -> None:
-    try:
-        import torch
-        from transformers import AutoModel, AutoProcessor
-    except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError(
-            "Nemotron 3.5 ASR reference requires transformers>=5.13"
-        ) from exc
-
-    device = torch.device(str(getattr(args, "device", "") or "cpu"))
-    common_kwargs = {
-        "trust_remote_code": bool(getattr(args, "trust_remote_code", False)),
-        "local_files_only": bool(getattr(args, "local_files_only", False)),
-    }
-    processor = AutoProcessor.from_pretrained(args.model, **common_kwargs)
-    model = AutoModel.from_pretrained(
-        args.model,
-        torch_dtype=_model_dtype(torch, getattr(args, "dtype", "auto")),
-        **common_kwargs,
-    ).eval()
-    model.to(device)
-    defaults = generation_defaults(Path(args.work_dir))
-    max_new_tokens = int(defaults.get("max_new_tokens", 256) or 256)
-
-    responses: list[dict[str, Any]] = []
-    with raw_path.open("w", encoding="utf-8") as raw_f:
-        for idx, prompt_row in enumerate(prompt_rows):
-            sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
-            audio_path = str(prompt_row.get("audio", ""))
-            if not audio_path:
-                raise ValueError(
-                    f"Nemotron 3.5 ASR HF reference expects an audio path for sample {idx}"
-                )
-            audio, sample_rate = _read_wav_float32(audio_path)
-            audio = _resample_audio(audio, sample_rate, target_sr)
-            mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
-            _write_wav_pcm16(mono_path, audio, target_sr)
-            language = str(
-                prompt_row.get("language")
-                or defaults.get("language", "en-US")
-                or "en-US"
-            )
-            inputs = processor(
-                audio,
-                sampling_rate=target_sr,
-                language=language,
-                return_tensors="pt",
-            )
-            inputs = _to_device(inputs, device)
-            start = time.perf_counter()
-            with torch.inference_mode():
-                generated = model.generate(**inputs, max_new_tokens=max_new_tokens)
-            wall_ms = (time.perf_counter() - start) * 1000.0
-            sequences = generated.sequences if hasattr(generated, "sequences") else generated
-            token_ids = [int(token_id) for token_id in sequences[0].detach().cpu().tolist()]
-            row = {
-                "sample_id": sample_id,
-                "output_text": processor.batch_decode(
-                    sequences, skip_special_tokens=True
-                )[0],
-                "generated_tokens": len(token_ids),
-                "generated_token_ids": token_ids,
-                "wall_ms": wall_ms,
-                "source": "hf",
-            }
-            responses.append(row)
-            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            raw_f.flush()
-            print(
-                f"[validation.nemotron35_hf] sample={idx + 1}/{len(prompt_rows)}",
-                file=sys.stderr,
-            )
-    write_predictions(pred_path, responses)
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
-def _run_nemo_asr_hf_pipeline_reference(
-    *,
-    args: argparse.Namespace,
-    prompt_rows: list[dict[str, Any]],
-    raw_path: Path,
-    pred_path: Path,
-    target_sr: int,
-    canary_audio_dir: Path,
-) -> None:
-    try:
-        import torch
-        from transformers import pipeline
-    except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("NeMo ASR reference requires NeMo or transformers pipeline") from exc
-
-    device = (
-        0
-        if str(getattr(args, "device", "")).startswith("cuda") and torch.cuda.is_available()
-        else -1
-    )
-    pipe = pipeline(
-        "automatic-speech-recognition",
-        model=args.model,
-        torch_dtype=_model_dtype(torch, getattr(args, "dtype", "auto")),
-        device=device,
-        trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
-        local_files_only=bool(getattr(args, "local_files_only", False)),
-    )
-    responses: list[dict[str, Any]] = []
-    with raw_path.open("w", encoding="utf-8") as raw_f:
-        for idx, prompt_row in enumerate(prompt_rows):
-            sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
-            audio_path = str(prompt_row.get("audio", ""))
-            if not audio_path:
-                raise ValueError(
-                    f"NeMo ASR HF pipeline reference expects an audio path for sample {idx}"
-                )
-            audio, sample_rate = _read_wav_float32(audio_path)
-            audio = _resample_audio(audio, sample_rate, target_sr)
-            mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
-            _write_wav_pcm16(mono_path, audio, target_sr)
-            start = time.perf_counter()
-            result = pipe({"raw": audio, "sampling_rate": target_sr})
-            wall_ms = (time.perf_counter() - start) * 1000.0
-            row = {
-                "sample_id": sample_id,
-                "output_text": _transcription_text(result),
-                "generated_tokens": None,
-                "generated_token_ids": None,
-                "wall_ms": wall_ms,
-                "source": "hf",
-            }
-            responses.append(row)
-            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            raw_f.flush()
-            print(
-                f"[validation.nemo_asr_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}",
-                file=sys.stderr,
-            )
-    write_predictions(pred_path, responses)
 
 
 def _load_vision_validation_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
@@ -7873,120 +7588,24 @@ def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
+
 def run_tts_hf_reference(args: argparse.Namespace) -> None:
-    try:
-        import numpy as np
-        import torch
-    except Exception as exc:  # pragma: no cover - runtime dependency
-        raise RuntimeError("TTS run-hf requires numpy and torch") from exc
-
-    work_dir = Path(args.work_dir)
-    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
-    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    if len(prompt_rows) != len(answers["requests"]):
-        raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
-    defaults = generation_defaults(work_dir)
-    seed = args.seed if args.seed is not None else int(defaults.get("seed", 42))
-    device = torch.device(args.device)
-    output_dir = work_dir / "hf_audio"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    is_magpie = "magpie" in args.model.lower()
-
-    if is_magpie:
-        try:
-            from nemo.collections.tts.models import MagpieTTSModel
-        except Exception as exc:  # pragma: no cover - runtime dependency
-            raise RuntimeError("Magpie TTS reference requires NeMo MagpieTTSModel") from exc
-        model = MagpieTTSModel.from_pretrained(args.model).eval().to(device)
-        processor = None
-    else:
-        try:
-            from transformers import AutoProcessor, BarkModel, logging
-        except Exception as exc:  # pragma: no cover - runtime dependency
-            raise RuntimeError("Bark TTS reference requires transformers BarkModel") from exc
-        logging.set_verbosity_error()
-        processor = AutoProcessor.from_pretrained(
-            args.model,
-            trust_remote_code=args.trust_remote_code,
-            local_files_only=args.local_files_only,
-        )
-        dtype = _model_dtype(torch, args.dtype)
-        model = (
-            BarkModel.from_pretrained(
-                args.model,
-                trust_remote_code=args.trust_remote_code,
-                local_files_only=args.local_files_only,
-                torch_dtype=dtype,
-            )
-            .eval()
-            .to(device)
+    if not _run_model_owned_reference(args, vision_language=False):
+        raise ValueError(
+            "TTS validation requires a model-owned reference_entrypoint"
         )
 
-    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
-    pred_path = work_dir / (args.predictions or "hf_predictions.json")
-    responses: list[dict[str, Any]] = []
-    with raw_path.open("w", encoding="utf-8") as raw_f:
-        for idx, prompt_row in enumerate(prompt_rows):
-            prompt = str(prompt_row.get("prompt", ""))
-            sample_id = str(prompt_row.get("sample_id", f"seedtts_{idx:06d}"))
-            sample_seed = seed + idx
-            random.seed(sample_seed)
-            np.random.seed(sample_seed)
-            torch.manual_seed(sample_seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(sample_seed)
-            start = time.perf_counter()
-            with torch.inference_mode():
-                if is_magpie:
-                    audio_tensor, audio_len = model.do_tts(
-                        transcript=prompt,
-                        language=str(prompt_row.get("language", "en") or "en"),
-                        use_cfg=True,
-                    )
-                    audio = audio_tensor.detach().cpu().numpy().reshape(-1)
-                    actual_len = int(audio_len.item()) if audio_len.numel() else len(audio)
-                    audio = audio[:actual_len]
-                    sample_rate = 22050
-                else:
-                    inputs = processor(prompt, return_tensors="pt")
-                    inputs = _to_device(inputs, device)
-                    audio_values = model.generate(**inputs)
-                    audio = audio_values.detach().cpu().numpy().reshape(-1)
-                    sample_rate = int(model.generation_config.sample_rate)
-            wall_ms = (time.perf_counter() - start) * 1000.0
-            wav_path = output_dir / f"{_safe_sample_filename(sample_id, '.wav')}"
-            _write_pcm16_wav(wav_path, np.asarray(audio), sample_rate)
-            row = _tts_response_row(sample_id, wav_path, wall_ms, "hf")
-            responses.append(row)
-            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            raw_f.flush()
-            print(f"[validation.tts_hf] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
 
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    scoring = work_scoring(work_dir)
-    transcripts = _transcribe_audio_files(
-        [Path(row["wav_path"]) for row in responses],
-        python=sys.executable,
-        model_id=str(scoring.get("asr_model", "openai/whisper-large-v3-turbo")),
-        local_files_only=args.local_files_only,
+def encoder_reference_class_names(
+    task_config: Mapping[str, Any],
+) -> tuple[str, str]:
+    return (
+        str(task_config.get("encoder_model_class", "AutoModel") or "AutoModel"),
+        str(
+            task_config.get("encoder_tokenizer_class", "AutoTokenizer")
+            or "AutoTokenizer"
+        ),
     )
-    for row, transcript in zip(responses, transcripts, strict=True):
-        row["output_text"] = transcript
-        row["asr_transcript"] = transcript
-    write_predictions(pred_path, responses)
-    with raw_path.open("w", encoding="utf-8") as raw_f:
-        for row in responses:
-            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-def encoder_reference_class_names(reference_family: str) -> tuple[str, str]:
-    if reference_family == "dpr_context_embed":
-        return "DPRContextEncoder", "DPRContextEncoderTokenizerFast"
-    return "AutoModel", "AutoTokenizer"
 
 
 def load_hf_text_generation_model(
@@ -8025,9 +7644,7 @@ def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
     task_config = work_manifest(work_dir).get("task_eval", {})
     task_config = task_config if isinstance(task_config, dict) else {}
     vector_mode = "embedding" if task_config.get("task_strategy") == "embedding" else "cls"
-    model_class_name, tokenizer_class_name = encoder_reference_class_names(
-        str(args.reference_family or "")
-    )
+    model_class_name, tokenizer_class_name = encoder_reference_class_names(task_config)
     model_class = getattr(transformers, model_class_name)
     tokenizer_class = getattr(transformers, tokenizer_class_name)
 
@@ -8611,11 +8228,11 @@ def run_tts_bundle(args: argparse.Namespace) -> None:
     runtime_config = task_config.get("runtime_config", {})
     runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
     set_tokens = _runtime_config_tokens(runtime_config) + list(args.set or [])
-    family = str(task_config.get("family", "") or "")
+    runtime_seed_parameter = str(task_config.get("runtime_seed_parameter", "") or "")
     arg_seed = getattr(args, "seed", None)
     seed = arg_seed if arg_seed is not None else int(defaults.get("seed", -1))
-    has_explicit_bark_seed = any(
-        token.split("=", 1)[0] == "audio_bark.seed" for token in set_tokens
+    has_explicit_runtime_seed = bool(runtime_seed_parameter) and any(
+        token.split("=", 1)[0] == runtime_seed_parameter for token in set_tokens
     )
     env = os.environ.copy()
     if args.cuda_visible_devices:
@@ -8647,8 +8264,8 @@ def run_tts_bundle(args: argparse.Namespace) -> None:
             if args.config:
                 cmd.extend(["--config", args.config])
             sample_set_tokens = list(set_tokens)
-            if family == "bark" and seed >= 0 and not has_explicit_bark_seed:
-                sample_set_tokens.append(f"audio_bark.seed={seed + idx}")
+            if runtime_seed_parameter and seed >= 0 and not has_explicit_runtime_seed:
+                sample_set_tokens.append(f"{runtime_seed_parameter}={seed + idx}")
             for token in sample_set_tokens:
                 cmd.extend(["--set", token])
             _append_native_trtmc_command(work_dir, sample_id, cmd)
@@ -9140,7 +8757,7 @@ def uses_split_decoder_cache_layout(
     if model.get("fp32_layers"):
         return False
 
-    from tensorrt_model_connect.families import family_has_capability
+    from tensorrt_model_connect.models import family_has_capability
 
     return family_has_capability(
         str(model.get("family", "") or ""),
@@ -9755,73 +9372,21 @@ def _read_optional_bundle_json_object(
 def _effective_bundle_tokenizer_payload(
     source_payload: bytes,
     tokenizer_config: Mapping[str, Any],
+    *,
+    family: str = "",
 ) -> bytes:
-    """Apply a declared GPT-2 wrapper to its bundled backend tokenizer.
+    """Apply an owner-declared tokenizer refinement, if one exists."""
 
-    StarCoder2 publishes ``Sequence[Digits, ByteLevel]`` in tokenizer.json but
-    declares ``GPT2Tokenizer`` in tokenizer_config.json. Transformers replaces
-    that sequence with its ByteLevel component. The native BPE runtime already
-    uses GPT-2 splitting for this sequence, so input-contract validation must
-    compare the same effective tokenizer instead of the raw backend file.
-
-    Keep the refinement fail-closed: only the exact BPE/Digits/ByteLevel shape
-    with a matching add-prefix-space contract is rewritten.
-    """
-
-    tokenizer_class = str(tokenizer_config.get("tokenizer_class", "") or "")
-    if tokenizer_class.removesuffix("Fast") != "GPT2Tokenizer":
+    transform = load_model_entrypoint(family, "validation_entrypoint")
+    if transform is None:
         return source_payload
-
-    tokenizer = json.loads(source_payload.decode("utf-8"))
-    if not isinstance(tokenizer, dict):
-        raise ValueError("tokenizer.json must contain an object")
-    model = tokenizer.get("model")
-    pre_tokenizer = tokenizer.get("pre_tokenizer")
-    if (
-        not isinstance(model, dict)
-        or model.get("type") != "BPE"
-        or not isinstance(pre_tokenizer, dict)
-        or pre_tokenizer.get("type") != "Sequence"
-    ):
-        return source_payload
-
-    sequence = pre_tokenizer.get("pretokenizers")
-    if not isinstance(sequence, list) or len(sequence) != 2:
-        return source_payload
-    digits = [
-        item
-        for item in sequence
-        if isinstance(item, dict) and item.get("type") == "Digits"
-    ]
-    byte_levels = [
-        item
-        for item in sequence
-        if isinstance(item, dict) and item.get("type") == "ByteLevel"
-    ]
-    if (
-        len(digits) != 1
-        or digits[0].get("individual_digits") is not True
-        or len(byte_levels) != 1
-    ):
-        return source_payload
-
-    byte_level = dict(byte_levels[0])
-    configured_prefix = tokenizer_config.get("add_prefix_space")
-    if (
-        configured_prefix is not None
-        and (
-            not isinstance(configured_prefix, bool)
-            or byte_level.get("add_prefix_space") is not configured_prefix
-        )
-    ):
-        return source_payload
-    tokenizer["pre_tokenizer"] = byte_level
-    return json.dumps(tokenizer, separators=(",", ":")).encode("utf-8")
+    return transform(source_payload, tokenizer_config)
 
 
 def _load_bundle_text_input_contract(
     *,
     bundle_path: Path,
+    family: str = "",
 ) -> tuple[Any, dict[str, Any]]:
     from tokenizers import Tokenizer
 
@@ -9834,6 +9399,7 @@ def _load_bundle_text_input_contract(
         _effective_bundle_tokenizer_payload(
             tokenizer_payload,
             tokenizer_config,
+            family=family,
         ).decode("utf-8")
     )
     bundle_config = json.loads(
@@ -9866,6 +9432,7 @@ def _load_text_input_contract(
     )
     bundle_tokenizer, bundle_config = _load_bundle_text_input_contract(
         bundle_path=bundle_path,
+        family=str(model.get("family", "") or ""),
     )
     return hf_tokenizer, bundle_tokenizer, bundle_config
 
@@ -9909,6 +9476,7 @@ def validate_text_input_token_contract(
         hf_tokenizer = None
         bundle_tokenizer, bundle_config = _load_bundle_text_input_contract(
             bundle_path=bundle_path,
+            family=str(model.get("family", "") or ""),
         )
     has_exact_frame = (
         "tokenizer_special_prefix_ids" in bundle_config
@@ -12579,6 +12147,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("list-suites")
     p.add_argument("--suites", default=str(DEFAULT_SUITES))
+    p.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("plan")
@@ -12608,6 +12177,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("prepare")
     p.add_argument("--suites", default=str(DEFAULT_SUITES))
+    p.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     p.add_argument("--suite", default="mmlu_five_shot_mcq")
     p.add_argument("--dataset")
     p.add_argument("--work-dir", required=True)
@@ -12658,6 +12228,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("prepare-ci-dataset")
     p.add_argument("--suites", default=str(DEFAULT_SUITES))
+    p.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
     p.add_argument("--suite", required=True)
     p.add_argument("--ci-lane", required=True)
     p.add_argument("--dataset")
@@ -12795,7 +12366,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def cmd_list_suites(args: argparse.Namespace) -> int:
-    suites = load_suites(Path(args.suites))
+    suites = load_suites(Path(args.suites), Path(args.models_dir))
     if args.json:
         print(json.dumps({"suites": suites}, indent=2))
     else:
@@ -12807,7 +12378,7 @@ def cmd_list_suites(args: argparse.Namespace) -> int:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    suites = load_suites(Path(args.suites))
+    suites = load_suites(Path(args.suites), Path(args.models_dir))
     models = load_manifest_records(Path(args.models_dir))
     waives = load_waives(Path(args.waives), args.waive_platform) if args.waives else {}
     rows = build_plan(
@@ -12830,7 +12401,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_prepare(args: argparse.Namespace) -> int:
-    suites = load_suites(Path(args.suites))
+    suites = load_suites(Path(args.suites), Path(args.models_dir))
     suite = suite_by_id(suites, args.suite)
     dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
     if not dataset_path:
@@ -13151,7 +12722,7 @@ def cmd_prepare_media(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    suites = load_suites(Path(args.suites))
+    suites = load_suites(Path(args.suites), Path(args.models_dir))
     suite = suite_by_id(suites, args.suite)
     ci_lane = str(getattr(args, "ci_lane", ""))
     expected_models = (

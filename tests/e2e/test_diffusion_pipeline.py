@@ -35,7 +35,7 @@ from tests.e2e_harness.manifest_loader import iter_manifest_paths
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 TOOLS_DIR = PROJECT_DIR / "tools"
-MODELS_DIR = Path(__file__).resolve().parent / "models"
+MODELS_DIR = PROJECT_DIR / "python" / "tensorrt_model_connect" / "models"
 
 
 # ---------------------------------------------------------------------------

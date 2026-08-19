@@ -9,24 +9,21 @@ lower-level check is not mistaken for model proof.
 
 ## Identify the ownership unit
 
-A native model contribution connects three model-owned roots:
+A native model contribution has one ownership root and one descriptor:
 
 ```text
-python/tensorrt_model_connect/families/<builder-family>/MODEL.toml
-src/runtime/models/<runtime-owner>/MODEL.toml
-tests/e2e/models/<e2e-family>/MODEL.toml
+python/tensorrt_model_connect/models/<owner>/MODEL.toml
 ```
 
-Each descriptor `id` must match its own directory. The three physical names
-normally match, but the Python family `model.py` and E2E manifest select the
-runtime owner through the exact family-owned `runtime_strategy`. Do not
-substitute a generic task name such as `text_generation_causal`;
+The descriptor `id` must match the directory. The sibling `model.py`,
+`runtime/`, and `tests/` belong to that same owner. Do not substitute a generic
+task name such as `text_generation_causal` for its exact runtime strategy;
 `task_strategy` selects the reusable runner/comparator contract, while
 `runtime_strategy` selects a concrete native model DSO.
 
 Before testing, record:
 
-- builder family, runtime owner, and E2E family;
+- canonical model owner;
 - Hugging Face model ID and immutable revision;
 - native runtime strategy and task strategy;
 - literal manifest name and testcase;
@@ -66,18 +63,15 @@ PYTHONPATH=python:. python3 tools/test_impact.py \
 If the canonical GitHub repository is named `origin` in your clone, use
 `origin/main` consistently instead.
 
-The runtime strategy matrix is a useful diagnostic:
+The owner-derived runtime strategy check is a required static diagnostic:
 
 ```bash
 PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
 ```
 
-At GitHub `main` commit
-`e6b798cdb145c38caf1ede8eda7f5ce83f894138`, this diagnostic has known
-repository-wide gaps for `diffusion_sana_wm` and five speech/omni runner
-entries. Do not claim the command is green on that snapshot. A model change
-must not add a new gap; report the pre-existing baseline separately from any
-new output.
+It has no central family list or compatibility fallback. The new owner must
+declare its strategy and manifests locally, and its task must have an
+owner-local runner/comparator plus shared task defaults.
 
 ## 2. Run focused contract tests
 
@@ -122,7 +116,7 @@ Run the literal family and manifest declared by the E2E descriptor:
 
 ```bash
 PYTHONPATH=python:. python3 -m pytest \
-  tests/e2e/models/qwen \
+  python/tensorrt_model_connect/models/qwen/tests \
   --e2e-model qwen3-0.6b-native-l0 \
   --engine-dir /path/to/engines \
   --trtmc-binary ./build/trtmc \

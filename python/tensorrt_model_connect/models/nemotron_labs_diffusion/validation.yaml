@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_generation_mode_parity:
+    models:
+    - nemotron-labs-diffusion-8b
+    default_models:
+    - nemotron-labs-diffusion-8b
+    qualification:
+      nemotron-labs-diffusion-8b: {}

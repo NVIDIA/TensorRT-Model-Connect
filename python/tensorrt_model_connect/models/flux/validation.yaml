@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  dpg_bench_diffusion_image:
+    models:
+    - flux-2-dev
+    - flux-2-dev-fp8
+    - flux-2-dev-fp8-l0
+    - flux-2-dev-fp8-l0-tp4
+    - flux-2-dev-l0
+    - flux-2-dev-l0-tp4
+    - flux-schnell
+    - flux-schnell-l0
+    - flux-schnell-l0-batch2
+    - flux-schnell-l0-cp4
+    - flux-schnell-l0-tp4
+    default_models:
+    - flux-2-dev-fp8-l0
+    - flux-2-dev-l0
+    - flux-schnell-l0
+    family_profile:
+      gates:
+        require_matching_initial_latents: 1
+        psnr: 5.0
+        ssim: 0.1
+    qualification:
+      flux-2-dev:
+        reference_cache_identity: flux-2-dev-dpg-v2
+      flux-2-dev-fp8:
+        reference_cache_identity: flux-2-dev-dpg-v2
+      flux-schnell: {}

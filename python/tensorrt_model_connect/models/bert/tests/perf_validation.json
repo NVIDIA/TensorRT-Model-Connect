@@ -1,0 +1,26 @@
+{
+  "models": [
+    {
+      "model": "google-bert/bert-base-uncased",
+      "pipeline_type": "bert_encoder_only",
+      "label": "D1-bert",
+      "benchmark": {
+        "label": "encode",
+        "gpu_argmax_label": "encode",
+        "metric": "pipeline_ms",
+        "command": ["{binary}", "encode", "{bundle}", "--prompt", "{prompt}", "{hf_python_args}"]
+      }
+    },
+    {
+      "model": "sentence-transformers/all-MiniLM-L6-v2",
+      "pipeline_type": "bert_encoder_only",
+      "label": "D2-embedding",
+      "benchmark": {
+        "label": "encode",
+        "gpu_argmax_label": "encode",
+        "metric": "pipeline_ms",
+        "command": ["{binary}", "encode", "{bundle}", "--prompt", "{prompt}", "{hf_python_args}"]
+      }
+    }
+  ]
+}

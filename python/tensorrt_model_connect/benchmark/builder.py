@@ -779,8 +779,8 @@ def _builder_source_digest(family: str, *, package_root: Path | None = None) -> 
     family_name = family.replace("-", "_")
     source_roots = (
         root,
-        root / "families",
-        root / "families" / family_name,
+        root / "models",
+        root / "models" / family_name,
         root / "kernels",
         root / "quantization",
         root / "runtime_config",
@@ -789,7 +789,7 @@ def _builder_source_digest(family: str, *, package_root: Path | None = None) -> 
     for source_root in source_roots:
         if not source_root.is_dir():
             continue
-        if source_root in {root, root / "families"}:
+        if source_root in {root, root / "models"}:
             candidates.update(path for path in source_root.iterdir() if path.is_file())
             continue
         candidates.update(path for path in source_root.rglob("*") if path.is_file())

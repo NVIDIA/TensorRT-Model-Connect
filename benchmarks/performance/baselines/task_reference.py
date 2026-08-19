@@ -939,7 +939,7 @@ def _load_locateanything(
 ) -> Session:
     import torch
     import transformers
-    from tensorrt_model_connect.families.locateanything.vl_debug_runner import (
+    from tensorrt_model_connect.models.locateanything.vl_debug_runner import (
         preprocess_image_inputs_for_trt,
     )
 
@@ -1997,7 +1997,7 @@ def _load_personaplex(
     # publish sphn for every supported architecture (notably L4T aarch64).
     personaplex_audio_compat = (
         REPOSITORY
-        / "tests/e2e/models/personaplex/e2e_plugins/references/personaplex_audio_compat"
+        / "python/tensorrt_model_connect/models/personaplex/tests/e2e_plugins/references/personaplex_audio_compat"
     )
     sys.path[:0] = [
         str(personaplex_audio_compat),
@@ -2394,7 +2394,7 @@ def _run_sana_wm(
             sys.executable,
             str(
                 REPOSITORY
-                / "tests/e2e/models/sana_wm/reference/inference_sana_wm.py"
+                / "python/tensorrt_model_connect/models/sana_wm/tests/reference/inference_sana_wm.py"
             ),
             "--image",
             str(image),

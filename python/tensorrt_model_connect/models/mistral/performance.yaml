@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: mistral.generate
+  operation: generate
+  model: mistral-7b
+  workload:
+    testcase: mistral-7b
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward
+additional_profiles:
+- model: riva-translate-4b
+  inherit: mistral.generate

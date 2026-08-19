@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  stsbenchmark_encoder_embedding_parity:
+    models:
+    - all-minilm-l6-v2
+    - bert-base-uncased
+    - bert-base-uncased-tp4
+    - bge-small-en-v1.5
+    - paraphrase-multilingual-minilm-l12-v2
+    default_models:
+    - all-minilm-l6-v2
+    - bert-base-uncased
+    - bge-small-en-v1.5
+    - paraphrase-multilingual-minilm-l12-v2
+    qualification:
+      all-minilm-l6-v2: {}
+      bert-base-uncased: {}
+      bge-small-en-v1.5: {}
+      paraphrase-multilingual-minilm-l12-v2: {}

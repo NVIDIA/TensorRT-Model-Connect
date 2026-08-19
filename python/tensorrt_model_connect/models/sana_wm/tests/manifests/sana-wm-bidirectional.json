@@ -1,0 +1,75 @@
+{
+  "name": "sana-wm-bidirectional",
+  "hf_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+  "bundle": "sana-wm-bidirectional.bundle",
+  "family": "sana_wm",
+  "precision": "bf16",
+  "runtime_strategy": "diffusion_sana_wm",
+  "task_strategy": "diffusion_media_generation",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 7200,
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "testcases": [
+    {
+      "name": "sana-wm-bidirectional",
+      "trace_id": "IT-E2E-SANAWM-01",
+      "model_type": "sana_wm",
+      "reference_family": "diffusers_video_gen",
+      "user_contract": "diffusion_video",
+      "description": "SANA-WM bidirectional image-to-video world-model e2e using the official camera-control demo contract",
+      "test_type": "diffusion",
+      "test_image": "assets/demo_0.png",
+      "prompt_file": "assets/demo_0.txt",
+      "model_assets": [
+        "assets/demo_0_intrinsics.npy"
+      ],
+      "camera_intrinsics_file": "assets/demo_0_intrinsics.npy",
+      "camera_intrinsics": [
+        797.87866,
+        830.0503,
+        844.2675,
+        463.7225
+      ],
+      "runtime_config": {
+        "sana_wm": {
+          "image_path": "assets/demo_0.png",
+          "action": "w-80,jw-40,w-40,lw-60,w-100",
+          "translation_speed": 0.055,
+          "rotation_speed_deg": 1.2,
+          "num_frames": 321,
+          "fps": 16,
+          "flow_shift": 9.8,
+          "intrinsics": "797.87866,830.0503,844.2675,463.7225"
+        }
+      },
+      "action": "w-80,jw-40,w-40,lw-60,w-100",
+      "translation_speed": 0.055,
+      "rotation_speed_deg": 1.2,
+      "num_inference_steps": 60,
+      "cfg_scale": 5.0,
+      "fps": 16,
+      "flow_shift": 9.8,
+      "no_action_overlay": true,
+      "sana_wm_require_official_script": true,
+      "video_num_frames": 321,
+      "video_height": 704,
+      "video_width": 1280,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "metadata": {
+        "contract_config": {
+          "use_diffusers": true,
+          "video_mode": true
+        }
+      },
+      "skip_text_comparison": true,
+      "notes": "Runs the SANA-WM image-to-video contract from the HF model-card command with model-owned demo assets, action w-80,jw-40,w-40,lw-60,w-100, translation_speed 0.055, rotation_speed_deg 1.2, step 60, cfg_scale 5.0, fps 16, flow_shift 9.8, and 321 output frames. The HF reference uses the model-owned copy of the official SANA-WM script with action overlay disabled; the TRTMC runtime is native TensorRT plus C++."
+    }
+  ]
+}

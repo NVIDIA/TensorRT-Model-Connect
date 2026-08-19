@@ -631,6 +631,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "facebook/sam2.1-hiera-small",
+      "revision": "6c381d9c16faed5e8a7c4a2cd99918bdca8316e4",
+      "revision_source": "resolved",
+      "metadata_file": "sam2.1_hiera_s.yaml",
+      "model_type": null,
+      "architectures": [
+        "Sam2BBoxVideoTracking"
+      ],
+      "architecture_source": "model-owned config adapter"
+    },
+    {
       "hf_id": "facebook/sam3",
       "revision": "3c879f39826c281e95690f02c7821c4de09afae7",
       "revision_source": "resolved",
@@ -948,6 +959,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "nvidia/c-fast-foundationstereo",
+      "revision": "9b446878c81ddb27593036767b29b2859d46103e",
+      "revision_source": "resolved",
+      "metadata_file": "cfg.yaml",
+      "model_type": null,
+      "architectures": [
+        "FastFoundationStereo"
+      ],
+      "architecture_source": "model-owned config adapter"
+    },
+    {
       "hf_id": "nvidia/canary-1b-v2",
       "revision": "87bc52657add533cd0156b3fc1aef027280754bf",
       "revision_source": "resolved",
@@ -1184,6 +1206,17 @@
       "model_type": null,
       "architectures": [
         "vit_base_patch16_224"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
+      "hf_id": "timm/vit_small_patch16_dinov3_qkvb.lvd1689m",
+      "revision": "2c7705788ac282557562465d6443606664a55f05",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "vit_small_patch16_dinov3_qkvb"
       ],
       "architecture_source": "config.architecture"
     },

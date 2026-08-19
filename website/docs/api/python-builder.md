@@ -73,54 +73,31 @@ API or CLI directly for other task-specific operations.
 | Local directory | The builder reads local `config.json`, weights, tokenizer, and model-specific assets. |
 | Diffusers model directory | The resolver maps `model_index.json` through family `diffusion_pipeline_classes`. |
 
-## Complete `build()` parameter reference
+## `build()` API
 
-`build()` currently has 31 public parameters.
+The shared API is intentionally only:
 
-| Parameter | Purpose |
-| --- | --- |
-| `model_id_or_path` | Hugging Face repository ID or resolved local model directory. |
-| `output_path` | Destination `.bundle` bundle path. |
-| `max_cache_length` | Explicit KV cache length. Omitted/`None` lets the family choose: eligible dense Qwen3/Llama use `max_position_embeddings`, while other family recipes normally use 256. |
-| `model_revision` | Hugging Face commit, tag, or branch to resolve. |
-| `decoder_engine_layout` | `split` or `dual_profile` for supported decoders. |
-| `dynamic_kv_cache` | Build decoder bundles with runtime-resizable KV cache support. |
-| `dynamic_kv_profile_rows_override` | Explicit dynamic-KV profile upper bounds. |
-| `precision` | Engine precision: `fp32`, `fp16`, or `bf16`. |
-| `fp32_layers` | Model-local layer indices that should compute in FP32. |
-| `quantize` | Structured quantization format such as `fp8` or `int4_awq`. |
-| `quant_scales` | Path to precomputed quantization scales when the selected quantizer accepts them. |
-| `quant_calibration_samples` | Maximum calibration sample count; defaults to 512. |
-| `verbose` | Emit detailed builder diagnostics. |
-| `kernel_artifacts` | Optional named shared libraries to embed beside the generated engine plans. |
-| `fp8_scales` | FP8 scale mapping or serialized scale source used by compatible native families. |
-| `save_fp8_scales` | Optional output path for calibrated FP8 scales. |
-| `rtx` | Build for TensorRT-RTX backend selection. |
-| `triattention_stats_path` | TriAttention statistics input used for KV compaction. |
-| `triattention_kv_budget` | Retained KV-token budget. |
-| `triattention_divide_length` | Compaction scoring division length; defaults to 128. |
-| `triattention_recent_window` | Recent-token protection window; defaults to 128. |
-| `triattention_score_aggregation` | Score aggregation mode, currently `mean` or `max`. |
-| `triattention_count_prompt_tokens` | Include prompt tokens in TriAttention accounting. |
-| `triattention_protect_prefill` | Protect prefill tokens during compaction. |
-| `triattention_disable_mlr` | Disable the MLR score component. |
-| `triattention_disable_trig` | Disable the trigonometric score component. |
-| `family_build_options` | Opaque model-family build options interpreted by the selected `model.py`. |
-| `parallel_config` | Programmatic tensor-parallel build configuration. |
-| `diffusion_overrides` | Image/video shape and inference-step overrides for diffusion models. |
-| `build_timing_path` | Structured build-timing JSON output path. |
-| `max_batch_size` | Maximum supported diffusion batch size, subject to family component policy. |
+```python
+build(model_id_or_path, output_path, **options)
+```
 
-`decoder_engine_layout` is interpreted by the selected family. A split build
-requires that family to implement compatible prefill/decode roles. The emitted
-`config.json.decoder_engine_layout`
-records the actual `split`, `dual_profile`, or `single` result, and only an
-actual split bundle contains `prefill_engine_plan`.
+The shared layer resolves or downloads the model, selects its owner, and calls
+that owner's `model.build()` exactly once. `model_revision` is consumed while
+resolving a Hugging Face snapshot; `rtx` selects the TensorRT backend before
+the owner module is imported. Every other option, its default, and its
+validation belong to the selected model owner. For example, decoder owners may
+accept `max_cache_length` or `decoder_engine_layout`, while diffusion owners may
+accept `diffusion_overrides` or `max_batch_size`. Unsupported options fail in
+the owner rather than expanding a central build protocol.
+
+Feature pages document the option names accepted by the relevant owners. The
+CLI's namespaced `--config` and repeatable `--set` inputs provide the generic
+extension path without adding a new shared Python parameter for each model.
 
 ## Required family model module
 
 Family packages are indexed from
-`python/tensorrt_model_connect/families/<family>/MODEL.toml`:
+`python/tensorrt_model_connect/models/<family>/MODEL.toml`:
 
 1. For a full config, `architecture_patterns`, aliases, and prefixes select
    bounded candidates whose required `matches(config)` functions run.
@@ -128,7 +105,7 @@ Family packages are indexed from
 3. For a Diffusers pipeline class, discovery uses only descriptor
    `diffusion_pipeline_classes`; there is no `pkgutil` fallback.
 
-Discovery imports `families.<family>.model` directly. `__init__.py` remains
+Discovery imports `models.<family>.model` directly. `__init__.py` remains
 empty so lightweight metadata/config consumers do not import TensorRT or
 optional family dependencies. There is no base class, protocol, module field,
 package scan, or compatibility shim.

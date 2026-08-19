@@ -62,7 +62,7 @@ def _module_name(family: str, family_dir: Path, path: Path) -> str:
     if parts[-1] == "__init__":
         parts.pop()
     suffix = ".".join(parts)
-    base = f"tensorrt_model_connect.families.{family}"
+    base = f"tensorrt_model_connect.models.{family}"
     return f"{base}.{suffix}" if suffix else base
 
 
@@ -262,7 +262,7 @@ def prune_named_definitions(
 
 
 def family_dirs(repo_root: Path, selected: tuple[str, ...]) -> list[Path]:
-    root = repo_root / "python/tensorrt_model_connect/families"
+    root = repo_root / "python/tensorrt_model_connect/models"
     if selected:
         paths = [root / family for family in selected]
         missing = [
@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         for family in report["families"]:
             family_dir = (
                 repo_root
-                / "python/tensorrt_model_connect/families"
+                / "python/tensorrt_model_connect/models"
                 / family["family"]
             )
             by_path: dict[str, set[str]] = {}

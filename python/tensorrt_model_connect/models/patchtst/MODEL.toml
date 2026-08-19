@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "patchtst"
+aliases = [
+  "patchtst",
+]
+prefixes = [
+  "patchtst",
+]
+runtime_plugins = [
+  "plugin.cpp|register_patchtst_plugin",
+]
+runtime_strategies = [
+  "patchtst_trt",
+]
+test_manifests = [
+  "tests/manifests/patchtst-etth1-regression-distribution-tp4.json",
+  "tests/manifests/patchtst-etth1-regression-distribution.json",
+  "tests/manifests/patchtst-granite-official.json",
+]
+
+[e2e_defaults.neural_operator]
+reference_backend = "torch_reference"
+oracle_level = "L2_internal_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "field_input", manifest = "field_input" },
+  { input = "branch_input", manifest = "branch_input" },
+  { input = "trunk_input", manifest = "trunk_input" },
+  { input = "output_field", manifest = "output_field" },
+]

@@ -28,7 +28,7 @@ Resolve the model through all relevant descriptors:
 - C++ model `MODEL.toml` and runtime strategy;
 - E2E family `MODEL.toml`, manifest, testcases, thresholds, and
   `perf_validation.json` when present;
-- model-first binding in `tests/validation/model_workloads.yaml`;
+- model-first binding in the family's `validation.yaml`;
 - optimized implementation/profile/qualification descriptors when selected.
 
 List and dry-run the reference-consistency workload:
@@ -134,7 +134,8 @@ and register it in the owning family `MODEL.toml`.
 
 For a quick diagnosis, use `$profile-model`. For release or qualification
 evidence, use the model-owned `perf_validation.json` and
-`benchmarks/performance/release.yaml` through `tools/perf_matrix.py`.
+the family's `performance.yaml` through `tools/perf_matrix.py`; the command
+still takes `benchmarks/performance/release.yaml` as the shared suite entrypoint.
 
 If bundle preparation occurred outside the matrix campaign, retain its
 `test_task` receipt and attach it with `tools/perf_matrix.py report

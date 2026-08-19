@@ -22,11 +22,18 @@ def test_validate_family_uses_model_owned_e2e_entrypoint() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: prevent validate_family.sh from scheduling the shared E2E test node.
     Preconditions: scripts/validate_family.sh exists.
-    Postconditions: the script builds tests/e2e/models/<family> node ids.
+    Postconditions: the script builds python/tensorrt_model_connect/models/<family> node ids.
     """
     text = (REPO_ROOT / "scripts" / "validate_family.sh").read_text(encoding="utf-8")
 
     assert "tests/test_e2e.py::test_e2e" not in text
-    assert "tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py" in text
+    assert (
+        "python/tensorrt_model_connect/models/${E2E_FAMILY}/tests/"
+        "test_${E2E_FAMILY}_e2e.py"
+    ) in text
     assert "--model-plugin-dir" in text
     assert "--isolate-model-plugin" in text
+    assert 'project / "python" / "tensorrt_model_connect" / "models"' in text
+    assert 'library = f"libtrtmc_model_{model_id}.so"' in text
+    assert 'project / "src" / "runtime" / "models"' not in text
+    assert "runtime_library" not in text

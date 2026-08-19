@@ -45,7 +45,7 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py check \
 ```
 
 Without an explicit binding, Accuracy runs every workload listed for the
-model in `tests/validation/model_workloads.yaml`.
+model in its owner-local `validation.yaml`.
 
 ## Run
 
@@ -125,8 +125,8 @@ See `benchmarks/performance/README.md` for the L4T TensorRT 11 bare-metal build.
 ## Add a model or dataset
 
 - Define an Accuracy suite in `tests/validation/workloads.yaml`.
-- Assign one or more suites in `tests/validation/model_workloads.yaml`.
-- Add the Perf entry independently in `benchmarks/performance/release.yaml`.
+- Assign one or more suites in `models/<family>/validation.yaml`.
+- Add the Perf entry independently in `models/<family>/performance.yaml`.
 - Add platform-wide model exclusions under `tests/model_checks/platforms/`.
 
 Each Accuracy `MODEL=SUITE` binding has its own engine directory. Perf bundles

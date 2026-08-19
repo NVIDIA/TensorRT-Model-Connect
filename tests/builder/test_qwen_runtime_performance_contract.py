@@ -7,7 +7,13 @@ from pathlib import Path
 
 
 RUNTIME_SOURCE = (
-    Path(__file__).resolve().parents[2] / "src" / "runtime" / "models" / "qwen" / "pipeline.cpp"
+    Path(__file__).resolve().parents[2]
+    / "python"
+    / "tensorrt_model_connect"
+    / "models"
+    / "qwen"
+    / "runtime"
+    / "pipeline.cpp"
 )
 
 

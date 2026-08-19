@@ -11,7 +11,7 @@ import pytest
 trt = pytest.importorskip(
     "tensorrt", reason="TensorRT is required for Falcon graph tests")
 
-from tensorrt_model_connect.families.falcon import graph_ops  # noqa: E402
+from tensorrt_model_connect.models.falcon import graph_ops  # noqa: E402
 
 
 class _ActivationLayer:

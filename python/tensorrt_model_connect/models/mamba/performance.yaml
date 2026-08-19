@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: mamba.generate
+  operation: generate
+  model: mamba-130m
+  workload:
+    testcase: mamba-130m
+  baseline:
+    runner: hf-transformers
+    mode: hf-eager

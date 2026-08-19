@@ -86,8 +86,8 @@ def _suppress_loading_weights_progress():
 def _default_assessment_config_path() -> Path:
     repo_root = Path(__file__).resolve().parents[1]
     configs = sorted(
-        (repo_root / "tests" / "e2e" / "models").glob(
-            "*/diffusion_vlm_assessment.json"
+        (repo_root / "python" / "tensorrt_model_connect" / "models").glob(
+            "*/tests/diffusion_vlm_assessment.json"
         )
     )
     defaults = []
@@ -99,7 +99,7 @@ def _default_assessment_config_path() -> Path:
         listed = ", ".join(str(path) for path in defaults) or "none"
         raise SystemExit(
             "Expected exactly one default diffusion VLM assessment config under "
-            f"tests/e2e/models/*/diffusion_vlm_assessment.json; found {listed}"
+            f"python/tensorrt_model_connect/models/*/diffusion_vlm_assessment.json; found {listed}"
         )
     return defaults[0]
 

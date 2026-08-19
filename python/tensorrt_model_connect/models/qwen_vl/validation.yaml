@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  vlm_mmmu_pro_vision_mcq:
+    models:
+    - qwen25vl-3b
+    - qwen25vl-3b-tp2
+    - qwen3-vl-2b
+    - qwen3-vl-2b-tp4
+    default_models:
+    - qwen25vl-3b
+    - qwen3-vl-2b
+  vlm_mmmu_pro_vision_fixed_mcq:
+    models:
+    - qwen25vl-3b
+    - qwen25vl-3b-tp2
+    - qwen3-vl-2b
+    - qwen3-vl-2b-tp4
+    default_models:
+    - qwen25vl-3b
+    - qwen3-vl-2b
+    qualification:
+      qwen25vl-3b: {}
+      qwen3-vl-2b: {}

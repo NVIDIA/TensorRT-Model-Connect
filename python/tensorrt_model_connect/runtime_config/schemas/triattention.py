@@ -5,7 +5,7 @@
 
 Replaces the former ``TRTMC_TRIATTN_*`` env vars and the fragment of bundle
 ``config.json`` previously parsed by
-family-local ``src/runtime/models/<family>/triattention_kv_cache.cpp``
+family-local ``python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp``
 parsers.
 
 Each field declares which config layers may supply a value. The former

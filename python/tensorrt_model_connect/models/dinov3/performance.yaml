@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: dinov3.extract_features
+  operation: extract_features
+  model: dinov3-vits16-pretrain-lvd1689m
+  workload:
+    testcase: dinov3-vits16-pretrain-lvd1689m
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-vision
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+    output_contract: image-features-shape
+additional_profiles:
+- model: dinov3-convnext-tiny-pretrain-lvd1689m
+  inherit: dinov3.extract_features

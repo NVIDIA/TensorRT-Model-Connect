@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: personaplex.speak
+  operation: speak
+  model: personaplex-7b
+  workload:
+    testcase: personaplex-7b
+  baseline:
+    runner: task-reference
+    adapter: pytorch-personaplex
+    mode: pytorch-eager
+    reference_backend: torch_reference
+    timing_scope: task-pipeline-call-wall
+    output_contract: audio-shape
+    adapter_options:
+      reference_commit: 3428dfd95309a7f3c84fd93259ded0f810d1ff91

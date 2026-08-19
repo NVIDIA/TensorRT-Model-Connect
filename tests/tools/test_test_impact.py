@@ -29,52 +29,24 @@ import test_impact  # noqa: E402
 # Fixtures
 # ---------------------------------------------------------------------------
 
-_TASK_STRATEGY_BY_RUNTIME = {
-    "decoder_family_decoder_kv_cache": "text_generation_causal",
-    "decoder_peer_family_decoder_kv_cache": "text_generation_causal",
-    "decoder_moe_family_decoder_moe": "text_generation_causal",
-    "mamba_ssm_recurrent": "text_generation_causal",
-    "vision_family_vision_language": "vision_language_generation",
-    "speech_to_text": "speech_to_text",
-    "text_to_audio_generic": "text_to_audio",
-    "prompt_seg_family_prompted_segmentation": "prompted_segmentation",
-    "prompt_seg_text_family_prompted_segmentation": "prompted_segmentation",
-    "semantic_seg_family_segmentation": "segmentation",
-    "encoder_family_encoder_only": "encoder_only_nlp",
-    "context_embed_family_encoder_only": "encoder_only_nlp",
-    "encoder_package_family_encoder_only": "encoder_only_nlp",
-    "custom_builder_family_encoder_only": "encoder_only_nlp",
-    "diffusion_media_primary": "diffusion_media_generation",
-    "diffusion_media_secondary": "diffusion_media_generation",
-    "registry_extension_family_decoder_kv_cache": "text_generation_causal",
-    "sequence_point_runtime": "neural_operator",
-    "sequence_mixer_runtime": "neural_operator",
-    "sequence_global_runtime": "neural_operator",
-    "sequence_quantile_runtime": "neural_operator",
-    "translation_runtime": "text_generation_causal",
-}
-
 
 def _write_json(path: Path, data: dict) -> None:
     data = dict(data)
-    runtime_strategy = data.get("runtime_strategy")
-    if "task_strategy" not in data and isinstance(runtime_strategy, str):
-        task_strategy = _TASK_STRATEGY_BY_RUNTIME.get(runtime_strategy)
-        if task_strategy:
-            data["task_strategy"] = task_strategy
+    if data.get("runtime_strategy") and not data.get("task_strategy"):
+        raise AssertionError(f"fixture must declare task_strategy explicitly: {path}")
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
 def _write_family(families_dir: Path, name: str, imports: str) -> None:
     family_dir = families_dir / name
-    family_dir.mkdir()
+    family_dir.mkdir(exist_ok=True)
     (family_dir / "__init__.py").write_text('"""Model family package."""\n', encoding="utf-8")
     (family_dir / "model.py").write_text(imports, encoding="utf-8")
 
 
-def _write_family_package(families_dir: Path, name: str, files: dict[str, str]) -> None:
+def _write_model_package(families_dir: Path, name: str, files: dict[str, str]) -> None:
     family_dir = families_dir / name
-    family_dir.mkdir()
+    family_dir.mkdir(exist_ok=True)
     for rel_path, content in files.items():
         (family_dir / rel_path).write_text(content, encoding="utf-8")
 
@@ -82,23 +54,12 @@ def _write_family_package(families_dir: Path, name: str, files: dict[str, str]) 
 @pytest.fixture
 def mock_repo(tmp_path):
     """Create a minimal mock repo with manifests and family model entries."""
-    models_dir = tmp_path / "tests" / "e2e" / "models"
-    models_dir.mkdir(parents=True)
     python_package_dir = tmp_path / "python" / "tensorrt_model_connect"
-    families_dir = python_package_dir / "families"
-    families_dir.mkdir(parents=True)
+    models_dir = python_package_dir / "models"
+    models_dir.mkdir(parents=True)
+    families_dir = models_dir
     (tmp_path / "src" / "runtime" / "plugins" / "shared").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "pipelines").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "decoder_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "decoder_peer_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "decoder_moe_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "registry_extension_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "vision_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_text_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "semantic_seg_family").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "media_runtime").mkdir(parents=True)
-    (tmp_path / "src" / "runtime" / "models" / "media_aux_runtime").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "core").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "domains" / "audio").mkdir(parents=True)
     (tmp_path / "src" / "runtime" / "domains" / "diffusion").mkdir(parents=True)
@@ -224,6 +185,7 @@ class TorchReference:
             "name": "decoder-small",
             "family": "decoder_family",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
             "hf_id": "example/decoder-small",
             "core": True,
         },
@@ -231,18 +193,21 @@ class TorchReference:
             "name": "decoder-large",
             "family": "decoder_family",
             "runtime_strategy": "decoder_family_decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
             "hf_id": "example/decoder-large",
         },
         {
             "name": "decoder-peer",
             "family": "decoder_peer_family",
             "runtime_strategy": "decoder_peer_family_decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
             "hf_id": "meta/decoder-peer",
         },
         {
             "name": "encoder-core",
             "family": "encoder_family",
             "runtime_strategy": "encoder_family_encoder_only",
+            "task_strategy": "encoder_only_nlp",
             "hf_id": "encoder-core",
             "core": True,
         },
@@ -250,15 +215,19 @@ class TorchReference:
             "name": "speech-core",
             "family": "speech_family",
             "runtime_strategy": "speech_family_speech_to_text",
+            "task_strategy": "speech_to_text",
             "hf_id": "example/speech-core",
             "precision": "fp16",
             "core": True,
-            "test_input_audio": "tests/e2e/data/Recording.wav",
+            "test_input_audio": (
+                "python/tensorrt_model_connect/models/speech_family/tests/data/Recording.wav"
+            ),
         },
         {
             "name": "canary-grouped",
             "family": "canary",
             "runtime_strategy": "speech_to_text",
+            "task_strategy": "speech_to_text",
             "hf_id": "example/canary-grouped",
             "core": True,
         },
@@ -273,12 +242,14 @@ class TorchReference:
             "name": "speech-streaming-case",
             "family": "nemotron_speech_streaming",
             "runtime_strategy": "speech_to_text",
+            "task_strategy": "speech_to_text",
             "hf_id": "example/speech-streaming-case",
         },
         {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
+            "task_strategy": "diffusion_media_generation",
             "hf_id": "example/media-core",
             "reference_family": "diffusers_image_gen",
             "core": True,
@@ -287,18 +258,21 @@ class TorchReference:
             "name": "media-alt",
             "family": "media_alt_family",
             "runtime_strategy": "diffusion_media_secondary",
+            "task_strategy": "diffusion_media_generation",
             "hf_id": "example/media-alt",
         },
         {
             "name": "media-scale",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
+            "task_strategy": "diffusion_media_generation",
             "hf_id": "example/media-scale",
         },
         {
             "name": "media-scale-fp8",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
+            "task_strategy": "diffusion_media_generation",
             "hf_id": "example/media-scale",
             "fp8_scales": "media-scale-fp8-scales.json",
         },
@@ -306,6 +280,7 @@ class TorchReference:
             "name": "recurrent-core",
             "family": "recurrent_family",
             "runtime_strategy": "mamba_ssm_recurrent",
+            "task_strategy": "text_generation_causal",
             "hf_id": "example/recurrent-core",
             "core": True,
         },
@@ -313,6 +288,7 @@ class TorchReference:
             "name": "vision-core",
             "family": "vision_family",
             "runtime_strategy": "vision_family_vision_language",
+            "task_strategy": "vision_language_generation",
             "hf_id": "example/vision-core",
             "test_image": "data/test_img.jpeg",
             "core": True,
@@ -321,6 +297,7 @@ class TorchReference:
             "name": "audio-core",
             "family": "audio_family",
             "runtime_strategy": "text_to_audio_generic",
+            "task_strategy": "text_to_audio",
             "hf_id": "example/audio-core",
             "core": True,
         },
@@ -328,6 +305,7 @@ class TorchReference:
             "name": "prompt-seg-core",
             "family": "prompt_seg_family",
             "runtime_strategy": "prompt_seg_family_prompted_segmentation",
+            "task_strategy": "prompted_segmentation",
             "hf_id": "example/prompt-seg-core",
             "reference_family": "prompted_segmentation_point",
             "core": True,
@@ -336,6 +314,7 @@ class TorchReference:
             "name": "prompt-seg-text",
             "family": "prompt_seg_text_family",
             "runtime_strategy": "prompt_seg_text_family_prompted_segmentation",
+            "task_strategy": "prompted_segmentation",
             "hf_id": "example/prompt-seg-text",
             "reference_family": "prompted_segmentation_text",
             "core": True,
@@ -344,6 +323,7 @@ class TorchReference:
             "name": "context-embed-model",
             "family": "context_embed_family",
             "runtime_strategy": "context_embed_family_encoder_only",
+            "task_strategy": "encoder_only_nlp",
             "hf_id": "example/context-embed-model",
             "reference_family": "context_embed_reference",
         },
@@ -351,6 +331,7 @@ class TorchReference:
             "name": "semantic-seg-core",
             "family": "semantic_seg_family",
             "runtime_strategy": "semantic_seg_family_segmentation",
+            "task_strategy": "segmentation",
             "hf_id": "example/semantic-seg-core",
             "reference_family": "semantic_segmentation",
             "core": True,
@@ -359,6 +340,7 @@ class TorchReference:
             "name": "decoder-moe-core",
             "family": "decoder_moe_family",
             "runtime_strategy": "decoder_moe_family_decoder_moe",
+            "task_strategy": "text_generation_causal",
             "hf_id": "example/decoder-moe-core",
             "core": True,
         },
@@ -366,56 +348,66 @@ class TorchReference:
             "name": "decoder-registry-case",
             "family": "registry_extension_family",
             "runtime_strategy": "registry_extension_family_decoder_kv_cache",
+            "task_strategy": "text_generation_causal",
             "hf_id": "org/decoder-registry-case",
         },
         {
             "name": "encoder-package-core",
             "family": "encoder_package_family",
             "runtime_strategy": "encoder_package_family_encoder_only",
+            "task_strategy": "encoder_only_nlp",
             "hf_id": "example/encoder-package",
         },
         {
             "name": "elf-flow-case",
             "family": "elf_flow",
             "runtime_strategy": "diffusion_text_generation",
+            "task_strategy": "diffusion_text_generation",
             "hf_id": "example/elf-flow",
         },
         {
             "name": "sequence-point-core",
             "family": "sequence_point_family",
             "runtime_strategy": "sequence_point_runtime",
+            "task_strategy": "neural_operator",
             "hf_id": "example/sequence-point-core",
         },
         {
             "name": "sequence-regression",
             "family": "sequence_point_family",
             "runtime_strategy": "sequence_point_runtime",
+            "task_strategy": "neural_operator",
             "hf_id": "example/sequence-regression",
         },
         {
             "name": "sequence-mixer-core",
             "family": "sequence_mixer_family",
             "runtime_strategy": "sequence_mixer_runtime",
+            "task_strategy": "neural_operator",
             "hf_id": "example/sequence-mixer-core",
         },
         {
             "name": "sequence-global-core",
             "family": "sequence_global_family",
             "runtime_strategy": "sequence_global_runtime",
+            "task_strategy": "neural_operator",
             "hf_id": "example/sequence-global-core",
         },
         {
             "name": "sequence-quantile-core",
             "family": "sequence_quantile_family",
             "runtime_strategy": "sequence_quantile_runtime",
+            "task_strategy": "neural_operator",
             "hf_id": "example/sequence-quantile-core",
         },
     ]
     for m in manifests:
-        _write_json(models_dir / f"{m['name']}.json", m)
+        manifest_dir = models_dir / m["family"] / "tests" / "manifests"
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(manifest_dir / f"{m['name']}.json", m)
 
-    prompt_seg_text_dir = models_dir / "prompt_seg_text_family"
-    prompt_seg_text_dir.mkdir()
+    prompt_seg_text_dir = models_dir / "prompt_seg_text_family" / "tests"
+    prompt_seg_text_dir.mkdir(parents=True, exist_ok=True)
     (prompt_seg_text_dir / "impact_diff_rules.json").write_text(
         json.dumps(
             [
@@ -445,8 +437,7 @@ class TorchReference:
                 {
                     "name": "prompt_seg_text_family_model_metadata",
                     "path": (
-                        "python/tensorrt_model_connect/families/"
-                        "prompt_seg_text_family/model.py"
+                        "python/tensorrt_model_connect/models/prompt_seg_text_family/model.py"
                     ),
                     "scope": {"owner_family": True},
                     "allowed_tokens": [
@@ -510,7 +501,7 @@ class TorchReference:
                 },
                 {
                     "name": "prompt_seg_text_config",
-                    "path": "src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h",
+                    "path": "python/tensorrt_model_connect/models/prompt_seg_text_family/runtime/prompt_seg_text_config.h",
                     "scope": {"owner_family": True},
                     "allowed_tokens": [
                         "image_mean",
@@ -570,15 +561,15 @@ class TorchReference:
         ),
         encoding="utf-8",
     )
-    context_embed_dir = models_dir / "context_embed_family"
-    context_embed_dir.mkdir()
+    context_embed_dir = models_dir / "context_embed_family" / "tests"
+    context_embed_dir.mkdir(parents=True, exist_ok=True)
     (context_embed_dir / "impact_diff_rules.json").write_text(
         json.dumps(
             [
                 {
                     "name": "context_embed_reference_backend",
                     "path": (
-                        "tests/e2e/models/context_embed_family/e2e_plugins/"
+                        "python/tensorrt_model_connect/models/context_embed_family/tests/e2e_plugins/"
                         "references/hf_transformers.py"
                     ),
                     "scope": {"models": ["context-embed-model"]},
@@ -610,7 +601,7 @@ class TorchReference:
 
     # Family model entries
     (families_dir / "__init__.py").write_text("")
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "decoder_family",
         {
@@ -619,7 +610,7 @@ class TorchReference:
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "decoder_peer_family",
         {
@@ -628,7 +619,7 @@ class TorchReference:
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "encoder_family",
         {
@@ -644,7 +635,7 @@ class TorchReference:
     _write_family(
         families_dir, "recurrent_family", "from ..config import C\nfrom ..graph_ops import ssm\n"
     )
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "vision_family",
         {
@@ -653,7 +644,7 @@ class TorchReference:
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "audio_family",
         {
@@ -675,7 +666,7 @@ class TorchReference:
         "semantic_seg_family",
         "from ..config import C\nfrom ..graph_ops import conv\n",
     )
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "decoder_moe_family",
         {
@@ -684,7 +675,7 @@ class TorchReference:
             "standard_decoder_builder.py": "def build():\n    pass\n",
         },
     )
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "encoder_package_family",
         {
@@ -693,7 +684,7 @@ class TorchReference:
             "builder.py": "from ... import graph_ops\n",
         },
     )
-    _write_family_package(
+    _write_model_package(
         families_dir,
         "elf_flow",
         {
@@ -712,80 +703,43 @@ class TorchReference:
     (python_package_dir / "encoder_builder.py").write_text("")
     (python_package_dir / "config.py").write_text("")
     (python_package_dir / "checkpoint_mapper.py").write_text("")
-    (tmp_path / "src" / "runtime" / "models" / "decoder_family" / "MODEL.toml").write_text(
-        'runtime_strategies = ["decoder_family_decoder_kv_cache"]\n',
+    runtime_strategies = {
+        "decoder_family": "decoder_family_decoder_kv_cache",
+        "decoder_peer_family": "decoder_peer_family_decoder_kv_cache",
+        "decoder_moe_family": "decoder_moe_family_decoder_moe",
+        "registry_extension_family": "registry_extension_family_decoder_kv_cache",
+        "vision_family": "vision_family_vision_language",
+        "prompt_seg_family": "prompt_seg_family_prompted_segmentation",
+        "prompt_seg_text_family": "prompt_seg_text_family_prompted_segmentation",
+        "semantic_seg_family": "semantic_seg_family_segmentation",
+        "media_family": "diffusion_media_primary",
+        "media_alt_family": "diffusion_media_secondary",
+    }
+    for family, strategy in runtime_strategies.items():
+        owner = models_dir / family
+        owner.mkdir(parents=True, exist_ok=True)
+        (owner / "MODEL.toml").write_text(
+            f'id = "{family}"\nruntime_strategies = ["{strategy}"]\n',
+            encoding="utf-8",
+        )
+        runtime = owner / "runtime"
+        runtime.mkdir(exist_ok=True)
+        (runtime / "plugin.cpp").write_text("// model runtime\n", encoding="utf-8")
+
+    media_runtime = models_dir / "media_family" / "runtime"
+    (media_runtime / "pipeline.cpp").write_text(
+        '#include "runtime/core/gpu_matmul.h"\n#include "diffusion_denoising_step_seam.h"\n',
         encoding="utf-8",
     )
-    (tmp_path / "src" / "runtime" / "models" / "decoder_peer_family" / "MODEL.toml").write_text(
-        'runtime_strategies = ["decoder_peer_family_decoder_kv_cache"]\n',
-        encoding="utf-8",
+    (media_runtime / "diffusion_denoising_step_seam.h").write_text("", encoding="utf-8")
+    media_aux_runtime = models_dir / "media_alt_family" / "runtime"
+    (media_aux_runtime / "pipeline.cpp").write_text(
+        '#include "diffusion_denoising_step_seam.h"\n', encoding="utf-8"
     )
-    (tmp_path / "src" / "runtime" / "models" / "decoder_moe_family" / "MODEL.toml").write_text(
-        'runtime_strategies = ["decoder_moe_family_decoder_moe"]\n',
-        encoding="utf-8",
-    )
-    (
-        tmp_path / "src" / "runtime" / "models" / "registry_extension_family" / "MODEL.toml"
-    ).write_text(
-        'runtime_strategies = ["registry_extension_family_decoder_kv_cache"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "vision_family" / "MODEL.toml").write_text(
-        'runtime_strategies = ["vision_family_vision_language"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_family" / "MODEL.toml").write_text(
-        'runtime_strategies = ["prompt_seg_family_prompted_segmentation"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "prompt_seg_text_family" / "MODEL.toml").write_text(
-        'runtime_strategies = ["prompt_seg_text_family_prompted_segmentation"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "semantic_seg_family" / "MODEL.toml").write_text(
-        'runtime_strategies = ["semantic_seg_family_segmentation"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "media_runtime" / "MODEL.toml").write_text(
-        'runtime_strategies = ["diffusion_media_primary"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "media_runtime" / "pipeline.cpp").write_text(
-        '#include "runtime/core/gpu_matmul.h"\n'
-        '#include "runtime/models/media_runtime/diffusion_denoising_step_seam.h"\n',
-        encoding="utf-8",
-    )
-    (
-        tmp_path
-        / "src"
-        / "runtime"
-        / "models"
-        / "media_runtime"
-        / "diffusion_denoising_step_seam.h"
-    ).write_text(
-        "",
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "media_aux_runtime" / "MODEL.toml").write_text(
-        'runtime_strategies = ["diffusion_media_auxiliary"]\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "src" / "runtime" / "models" / "media_aux_runtime" / "pipeline.cpp").write_text(
-        '#include "runtime/models/media_aux_runtime/diffusion_denoising_step_seam.h"\n',
-        encoding="utf-8",
-    )
-    (
-        tmp_path
-        / "src"
-        / "runtime"
-        / "models"
-        / "media_aux_runtime"
-        / "diffusion_denoising_step_seam.h"
-    ).write_text(
-        "",
-        encoding="utf-8",
-    )
-    (tmp_path / "tests" / "e2e" / "data" / "media-scale-fp8-scales.json").write_text(
+    (media_aux_runtime / "diffusion_denoising_step_seam.h").write_text("", encoding="utf-8")
+    media_data = models_dir / "media_family" / "tests" / "data"
+    media_data.mkdir(parents=True, exist_ok=True)
+    (media_data / "media-scale-fp8-scales.json").write_text(
         "{}",
         encoding="utf-8",
     )
@@ -823,14 +777,17 @@ class TestDeclarativeClassificationRules:
         "path,rule_name",
         [
             (
-                "python/tensorrt_model_connect/families/speech_family/model.py",
-                "family_package",
+                "python/tensorrt_model_connect/models/speech_family/model.py",
+                "model_package",
             ),
             (
-                "python/tensorrt_model_connect/families/__init__.py",
-                "family_registry",
+                "python/tensorrt_model_connect/models/__init__.py",
+                "model_registry",
             ),
-            ("src/runtime/models/custom_backend/plugin.cpp", "cpp_runtime_model_unknown"),
+            (
+                "python/tensorrt_model_connect/models/custom_backend/runtime/plugin.cpp",
+                "shared_builder_module",
+            ),
             ("tests/e2e_harness/runners/__init__.py", "harness_runner_init"),
             ("tests/e2e_harness/runners/custom.py", "harness_runner_unknown"),
             ("tests/e2e_harness/comparators/__init__.py", "harness_comparator_init"),
@@ -845,8 +802,8 @@ class TestDeclarativeClassificationRules:
             ),
             ("tests/e2e_harness/test_orchestrator_phases.py", "harness_unit_test"),
             (
-                "python/tensorrt_model_connect/families/example_family/local_tool.py",
-                "family_package",
+                "python/tensorrt_model_connect/models/example_family/local_tool.py",
+                "shared_builder_module",
             ),
         ],
     )
@@ -858,14 +815,16 @@ class TestDeclarativeClassificationRules:
 
     def test_specialized_builder_rule(self, mock_repo):
         """Root builder imports still use the dynamic family import index."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
-        families_dir = mock_repo / "python" / "tensorrt_model_connect" / "families"
+        families_dir = mock_repo / "python" / "tensorrt_model_connect" / "models"
+        models_dir = families_dir / "custom_builder_family" / "tests" / "manifests"
+        models_dir.mkdir(parents=True)
         _write_json(
             models_dir / "custom-builder-model.json",
             {
                 "name": "custom-builder-model",
                 "family": "custom_builder_family",
                 "runtime_strategy": "custom_builder_family_encoder_only",
+                "task_strategy": "encoder_only_nlp",
                 "hf_id": "custom/model",
             },
         )
@@ -898,20 +857,20 @@ class TestModelOwnedAdapterIsolation:
         ("path", "expected_rule", "expected_tier", "rebuild"),
         (
             (
-                "python/tensorrt_model_connect/families/decoder_family/optimized_adapter/adapter.py",
-                "family_package",
+                "python/tensorrt_model_connect/models/decoder_family/optimized_adapter/adapter.py",
+                "model_package",
                 "builder",
                 False,
             ),
             (
-                "src/runtime/models/decoder_family/optimized_adapter/adapter.cpp",
-                "cpp_runtime_model",
+                "python/tensorrt_model_connect/models/decoder_family/runtime/optimized_adapter/adapter.cpp",
+                "model_package",
                 "cpp",
                 True,
             ),
             (
-                "tests/e2e/models/decoder_family/optimized_adapter/test_contract.py",
-                "e2e_model_owned_test",
+                "python/tensorrt_model_connect/models/decoder_family/tests/optimized_adapter/test_contract.py",
+                "model_package",
                 None,
                 False,
             ),
@@ -934,68 +893,76 @@ class TestModelOwnedAdapterIsolation:
         if expected_tier is not None:
             assert expected_tier in match.unit_tiers
 
+
 class TestFamilyModel:
-    def test_family_only_change(self, imap):
-        """families/decoder_family/model.py -> exactly decoder-family models."""
+    @pytest.mark.parametrize("name", ["validation.yaml", "performance.yaml"])
+    def test_model_qualification_fragment(self, imap, name):
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/model.py", imap
+            f"python/tensorrt_model_connect/models/decoder_family/{name}", imap
         )
-        assert match.rule == "family_package"
+
+        assert match.rule == "model_qualification_fragment"
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    def test_family_only_change(self, imap):
+        """models/decoder_family/model.py -> exactly decoder-family models."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/decoder_family/model.py", imap
+        )
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
     def test_family_isolation(self, imap):
         """A family model entry does not affect a peer family."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/model.py", imap
+            "python/tensorrt_model_connect/models/decoder_family/model.py", imap
         )
         assert "decoder-peer" not in match.models
 
-    def test_family_with_no_manifest(self, imap):
-        """A family package with no manifest -> empty models, no crash."""
+    def test_family_with_no_manifest_falls_back_broadly(self, imap):
+        """An unregistered owner path cannot silently select zero models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/nonexistent_family/model.py", imap
-        )
-        assert match.rule == "family_package"
-        assert match.models == []
-
-    def test_internal_family_folder_is_not_model_owned(self, imap):
-        """families/_internal files are not a model ownership boundary."""
-        match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/_internal/helper.py", imap
+            "python/tensorrt_model_connect/models/nonexistent_family/model.py", imap
         )
         assert match.rule == "shared_builder_module"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
-    def test_family_registry_all_models(self, imap):
-        """The family resolver registry affects all models."""
+    def test_internal_family_folder_is_not_model_owned(self, imap):
+        """models/_internal files are not a model ownership boundary."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/__init__.py", imap
+            "python/tensorrt_model_connect/models/_internal/helper.py", imap
         )
-        assert match.rule == "family_registry"
+        assert match.rule == "shared_builder_module"
+        assert sorted(match.models) == sorted(imap.all_model_names)
+
+    def test_model_registry_all_models(self, imap):
+        """The family resolver registry affects all models."""
+        match = test_impact.classify_file("python/tensorrt_model_connect/models/__init__.py", imap)
+        assert match.rule == "model_registry"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
     def test_family_init_all_models(self, imap):
-        """families/__init__.py -> ALL models."""
-        match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/__init__.py", imap
-        )
-        assert match.rule == "family_registry"
+        """models/__init__.py -> ALL models."""
+        match = test_impact.classify_file("python/tensorrt_model_connect/models/__init__.py", imap)
+        assert match.rule == "model_registry"
         assert len(match.models) == len(imap.all_model_names)
 
-    def test_family_package_file(self, imap):
-        """families/encoder_package_family/builder.py -> exactly encoder-package models."""
+    def test_model_package_file(self, imap):
+        """models/encoder_package_family/builder.py -> exactly encoder-package models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/encoder_package_family/builder.py", imap
+            "python/tensorrt_model_connect/models/encoder_package_family/builder.py", imap
         )
-        assert match.rule == "family_package"
+        assert match.rule == "model_package"
         assert match.models == ["encoder-package-core"]
 
-    def test_family_package_model(self, imap):
+    def test_model_package_model(self, imap):
         """A model.py entry uses its family package as the impact boundary."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/encoder_package_family/model.py", imap
+            "python/tensorrt_model_connect/models/encoder_package_family/model.py", imap
         )
-        assert match.rule == "family_package"
+        assert match.rule == "model_package"
         assert match.models == ["encoder-package-core"]
 
     @pytest.mark.parametrize(
@@ -1011,22 +978,13 @@ class TestFamilyModel:
     def test_family_resource(self, imap, relative_path):
         """Every resource under a public family folder belongs only to that family."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/" + relative_path,
+            "python/tensorrt_model_connect/models/decoder_family/" + relative_path,
             imap,
         )
 
-        assert match.rule == "family_package"
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
         assert "decoder-peer" not in match.models
-
-    def test_family_development_tool(self, imap):
-        """Family-owned development tools select only their owner models."""
-        match = test_impact.classify_file("tools/families/decoder_family/debug_runner.py", imap)
-
-        assert match.rule == "family_development_tool"
-        assert sorted(match.models) == ["decoder-large", "decoder-small"]
-        assert match.unit_tiers == ["tools"]
-        assert match.rebuild_cpp is False
 
 
 # ---------------------------------------------------------------------------
@@ -1088,11 +1046,11 @@ class TestSharedModules:
     def test_python_profile_requirements_scope(self, imap):
         """python profile locks affect only families that use that profile."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/sequence_quantile_family/profiles/requirements/sequence_profile.lock.txt",
+            "python/tensorrt_model_connect/models/sequence_quantile_family/profiles/requirements/sequence_profile.lock.txt",
             imap,
         )
 
-        assert match.rule == "python_profile_requirements"
+        assert match.rule == "model_package"
         assert match.models == ["sequence-quantile-core"]
 
 
@@ -1102,8 +1060,8 @@ class TestSharedModules:
 
 
 class TestFamilyOwnedBuilder:
-    def test_root_standard_decoder_builder_shim_is_broad(self, imap):
-        """Root standard_decoder_builder.py is only a compatibility shim."""
+    def test_unknown_shared_decoder_builder_path_is_broad(self, imap):
+        """An unknown shared-root decoder builder path remains broad."""
         match = test_impact.classify_file(
             "python/tensorrt_model_connect/standard_decoder_builder.py", imap
         )
@@ -1111,35 +1069,35 @@ class TestFamilyOwnedBuilder:
         assert sorted(match.models) == sorted(imap.all_model_names)
 
     def test_family_local_model_implementation(self, imap):
-        """families/decoder_family/model/model.py -> exactly decoder_family models."""
+        """models/decoder_family/model/model.py -> exactly decoder_family models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/model/model.py",
+            "python/tensorrt_model_connect/models/decoder_family/model/model.py",
             imap,
         )
-        assert match.rule == "family_package"
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
-    def test_family_model_index(self, imap):
-        """families/decoder_family/MODEL.toml -> exactly decoder_family models."""
+    def test_model_index(self, imap):
+        """models/decoder_family/MODEL.toml -> exactly decoder_family models."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/MODEL.toml",
+            "python/tensorrt_model_connect/models/decoder_family/MODEL.toml",
             imap,
         )
-        assert match.rule == "family_model_index"
+        assert match.rule == "model_index"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
-    def test_root_encoder_builder_shim_is_broad(self, imap):
-        """Root encoder_builder.py is only a compatibility shim."""
+    def test_unknown_shared_encoder_builder_path_is_broad(self, imap):
+        """An unknown shared-root encoder builder path remains broad."""
         match = test_impact.classify_file("python/tensorrt_model_connect/encoder_builder.py", imap)
         assert match.rule == "shared_builder_module"
         assert sorted(match.models) == sorted(imap.all_model_names)
 
     def test_family_local_encoder_builder(self, imap):
-        """families/encoder_family/encoder_builder.py -> exactly encoder family."""
+        """models/encoder_family/encoder_builder.py -> exactly encoder family."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/encoder_family/encoder_builder.py", imap
+            "python/tensorrt_model_connect/models/encoder_family/encoder_builder.py", imap
         )
-        assert match.rule == "family_package"
+        assert match.rule == "model_package"
         assert set(match.models) == {"encoder-core"}
 
 
@@ -1151,8 +1109,10 @@ class TestFamilyOwnedBuilder:
 class TestCppScope:
     def test_cpp_runtime_decoder_family_scope(self, imap):
         """decoder_family runtime model files -> only decoder_family models."""
-        match = test_impact.classify_file("src/runtime/models/decoder_family/plugin.cpp", imap)
-        assert match.rule == "cpp_runtime_model"
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/decoder_family/runtime/plugin.cpp", imap
+        )
+        assert match.rule == "model_package"
         assert match.rebuild_cpp is True
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
         assert "decoder-peer" not in match.models
@@ -1163,14 +1123,18 @@ class TestCppScope:
 
     def test_cpp_runtime_vision_family_scope(self, imap):
         """vision_family runtime model files -> only vision_family models."""
-        match = test_impact.classify_file("src/runtime/models/vision_family/plugin.cpp", imap)
-        assert match.rule == "cpp_runtime_model"
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/vision_family/runtime/plugin.cpp", imap
+        )
+        assert match.rule == "model_package"
         assert set(match.models) == {"vision-core"}
 
     def test_cpp_model_local_plugin_helpers(self, imap):
         """Model-local plugin_helpers.h is scoped to its owning runtime model."""
-        match = test_impact.classify_file("src/runtime/models/media_runtime/plugin_helpers.h", imap)
-        assert match.rule == "cpp_runtime_model"
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/media_family/runtime/plugin_helpers.h", imap
+        )
+        assert match.rule == "model_package"
         assert "media-core" in match.models
         assert "decoder-small" not in match.models
 
@@ -1194,40 +1158,50 @@ class TestCppScope:
 
     def test_cpp_pipeline_scope(self, imap):
         """decoder_family pipeline.cpp -> only decoder_family models."""
-        match = test_impact.classify_file("src/runtime/models/decoder_family/pipeline.cpp", imap)
-        assert match.rule == "cpp_runtime_model"
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/decoder_family/runtime/pipeline.cpp", imap
+        )
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
         assert "decoder-registry-case" not in match.models
         assert "encoder-core" not in match.models
 
-    def test_media_family_pipeline_runtime_scope_uses_non_fp8_l0_representative(self, imap):
-        """media_family pipeline.cpp is runtime-only, so media scale BF16 covers FP8 contract."""
-        match = test_impact.classify_file("src/runtime/models/media_runtime/pipeline.cpp", imap)
-        assert match.rule == "cpp_runtime_model"
+    def test_media_family_pipeline_selects_every_owned_profile(self, imap):
+        """A model runtime edit selects every profile owned by that model."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/media_family/runtime/pipeline.cpp", imap
+        )
+        assert match.rule == "model_package"
         assert "media-scale" in match.models
         assert "media-core" in match.models
-        assert "media-scale-fp8" not in match.models
+        assert "media-scale-fp8" in match.models
 
     def test_media_family_plugin_runtime_scope_uses_non_fp8_l0_representative(self, imap):
         """media_family plugin.cpp is runtime-only, so it does not duplicate FP8 builder coverage."""
-        match = test_impact.classify_file("src/runtime/models/media_runtime/plugin.cpp", imap)
-        assert match.rule == "cpp_runtime_model"
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/media_family/runtime/plugin.cpp", imap
+        )
+        assert match.rule == "model_package"
         assert "media-scale" in match.models
         assert "media-core" in match.models
-        assert "media-scale-fp8" not in match.models
+        assert "media-scale-fp8" in match.models
 
-    def test_cpp_runtime_model_scope(self, imap):
-        """src/runtime/models/<strategy> files are scoped by MODEL.toml."""
-        match = test_impact.classify_file("src/runtime/models/media_runtime/plugin.cpp", imap)
-        assert match.rule == "cpp_runtime_model"
+    def test_model_package_scope(self, imap):
+        """python/tensorrt_model_connect/models/<strategy> files are scoped by MODEL.toml."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/media_family/runtime/plugin.cpp", imap
+        )
+        assert match.rule == "model_package"
         assert match.rebuild_cpp is True
-        assert sorted(match.models) == ["media-core", "media-scale"]
+        assert sorted(match.models) == ["media-core", "media-scale", "media-scale-fp8"]
 
-    def test_cpp_runtime_model_manifest_scope(self, imap):
+    def test_model_package_manifest_scope(self, imap):
         """MODEL.toml itself is model-runtime scoped."""
-        match = test_impact.classify_file("src/runtime/models/media_runtime/MODEL.toml", imap)
-        assert match.rule == "cpp_runtime_model"
-        assert sorted(match.models) == ["media-core", "media-scale"]
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/media_family/MODEL.toml", imap
+        )
+        assert match.rule == "model_index"
+        assert sorted(match.models) == ["media-core", "media-scale", "media-scale-fp8"]
 
     def test_scoped_cpp_helper_gpu_matmul(self, imap):
         """gpu_matmul.cpp -> only the pipelines that reference it."""
@@ -1238,15 +1212,16 @@ class TestCppScope:
         assert "media-scale-fp8" not in match.models
         assert "decoder-small" not in match.models
 
-    def test_cpp_runtime_model_owned_diffusion_seam(self, imap):
+    def test_model_package_owned_diffusion_seam(self, imap):
         """model-owned diffusion seam helper -> owning runtime models only."""
         match = test_impact.classify_file(
-            "src/runtime/models/media_runtime/diffusion_denoising_step_seam.h", imap
+            "python/tensorrt_model_connect/models/media_family/runtime/diffusion_denoising_step_seam.h",
+            imap,
         )
-        assert match.rule == "cpp_runtime_model"
+        assert match.rule == "model_package"
         assert "media-core" in match.models
         assert "media-scale" in match.models
-        assert "media-scale-fp8" not in match.models
+        assert "media-scale-fp8" in match.models
         assert "decoder-small" not in match.models
 
     def test_third_party_stb_scopes_to_image_models(self, imap):
@@ -1278,14 +1253,23 @@ class TestSafetyNet:
     def test_manifest_self(self, imap):
         """Changing a manifest JSON -> only that one model."""
         match = test_impact.classify_file(
-            "tests/e2e/models/decoder_family/manifests/decoder-small.json", imap
+            "python/tensorrt_model_connect/models/decoder_family/tests/manifests/decoder-small.json",
+            imap,
         )
         assert match.rule == "manifest"
         assert match.models == ["decoder-small"]
 
     def test_nested_manifest_uses_manifest_name_not_filename(self, mock_repo):
         """Nested manifest path lookup handles filename/name mismatches."""
-        manifest_dir = mock_repo / "tests" / "e2e" / "models" / "translation_family" / "manifests"
+        manifest_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "translation_family"
+            / "tests"
+            / "manifests"
+        )
         manifest_dir.mkdir(parents=True)
         _write_json(
             manifest_dir / "translation-case.json",
@@ -1293,40 +1277,44 @@ class TestSafetyNet:
                 "name": "translation-case",
                 "family": "translation_family",
                 "runtime_strategy": "translation_runtime",
+                "task_strategy": "text_generation_causal",
                 "hf_id": "example/translation-case",
             },
         )
         imap = test_impact.build_impact_map(mock_repo)
 
         match = test_impact.classify_file(
-            "tests/e2e/models/translation_family/manifests/translation-case.json", imap
+            "python/tensorrt_model_connect/models/translation_family/tests/manifests/translation-case.json",
+            imap,
         )
 
         assert match.rule == "manifest"
         assert match.models == ["translation-case"]
 
-    def test_e2e_model_index_self(self, imap):
+    def test_model_index_self(self, imap):
         """Changing a model E2E index -> only that family's models."""
-        match = test_impact.classify_file("tests/e2e/models/decoder_family/MODEL.toml", imap)
-        assert match.rule == "e2e_model_index"
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/decoder_family/MODEL.toml", imap
+        )
+        assert match.rule == "model_index"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
-    def test_e2e_model_owned_test_self(self, imap):
+    def test_model_package_self(self, imap):
         """Changing a model-owned E2E test -> only that family's models."""
         match = test_impact.classify_file(
-            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py",
             imap,
         )
-        assert match.rule == "e2e_model_owned_test"
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
     def test_e2e_model_owned_runner_self(self, imap):
         """Changing a model-owned E2E runner -> only that family's models."""
         match = test_impact.classify_file(
-            "tests/e2e/models/decoder_family/runner.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/runner.py",
             imap,
         )
-        assert match.rule == "e2e_model_owned_test"
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
     def test_e2e_model_runner(self, imap):
@@ -1341,46 +1329,46 @@ class TestSafetyNet:
     def test_e2e_model_owned_waives_self(self, imap):
         """Changing a model-owned waive file -> only that family's models."""
         match = test_impact.classify_file(
-            "tests/e2e/models/decoder_family/waives.txt",
+            "python/tensorrt_model_connect/models/decoder_family/tests/waives.txt",
             imap,
         )
-        assert match.rule == "e2e_model_owned_test"
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
     def test_e2e_model_owned_impact_rules_self(self, imap):
         """Changing model-owned impact metadata -> only that family's models."""
         match = test_impact.classify_file(
-            "tests/e2e/models/prompt_seg_text_family/impact_diff_rules.json",
+            "python/tensorrt_model_connect/models/prompt_seg_text_family/tests/impact_diff_rules.json",
             imap,
         )
-        assert match.rule == "e2e_model_owned_test"
+        assert match.rule == "model_package"
         assert match.models == ["prompt-seg-text"]
 
     def test_e2e_model_owned_root_json_self(self, imap):
         """Changing a model-owned root JSON sidecar -> only that family's models."""
         match = test_impact.classify_file(
-            "tests/e2e/models/decoder_family/perf_validation.json",
+            "python/tensorrt_model_connect/models/decoder_family/tests/perf_validation.json",
             imap,
         )
-        assert match.rule == "e2e_model_owned_test"
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
     def test_e2e_model_owned_threshold_self(self, imap):
         """Changing a model-owned threshold sidecar -> only that model."""
         match = test_impact.classify_file(
-            "tests/e2e/models/decoder_family/thresholds/decoder-small.json",
+            "python/tensorrt_model_connect/models/decoder_family/tests/thresholds/decoder-small.json",
             imap,
         )
-        assert match.rule == "e2e_model_threshold"
+        assert match.rule == "model_threshold"
         assert match.models == ["decoder-small"]
 
     def test_e2e_model_owned_unknown_threshold_falls_back_to_family(self, imap):
         """Unknown threshold sidecars remain conservative."""
         match = test_impact.classify_file(
-            "tests/e2e/models/decoder_family/thresholds/new-threshold-profile.json",
+            "python/tensorrt_model_connect/models/decoder_family/tests/thresholds/new-threshold-profile.json",
             imap,
         )
-        assert match.rule == "e2e_model_threshold"
+        assert match.rule == "model_threshold"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
     def test_cmake_no_e2e_models(self, imap):
@@ -1465,9 +1453,7 @@ class TestNoImpact:
         assert match.models == []
         assert match.unit_tiers == ["tools"]
 
-    @pytest.mark.parametrize(
-        "path", ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86")
-    )
+    @pytest.mark.parametrize("path", ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86"))
     def test_source_dockerfiles_trigger_tools_tier(self, imap, path):
         """Opt-in source images run static contracts without model proofs."""
         match = test_impact.classify_file(path, imap)
@@ -1543,7 +1529,6 @@ class TestNoImpact:
         [
             "tests/e2e/timing_estimates.json",
             "tests/e2e_partition.py",
-            "tests/runtime_strategy_matrix.yaml",
         ],
     )
     def test_e2e_schedule_metadata_tools_only(self, imap, path):
@@ -1572,43 +1557,60 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
-            "tests/e2e/models/decoder_family/run_decoder_fi.py",
-            "tests/e2e/models/decoder_family/test_flashinfer_plugin.py",
-            "tests/e2e/models/decoder_family/test_flashinfer_trt_attention.py",
-            "tests/e2e/models/decoder_family/test_decoder_flashinfer.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/run_decoder_fi.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_flashinfer_plugin.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_flashinfer_trt_attention.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_flashinfer.py",
             "tests/test_tvm_ffi_e2e.py",
         ],
     )
     def test_standalone_gpu_tests_do_not_select_models(self, imap, path):
-        """Standalone GPU test files should not drive manifest-harness model scope."""
+        """Model-local GPU tests select their owner; the shared probe stays tools-only."""
         match = test_impact.classify_file(path, imap)
-        assert match.rule == "standalone_gpu_test_support"
-        assert match.models == []
-        assert match.unit_tiers == ["tools"]
+        if path == "tests/test_tvm_ffi_e2e.py":
+            assert match.rule == "standalone_gpu_test_support"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+        else:
+            assert match.rule == "model_package"
+            assert sorted(match.models) == ["decoder-large", "decoder-small"]
 
 
 class TestE2EDataFiles:
     def test_data_file_maps_to_manifest_users(self, imap):
         """Checked-in E2E data should map to manifests that reference it."""
-        match = test_impact.classify_file("tests/e2e/data/media-scale-fp8-scales.json", imap)
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/media_family/tests/data/"
+            "media-scale-fp8-scales.json",
+            imap,
+        )
         assert match.rule == "e2e_data_file"
         assert match.models == ["media-scale-fp8"]
 
     def test_repo_relative_data_file_maps_to_manifest_users(self, imap):
-        """Manifest tests/e2e/data references should select only their users."""
-        match = test_impact.classify_file("tests/e2e/data/Recording.wav", imap)
+        """Model-local data references select only their users."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/speech_family/tests/data/Recording.wav",
+            imap,
+        )
         assert match.rule == "e2e_data_file"
         assert match.models == ["speech-core"]
 
     def test_manifest_relative_data_file_maps_to_manifest_users(self, imap):
-        """Manifest data/ references resolve relative to tests/e2e/."""
-        match = test_impact.classify_file("tests/e2e/data/test_img.jpeg", imap)
+        """Manifest data/ references resolve relative to the owner's tests directory."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/models/vision_family/tests/data/test_img.jpeg",
+            imap,
+        )
         assert match.rule == "e2e_data_file"
         assert match.models == ["vision-core"]
 
     def test_declared_model_asset_maps_to_declaring_model(self, mock_repo):
         """Explicit model_assets entries select only the declaring model."""
-        manifest = mock_repo / "tests/e2e/models/decoder_family/manifests/decoder-assets.json"
+        manifest = (
+            mock_repo
+            / "python/tensorrt_model_connect/models/decoder_family/tests/manifests/decoder-assets.json"
+        )
         manifest.parent.mkdir(parents=True, exist_ok=True)
         _write_json(
             manifest,
@@ -1617,15 +1619,19 @@ class TestE2EDataFiles:
                 "family": "decoder_family",
                 "runtime_strategy": "decoder_family_decoder_kv_cache",
                 "task_strategy": "text_generation_causal",
-                "prompt_file": ("tests/e2e/models/decoder_family/assets/prompt.txt"),
-                "model_assets": ["tests/e2e/models/decoder_family/assets/intrinsics.npy"],
+                "prompt_file": (
+                    "python/tensorrt_model_connect/models/decoder_family/tests/assets/prompt.txt"
+                ),
+                "model_assets": [
+                    "python/tensorrt_model_connect/models/decoder_family/tests/assets/intrinsics.npy"
+                ],
             },
         )
         imap = test_impact.build_impact_map(mock_repo)
 
         for path in (
-            "tests/e2e/models/decoder_family/assets/prompt.txt",
-            "tests/e2e/models/decoder_family/assets/intrinsics.npy",
+            "python/tensorrt_model_connect/models/decoder_family/tests/assets/prompt.txt",
+            "python/tensorrt_model_connect/models/decoder_family/tests/assets/intrinsics.npy",
         ):
             match = test_impact.classify_file(path, imap)
             assert match.rule == "e2e_data_file"
@@ -1634,29 +1640,29 @@ class TestE2EDataFiles:
     @pytest.mark.parametrize(
         "path",
         [
-            "tests/e2e/models/decoder_family/assets/new-prompt.txt",
-            "tests/e2e/models/decoder_family/assets/new-intrinsics.npy",
+            "python/tensorrt_model_connect/models/decoder_family/tests/assets/new-prompt.txt",
+            "python/tensorrt_model_connect/models/decoder_family/tests/assets/new-intrinsics.npy",
         ],
     )
     def test_unlisted_family_asset_maps_to_family(self, imap, path):
         """Unlisted assets stay within their family instead of selecting all models."""
         match = test_impact.classify_file(path, imap)
 
-        assert match.rule == "e2e_model_owned_test"
+        assert match.rule == "model_package"
         assert sorted(match.models) == ["decoder-large", "decoder-small"]
         assert "decoder-peer" not in match.models
 
     @pytest.mark.parametrize(
         "path",
         [
-            "tests/e2e/models/speech_family/data/asr_probes/manifest.json",
-            "tests/e2e/models/speech_family/data/asr_probes/generate_asr_probe_inputs.py",
+            "python/tensorrt_model_connect/models/speech_family/tests/data/asr_probes/manifest.json",
+            "python/tensorrt_model_connect/models/speech_family/tests/data/asr_probes/generate_asr_probe_inputs.py",
         ],
     )
     def test_asr_probe_support_files_select_asr(self, imap, path):
         """ASR probe support files should stay scoped to their owning family."""
         match = test_impact.classify_file(path, imap)
-        assert match.rule == "e2e_model_owned_test"
+        assert match.rule == "model_package"
         assert "speech-core" in match.models
         assert "decoder-small" not in match.models
 
@@ -1667,6 +1673,14 @@ class TestE2EDataFiles:
 
 
 class TestUnitTiers:
+    def test_model_entrypoint_loader_is_broad(self, imap):
+        match = test_impact.classify_file("tools/model_entrypoint.py", imap)
+
+        assert match.rule == "model_entrypoint_loader"
+        assert sorted(match.models) == sorted(imap.all_model_names)
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_unit_tier_builder(self, imap):
         """tests/builder/ -> unit tier 'builder', no E2E."""
         match = test_impact.classify_file("tests/builder/test_config.py", imap)
@@ -1675,12 +1689,12 @@ class TestUnitTiers:
         assert "builder" in match.unit_tiers
 
     def test_family_unit_builder(self, imap):
-        """families/<family>/tests/ -> unit tier 'builder', no E2E."""
+        """A model-local unit test selects its owner and the builder tier."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/tests/test_family.py", imap
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_family.py", imap
         )
-        assert match.rule == "family_unit_builder"
-        assert match.models == []
+        assert match.rule == "model_package"
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
         assert "builder" in match.unit_tiers
 
     def test_unit_tier_cpp(self, imap):
@@ -1700,10 +1714,10 @@ class TestUnitTiers:
     def test_elf_flow_prepare_model_dir_is_family_owned(self, imap):
         """ELF model-dir preparation belongs to the elf_flow family boundary."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/elf_flow/prepare_model_dir.py",
+            "python/tensorrt_model_connect/models/elf_flow/prepare_model_dir.py",
             imap,
         )
-        assert match.rule == "family_package"
+        assert match.rule == "model_package"
         assert match.models == ["elf-flow-case"]
 
     @pytest.mark.parametrize(
@@ -1805,23 +1819,10 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
-    def test_validation_config_triggers_tools_tier(self, imap):
-        """Model-first validation catalog edits run tools-tier tests without E2E."""
-        match = test_impact.classify_file(
-            "tests/validation/model_workloads.yaml",
-            imap,
-        )
-
-        assert match.rule == "validation_config"
-        assert match.models == []
-        assert match.unit_tiers == ["tools"]
-        assert match.rebuild_cpp is False
-
     def test_validation_reference_requirements_trigger_tools_tier(self, imap):
         """The shared HF validation environment only affects tools-tier tests."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/"
-            "python_profile_requirements/reference_common.lock.txt",
+            "python/tensorrt_model_connect/python_profile_requirements/reference_common.lock.txt",
             imap,
         )
 
@@ -1886,10 +1887,7 @@ class TestUnitTiers:
 
     def test_model_plugin_validation_tools(self, imap):
         """Model-plugin validation tools run tools-tier validation without E2E."""
-        for path in (
-            "tools/e2e_origin_main_parity.py",
-            "tools/model_plugin_isolation.py",
-        ):
+        for path in ("tools/model_plugin_isolation.py",):
             match = test_impact.classify_file(path, imap)
             assert match.rule == "model_plugin_validation_tool"
             assert match.models == []
@@ -1899,7 +1897,6 @@ class TestUnitTiers:
     def test_family_ownership_tools(self, imap):
         """Family ownership and isolation tools run tools-tier validation."""
         for path in (
-            "tools/families/__init__.py",
             "tools/family_source_isolation.py",
             "tools/family_specialization.py",
             "tools/prune_family_helpers.py",
@@ -1952,7 +1949,7 @@ class TestUnitTiers:
     def test_builder_source_implies_unit_tier(self, imap):
         """Python builder source change implies 'builder' unit tier."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/model.py", imap
+            "python/tensorrt_model_connect/models/decoder_family/model.py", imap
         )
         assert "builder" in match.unit_tiers
 
@@ -2074,13 +2071,22 @@ class CustomTorchReference:
 """.lstrip(),
             encoding="utf-8",
         )
-        models_dir = mock_repo / "tests" / "e2e" / "models"
+        models_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "sequence_point_family"
+            / "tests"
+            / "manifests"
+        )
         _write_json(
             models_dir / "neural-op-case.json",
             {
                 "name": "neural-op-case",
                 "family": "sequence_point_family",
                 "runtime_strategy": "sequence_point_runtime",
+                "task_strategy": "neural_operator",
                 "hf_id": "example/neural-operator",
             },
         )
@@ -2110,7 +2116,6 @@ class CustomTorchReference:
             "pyproject_validation_optional_dependencies",
             "harness_shared_fp8_scales",
             "e2e_timing_estimates_known_models",
-            "runtime_strategy_matrix_known_strategies",
             "pyproject_known_profiles",
             "harness_shared_known_identifiers",
             "e2e_warm_hf_cache_diffusers_components",
@@ -2155,38 +2160,6 @@ diff --git a/tests/e2e/timing_estimates.json b/tests/e2e/timing_estimates.json
         )
         assert refined_timing.rule == "e2e_timing_estimates_known_models"
         assert refined_timing.models == ["decoder-small", "sequence-quantile-core"]
-
-        matrix_diff = """
-diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
-@@ -1 +1 @@
-+    "decoder_moe_family_decoder_moe": {
-+      "task_strategy": "text_generation_causal",
-+      "cli_commands": [],
-+      "cli_exemption": "Uses a model-owned public C ABI.",
-+      "runner_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.runners.text_generation.TextGenerationCausalRunner",
-+      "comparator_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.comparators.text.TextComparator",
-+      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['decoder_moe_family_decoder_moe'].",
-+      "performance_mode": "multi_stage"
-+    },
-+    "sequence_quantile_runtime": {
-+      "task_strategy": "neural_operator",
-+      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
-+      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_quantile_runtime']."
-+    },
-"""
-        broad_matrix = test_impact.classify_file("tests/runtime_strategy_matrix.yaml", imap)
-        refined_matrix = test_impact.maybe_refine_match_with_diff(
-            "tests/runtime_strategy_matrix.yaml", broad_matrix, matrix_diff, imap
-        )
-        assert refined_matrix.rule == "runtime_strategy_matrix_known_strategies"
-        assert refined_matrix.models == [
-            "decoder-moe-core",
-            "sequence-quantile-core",
-        ]
 
     def test_harness_rules_refine_registry_diffs_for_known_identifiers(self, imap):
         """Harness additions stay scoped to mentioned models and runtime strategies."""
@@ -2317,17 +2290,6 @@ diff --git a/tests/e2e_harness/contracts.py b/tests/e2e_harness/contracts.py
 @@ -1 +1 @@
 +    "media-core": ReferenceFamily.DIFFUSERS_IMAGE_GEN.value,
 """,
-            "tests/runtime_strategy_matrix.yaml": """
-diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
-@@ -1 +1 @@
-+    "decoder_moe_family_decoder_moe": {
-+      "task_strategy": "text_generation_causal",
-+      "cli_commands": ["run"],
-+      "runner_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.runners.text_generation.TextGenerationCausalRunner",
-+      "comparator_class": "tests.e2e.models.decoder_moe_family.e2e_plugins.comparators.text.TextComparator",
-+      "diff_framework_check_classes": []
-+    },
-""",
         }
         monkeypatch.setattr(
             test_impact,
@@ -2345,7 +2307,6 @@ diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.
 
         assert result.e2e_models == [
             "decoder-large",
-            "decoder-moe-core",
             "decoder-small",
             "media-core",
         ]
@@ -2393,11 +2354,11 @@ diff --git a/pyproject.toml b/pyproject.toml
 @@ -1 +1 @@
 +sequence_quantile_family = ["sequence-profile-runtime>=2.2.2"]
 """,
-            "python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml": """
-diff --git a/python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml b/python/tensorrt_model_connect/families/sequence_quantile_family/MODEL.toml
+            "python/tensorrt_model_connect/models/sequence_quantile_family/MODEL.toml": """
+diff --git a/python/tensorrt_model_connect/models/sequence_quantile_family/MODEL.toml b/python/tensorrt_model_connect/models/sequence_quantile_family/MODEL.toml
 @@ -1 +1 @@
 +python_profile_specs = [
-+  "sequence_profile|families/sequence_quantile_family/profiles/requirements/sequence_profile.lock.txt|families/sequence_quantile_family/profiles/verify.py|true",
++  "sequence_profile|models/sequence_quantile_family/profiles/requirements/sequence_profile.lock.txt|models/sequence_quantile_family/profiles/verify.py|true",
 +]
 +default_execution_profiles = [
 +  "build|sequence_profile",
@@ -2454,55 +2415,19 @@ diff --git a/tests/e2e_harness/references/torch_reference.py b/tests/e2e_harness
 +    import sequence_profile
 +    return torch.tensor([0.0]), "quantile_preds"
 """,
-            "tests/runtime_strategy_matrix.yaml": """
-diff --git a/tests/runtime_strategy_matrix.yaml b/tests/runtime_strategy_matrix.yaml
-@@ -1 +1 @@
-+    "sequence_point_runtime": {
-+      "task_strategy": "neural_operator",
-+      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e.models.sequence_point_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e.models.sequence_point_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
-+      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_point_runtime']."
-+    },
-+    "sequence_mixer_runtime": {
-+      "task_strategy": "neural_operator",
-+      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e.models.sequence_mixer_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e.models.sequence_mixer_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
-+      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_mixer_runtime']."
-+    },
-+    "sequence_global_runtime": {
-+      "task_strategy": "neural_operator",
-+      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e.models.sequence_global_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e.models.sequence_global_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
-+      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_global_runtime']."
-+    },
-+    "sequence_quantile_runtime": {
-+      "task_strategy": "neural_operator",
-+      "cli_commands": ["solve"],
-+      "runner_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.runners.neural_operator.NeuralOperatorRunner",
-+      "comparator_class": "tests.e2e.models.sequence_quantile_family.e2e_plugins.comparators.neural_operator.NeuralOperatorComparator",
-+      "diff_framework_check_classes": [],
-+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['sequence_quantile_runtime']."
-+    },
-""",
         }
-        for model_name in (
-            "sequence-quantile-core",
-            "sequence-mixer-core",
-            "sequence-point-core",
-            "sequence-regression",
-            "sequence-global-core",
-        ):
-            diffs[f"tests/e2e/models/{model_name}.json"] = (
-                f"diff --git a/tests/e2e/models/{model_name}.json "
-                f"b/tests/e2e/models/{model_name}.json\n"
-                "@@ -1 +1 @@\n"
-                f'+{{"name": "{model_name}"}}\n'
+        for model_name, family in {
+            "sequence-quantile-core": "sequence_quantile_family",
+            "sequence-mixer-core": "sequence_mixer_family",
+            "sequence-point-core": "sequence_point_family",
+            "sequence-regression": "sequence_point_family",
+            "sequence-global-core": "sequence_global_family",
+        }.items():
+            path = (
+                f"python/tensorrt_model_connect/models/{family}/tests/manifests/{model_name}.json"
+            )
+            diffs[path] = (
+                f'diff --git a/{path} b/{path}\n@@ -1 +1 @@\n+{{"name": "{model_name}"}}\n'
             )
 
         monkeypatch.setattr(
@@ -2554,7 +2479,7 @@ diff --git a/include/trtmc/pipeline.h b/include/trtmc/pipeline.h
     def test_prompt_seg_text_family_model_rule_refines_metadata_diff(self, imap):
         """text-prompt segmentation bundle metadata plumbing does not select every builder model."""
         diff_text = """
-diff --git a/python/tensorrt_model_connect/families/prompt_seg_text_family/model.py b/python/tensorrt_model_connect/families/prompt_seg_text_family/model.py
+diff --git a/python/tensorrt_model_connect/models/prompt_seg_text_family/model.py b/python/tensorrt_model_connect/models/prompt_seg_text_family/model.py
 @@ -1 +1 @@
 +    "processor_config.json",
 -    if runtime_strategy not in (
@@ -2563,11 +2488,9 @@ diff --git a/python/tensorrt_model_connect/families/prompt_seg_text_family/model
 -                     "preprocessor_config.json"):
 +                     "preprocessor_config.json", "processor_config.json"):
 """
-        path = "python/tensorrt_model_connect/families/prompt_seg_text_family/model.py"
+        path = "python/tensorrt_model_connect/models/prompt_seg_text_family/model.py"
         broad = test_impact.classify_file(path, imap)
-        refined = test_impact.maybe_refine_match_with_diff(
-            path, broad, diff_text, imap
-        )
+        refined = test_impact.maybe_refine_match_with_diff(path, broad, diff_text, imap)
         assert refined.rule == "prompt_seg_text_family_model_metadata"
         assert refined.models == ["prompt-seg-text"]
 
@@ -2618,7 +2541,7 @@ diff --git a/src/cli/main.cpp b/src/cli/main.cpp
     def test_prompt_seg_text_runtime_support_rules_refine_shared_cpp_diffs(self, imap):
         """text-prompt segmentation config and BPE suffix support avoid all-model fallback."""
         config_diff = """
-diff --git a/src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h b/src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h
+diff --git a/python/tensorrt_model_connect/models/prompt_seg_text_family/runtime/prompt_seg_text_config.h b/python/tensorrt_model_connect/models/prompt_seg_text_family/runtime/prompt_seg_text_config.h
 @@ -10 +10 @@ struct PromptSegConfig {
 -    int32_t image_embedding_size{64};  // image_size / patch_size
 +    int32_t image_embedding_size{64}; // image_size / patch_size
@@ -2656,10 +2579,11 @@ diff --git a/src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h 
 +    std::vector<int32_t> class_map; // [H, W] class indices
 """
         broad_config = test_impact.classify_file(
-            "src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h", imap
+            "python/tensorrt_model_connect/models/prompt_seg_text_family/runtime/prompt_seg_text_config.h",
+            imap,
         )
         refined_config = test_impact.maybe_refine_match_with_diff(
-            "src/runtime/models/prompt_seg_text_family/prompt_seg_text_config.h",
+            "python/tensorrt_model_connect/models/prompt_seg_text_family/runtime/prompt_seg_text_config.h",
             broad_config,
             config_diff,
             imap,
@@ -2717,8 +2641,11 @@ diff --git a/tests/e2e_harness/orchestrator.py b/tests/e2e_harness/orchestrator.
 -    CILane,
 +    fp8_scales = case.metadata.get("fp8_scales")
 +    if fp8_scales:
-+        # Resolve relative to tests/e2e/data/
-+        scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales
++        scales_path = Path(fp8_scales)
++        if not scales_path.is_absolute():
++            model_test_dir = case.metadata.get("model_test_dir", "")
++            if model_test_dir:
++                scales_path = Path(model_test_dir) / fp8_scales
 +        if scales_path.is_file():
 +            cmd.extend(["--fp8-scales", str(scales_path)])
 """
@@ -2773,7 +2700,7 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
     def test_harness_reference_vl_generated_only_decode_rule_refines_hf_vl_diff(self, imap):
         """InternVL-owned generated-only decode fallback is scoped to InternVL3-8B."""
         diff_text = """
-diff --git a/tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py b/tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py
+diff --git a/python/tensorrt_model_connect/models/internvl/tests/e2e_plugins/references/hf_transformers.py b/python/tensorrt_model_connect/models/internvl/tests/e2e_plugins/references/hf_transformers.py
 @@ -1 +1 @@
 +def _decode_vl_generated_text(processor, generated_ids, input_len: int) -> str:
 +    token_count = len(generated_ids)
@@ -2786,18 +2713,18 @@ diff --git a/tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py
 +    if not text.strip():
 +        raise RuntimeError("HF VL reference produced empty or prompt-only generated text")
 +    return _decode_token_ids(generated_ids)
-+            from tests.e2e.models.internvl.e2e_plugins.references.hf_transformers import (
++            from tensorrt_model_connect.models.internvl.tests.e2e_plugins.references.hf_transformers import (
 +                _decode_vl_generated_text,
 +            )
 +            text = _decode_vl_generated_text(
 +                processor, generated_ids[0], input_len, prompt_texts)
 """
         broad = test_impact.classify_file(
-            "tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py",
+            "python/tensorrt_model_connect/models/internvl/tests/e2e_plugins/references/hf_transformers.py",
             imap,
         )
         refined = test_impact.maybe_refine_match_with_diff(
-            "tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py",
+            "python/tensorrt_model_connect/models/internvl/tests/e2e_plugins/references/hf_transformers.py",
             broad,
             diff_text,
             imap,
@@ -2808,7 +2735,7 @@ diff --git a/tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py
     def test_model_owned_reference_rule_refines_hf_context_diff(self, imap):
         """A model-owned reference rule should not select every HF model."""
         diff_text = """
-diff --git a/tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py b/tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py
+diff --git a/python/tensorrt_model_connect/models/context_embed_family/tests/e2e_plugins/references/hf_transformers.py b/python/tensorrt_model_connect/models/context_embed_family/tests/e2e_plugins/references/hf_transformers.py
 @@ -1 +1 @@
 -            tokenizer = AutoTokenizer.from_pretrained(
 -                model_ref, trust_remote_code=trust_remote_code)
@@ -2824,11 +2751,11 @@ diff --git a/tests/e2e/models/context_embed_family/e2e_plugins/references/hf_tra
 +                    model_ref, trust_remote_code=trust_remote_code)
 """
         broad = test_impact.classify_file(
-            "tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py",
+            "python/tensorrt_model_connect/models/context_embed_family/tests/e2e_plugins/references/hf_transformers.py",
             imap,
         )
         refined = test_impact.maybe_refine_match_with_diff(
-            "tests/e2e/models/context_embed_family/e2e_plugins/references/hf_transformers.py",
+            "python/tensorrt_model_connect/models/context_embed_family/tests/e2e_plugins/references/hf_transformers.py",
             broad,
             diff_text,
             imap,
@@ -2868,6 +2795,7 @@ diff --git a/python/tensorrt_model_connect/build_cli.py b/python/tensorrt_model_
         assert refined.rule == "shared_builder_fp8_scales_cli"
         assert refined.models == ["media-scale-fp8"]
 
+
 # ---------------------------------------------------------------------------
 # Aggregation / cap tests
 # ---------------------------------------------------------------------------
@@ -2878,8 +2806,8 @@ class TestAggregation:
         """Multiple family changes -> union of models."""
         result = test_impact.analyze_impact(
             [
-                "python/tensorrt_model_connect/families/decoder_family/model.py",
-                "python/tensorrt_model_connect/families/decoder_peer_family/model.py",
+                "python/tensorrt_model_connect/models/decoder_family/model.py",
+                "python/tensorrt_model_connect/models/decoder_peer_family/model.py",
             ],
             imap,
         )
@@ -2890,7 +2818,7 @@ class TestAggregation:
     def test_cap_not_applied_when_under(self, imap):
         """Cap not applied when affected models <= cap."""
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"], imap, cap=5
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"], imap, cap=5
         )
         assert not result.cap_applied
         assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
@@ -2914,7 +2842,7 @@ class TestAggregation:
         """Family plugin + unit test -> models + unit tier."""
         result = test_impact.analyze_impact(
             [
-                "python/tensorrt_model_connect/families/decoder_family/model.py",
+                "python/tensorrt_model_connect/models/decoder_family/model.py",
                 "tests/builder/test_config.py",
             ],
             imap,
@@ -2924,7 +2852,15 @@ class TestAggregation:
 
     def test_l0_replaces_nightly_only_model(self, mock_repo):
         """PR L0 substitutes configured scale-only models with representatives."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
+        models_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "decoder_family"
+            / "tests"
+            / "manifests"
+        )
         decoder_family4b = json.loads((models_dir / "decoder-large.json").read_text())
         decoder_family4b["ci_tier"] = "nightly_only"
         decoder_family4b["l0_replacement"] = "decoder-small"
@@ -2933,7 +2869,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"], imap
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"], imap
         )
 
         assert result.e2e_models == ["decoder-small"]
@@ -2947,7 +2883,15 @@ class TestAggregation:
 
     def test_waive_line_keeps_exact_model_despite_l0_replacement(self, mock_repo):
         """Waiver edits name exact configs, so L0 should not substitute them."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
+        models_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "decoder_family"
+            / "tests"
+            / "manifests"
+        )
         decoder_large = json.loads((models_dir / "decoder-large.json").read_text())
         decoder_large["l0_replacement"] = "decoder-small"
         decoder_large["l0_replacement_reason"] = "scale-only coverage"
@@ -2963,7 +2907,15 @@ class TestAggregation:
 
     def test_nightly_keeps_exact_impacted_models(self, mock_repo):
         """Nightly policy does not apply PR L0 replacements."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
+        models_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "decoder_family"
+            / "tests"
+            / "manifests"
+        )
         decoder_family4b = json.loads((models_dir / "decoder-large.json").read_text())
         decoder_family4b["ci_tier"] = "nightly_only"
         decoder_family4b["l0_replacement"] = "decoder-small"
@@ -2971,7 +2923,7 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"],
             imap,
             e2e_suite="nightly",
         )
@@ -2981,14 +2933,22 @@ class TestAggregation:
 
     def test_impact_excludes_multi_device_models_by_default(self, mock_repo):
         """Default impact selection matches current single-device CI capability."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
+        models_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "decoder_family"
+            / "tests"
+            / "manifests"
+        )
         decoder_family4b = json.loads((models_dir / "decoder-large.json").read_text())
         decoder_family4b["ci_tier"] = "multi_device"
         _write_json(models_dir / "decoder-large.json", decoder_family4b)
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"],
             imap,
         )
 
@@ -3000,14 +2960,22 @@ class TestAggregation:
 
     def test_impact_can_include_multi_device_models_by_flag(self, mock_repo):
         """Manual multi-device selection opts in by clearing the default exclusion."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
+        models_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "decoder_family"
+            / "tests"
+            / "manifests"
+        )
         decoder_family4b = json.loads((models_dir / "decoder-large.json").read_text())
         decoder_family4b["ci_tier"] = "multi_device"
         _write_json(models_dir / "decoder-large.json", decoder_family4b)
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"],
             imap,
             exclude_ci_tiers=set(),
         )
@@ -3023,7 +2991,15 @@ class TestAggregation:
         mock_repo,
     ):
         """Direct nightly-only manifest edits still keep PR L0 at representative scale."""
-        models_dir = mock_repo / "tests" / "e2e" / "models"
+        models_dir = (
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "decoder_family"
+            / "tests"
+            / "manifests"
+        )
         decoder_family4b = json.loads((models_dir / "decoder-large.json").read_text())
         decoder_family4b["ci_tier"] = "nightly_only"
         decoder_family4b["l0_replacement"] = "decoder-small"
@@ -3032,7 +3008,10 @@ class TestAggregation:
 
         imap = test_impact.build_impact_map(mock_repo)
         result = test_impact.analyze_impact(
-            ["tests/e2e/models/decoder_family/manifests/decoder-large.json"], imap
+            [
+                "python/tensorrt_model_connect/models/decoder_family/tests/manifests/decoder-large.json"
+            ],
+            imap,
         )
 
         assert result.e2e_models == ["decoder-small"]
@@ -3129,7 +3108,7 @@ class TestValidation:
     def test_validate_consistency(self):
         """Runs --validate on the real repo and checks it passes."""
         real_root = REPO_ROOT
-        if not (real_root / "tests" / "e2e" / "models").is_dir():
+        if not (real_root / "python" / "tensorrt_model_connect" / "models").is_dir():
             pytest.skip("Not in the project repo")
         imap = test_impact.build_impact_map(real_root)
         errors = test_impact.validate_map(imap, real_root)
@@ -3138,7 +3117,7 @@ class TestValidation:
     def test_real_repo_has_core_models(self):
         """Real repo has at least 5 core models."""
         real_root = REPO_ROOT
-        if not (real_root / "tests" / "e2e" / "models").is_dir():
+        if not (real_root / "python" / "tensorrt_model_connect" / "models").is_dir():
             pytest.skip("Not in the project repo")
         imap = test_impact.build_impact_map(real_root)
         assert len(imap.core_models) >= 5, (
@@ -3148,17 +3127,17 @@ class TestValidation:
     def test_flux_runtime_selects_batch2_detector(self):
         """FLUX runtime changes must execute the real-bundle batch contract."""
         real_root = REPO_ROOT
-        if not (real_root / "tests" / "e2e" / "models").is_dir():
+        if not (real_root / "python" / "tensorrt_model_connect" / "models").is_dir():
             pytest.skip("Not in the project repo")
         imap = test_impact.build_impact_map(real_root)
 
         result = test_impact.analyze_impact(
-            ["src/runtime/models/flux/pipeline.cpp"], imap, e2e_suite="l0"
+            ["python/tensorrt_model_connect/models/flux/runtime/pipeline.cpp"], imap, e2e_suite="l0"
         )
 
         assert "flux-schnell-l0-batch2" in result.e2e_models
         assert (
-            "tests/e2e/models/flux/test_flux_e2e.py::test_model_e2e[flux-schnell-l0-batch2]"
+            "python/tensorrt_model_connect/models/flux/tests/test_flux_e2e.py::test_model_e2e[flux-schnell-l0-batch2]"
         ) in result.e2e_test_ids
 
 
@@ -3176,12 +3155,12 @@ class TestOutput:
             cap_applied=False,
             matched_rules=[],
             e2e_test_ids=[
-                "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-small]",
+                "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-small]",
             ],
         )
         output = test_impact.format_human(result)
         assert (
-            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-small]"
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-small]"
             in output
         )
         assert "builder" in output
@@ -3193,7 +3172,7 @@ class TestOutput:
             unit_tiers=["builder"],
             rebuild_cpp=False,
             cap_applied=False,
-            matched_rules=[{"file": "f.py", "rule": "family_package", "models": ["decoder-small"]}],
+            matched_rules=[{"file": "f.py", "rule": "model_package", "models": ["decoder-small"]}],
         )
         output = test_impact.format_json(result)
         data = json.loads(output)
@@ -3223,12 +3202,12 @@ class TestCoverageMapIntegration:
     def test_impact_result_has_test_lists(self, imap):
         """ImpactResult with coverage map includes per-tier test lists."""
         coverage_map = {
-            "python/tensorrt_model_connect/families/decoder_family/model.py": [
+            "python/tensorrt_model_connect/models/decoder_family/model.py": [
                 "tests/builder/test_engine_decoder_family.py::TestDecoderFamily::test_model",
             ],
         }
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"],
             imap,
             coverage_map=coverage_map,
         )
@@ -3255,8 +3234,10 @@ class TestCoverageMapIntegration:
         mock_repo,
     ):
         """Model-owned coverage misses do not fan out to the full builder tier."""
-        family_dir = mock_repo / "tests" / "e2e" / "models" / "decoder_family"
-        family_dir.mkdir()
+        family_dir = (
+            mock_repo / "python" / "tensorrt_model_connect" / "models" / "decoder_family" / "tests"
+        )
+        family_dir.mkdir(exist_ok=True)
         (family_dir / "test_decoder_family_builder.py").write_text(
             "def test_builder():\n    pass\n",
             encoding="utf-8",
@@ -3268,7 +3249,7 @@ class TestCoverageMapIntegration:
         imap = test_impact.build_impact_map(mock_repo)
 
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"],
             imap,
             coverage_map={},
             repo_root=mock_repo,
@@ -3276,18 +3257,20 @@ class TestCoverageMapIntegration:
 
         assert result.e2e_models == ["decoder-large", "decoder-small"]
         assert result.e2e_test_ids == [
-            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-large]",
-            "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-small]",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-large]",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-small]",
         ]
         assert result.builder_tests == [
-            "tests/e2e/models/decoder_family/test_decoder_family_builder.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_builder.py",
         ]
         assert "builder" not in result.fallback_tiers
 
     def test_changed_model_owned_unit_test_runs_directly(self, mock_repo):
         """Changed model-owned non-E2E pytest files are direct builder targets."""
-        family_dir = mock_repo / "tests" / "e2e" / "models" / "decoder_family"
-        family_dir.mkdir()
+        family_dir = (
+            mock_repo / "python" / "tensorrt_model_connect" / "models" / "decoder_family" / "tests"
+        )
+        family_dir.mkdir(exist_ok=True)
         (family_dir / "test_decoder_family_builder.py").write_text(
             "def test_builder():\n    pass\n",
             encoding="utf-8",
@@ -3295,21 +3278,29 @@ class TestCoverageMapIntegration:
         imap = test_impact.build_impact_map(mock_repo)
 
         result = test_impact.analyze_impact(
-            ["tests/e2e/models/decoder_family/test_decoder_family_builder.py"],
+            [
+                "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_builder.py"
+            ],
             imap,
             coverage_map={},
             repo_root=mock_repo,
         )
 
         assert result.builder_tests == [
-            "tests/e2e/models/decoder_family/test_decoder_family_builder.py",
+            "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_builder.py",
         ]
         assert "builder" not in result.fallback_tiers
 
     def test_changed_nested_model_owned_unit_test_runs_directly(self, mock_repo):
         """Nested adapter tests remain direct targets inside one family."""
         adapter_tests = (
-            mock_repo / "tests" / "e2e" / "models" / "decoder_family" / "optimized_adapter"
+            mock_repo
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+            / "decoder_family"
+            / "tests"
+            / "optimized_adapter"
         )
         adapter_tests.mkdir(parents=True)
         test_path = adapter_tests / "test_contract.py"
@@ -3332,10 +3323,11 @@ class TestCoverageMapIntegration:
         """The _e2e.py suffix remains an execution boundary at every depth."""
         test_path = (
             mock_repo
-            / "tests"
-            / "e2e"
+            / "python"
+            / "tensorrt_model_connect"
             / "models"
             / "decoder_family"
+            / "tests"
             / "optimized_adapter"
             / "test_adapter_e2e.py"
         )
@@ -3352,7 +3344,7 @@ class TestCoverageMapIntegration:
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/decoder_family/model.py"],
+            ["python/tensorrt_model_connect/models/decoder_family/model.py"],
             imap,
         )
         assert result.builder_tests == []
@@ -3396,16 +3388,16 @@ class TestCoverageMapIntegration:
         assert "builder" in result.fallback_tiers
 
     def test_changed_family_builder_test_selected_directly_without_coverage_map(self, imap):
-        """Changed colocated family builder tests run directly without E2E impact."""
+        """Changed colocated builder tests run directly and select their owner."""
         result = test_impact.analyze_impact(
-            ["python/tensorrt_model_connect/families/media_family/tests/test_family.py"],
+            ["python/tensorrt_model_connect/models/media_family/tests/test_family.py"],
             imap,
         )
 
         assert result.builder_tests == [
-            "python/tensorrt_model_connect/families/media_family/tests/test_family.py"
+            "python/tensorrt_model_connect/models/media_family/tests/test_family.py"
         ]
-        assert result.e2e_models == []
+        assert result.e2e_models == ["media-core", "media-scale", "media-scale-fp8"]
         assert result.fallback_tiers == []
 
     def test_changed_e2e_harness_unit_test_selected_directly(self, imap):
@@ -3434,9 +3426,7 @@ class TestCoverageMapIntegration:
             ("tools/ci/e2e_schedule.py", ["tests/tools/test_schedule_e2e.py"]),
         ],
     )
-    def test_e2e_runner_selects_explicit_tools_tests(
-        self, imap, coverage_map, path, expected
-    ):
+    def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map, path, expected):
         """E2E scheduler edits select tests that coverage cannot discover."""
         result = test_impact.analyze_impact(
             [path],

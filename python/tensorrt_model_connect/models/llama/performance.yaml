@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: llama.generate
+  operation: generate
+  model: falcon3-1b
+  workload:
+    testcase: falcon3-1b
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward
+additional_profiles:
+- model: minitron-4b-depth
+  inherit: llama.generate
+- model: minitron-4b-width
+  inherit: llama.generate
+- model: nemotron-nano-4b
+  inherit: llama.generate
+- model: tinyllama-1.1b
+  inherit: llama.generate

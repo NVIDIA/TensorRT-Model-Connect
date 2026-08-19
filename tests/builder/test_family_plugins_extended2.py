@@ -4,7 +4,7 @@
 """Generic guard for translation family plugin weight test ownership.
 
 Concrete translation family plugin load_weights assertions live under
-``tests/e2e/models/<family>/``. This shared file intentionally keeps no
+``python/tensorrt_model_connect/models/<family>/``. This shared file intentionally keeps no
 model-specific checkpoint keys or plugin assertions.
 """
 
@@ -14,8 +14,13 @@ from pathlib import Path
 
 
 def test_translation_family_plugin_weight_tests_are_model_owned() -> None:
-    models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
-    owned_tests = sorted(models_dir.glob("*/test_*family_plugin_weights.py"))
+    models_dir = (
+        Path(__file__).resolve().parents[2]
+        / "python"
+        / "tensorrt_model_connect"
+        / "models"
+    )
+    owned_tests = sorted(models_dir.glob("*/tests/test_*family_plugin_weights.py"))
 
     assert owned_tests, "expected family-owned plugin weight tests"
-    assert all("/tests/e2e/models/" in test.as_posix() for test in owned_tests)
+    assert all("/python/tensorrt_model_connect/models/" in test.as_posix() for test in owned_tests)

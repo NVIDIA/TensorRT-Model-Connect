@@ -70,9 +70,9 @@ raw JSON, never know about CLI flags.
 Phase 4a (new, added to plan): pure rename of `override` in identifiers
 and comments. Grep scope:
 - `python/tensorrt_model_connect/triattention_export.py`
-- `src/runtime/models/<family>/triattention_kv_cache.h`
-- `src/runtime/models/<family>/triattention_kv_cache.cpp`
-- `python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py`
+- `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.h`
+- `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp`
+- `python/tensorrt_model_connect/models/qwen/tools/benchmark_qwen3_8b_aime25_vs_hf.py`
 - worklog entries and any test names
 
 Rename lands before the env-var deletion so the diff stays readable and
@@ -127,7 +127,7 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done, `[!]` blocked.
 - [x] `--config` + `--set` on `src/cli/main.cpp` (commit `3bf3fbb8`)
 - [x] `--config` + `--set` on `examples/trtmc_dataset_benchmark.cpp` (commit TBD)
 - [x] `--config` / `--set` / `--dense-set` / `--tri-set` on
-      `python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py` (commit TBD)
+      `python/tensorrt_model_connect/models/qwen/tools/benchmark_qwen3_8b_aime25_vs_hf.py` (commit TBD)
 - [ ] C ABI `trtmc_create_pipeline_ex` gains `const char* config_json`
   - Deferred further: the C++ CLI and dataset benchmark both thread
     config through without needing the C ABI. The ABI extension is only
@@ -155,7 +155,7 @@ imports, `build_cli.py`, and all internal imports updated.
 ### Phase 4 — Cluster migration
 - [x] Phase 4a: `override` rename
   - Skipped as a standalone commit: the `triattention_override_*`
-    helpers in `src/runtime/models/<family>/triattention_kv_cache.cpp` will be
+    helpers in `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp` will be
     deleted (not renamed) when Cluster A's env-var removal lands.
     Rename + delete would churn the same lines twice; the single
     deletion commit is the cleaner diff. New code in the config
@@ -228,7 +228,7 @@ imports, `build_cli.py`, and all internal imports updated.
   - Schema declared in Python + C++ (4 fields: step_trace_path,
     step_trace_start_pos, step_trace_end_pos, step_trace_topk).
     Session/platform only (debug knobs, no build-time baking).
-  - `src/runtime/models/<family>/pipeline.cpp` env-var
+  - `python/tensorrt_model_connect/models/<family>/runtime/pipeline.cpp` env-var
     initializer in `step_trace_config()` deleted. New public entry
     point `apply_text_trace_config_from_registry(path, start, end,
     topk)` mutates the process-wide static (same observable shape as
@@ -311,7 +311,7 @@ deleted (hard removal with no shims), tests updated.
   - Architecture is validated; what remains is the 10–12 hour empirical
     benchmark to confirm accuracy/throughput parity with iter2.
     Deferred to a user-driven kickoff. One-liner:
-      python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py
+      python/tensorrt_model_connect/models/qwen/tools/benchmark_qwen3_8b_aime25_vs_hf.py
           --dense-bundle PATH.bundle --tri-bundle PATH.bundle
           --output-dir artifacts/triattention/loop/iter3
           --set triattention.profile=true
@@ -596,12 +596,12 @@ Commit chain:
     INTERNAL_ERROR / ERROR / WARNING / INFO / VERBOSE validator). Session /
     platform layers.
   * Schema manifest entry added — eighth row in the list.
-- `python/tensorrt_model_connect/families/magpie_tts/magpie_tokenizer.py`:
+- `python/tensorrt_model_connect/models/magpie_tts/magpie_tokenizer.py`:
   * Deleted the `TRTMC_MAGPIE_ASSET_DIR` env-var read. Asset dir now
     resolves via standard `XDG_CACHE_HOME` / `~/.cache/trtmc_nemo_assets`
     / `/tmp/trtmc_nemo_assets` fallbacks only. The migration doc note
     in the source explains why.
-- `python/tensorrt_model_connect/families/magpie_tts/profile.py`:
+- `python/tensorrt_model_connect/models/magpie_tts/profile.py`:
   * Deleted the `os.environ["TRTMC_MAGPIE_GREEDY"]` assignment — the
     Python debug runner doesn't go through the C++ pipeline factory,
     so the registry isn't consulted here. Noted in a comment.
@@ -634,8 +634,8 @@ Commit chain:
     * TRTMC_MAGPIE_GREEDY, TRTMC_MAGPIE_CFG_SCALE, TRTMC_MAGPIE_TEMPERATURE,
       TRTMC_MAGPIE_FINISHED_LIMIT, TRTMC_MAGPIE_SEED (runtime, in
       magpie_pipeline.cpp).
-    * TRTMC_MAGPIE_MAX_SOURCE_POS (build-time, in
-      python/tensorrt_model_connect/families/magpie_tts/plugin.py).
+    * TRTMC_MAGPIE_MAX_SOURCE_POS (build-time; the current owner-local entry is
+      `python/tensorrt_model_connect/models/magpie_tts/model.py`).
 - C++ side: `MagpieTTSConfig` gains `seed` (int64_t). `apply_env_overrides`
   shrinks to a single RNG-seed statement (all other fields arrive
   pre-populated from the registry via magpie_plugin). The file-scope
@@ -756,17 +756,17 @@ Commit chain:
   unbounded), step_trace_topk (int32, ≥1, default 8). Session /
   platform layers only; these are debug knobs.
 - Schema manifest entry added (third schema file).
-- `src/runtime/models/<family>/pipeline.cpp`:
+- `python/tensorrt_model_connect/models/<family>/runtime/pipeline.cpp`:
   * Deleted the env-var initializer inside `step_trace_config()`;
     replaced the old lazy-static-from-env pattern with a
     `mutable_step_trace_config()` + external `apply_text_trace_config_from_registry(path, start, end, topk)` entry point.
   * `env_int_or_default` helper deleted (only call site was the
     step-trace init). `env_flag_set` retained: two unmigrated env
     vars (`TRTMC_DISABLE_CUDA_GRAPH`, `TRTMC_GPU_ARGMAX`) still use it.
-- `src/runtime/models/<family>/pipeline.h`: new forward-
+- `python/tensorrt_model_connect/models/<family>/runtime/pipeline.h`: new forward-
   declared `apply_text_trace_config_from_registry(...)` at namespace
   scope, so decoder_plugin can call without cross-file fragility.
-- `src/runtime/models/<family>/plugin.cpp`:
+- `python/tensorrt_model_connect/models/<family>/runtime/plugin.cpp`:
   * Includes `trtmc/config/config_bundle.h` (needed for templated
     `ctx.runtime_config->get<T>(...)` calls against the now-complete
     type; forward declaration in pipeline_plugin.h was insufficient).
@@ -829,7 +829,7 @@ Commit chain:
 - Commit: pending end-of-tick.
 - Next tick (12) — Cluster C (`text_trace.*`). Inventory:
   `TRTMC_TEXT_STEP_TRACE_PATH`, plus any sibling step-trace env vars
-  read in `src/runtime/models/<family>/pipeline.cpp`.
+  read in `python/tensorrt_model_connect/models/<family>/runtime/pipeline.cpp`.
   Similar shape to Cluster A but smaller (2-3 fields). The main piece
   of work is plumbing the resolved values from the text-generation
   pipeline constructor — they're session-level knobs, so all layers
@@ -840,7 +840,7 @@ Commit chain:
   the registry only. TRTMC_TRIATTN_* env vars deleted entirely; the only
   supported input channels are bundle `defaults:`, CLI `--config <file>`,
   and `--set triattention.<field>=<value>`.
-- `src/runtime/models/<family>/triattention_kv_cache.h`:
+- `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.h`:
   * `TriAttentionConfig` grows 12 debug/profile fields (debug, profile,
     runtime_bucket_rows, disable_gpu_selection, disable_gpu_compaction,
     disable_gpu_state, zero_tail, dump_keep_path, dump_compaction_index,
@@ -850,7 +850,7 @@ Commit chain:
     runtime_config=nullptr)` signature grows an optional
     `ConfigBundle*` parameter; legacy JSON path still works for
     pre-migration bundles that lack `defaults:`.
-- `src/runtime/models/<family>/triattention_kv_cache.cpp`:
+- `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp`:
   * Deleted `triattention_debug_enabled`, `triattention_profile_enabled`,
     `triattention_disable_gpu_{selection,compaction,state}`,
     `triattention_dump_{keep_path,compaction_index,score_cache_enabled,
@@ -864,7 +864,7 @@ Commit chain:
     keep precedence for unset fields.
   * All ~20 scattered `triattention_*_enabled()` call sites rewritten
     to read `config_.<field>` directly.
-- `src/runtime/models/<family>/plugin.cpp`:
+- `python/tensorrt_model_connect/models/<family>/runtime/plugin.cpp`:
   * Single call site updated to pass `ctx.runtime_config` through to
     `parse_triattention_bundle_config`.
 - Gates: full build clean with `-Wall -Wextra -Wpedantic`. All 7
@@ -928,8 +928,8 @@ Commit chain:
 - Commit: pending end-of-tick.
 - Next tick (10) — swap TriAttention env-var readers for
   `ctx.runtime_config->get<T>("triattention", …)` queries. Target
-  `src/runtime/models/<family>/triattention_kv_cache.cpp` and
-  `src/runtime/models/<family>/triattention_kv_cache.h`. Delete the env-var
+  `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp` and
+  `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.h`. Delete the env-var
   helpers (`triattention_override_*` and bare `std::getenv` reads) in
   the same commit. Scope gate: the Python builder path still provides
   a way to populate the bundle `defaults:` block for TriAttention
@@ -1041,7 +1041,7 @@ Commit chain:
        (`include/trtmc/config/schemas/triattention.h` + registration in a
        new `.cpp` file added to the force-link anchor list).
     4. Swap the `TRTMC_TRIATTN_*` env-var readers in
-       `src/runtime/models/<family>/triattention_kv_cache.cpp` for ConfigBundle
+       `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp` for ConfigBundle
        queries. Similarly for the Python build path.
     5. Delete the env-var readers (hard removal with no shims).
     6. Validate per-cluster tests still pass.
@@ -1052,7 +1052,7 @@ Commit chain:
   supplied and schemas are registered, writes `effective_config.json`
   next to the bundle path. Same no-schemas-yet pre-Phase-4 message as
   the main CLI.
-- `python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py` — four new flags, all in
+- `python/tensorrt_model_connect/models/qwen/tools/benchmark_qwen3_8b_aime25_vs_hf.py` — four new flags, all in
   the generic config-registry shape:
     * `--config <file>` — shared config profile, applied to both runs.
     * `--set NS.FIELD=VALUE` — shared session-layer override (repeatable).

@@ -1,126 +1,126 @@
 <!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
-<svg width="745" height="705" role="img" aria-labelledby="architecture-build-ownership-svg-title architecture-build-ownership-svg-description" preserveAspectRatio="xMidYMid meet"
- viewBox="0.00 0.00 745.00 705.00" xmlns="http://www.w3.org/2000/svg">
+<svg width="1022" height="705" role="img" aria-labelledby="architecture-build-ownership-svg-title architecture-build-ownership-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 1022.00 705.00" xmlns="http://www.w3.org/2000/svg">
 <title id="architecture-build-ownership-svg-title">Build-time units and ownership</title>
-<desc id="architecture-build-ownership-svg-description">Public build entry points resolve one family model module and call model.build exactly once; that module owns native or exact optimized construction and complete deployment-bundle assembly.</desc>
+<desc id="architecture-build-ownership-svg-description">Public build entry points resolve one model owner and call model.build exactly once; that same folder owns its descriptor, Python construction, native runtime, tests, and complete deployment bundle.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 680)">
-<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-680 719.82,-680 719.82,25.2 -25.2,25.2"/>
-<text xml:space="preserve" text-anchor="start" x="204.97" y="-626.6" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Build&#45;time ownership</text>
-<text xml:space="preserve" text-anchor="start" x="11.56" y="-609.4" font-family="Arial" font-size="16.00" fill="#111827">Shared entry points resolve and dispatch; one family model module owns the complete bundle.</text>
+<polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-680 997.14,-680 997.14,25.2 -25.2,25.2"/>
+<text xml:space="preserve" text-anchor="start" x="175.57" y="-626.6" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">One model owner, one vertical implementation</text>
+<text xml:space="preserve" text-anchor="start" x="162.22" y="-609.4" font-family="Arial" font-size="16.00" fill="#111827">Shared entry points resolve and dispatch; one folder owns build, runtime, tests, and bundle.</text>
 <g id="clust2" class="cluster">
 <title>cluster_family</title>
-<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M20,-237.5C20,-237.5 336,-237.5 336,-237.5 342,-237.5 348,-243.5 348,-249.5 348,-249.5 348,-515.8 348,-515.8 348,-521.8 342,-527.8 336,-527.8 336,-527.8 20,-527.8 20,-527.8 14,-527.8 8,-521.8 8,-515.8 8,-515.8 8,-249.5 8,-249.5 8,-243.5 14,-237.5 20,-237.5"/>
-<text xml:space="preserve" text-anchor="start" x="72.51" y="-508.6" font-family="Arial" font-weight="bold" font-size="18.00" fill="#1e3a8a">Model&#45;owned build units</text>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="2" d="M29.32,-237.5C29.32,-237.5 603.32,-237.5 603.32,-237.5 609.32,-237.5 615.32,-243.5 615.32,-249.5 615.32,-249.5 615.32,-515.8 615.32,-515.8 615.32,-521.8 609.32,-527.8 603.32,-527.8 603.32,-527.8 29.32,-527.8 29.32,-527.8 23.32,-527.8 17.32,-521.8 17.32,-515.8 17.32,-515.8 17.32,-249.5 17.32,-249.5 17.32,-243.5 23.32,-237.5 29.32,-237.5"/>
+<text xml:space="preserve" text-anchor="start" x="242.79" y="-508.6" font-family="Arial" font-weight="bold" font-size="18.00" fill="#1e3a8a">models/&lt;owner&gt;/</text>
 </g>
 <!-- cli -->
 <g id="node1" class="node">
 <title>cli</title>
-<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M139.32,-602.8C139.32,-602.8 46.68,-602.8 46.68,-602.8 40.68,-602.8 34.68,-596.8 34.68,-590.8 34.68,-590.8 34.68,-572.8 34.68,-572.8 34.68,-566.8 40.68,-560.8 46.68,-560.8 46.68,-560.8 139.32,-560.8 139.32,-560.8 145.32,-560.8 151.32,-566.8 151.32,-572.8 151.32,-572.8 151.32,-590.8 151.32,-590.8 151.32,-596.8 145.32,-602.8 139.32,-602.8"/>
-<text xml:space="preserve" text-anchor="start" x="49.08" y="-577.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">trtmc build</text>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M104.63,-602.8C104.63,-602.8 12,-602.8 12,-602.8 6,-602.8 0,-596.8 0,-590.8 0,-590.8 0,-572.8 0,-572.8 0,-566.8 6,-560.8 12,-560.8 12,-560.8 104.63,-560.8 104.63,-560.8 110.63,-560.8 116.63,-566.8 116.63,-572.8 116.63,-572.8 116.63,-590.8 116.63,-590.8 116.63,-596.8 110.63,-602.8 104.63,-602.8"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-577.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">trtmc build</text>
 </g>
 <!-- descriptor -->
 <g id="node3" class="node">
 <title>descriptor</title>
-<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M276.65,-490.2C276.65,-490.2 79.35,-490.2 79.35,-490.2 73.35,-490.2 67.35,-484.2 67.35,-478.2 67.35,-478.2 67.35,-447.6 67.35,-447.6 67.35,-441.6 73.35,-435.6 79.35,-435.6 79.35,-435.6 276.65,-435.6 276.65,-435.6 282.65,-435.6 288.65,-441.6 288.65,-447.6 288.65,-447.6 288.65,-478.2 288.65,-478.2 288.65,-484.2 282.65,-490.2 276.65,-490.2"/>
-<text xml:space="preserve" text-anchor="start" x="107.14" y="-465.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family descriptor</text>
-<text xml:space="preserve" text-anchor="start" x="81.75" y="-449" font-family="Arial" font-size="16.00" fill="#111827">MODEL.toml + match rules</text>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M249.75,-490.2C249.75,-490.2 36.88,-490.2 36.88,-490.2 30.88,-490.2 24.88,-484.2 24.88,-478.2 24.88,-478.2 24.88,-447.6 24.88,-447.6 24.88,-441.6 30.88,-435.6 36.88,-435.6 36.88,-435.6 249.75,-435.6 249.75,-435.6 255.75,-435.6 261.75,-441.6 261.75,-447.6 261.75,-447.6 261.75,-478.2 261.75,-478.2 261.75,-484.2 255.75,-490.2 249.75,-490.2"/>
+<text xml:space="preserve" text-anchor="start" x="64.45" y="-465.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Single MODEL.toml</text>
+<text xml:space="preserve" text-anchor="start" x="39.28" y="-449" font-family="Arial" font-size="16.00" fill="#111827">identity · runtime · manifests</text>
 </g>
 <!-- cli&#45;&gt;descriptor -->
 <g id="edge1" class="edge">
 <title>cli&#45;&gt;descriptor</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" d="M108.2,-559.9C120.26,-543.31 137.42,-519.71 151.7,-500.07"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="153.87,-501.85 156.31,-493.73 149.34,-498.55 153.87,-501.85"/>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M73.51,-559.9C85.58,-543.31 102.73,-519.71 117.02,-500.07"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="119.19,-501.85 121.63,-493.73 114.66,-498.55 119.19,-501.85"/>
 </g>
 <!-- python -->
 <g id="node2" class="node">
 <title>python</title>
-<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M322.53,-602.8C322.53,-602.8 203.47,-602.8 203.47,-602.8 197.47,-602.8 191.47,-596.8 191.47,-590.8 191.47,-590.8 191.47,-572.8 191.47,-572.8 191.47,-566.8 197.47,-560.8 203.47,-560.8 203.47,-560.8 322.53,-560.8 322.53,-560.8 328.53,-560.8 334.53,-566.8 334.53,-572.8 334.53,-572.8 334.53,-590.8 334.53,-590.8 334.53,-596.8 328.53,-602.8 322.53,-602.8"/>
-<text xml:space="preserve" text-anchor="start" x="205.87" y="-577.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Python build()</text>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M287.84,-602.8C287.84,-602.8 168.79,-602.8 168.79,-602.8 162.79,-602.8 156.79,-596.8 156.79,-590.8 156.79,-590.8 156.79,-572.8 156.79,-572.8 156.79,-566.8 162.79,-560.8 168.79,-560.8 168.79,-560.8 287.84,-560.8 287.84,-560.8 293.84,-560.8 299.84,-566.8 299.84,-572.8 299.84,-572.8 299.84,-590.8 299.84,-590.8 299.84,-596.8 293.84,-602.8 287.84,-602.8"/>
+<text xml:space="preserve" text-anchor="start" x="171.19" y="-577.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Python build()</text>
 </g>
 <!-- python&#45;&gt;descriptor -->
 <g id="edge2" class="edge">
 <title>python&#45;&gt;descriptor</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" d="M247.8,-559.9C235.74,-543.31 218.58,-519.71 204.3,-500.07"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="206.66,-498.55 199.69,-493.73 202.13,-501.85 206.66,-498.55"/>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M213.12,-559.9C201.05,-543.31 183.9,-519.71 169.61,-500.07"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="171.97,-498.55 165,-493.73 167.44,-501.85 171.97,-498.55"/>
 </g>
 <!-- model -->
 <g id="node4" class="node">
 <title>model</title>
-<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M328.48,-368.4C328.48,-368.4 27.52,-368.4 27.52,-368.4 21.52,-368.4 15.52,-362.4 15.52,-356.4 15.52,-356.4 15.52,-325.8 15.52,-325.8 15.52,-319.8 21.52,-313.8 27.52,-313.8 27.52,-313.8 328.48,-313.8 328.48,-313.8 334.48,-313.8 340.48,-319.8 340.48,-325.8 340.48,-325.8 340.48,-356.4 340.48,-356.4 340.48,-362.4 334.48,-368.4 328.48,-368.4"/>
-<text xml:space="preserve" text-anchor="start" x="111.4" y="-343.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Family model.py</text>
-<text xml:space="preserve" text-anchor="start" x="29.92" y="-327.2" font-family="Arial" font-size="16.00" fill="#111827">match · config · weights · route · bundle</text>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M595.79,-368.4C595.79,-368.4 294.84,-368.4 294.84,-368.4 288.84,-368.4 282.84,-362.4 282.84,-356.4 282.84,-356.4 282.84,-325.8 282.84,-325.8 282.84,-319.8 288.84,-313.8 294.84,-313.8 294.84,-313.8 595.79,-313.8 595.79,-313.8 601.79,-313.8 607.79,-319.8 607.79,-325.8 607.79,-325.8 607.79,-356.4 607.79,-356.4 607.79,-362.4 601.79,-368.4 595.79,-368.4"/>
+<text xml:space="preserve" text-anchor="start" x="408" y="-343.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">model.py</text>
+<text xml:space="preserve" text-anchor="start" x="297.24" y="-327.2" font-family="Arial" font-size="16.00" fill="#111827">match · config · weights · route · bundle</text>
 </g>
 <!-- descriptor&#45;&gt;model -->
 <g id="edge3" class="edge">
 <title>descriptor&#45;&gt;model</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" d="M178,-434.72C178,-418.71 178,-398.21 178,-380.56"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="180.8,-380.81 178,-372.81 175.2,-380.81 180.8,-380.81"/>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M211.84,-434.72C257.63,-416.55 318.01,-392.6 365.9,-373.6"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="366.76,-376.28 373.16,-370.72 364.69,-371.07 366.76,-376.28"/>
 </g>
 <!-- native -->
 <g id="node5" class="node">
 <title>native</title>
-<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M337.35,-54.6C337.35,-54.6 82.65,-54.6 82.65,-54.6 76.65,-54.6 70.65,-48.6 70.65,-42.6 70.65,-42.6 70.65,-12 70.65,-12 70.65,-6 76.65,0 82.65,0 82.65,0 337.35,0 337.35,0 343.35,0 349.35,-6 349.35,-12 349.35,-12 349.35,-42.6 349.35,-42.6 349.35,-48.6 343.35,-54.6 337.35,-54.6"/>
-<text xml:space="preserve" text-anchor="start" x="157.08" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Native recipe</text>
-<text xml:space="preserve" text-anchor="start" x="85.05" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">graph + TensorRT plans + sections</text>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M609.77,-54.6C609.77,-54.6 352.86,-54.6 352.86,-54.6 346.86,-54.6 340.86,-48.6 340.86,-42.6 340.86,-42.6 340.86,-12 340.86,-12 340.86,-6 346.86,0 352.86,0 352.86,0 609.77,0 609.77,0 615.77,0 621.77,-6 621.77,-12 621.77,-12 621.77,-42.6 621.77,-42.6 621.77,-48.6 615.77,-54.6 609.77,-54.6"/>
+<text xml:space="preserve" text-anchor="start" x="447.78" y="-29.5" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">runtime/</text>
+<text xml:space="preserve" text-anchor="start" x="355.26" y="-13.4" font-family="Arial" font-size="16.00" fill="#111827">native recipe + model DSO sources</text>
 </g>
 <!-- model&#45;&gt;native -->
 <g id="edge4" class="edge">
 <title>model&#45;&gt;native</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" d="M180.78,-312.98C186.48,-257.46 199.49,-130.75 206.05,-66.77"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="208.8,-67.44 206.83,-59.2 203.23,-66.87 208.8,-67.44"/>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M448.45,-312.98C454.86,-257.46 469.49,-130.75 476.87,-66.77"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="479.61,-67.46 477.75,-59.19 474.05,-66.82 479.61,-67.46"/>
 </g>
 <!-- optimized -->
 <g id="node6" class="node">
 <title>optimized</title>
-<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M613.7,-264.8C613.7,-264.8 368.3,-264.8 368.3,-264.8 362.3,-264.8 356.3,-258.8 356.3,-252.8 356.3,-252.8 356.3,-222.2 356.3,-222.2 356.3,-216.2 362.3,-210.2 368.3,-210.2 368.3,-210.2 613.7,-210.2 613.7,-210.2 619.7,-210.2 625.7,-216.2 625.7,-222.2 625.7,-222.2 625.7,-252.8 625.7,-252.8 625.7,-258.8 619.7,-264.8 613.7,-264.8"/>
-<text xml:space="preserve" text-anchor="start" x="397.96" y="-239.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Exact optimized profile</text>
-<text xml:space="preserve" text-anchor="start" x="370.7" y="-223.6" font-family="Arial" font-size="16.00" fill="#111827">implementation + isolated adapter</text>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M907.34,-264.8C907.34,-264.8 635.29,-264.8 635.29,-264.8 629.29,-264.8 623.29,-258.8 623.29,-252.8 623.29,-252.8 623.29,-222.2 623.29,-222.2 623.29,-216.2 629.29,-210.2 635.29,-210.2 635.29,-210.2 907.34,-210.2 907.34,-210.2 913.34,-210.2 919.34,-216.2 919.34,-222.2 919.34,-222.2 919.34,-252.8 919.34,-252.8 919.34,-258.8 913.34,-264.8 907.34,-264.8"/>
+<text xml:space="preserve" text-anchor="start" x="678.27" y="-239.7" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Exact optimized profile</text>
+<text xml:space="preserve" text-anchor="start" x="637.69" y="-223.6" font-family="Arial" font-size="16.00" fill="#111827">owner&#45;local implementation + adapter</text>
 </g>
 <!-- model&#45;&gt;optimized -->
 <g id="edge5" class="edge">
 <title>model&#45;&gt;optimized</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" d="M261.88,-312.87C303.27,-299.44 353.38,-283.17 396.17,-269.28"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="396.96,-271.97 403.71,-266.84 395.23,-266.64 396.96,-271.97"/>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M532.68,-312.87C575.98,-299.38 628.42,-283.03 673.11,-269.11"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="673.72,-271.85 680.53,-266.79 672.06,-266.5 673.72,-271.85"/>
 </g>
 <!-- bundle -->
-<g id="node7" class="node">
+<g id="node8" class="node">
 <title>bundle</title>
-<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M682.62,-161.2C682.62,-161.2 279.38,-161.2 279.38,-161.2 273.38,-161.2 267.38,-155.2 267.38,-149.2 267.38,-149.2 267.38,-115.6 267.38,-115.6 267.38,-109.6 273.38,-103.6 279.38,-103.6 279.38,-103.6 682.62,-103.6 682.62,-103.6 688.62,-103.6 694.62,-109.6 694.62,-115.6 694.62,-115.6 694.62,-149.2 694.62,-149.2 694.62,-155.2 688.62,-161.2 682.62,-161.2"/>
-<text xml:space="preserve" text-anchor="start" x="344.32" y="-133.4" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.bundle deployment contract</text>
-<text xml:space="preserve" text-anchor="start" x="281.78" y="-117" font-family="Arial" font-size="16.00" fill="#111827">metadata · plans or embedded implementation · assets</text>
+<path fill="#fffbeb" stroke="#b45309" stroke-width="2" d="M959.94,-161.2C959.94,-161.2 556.69,-161.2 556.69,-161.2 550.69,-161.2 544.69,-155.2 544.69,-149.2 544.69,-149.2 544.69,-115.6 544.69,-115.6 544.69,-109.6 550.69,-103.6 556.69,-103.6 556.69,-103.6 959.94,-103.6 959.94,-103.6 965.94,-103.6 971.94,-109.6 971.94,-115.6 971.94,-115.6 971.94,-149.2 971.94,-149.2 971.94,-155.2 965.94,-161.2 959.94,-161.2"/>
+<text xml:space="preserve" text-anchor="start" x="621.64" y="-133.4" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">.bundle deployment contract</text>
+<text xml:space="preserve" text-anchor="start" x="559.09" y="-117" font-family="Arial" font-size="16.00" fill="#111827">metadata · plans or embedded implementation · assets</text>
 </g>
 <!-- native&#45;&gt;bundle -->
 <g id="edge6" class="edge">
 <title>native&#45;&gt;bundle</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" d="M281.36,-55.45C316.15,-68.68 358.28,-84.71 394.86,-98.63"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="393.64,-101.16 402.12,-101.39 395.63,-95.93 393.64,-101.16"/>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M554.25,-55.45C589.82,-68.68 632.88,-84.71 670.26,-98.63"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="669.28,-101.25 677.75,-101.41 671.23,-96 669.28,-101.25"/>
 </g>
 <!-- optimized&#45;&gt;bundle -->
 <g id="edge7" class="edge">
 <title>optimized&#45;&gt;bundle</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" d="M488.37,-209.41C487.3,-198.38 486.04,-185.4 484.87,-173.32"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="487.69,-173.42 484.14,-165.73 482.12,-173.96 487.69,-173.42"/>
+<path fill="none" stroke="#64748b" stroke-width="2.4" d="M767.9,-209.41C766.51,-198.38 764.87,-185.4 763.35,-173.32"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="766.17,-173.3 762.39,-165.71 760.61,-174 766.17,-173.3"/>
 </g>
 <!-- evidence -->
-<g id="node8" class="node">
+<g id="node7" class="node">
 <title>evidence</title>
-<path fill="#ecfeff" stroke="#0e7490" stroke-width="2" d="M640.25,-490.2C640.25,-490.2 367.75,-490.2 367.75,-490.2 361.75,-490.2 355.75,-484.2 355.75,-478.2 355.75,-478.2 355.75,-447.6 355.75,-447.6 355.75,-441.6 361.75,-435.6 367.75,-435.6 367.75,-435.6 640.25,-435.6 640.25,-435.6 646.25,-435.6 652.25,-441.6 652.25,-447.6 652.25,-447.6 652.25,-478.2 652.25,-478.2 652.25,-484.2 646.25,-490.2 640.25,-490.2"/>
-<text xml:space="preserve" text-anchor="start" x="436.92" y="-465.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Owned evidence</text>
-<text xml:space="preserve" text-anchor="start" x="370.15" y="-449" font-family="Arial" font-size="16.00" fill="#111827">unit · E2E · exact&#45;profile qualification</text>
+<path fill="#ffffff" stroke="#64748b" stroke-width="2" d="M595.01,-490.2C595.01,-490.2 313.62,-490.2 313.62,-490.2 307.62,-490.2 301.62,-484.2 301.62,-478.2 301.62,-478.2 301.62,-447.6 301.62,-447.6 301.62,-441.6 307.62,-435.6 313.62,-435.6 313.62,-435.6 595.01,-435.6 595.01,-435.6 601.01,-435.6 607.01,-441.6 607.01,-447.6 607.01,-447.6 607.01,-478.2 607.01,-478.2 607.01,-484.2 601.01,-490.2 595.01,-490.2"/>
+<text xml:space="preserve" text-anchor="start" x="432.11" y="-465.1" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">tests/</text>
+<text xml:space="preserve" text-anchor="start" x="316.02" y="-449" font-family="Arial" font-size="16.00" fill="#111827">unit · C++ · manifests · E2E evidence</text>
 </g>
 <!-- evidence&#45;&gt;model -->
 <g id="edge8" class="edge">
 <title>evidence&#45;&gt;model</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M398.98,-434.62C353.47,-422.79 310.39,-411.6 310.39,-411.6 310.39,-411.6 274.47,-392.75 240.06,-374.68"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="241.55,-372.3 233.16,-371.06 238.94,-377.25 241.55,-372.3"/>
-<text xml:space="preserve" text-anchor="middle" x="388.2" y="-397.2" font-family="Arial" font-size="16.00" fill="#334155">proves family contract</text>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M452.27,-434.72C451.07,-418.71 449.53,-398.21 448.2,-380.56"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="451.01,-380.57 447.62,-372.8 445.43,-380.99 451.01,-380.57"/>
+<text xml:space="preserve" text-anchor="middle" x="529.06" y="-397.2" font-family="Arial" font-size="16.00" fill="#334155">proves owner contract</text>
 </g>
 <!-- evidence&#45;&gt;optimized -->
 <g id="edge9" class="edge">
 <title>evidence&#45;&gt;optimized</title>
-<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M502.43,-434.95C500.14,-395.54 495.86,-321.96 493.23,-276.9"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="496.04,-276.99 492.78,-269.17 490.45,-277.32 496.04,-276.99"/>
-<text xml:space="preserve" text-anchor="middle" x="567.89" y="-336.3" font-family="Arial" font-size="16.00" fill="#334155">proves exact profile</text>
+<path fill="none" stroke="#64748b" stroke-width="2.4" stroke-dasharray="5,2" d="M542.49,-434.69C580.9,-422.84 617.32,-411.6 617.32,-411.6 617.32,-411.6 694.72,-324.59 739.78,-273.95"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.4" points="741.61,-276.1 744.84,-268.26 737.43,-272.38 741.61,-276.1"/>
+<text xml:space="preserve" text-anchor="middle" x="773.29" y="-336.3" font-family="Arial" font-size="16.00" fill="#334155">proves exact profile</text>
 </g>
 </g>
 </svg>

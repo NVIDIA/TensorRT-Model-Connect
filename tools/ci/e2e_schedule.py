@@ -432,7 +432,12 @@ def main() -> None:
     parser.add_argument(
         "--manifest-dir",
         type=Path,
-        default=Path(__file__).resolve().parents[2] / "tests" / "e2e" / "models",
+        default=(
+            Path(__file__).resolve().parents[2]
+            / "python"
+            / "tensorrt_model_connect"
+            / "models"
+        ),
     )
     parser.add_argument(
         "--timing-estimates",

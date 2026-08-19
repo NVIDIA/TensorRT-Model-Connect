@@ -14,7 +14,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FAMILIES = ROOT / "python" / "tensorrt_model_connect" / "families"
+FAMILIES = ROOT / "python" / "tensorrt_model_connect" / "models"
 
 
 def _family_dirs():
@@ -43,7 +43,7 @@ def _load_owned_module(
                 continue
             try:
                 module = importlib.import_module(
-                    f"tensorrt_model_connect.families.{family_dir.name}.{module_name}"
+                    f"tensorrt_model_connect.models.{family_dir.name}.{module_name}"
                 )
             except ModuleNotFoundError as exc:
                 if exc.name and not exc.name.startswith("tensorrt_model_connect"):
@@ -74,7 +74,7 @@ def load_owned_callable(
             continue
         try:
             module = importlib.import_module(
-                f"tensorrt_model_connect.families.{family_dir.name}.{module_name}"
+                f"tensorrt_model_connect.models.{family_dir.name}.{module_name}"
             )
         except ModuleNotFoundError as exc:
             if exc.name and not exc.name.startswith("tensorrt_model_connect"):
@@ -121,7 +121,7 @@ def load_family_graph_ops(family: str):
     module_name = ".".join(Path(module_file).with_suffix("").parts)
     try:
         return importlib.import_module(
-            f"tensorrt_model_connect.families.{family}.{module_name}"
+            f"tensorrt_model_connect.models.{family}.{module_name}"
         )
     except ModuleNotFoundError as exc:
         if exc.name and not exc.name.startswith("tensorrt_model_connect"):

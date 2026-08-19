@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_five_shot_mcq:
+    models:
+    - qwen3-0.6b-fp16
+    - qwen3-0.6b-fp16-tp4
+    - qwen3-0.6b-fp8
+    - qwen3-0.6b-native-l0
+    - qwen3-0.6b-topp
+    - qwen3-4b-instruct-2507
+    - qwen3-4b-instruct-2507-tp4
+    default_models:
+    - qwen3-0.6b-fp16
+    - qwen3-0.6b-fp8
+    - qwen3-0.6b-topp
+    - qwen3-4b-instruct-2507
+    qualification:
+      qwen3-0.6b-fp16:
+        reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
+      qwen3-0.6b-fp8:
+        reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
+      qwen3-0.6b-topp:
+        reference_cache_identity: qwen3-0.6b-mmlu-five-shot-v1
+      qwen3-4b-instruct-2507: {}

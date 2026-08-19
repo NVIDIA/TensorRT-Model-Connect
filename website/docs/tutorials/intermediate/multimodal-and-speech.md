@@ -124,7 +124,7 @@ $TRTMC build openai/whisper-large-v3-turbo \
   --precision fp16
 
 $TRTMC transcribe /tmp/whisper.bundle \
-  --audio tests/e2e/models/whisper/data/Recording.wav \
+  --audio python/tensorrt_model_connect/models/whisper/tests/data/Recording.wav \
   --max-new-tokens 224
 ```
 
@@ -153,7 +153,7 @@ $TRTMC build nvidia/nemotron-speech-streaming-en-0.6b \
   --max-cache-length 128
 
 $TRTMC transcribe /tmp/nemotron-rnnt.bundle \
-  --audio tests/e2e/models/whisper/data/Recording.wav \
+  --audio python/tensorrt_model_connect/models/whisper/tests/data/Recording.wav \
   --stream \
   --chunk-ms 160 \
   --att-context-size 70,13

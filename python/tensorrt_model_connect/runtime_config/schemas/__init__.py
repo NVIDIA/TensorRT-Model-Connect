@@ -5,7 +5,7 @@
 
 Shared features own modules in this package. Model-family specific features
 own ``runtime_config_schema.py`` sidecars under
-``tensorrt_model_connect/families/<family>/``. Loading sidecars by file path
+``tensorrt_model_connect/models/<family>/``. Loading sidecars by file path
 keeps schema discovery generic without importing family model modules.
 """
 
@@ -30,7 +30,7 @@ def _load_module_from_path(qualname: str, path: Path) -> None:
 
 
 def _iter_family_schema_modules() -> list[tuple[str, Path]]:
-    import tensorrt_model_connect.families as families
+    import tensorrt_model_connect.models as families
 
     modules: list[tuple[str, Path]] = []
     for root in families.__path__:

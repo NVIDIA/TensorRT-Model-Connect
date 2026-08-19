@@ -85,8 +85,10 @@ requires it. It must not add a second optimized-runtime framework.
 
 ## Ownership and Layout
 
-Everything specific to Qwen x Edge-LLM stays in the Qwen-owned Builder,
-Runtime, and Test trees:
+The following is the historical three-tree layout used during implementation.
+The current files are colocated under
+`python/tensorrt_model_connect/models/qwen/`; the old paths are retained below
+only as point-in-time evidence.
 
 ```text
 # Builder

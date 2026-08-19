@@ -351,7 +351,7 @@ def _resolve_build_model_metadata(
     """Return model path and metadata candidate for profile selection."""
     from .config import ModelConfig
     from .engine_builder import _resolve_model
-    from .families import (
+    from .models import (
         resolve_diffusion_family_id,
         resolve_family_id_from_config,
     )
@@ -586,11 +586,6 @@ def _cmd_version(_args: argparse.Namespace) -> int:
     else:
         print("TensorRT-RTX: not installed")
     return 0
-
-
-def cmd_build(args: argparse.Namespace) -> int:
-    """Compatibility wrapper for tests and callers that import command handlers."""
-    return _cmd_build(args)
 
 
 def _cmd_graph(args: argparse.Namespace) -> int:

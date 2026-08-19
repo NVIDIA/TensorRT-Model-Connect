@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_continuation_parity:
+    models:
+    - opt-125m
+    - opt-125m-tp4
+    default_models:
+    - opt-125m
+    model_overrides:
+      opt-125m:
+        # Reserve the suite's 64 generated tokens inside OPT's 2048 limit.
+        prompt_token_limit: 1984
+        prompt_truncation_side: left
+    qualification:
+      opt-125m: {}

@@ -30,10 +30,10 @@ normal user.
 ## General runtime strategy
 
 For one exact `model × platform × configuration` tuple, Model Connect selects
-one runtime owner. It can be the model family's native TensorRT runtime or an
-exact platform-specialized provider. Selection must not create two competing
-owners for the same qualified tuple or silently fall through after one provider
-claims it.
+one implementation path inside the model's owner contract: its native
+TensorRT runtime or an exact platform-specialized provider. Selection must not
+create two competing implementations for the same qualified tuple or silently
+fall through after one provider claims it.
 
 The native and platform-specialized paths are separate implementation
 boundaries. Users normally interact with the same bundle/task API; advanced

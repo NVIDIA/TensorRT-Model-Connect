@@ -31,7 +31,7 @@ def build_debug_engine(model_id_or_path, max_cache_length, verbose):
     """Build TRT engine with debug layer outputs marked."""
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families import family_has_capability, find_model
+    from tensorrt_model_connect.models import family_has_capability, find_model
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)

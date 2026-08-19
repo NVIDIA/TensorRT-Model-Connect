@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: wan_t2v.generate_image
+  operation: generate_image
+  model: wan21-t2v-1.3b
+  workload:
+    testcase: wan21-t2v-1.3b
+  baseline:
+    runner: task-reference
+    adapter: hf-diffusers
+    mode: hf-eager
+    reference_backend: hf_diffusers
+    timing_scope: task-pipeline-call-wall
+    output_contract: media-shape

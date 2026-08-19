@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "deepseek_v2"
+capabilities = [
+  "debug_layer_outputs",
+]
+aliases = [
+  "deepseek_v2",
+  "deepseek_v3",
+  "deepseekv2",
+]
+prefixes = [
+  "deepseek_v2",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "deepseek_v2_decoder_kv_cache",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_deepseek_v2_plugin",
+]
+runtime_strategies = [
+  "deepseek_v2_decoder_kv_cache",
+]
+test_manifests = [
+  "tests/manifests/deepseek-v2-lite-tp4.json",
+  "tests/manifests/deepseek-v2-lite.json",
+  "tests/manifests/deepseek-v2-tiny-tp2.json",
+  "tests/manifests/deepseek-v2-tiny.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "deepseek_v2_decoder_kv_cache",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

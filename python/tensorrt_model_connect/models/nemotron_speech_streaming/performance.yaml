@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: nemotron_speech_streaming.transcribe
+  operation: transcribe
+  model: nemotron-3.5-asr-streaming-0.6b
+  workload:
+    testcase: nemotron-3.5-asr-streaming-0.6b
+  baseline:
+    runner: task-reference
+    adapter: nemo-asr
+    mode: pytorch-eager
+    reference_backend: nemo_reference
+    timing_scope: task-pipeline-call-wall
+    asset_loading_included: true
+additional_profiles:
+- model: nemotron-speech-streaming-en-0.6b
+  inherit: nemotron_speech_streaming.transcribe

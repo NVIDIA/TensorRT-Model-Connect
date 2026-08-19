@@ -9,12 +9,12 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import tensorrt_model_connect.families as families
+import tensorrt_model_connect.models as families
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CATALOG_PATH = REPO_ROOT / "website/data/hf-model-metadata.json"
-E2E_MODELS_ROOT = REPO_ROOT / "tests/e2e/models"
+E2E_MODELS_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models"
 
 # This checkpoint is metadata for a family-owned test dependency rather than an
 # E2E manifest root, so it intentionally has no direct manifest of its own.
@@ -30,10 +30,7 @@ def _catalog() -> list[dict[str, object]]:
 
 def _e2e_families_by_hf_id() -> dict[str, str]:
     owners: dict[str, str] = {}
-    paths = {
-        *E2E_MODELS_ROOT.glob("*.json"),
-        *E2E_MODELS_ROOT.glob("*/manifests/*.json"),
-    }
+    paths = set(E2E_MODELS_ROOT.glob("*/tests/manifests/*.json"))
     for path in sorted(paths):
         payload = json.loads(path.read_text(encoding="utf-8"))
         hf_id = payload.get("hf_id")

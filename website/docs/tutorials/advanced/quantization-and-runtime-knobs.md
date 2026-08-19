@@ -112,7 +112,7 @@ options directly without a shared provider probe.
 ```bash
 $TRTMC build black-forest-labs/FLUX.2-dev \
   -o /tmp/flux2-fp8.bundle \
-  --fp8-scales tests/e2e/models/flux/data/flux2-fp8-scales.json
+  --fp8-scales python/tensorrt_model_connect/models/flux/tests/data/flux2-fp8-scales.json
 ```
 
 Use `--save-fp8-scales` when you want to reuse calibrated scales across builds.

@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "m2m_100"
+aliases = [
+  "m2m100",
+  "m2m_100",
+  "nllb",
+]
+prefixes = [
+  "m2m_100",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "m2m_100_seq2seq_encoder_decoder",
+]
+performance_mode = "enc_dec"
+runtime_plugins = [
+  "plugin.cpp|register_m2m_100_plugin",
+]
+runtime_strategies = [
+  "m2m_100_seq2seq_encoder_decoder",
+]
+test_manifests = [
+  "tests/manifests/nllb-200.json",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

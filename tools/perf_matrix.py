@@ -48,7 +48,7 @@ from tensorrt_model_connect.benchmark.worker import (  # noqa: E402
     find_worker,
     worker_metadata,
 )
-from tensorrt_model_connect.families.locateanything.task_contract import (  # noqa: E402
+from tensorrt_model_connect.models.locateanything.task_contract import (  # noqa: E402
     matched_box_iou,
     matched_point_distance,
     parse_localizations,
@@ -73,7 +73,9 @@ from tools import qualification_report  # noqa: E402
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
 PREPARATION_SCHEMA = "trtmc.perf-bundle-preparation/v1"
 SUITE_SCHEMA = "trtmc.perf-suite/v2"
+OWNER_SUITE_SCHEMA = "trtmc.perf-owner/v1"
 ENVIRONMENT_SCHEMA = "trtmc.perf-environment/v1"
+MODELS_ROOT = REPOSITORY / "python" / "tensorrt_model_connect" / "models"
 L0_PROFILE_PATTERN = re.compile(r"(?:^|-)l0(?:-|$)", re.IGNORECASE)
 SEQUENCE_RUNTIME_MARKERS = ("bart_", "marian_", "m2m_100_", "t5_")
 TASK_REFERENCE_ADAPTERS = {
@@ -215,11 +217,149 @@ def _read_yaml_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
+def _read_owner_performance(models_root: Path) -> dict[str, list[Any]]:
+    fragments = sorted(models_root.glob("*/performance.yaml"))
+    if not fragments:
+        raise PerfMatrixError(
+            f"no model-owned performance fragments found under {models_root}"
+        )
+    merged: dict[str, list[Any]] = {
+        "entries": [],
+        "additional_profiles": [],
+        "excluded_profiles": [],
+    }
+    seen_entry_ids: set[str] = set()
+    seen_profile_models: set[str] = set()
+    seen_excluded_models: set[str] = set()
+    catalog_families: dict[str, str] | None = None
+    for fragment in fragments:
+        owner = fragment.parent.name
+        if not (fragment.parent / "MODEL.toml").is_file():
+            raise PerfMatrixError(
+                f"performance fragment owner {owner!r} has no MODEL.toml"
+            )
+        raw = _read_yaml_object(fragment, "model-owned performance fragment")
+        if raw.get("schema_version") != OWNER_SUITE_SCHEMA:
+            raise PerfMatrixError(
+                f"{fragment}: schema_version must be {OWNER_SUITE_SCHEMA!r}"
+            )
+        unsupported = sorted(
+            set(raw)
+            - {
+                "schema_version",
+                "entries",
+                "additional_profiles",
+                "excluded_profiles",
+            }
+        )
+        if unsupported:
+            raise PerfMatrixError(
+                f"{fragment}: unsupported fields: {', '.join(unsupported)}"
+            )
+        local_entries = raw.get("entries", [])
+        local_profiles = raw.get("additional_profiles", [])
+        local_exclusions = raw.get("excluded_profiles", [])
+        for field, configured in (
+            ("entries", local_entries),
+            ("additional_profiles", local_profiles),
+            ("excluded_profiles", local_exclusions),
+        ):
+            if not isinstance(configured, list):
+                raise PerfMatrixError(f"{fragment}: {field} must be a list")
+        if not local_entries and not local_profiles and not local_exclusions:
+            raise PerfMatrixError(f"{fragment}: fragment must not be empty")
+
+        local_entry_ids: set[str] = set()
+        normalized_entries: list[dict[str, Any]] = []
+        for entry in local_entries:
+            if not isinstance(entry, Mapping):
+                raise PerfMatrixError(f"{fragment}: every entry must be an object")
+            entry_id = entry.get("id")
+            if not isinstance(entry_id, str) or not entry_id.strip():
+                raise PerfMatrixError(f"{fragment}: every entry needs a non-empty id")
+            if "family" in entry:
+                raise PerfMatrixError(
+                    f"{fragment}: entry {entry_id!r} must not declare family; "
+                    f"the owner directory is {owner!r}"
+                )
+            if entry_id in seen_entry_ids:
+                raise PerfMatrixError(f"duplicate model-owned performance entry: {entry_id}")
+            seen_entry_ids.add(entry_id)
+            local_entry_ids.add(entry_id)
+            normalized_entries.append({**deepcopy(dict(entry)), "family": owner})
+
+        for profile in local_profiles:
+            if not isinstance(profile, Mapping):
+                raise PerfMatrixError(
+                    f"{fragment}: every additional profile must be an object"
+                )
+            model = profile.get("model")
+            inherited = profile.get("inherit")
+            if not isinstance(model, str) or not model.strip():
+                raise PerfMatrixError(
+                    f"{fragment}: every additional profile needs a non-empty model"
+                )
+            if inherited not in local_entry_ids:
+                raise PerfMatrixError(
+                    f"{fragment}: profile {model!r} must inherit an entry in the same owner"
+                )
+            if model in seen_profile_models:
+                raise PerfMatrixError(
+                    f"duplicate model-owned additional profile: {model}"
+                )
+            seen_profile_models.add(model)
+
+        for exclusion in local_exclusions:
+            if not isinstance(exclusion, Mapping):
+                raise PerfMatrixError(
+                    f"{fragment}: every excluded profile must be an object"
+                )
+            model = exclusion.get("model")
+            if not isinstance(model, str) or not model.strip():
+                raise PerfMatrixError(
+                    f"{fragment}: every excluded profile needs a non-empty model"
+                )
+            if model in seen_excluded_models:
+                raise PerfMatrixError(
+                    f"duplicate model-owned excluded profile: {model}"
+                )
+            if catalog_families is None:
+                catalog_families = {
+                    entry.name: entry.family
+                    for entry in ManifestCatalog(models_root).entries()
+                }
+            catalog_owner = catalog_families.get(model)
+            if catalog_owner != owner:
+                raise PerfMatrixError(
+                    f"{fragment}: excluded profile {model!r} is owned by "
+                    f"{catalog_owner!r}, not {owner!r}"
+                )
+            seen_excluded_models.add(model)
+
+        merged["entries"].extend(normalized_entries)
+        merged["additional_profiles"].extend(deepcopy(local_profiles))
+        merged["excluded_profiles"].extend(deepcopy(local_exclusions))
+    return merged
+
+
+def _read_yaml(path: Path, *, models_root: Path = MODELS_ROOT) -> dict[str, Any]:
     value = _read_yaml_object(path, "performance suite")
     if value.get("schema_version") != SUITE_SCHEMA:
         raise PerfMatrixError(f"suite schema_version must be {SUITE_SCHEMA!r}")
+    unsupported = sorted(set(value) - {"schema_version", "name", "defaults"})
+    if unsupported:
+        raise PerfMatrixError(
+            "performance suite must contain only shared schema/defaults; "
+            f"move model configuration to models/<family>/performance.yaml: "
+            f"{', '.join(unsupported)}"
+        )
+    value.update(_read_owner_performance(models_root))
     return value
+
+
+def _suite_sha256(suite: Mapping[str, Any]) -> str:
+    encoded = json.dumps(suite, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 _ENVIRONMENT_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -1055,7 +1195,7 @@ def _initial_results(
         "status": "running",
         "suite": str(suite_path.resolve()),
         "suite_name": str(suite.get("name", suite_path.stem)),
-        "suite_sha256": _sha256_file(suite_path),
+        "suite_sha256": _suite_sha256(suite),
         "repository_root": str(REPOSITORY),
         "git_commit": _git_commit(),
         "started_at": _now(),
@@ -3220,7 +3360,7 @@ def _raw_commands_html(row: Mapping[str, Any], default_cwd: str) -> str:
 
 @cache
 def _manifest_user_contract(manifest: str, testcase: str) -> str:
-    path = REPOSITORY / "tests" / "e2e" / "models" / manifest
+    path = REPOSITORY / "python" / "tensorrt_model_connect" / "models" / manifest
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -3989,13 +4129,15 @@ def _resume(arguments: argparse.Namespace) -> int:
         raise PerfMatrixError(
             f"cannot resume because environment is unavailable: {environment_path}"
         )
-    if results.get("suite_sha256") != _sha256_file(suite_path):
-        raise PerfMatrixError("cannot resume because the suite content changed")
+    suite = _read_yaml(suite_path)
+    if results.get("suite_sha256") != _suite_sha256(suite):
+        raise PerfMatrixError(
+            "cannot resume because the suite or a model-owned fragment changed"
+        )
     if environment_record.get("sha256") != _sha256_file(environment_path):
         raise PerfMatrixError("cannot resume because the environment content changed")
     if results.get("git_commit") != _git_commit():
         raise PerfMatrixError("cannot resume because the repository revision changed")
-    suite = _read_yaml(suite_path)
     cases = _cases(suite)
     _validate_coverage(cases, _excluded_profiles(suite))
     selected_ids = results.get("selected_entry_ids")

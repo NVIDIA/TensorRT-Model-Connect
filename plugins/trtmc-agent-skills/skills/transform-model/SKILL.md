@@ -3,8 +3,8 @@ name: transform-model
 description: >-
   Use when onboarding a Hugging Face model into TensorRT-Model-Connect or
   extending an existing family to produce a `.bundle` bundle. Drives
-  ownership-first implementation across Python builder, native runtime, and
-  model-owned E2E descriptors, then requires reference-consistency and runtime
+  ownership-first implementation across one model folder containing its
+  Python builder, native runtime, and E2E contracts, then requires reference-consistency and runtime
   evidence before support is claimed.
 ---
 
@@ -26,13 +26,14 @@ implementation, nearest family descriptors, and owned tests first.
 
 ## Ownership Map
 
-A fully registered native model normally crosses three descriptors:
+A fully registered native model has one descriptor and one owner root:
 
-| Layer | Owner |
+| Component | Owner-local path |
 |---|---|
-| Python build/family selection | `python/tensorrt_model_connect/families/<family>/MODEL.toml` |
-| Native C++ strategy/plugin | `src/runtime/models/<family>/MODEL.toml` |
-| E2E models, manifests, sidecars | `tests/e2e/models/<family>/MODEL.toml` |
+| Combined discovery and ownership metadata | `python/tensorrt_model_connect/models/<family>/MODEL.toml` |
+| Python build | `python/tensorrt_model_connect/models/<family>/model.py` |
+| Native C++ strategy/plugin | `python/tensorrt_model_connect/models/<family>/runtime/` |
+| E2E manifests, assets, and tests | `python/tensorrt_model_connect/models/<family>/tests/` |
 
 The owning directories also contain family-local builders, graph helpers,
 runtime sources, manifests, testcases, thresholds, and performance contracts.
@@ -59,7 +60,7 @@ entrypoint.
 ### Python Builder
 
 - Put the complete config → weights → engines → bundle recipe in
-  `families/<family>/model.py` and expose required `matches(config)` and
+  `models/<family>/model.py` and expose required `matches(config)` and
   `build(model_dir, output_path, **options)` functions.
 - Parse model configuration without inventing defaults that change semantics.
 - Map checkpoint tensors explicitly, including tied weights, fused/split
@@ -96,13 +97,13 @@ reject TensorRT-RTX, optimized-runtime, quantized, and tensor-parallel builds.
 
 ### Model-Owned Evidence
 
-- Add the manifest under `tests/e2e/models/<family>/manifests/`.
-- Register it in that family's E2E `MODEL.toml`.
+- Add the manifest under `python/tensorrt_model_connect/models/<family>/tests/manifests/`.
+- Register it in that family's root `MODEL.toml`.
 - Use real task strategy, runtime strategy, testcase, inputs, and comparator.
 - Put model-specific tolerances in the established threshold sidecar.
 - Add `perf_validation.json` only when a reviewed performance contract exists.
-- Bind a reference workload in `tests/validation/model_workloads.yaml` when the
-  task has an aligned comparison implementation.
+- Bind a reference workload in the family's `validation.yaml` when the task has
+  an aligned comparison implementation.
 - Define a new workload in `tests/validation/workloads.yaml` only when the
   reference runner, TRTMC runner, comparator, gates, and reproduction contract
   are complete; implementation belongs in `tools/validation/`.
@@ -125,7 +126,7 @@ Use the supported dev container when TensorRT/GPU dependencies are required:
   --isolate-model-plugin
 ```
 
-The script builds the bundle, discovers the native runtime owner, runs
+The script builds the bundle, resolves the model owner's native runtime, runs
 decoder-only diff tools only for a declared `decoder_debug` profile, and runs a
 matching model-owned E2E case when present. A warning about a missing manifest
 is not a support pass.
@@ -182,7 +183,7 @@ Before `$submit-github-pr`, run skill/static checks, relevant unit tests, the
 model-owned E2E and comparison where hardware permits, and `git diff --check`.
 Use `$write-git-messages`.
 
-The PR must identify the exact model revision, all three ownership descriptors,
+The PR must identify the exact model revision, unified owner descriptor,
 runtime/bundle path, build and validation commands, artifact hashes/paths,
 comparison metrics, target hardware, performance evidence if claimed, and
 unrun or blocked gates.

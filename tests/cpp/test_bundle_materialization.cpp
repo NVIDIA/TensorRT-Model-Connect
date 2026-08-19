@@ -55,6 +55,13 @@ std::string two_section_header(std::size_t config_size, std::uint64_t plan_size)
     return header.str();
 }
 
+std::string plan_only_header(std::uint64_t plan_size) {
+    std::ostringstream header;
+    header << R"({"model_id":"test","sections":{)"
+           << R"("denoiser_plan":{"offset":0,"size":)" << plan_size << "}}}";
+    return header.str();
+}
+
 const trtmc::BundleSection* find_section(const trtmc::BundleFile& bundle, const std::string& name) {
     for (const auto& section : bundle.sections) {
         if (section.name == name)
@@ -67,7 +74,7 @@ void test_staged_policy_leaves_plan_bytes_unread() {
     const auto directory = temporary_directory();
     const auto path = directory / "staged.bundle";
     const std::string config =
-        R"({"bundle_loading":{"mode":"staged","eager_sections":["config.json"],"lazy_sections":["denoiser_plan"]}})";
+        R"({"runtime_strategy":"test","bundle_loading":{"mode":"staged","eager_sections":["config.json"],"lazy_sections":["denoiser_plan"]}})";
     const std::uint64_t absent_plan_size = 1ULL << 40;
     write_bundle(path, two_section_header(config.size(), absent_plan_size),
                  std::vector<char>(config.begin(), config.end()));
@@ -89,7 +96,7 @@ void test_invalid_partition_fails_before_plan_read() {
     const auto directory = temporary_directory();
     const auto path = directory / "invalid.bundle";
     const std::string config =
-        R"({"bundle_loading":{"mode":"staged","eager_sections":["config.json"],"lazy_sections":["config.json"]}})";
+        R"({"runtime_strategy":"test","bundle_loading":{"mode":"staged","eager_sections":["config.json"],"lazy_sections":["config.json"]}})";
     write_bundle(path, two_section_header(config.size(), 1ULL << 40),
                  std::vector<char>(config.begin(), config.end()));
 
@@ -126,12 +133,94 @@ void test_bundle_without_policy_preserves_read_all_behavior() {
     trtmc_test::remove_all_safe(directory);
 }
 
+void test_missing_config_section_is_rejected() {
+    const auto directory = temporary_directory();
+    const auto path = directory / "missing-config.bundle";
+    const std::vector<char> plan = {'P', 'L', 'A', 'N'};
+    write_bundle(path, plan_only_header(plan.size()), plan);
+
+    std::string error;
+    try {
+        (void)trtmc::detail::materialize_pipeline_bundle(path.string());
+    } catch (const std::runtime_error& exception) {
+        error = exception.what();
+    }
+    check(error.find("Native bundle must contain a non-empty config.json section") == 0,
+          "native bundle without config is rejected");
+
+    trtmc_test::remove_all_safe(directory);
+}
+
+void test_empty_config_section_is_rejected() {
+    const auto directory = temporary_directory();
+    const auto path = directory / "empty-config.bundle";
+    const std::vector<char> plan = {'P', 'L', 'A', 'N'};
+    write_bundle(path, two_section_header(/*config_size=*/0, plan.size()), plan);
+
+    std::string error;
+    try {
+        (void)trtmc::detail::materialize_pipeline_bundle(path.string());
+    } catch (const std::runtime_error& exception) {
+        error = exception.what();
+    }
+    check(error.find("Native bundle must contain a non-empty config.json section") == 0,
+          "native bundle with empty config is rejected");
+
+    trtmc_test::remove_all_safe(directory);
+}
+
+void test_malformed_config_section_is_rejected() {
+    const auto directory = temporary_directory();
+    const auto path = directory / "malformed-config.bundle";
+    const std::string config = R"({"runtime_strategy":"test")";
+    const std::vector<char> plan = {'P', 'L', 'A', 'N'};
+    std::vector<char> payload(config.begin(), config.end());
+    payload.insert(payload.end(), plan.begin(), plan.end());
+    write_bundle(path, two_section_header(config.size(), plan.size()), payload);
+
+    std::string error;
+    try {
+        (void)trtmc::detail::materialize_pipeline_bundle(path.string());
+    } catch (const std::runtime_error& exception) {
+        error = exception.what();
+    }
+    check(error.find("Invalid native bundle config.json") == 0,
+          "native bundle with malformed config is rejected");
+
+    trtmc_test::remove_all_safe(directory);
+}
+
+void test_missing_runtime_strategy_is_rejected() {
+    const auto directory = temporary_directory();
+    const auto path = directory / "missing-strategy.bundle";
+    const std::string config = R"({"model_type":"test"})";
+    const std::vector<char> plan = {'P', 'L', 'A', 'N'};
+    std::vector<char> payload(config.begin(), config.end());
+    payload.insert(payload.end(), plan.begin(), plan.end());
+    write_bundle(path, two_section_header(config.size(), plan.size()), payload);
+
+    std::string error;
+    try {
+        (void)trtmc::detail::materialize_pipeline_bundle(path.string());
+    } catch (const std::runtime_error& exception) {
+        error = exception.what();
+    }
+    check(error == "Bundle config missing runtime_strategy",
+          "native bundle without runtime strategy is rejected");
+
+    trtmc_test::remove_all_safe(directory);
+}
+
 } // namespace
 
 int main() {
     test_staged_policy_leaves_plan_bytes_unread();
     test_invalid_partition_fails_before_plan_read();
     test_bundle_without_policy_preserves_read_all_behavior();
+    test_missing_config_section_is_rejected();
+    test_empty_config_section_is_rejected();
+    test_malformed_config_section_is_rejected();
+    test_missing_runtime_strategy_is_rejected();
     if (failures != 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;

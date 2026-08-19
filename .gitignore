@@ -80,7 +80,7 @@ scripts/agents/prompts/
 *.swo
 
 # Downloaded HF model directories (heavyweight, not committed)
-# Checked-in family fixtures live under tests/e2e/models/<family>/data/.
+# Checked-in family fixtures live under python/tensorrt_model_connect/models/<family>/tests/data/.
 models/hf/TinyLlama__*/
 models/hf/tiny-random-*/
 models/hf/01-ai__*/
@@ -133,5 +133,7 @@ engines
 *.ttrtb
 results.json
 !**/Recording.wav
-!tests/e2e/models/whisper/data/librispeech-test-clean-6930-75918-0003.wav
+# Model-owned test assets are source inputs, not ambient benchmark output.
+!python/tensorrt_model_connect/models/*/tests/**/*.png
+!python/tensorrt_model_connect/models/*/tests/**/*.wav
 worktrees/

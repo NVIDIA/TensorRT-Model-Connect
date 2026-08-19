@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  dinov3_image_feature_extraction_parity:
+    dataset:
+      default_path: python/tensorrt_model_connect/models/dinov3/tests/data/validation.json
+    models:
+    - dinov3-convnext-tiny-pretrain-lvd1689m
+    - dinov3-vits16-pretrain-lvd1689m
+    default_models:
+    - dinov3-convnext-tiny-pretrain-lvd1689m
+    - dinov3-vits16-pretrain-lvd1689m
+    qualification:
+      dinov3-convnext-tiny-pretrain-lvd1689m: {}
+      dinov3-vits16-pretrain-lvd1689m: {}

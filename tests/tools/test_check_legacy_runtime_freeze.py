@@ -70,7 +70,7 @@ def test_is_protected_matches_all_prefixes_from_module_tuple() -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "src/runtime/models/qwen/plugin.cpp",
+        "python/tensorrt_model_connect/models/qwen/runtime/plugin.cpp",
         "tools/coverage_map/fetch_latest.py",
         "include/trtmc/runtime/pipeline_plugin.h",
         "README.md",
@@ -102,7 +102,11 @@ def test_is_protected_does_not_match_prefix_without_trailing_slash() -> None:
 
 def test_main_blocks_explicit_protected_file_list(capsys) -> None:
     rc = check_legacy_runtime_freeze.main(
-        ["--files", "src/cabi/pipeline/foo.cpp", "src/runtime/models/qwen/plugin.cpp"]
+        [
+            "--files",
+            "src/cabi/pipeline/foo.cpp",
+            "python/tensorrt_model_connect/models/qwen/runtime/plugin.cpp",
+        ]
     )
 
     captured = capsys.readouterr()

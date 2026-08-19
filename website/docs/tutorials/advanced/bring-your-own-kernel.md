@@ -361,10 +361,10 @@ git clone --branch v0.6.15 --depth 1 \
   "$WORK/flashinfer-v0.6.15"
 
 git -C "$WORK/flashinfer-v0.6.15" apply \
-  "$PWD/python/tensorrt_model_connect/families/qwen/kernels/flashinfer_device_kv_length.patch"
+  "$PWD/python/tensorrt_model_connect/models/qwen/kernels/flashinfer_device_kv_length.patch"
 
 PYTHONPATH="$WORK/flashinfer-v0.6.15:$PWD/python" \
-  python python/tensorrt_model_connect/families/qwen/kernels/export_flashinfer_decode_attention.py \
+  python python/tensorrt_model_connect/models/qwen/kernels/export_flashinfer_decode_attention.py \
   --output "$WORK/qwen3-flashinfer-linear.so"
 ```
 

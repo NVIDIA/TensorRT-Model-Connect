@@ -20,7 +20,7 @@
 <title>build</title>
 <path fill="#eff6ff" stroke="#2563eb" stroke-width="2.2" d="M516.13,-180.32C516.13,-180.32 284.78,-180.32 284.78,-180.32 278.78,-180.32 272.78,-174.32 272.78,-168.32 272.78,-168.32 272.78,-120.16 272.78,-120.16 272.78,-114.16 278.78,-108.16 284.78,-108.16 284.78,-108.16 516.13,-108.16 516.13,-108.16 522.13,-108.16 528.13,-114.16 528.13,-120.16 528.13,-120.16 528.13,-168.32 528.13,-168.32 528.13,-174.32 522.13,-180.32 516.13,-180.32"/>
 <text xml:space="preserve" text-anchor="start" x="348.79" y="-153.24" font-family="Arial" font-weight="bold" font-size="20.00" fill="#111827">trtmc build</text>
-<text xml:space="preserve" text-anchor="start" x="294.2" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">resolve → family model.build()</text>
+<text xml:space="preserve" text-anchor="start" x="293.3" y="-136.84" font-family="Arial" font-size="16.00" fill="#111827">resolve owner → model.build()</text>
 <text xml:space="preserve" text-anchor="start" x="285.74" y="-120.84" font-family="Arial" font-size="16.00" fill="#111827">native or exact optimized artifact</text>
 </g>
 <!-- checkpoint&#45;&gt;build -->

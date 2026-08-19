@@ -26,7 +26,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 DOWNLOAD_WORKER = REPO_ROOT / "scripts" / "hf_cache_download_worker.py"
-FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
+FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
 HELPER_FUNCTIONS = {
     "_component_has_weight",
     "_dedupe_file_assets",

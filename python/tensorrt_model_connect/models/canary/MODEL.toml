@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "canary"
+reference_entrypoint = "tools/reference.py|run"
+model_dir_adapter = "nemo_archive.py|resolve_model_dir"
+nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
+nemo_model_type = "canary"
+nemo_target_patterns = [
+  "EncDecMultiTaskModel",
+  "canary",
+]
+aliases = [
+  "canary",
+  "canary_asr",
+  "enc_dec_multi_task",
+]
+prefixes = [
+  "canary",
+]
+runtime_plugins = [
+  "plugin.cpp|register_canary_plugin",
+]
+runtime_strategies = [
+  "canary_speech_to_text",
+]
+test_manifests = [
+  "tests/manifests/canary-1b-v2-tp4.json",
+  "tests/manifests/canary-1b-v2.json",
+]
+
+[e2e_defaults.speech_to_text]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "audio", manifest = "test_input_audio" },
+]
+preflight_asset_fields = [
+  "test_input_audio",
+]

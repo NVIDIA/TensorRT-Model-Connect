@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: eagle_vlm.embed
+  operation: embed
+  model: nemotron-embed-vl-1b-v2
+  workload:
+    testcase: nemotron-embed-vl-1b-v2
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-embedding
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+- id: eagle_vlm.rerank
+  operation: rerank
+  model: nemotron-rerank-vl-1b-v2
+  workload:
+    testcase: nemotron-rerank-vl-1b-v2
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-reranking
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false

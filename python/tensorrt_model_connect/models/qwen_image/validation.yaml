@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  dpg_bench_diffusion_image:
+    models:
+    - qwen-image
+    - qwen-image-2512
+    - qwen-image-l0
+    default_models:
+    - qwen-image
+    - qwen-image-2512
+    family_profile:
+      gates:
+        require_matching_initial_latents: 1
+        psnr: 9.0
+        ssim: 0.1
+    model_profiles:
+      qwen-image-2512:
+        gates:
+          psnr: 11.0
+    qualification:
+      qwen-image: {}
+      qwen-image-2512: {}
+  gedit_bench_image_edit:
+    models:
+    - qwen-image-edit-2511
+    default_models:
+    - qwen-image-edit-2511
+    qualification:
+      qwen-image-edit-2511: {}

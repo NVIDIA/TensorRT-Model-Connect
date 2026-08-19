@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "t5"
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "t5_text_to_text",
+]
+aliases = [
+  "t5",
+]
+prefixes = [
+  "t5",
+]
+performance_mode = "enc_dec"
+runtime_plugins = [
+  "plugin.cpp|register_t5_plugin",
+]
+runtime_strategies = [
+  "t5_text_to_text",
+]
+test_manifests = [
+  "tests/manifests/t5-small-tp4.json",
+  "tests/manifests/t5-small.json",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

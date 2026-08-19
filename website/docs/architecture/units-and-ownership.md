@@ -8,8 +8,8 @@ import Diagram from '@site/src/components/Diagram';
 Architecture explains the system flow. Unit ownership answers a different
 question: **where does a behavior belong?**
 
-The repository follows one rule throughout the build, runtime, and test trees:
-model-specific knowledge stays with the model that owns it. Shared units own
+The repository follows one rule throughout build, runtime, and tests:
+model-specific knowledge stays under one model owner root. Shared units own
 public contracts, bundle transport, loading, configuration mechanics, device
 abstractions, and code that is genuinely model-independent.
 
@@ -17,8 +17,8 @@ abstractions, and code that is genuinely model-independent.
 
 <Diagram
   src="/img/diagrams/architecture/build-ownership.svg"
-  alt="Build-time ownership from public CLI and Python entry points through a model family to native or optimized bundle construction"
-  caption="Build-time model knowledge stays in the owning family; the bundle is the only artifact passed into runtime."
+  alt="Build-time ownership from public entry points into one model folder containing its descriptor, Python build, native runtime, and tests"
+  caption="Every model-specific build, runtime, and evidence surface stays in one owner folder; the bundle is the deployment handoff."
 />
 
 <Diagram
@@ -46,7 +46,7 @@ must agree with them.
 | Model DSO loading | `include/trtmc/runtime/pipeline_plugin_loader.h` |
 | Backend and engine-execution abstraction | `include/trtmc/runtime/trt_backend.h`, `include/trtmc/runtime/trt_module.h` |
 | Runtime configuration | `include/trtmc/config/` |
-| Python family build entry | `python/tensorrt_model_connect/families/<family>/model.py` |
+| Model descriptor and build entry | `python/tensorrt_model_connect/models/<owner>/MODEL.toml` and `model.py` |
 | Python bundle serialization | `python/tensorrt_model_connect/bundle_writer.py` |
 
 The declarations with C linkage at the bottom of `pipeline.h` are a limited
@@ -59,39 +59,37 @@ opaque-handle ownership API, so they are not a stable pure-C ABI.
 | --- | --- | --- |
 | Public C++ API | `include/trtmc/` | Task methods, typed results, load options, bundle inspection |
 | CLI | `src/cli/` | Argument parsing, file/media adaptation, and calls into public APIs |
-| Python package | `python/tensorrt_model_connect/` | Public build API, CLI bridge, family resolution, and bundle writing |
-| Python families | `python/tensorrt_model_connect/families/<family>/` | Checkpoint/config semantics, native builders, and optional optimized implementations |
+| Python package | `python/tensorrt_model_connect/` | Public build API, CLI bridge, model resolution, and bundle writing |
+| Model owners | `python/tensorrt_model_connect/models/<owner>/` | Descriptor, checkpoint/config semantics, Python builder, native runtime, tests, manifests, assets, and optional tools |
 | Bundle implementation | `src/bundle/` | Safe header parsing and section access |
 | Runtime registry | `src/runtime/registry/` | Native strategy resolution, DSO loading, plugin lookup, and pipeline creation |
 | Optimized host | `src/runtime/providers/` | Descriptor validation, artifact materialization, and private factory loading |
-| Model runtimes | `src/runtime/models/<owner>/` | Native plugins, pipelines, state, samplers, preprocessors, and model CUDA |
 | Runtime core | `src/runtime/core/` | Device tensors, streams, pooling, distributed setup, and reusable execution mechanics |
 | Runtime domains | `src/runtime/domains/` | Small assumption-free helpers shared by real model owners |
 | Backend | `src/runtime/backend/` | TensorRT ABI-sensitive engine deserialization and execution |
-| Tests and evidence | `tests/` | Builder, C++, tool, E2E, and qualification contracts |
+| Shared tests and evidence | `tests/` | Cross-model builder, runtime, tooling, and harness contracts |
+| Model evidence | `python/tensorrt_model_connect/models/<owner>/tests/` | Owner-local Python, C++, E2E, manifest, asset, and qualification contracts |
 
-## Descriptor relationship
+## One descriptor, one owner
 
-Three native descriptor roots own different parts of one supported model:
+One descriptor owns every model-specific surface:
 
 | Descriptor | Responsibility |
 | --- | --- |
-| `python/tensorrt_model_connect/families/<family>/MODEL.toml` | Builder discovery and specialization metadata |
-| `src/runtime/models/<owner>/MODEL.toml` | Native model DSO, registrar symbols, runtime strategies, config schemas, and focused C++ tests |
-| `tests/e2e/models/<family>/MODEL.toml` | E2E manifests, task defaults, and validation ownership |
+| `python/tensorrt_model_connect/models/<owner>/MODEL.toml` | Builder discovery, runtime plugins and strategies, config schemas, focused C++ tests, E2E manifests, task defaults, and validation ownership |
 
-The IDs normally align, but `runtime_strategy` is the authoritative link when a
-builder/E2E family and runtime owner have different compatibility names.
-`task_strategy` is separate: it selects the user-task runner/comparator
-contract, not a native runtime DSO.
+The owner directory and descriptor `id` are identical. There is no runtime-ID
+alias or second model descriptor. `runtime_strategy` selects one native
+implementation owned by that folder; `task_strategy` selects the shared
+runner/comparator contract and does not select a DSO.
 
 An optimized implementation uses a different ownership shape:
 
 ```text
-python/tensorrt_model_connect/families/<family>/<implementation>/IMPLEMENTATION.toml
-python/tensorrt_model_connect/families/<family>/<implementation>/profiles/*.toml
-tests/e2e/models/<family>/<implementation>/test_adapter.py
-tests/e2e/models/<family>/<implementation>/test_runtime_contract.py
+python/tensorrt_model_connect/models/<family>/<implementation>/IMPLEMENTATION.toml
+python/tensorrt_model_connect/models/<family>/<implementation>/profiles/*.toml
+python/tensorrt_model_connect/models/<family>/tests/<implementation>/test_adapter.py
+python/tensorrt_model_connect/models/<family>/tests/<implementation>/test_runtime_contract.py
 ```
 
 It produces an embedded implementation DSO and does not need a synthetic native
@@ -116,10 +114,10 @@ meanings; neither should be presented as the other.
 When tracing an unfamiliar change, follow its owner before following similar
 code elsewhere:
 
-1. Find the Python, runtime, or E2E descriptor that declares the owner.
+1. Find the single model descriptor that declares the owner.
 2. Follow the exact strategy, implementation/profile, or task identity named by
    that descriptor.
-3. Read the family `model.py`, runtime plugin, or optimized adapter before
+3. Read the owner's `model.py`, runtime plugin, or optimized adapter before
    reading shared infrastructure.
 4. Check which test or qualification artifact proves the stated behavior.
 5. Escalate to a shared abstraction only when multiple independent owners need

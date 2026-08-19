@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "model": "nvidia/segformer-b0-finetuned-ade-512-512",
+      "pipeline_type": "segformer_segmentation",
+      "label": "D3-segmentation",
+      "benchmark": {
+        "label": "segment",
+        "gpu_argmax_label": "segment",
+        "metric": "pipeline_ms",
+        "command": ["{binary}", "segment", "{bundle}", "--image", "{repo_root}/python/tensorrt_model_connect/models/segformer/tests/data/test_img.jpeg", "--output", "{generated_output_image}", "{hf_python_args}"]
+      }
+    }
+  ]
+}

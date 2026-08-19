@@ -495,7 +495,7 @@ The runtime only begins compaction once
 `cache_length_ >= compaction_trigger_length()`, and
 `compaction_trigger_length()` is `kv_budget + divide_length = 3200` for this
 bundle configuration; see
-`src/runtime/models/<family>/triattention_kv_cache.cpp`.
+`python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp`.
 
 Because both prompts are far below `3200`, the tested runs never depend on a
 physical cache capacity larger than `12288`. After compaction starts, the live
@@ -739,7 +739,7 @@ The first full hybrid-bundle benchmark replay later showed a new regression on
 regression.
 
 HF reference generation in
-`python/tensorrt_model_connect/families/qwen/benchmark_qwen3_8b_aime25_vs_hf.py`
+`python/tensorrt_model_connect/models/qwen/tools/benchmark_qwen3_8b_aime25_vs_hf.py`
 already reseeded per sample:
 
 - `torch.manual_seed(seed + row_idx)` for the single-GPU case
@@ -1116,10 +1116,10 @@ At this point the remaining explanations are narrower:
 
 ## Files most directly responsible for the final result
 
-- `src/runtime/models/<family>/triattention_kv_cache.cpp`
-- `src/runtime/models/<family>/triattention_kernels.cu`
-- `src/runtime/models/<family>/triattention_kv_cache.h`
-- `tests/builder/test_triattention_runtime.py`
+- `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp`
+- `python/tensorrt_model_connect/models/<family>/runtime/triattention_kernels.cu`
+- `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.h`
+- `python/tensorrt_model_connect/models/qwen/tests/test_triattention_runtime.py`
 
 ## Short version
 
@@ -1765,7 +1765,7 @@ This makes sense after reading the native runtime code:
 - `cache_length_` only grows in `append_present_to_cache()`
 - prefill tokens do not contribute to `cache_length_`
 - compaction triggering uses `cache_length_ >= compaction_trigger_length()`
-- relevant code: `src/runtime/models/<family>/triattention_kv_cache.cpp` around the
+- relevant code: `python/tensorrt_model_connect/models/<family>/runtime/triattention_kv_cache.cpp` around the
   append/cache-length and compaction-trigger paths
 
 So the earlier Python replay with `count_prompt_tokens=True` was not an
@@ -2352,8 +2352,8 @@ That led to a new exact sparse CUDA sampler:
 
 The implementation is in:
 
-- `src/runtime/models/<family>/sparse_multinomial_kernel.cu`
-- `src/runtime/models/<family>/sampler.cpp`
+- `python/tensorrt_model_connect/models/<family>/runtime/sparse_multinomial_kernel.cu`
+- `python/tensorrt_model_connect/models/<family>/runtime/sampler.cpp`
 
 New sampler regression coverage was added for:
 

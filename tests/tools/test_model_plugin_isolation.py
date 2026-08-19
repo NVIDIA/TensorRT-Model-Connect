@@ -30,22 +30,23 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 
 def _make_repo(tmp_path: Path) -> Path:
     repo_root = tmp_path / "repo"
-    manifests_dir = repo_root / "tests" / "e2e" / "models" / "decoder_family" / "manifests"
+    model_root = repo_root / "python" / "tensorrt_model_connect" / "models" / "decoder_family"
+    manifests_dir = model_root / "tests" / "manifests"
     manifests_dir.mkdir(parents=True)
     (manifests_dir / "decoder-small.json").write_text(
-        json.dumps({
-            "name": "decoder-small",
-            "family": "decoder_family",
-            "runtime_strategy": "llama_decoder_kv_cache",
-        }),
+        json.dumps(
+            {
+                "name": "decoder-small",
+                "family": "decoder_family",
+                "runtime_strategy": "decoder_family_runtime",
+            }
+        ),
         encoding="utf-8",
     )
-    runtime_dir = repo_root / "src" / "runtime" / "models" / "llama"
+    runtime_dir = model_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    (runtime_dir / "MODEL.toml").write_text(
-        'id = "llama"\n'
-        'runtime_library = "libtrtmc_model_llama.so"\n'
-        'runtime_strategies = ["llama_decoder_kv_cache"]\n',
+    (model_root / "MODEL.toml").write_text(
+        'id = "decoder_family"\nruntime_strategies = ["decoder_family_runtime"]\n',
         encoding="utf-8",
     )
     return repo_root
@@ -59,7 +60,9 @@ def _add_case(
     runtime_id: str,
     runtime_strategy: str,
 ) -> None:
-    manifests_dir = repo_root / "tests" / "e2e" / "models" / family / "manifests"
+    del runtime_id
+    model_root = repo_root / "python" / "tensorrt_model_connect" / "models" / family
+    manifests_dir = model_root / "tests" / "manifests"
     manifests_dir.mkdir(parents=True, exist_ok=True)
     (manifests_dir / f"{name}.json").write_text(
         json.dumps(
@@ -71,12 +74,10 @@ def _add_case(
         ),
         encoding="utf-8",
     )
-    runtime_dir = repo_root / "src" / "runtime" / "models" / runtime_id
+    runtime_dir = model_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    (runtime_dir / "MODEL.toml").write_text(
-        f'id = "{runtime_id}"\n'
-        f'runtime_library = "libtrtmc_model_{runtime_id}.so"\n'
-        f'runtime_strategies = ["{runtime_strategy}"]\n',
+    (model_root / "MODEL.toml").write_text(
+        f'id = "{family}"\nruntime_strategies = ["{runtime_strategy}"]\n',
         encoding="utf-8",
     )
 
@@ -91,7 +92,7 @@ def test_targets_resolve_e2e_model_to_runtime_plugin_owner(tmp_path: Path) -> No
         "decoder-small",
     )
 
-    assert result.stdout.splitlines() == ["trtmc_model_llama"]
+    assert result.stdout.splitlines() == ["trtmc_model_decoder_family"]
 
 
 @pytest.mark.parametrize(
@@ -138,22 +139,23 @@ def test_targets_resolve_model_owned_runtime_plugin(
 ) -> None:
     repo_root = _make_repo(tmp_path)
     model_name = f"{family}-case"
-    manifests_dir = repo_root / "tests" / "e2e" / "models" / family / "manifests"
+    model_root = repo_root / "python" / "tensorrt_model_connect" / "models" / family
+    manifests_dir = model_root / "tests" / "manifests"
     manifests_dir.mkdir(parents=True, exist_ok=True)
     (manifests_dir / f"{model_name}.json").write_text(
-        json.dumps({
-            "name": model_name,
-            "family": family,
-            "runtime_strategy": strategy,
-        }),
+        json.dumps(
+            {
+                "name": model_name,
+                "family": family,
+                "runtime_strategy": strategy,
+            }
+        ),
         encoding="utf-8",
     )
-    runtime_dir = repo_root / "src" / "runtime" / "models" / family
+    runtime_dir = model_root / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    (runtime_dir / "MODEL.toml").write_text(
-        f'id = "{family}"\n'
-        f'runtime_library = "libtrtmc_model_{family}.so"\n'
-        f'runtime_strategies = ["{strategy}"]\n',
+    (model_root / "MODEL.toml").write_text(
+        f'id = "{family}"\nruntime_strategies = ["{strategy}"]\n',
         encoding="utf-8",
     )
 
@@ -172,7 +174,7 @@ def test_targets_resolve_model_owned_node_id_from_tests_file(tmp_path: Path) -> 
     repo_root = _make_repo(tmp_path)
     tests_file = tmp_path / "tests.txt"
     tests_file.write_text(
-        "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-small]\n",
+        "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-small]\n",
         encoding="utf-8",
     )
 
@@ -184,15 +186,15 @@ def test_targets_resolve_model_owned_node_id_from_tests_file(tmp_path: Path) -> 
         str(tests_file),
     )
 
-    assert result.stdout.splitlines() == ["trtmc_model_llama"]
+    assert result.stdout.splitlines() == ["trtmc_model_decoder_family"]
 
 
 def test_prepare_copies_only_selected_runtime_plugin(tmp_path: Path) -> None:
     repo_root = _make_repo(tmp_path)
     build_dir = tmp_path / "build"
-    source_dir = build_dir / "models" / "llama"
+    source_dir = build_dir / "models" / "decoder_family"
     source_dir.mkdir(parents=True)
-    source = source_dir / "libtrtmc_model_llama.so"
+    source = source_dir / "libtrtmc_model_decoder_family.so"
     source.write_bytes(b"fake-so")
 
     output_dir = tmp_path / "only-selected"
@@ -208,42 +210,32 @@ def test_prepare_copies_only_selected_runtime_plugin(tmp_path: Path) -> None:
         str(output_dir),
     )
 
-    copied = output_dir / "llama" / "libtrtmc_model_llama.so"
+    copied = output_dir / "decoder_family" / "libtrtmc_model_decoder_family.so"
     assert copied.read_bytes() == b"fake-so"
-    assert result.stdout.splitlines() == [f"trtmc_model_llama {copied}"]
+    assert result.stdout.splitlines() == [f"trtmc_model_decoder_family {copied}"]
 
 
 def _add_projection_fixture_files(repo_root: Path) -> None:
     files = {
         "README.md": "generic root\n",
-        "python/tensorrt_model_connect/families/__init__.py": "# registry\n",
-        "python/tensorrt_model_connect/families/base.py": "# protocol\n",
-        "python/tensorrt_model_connect/families/decoder_family/MODEL.toml": (
-            'id = "decoder_family"\n'
+        "python/tensorrt_model_connect/models/__init__.py": "# registry\n",
+        "python/tensorrt_model_connect/models/decoder_family/model.py": ("# selected builder\n"),
+        "python/tensorrt_model_connect/models/sibling/MODEL.toml": (
+            'id = "sibling"\nruntime_strategies = ["sibling_runtime"]\n'
         ),
-        "python/tensorrt_model_connect/families/decoder_family/plugin.py": (
-            "# selected builder\n"
-        ),
-        "python/tensorrt_model_connect/families/sibling/MODEL.toml": 'id = "sibling"\n',
-        "python/tensorrt_model_connect/families/sibling/plugin.py": "# sibling builder\n",
+        "python/tensorrt_model_connect/models/sibling/model.py": "# sibling builder\n",
         "src/runtime/core/core.cpp": "// shared runtime\n",
-        "src/runtime/models/llama/plugin.cpp": "// selected runtime\n",
-        "src/runtime/models/sibling/MODEL.toml": (
-            'id = "sibling"\n'
-            'runtime_library = "libtrtmc_model_sibling.so"\n'
-            'runtime_plugins = ["plugin.cpp|register_sibling"]\n'
-            'runtime_strategies = ["sibling_runtime"]\n'
+        "python/tensorrt_model_connect/models/decoder_family/runtime/plugin.cpp": (
+            "// selected runtime\n"
         ),
-        "src/runtime/models/sibling/plugin.cpp": "// sibling runtime\n",
+        "python/tensorrt_model_connect/models/sibling/runtime/plugin.cpp": "// sibling runtime\n",
         "tests/e2e_harness/contracts.py": "# shared harness\n",
-        "tests/e2e/models/decoder_family/MODEL.toml": (
-            'id = "decoder_family"\n'
+        "python/tensorrt_model_connect/models/decoder_family/tests/runner.py": "# selected E2E\n",
+        "python/tensorrt_model_connect/models/sibling/tests/runner.py": "# sibling E2E\n",
+        "python/tensorrt_model_connect/models/decoder_family/tests/cpp/test_runtime.cpp": (
+            "// selected runtime test\n"
         ),
-        "tests/e2e/models/decoder_family/runner.py": "# selected E2E\n",
-        "tests/e2e/models/sibling/MODEL.toml": 'id = "sibling"\n',
-        "tests/e2e/models/sibling/runner.py": "# sibling E2E\n",
-        "tests/cpp/models/llama/test_runtime.cpp": "// selected runtime test\n",
-        "tests/cpp/models/sibling/test_runtime.cpp": "// sibling runtime test\n",
+        "python/tensorrt_model_connect/models/sibling/tests/cpp/test_runtime.cpp": "// sibling runtime test\n",
     }
     for relative, content in files.items():
         path = repo_root / relative
@@ -270,44 +262,32 @@ def test_stage_source_masks_sibling_model_roots(tmp_path: Path) -> None:
     )
 
     assert "families=decoder_family" in result.stdout
-    assert "runtime_plugins=llama" in result.stdout
+    assert "runtime_plugins=decoder_family" in result.stdout
     assert (output_dir / "README.md").read_text() == "generic root\n"
+    assert (output_dir / "python/tensorrt_model_connect/models/__init__.py").is_file()
+    assert (output_dir / "python/tensorrt_model_connect/models/decoder_family/model.py").is_file()
+    assert not (output_dir / "python/tensorrt_model_connect/models/sibling").exists()
     assert (
-        output_dir / "python/tensorrt_model_connect/families/__init__.py"
+        output_dir / "python/tensorrt_model_connect/models/decoder_family/runtime/plugin.cpp"
     ).is_file()
     assert (
-        output_dir / "python/tensorrt_model_connect/families/base.py"
+        output_dir / "python/tensorrt_model_connect/models/decoder_family/tests/runner.py"
     ).is_file()
     assert (
         output_dir
-        / "python/tensorrt_model_connect/families/decoder_family/plugin.py"
+        / "python/tensorrt_model_connect/models/decoder_family/tests/cpp/test_runtime.cpp"
     ).is_file()
-    assert not (
-        output_dir / "python/tensorrt_model_connect/families/sibling"
-    ).exists()
-    assert (output_dir / "src/runtime/models/llama/plugin.cpp").is_file()
-    assert not (output_dir / "src/runtime/models/sibling").exists()
-    assert (
-        output_dir / "tests/e2e/models/decoder_family/runner.py"
-    ).is_file()
-    assert not (output_dir / "tests/e2e/models/sibling").exists()
-    assert (
-        output_dir / "tests/cpp/models/llama/test_runtime.cpp"
-    ).is_file()
-    assert not (output_dir / "tests/cpp/models/sibling").exists()
+    assert not (output_dir / "python/tensorrt_model_connect/models/sibling").exists()
 
-    manifest = json.loads(
-        (output_dir / ".trtmc-isolation.json").read_text(encoding="utf-8")
-    )
+    manifest = json.loads((output_dir / ".trtmc-isolation.json").read_text(encoding="utf-8"))
     assert manifest["selected_models"] == ["decoder-small"]
-    assert manifest["builder_families"] == ["decoder_family"]
-    assert manifest["e2e_families"] == ["decoder_family"]
+    assert manifest["model_owners"] == ["decoder_family"]
     assert manifest["runtime_plugins"] == [
         {
-            "model_id": "llama",
-            "library": "libtrtmc_model_llama.so",
-            "strategies": ["llama_decoder_kv_cache"],
-            "target": "trtmc_model_llama",
+            "model_id": "decoder_family",
+            "library": "libtrtmc_model_decoder_family.so",
+            "strategies": ["decoder_family_runtime"],
+            "target": "trtmc_model_decoder_family",
         }
     ]
     assert all(value > 0 for value in manifest["excluded_model_files"].values())
@@ -378,7 +358,7 @@ def test_plan_groups_shared_family_runtime_and_splits_siblings(tmp_path: Path) -
         name="decoder-medium",
         family="decoder_family",
         runtime_id="llama",
-        runtime_strategy="llama_decoder_kv_cache",
+        runtime_strategy="decoder_family_runtime",
     )
     _add_case(
         repo_root,
@@ -406,8 +386,8 @@ def test_plan_groups_shared_family_runtime_and_splits_siblings(tmp_path: Path) -
     assert "3 model(s) in 2 single-family isolation group(s)" in result.stdout
     plan = json.loads((output_dir / "plan.json").read_text(encoding="utf-8"))
     assert [group["id"] for group in plan["groups"]] == [
-        "decoder_family--llama",
-        "encoder_family--bert",
+        "decoder_family",
+        "encoder_family",
     ]
     assert plan["groups"][0]["models"] == ["decoder-medium", "decoder-small"]
     assert (output_dir / plan["groups"][0]["models_file"]).read_text(
@@ -416,7 +396,7 @@ def test_plan_groups_shared_family_runtime_and_splits_siblings(tmp_path: Path) -
         "decoder-medium",
         "decoder-small",
     ]
-    assert plan["groups"][1]["runtime_plugin"]["target"] == "trtmc_model_bert"
+    assert plan["groups"][1]["runtime_plugin"]["target"] == "trtmc_model_encoder_family"
 
 
 def test_schedule_balances_groups_across_gpu_queues(tmp_path: Path) -> None:
@@ -471,18 +451,15 @@ def test_schedule_balances_groups_across_gpu_queues(tmp_path: Path) -> None:
     )
 
     assert "2 isolation group(s) across 2 GPU queue(s)" in result.stdout
-    schedule = json.loads(
-        (schedule_dir / "schedule.json").read_text(encoding="utf-8")
-    )
-    assert [
-        item["group_id"] for item in schedule["assignments"]["0"]
-    ] == ["decoder_family--llama"]
-    assert [
-        item["group_id"] for item in schedule["assignments"]["2"]
-    ] == ["encoder_family--bert"]
+    schedule = json.loads((schedule_dir / "schedule.json").read_text(encoding="utf-8"))
+    assert [item["group_id"] for item in schedule["assignments"]["0"]] == ["decoder_family"]
+    assert [item["group_id"] for item in schedule["assignments"]["2"]] == ["encoder_family"]
     assert schedule["queue_estimated_seconds"] == {"0": 110.0, "2": 30.0}
-    assert (schedule_dir / "gpu-0.txt").read_text(encoding="utf-8").strip().endswith(
-        "groups/decoder_family--llama/group.json"
+    assert (
+        (schedule_dir / "gpu-0.txt")
+        .read_text(encoding="utf-8")
+        .strip()
+        .endswith("groups/decoder_family/group.json")
     )
 
 
@@ -493,13 +470,13 @@ def test_impact_models_selects_owned_rules_and_l0_replacements(tmp_path: Path) -
             {
                 "e2e_models": ["decoder-small", "decoder-large-l0", "shared-case"],
                 "e2e_test_ids": [
-                    "tests/e2e/models/decoder/test_decoder_e2e.py"
+                    "python/tensorrt_model_connect/models/decoder/tests/test_decoder_e2e.py"
                     "::test_model_e2e[decoder-small]"
                 ],
                 "matched_rules": [
                     {
-                        "file": "python/tensorrt_model_connect/families/decoder/plugin.py",
-                        "rule": "family_package",
+                        "file": "python/tensorrt_model_connect/models/decoder/plugin.py",
+                        "rule": "model_package",
                         "models": ["decoder-small", "decoder-large"],
                     },
                     {
@@ -528,17 +505,16 @@ def test_impact_models_excludes_non_runnable_ci_tiers(tmp_path: Path) -> None:
     repo_root = _make_repo(tmp_path)
     manifest_path = (
         repo_root
-        / "tests"
-        / "e2e"
+        / "python"
+        / "tensorrt_model_connect"
         / "models"
         / "decoder_family"
+        / "tests"
         / "manifests"
         / "decoder-small.json"
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["testcases"] = [
-        {"name": "decoder-small", "ci_tier": "multi_device"}
-    ]
+    manifest["testcases"] = [{"name": "decoder-small", "ci_tier": "multi_device"}]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     impact_path = tmp_path / "impact.json"
     impact_path.write_text(
@@ -547,8 +523,8 @@ def test_impact_models_excludes_non_runnable_ci_tiers(tmp_path: Path) -> None:
                 "e2e_models": ["decoder-small"],
                 "matched_rules": [
                     {
-                        "file": "tests/e2e/models/decoder_family/runner.py",
-                        "rule": "e2e_model_owned_test",
+                        "file": "python/tensorrt_model_connect/models/decoder_family/tests/runner.py",
+                        "rule": "model_package",
                         "models": ["decoder-small"],
                     }
                 ],
@@ -1049,16 +1025,12 @@ def test_verify_results_rejects_invalid_optional_stage_execution(
     repo_root = _make_repo(tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     result_data = _passing_result("decoder-small")
-    result_data["case_config"] = {
-        "stages": [{"name": "advisory_probe", "required": required}]
-    }
+    result_data["case_config"] = {"stages": [{"name": "advisory_probe", "required": required}]}
     result_data["stages"]["advisory_probe"] = {
         "status": stage_status,
         "metrics": {},
     }
-    result_data["stage_outputs"]["advisory_probe"] = {
-        "metadata": {"returncode": returncode}
-    }
+    result_data["stage_outputs"]["advisory_probe"] = {"metadata": {"returncode": returncode}}
     _write_result(artifacts_dir, "decoder-small", result_data)
 
     result = subprocess.run(
@@ -1089,10 +1061,11 @@ def test_verify_results_uses_first_testcase_when_model_has_no_same_named_case(
     repo_root = _make_repo(tmp_path)
     manifest_path = (
         repo_root
-        / "tests"
-        / "e2e"
+        / "python"
+        / "tensorrt_model_connect"
         / "models"
         / "decoder_family"
+        / "tests"
         / "manifests"
         / "decoder-small.json"
     )
@@ -1138,9 +1111,7 @@ def test_verify_results_uses_first_testcase_when_model_has_no_same_named_case(
             "returncode is 1",
         ),
         (
-            lambda result: result["commands"][0].update(
-                returncode=-signal.SIGSEGV
-            ),
+            lambda result: result["commands"][0].update(returncode=-signal.SIGSEGV),
             "returncode is -11",
         ),
     ],
@@ -1225,9 +1196,7 @@ def _write_build_ledger(
         "build_timing_path": str(timing_path),
     }
     payload.update(overrides)
-    (ledger_dir / f"{model_name}.json").write_text(
-        json.dumps(payload), encoding="utf-8"
-    )
+    (ledger_dir / f"{model_name}.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_verify_builds_accepts_exactly_one_completed_build_per_model(

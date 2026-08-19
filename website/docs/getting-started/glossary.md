@@ -44,13 +44,13 @@ Use this page whenever a tutorial uses an unfamiliar deployment or inference ter
 | --- | --- | --- |
 | Python builder | Thin build-time entry point. | `trtmc build` resolves a checkpoint's owning family and calls that family's `model.build()` once. The family writes the complete `.bundle`; Qwen also owns its exact optimized-profile selection locally. |
 | C++ runtime | Request-time execution library and CLI. | `trtmc` and `trtmc::load()` load bundles and run task APIs. Source Build adds its CLI to `PATH`. |
-| Family model module | Self-contained Python build owner for a model family. | `python/tensorrt_model_connect/families/<id>/model.py` matches the config and owns config → weights → engines/components → bundle. |
+| Family model module | Self-contained Python build owner for a model family. | `python/tensorrt_model_connect/models/<id>/model.py` matches the config and owns config → weights → engines/components → bundle. |
 | Runtime strategy | Model-owned native C++ dispatch key in bundle metadata. | Examples: `qwen_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux`, `diffusion_pixart`. Optimized-runtime bundles use `optimized_runtime.json` instead. |
 | Optimized-runtime descriptor | Exact delegated implementation contract in a bundle. | `optimized_runtime.json` binds the implementation/profile and embedded artifact tree; it bypasses native strategy, model-plugin, and backend-DSO selection. |
 | Task strategy | E2E/user-contract category shared by models with the same result shape. | Examples: `text_generation_causal`, `speech_to_text`, `vision_language_generation`, `diffusion_media_generation`. It does not select a runtime DSO. |
 | Pipeline | Task-oriented runtime implementation. | A concrete `IPipeline` handles generation, transcription, segmentation, solve, or another task. |
 | Registry | Lookup table for native runtime plugins. | On the native path, `PipelineRegistry` maps `runtime_strategy` to an `IPipelinePlugin`. |
-| E2E manifest | Canonical test description. | Files in `tests/e2e/models/` define model IDs, task type, expected runtime strategy, prompts, and tolerances. |
+| E2E manifest | Canonical test description. | Files under each `python/tensorrt_model_connect/models/<owner>/tests/manifests/` directory define model IDs, task type, expected runtime strategy, prompts, and tolerances. |
 | Oracle | Reference behavior used by validation. | Usually Hugging Face, Diffusers, NeMo, or another official implementation. |
 | Tolerance | Allowed numerical difference from the oracle. | Needed because optimized engines may not match reference floating-point values bit-for-bit. |
 

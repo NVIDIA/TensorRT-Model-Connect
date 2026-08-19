@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "marian"
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "marian_translation",
+]
+aliases = [
+  "marian",
+]
+prefixes = [
+  "marian",
+]
+performance_mode = "enc_dec"
+runtime_plugins = [
+  "plugin.cpp|register_marian_plugin",
+]
+runtime_strategies = [
+  "marian_translation",
+]
+test_manifests = [
+  "tests/manifests/marian-en-ru-tp4.json",
+  "tests/manifests/marian-en-ru.json",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

@@ -68,7 +68,7 @@ Unit tests: `tests/tools/test_sampling_contract_plugin.py`
 - edge-case tests cover `top_k=0`, `top_p=0`, invalid/clamped values, and seeded
   `reset()` reproducibility
 
-E2E test: `tests/e2e/models/qwen/manifests/qwen3-0.6b-topp.json` (`trace_id: IT-E2E-TOPP-001`)
+E2E test: `python/tensorrt_model_connect/models/qwen/tests/manifests/qwen3-0.6b-topp.json` (`trace_id: IT-E2E-TOPP-001`)
 -- runs Qwen3-0.6B with temperature=0.7/top_p=0.9/top_k=50/seed=42 under
 the `sampling_top_p` invariant contract. The contract verifies that the runtime
 CLI forwards the requested sampling flags, produces non-empty sampled text, and

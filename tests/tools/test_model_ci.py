@@ -50,39 +50,32 @@ def _add_model(
     strategy: str | None = None,
 ) -> None:
     runtime_id = runtime_id or logical_id
+    if runtime_id != logical_id:
+        raise ValueError("model owner and runtime id must match")
     strategy = strategy or f"{runtime_id}_runtime"
     _write(
         repo,
-        f"python/tensorrt_model_connect/families/{logical_id}/MODEL.toml",
-        f'id = "{logical_id}"\n',
+        f"python/tensorrt_model_connect/models/{logical_id}/MODEL.toml",
+        f'id = "{logical_id}"\n'
+        f'runtime_plugins = ["plugin.cpp|register_{logical_id}_plugin"]\n'
+        f'runtime_strategies = ["{strategy}"]\n'
+        f'test_manifests = ["tests/manifests/{logical_id}.json"]\n',
     )
     _write(
         repo,
-        f"python/tensorrt_model_connect/families/{logical_id}/model.py",
+        f"python/tensorrt_model_connect/models/{logical_id}/model.py",
         f'MODEL = "{logical_id}"\n\n'
         "def matches(config):\n    return True\n\n"
         "def build(model_dir, output_path, **options):\n    pass\n",
     )
     _write(
         repo,
-        f"src/runtime/models/{runtime_id}/MODEL.toml",
-        f'id = "{runtime_id}"\n'
-        f'runtime_library = "libtrtmc_model_{runtime_id}.so"\n'
-        f'runtime_strategies = ["{strategy}"]\n',
-    )
-    _write(
-        repo,
-        f"src/runtime/models/{runtime_id}/plugin.cpp",
+        f"python/tensorrt_model_connect/models/{logical_id}/runtime/plugin.cpp",
         f"// {runtime_id}\n",
     )
     _write(
         repo,
-        f"tests/e2e/models/{logical_id}/MODEL.toml",
-        f'id = "{logical_id}"\ntest_manifests = ["manifests/{logical_id}.json"]\n',
-    )
-    _write(
-        repo,
-        f"tests/e2e/models/{logical_id}/manifests/{logical_id}.json",
+        f"python/tensorrt_model_connect/models/{logical_id}/tests/manifests/{logical_id}.json",
         json.dumps(
             {
                 "name": logical_id,
@@ -95,8 +88,13 @@ def _add_model(
     )
     _write(
         repo,
-        f"tests/cpp/models/{runtime_id}/test_{runtime_id}.cpp",
+        f"python/tensorrt_model_connect/models/{logical_id}/tests/cpp/test_{runtime_id}.cpp",
         f"// {runtime_id} test\n",
+    )
+    _write(
+        repo,
+        f"python/tensorrt_model_connect/models/{logical_id}/tests/test_{logical_id}_e2e.py",
+        "def test_model_e2e():\n    pass\n",
     )
 
 
@@ -112,7 +110,7 @@ def _make_repo(
     _git(repo, "config", "user.email", "model-ci@example.com")
     for model_id in model_ids:
         _add_model(repo, model_id)
-    _write(repo, "python/tensorrt_model_connect/families/__init__.py", "# registry\n")
+    _write(repo, "python/tensorrt_model_connect/models/__init__.py", "# registry\n")
     _write(
         repo,
         "pyproject.toml",
@@ -134,7 +132,6 @@ def _make_repo(
         _write(repo, support_path, "# shared test support\n")
     _write(repo, "tests/builder/test_checkpoint_mapper.py", "# unrelated test suite\n")
     _write(repo, "tests/builder/test_debug_runner.py", "# unrelated test suite\n")
-    _write(repo, "tests/runtime_strategy_matrix.yaml", "strategies: []\n")
     for source in sorted((REPO_ROOT / "tools/ci").glob("*.py")):
         _write(repo, f"tools/ci/{source.name}", f"# projected CI module: {source.name}\n")
     _write(
@@ -271,7 +268,9 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
 
 def test_validate_rejects_multi_gpu_case_outside_multi_device_tier(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
-    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest_path = (
+        repo / "python/tensorrt_model_connect/models/model_a/tests/manifests/model_a.json"
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["build_args"] = {"parallel": {"mode": "tensor_parallel", "tp_size": 4}}
     manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
@@ -288,7 +287,9 @@ def test_validate_rejects_multi_gpu_case_outside_multi_device_tier(tmp_path: Pat
 
 def test_validate_uses_gpu_count_preflight_for_device_tier(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
-    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest_path = (
+        repo / "python/tensorrt_model_connect/models/model_a/tests/manifests/model_a.json"
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["testcases"] = [
         {
@@ -324,7 +325,9 @@ def test_nightly_matrix_schedules_exclusive_then_shared_and_longest_first(
         "model_e-case": 300,
     }
     for model in ("model_a", "model_b", "model_c", "model_d", "model_e", "model_f"):
-        manifest_path = repo / f"tests/e2e/models/{model}/manifests/{model}.json"
+        manifest_path = (
+            repo / f"python/tensorrt_model_connect/models/{model}/tests/manifests/{model}.json"
+        )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if model == "model_a":
             manifest["testcases"] = [
@@ -393,7 +396,9 @@ def test_nightly_matrix_schedules_exclusive_then_shared_and_longest_first(
 
 def test_all_rejects_an_owner_without_a_single_gpu_nightly_case(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path, model_ids=("model_a",))
-    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest_path = (
+        repo / "python/tensorrt_model_connect/models/model_a/tests/manifests/model_a.json"
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["testcases"] = [{"name": "model_a-tp", "ci_tier": "multi_device"}]
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
@@ -409,7 +414,7 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(
         repo,
-        "python/tensorrt_model_connect/families/model_a/model.py",
+        "python/tensorrt_model_connect/models/model_a/model.py",
         'MODEL = "model_a_changed"\n',
     )
     head = _commit(repo, "change a")
@@ -428,12 +433,12 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "path",
     (
-        "python/tensorrt_model_connect/families/model_a/graph_ops.py",
-        "python/tensorrt_model_connect/families/model_a/graph_blocks.py",
-        "python/tensorrt_model_connect/families/model_a/model/model.py",
-        "python/tensorrt_model_connect/families/model_a/debug_runner.py",
-        "tests/e2e/models/model_a/model.l0.json",
-        "src/runtime/models/model_a/model_a.cpp",
+        "python/tensorrt_model_connect/models/model_a/graph_ops.py",
+        "python/tensorrt_model_connect/models/model_a/graph_blocks.py",
+        "python/tensorrt_model_connect/models/model_a/model/model.py",
+        "python/tensorrt_model_connect/models/model_a/debug_runner.py",
+        "python/tensorrt_model_connect/models/model_a/tests/model.l0.json",
+        "python/tensorrt_model_connect/models/model_a/runtime/model_a.cpp",
     ),
 )
 def test_model_owned_change_runs_builder_units(
@@ -455,7 +460,7 @@ def test_model_owned_change_runs_builder_units(
 
 def test_model_owned_deletion_runs_builder_units(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
-    path = "python/tensorrt_model_connect/families/model_a/graph_ops.py"
+    path = "python/tensorrt_model_connect/models/model_a/graph_ops.py"
     _write(repo, path, "# graph implementation\n")
     base = _commit(repo, "add family graph source")
     (repo / path).unlink()
@@ -473,7 +478,7 @@ def test_mixed_model_and_cli_change_runs_all_units(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(
         repo,
-        "python/tensorrt_model_connect/families/model_a/graph_ops.py",
+        "python/tensorrt_model_connect/models/model_a/graph_ops.py",
         "# graph implementation\n",
     )
     _write(repo, "src/runtime/config/cli_support.cpp", "// CLI implementation\n")
@@ -491,20 +496,19 @@ def test_mixed_model_and_cli_change_runs_all_units(tmp_path: Path) -> None:
     ("path", "content"),
     (
         (
-            "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
+            "python/tensorrt_model_connect/models/model_b/optimized_adapter/adapter.py",
             'MODEL = "model_b"\n',
         ),
         (
-            "python/tensorrt_model_connect/families/model_b/optimized_adapter/"
-            "profiles/example.toml",
+            "python/tensorrt_model_connect/models/model_b/optimized_adapter/profiles/example.toml",
             'profile_id = "example"\n',
         ),
         (
-            "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
+            "python/tensorrt_model_connect/models/model_b/runtime/optimized_adapter/adapter.cpp",
             "// model_b optimized runtime adapter\n",
         ),
         (
-            "tests/e2e/models/model_b/optimized_adapter/test_contract.py",
+            "python/tensorrt_model_connect/models/model_b/tests/optimized_adapter/test_contract.py",
             "def test_contract():\n    assert True\n",
         ),
     ),
@@ -534,7 +538,9 @@ def test_model_owned_adapter_change_selects_only_its_family(
 
 def test_impact_allows_head_to_migrate_legacy_multi_gpu_tier(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
-    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest_path = (
+        repo / "python/tensorrt_model_connect/models/model_a/tests/manifests/model_a.json"
+    )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["build_args"] = {"parallel": {"mode": "tensor_parallel", "tp_size": 4}}
     manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
@@ -563,10 +569,12 @@ def test_impact_allows_head_to_migrate_legacy_multi_gpu_tier(tmp_path: Path) -> 
 
 def test_impact_selects_each_modified_model_once(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
-    _write(repo, "src/runtime/models/model_a/plugin.cpp", "// changed a\n")
+    _write(
+        repo, "python/tensorrt_model_connect/models/model_a/runtime/plugin.cpp", "// changed a\n"
+    )
     _write(
         repo,
-        "tests/e2e/models/model_b/manifests/model_b.json",
+        "python/tensorrt_model_connect/models/model_b/tests/manifests/model_b.json",
         json.dumps(
             {
                 "name": "model_b",
@@ -664,11 +672,10 @@ def test_release_performance_config_runs_source_contracts_without_model_fallback
     } == {"unit_tests"}
 
 
-@pytest.mark.parametrize(
-    "dockerfile", ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86")
-)
+@pytest.mark.parametrize("dockerfile", ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86"))
 def test_source_container_runs_units_without_model_fallback(
-    tmp_path: Path, dockerfile: str,
+    tmp_path: Path,
+    dockerfile: str,
 ) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, dockerfile, "FROM scratch\n")
@@ -705,9 +712,7 @@ def test_release_performance_runtime_changes_keep_model_fallback(
     assert result["affected_models"] == ["model_a"]
     assert result["direct_models"] == []
     assert result["fallback_models"] == ["model_a"]
-    assert result["matrix"] == {
-        "include": [{"model": "model_a", "selection_kind": "fallback"}]
-    }
+    assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "fallback"}]}
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == "all"
 
@@ -730,6 +735,14 @@ def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None
 
 def test_tokenizer_platform_change_always_selects_known_consumers(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path, model_ids=("flux", "model_a", "sam3"))
+    for owner in ("flux", "sam3"):
+        manifest = repo / f"python/tensorrt_model_connect/models/{owner}/MODEL.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + 'ci_platform_prefixes = ["src/tokenizer/"]\n',
+            encoding="utf-8",
+        )
+    base = _commit(repo, "declare shared tokenizer consumers")
     _write(repo, "src/tokenizer/bpe_tokenizer.cpp", "// changed shared tokenizer\n")
     head = _commit(repo, "change shared tokenizer")
 
@@ -759,9 +772,43 @@ def test_tokenizer_platform_change_always_selects_known_consumers(tmp_path: Path
     }
 
 
+def test_platform_consumer_declaration_is_owner_local(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path, model_ids=("consumer", "model_a"))
+    manifest = repo / "python/tensorrt_model_connect/models/consumer/MODEL.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + 'ci_platform_prefixes = ["src/shared_component/"]\n',
+        encoding="utf-8",
+    )
+    base = _commit(repo, "declare shared component consumer")
+    _write(repo, "src/shared_component/implementation.cpp", "// changed\n")
+    head = _commit(repo, "change shared component")
+
+    result = _impact(repo, base, head, fallback_models=("model_a",))
+
+    assert result["direct_models"] == ["consumer"]
+    assert result["fallback_models"] == ["model_a"]
+
+
+def test_validate_rejects_unsafe_platform_consumer_prefix(tmp_path: Path) -> None:
+    repo, _base = _make_repo(tmp_path)
+    manifest = repo / "python/tensorrt_model_connect/models/model_a/MODEL.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + 'ci_platform_prefixes = ["../src/"]\n',
+        encoding="utf-8",
+    )
+    head = _commit(repo, "declare unsafe shared prefix")
+
+    result = _run(repo, "validate", "--revision", head, check=False)
+
+    assert result.returncode != 0
+    assert "unsafe ci_platform_prefix" in result.stderr
+
+
 def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
-    _write(repo, "python/tensorrt_model_connect/families/__init__.py", "# changed registry\n")
+    _write(repo, "python/tensorrt_model_connect/models/__init__.py", "# changed registry\n")
     head = _commit(repo, "shared family registry")
 
     result = _impact(repo, base, head)
@@ -848,7 +895,11 @@ def test_mixed_model_and_broad_change_keeps_direct_model_plus_fallback(
     tmp_path: Path,
 ) -> None:
     repo, base = _make_repo(tmp_path)
-    _write(repo, "src/runtime/models/model_b/plugin.cpp", "// changed model b\n")
+    _write(
+        repo,
+        "python/tensorrt_model_connect/models/model_b/runtime/plugin.cpp",
+        "// changed model b\n",
+    )
     _write(repo, "CMakeLists.txt", "# changed platform\n")
     head = _commit(repo, "mixed change")
 
@@ -944,7 +995,11 @@ def test_validation_and_model_change_runs_direct_model_proof_plus_units(
 ) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, "tools/validation/engine.py", "# expanded validation runner\n")
-    _write(repo, "src/runtime/models/model_b/plugin.cpp", "// changed model b\n")
+    _write(
+        repo,
+        "python/tensorrt_model_connect/models/model_b/runtime/plugin.cpp",
+        "// changed model b\n",
+    )
     head = _commit(repo, "change validation and model b")
 
     result = _impact(repo, base, head)
@@ -960,12 +1015,18 @@ def test_validation_and_model_change_runs_direct_model_proof_plus_units(
 
 def test_impact_includes_deletions_and_both_sides_of_rename(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
-    (repo / "tests/cpp/models/model_a/test_model_a.cpp").unlink()
+    _write(
+        repo,
+        "python/tensorrt_model_connect/models/model_a/graph_ops.py",
+        "# graph ops\n",
+    )
+    base = _commit(repo, "add rename source")
+    (repo / "python/tensorrt_model_connect/models/model_a/tests/cpp/test_model_a.cpp").unlink()
     _git(
         repo,
         "mv",
-        "python/tensorrt_model_connect/families/model_a/model.py",
-        "python/tensorrt_model_connect/families/model_b/from_a.py",
+        "python/tensorrt_model_connect/models/model_a/graph_ops.py",
+        "python/tensorrt_model_connect/models/model_b/from_a.py",
     )
     head = _commit(repo, "delete and rename")
 
@@ -982,10 +1043,7 @@ def test_whole_model_deletion_runs_units_and_fixed_fallback(tmp_path: Path) -> N
         repo,
         "rm",
         "-r",
-        "python/tensorrt_model_connect/families/model_b",
-        "src/runtime/models/model_b",
-        "tests/e2e/models/model_b",
-        "tests/cpp/models/model_b",
+        "python/tensorrt_model_connect/models/model_b",
     )
     head = _commit(repo, "delete model b")
 
@@ -1003,10 +1061,7 @@ def test_deleting_configured_fallback_requires_policy_update(tmp_path: Path) -> 
         repo,
         "rm",
         "-r",
-        "python/tensorrt_model_connect/families/model_a",
-        "src/runtime/models/model_a",
-        "tests/e2e/models/model_a",
-        "tests/cpp/models/model_a",
+        "python/tensorrt_model_connect/models/model_a",
     )
     head = _commit(repo, "delete fallback model")
 
@@ -1030,7 +1085,9 @@ def test_deleting_configured_fallback_requires_policy_update(tmp_path: Path) -> 
 
 def test_impact_rejects_unowned_path_below_model_root(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
-    _write(repo, "tests/e2e/models/unowned/test_unowned.py", "VALUE = 1\n")
+    _write(
+        repo, "python/tensorrt_model_connect/models/unowned/tests/test_unowned.py", "VALUE = 1\n"
+    )
     head = _commit(repo, "unowned model source")
 
     result = _run(
@@ -1133,7 +1190,7 @@ def test_broad_impact_rejects_invalid_fallback_configuration(
 
 def test_validate_rejects_overlapping_runtime_ownership(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
-    manifest = repo / "tests/e2e/models/model_b/manifests/model_b.json"
+    manifest = repo / "python/tensorrt_model_connect/models/model_b/tests/manifests/model_b.json"
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     payload["runtime_strategy"] = "model_a_runtime"
     manifest.write_text(json.dumps(payload) + "\n", encoding="utf-8")
@@ -1142,14 +1199,14 @@ def test_validate_rejects_overlapping_runtime_ownership(tmp_path: Path) -> None:
     result = _run(repo, "validate", check=False)
 
     assert result.returncode == 2
-    assert "depends on multiple runtime models" in result.stderr
+    assert "uses runtime strategy 'model_a_runtime' owned by 'model_a'" in result.stderr
 
 
 def test_projection_contains_only_selected_model_and_stable_git_blobs(
     tmp_path: Path,
 ) -> None:
     repo, revision = _make_repo(tmp_path)
-    source = repo / "python/tensorrt_model_connect/families/model_a/model.py"
+    source = repo / "python/tensorrt_model_connect/models/model_a/model.py"
     expected = source.read_bytes()
     source.write_text('MODEL = "dirty_worktree_value"\n', encoding="utf-8")
     output = tmp_path / "projection"
@@ -1167,16 +1224,15 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         ).stdout
     )
 
-    copied = output / "python/tensorrt_model_connect/families/model_a/model.py"
+    copied = output / "python/tensorrt_model_connect/models/model_a/model.py"
     assert copied.read_bytes() == expected
-    assert not (output / "python/tensorrt_model_connect/families/model_b").exists()
-    assert not (output / "src/runtime/models/model_b").exists()
-    assert not (output / "tests/e2e/models/model_b").exists()
-    assert not (output / "tests/cpp/models/model_b").exists()
-    assert (output / "tests/cpp/models/model_a/test_model_a.cpp").is_file()
+    assert not (output / "python/tensorrt_model_connect/models/model_b").exists()
+    assert (
+        output / "python/tensorrt_model_connect/models/model_a/tests/cpp/test_model_a.cpp"
+    ).is_file()
     assert (output / "src/runtime/core/core.cpp").is_file()
     assert (output / "examples/byok/identity_copy_kernel.cpp").is_file()
-    assert (output / "python/tensorrt_model_connect/families/__init__.py").is_file()
+    assert (output / "python/tensorrt_model_connect/models/__init__.py").is_file()
     assert (output / "tests/__init__.py").is_file()
     assert (output / "tests/builder/__init__.py").is_file()
     for support_path in (
@@ -1189,7 +1245,6 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "tests/builder/test_debug_runner.py",
     ):
         assert not (output / unrelated_path).exists()
-    assert (output / "tests/runtime_strategy_matrix.yaml").is_file()
     assert (output / "tools/ci/__main__.py").is_file()
     assert (output / "tools/ci/model_proof.py").is_file()
     fallback = output / ".github/scripts/write-model-proof-fallback-report.py"
@@ -1272,11 +1327,11 @@ def test_projection_includes_only_the_selected_family_adapter_subtrees(
 ) -> None:
     repo, _ = _make_repo(tmp_path)
     selected_paths = (
-        "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
-        "python/tensorrt_model_connect/families/model_b/optimized_adapter/dependency.lock",
-        "python/tensorrt_model_connect/families/model_b/optimized_adapter/profiles/example.toml",
-        "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
-        "tests/e2e/models/model_b/optimized_adapter/test_contract.py",
+        "python/tensorrt_model_connect/models/model_b/optimized_adapter/adapter.py",
+        "python/tensorrt_model_connect/models/model_b/optimized_adapter/dependency.lock",
+        "python/tensorrt_model_connect/models/model_b/optimized_adapter/profiles/example.toml",
+        "python/tensorrt_model_connect/models/model_b/runtime/optimized_adapter/adapter.cpp",
+        "python/tensorrt_model_connect/models/model_b/tests/optimized_adapter/test_contract.py",
     )
     sibling_paths = tuple(path.replace("model_b", "model_a") for path in selected_paths)
     for path in selected_paths:
@@ -1337,53 +1392,15 @@ def test_affected_model_projections_include_only_shared_support_and_owned_roots(
         )
 
         assert (output / required_shared_file).is_file()
-        for model_root in (
-            "python/tensorrt_model_connect/families",
-            "src/runtime/models",
-            "tests/e2e/models",
-            "tests/cpp/models",
-        ):
-            assert (output / model_root / selected).is_dir()
-            for sibling in {model_id for model_id, _ in cases} - {selected}:
-                assert not (output / model_root / sibling).exists()
-
-
-def test_projection_and_impact_normalize_logical_runtime_owner(tmp_path: Path) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.name", "Model CI Test")
-    _git(repo, "config", "user.email", "model-ci@example.com")
-    _add_model(repo, "logical_model", runtime_id="runtime_model", strategy="runtime_strategy")
-    _write(repo, "CMakeLists.txt", "# platform\n")
-    base = _commit(repo, "initial")
-    _write(repo, "src/runtime/models/runtime_model/plugin.cpp", "// changed runtime\n")
-    head = _commit(repo, "runtime change")
-
-    impact = _impact(repo, base, head)
-    output = tmp_path / "projection"
-    projection = json.loads(
-        _run(
-            repo,
-            "project",
-            "--revision",
-            head,
-            "--model",
-            "logical_model",
-            "--output-dir",
-            str(output),
-        ).stdout
-    )
-
-    assert impact["affected_models"] == ["logical_model"]
-    assert projection["runtime_model"] == "runtime_model"
-    assert projection["build_target"] == "trtmc_model_runtime_model"
-    assert (output / "src/runtime/models/runtime_model/plugin.cpp").is_file()
+        model_root = output / "python/tensorrt_model_connect/models"
+        assert (model_root / selected).is_dir()
+        for sibling in {model_id for model_id, _ in cases} - {selected}:
+            assert not (model_root / sibling).exists()
 
 
 def test_projection_rejects_symlink_that_escapes_allowlist(tmp_path: Path) -> None:
     repo, revision = _make_repo(tmp_path)
-    link = repo / "python/tensorrt_model_connect/families/model_a/escape"
+    link = repo / "python/tensorrt_model_connect/models/model_a/escape"
     link.symlink_to("/etc/passwd")
     revision = _commit(repo, "escaping symlink")
 

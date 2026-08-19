@@ -51,8 +51,8 @@ PYTHONPATH=python:. python3 tools/trtmc_validate.py \
   --output /tmp/trtmc-validation
 ```
 
-The model binding in `tests/validation/model_workloads.yaml`, workload contract
-in `tests/validation/workloads.yaml`, family manifests, and their sidecars are
+The model binding in the family's `validation.yaml`, workload contract in
+`tests/validation/workloads.yaml`, family manifests, and their sidecars are
 the source of truth for inputs, sampling, and comparison gates. Read
 `tools/validation/README.md` before changing the engine: the persisted
 `task_eval` artifact key remains intentionally stable even though executable
@@ -61,7 +61,7 @@ separate in the report; an execution failure is not a numerical mismatch.
 
 ## Route By Model Capability
 
-Inspect the model's Python, C++, and E2E `MODEL.toml` entries before selecting a
+Inspect the model's unified `MODEL.toml`, Python builder, runtime, and E2E entries before selecting a
 debugger:
 
 | Model path | First focused tool |

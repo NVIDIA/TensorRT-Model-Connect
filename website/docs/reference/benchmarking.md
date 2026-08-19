@@ -18,15 +18,17 @@ trtmc-bench run --model distilgpt2
 `trtmc-bench` measures one resolved workload. The release performance matrix
 adds a repository-owned comparison layer around it: `tools/perf_matrix.py`
 runs TRTMC through `trtmc-bench`, runs the reference backend declared by each
-suite row in a separate Python process, and checks that both sides used the
-same workload and timing boundary.
+model owner's `performance.yaml` in a separate Python process, and checks that
+both sides used the same workload and timing boundary.
 
-The checked-in suite at `benchmarks/performance/release.yaml` currently covers
-107 release-relevant, ready, single-process model-profile comparisons across
-77 families and 78 `(family, operation)` contracts. Short `l0` smoke duplicates
-are excluded by rule; any other omission must appear in `excluded_profiles`
-with a reason. Validate coverage and all machine prerequisites without
-measuring a model:
+`benchmarks/performance/release.yaml` contains only shared defaults. The matrix
+discovers `python/tensorrt_model_connect/models/*/performance.yaml`; together
+those owner-local files currently cover 107 release-relevant, ready,
+single-process model-profile comparisons across 77 families and 78
+`(family, operation)` contracts. Short `l0` smoke duplicates are excluded by
+rule; any other omission must appear in its owner's `excluded_profiles` with a
+reason. Validate coverage and all machine prerequisites without measuring a
+model:
 
 ```bash
 python3 tools/perf_matrix.py check \
@@ -52,7 +54,7 @@ profiles described in `benchmarks/performance/README.md` are additional
 operator prerequisites; dependency installation is outside the measured
 campaign.
 
-Reference precision is resolved from the suite row's explicit
+Reference precision is resolved from the owner-local row's explicit
 `baseline.precision`, then the selected testcase's `reference_precision`, then
 the model manifest's top-level `reference_precision`, and finally the resolved
 TRTMC model precision. The chosen value is passed to the reference runner,

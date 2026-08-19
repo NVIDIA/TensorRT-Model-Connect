@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: deepseek_v2.generate
+  operation: generate
+  model: deepseek-v2-lite
+  workload:
+    testcase: deepseek-v2-lite
+  baseline:
+    runner: hf-transformers
+    mode: hf-eager
+    experts_implementation: batched_mm
+additional_profiles:
+- model: deepseek-v2-tiny
+  inherit: deepseek_v2.generate

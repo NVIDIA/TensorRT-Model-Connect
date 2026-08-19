@@ -169,7 +169,7 @@ def _write_part(
         "suite": suite,
         "gpu_id": "1",
         "runtime_library": proof["runtime_library"],
-        "e2e_test": f"tests/e2e/models/{owner}/test_{owner}_e2e.py",
+        "e2e_test": f"python/tensorrt_model_connect/models/{owner}/test_{owner}_e2e.py",
         "e2e_cases": [
             {
                 "name": case,
@@ -632,24 +632,24 @@ def test_combined_report_rebases_isolated_src_input_media(tmp_path: Path) -> Non
         strategy="vision_language_generation",
     )
 
-    audio_input = tmp_path / "tests/e2e/models/audio-owner/data/source.wav"
+    audio_input = tmp_path / "python/tensorrt_model_connect/models/audio/tests-owner/data/source.wav"
     audio_input.parent.mkdir(parents=True)
     _tiny_wav(audio_input)
-    visual_input = tmp_path / "tests/e2e/models/visual-owner/data/source.png"
+    visual_input = tmp_path / "python/tensorrt_model_connect/models/visual/tests-owner/data/source.png"
     visual_input.parent.mkdir(parents=True)
     _tiny_png(visual_input)
 
     audio_result_path = audio_root / "e2e/audio-case/result.json"
     audio_result = json.loads(audio_result_path.read_text(encoding="utf-8"))
     audio_result["case_config"]["inputs"] = {
-        "audio": "/src/tests/e2e/models/audio-owner/data/source.wav"
+        "audio": "/src/python/tensorrt_model_connect/models/audio/tests-owner/data/source.wav"
     }
     audio_result_path.write_text(json.dumps(audio_result), encoding="utf-8")
 
     visual_result_path = visual_root / "e2e/visual-case/result.json"
     visual_result = json.loads(visual_result_path.read_text(encoding="utf-8"))
     visual_result["case_config"]["inputs"] = {
-        "image": "/src/tests/e2e/models/visual-owner/data/source.png"
+        "image": "/src/python/tensorrt_model_connect/models/visual/tests-owner/data/source.png"
     }
     visual_result_path.write_text(json.dumps(visual_result), encoding="utf-8")
 

@@ -15,7 +15,7 @@ def test_time_series_builders_do_not_use_removed_precision_flags() -> None:
             root
             / "python"
             / "tensorrt_model_connect"
-            / "families"
+            / "models"
             / family
             / "time_series_trt.py"
         ).read_text(encoding="utf-8")
@@ -29,7 +29,7 @@ def test_chronos_fp16_gemms_use_fp32_accumulation() -> None:
         root
         / "python"
         / "tensorrt_model_connect"
-        / "families"
+        / "models"
         / "chronos_bolt"
         / "model.py"
     ).read_text(encoding="utf-8")

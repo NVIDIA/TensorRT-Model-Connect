@@ -10,12 +10,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from .model_reference_cache import parse_model_reference_contract
 from .process import CiError
+
+
+_RETIRED_RUNTIME_DESCRIPTOR_FIELDS = frozenset(
+    {
+        "runtime_library",
+        "runtime_strategy",
+        "default_runtime_strategy",
+        "legacy_runtime_strategy_aliases",
+        "runtime_tests",
+        "runtime_link_libraries",
+        "gnu_warning_suppressed_sources",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -58,21 +72,16 @@ class ModelProofSelector:
     def select(self, output: Path, lease: dict[str, object] | None = None) -> ModelProofSelection:
         self._validate_projection()
         owners = self._owners()
-        runtime_manifest = (
-            self.source / "src/runtime/models" / str(owners["runtime"]) / "MODEL.toml"
-        )
-        runtime = tomllib.loads(runtime_manifest.read_text(encoding="utf-8"))
-        runtime_library = str(
-            runtime.get("runtime_library") or f"libtrtmc_model_{owners['runtime']}.so"
-        )
-        runtime_tests = self._runtime_tests(runtime_manifest, runtime)
-        e2e_dir = self.source / "tests/e2e/models" / str(owners["e2e"])
-        owner_data = tomllib.loads((e2e_dir / "MODEL.toml").read_text(encoding="utf-8"))
-        reference_cache = self._reference_cache(
-            owner_data, str(owners["e2e"]), e2e_dir / "MODEL.toml"
-        )
-        cases = self._cases(e2e_dir)
-        selected_cases = self._select_cases(cases, str(owners["e2e"]))
+        model_root = self.source / "python/tensorrt_model_connect/models" / str(owners["model"])
+        model_manifest = model_root / "MODEL.toml"
+        model_data = tomllib.loads(model_manifest.read_text(encoding="utf-8"))
+        self._validate_runtime_descriptor(model_manifest, model_data)
+        runtime_library = f"libtrtmc_model_{owners['model']}.so"
+        runtime_tests = self._runtime_tests(model_root / "runtime" / "CMakeLists.txt")
+        tests_dir = model_root / "tests"
+        reference_cache = self._reference_cache(model_data, str(owners["model"]), model_manifest)
+        cases = self._cases(tests_dir)
+        selected_cases = self._select_cases(cases, str(owners["model"]))
         resource = (
             "exclusive_gpu"
             if any(case["resource_class"] == "exclusive_gpu" for case in selected_cases)
@@ -84,28 +93,21 @@ class ModelProofSelector:
         lease_fields = (
             self._validate_lease(lease, resource, min_free_gpu_memory_mib) if lease else {}
         )
-        e2e_tests = sorted(e2e_dir.glob("test_*_e2e.py"))
+        e2e_tests = sorted(tests_dir.glob("test_*_e2e.py"))
         if len(e2e_tests) != 1:
             raise CiError(
                 f"projected model must have exactly one canonical E2E test; found {len(e2e_tests)}"
             )
         python_tests = [
-            path for path in e2e_dir.rglob("test_*.py") if not path.name.endswith("_e2e.py")
+            path for path in tests_dir.rglob("test_*.py") if not path.name.endswith("_e2e.py")
         ]
-        python_family = owners["python"]
-        if python_family:
-            python_tests.extend(
-                (self.source / "python/tensorrt_model_connect/families" / str(python_family)).rglob(
-                    "test_*.py"
-                )
-            )
         payload: dict[str, object] = {
             "schema_version": 1,
             "requested_model": self.model,
             "owners": owners,
             "runtime_library": runtime_library,
             "runtime_tests": runtime_tests,
-            "python_family": python_family,
+            "python_family": owners["model"],
             "python_tests": [
                 str(path.relative_to(self.source)) for path in sorted(set(python_tests))
             ],
@@ -145,47 +147,60 @@ class ModelProofSelector:
         return projection
 
     def _owners(self) -> dict[str, str | None]:
-        roots = {
-            "python": self.source / "python/tensorrt_model_connect/families",
-            "runtime": self.source / "src/runtime/models",
-            "e2e": self.source / "tests/e2e/models",
+        root = self.source / "python/tensorrt_model_connect/models"
+        manifests = sorted(root.glob("*/MODEL.toml"))
+        if len(manifests) != 1:
+            raise CiError(
+                "projected model ownership root must contain exactly one MODEL.toml; "
+                f"found {len(manifests)}"
+            )
+        data = tomllib.loads(manifests[0].read_text(encoding="utf-8"))
+        owner = str(data.get("id") or "")
+        if not owner or owner != manifests[0].parent.name:
+            raise CiError(f"invalid projected model manifest: {manifests[0]}")
+        owners: dict[str, str | None] = {
+            "model": owner,
+            "python": owner,
+            "runtime": owner,
+            "e2e": owner,
         }
-        owners: dict[str, str | None] = {}
-        for kind, root in roots.items():
-            manifests = sorted(root.glob("*/MODEL.toml"))
-            minimum = 0 if kind == "python" else 1
-            if len(manifests) < minimum or len(manifests) > 1:
-                qualifier = "at most" if kind == "python" else "exactly"
-                raise CiError(
-                    f"projected {kind} ownership root must contain {qualifier} one MODEL.toml; "
-                    f"found {len(manifests)}"
-                )
-            if not manifests:
-                owners[kind] = None
-                continue
-            data = tomllib.loads(manifests[0].read_text(encoding="utf-8"))
-            owner = str(data.get("id") or "")
-            if not owner or owner != manifests[0].parent.name:
-                raise CiError(f"invalid projected {kind} manifest: {manifests[0]}")
-            owners[kind] = owner
         projection = json.loads(
             (self.source / ".trtmc-model-projection.json").read_text(encoding="utf-8")
         )
-        if projection.get("runtime_model") != owners["runtime"]:
+        if projection.get("runtime_model") != owner:
             raise CiError("projection runtime model does not match projected ownership")
-        if projection.get("e2e_family") != owners["e2e"]:
+        if projection.get("e2e_family") != owner:
             raise CiError("projection E2E family does not match projected ownership")
         return owners
 
     @staticmethod
-    def _runtime_tests(path: Path, data: dict[str, object]) -> list[str]:
-        tests = []
-        for entry in data.get("runtime_tests", []):
-            fields = str(entry).split("|")
-            if len(fields) != 5 or not fields[0]:
-                raise CiError(f"invalid runtime_tests entry in {path}: {entry!r}")
-            tests.append(fields[0])
-        return tests
+    def _validate_runtime_descriptor(path: Path, data: dict[str, object]) -> None:
+        retired = sorted(_RETIRED_RUNTIME_DESCRIPTOR_FIELDS & data.keys())
+        if retired:
+            raise CiError(
+                f"retired {', '.join(repr(key) for key in retired)} field(s) in {path}; "
+                "keep runtime identity in MODEL.toml and build declarations in "
+                "runtime/CMakeLists.txt"
+            )
+        strategies = data.get("runtime_strategies")
+        if (
+            not isinstance(strategies, list)
+            or not strategies
+            or any(not isinstance(strategy, str) or not strategy for strategy in strategies)
+        ):
+            raise CiError(f"runtime_strategies must be a non-empty string list: {path}")
+
+    @staticmethod
+    def _runtime_tests(path: Path) -> list[str]:
+        if not path.is_file():
+            raise CiError(f"projected model has no runtime build declaration: {path}")
+        tests = re.findall(
+            r"(?m)^\s*trtmc_add_test\(\s*([A-Za-z_][A-Za-z0-9_]*)",
+            path.read_text(encoding="utf-8"),
+        )
+        if len(tests) != len(set(tests)):
+            raise CiError(f"duplicate runtime test target in {path}")
+        return sorted(tests)
 
     def _reference_cache(
         self, owner: dict[str, object], family: str, owner_manifest: Path
@@ -198,13 +213,13 @@ class ModelProofSelector:
         )
         return contract.as_payload() if contract else None
 
-    def _cases(self, e2e_dir: Path) -> list[dict[str, object]]:
+    def _cases(self, tests_dir: Path) -> list[dict[str, object]]:
         timing = {}
         timing_path = self.source / "tests/e2e/timing_estimates.json"
         if timing_path.is_file():
             timing = json.loads(timing_path.read_text(encoding="utf-8")).get("estimates_s", {})
         cases = []
-        for path in sorted((e2e_dir / "manifests").glob("*.json")):
+        for path in sorted((tests_dir / "manifests").glob("*.json")):
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("skip_reason") or data.get("skip"):
                 continue
@@ -237,25 +252,19 @@ class ModelProofSelector:
                 if not isinstance(testcase, dict):
                     raise CiError(f"E2E manifest has an invalid testcase: {path}")
                 if "e2e_min_free_gpu_memory_mib" in testcase:
-                    raise CiError(
-                        "E2E manifest e2e_min_free_gpu_memory_mib is model-only: "
-                        f"{path}"
-                    )
+                    raise CiError(f"E2E manifest e2e_min_free_gpu_memory_mib is model-only: {path}")
                 if testcase.get("skip_reason") or testcase.get("skip"):
                     continue
                 name = str(testcase.get("name") or "")
                 if not name:
                     raise CiError(f"E2E manifest has an unnamed testcase: {path}")
-                test_category = testcase.get(
-                    "test_category", data.get("test_category", "e2e")
-                )
+                test_category = testcase.get("test_category", data.get("test_category", "e2e"))
                 if not isinstance(test_category, str) or test_category not in {
                     "e2e",
                     "regression",
                 }:
                     raise CiError(
-                        "E2E manifest test_category must be 'e2e' or 'regression': "
-                        f"{path}"
+                        f"E2E manifest test_category must be 'e2e' or 'regression': {path}"
                     )
                 tier = str(testcase.get("ci_tier") or data.get("ci_tier") or "")
                 if tier == "multi_device":
@@ -287,20 +296,14 @@ class ModelProofSelector:
         ]
         if not eligible:
             raise CiError(f"no premerge E2E case is available for {family}")
-        regressions = [
-            case for case in eligible if case["test_category"] == "regression"
-        ]
-        smoke_cases = [
-            case for case in eligible if case["test_category"] != "regression"
-        ]
+        regressions = [case for case in eligible if case["test_category"] == "regression"]
+        smoke_cases = [case for case in eligible if case["test_category"] != "regression"]
         replacements = {
             case["l0_replacement"]
             for case in cases
             if case["ci_tier"] == "nightly_only" and case["l0_replacement"]
         }
-        candidates = [
-            case for case in smoke_cases if case["name"] in replacements
-        ] or smoke_cases
+        candidates = [case for case in smoke_cases if case["name"] in replacements] or smoke_cases
         priority = {"l0_only": 0, "contract_only": 1, "": 2}
         candidates.sort(
             key=lambda case: (
@@ -337,9 +340,7 @@ class ModelProofSelector:
             or isinstance(lease_minimum, bool)
             or lease_minimum != min_free_gpu_memory_mib
         ):
-            raise CiError(
-                "leased minimum free GPU memory does not match selected E2E requirements"
-            )
+            raise CiError("leased minimum free GPU memory does not match selected E2E requirements")
         lease_fields: dict[str, object] = {
             "gpu_id": str(lease["gpu_id"]),
             "gpu_slot": slots[0] if resource == "shared" else None,

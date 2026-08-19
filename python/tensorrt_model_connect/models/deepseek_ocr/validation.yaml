@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  ocrbench_v2_unified:
+    models:
+    - deepseek-ocr
+    - deepseek-ocr-l0
+    - deepseek-ocr-l0-tp2
+    default_models:
+    - deepseek-ocr
+    model_overrides:
+      deepseek-ocr:
+        # Upstream model.infer is explicitly BF16. TRTMC uses its reviewed
+        # FP16/FP32 policy, so record the difference rather than coercing it.
+        reference_precision: bf16
+        allow_reference_precision_mismatch: true
+    qualification:
+      deepseek-ocr: {}

@@ -215,7 +215,7 @@ class ModelConfig:
         if config_path.exists():
             return ModelConfig.from_json(config_path.read_text())
 
-        from .families import resolve_config_from_model_dir
+        from .models import resolve_config_from_model_dir
 
         family_config = resolve_config_from_model_dir(model_path)
         if family_config is not None:

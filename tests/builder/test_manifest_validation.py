@@ -74,6 +74,7 @@ class TestManifestValidation:
         }
         model = {"name": data.get("name", "")}
         model.update({key: value for key, value in data.items() if key in model_fields})
+        model.setdefault("task_strategy", "text_generation_causal")
         testcase = {key: value for key, value in data.items() if key not in model_fields}
         model["testcases"] = [testcase]
         return self._write_manifest(tmp_path, model)
@@ -191,18 +192,16 @@ class TestManifestValidation:
         with pytest.raises(ValueError, match="model-level field"):
             load_model_manifest(path)
 
-    def test_unknown_runtime_strategy_warns(self, tmp_path):
-        """Unknown runtime_strategy should emit a warning."""
+    def test_unknown_runtime_strategy_fails_closed(self, tmp_path):
+        """Unknown runtime_strategy must not route through a generic fallback."""
         data = {
             "name": "test",
             "hf_id": EXAMPLE_MODEL_ID,
             "family": EXAMPLE_FAMILY,
             "runtime_strategy": "bogus_strategy",
         }
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="bogus_strategy"):
             _validate_manifest(data, "test.json")
-            assert any("bogus_strategy" in str(warning.message) for warning in w)
 
     def test_known_runtime_strategy_no_warning(self, tmp_path):
         """Known runtime_strategy should not emit a warning."""
@@ -344,10 +343,15 @@ class TestManifestValidation:
             _validate_manifest(data, "test.json")
 
     def test_model_owned_layout_is_discovered(self, tmp_path):
-        """Nested tests/e2e/models/<family>/manifests layout is supported."""
+        """A model descriptor owns its colocated test manifests."""
         models_dir = tmp_path / "models"
-        manifest_dir = models_dir / EXAMPLE_FAMILY / "manifests"
+        family_dir = models_dir / EXAMPLE_FAMILY
+        manifest_dir = family_dir / "tests" / "manifests"
         manifest_dir.mkdir(parents=True)
+        (family_dir / "MODEL.toml").write_text(
+            'id = "example_family"\ntest_manifests = ["tests/manifests/example-test.json"]\n',
+            encoding="utf-8",
+        )
         manifest_path = manifest_dir / "example-test.json"
         manifest_path.write_text(
             json.dumps(
@@ -356,6 +360,7 @@ class TestManifestValidation:
                     "hf_id": EXAMPLE_MODEL_ID,
                     "family": EXAMPLE_FAMILY,
                     "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "task_strategy": "text_generation_causal",
                     "testcases": [
                         {
                             "name": "example-test",
@@ -366,7 +371,7 @@ class TestManifestValidation:
                             "name": "example-test-probe01",
                             "prompt": "Probe",
                             "max_new_tokens": 2,
-                        }
+                        },
                     ],
                 }
             ),
@@ -389,7 +394,7 @@ class TestManifestValidation:
 
     def test_model_owned_threshold_sidecar_is_loaded(self, tmp_path):
         """Model-local thresholds/<case>.json sidecars feed E2E thresholds."""
-        family_dir = tmp_path / "models" / EXAMPLE_FAMILY
+        family_dir = tmp_path / "models" / EXAMPLE_FAMILY / "tests"
         manifest_dir = family_dir / "manifests"
         threshold_dir = family_dir / "thresholds"
         manifest_dir.mkdir(parents=True)
@@ -402,6 +407,7 @@ class TestManifestValidation:
                     "hf_id": EXAMPLE_MODEL_ID,
                     "family": EXAMPLE_FAMILY,
                     "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "task_strategy": "text_generation_causal",
                     "testcases": [
                         {
                             "name": "example-test",
@@ -435,11 +441,13 @@ class TestManifestValidation:
 
     def test_repo_model_indexes_cover_all_nested_manifests(self):
         """Every repo E2E manifest is listed from its family MODEL.toml."""
-        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
-        nested_manifests = set(models_dir.glob("*/manifests/*.json"))
+        models_dir = (
+            Path(__file__).resolve().parents[2] / "python" / "tensorrt_model_connect" / "models"
+        )
+        nested_manifests = set(models_dir.glob("*/tests/manifests/*.json"))
         assert nested_manifests
 
-        family_dirs = {path.parent.parent for path in nested_manifests}
+        family_dirs = {path.parents[2] for path in nested_manifests}
         missing_indexes = [
             path.relative_to(models_dir).as_posix()
             for path in sorted(family_dirs)
@@ -451,7 +459,9 @@ class TestManifestValidation:
 
     def test_repo_model_dirs_own_e2e_runner(self):
         """Each model E2E folder owns its pytest runner entrypoint."""
-        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        models_dir = (
+            Path(__file__).resolve().parents[2] / "python" / "tensorrt_model_connect" / "models"
+        )
         family_dirs = sorted(
             path
             for path in models_dir.iterdir()
@@ -464,26 +474,27 @@ class TestManifestValidation:
         missing_plugins = []
         central_imports = []
         for family_dir in family_dirs:
-            runner = family_dir / "runner.py"
-            tests = sorted(family_dir.glob("test_*_e2e.py"))
+            test_dir = family_dir / "tests"
+            runner = test_dir / "runner.py"
+            tests = sorted(test_dir.glob("test_*_e2e.py"))
             if not runner.is_file():
                 missing_runner.append(family_dir.name)
             if len(tests) != 1:
                 missing_test.append(family_dir.name)
             for plugin_name in ("runner.py", "reference.py", "comparator.py"):
-                if not (family_dir / "e2e_plugins" / plugin_name).is_file():
+                if not (test_dir / "e2e_plugins" / plugin_name).is_file():
                     missing_plugins.append(
                         f"{family_dir.relative_to(models_dir).as_posix()}/e2e_plugins/{plugin_name}"
                     )
             for plugin_subdir in ("runners", "references", "comparators"):
-                if not (family_dir / "e2e_plugins" / plugin_subdir).is_dir():
+                if not (test_dir / "e2e_plugins" / plugin_subdir).is_dir():
                     missing_plugins.append(
                         f"{family_dir.relative_to(models_dir).as_posix()}/"
                         f"e2e_plugins/{plugin_subdir}"
                     )
 
             local_files = [path for path in [runner, *tests] if path.is_file()]
-            local_files.extend(sorted((family_dir / "e2e_plugins").rglob("*.py")))
+            local_files.extend(sorted((test_dir / "e2e_plugins").rglob("*.py")))
             for path in local_files:
                 text = path.read_text(encoding="utf-8")
                 if "tests.test_e2e" in text:
@@ -505,7 +516,9 @@ class TestManifestValidation:
 
     def test_repo_model_thresholds_are_sidecars(self):
         """Per-model threshold overrides live under model-owned thresholds/."""
-        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        models_dir = (
+            Path(__file__).resolve().parents[2] / "python" / "tensorrt_model_connect" / "models"
+        )
         inline_fields = {
             "threshold_overrides",
             "logit_atol",
@@ -522,15 +535,15 @@ class TestManifestValidation:
         }
 
         inline_thresholds = []
-        for manifest_path in sorted(models_dir.glob("*/manifests/*.json")):
+        for manifest_path in sorted(models_dir.glob("*/tests/manifests/*.json")):
             raw = json.loads(manifest_path.read_text(encoding="utf-8"))
             keys = sorted(inline_fields & raw.keys())
             if keys:
                 inline_thresholds.append((manifest_path.relative_to(models_dir).as_posix(), keys))
 
-        sidecars = sorted(models_dir.glob("*/thresholds/*.json"))
+        sidecars = sorted(models_dir.glob("*/tests/thresholds/*.json"))
         testcase_paths = {}
-        for manifest_path in sorted(models_dir.glob("*/manifests/*.json")):
+        for manifest_path in sorted(models_dir.glob("*/tests/manifests/*.json")):
             raw = json.loads(manifest_path.read_text(encoding="utf-8"))
             for testcase in raw["testcases"]:
                 testcase_paths[(manifest_path.parent.parent, testcase["name"])] = (
@@ -592,7 +605,9 @@ class TestManifestValidation:
 
     def test_repo_model_assets_are_local(self):
         """Model E2E manifests resolve data assets from their own folders."""
-        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        models_dir = (
+            Path(__file__).resolve().parents[2] / "python" / "tensorrt_model_connect" / "models"
+        )
         asset_fields = {
             "test_image",
             "test_input_audio",
@@ -600,6 +615,8 @@ class TestManifestValidation:
             "golden_snapshot_path",
             "edit_condition_image",
             "fp8_scales",
+            "camera_intrinsics_file",
+            "model_assets",
         }
         global_refs = []
         missing_assets = []
@@ -616,15 +633,15 @@ class TestManifestValidation:
             elif isinstance(value, str) and key in asset_fields:
                 yield value
 
-        for manifest_path in sorted(models_dir.glob("*/manifests/*.json")):
+        for manifest_path in sorted(models_dir.glob("*/tests/manifests/*.json")):
             text = manifest_path.read_text(encoding="utf-8")
-            if "tests/e2e/data" in text:
+            if "python/tensorrt_model_connect/models" in text:
                 global_refs.append(manifest_path.relative_to(models_dir).as_posix())
 
             raw = json.loads(text)
             family_dir = manifest_path.parent.parent
             for asset in iter_asset_values(raw):
-                if asset.startswith("tests/e2e/data"):
+                if asset.startswith(("python/", "tests/e2e/")):
                     global_refs.append(manifest_path.relative_to(models_dir).as_posix())
                     continue
                 if asset.startswith("data/") and not (family_dir / asset).is_file():
@@ -637,17 +654,19 @@ class TestManifestValidation:
 
     def test_repo_models_use_model_local_e2e_plugins(self):
         """Every manifest resolves runner/reference/comparator from its folder."""
-        models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+        models_dir = (
+            Path(__file__).resolve().parents[2] / "python" / "tensorrt_model_connect" / "models"
+        )
         failures = []
         for family_dir in sorted(
             path
             for path in models_dir.iterdir()
             if path.is_dir() and (path / "MODEL.toml").is_file()
         ):
-            family_prefix = f"tests.e2e.models.{family_dir.name}.e2e_plugins."
+            family_prefix = f"tensorrt_model_connect.models.{family_dir.name}.tests.e2e_plugins."
             try:
-                activate_model_plugins(family_dir)
-                for manifest_path in sorted((family_dir / "manifests").glob("*.json")):
+                activate_model_plugins(family_dir / "tests")
+                for manifest_path in sorted((family_dir / "tests" / "manifests").glob("*.json")):
                     model = load_model_manifest(manifest_path)
                     for case in model.testcases:
                         resolved = {
@@ -674,7 +693,7 @@ class TestManifestValidation:
     def test_repo_runtime_models_use_model_local_helpers(self):
         """Runtime plugin helpers are model-owned when production code uses them."""
         repo_root = Path(__file__).resolve().parents[2]
-        runtime_models_dir = repo_root / "src" / "runtime" / "models"
+        runtime_models_dir = repo_root / "python" / "tensorrt_model_connect" / "models"
         shared_helpers_dir = repo_root / "src" / "runtime" / "plugins" / "shared"
 
         obsolete_shared_helpers = sorted(shared_helpers_dir.glob("*_helpers.*"))
@@ -687,9 +706,10 @@ class TestManifestValidation:
         missing_helpers = []
         shared_includes = []
         cross_model_includes = []
-        for model_dir in sorted(path for path in runtime_models_dir.iterdir() if path.is_dir()):
-            if not (model_dir / "MODEL.toml").is_file():
+        for owner_dir in sorted(path for path in runtime_models_dir.iterdir() if path.is_dir()):
+            if not (owner_dir / "MODEL.toml").is_file():
                 continue
+            model_dir = owner_dir / "runtime"
             sources = sorted(model_dir.glob("*.[ch]pp")) + sorted(model_dir.glob("*.h"))
             uses_plugin_helpers = any(
                 path.name not in {"plugin_helpers.h", "plugin_helpers.cpp"}
@@ -699,30 +719,28 @@ class TestManifestValidation:
             if uses_plugin_helpers:
                 for helper in ("plugin_helpers.h", "plugin_helpers.cpp"):
                     if not (model_dir / helper).is_file():
-                        missing_helpers.append(f"{model_dir.name}/{helper}")
+                        missing_helpers.append(f"{owner_dir.name}/{helper}")
 
             for path in sources:
                 text = path.read_text(encoding="utf-8")
                 if "runtime/plugins/shared" in text:
                     shared_includes.append(path.relative_to(repo_root).as_posix())
-                for include_line in [
+                for include_line in (
                     line.strip()
                     for line in text.splitlines()
-                    if line.strip().startswith('#include "runtime/models/')
-                ]:
-                    prefix = f'#include "runtime/models/{model_dir.name}/'
-                    if not include_line.startswith(prefix):
-                        cross_model_includes.append(
-                            f"{path.relative_to(repo_root).as_posix()}: {include_line}"
-                        )
+                    if line.strip().startswith('#include "tensorrt_model_connect/models/')
+                ):
+                    cross_model_includes.append(
+                        f"{path.relative_to(repo_root).as_posix()}: {include_line}"
+                    )
                 if '#include "audio_helpers.h"' in text:
                     for helper in ("audio_helpers.h", "audio_helpers.cpp"):
                         if not (model_dir / helper).is_file():
-                            missing_helpers.append(f"{model_dir.name}/{helper}")
+                            missing_helpers.append(f"{owner_dir.name}/{helper}")
                 if '#include "diffusion_helpers.h"' in text:
                     for helper in ("diffusion_helpers.h", "diffusion_helpers.cpp"):
                         if not (model_dir / helper).is_file():
-                            missing_helpers.append(f"{model_dir.name}/{helper}")
+                            missing_helpers.append(f"{owner_dir.name}/{helper}")
 
         assert not missing_helpers
         assert not shared_includes
@@ -771,7 +789,7 @@ class TestManifestValidation:
                 "name": "remote-code-test",
                 "hf_id": "org/remote-code-model",
                 "family": EXAMPLE_FAMILY,
-                "runtime_strategy": "embedding",
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
                 "trust_remote_code": True,
             },
         )
@@ -796,6 +814,7 @@ class TestManifestValidation:
                     "hf_id": EXAMPLE_MODEL_ID,
                     "family": EXAMPLE_FAMILY,
                     "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "task_strategy": "image_feature_extraction",
                     "testcases": [
                         {
                             "name": "image-model",
@@ -956,7 +975,7 @@ class TestManifestValidation:
                 "name": "rerank-test",
                 "hf_id": "org/rerank",
                 "family": EXAMPLE_FAMILY,
-                "runtime_strategy": "reranking",
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
                 "skip_comparison": "reference shape mismatch",
             },
         )
@@ -985,7 +1004,7 @@ class TestManifestValidation:
                 "name": "rerank-test",
                 "hf_id": "org/rerank",
                 "family": EXAMPLE_FAMILY,
-                "runtime_strategy": "reranking",
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
                 "skip_comparison": True,
             },
         )

@@ -222,7 +222,7 @@ def test_cmd_build_rtx_profile_resolution_does_not_import_family_model(
 ):
     import tensorrt_model_connect.build_cli as cli
     import tensorrt_model_connect.engine_builder as engine_builder
-    from tensorrt_model_connect import families, trt_compat
+    from tensorrt_model_connect import models as families, trt_compat
 
     model_dir = tmp_path / "model"
     model_dir.mkdir()
@@ -236,8 +236,8 @@ def test_cmd_build_rtx_profile_resolution_does_not_import_family_model(
     monkeypatch.setitem(sys.modules, "tensorrt_rtx", rtx)
     monkeypatch.delitem(sys.modules, "tensorrt", raising=False)
     for module_name in tuple(sys.modules):
-        if module_name == "tensorrt_model_connect.families.example_family" or module_name.startswith(
-            "tensorrt_model_connect.families.example_family."
+        if module_name == "tensorrt_model_connect.models.example_family" or module_name.startswith(
+            "tensorrt_model_connect.models.example_family."
         ):
             monkeypatch.delitem(sys.modules, module_name)
     monkeypatch.setattr(trt_compat, "_module", None)
@@ -246,7 +246,7 @@ def test_cmd_build_rtx_profile_resolution_does_not_import_family_model(
     calls = []
 
     def build(**kwargs):
-        assert "tensorrt_model_connect.families.example_family.model" not in sys.modules
+        assert "tensorrt_model_connect.models.example_family.model" not in sys.modules
         engine_builder._setup_trt_import(kwargs["rtx"])
         calls.append(kwargs)
 
@@ -294,8 +294,8 @@ def test_profile_metadata_prefers_chronos_architecture_without_model_import(
     )
     for family in ("chronos_bolt", "t5"):
         for module_name in tuple(sys.modules):
-            if module_name == f"tensorrt_model_connect.families.{family}" or module_name.startswith(
-                f"tensorrt_model_connect.families.{family}."
+            if module_name == f"tensorrt_model_connect.models.{family}" or module_name.startswith(
+                f"tensorrt_model_connect.models.{family}."
             ):
                 monkeypatch.delitem(sys.modules, module_name)
 
@@ -303,8 +303,8 @@ def test_profile_metadata_prefers_chronos_architecture_without_model_import(
 
     assert resolved == str(model_dir)
     assert family == "chronos_bolt"
-    assert "tensorrt_model_connect.families.chronos_bolt.model" not in sys.modules
-    assert "tensorrt_model_connect.families.t5.model" not in sys.modules
+    assert "tensorrt_model_connect.models.chronos_bolt.model" not in sys.modules
+    assert "tensorrt_model_connect.models.t5.model" not in sys.modules
 
 
 class TestInspectArgs:

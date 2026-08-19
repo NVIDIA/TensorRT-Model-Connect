@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: nemotron_labs_diffusion.generate
+  operation: generate
+  model: nemotron-labs-diffusion-8b
+  workload:
+    testcase: nemotron-labs-diffusion-8b-ar
+  baseline:
+    runner: hf-transformers
+    mode: hf-eager
+    model_class: auto
+    generation_method: ar-generate
+    output_contract: normalized-text

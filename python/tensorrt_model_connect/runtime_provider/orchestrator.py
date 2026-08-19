@@ -57,8 +57,8 @@ def family_implementation_root(family_name: str) -> Path | None:
         or not family_name.replace("_", "").isalnum()
     ):
         raise ValueError(f"Invalid model family name: {family_name!r}")
-    families_root = Path(__file__).resolve().parents[1] / "families"
-    family_root = families_root / family_name
+    models_root = Path(__file__).resolve().parents[1] / "models"
+    family_root = models_root / family_name
     if not family_root.is_dir():
         return None
     return family_root

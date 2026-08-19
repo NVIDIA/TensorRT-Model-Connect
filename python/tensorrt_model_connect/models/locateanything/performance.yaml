@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: locateanything.generate
+  operation: generate
+  model: locateanything-3b
+  workload:
+    testcase: locateanything-3b
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-vlm
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+    output_contract: localization
+    min_localization_box_iou: 0.9
+    max_localization_point_distance: 10.0
+    max_normalized_edit_distance: 0.5

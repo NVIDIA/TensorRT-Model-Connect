@@ -14,6 +14,6 @@ Current owners:
 - `src/tokenizer/`: tokenizer implementations used by model-owned pipelines.
 
 Keep new model-specific engine setup and tokenizer policy under the owning
-`src/runtime/models/<family>/` directory.
+`python/tensorrt_model_connect/models/<family>/runtime/` directory.
 
 <!-- Collaborative review anchor: batch 2. -->

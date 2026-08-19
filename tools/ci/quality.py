@@ -225,7 +225,6 @@ class UnitTestRunner:
             "no:cacheprovider",
             "-m",
             "not gpu and not trt and not e2e and not model_proof_allocator",
-            "--ignore=tests/builder/test_flashinfer_benchmark.py",
             "--ignore=tests/builder/test_tvm_ffi_plugin.py",
         ]
         if selected_wheel:
@@ -272,7 +271,7 @@ class UnitTestRunner:
                     "-DTRTMC_BUILD_TESTS=ON",
                     "-DTRTMC_BUILD_BENCHMARKS=OFF",
                     "-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF",
-                    "-DTRTMC_BUILD_DIFFUSION_KERNELS=OFF",
+                    "-DTRTMC_BUILD_MODEL_KERNELS=OFF",
                     "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
                 ]
             )

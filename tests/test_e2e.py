@@ -55,7 +55,7 @@ from tests.e2e_harness.model_runner import (
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 _WAIVES_FILE = Path(__file__).resolve().parent / "e2e" / "waives.txt"
-_MODELS_DIR = Path(__file__).resolve().parent / "e2e" / "models"
+_MODELS_DIR = PROJECT_DIR / "python" / "tensorrt_model_connect" / "models"
 
 
 def _resolve_binary(config) -> str:

@@ -11,8 +11,8 @@ import re
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FAMILIES_ROOT = REPO_ROOT / "python/tensorrt_model_connect/families"
-E2E_MODELS_ROOT = REPO_ROOT / "tests/e2e/models"
+FAMILIES_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models"
+E2E_MODELS_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models"
 ENGINE_BUILDER = REPO_ROOT / "python/tensorrt_model_connect/engine_builder.py"
 RETIRED_FULL_ROPE_TABLE_APIS = {
     "make_rope_table",
@@ -64,6 +64,33 @@ def test_every_family_has_one_required_model_entrypoint() -> None:
         assert {"matches", "build"} <= functions, (
             f"{family.name}/model.py must define matches() and build()"
         )
+
+
+def test_model_owners_have_no_builder_forwarding_shims() -> None:
+    forwarding_imports = {
+        "standard_decoder_builder.py": "from .default_decoder import",
+        "dual_profile_decoder_tp_builder.py": (
+            "from .default_dual_profile_decoder_tp import"
+        ),
+    }
+    violations = []
+    for filename, marker in forwarding_imports.items():
+        for path in FAMILIES_ROOT.glob(f"*/{filename}"):
+            if marker in path.read_text(encoding="utf-8"):
+                violations.append(path.relative_to(REPO_ROOT).as_posix())
+
+    assert not violations, f"obsolete model-owned builder forwarding shims: {violations}"
+
+
+def test_dense_kv_caches_have_no_deprecated_mask_forwarder() -> None:
+    marker = "Kept for backward compatibility with tests that call this directly"
+    violations = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in FAMILIES_ROOT.glob("*/runtime/kv_cache.h")
+        if marker in path.read_text(encoding="utf-8")
+    ]
+
+    assert not violations, f"deprecated dense KV mask forwarders: {violations}"
 
 
 def test_family_modules_do_not_restore_retired_full_rope_table_apis() -> None:
@@ -122,7 +149,7 @@ def test_model_entries_are_direct_module_functions() -> None:
 
 def test_model_consumers_do_not_restore_object_forwarding_or_missing_imports() -> None:
     module_bindings = {
-        f"tensorrt_model_connect.families.{family.name}.model": _module_bindings(
+        f"tensorrt_model_connect.models.{family.name}.model": _module_bindings(
             family / "model.py"
         )
         for family in _family_dirs()
@@ -145,7 +172,7 @@ def test_model_consumers_do_not_restore_object_forwarding_or_missing_imports() -
             source = path.read_text(encoding="utf-8")
             if "PLUGIN_CLASS" in source:
                 violations.append(f"{path}: retired PLUGIN_CLASS forwarding")
-            if "tensorrt_model_connect.families." not in source or ".model" not in source:
+            if "tensorrt_model_connect.models." not in source or ".model" not in source:
                 continue
             tree = ast.parse(source, filename=str(path))
             for node in ast.walk(tree):

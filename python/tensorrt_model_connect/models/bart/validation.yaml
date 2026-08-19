@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_continuation_parity:
+    models:
+    - bart-base
+    - bart-base-tp4
+    default_models:
+    - bart-base
+    model_overrides:
+      bart-base:
+        # Reserve two special tokens plus 64 generated decoder tokens inside
+        # the causal BART path's 1024-position table.
+        prompt_token_limit: 958
+        prompt_truncation_side: left
+        # Compare raw greedy logits. The checkpoint generation defaults would
+        # otherwise inject a 3-gram repetition ban and force BOS/EOS tokens.
+        hf_generation_overrides:
+          no_repeat_ngram_size: 0
+          forced_bos_token_id: null
+          forced_eos_token_id: null
+    qualification:
+      bart-base: {}

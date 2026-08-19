@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  seedtts_en_omni_audio_parity:
+    models:
+    - qwen3-omni-30b-a3b-instruct
+    default_models:
+    - qwen3-omni-30b-a3b-instruct
+    qualification:
+      qwen3-omni-30b-a3b-instruct: {}

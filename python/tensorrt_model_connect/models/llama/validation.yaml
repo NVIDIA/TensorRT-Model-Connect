@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_five_shot_mcq:
+    models:
+    - nemotron-nano-4b
+    - tinyllama-1.1b
+    default_models:
+    - nemotron-nano-4b
+    - tinyllama-1.1b
+    qualification:
+      nemotron-nano-4b: {}
+      tinyllama-1.1b: {}
+  mmlu_continuation_parity:
+    models:
+    - falcon3-1b
+    - minitron-4b-depth
+    - minitron-4b-width
+    - minitron-4b-width-l0
+    default_models:
+    - falcon3-1b
+    - minitron-4b-depth
+    - minitron-4b-width
+    qualification:
+      falcon3-1b: {}
+      minitron-4b-depth: {}
+      minitron-4b-width: {}

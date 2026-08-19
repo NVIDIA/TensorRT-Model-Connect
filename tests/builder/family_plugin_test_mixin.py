@@ -14,7 +14,7 @@ Usage:
     from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
 
     class ExamplePluginTester(FamilyPluginTester):
-        plugin_module = "tensorrt_model_connect.families.example"
+        plugin_module = "tensorrt_model_connect.models.example"
         model_type = "example_decoder"
 
     class TestExampleEngine(FamilyPluginTestMixin):

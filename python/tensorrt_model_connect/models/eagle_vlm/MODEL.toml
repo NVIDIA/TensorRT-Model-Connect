@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "eagle_vlm"
+aliases = [
+  "eagle_vlm",
+  "eaglevlm",
+  "llama_nemotron_vl",
+]
+prefixes = [
+  "eagle_vlm",
+  "llama_nemotron_vl",
+]
+runtime_plugins = [
+  "plugin.cpp|register_eagle_vlm_plugin",
+]
+runtime_strategies = [
+  "eagle_vlm_embedding",
+  "eagle_vlm_reranking",
+]
+test_manifests = [
+  "tests/manifests/nemotron-embed-vl-1b-v2-tp4.json",
+  "tests/manifests/nemotron-embed-vl-1b-v2.json",
+  "tests/manifests/nemotron-rerank-vl-1b-v2-tp4.json",
+  "tests/manifests/nemotron-rerank-vl-1b-v2.json",
+]
+
+[e2e_defaults.embedding]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+
+[e2e_defaults.reranking]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]

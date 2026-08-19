@@ -11,7 +11,6 @@ from diff_framework.protocol import DiffResult, TestContext
 class LayerProfileTest:
     name = "layer_profile"
     description = "Per-layer TRT kernel timing via IProfiler (decoder models only)"
-    runtime_strategies = []
     requires_bundle = False
     requires_gpu = True
 

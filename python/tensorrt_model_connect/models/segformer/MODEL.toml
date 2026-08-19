@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "segformer"
+aliases = [
+  "segformer",
+]
+prefixes = [
+  "segformer",
+]
+runtime_plugins = [
+  "plugin.cpp|register_segformer_plugin",
+]
+runtime_strategies = [
+  "segformer_segmentation",
+]
+test_manifests = [
+  "tests/manifests/segformer-b0-ade-tp4.json",
+  "tests/manifests/segformer-b0-ade.json",
+]
+
+[e2e_defaults.segmentation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

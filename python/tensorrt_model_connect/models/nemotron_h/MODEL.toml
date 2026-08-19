@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "nemotron_h"
+python_profile_specs = [
+  "nemotron_h_reference|models/nemotron_h/python_profile_requirements/nemotron_h_reference.lock.txt|models/nemotron_h/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|nemotron_h_reference",
+]
+capabilities = [
+  "debug_layer_outputs",
+]
+aliases = [
+  "nemotron_h",
+  "nemotron_hybrid",
+  "nemotronh",
+]
+prefixes = [
+  "nemotron_h",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "nemotron_h_hybrid_mamba_attention",
+]
+runtime_plugins = [
+  "plugin.cpp|register_nemotron_h_plugin",
+]
+runtime_strategies = [
+  "nemotron_h_hybrid_mamba_attention",
+]
+test_manifests = [
+  "tests/manifests/nemotron-h-nano-9b-tp4.json",
+  "tests/manifests/nemotron-h-nano-9b.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "nemotron_h_hybrid_mamba_attention",
+]
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

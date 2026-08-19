@@ -310,57 +310,5 @@ def write_bundle(
     info: BundleInfo,
     sections: list[BundleSection],
 ) -> None:
-    """Write a .bundle artifact file."""
-    if any(isinstance(section, _FileBundleSection) for section in sections):
-        _write_file_backed_bundle(path, info, sections)
-        return
-
-    # Build section offset/size list for JSON header
-    section_meta: list[dict[str, Any]] = []
-    offset = 0
-    for s in sections:
-        section_meta.append({
-            "name": s.name,
-            "offset": offset,
-            "size": len(s.data),
-        })
-        offset += len(s.data)
-
-    # Build JSON header
-    header = {
-        "model_id": info.model_id,
-        "model_type": info.model_type,
-        "family": info.family,
-        "trt_version": info.trt_version,
-        "trt_abi": info.trt_abi,
-        "gpu_name": info.gpu_name,
-        "created_at": info.created_at,
-        "vocab_size": info.vocab_size,
-        "hidden_size": info.hidden_size,
-        "num_layers": info.num_layers,
-        "num_attention_heads": info.num_attention_heads,
-        "num_key_value_heads": info.num_key_value_heads,
-        "max_cache_length": info.max_cache_length,
-        **({"runtime_strategy": info.runtime_strategy}
-           if info.runtime_strategy else {}),
-        "precision": info.precision,
-        **({"quantization": info.quantization}
-           if info.quantization != "none" else {}),
-        "tokenizer_add_special_tokens": int(info.tokenizer_add_special_tokens),
-        **({"io_map": info.io_map} if info.io_map else {}),
-        **({"defaults": info.defaults} if info.defaults else {}),
-        **({"max_batch_size": dict(info.max_batch_size)}
-           if info.max_batch_size else {}),
-        "sections": {
-            s["name"]: {"offset": s["offset"], "size": s["size"]}
-            for s in section_meta
-        },
-    }
-    header_json = json.dumps(header, indent=2).encode("utf-8")
-
-    with open(path, "wb") as f:
-        f.write(BUNDLE_MAGIC)
-        f.write(struct.pack("<Q", len(header_json)))
-        f.write(header_json)
-        for s in sections:
-            f.write(s.data)
+    """Validate and atomically write a .bundle artifact file."""
+    _write_file_backed_bundle(path, info, sections)

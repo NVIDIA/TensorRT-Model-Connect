@@ -12,17 +12,17 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
-- `tests/e2e/models/dinov3/data/test_img.jpeg`
-- `tests/e2e/models/internvl/data/test_img.jpeg`
-- `tests/e2e/models/lance/data/test_img.jpeg`
-- `tests/e2e/models/locateanything/data/test_img.jpeg`
-- `tests/e2e/models/phi4_multimodal/data/test_img.jpeg`
-- `tests/e2e/models/qwen_image/data/test_img.jpeg`
-- `tests/e2e/models/qwen_vl/data/test_img.jpeg`
-- `tests/e2e/models/sam/data/test_img.jpeg`
-- `tests/e2e/models/sam3/data/test_img.jpeg`
-- `tests/e2e/models/segformer/data/test_img.jpeg`
-- `tests/e2e/models/timm_vit/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/dinov3/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/internvl/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/lance/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/locateanything/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/phi4_multimodal/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/qwen_image/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/qwen_vl/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/sam/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/sam3/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/segformer/tests/data/test_img.jpeg`
+- `python/tensorrt_model_connect/models/timm_vit/tests/data/test_img.jpeg`
 
 SHA-256: `d68cb42a55f79e51f71b78cf7d726f01c80a0e2dab8674da6f68361cce004cbc`
 
@@ -33,7 +33,7 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `tests/assets/test_image.jpg` — synthetic two-color image fixture;
   SHA-256 `d321e0168fc3678faca52c73dffafc80e729f125432cbcaf51f24c5044931c98`
-- `tests/e2e/models/deepseek_ocr/data/orc_test_img.jpeg` — screenshot of
+- `python/tensorrt_model_connect/models/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing; SHA-256
   `d27d4e33afb8e820916b19bffc4c94f1f626536cc3375b5fafeee684b0a3b9b3`
 
@@ -53,9 +53,9 @@ The project maintainer recorded and supplied the original human-voice fixture
 and authorized its inclusion and redistribution under the Apache License 2.0.
 Byte-identical copies are stored at:
 
-- `tests/e2e/models/canary/data/Recording.wav`
-- `tests/e2e/models/nemotron_speech_streaming/data/Recording.wav`
-- `tests/e2e/models/whisper/data/Recording.wav`
+- `python/tensorrt_model_connect/models/canary/tests/data/Recording.wav`
+- `python/tensorrt_model_connect/models/nemotron_speech_streaming/tests/data/Recording.wav`
+- `python/tensorrt_model_connect/models/whisper/tests/data/Recording.wav`
 
 SHA-256: `fe14352b6b83009d4e344613fc05b17c0a89a94b0c8502c8422c637928263ca4`
 
@@ -77,18 +77,18 @@ content in all three model families:
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
 
-- `tests/e2e/models/personaplex/data/Recording.wav`; SHA-256
+- `python/tensorrt_model_connect/models/personaplex/tests/data/Recording.wav`; SHA-256
   `6d5dc6d3b696db0d97d1e45679c81198cb1c9187d5056bb6673ef205dbd4d2e7`
 
 The following NumPy array is project-generated golden model output for that
 fixture and is distributed under the Apache License 2.0:
 
-- `tests/e2e/models/personaplex/data/personaplex_recording_official_tokens_greedy.npy`;
+- `python/tensorrt_model_connect/models/personaplex/tests/data/personaplex_recording_official_tokens_greedy.npy`;
   SHA-256 `1f9cbce7a20d09a65069eaa521c3bc5c492f00b27f2d32a4b5c12d1de5a9618c`
 
 ## LibriSpeech accuracy fixture
 
-`tests/e2e/models/whisper/data/librispeech-test-clean-6930-75918-0003.wav`
+`python/tensorrt_model_connect/models/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 is utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
 distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
 International license. LibriSpeech was prepared by Vassil Panayotov with the
@@ -106,22 +106,22 @@ The following files are unmodified copies from NVlabs/Sana revision
 Apache License 2.0:
 
 - Upstream: https://github.com/NVlabs/Sana/tree/59629fdf790850797cb657bad014fce432bd713d
-- `tests/e2e/models/sana_wm/assets/demo_0.png`; SHA-256
+- `python/tensorrt_model_connect/models/sana_wm/tests/assets/demo_0.png`; SHA-256
   `632754d1cb85bb5d04dc0f81709065892f80fba133d065ad4edd14c1f141d626`
-- `tests/e2e/models/sana_wm/assets/demo_0.txt`; SHA-256
+- `python/tensorrt_model_connect/models/sana_wm/tests/assets/demo_0.txt`; SHA-256
   `e6e573dac5002554b0be2bc444b41f77e842f9b35da39984166861273d975901`
-- `tests/e2e/models/sana_wm/assets/demo_0_intrinsics.npy`; SHA-256
+- `python/tensorrt_model_connect/models/sana_wm/tests/assets/demo_0_intrinsics.npy`; SHA-256
   `ae21429541b5a61a386322f2e3dd71ab1d1b104aaf44f04d8d20a2c47d97ea1f`
 
 ## ELF numerical replay fixtures
 
-The `.f32` files below `tests/e2e/models/elf_flow/data/` are numerical replay
+The `.f32` files below `python/tensorrt_model_connect/models/elf_flow/tests/data/` are numerical replay
 tensors exported for this project from the official ELF evaluator at revision
 `1f38c80457d33c95020efdaaf9463823c569c786`. They are distributed as project
 test data under the Apache License 2.0. The upstream ELF implementation is MIT
 licensed and is attributed in `NOTICE`.
 
-| Relative path below `tests/e2e/models/elf_flow/data/` | SHA-256 |
+| Relative path below `python/tensorrt_model_connect/models/elf_flow/tests/data/` | SHA-256 |
 |---|---|
 | `elf-b-de-en-replay/condition_latents.f32` | `9f6083ed8fd0084d0e16ba8616d82fe2412bb4092919a24f661056629113885d` |
 | `elf-b-de-en-replay/condition_mask.f32` | `45c048edf5f982926c32922ce9c0c55f3118cb572ea2434cdb0d0816b746ff5b` |

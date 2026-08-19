@@ -15,6 +15,7 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.ci.container import CiContainer
@@ -190,7 +191,8 @@ def _ci_source(*filenames: str) -> str:
 
 
 def _single_default_model_config(filename: str) -> tuple[Path, dict]:
-    configs = sorted((REPO_ROOT / "tests" / "e2e" / "models").glob(f"*/{filename}"))
+    models_root = REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
+    configs = sorted(models_root.glob(f"*/tests/{filename}"))
     defaults = []
     for path in configs:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -941,7 +943,9 @@ def test_diffusion_vlm_pair_count_uses_helper() -> None:
 
 def test_diffusion_vlm_assessment_default_is_model_owned() -> None:
     path, data = _single_default_model_config("diffusion_vlm_assessment.json")
-    assert path.parent.parent == REPO_ROOT / "tests" / "e2e" / "models"
+    assert path.parent.parent.parent == (
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
+    )
     for key in ("model_id", "max_side", "max_new_tokens", "timeout"):
         assert data.get(key)
 
@@ -1005,7 +1009,7 @@ def test_selective_python_always_runs_static_ci_smoke_tests() -> None:
 def test_python_package_coverage_gate_excludes_family_owned_modules() -> None:
     text = _ci_source("coverage.py")
     assert "_write_python_config" in text
-    assert "*/tensorrt_model_connect/families/*" in text
+    assert "*/tensorrt_model_connect/models/*" in text
     assert 'self.directory / "python-package-gate.coveragerc"' in text
     assert 'f"--cov-config={config}"' in text
     assert "PYTHON_COVERAGE_MIN_LINE" in text
@@ -1017,7 +1021,8 @@ def test_full_e2e_collection_uses_model_e2e_files_with_visible_errors() -> None:
     full_mode = text.split("def _collect_tests", maxsplit=1)[1].split(
         "def _model_name", maxsplit=1
     )[0]
-    assert 'glob("*/test_*_e2e.py")' in full_mode
+    assert 'repository / "python/tensorrt_model_connect/models"' in full_mode
+    assert '"*/tests/test_*_e2e.py"' in full_mode
     assert '"--co"' in full_mode
     assert '"-q"' in full_mode
     assert '"test_model_e2e[" in line' in full_mode
@@ -1025,9 +1030,9 @@ def test_full_e2e_collection_uses_model_e2e_files_with_visible_errors() -> None:
 
 def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
     for relpath in (
-        "tests/e2e/models/qwen/test_flashinfer_plugin.py",
-        "tests/e2e/models/qwen/test_flashinfer_trt_attention.py",
-        "tests/e2e/models/qwen/test_qwen3_flashinfer.py",
+        "python/tensorrt_model_connect/models/qwen/tests/test_flashinfer_plugin.py",
+        "python/tensorrt_model_connect/models/qwen/tests/test_flashinfer_trt_attention.py",
+        "python/tensorrt_model_connect/models/qwen/tests/test_qwen3_flashinfer.py",
     ):
         text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
         assert 'if __name__ != "__main__":' in text
@@ -1047,7 +1052,23 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     script = _ci_source("quality.py")
     stage = script.split("def premerge", maxsplit=1)[1].split("def _premerge_scope", maxsplit=1)[0]
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
-    qwen_manifest = (REPO_ROOT / "src" / "runtime" / "models" / "qwen" / "MODEL.toml").read_text()
+    qwen_manifest = (
+        REPO_ROOT
+        / "python"
+        / "tensorrt_model_connect"
+        / "models"
+        / "qwen"
+        / "MODEL.toml"
+    ).read_text()
+    qwen_runtime_cmake = (
+        REPO_ROOT
+        / "python"
+        / "tensorrt_model_connect"
+        / "models"
+        / "qwen"
+        / "runtime"
+        / "CMakeLists.txt"
+    ).read_text()
 
     assert "pip install" not in stage
     assert "source / 'python'" in stage
@@ -1075,17 +1096,17 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert "-DTRTMC_ENABLE_TRT=OFF" not in stage
     assert "-DTRTMC_BUILD_BACKEND_TRT=OFF" not in stage
     assert "-DTRTMC_ENABLE_TVM_FFI=OFF" not in stage
+    assert "-DTRTMC_BUILD_MODEL_KERNELS=OFF" in stage
+    assert "TRTMC_BUILD_DIFFUSION_KERNELS" not in script
     assert "conan " not in stage
     assert "build_pip_package" not in stage
     assert "trtmc_model_plugins" not in stage
     assert "add_custom_target(trtmc_platform_cpp_tests)" in cmake
     assert "trtmc_add_test(test_model_plugin_loader MODEL_OWNED)" in cmake
     assert "test_c_abi_runtime_regression" not in cmake
-    assert (
-        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|trtmc_model_qwen|_|_"
-        in qwen_manifest
-    )
-    assert "MODEL_OWNED\n        ${_trtmc_test_options}" in cmake
+    assert "runtime_tests" not in qwen_manifest
+    assert "trtmc_add_test(test_c_abi_runtime_regression" in qwen_runtime_cmake
+    assert "MODEL_OWNED" in qwen_runtime_cmake
     for gpu_test in (
         "test_trt_runtime_lifetime REQUIRES_TRT REQUIRES_GPU",
         "test_trt_module REQUIRES_TRT REQUIRES_GPU",
@@ -1137,20 +1158,22 @@ def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> 
 
 
 
-def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
+def test_gpu_only_tests_are_owner_local_or_excluded_from_cpu_units() -> None:
     stage = _ci_source("quality.py")
-    for relative in (
-        "tests/builder/test_flashinfer_benchmark.py",
-        "tests/builder/test_tvm_ffi_plugin.py",
-    ):
-        assert f"--ignore={relative}" in stage
+    assert "--ignore=tests/builder/test_tvm_ffi_plugin.py" in stage
+    assert "tests/builder/test_flashinfer_benchmark.py" not in stage
 
-    ffi_architecture = (REPO_ROOT / "tests/builder/test_ffi_architecture.py").read_text()
-    flashinfer_section = ffi_architecture.split("class TestFlashInferKernelSetup:", maxsplit=1)[
-        1
-    ].split("class TestEngineBuilderKernelArtifacts:", maxsplit=1)[0]
-    assert flashinfer_section.count("@pytest.mark.gpu") == 3
-    assert flashinfer_section.count("@pytest.mark.trt") == 3
+    owner_benchmark = (
+        REPO_ROOT
+        / "python"
+        / "tensorrt_model_connect"
+        / "models"
+        / "qwen"
+        / "tests"
+        / "test_flashinfer_benchmark.py"
+    )
+    assert owner_benchmark.is_file()
+    assert "requires_flashinfer" in owner_benchmark.read_text(encoding="utf-8")
 
 
 
@@ -1180,7 +1203,9 @@ def test_package_reuses_conan_cmake_build_directory(tmp_path: Path) -> None:
 
 def test_package_smoke_default_is_model_owned() -> None:
     path, data = _single_default_model_config("package_smoke.json")
-    assert path.parent.parent == REPO_ROOT / "tests" / "e2e" / "models"
+    assert path.parent.parent.parent == (
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
+    )
     for key in (
         "name",
         "model_id",
@@ -1198,6 +1223,26 @@ def test_package_smoke_default_is_model_owned() -> None:
     assert isinstance(data.get("run_args", []), list)
 
 
+def test_package_manager_discovers_the_owner_local_smoke_config() -> None:
+    from tools.ci.package import WheelPackageManager
+
+    class Context:
+        env: dict[str, str] = {}
+        repository = REPO_ROOT
+
+        @staticmethod
+        def read_json(path: Path) -> dict[str, object]:
+            return json.loads(path.read_text(encoding="utf-8"))
+
+    path, config = WheelPackageManager(Context())._default_config(
+        "TRTMC_WHEEL_SMOKE_CONFIG", "package_smoke.json"
+    )
+
+    assert path.parent.name == "tests"
+    assert path.parents[1].name == "qwen"
+    assert config["default"] is True
+
+
 def test_package_smoke_ci_surface_has_no_model_owned_names() -> None:
     shared_paths = (
         REPO_ROOT / "tools" / "ci" / "stage.py",
@@ -1206,7 +1251,7 @@ def test_package_smoke_ci_surface_has_no_model_owned_names() -> None:
         REPO_ROOT / "tools" / "ci" / "pipeline.py",
     )
     config_path, data = _single_default_model_config("package_smoke.json")
-    family = config_path.parent.name
+    family = config_path.parent.parent.name
     model_name = str(data["name"])
     model_prefix = model_name.split("-", maxsplit=1)[0]
     family_tokens = {family, model_prefix}
@@ -1243,6 +1288,7 @@ def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
     assert 'f"*-{tag}-none-{platform}.whl"' in text
     assert "_validate_build_platform" in text
     assert "build_glibc" in text
+    assert "/models/wan2_2_ti2v/data/" in text
 
 
 def test_package_stage_uses_conan_py_build_inputs() -> None:
@@ -1396,7 +1442,9 @@ def test_cpp_coverage_builds_excluded_test_target() -> None:
 def test_cpp_coverage_gate_excludes_model_owned_runtime_plugins() -> None:
     coverage = _ci_source("coverage.py")
     assert 'self._words("GCOVR_EXCLUDES")' in coverage
-    assert 'str(self.repository / "src/runtime/models")' in coverage
+    assert (
+        'str(self.repository / "python/tensorrt_model_connect/models")' in coverage
+    )
     assert 'gcovr_base.extend(("--exclude", value))' in coverage
 
 
@@ -1577,6 +1625,31 @@ def test_etth1_model_proofs_use_the_single_validation_engine_entry_point() -> No
             ")", maxsplit=1
         )[0]
     )
+
+
+def test_etth1_nightly_models_are_discovered_from_owner_qualification() -> None:
+    from tools.ci.process import CiError
+    from tools.ci.validation import ValidationPolicy
+    from tools.validation import catalog as validation_catalog
+
+    suites = validation_catalog.load_suites()
+    suite = validation_catalog.suite_by_id(suites, "etth1_time_series_parity")
+    manifests = validation_catalog.load_manifest_records()
+    expected_by_owner: dict[str, list[str]] = {}
+    for manifest in manifests:
+        name = str(manifest["name"])
+        if name in suite["qualification_models"]:
+            expected_by_owner.setdefault(str(manifest["family"]), []).append(name)
+
+    assert expected_by_owner
+    for owner, expected in expected_by_owner.items():
+        assert ValidationPolicy.models("nightly", owner) == tuple(expected)
+    assert ValidationPolicy.models("premerge", next(iter(expected_by_owner))) == ()
+    with pytest.raises(CiError, match="unknown model owner"):
+        ValidationPolicy.models("nightly", "unknown-owner")
+
+    source = (REPO_ROOT / "tools" / "ci" / "validation.py").read_text(encoding="utf-8")
+    assert "MODELS =" not in source
 
 
 def test_etth1_dataset_preparation_imports_the_projected_python_package(

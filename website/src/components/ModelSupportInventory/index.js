@@ -211,14 +211,14 @@ export default function ModelSupportInventory({variant = 'summary', taskGroup}) 
   if (variant === 'facts') {
     return (
       <ul>
-        <li>{inventory.familyModelCount} Python family models under <code>python/tensorrt_model_connect/families/</code>.</li>
-        <li>{inventory.e2eManifestCount} E2E model manifests and {inventory.e2eFamilyIndexCount} family indexes under <code>tests/e2e/models/</code>.</li>
-        <li>{inventory.runtimeStrategyKeyCount} unique C++ runtime strategy keys declared by model metadata under <code>src/runtime/models/</code>.</li>
+        <li>{inventory.modelOwnerCount} independent model owners under <code>python/tensorrt_model_connect/models/</code>.</li>
+        <li>{inventory.e2eManifestCount} E2E manifests under each owner's <code>tests/manifests/</code>.</li>
+        <li>{inventory.runtimeStrategyKeyCount} unique C++ runtime strategy keys declared by those same owner descriptors.</li>
       </ul>
     );
   }
   if (variant === 'families') {
-    return <pre><code>{inventory.familyModelNames.join(', ')}</code></pre>;
+    return <pre><code>{inventory.modelOwnerNames.join(', ')}</code></pre>;
   }
   if (variant === 'models') {
     return <ModelProfileTable profiles={inventory.modelProfiles} taskGroup={taskGroup} />;
@@ -228,8 +228,9 @@ export default function ModelSupportInventory({variant = 'summary', taskGroup}) 
   }
   return (
     <p>
-      The current checkout contains {inventory.familyModelCount} Python family models,{' '}
-      {inventory.e2eManifestCount} E2E model manifests, and {inventory.e2eFamilyIndexCount} E2E family indexes.
+      The current checkout contains {inventory.modelOwnerCount} independent model owners,{' '}
+      {inventory.e2eManifestCount} E2E manifests, and {inventory.runtimeStrategyKeyCount}{' '}
+      model-owned runtime strategy keys.
     </p>
   );
 }

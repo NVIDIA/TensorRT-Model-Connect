@@ -191,7 +191,7 @@ class TestInputMediaPathResolution:
     def test_rebases_isolated_image_audio_and_video_paths(self, tmp_path):
         mod = _import_report()
         project_dir = tmp_path / "checkout"
-        media_dir = project_dir / "tests/e2e/models/example/data"
+        media_dir = project_dir / "python/tensorrt_model_connect/models/example/tests/data"
         media_dir.mkdir(parents=True)
         media = {
             "input.png": _make_tiny_png,
@@ -204,7 +204,7 @@ class TestInputMediaPathResolution:
         for filename, writer in media.items():
             target = media_dir / filename
             writer(target)
-            isolated_path = f"/src/tests/e2e/models/example/data/{filename}"
+            isolated_path = f"/src/python/tensorrt_model_connect/models/example/tests/data/{filename}"
 
             assert mod._resolve_input_media(isolated_path, project_dir) == target.resolve()
             assert mod._embeddable(target)
@@ -212,7 +212,7 @@ class TestInputMediaPathResolution:
     def test_rebase_rejects_other_absolute_traversal_and_symlink_paths(self, tmp_path):
         mod = _import_report()
         project_dir = tmp_path / "checkout"
-        source_dir = project_dir / "tests/e2e/models/example/data"
+        source_dir = project_dir / "python/tensorrt_model_connect/models/example/tests/data"
         source_dir.mkdir(parents=True)
         outside = tmp_path / "outside.wav"
         _make_tiny_wav(outside)
@@ -222,7 +222,7 @@ class TestInputMediaPathResolution:
         assert mod._resolve_input_media("/src/../outside.wav", project_dir) is None
         assert (
             mod._resolve_input_media(
-                "/src/tests/e2e/models/example/data/escape.wav", project_dir
+                "/src/python/tensorrt_model_connect/models/example/tests/data/escape.wav", project_dir
             )
             is None
         )
@@ -231,7 +231,7 @@ class TestInputMediaPathResolution:
     def test_single_model_existing_absolute_project_path_is_unchanged(self, tmp_path):
         mod = _import_report()
         project_dir = tmp_path / "standalone-source"
-        source = project_dir / "tests/e2e/models/example/data/input.wav"
+        source = project_dir / "python/tensorrt_model_connect/models/example/tests/data/input.wav"
         source.parent.mkdir(parents=True)
         _make_tiny_wav(source)
 
@@ -308,7 +308,7 @@ class TestClassifyModality:
         mod = _import_report()
         repo_root = Path(__file__).resolve().parents[2]
         strategies = set()
-        for path in (repo_root / "tests/e2e/models").glob("*/manifests/*.json"):
+        for path in (repo_root / "python/tensorrt_model_connect/models").glob("*/manifests/*.json"):
             payload = json.loads(path.read_text(encoding="utf-8"))
             if payload.get("task_strategy"):
                 strategies.add(payload["task_strategy"])
@@ -408,7 +408,7 @@ class TestLoadAllResults:
         _write_junit(
             e2e_root,
             """
-            <testcase classname="tests.e2e.models.fnet.test_fnet_e2e"
+            <testcase classname="tensorrt_model_connect.models.fnet.tests.test_fnet_e2e"
                       name="test_model_e2e[fnet-base]">
               <skipped type="pytest.xfail"
                        message="(encoder representation parity below minimum contract floor)" />
@@ -456,11 +456,11 @@ class TestLoadAllResults:
         _write_junit(
             e2e_root,
             """
-            <testcase classname="tests.e2e.models.canary.test_canary_e2e"
+            <testcase classname="tensorrt_model_connect.models.canary.tests.test_canary_e2e"
                       name="test_model_e2e[canary-1b-v2]" />
-            <testcase classname="tests.e2e.models.canary.test_canary_e2e"
+            <testcase classname="tensorrt_model_connect.models.canary.tests.test_canary_e2e"
                       name="test_model_e2e[canary-1b-v2-asr-probe01]" />
-            <testcase classname="tests.e2e.models.canary.test_canary_e2e"
+            <testcase classname="tensorrt_model_connect.models.canary.tests.test_canary_e2e"
                       name="test_model_e2e[canary-1b-v2-asr-probe02]">
               <failure message="probe comparison failed" />
             </testcase>
@@ -507,7 +507,7 @@ class TestLoadAllResults:
         _write_junit(
             e2e_root,
             f"""
-            <testcase classname="tests.e2e.models.multi.test_multi_e2e"
+            <testcase classname="tensorrt_model_connect.models.multi.tests.test_multi_e2e"
                       name="test_model_e2e[{parent_name}]" />
             """,
         )
@@ -2188,7 +2188,7 @@ class TestEvidenceCompleteness:
             "steps": {"scratch_build": {"status": "passed", "evidence": "build.log"}},
             "selection": {
                 "runtime_tests": ["test_alpha"],
-                "python_tests": ["tests/e2e/models/alpha/test_alpha_unit.py"],
+                "python_tests": ["python/tensorrt_model_connect/models/alpha/tests/test_alpha_unit.py"],
                 "e2e_cases": [
                     {
                         "name": "alpha-small",
@@ -2196,7 +2196,7 @@ class TestEvidenceCompleteness:
                         "min_free_gpu_memory_mib": 0,
                     }
                 ],
-                "e2e_test": "tests/e2e/models/alpha/test_alpha_e2e.py",
+                "e2e_test": "python/tensorrt_model_connect/models/alpha/tests/test_alpha_e2e.py",
             },
         }
 
@@ -2270,7 +2270,7 @@ class TestEvidenceCompleteness:
         selection = {
             "requested_model": "alpha",
             "gpu_id": "2",
-            "e2e_test": "tests/e2e/models/alpha/test_alpha_e2e.py",
+            "e2e_test": "python/tensorrt_model_connect/models/alpha/tests/test_alpha_e2e.py",
             "e2e_cases": [
                 {
                     "name": "alpha-small",

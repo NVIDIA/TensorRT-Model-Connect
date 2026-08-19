@@ -10,37 +10,12 @@
 catch_all .dockerignore # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all Dockerfile # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all _pyproject_backend.py # root PEP 517/660 backend routes wheel builds and editable installs; catch-all stays conservative
-catch_all benchmarks/performance/baselines/hf_transformers.py # shared release reference runner can affect every text-family comparison; catch-all stays conservative
-catch_all benchmarks/performance/baselines/task_reference.py # shared release reference adapters can affect every task-family comparison; catch-all stays conservative
-catch_all benchmarks/performance/release.yaml # release matrix workloads and comparison contracts span every ready family; catch-all stays conservative
 catch_all conanfile.py # release wheel native packaging recipe; catch-all stays conservative
 catch_all conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all examples/byok/export_cutedsl_residual_add.py # standalone GPU tutorial exporter has no precise impact rule yet; catch-all stays conservative
-catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all NOTICE # top-level legal attribution metadata; conservative full-suite fallback is intentionally retained
 catch_all pyproject.toml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all ruff.toml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/assets/test_image.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_bundle_inspect.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_cache_correctness.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_diffusion_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_error_handling.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_full_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_inference.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_logit_parity.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_runner_parity.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/test_vl_pipeline.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e/timing_estimates.json # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/e2e_partition.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/runtime_strategy_matrix.yaml # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all tests/test_tvm_ffi_e2e.py # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all third_party/stb/stb_image.h # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all third_party/stb/stb_image_resize2.h # tracked path has no precise impact rule yet; catch-all stays conservative
-catch_all third_party/stb/stb_image_write.h # tracked path has no precise impact rule yet; catch-all stays conservative
 harness_shared tests/e2e_harness/__init__.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/artifact_sink.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/conftest_gpu.py # shared E2E harness surface; broad E2E impact is intentional
@@ -54,12 +29,9 @@ harness_shared tests/e2e_harness/registry.py # shared E2E harness surface; broad
 harness_shared tests/e2e_harness/result_schema.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/runtime_config.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/runtime_strategy_metadata.py # shared E2E strategy metadata surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/task_defaults.py # shared task defaults consumed by every owner; broad E2E impact is intentional
 harness_shared tests/e2e_harness/threshold_policy.py # shared E2E threshold ownership policy; broad E2E impact is intentional
 harness_shared tests/e2e_harness/thresholds/__init__.py # shared E2E harness surface; broad E2E impact is intentional
-no_impact scripts/_build_fp8_onnx_monolithic.py # developer utility script; no CI test impact is intentional
-no_impact scripts/_inject_fp8_qdq_proto.py # developer utility script; no CI test impact is intentional
-no_impact scripts/_mk_fp8_bf16_bundle.py # developer utility script; no CI test impact is intentional
-no_impact scripts/_quantize_fp8.py # developer utility script; no CI test impact is intentional
 no_impact scripts/bootstrap_workspace.sh # developer utility script; no CI test impact is intentional
 no_impact scripts/check_family_coverage.py # developer utility script; no CI test impact is intentional
 no_impact scripts/docker_build_gb300.sh # developer utility script; no CI test impact is intentional
@@ -70,8 +42,6 @@ no_impact scripts/generate_perf_report.py # developer utility script; no CI test
 no_impact scripts/hf_generate.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
-no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
-no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
 no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helper; no CI test impact is intentional
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
 no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
@@ -146,8 +116,6 @@ shared_builder_module python/tensorrt_model_connect/tvm_ffi/graph_cli.py # opt-i
 shared_builder_module python/tensorrt_model_connect/tvm_ffi/graph_patch.py # opt-in raw graph capture and rewiring; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/hf_snapshot.py # shared HF snapshot selection used by every builder and gated offline preflight; broad all-model impact is intentional
 shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/runtime_provider/__init__.py # shared delegated-build dispatcher surface; conservative all-model impact is intentional while model-owned adapter edits remain family-only
 shared_builder_module python/tensorrt_model_connect/runtime_provider/provider_process.py # shared delegated-build process boundary; conservative all-model impact is intentional while model-owned adapter edits remain family-only
 shared_builder_module python/tensorrt_model_connect/runtime_provider/bundle.py # shared delegated-bundle writer; conservative all-model impact is intentional while model-owned adapter edits remain family-only
@@ -177,7 +145,6 @@ shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/runti
 shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/text_trace.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/runtime_config/schemas/triattention.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/triattention_export.py # shared Python builder surface; broad builder impact is intentional
-shared_builder_module python/tensorrt_model_connect/triattention_runtime.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tvm_ffi/plugin.py # shared TVM-FFI plugin insertion helper; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tokenizer_conversion.py # shared tokenizer conversion primitives used by family adapters; broad builder impact is intentional

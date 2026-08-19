@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resolve and prepare isolated runtime model plugin directories for E2E.
+"""Resolve and prepare isolated model-owned runtime plugin directories for E2E.
 
-The E2E model family is not always the same as the runtime plugin owner. This
-tool maps selected E2E models to the owning ``src/runtime/models/<id>`` plugin
-and can copy only those DSOs out of a CMake build tree.
+Every model directory owns its builder, runtime, and tests. This tool validates
+that identity and can copy only the selected model DSOs from a CMake build tree.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -49,12 +49,19 @@ class RuntimePlugin:
 
 _NODE_ID_MODEL_RE = re.compile(r"::test_model_e2e\[([^\]]+)\]")
 
-_MODEL_OWNED_ROOTS = {
-    Path("python/tensorrt_model_connect/families"): "builder_families",
-    Path("src/runtime/models"): "runtime_plugins",
-    Path("tests/e2e/models"): "e2e_families",
-    Path("tests/cpp/models"): "runtime_plugins",
-}
+_MODELS_ROOT = Path("python/tensorrt_model_connect/models")
+_MODEL_OWNED_ROOTS = {_MODELS_ROOT: "models"}
+_RETIRED_RUNTIME_DESCRIPTOR_FIELDS = frozenset(
+    {
+        "runtime_library",
+        "runtime_strategy",
+        "default_runtime_strategy",
+        "legacy_runtime_strategy_aliases",
+        "runtime_tests",
+        "runtime_link_libraries",
+        "gnu_warning_suppressed_sources",
+    }
+)
 
 _MODEL_OWNED_IMPACT_RULES = frozenset(
     {
@@ -62,9 +69,8 @@ _MODEL_OWNED_IMPACT_RULES = frozenset(
         "e2e_model_index",
         "e2e_model_threshold",
         "e2e_model_owned_test",
-        "family_model_index",
-        "family_package",
-        "family_plugin",
+        "model_index",
+        "model_package",
         "python_profile_requirements",
         "cpp_runtime_model",
     }
@@ -109,31 +115,22 @@ def _positive_pid(value: object) -> bool:
     return type(value) is int and value > 0
 
 
-def _toml_string(text: str, key: str) -> str:
-    match = re.search(rf"(?m)^\s*{re.escape(key)}\s*=\s*\"([^\"]+)\"", text)
-    return match.group(1) if match else ""
-
-
-def _toml_list(text: str, key: str) -> tuple[str, ...]:
-    match = re.search(rf"(?ms)^\s*{re.escape(key)}\s*=\s*\[([^\]]*)\]", text)
-    if not match:
-        return ()
-    return tuple(re.findall(r"\"([^\"]+)\"", match.group(1)))
-
-
 def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
-    models_dir = repo_root / "tests" / "e2e" / "models"
+    models_dir = repo_root / _MODELS_ROOT
     manifests: dict[str, E2EManifest] = {}
-    paths = sorted({*models_dir.glob("*.json"), *models_dir.glob("*/manifests/*.json")})
+    paths = sorted(models_dir.glob("*/tests/manifests/*.json"))
     for path in paths:
         try:
             raw = json.loads(_read_text(path))
         except (OSError, json.JSONDecodeError):
             continue
         name = str(raw.get("name") or path.stem)
-        family = str(raw.get("family") or "")
-        if not family and path.parent.name == "manifests":
-            family = path.parent.parent.name
+        owner = path.parents[2].name
+        family = str(raw.get("family") or owner)
+        if family != owner:
+            raise SystemExit(
+                f"E2E manifest family {family!r} does not match owner {owner!r}: {path}"
+            )
         runtime_strategy = str(raw.get("runtime_strategy") or "")
         testcases = raw.get("testcases", [])
         testcase_names = [
@@ -142,18 +139,13 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
             if isinstance(testcase, dict) and testcase.get("name")
         ]
         result_case = (
-            name
-            if name in testcase_names
-            else testcase_names[0]
-            if testcase_names
-            else name
+            name if name in testcase_names else testcase_names[0] if testcase_names else name
         )
         result_testcase = next(
             (
                 testcase
                 for testcase in testcases
-                if isinstance(testcase, dict)
-                and str(testcase.get("name") or "") == result_case
+                if isinstance(testcase, dict) and str(testcase.get("name") or "") == result_case
             ),
             {},
         )
@@ -165,26 +157,42 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
                 path=path,
                 bundle=str(raw.get("bundle") or f"{name}.bundle"),
                 result_case=result_case,
-                ci_tier=str(
-                    result_testcase.get("ci_tier") or raw.get("ci_tier") or ""
-                ),
+                ci_tier=str(result_testcase.get("ci_tier") or raw.get("ci_tier") or ""),
             )
     return manifests
 
 
 def discover_runtime_plugins(repo_root: Path) -> dict[str, RuntimePlugin]:
-    runtime_dir = repo_root / "src" / "runtime" / "models"
+    runtime_dir = repo_root / _MODELS_ROOT
     plugins: dict[str, RuntimePlugin] = {}
     for manifest in sorted(runtime_dir.glob("*/MODEL.toml")):
         text = _read_text(manifest)
-        model_id = _toml_string(text, "id") or manifest.parent.name
-        library = _toml_string(text, "runtime_library") or f"libtrtmc_model_{model_id}.so"
-        strategies = _toml_list(text, "runtime_strategies")
-        single_strategy = _toml_string(text, "runtime_strategy")
-        if not strategies and single_strategy:
-            strategies = (single_strategy,)
-        if strategies:
-            plugins[model_id] = RuntimePlugin(model_id, library, strategies)
+        data = tomllib.loads(text)
+        retired = sorted(_RETIRED_RUNTIME_DESCRIPTOR_FIELDS & data.keys())
+        if retired:
+            raise SystemExit(
+                f"Retired {', '.join(repr(key) for key in retired)} field(s) in {manifest}; "
+                "keep runtime identity in MODEL.toml and build declarations in "
+                "runtime/CMakeLists.txt"
+            )
+        model_id = str(data.get("id") or "")
+        if not model_id or model_id != manifest.parent.name:
+            raise SystemExit(
+                f"Model id must match owner directory {manifest.parent.name!r}: {manifest}"
+            )
+        raw_strategies = data.get("runtime_strategies")
+        if (
+            not isinstance(raw_strategies, list)
+            or not raw_strategies
+            or any(not isinstance(strategy, str) or not strategy for strategy in raw_strategies)
+        ):
+            raise SystemExit(f"runtime_strategies must be a non-empty string list: {manifest}")
+        strategies = tuple(raw_strategies)
+        plugins[model_id] = RuntimePlugin(
+            model_id,
+            f"libtrtmc_model_{model_id}.so",
+            strategies,
+        )
     return plugins
 
 
@@ -238,6 +246,11 @@ def plugins_for_models(
         if plugin is None:
             missing_strategies.append(f"{model}:{manifest.runtime_strategy}")
             continue
+        if plugin.model_id != manifest.family:
+            raise SystemExit(
+                f"Model {manifest.family!r} uses runtime_strategy {manifest.runtime_strategy!r} "
+                f"owned by {plugin.model_id!r}"
+            )
         selected[plugin.model_id] = plugin
 
     if missing_models:
@@ -287,6 +300,11 @@ def isolation_groups(
         if plugin is None:
             missing_strategies.append(f"{model_name}:{manifest.runtime_strategy}")
             continue
+        if plugin.model_id != manifest.family:
+            raise SystemExit(
+                f"Model {manifest.family!r} uses runtime_strategy {manifest.runtime_strategy!r} "
+                f"owned by {plugin.model_id!r}"
+            )
         grouped.setdefault((manifest.family, plugin.model_id), []).append(model_name)
 
     if missing_models:
@@ -302,7 +320,7 @@ def isolation_groups(
     groups: list[dict[str, object]] = []
     for (family, runtime_id), models in sorted(grouped.items()):
         plugin = runtime_plugins[runtime_id]
-        group_id = f"{family}--{runtime_id}"
+        group_id = family
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", group_id):
             raise SystemExit(f"Isolation group has an unsafe identifier: {group_id!r}")
         groups.append(
@@ -323,9 +341,7 @@ def isolation_groups(
 
 def model_owned_impact_models(impact: dict[str, object]) -> list[str]:
     """Return final impacted cases reached through model-owned rules."""
-    selected = {
-        str(model) for model in impact.get("e2e_models", []) if str(model)
-    }
+    selected = {str(model) for model in impact.get("e2e_models", []) if str(model)}
     for node_id in impact.get("e2e_test_ids", []):
         match = _NODE_ID_MODEL_RE.search(str(node_id))
         if match:
@@ -354,11 +370,7 @@ def _git_paths(repo_root: Path, *, include_untracked: bool) -> list[Path]:
         result = subprocess.run(cmd, check=True, capture_output=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         raise SystemExit(f"Could not list source files with git ls-files: {exc}") from exc
-    return sorted(
-        Path(os.fsdecode(raw))
-        for raw in result.stdout.split(b"\0")
-        if raw
-    )
+    return sorted(Path(os.fsdecode(raw)) for raw in result.stdout.split(b"\0") if raw)
 
 
 def _owner_under(path: Path, root: Path) -> str | None:
@@ -462,37 +474,29 @@ def command_stage_source(args: argparse.Namespace) -> int:
     selected_plugins = plugins_for_models(model_names, manifests, runtime_plugins)
     families = {manifest.family for manifest in selected_manifests}
     runtime_ids = {plugin.model_id for plugin in selected_plugins}
-    owners = {
-        "builder_families": set(families),
-        "runtime_plugins": runtime_ids,
-        "e2e_families": set(families),
-    }
+    if runtime_ids != families:
+        raise SystemExit(
+            f"Selected runtime owners do not match model owners: {sorted(runtime_ids)} != "
+            f"{sorted(families)}"
+        )
+    owners = {"models": set(families)}
 
     for family in sorted(families):
-        family_dir = repo_root / "python" / "tensorrt_model_connect" / "families" / family
-        e2e_dir = repo_root / "tests" / "e2e" / "models" / family
-        if not family_dir.is_dir():
-            raise SystemExit(f"Selected builder family directory does not exist: {family_dir}")
-        if not e2e_dir.is_dir():
-            raise SystemExit(f"Selected E2E family directory does not exist: {e2e_dir}")
-    for runtime_id in sorted(runtime_ids):
-        runtime_dir = repo_root / "src" / "runtime" / "models" / runtime_id
-        if not runtime_dir.is_dir():
-            raise SystemExit(f"Selected runtime plugin directory does not exist: {runtime_dir}")
+        model_dir = repo_root / _MODELS_ROOT / family
+        for required in (model_dir / "model.py", model_dir / "runtime", model_dir / "tests"):
+            if not required.exists():
+                raise SystemExit(f"Selected model-owned path does not exist: {required}")
 
     _prepare_output_dir(output_dir, clean=args.clean)
     paths = _git_paths(repo_root, include_untracked=args.include_untracked)
-    copied_files, excluded_files = _copy_source_files(
-        repo_root, output_dir, paths, owners
-    )
+    copied_files, excluded_files = _copy_source_files(repo_root, output_dir, paths, owners)
 
     manifest = {
         "schema_version": 1,
         "source_root": str(repo_root),
         "source_revision": _git_revision(repo_root),
         "selected_models": sorted(model_names),
-        "builder_families": sorted(families),
-        "e2e_families": sorted(families),
+        "model_owners": sorted(families),
         "runtime_plugins": [
             {
                 "model_id": plugin.model_id,
@@ -601,23 +605,18 @@ def command_schedule(args: argparse.Namespace) -> int:
             raise SystemExit(f"Invalid isolation group in {plan_path}: {group!r}")
         model_names = [str(model) for model in models]
         estimated_seconds = args.build_overhead_seconds + sum(
-            estimates.get(model, args.default_estimate_seconds)
-            for model in model_names
+            estimates.get(model, args.default_estimate_seconds) for model in model_names
         )
         scheduled_groups.append(
             {
                 "group_id": group_id,
-                "group_manifest": str(
-                    plan_path.parent / "groups" / group_id / "group.json"
-                ),
+                "group_manifest": str(plan_path.parent / "groups" / group_id / "group.json"),
                 "models": model_names,
                 "estimated_seconds": estimated_seconds,
             }
         )
 
-    assignments: dict[str, list[dict[str, object]]] = {
-        gpu_id: [] for gpu_id in gpu_ids
-    }
+    assignments: dict[str, list[dict[str, object]]] = {gpu_id: [] for gpu_id in gpu_ids}
     queue_totals = {gpu_id: 0.0 for gpu_id in gpu_ids}
     for group in sorted(
         scheduled_groups,
@@ -638,9 +637,7 @@ def command_schedule(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "plan": str(plan_path),
         "timing_estimates": (
-            str(args.timing_estimates.resolve())
-            if args.timing_estimates is not None
-            else None
+            str(args.timing_estimates.resolve()) if args.timing_estimates is not None else None
         ),
         "default_estimate_seconds": args.default_estimate_seconds,
         "build_overhead_seconds": args.build_overhead_seconds,
@@ -648,12 +645,9 @@ def command_schedule(args: argparse.Namespace) -> int:
         "queue_estimated_seconds": queue_totals,
     }
     schedule_path = output_dir / "schedule.json"
-    schedule_path.write_text(
-        json.dumps(schedule, indent=2) + "\n", encoding="utf-8"
-    )
+    schedule_path.write_text(json.dumps(schedule, indent=2) + "\n", encoding="utf-8")
     print(
-        f"Scheduled {len(scheduled_groups)} isolation group(s) across "
-        f"{len(gpu_ids)} GPU queue(s)"
+        f"Scheduled {len(scheduled_groups)} isolation group(s) across {len(gpu_ids)} GPU queue(s)"
     )
     for gpu_id in gpu_ids:
         print(
@@ -717,9 +711,7 @@ def _load_verified_build_records(
             or raw_record.get("passed") is not True
             or not isinstance(raw_record.get("record"), dict)
         ):
-            raise SystemExit(
-                f"Build verification report records[{index}] is not a passing record"
-            )
+            raise SystemExit(f"Build verification report records[{index}] is not a passing record")
         record = raw_record["record"]
         identity = record.get("identity")
         if (
@@ -728,14 +720,10 @@ def _load_verified_build_records(
             or raw_record.get("identity") != identity
             or identity in records
         ):
-            raise SystemExit(
-                f"Build verification report records[{index}] has an invalid identity"
-            )
+            raise SystemExit(f"Build verification report records[{index}] has an invalid identity")
         records[identity] = record
     if set(records) != expected_models:
-        raise SystemExit(
-            "Build verification report identities do not match selected models"
-        )
+        raise SystemExit("Build verification report identities do not match selected models")
     return records
 
 
@@ -771,9 +759,7 @@ def _command_verification_errors(
             else []
         )
         if not expected_prefix:
-            errors.append(
-                f"verified build attempt_count is {attempt_count!r}, expected 1 or 2"
-            )
+            errors.append(f"verified build attempt_count is {attempt_count!r}, expected 1 or 2")
         verified_prefix_length = len(expected_prefix)
         for index, (expected_label, expected_returncode) in enumerate(expected_prefix):
             command = commands[index] if index < len(commands) else None
@@ -786,8 +772,7 @@ def _command_verification_errors(
             )
             if not valid:
                 errors.append(
-                    f"commands[{index}] does not match verified "
-                    f"{expected_label!r} build evidence"
+                    f"commands[{index}] does not match verified {expected_label!r} build evidence"
                 )
 
     for index, command in enumerate(
@@ -801,14 +786,10 @@ def _command_verification_errors(
             "build",
             "build_recovery_attempt_1",
         }:
-            errors.append(
-                f"commands[{index}].label is reserved for verified build evidence"
-            )
+            errors.append(f"commands[{index}].label is reserved for verified build evidence")
         returncode = command.get("returncode")
         if type(returncode) is not int or returncode != 0:
-            errors.append(
-                f"commands[{index}].returncode is {returncode!r}, expected 0"
-            )
+            errors.append(f"commands[{index}].returncode is {returncode!r}, expected 0")
     return errors
 
 
@@ -870,20 +851,14 @@ def _verify_model_result(
                 errors.append(f"stage {stage_name!r} is not an object")
                 continue
             stage_status = stage.get("status")
-            optional_skip = (
-                stage_name in optional_stage_names and stage_status == "skipped"
-            )
+            optional_skip = stage_name in optional_stage_names and stage_status == "skipped"
             if stage_status != "passed" and not optional_skip:
-                errors.append(
-                    f"stage {stage_name!r} status is {stage_status!r}, expected 'passed'"
-                )
+                errors.append(f"stage {stage_name!r} status is {stage_status!r}, expected 'passed'")
             metrics = stage.get("metrics", {})
             if not isinstance(metrics, dict):
                 errors.append(f"stage {stage_name!r} metrics is not an object")
 
-    errors.extend(
-        _command_verification_errors(result.get("commands"), build_record)
-    )
+    errors.extend(_command_verification_errors(result.get("commands"), build_record))
 
     errors.extend(_returncode_failures(result.get("stage_outputs", {}), "stage_outputs"))
     errors = list(dict.fromkeys(errors))
@@ -976,31 +951,21 @@ def command_verify_builds(args: argparse.Namespace) -> int:
             record_errors.append("identity is missing")
         schema_version = record.get("schema_version")
         if type(schema_version) is not int or schema_version != 1:
-            record_errors.append(
-                f"schema_version is {schema_version!r}, expected 1"
-            )
+            record_errors.append(f"schema_version is {schema_version!r}, expected 1")
         invocation_count = record.get("invocation_count")
         if type(invocation_count) is not int or invocation_count != 1:
-            record_errors.append(
-                f"invocation_count is {invocation_count!r}, expected 1"
-            )
+            record_errors.append(f"invocation_count is {invocation_count!r}, expected 1")
         attempt_count = record.get("attempt_count")
-        valid_attempt_count = (
-            type(attempt_count) is int and 1 <= attempt_count <= 2
-        )
+        valid_attempt_count = type(attempt_count) is int and 1 <= attempt_count <= 2
         if not valid_attempt_count:
             record_errors.append(f"attempt_count is {attempt_count!r}, expected 1 or 2")
         builder_pid = record.get("builder_pid")
         if not _positive_pid(builder_pid):
-            record_errors.append(
-                f"builder_pid is {builder_pid!r}, expected a positive integer"
-            )
+            record_errors.append(f"builder_pid is {builder_pid!r}, expected a positive integer")
         started_at = record.get("started_at")
         started_at_time = _utc_timestamp(started_at)
         if started_at_time is None:
-            record_errors.append(
-                f"started_at is {started_at!r}, expected a UTC timestamp"
-            )
+            record_errors.append(f"started_at is {started_at!r}, expected a UTC timestamp")
         recovery_attempts = record.get("recovery_attempts")
         expected_recoveries = attempt_count - 1 if valid_attempt_count else -1
         if not isinstance(recovery_attempts, list) or len(recovery_attempts) != expected_recoveries:
@@ -1034,18 +999,13 @@ def command_verify_builds(args: argparse.Namespace) -> int:
             )
             if not complete_fresh_process_evidence:
                 record_errors.append(
-                    "recovery_attempts must contain complete ordered "
-                    "fresh-process SIGSEGV evidence"
+                    "recovery_attempts must contain complete ordered fresh-process SIGSEGV evidence"
                 )
         if record.get("status") != "passed":
-            record_errors.append(
-                f"status is {record.get('status')!r}, expected 'passed'"
-            )
+            record_errors.append(f"status is {record.get('status')!r}, expected 'passed'")
         returncode = record.get("returncode")
         if type(returncode) is not int or returncode != 0:
-            record_errors.append(
-                f"returncode is {returncode!r}, expected 0"
-            )
+            record_errors.append(f"returncode is {returncode!r}, expected 0")
         if expected_revision and record.get("source_revision") != expected_revision:
             record_errors.append(
                 "source_revision is "
@@ -1100,16 +1060,10 @@ def command_verify_builds(args: argparse.Namespace) -> int:
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(report_path)
 
-    passing_records = {
-        str(record["identity"])
-        for record in records
-        if bool(record["passed"])
-    }
+    passing_records = {str(record["identity"]) for record in records if bool(record["passed"])}
     for model in sorted(expected_models | observed_models):
         passed = (
-            model in expected_models
-            and model in passing_records
-            and model not in duplicate_models
+            model in expected_models and model in passing_records and model not in duplicate_models
         )
         print(f"{'PASS' if passed else 'FAIL'} {model}")
     for error in errors:

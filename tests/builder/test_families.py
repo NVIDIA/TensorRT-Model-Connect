@@ -10,12 +10,12 @@ import json
 import tarfile
 from pathlib import Path
 
-import tensorrt_model_connect.families as families
+import tensorrt_model_connect.models as families
 from tests.e2e_harness.manifest_loader import iter_manifest_paths
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FAMILIES_ROOT = REPO_ROOT / "python/tensorrt_model_connect/families"
+FAMILIES_ROOT = REPO_ROOT / "python/tensorrt_model_connect/models"
 
 
 def test_candidate_names_use_the_cached_metadata_index(monkeypatch) -> None:
@@ -131,7 +131,7 @@ def test_every_family_has_an_e2e_manifest_and_every_manifest_family_exists() -> 
     family_ids = set(families.available_family_ids())
     manifested: set[str] = set()
     unknown: list[tuple[str, str]] = []
-    for manifest_path in iter_manifest_paths(REPO_ROOT / "tests/e2e/models"):
+    for manifest_path in iter_manifest_paths(REPO_ROOT / "python/tensorrt_model_connect/models"):
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         family = str(payload.get("family", ""))
         if family:
@@ -149,7 +149,7 @@ def test_family_models_do_not_import_other_families() -> None:
         if not model_path.is_file():
             continue
         source = model_path.read_text(encoding="utf-8")
-        foreign_prefix = "tensorrt_model_connect.families."
+        foreign_prefix = "tensorrt_model_connect.models."
         for line in source.splitlines():
             if foreign_prefix not in line:
                 continue

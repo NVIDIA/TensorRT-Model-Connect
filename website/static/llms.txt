@@ -30,8 +30,9 @@ Repository: https://github.com/NVIDIA/TensorRT-Model-Connect
 
 ## Sources of truth
 
-- Python family ownership: python/tensorrt_model_connect/families/<family>/MODEL.toml
-- Native runtime ownership: src/runtime/models/<owner>/MODEL.toml
-- Exact native model contracts: tests/e2e/models/<family>/manifests/*.json
+- Unified model ownership: python/tensorrt_model_connect/models/<owner>/MODEL.toml
+- Python build entry: python/tensorrt_model_connect/models/<owner>/model.py
+- Native runtime: python/tensorrt_model_connect/models/<owner>/runtime/
+- Exact model contracts: python/tensorrt_model_connect/models/<owner>/tests/manifests/*.json
 - CLI: website/docs/api/cli-reference.md and trtmc --help
 - Repository agent rules: AGENTS.md

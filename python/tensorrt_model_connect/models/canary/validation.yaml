@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  librispeech_clean_asr:
+    models:
+    - canary-1b-v2
+    - canary-1b-v2-tp4
+    default_models:
+    - canary-1b-v2
+    qualification:
+      canary-1b-v2: {}

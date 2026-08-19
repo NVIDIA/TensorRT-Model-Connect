@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "qwen3_5"
+aliases = [
+  "qwen35",
+  "qwen3.5",
+  "qwen3_5",
+]
+prefixes = [
+  "qwen3_5",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "qwen3_5_hybrid_mamba_attention",
+]
+runtime_plugins = [
+  "plugin.cpp|register_qwen3_5_plugin",
+]
+runtime_strategies = [
+  "qwen3_5_hybrid_mamba_attention",
+]
+test_manifests = [
+  "tests/manifests/qwen35-9b.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "qwen3_5_hybrid_mamba_attention",
+]
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

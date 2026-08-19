@@ -137,7 +137,7 @@ class CiPipeline:
                 "-o",
                 artifacts / "e2e_report.html",
                 "--manifest-dir",
-                "tests/e2e/models",
+                "python/tensorrt_model_connect/models",
                 "--project-dir",
                 ".",
                 "--title",

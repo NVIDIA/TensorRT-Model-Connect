@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  sana_wm_benchmark_diffusion_video:
+    models:
+    - sana-wm-bidirectional
+    default_models:
+    - sana-wm-bidirectional
+    qualification:
+      sana-wm-bidirectional: {}

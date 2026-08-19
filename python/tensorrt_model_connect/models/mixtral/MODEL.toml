@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "mixtral"
+capabilities = [
+  "disable_dual_profile_decoder",
+  "debug_layer_outputs",
+]
+aliases = [
+  "mixtral",
+]
+prefixes = [
+  "mixtral",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "mixtral_decoder_moe",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_mixtral_plugin",
+]
+runtime_strategies = [
+  "mixtral_decoder_moe",
+]
+test_manifests = [
+  "tests/manifests/mixtral-stories-15m-tp2.json",
+  "tests/manifests/mixtral-stories-15m.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "mixtral_decoder_moe",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

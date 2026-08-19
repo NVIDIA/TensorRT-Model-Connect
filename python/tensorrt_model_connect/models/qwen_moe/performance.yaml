@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: qwen_moe.generate
+  operation: generate
+  model: qwen3-moe-30b-a3b
+  workload:
+    testcase: qwen3-moe-30b-a3b
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward
+    experts_implementation: batched_mm
+additional_profiles:
+- model: qwen3-moe-tiny-random
+  inherit: qwen_moe.generate

@@ -282,7 +282,7 @@ def classify_from_nsys(
         confidence = "high" if best_score >= 3 else "medium"
 
     # Build technique recommendations (mode-aware)
-    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
+    mode = runtime_strategy_performance_mode(pipeline_type)
     mode_priorities = TECHNIQUE_PRIORITY_BY_MODE.get(mode, TECHNIQUE_PRIORITY)
     techniques = []
     for tech_key in mode_priorities.get(classification, ["fp16"]):
@@ -358,7 +358,7 @@ def classify_from_l1(
         classification = best
         confidence = "high" if best_score >= 3 else "medium"
 
-    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
+    mode = runtime_strategy_performance_mode(pipeline_type)
     mode_priorities = TECHNIQUE_PRIORITY_BY_MODE.get(mode, TECHNIQUE_PRIORITY)
     techniques = []
     for tech_key in mode_priorities.get(classification, ["fp16"]):
@@ -462,7 +462,7 @@ def main():
     parser.add_argument("--l1-json",
                         help="Path to L1 CPU profile JSON")
     parser.add_argument("--pipeline-type", required=True,
-                        help="Runtime strategy declared in tests/runtime_strategy_matrix.yaml")
+                        help="Runtime strategy declared by a unified model owner")
     parser.add_argument("--engine-section", default="all",
                         help="Which engine to analyze: 'all' (default), 'primary', "
                              "'secondary', or a specific CUDA graph ID number")

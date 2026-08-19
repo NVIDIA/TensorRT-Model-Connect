@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: qwen_vl.generate
+  operation: generate
+  model: qwen3-vl-2b
+  workload:
+    testcase: qwen3-vl-2b
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-vlm
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+    output_contract: normalized-text
+additional_profiles:
+- model: qwen25vl-3b
+  inherit: qwen_vl.generate

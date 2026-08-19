@@ -63,10 +63,7 @@ def _detect_model_type(model_id: str) -> str:
 
 def _family_handler_paths(filename: str) -> list[Path]:
     repo_root = Path(__file__).resolve().parents[1]
-    roots = (
-        repo_root / "tools/families",
-        repo_root / "python/tensorrt_model_connect/families",
-    )
+    roots = (repo_root / "python/tensorrt_model_connect/models",)
     handlers: dict[str, Path] = {}
     for root in reversed(roots):
         handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
@@ -121,7 +118,7 @@ def _bundle_family(bundle_path: str) -> str:
         return family
     model_type = str(header.get("model_type") or "")
     if model_type:
-        from tensorrt_model_connect.families import find_model
+        from tensorrt_model_connect.models import find_model
 
         model = find_model(model_type)
         if model is not None:
@@ -138,9 +135,8 @@ def _load_family_vl_debug_runner(bundle_path: str) -> ModuleType:
         )
     repo_root = Path(__file__).resolve().parents[1]
     candidates = (
-        repo_root / "tools/families" / family / "vl_debug_runner.py",
         repo_root
-        / "python/tensorrt_model_connect/families"
+        / "python/tensorrt_model_connect/models"
         / family
         / "vl_debug_runner.py",
     )

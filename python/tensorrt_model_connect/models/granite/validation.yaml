@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_continuation_parity:
+    models:
+    - granite-3.1-2b
+    - granite-3.1-2b-tp4
+    default_models:
+    - granite-3.1-2b
+    model_overrides:
+      granite-3.1-2b:
+        # This checkpoint is numerically sensitive in FP16. Compare both sides
+        # in FP32 instead of measuring different FP16 kernel rounding.
+        comparison_precision: fp32
+    qualification:
+      granite-3.1-2b: {}

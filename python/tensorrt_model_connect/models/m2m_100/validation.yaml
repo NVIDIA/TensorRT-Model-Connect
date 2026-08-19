@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  flores200_en_fr_seq2seq_parity:
+    models:
+    - nllb-200-distilled-600m
+    default_models:
+    - nllb-200-distilled-600m
+    qualification:
+      nllb-200-distilled-600m: {}

@@ -2,24 +2,23 @@
 title: Source Layout
 ---
 
-This page is a map of the current repository. Native model support is
-deliberately split across three linked, model-owned descriptors:
+This page is a map of the current repository. Every supported model has one
+physical owner and one descriptor:
 
 | Path | Authority |
 | --- | --- |
-| `python/tensorrt_model_connect/families/<builder-family>/MODEL.toml` | Python family discovery metadata; build code is the required sibling `model.py` |
-| `src/runtime/models/<runtime-owner>/MODEL.toml` | Runtime DSO name, plugin entry points, strategy keys, config schemas, and C++ tests |
-| `tests/e2e/models/<e2e-family>/MODEL.toml` | E2E manifests, model-local plugins, defaults, and test ownership |
+| `python/tensorrt_model_connect/models/<owner>/MODEL.toml` | Discovery metadata, runtime strategies and registrars, E2E manifests, and task defaults |
+| `python/tensorrt_model_connect/models/<owner>/model.py` | Required Python build entry point |
+| `python/tensorrt_model_connect/models/<owner>/runtime/CMakeLists.txt` | Native DSO sources, dependencies, warnings, optional kernels, and focused C++ test targets |
+| `python/tensorrt_model_connect/models/<owner>/runtime/` | Native model DSO implementation |
+| `python/tensorrt_model_connect/models/<owner>/tests/` | E2E manifests, assets, Python tests, and focused C++ tests under `tests/cpp/` |
+| `python/tensorrt_model_connect/models/<owner>/tools/` | Optional owner-specific development tools |
 
-Each directory name must agree with the `id` in its own descriptor. The three
-physical names usually match, but their link is the exact
-`runtime_strategy`, not filename equality: current builder/E2E owners
-`magpie_tts` and `wan_t2v` map to runtime owners `magpie` and `wan`,
-respectively. At this revision, all three trees contain 80 descriptors. The E2E
-descriptors declare 212 JSON manifests; runtime descriptors declare 81 unique
-strategy keys because one runtime owner exposes two strategies. Treat these
-numbers as a checked snapshot, not a constant: the descriptor files are the
-source of truth.
+The directory name and descriptor `id` must agree. Runtime identity is not a
+second owner name: the DSO target and default library name derive from that
+same ID. At this revision there are 82 descriptors, 215 JSON manifests, and 83
+unique runtime strategy keys. Treat those numbers as a checked snapshot rather
+than a constant; the owner directories are the source of truth.
 
 ## Top-level directories
 
@@ -32,15 +31,14 @@ source of truth.
 | `src/runtime/config/` | Runtime config schemas and layered resolution |
 | `src/runtime/core/` | Model-independent device/runtime primitives |
 | `src/runtime/domains/` | Small modality helpers shared across model DSOs |
-| `src/runtime/models/` | Family-owned runtime implementations and descriptors |
 | `src/runtime/registry/` | DSO discovery, registry, and pipeline factory |
 | `src/runtime/providers/` | Generic optimized-runtime descriptor, artifact, and private factory host |
 | `src/tokenizer/` | Tokenizer implementations |
 | `python/tensorrt_model_connect/` | Python build package |
 | `python/tensorrt_model_connect/runtime_provider/` | Family-scoped optimized implementation discovery, isolated build, and generic bundle packaging |
 | `tests/builder/` | Python builder tests |
-| `tests/cpp/` | C++ runtime tests |
-| `tests/e2e/` | E2E entry points and model-owned cases |
+| `tests/cpp/` | Shared C++ runtime tests; model-specific C++ tests live with their owner |
+| `tests/e2e/` | Shared E2E entry points and selection support |
 | `tests/e2e_harness/` | Manifest loading, orchestration, runners, and comparators |
 | `tests/tools/` | Tests for repository tools |
 | `tools/` | CI, comparison, profiling, and repository checks |
@@ -49,8 +47,9 @@ source of truth.
 
 ## Runtime selection
 
-For a native bundle, CMake scans `src/runtime/models/*/MODEL.toml`;
-contributors do not maintain a central list of model plugins. At runtime,
+For a native bundle, CMake scans `python/tensorrt_model_connect/models/*/MODEL.toml`
+and adds each owner's `runtime/CMakeLists.txt`; contributors do not maintain a
+central list of model plugins or model sources. At runtime,
 `PipelineFactory` reads `runtime_strategy`, resolves the owning model DSO from
 generated manifest data, loads that DSO, and asks `PipelineRegistry` for the
 registered plugin.
@@ -61,8 +60,8 @@ validates and materializes its embedded artifact tree, loads the exact
 `libtrtmc_impl_*.so`, and asks its private factory to return an `IPipeline`.
 The native strategy index, model DSO, and backend DSO are not part of that
 path. Build-side implementation manifests and exact qualification profiles
-live under the owning Python family; the current example is
-`python/tensorrt_model_connect/families/qwen/edge_llm_adapter/`.
+live under the owning model root; the current example is
+`python/tensorrt_model_connect/models/qwen/edge_llm_adapter/`.
 
 The generic task shape belongs in `task_strategy` (for example,
 `text_generation_causal`). The `runtime_strategy` is the concrete runtime
@@ -82,17 +81,15 @@ PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_runtime_strategy_matrix_checker.py -q
 ```
 
-The broader runtime-strategy matrix command is a drift diagnostic:
+The runtime-strategy control-plane command validates owner-local declarations:
 
 ```bash
 PYTHONPATH=python:. python3 tools/check_runtime_strategy_matrix.py
 ```
 
-At GitHub `main` commit
-`e6b798cdb145c38caf1ede8eda7f5ce83f894138`, it exits nonzero because
-`diffusion_sana_wm` is absent from the matrix and five speech/omni task entries
-have no discoverable runner class. Report that known baseline separately from
-new changes; do not present the command as a passing consistency check.
+It derives all 83 current native strategies from the 82 owner descriptors and
+requires each strategy to map through owner manifests to exactly one shared
+task contract, local runner/comparator coverage, and valid local diff checks.
 
 Use `tools/test_impact.py` for change selection. Do not infer ownership from an
 old document count or from a removed shared runtime directory.

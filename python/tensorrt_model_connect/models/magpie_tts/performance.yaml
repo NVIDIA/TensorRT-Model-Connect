@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: magpie_tts.generate_audio
+  operation: generate_audio
+  model: magpie-tts-357m
+  workload:
+    testcase: magpie-tts-357m
+    request:
+      max_new_tokens: 256
+  baseline:
+    runner: task-reference
+    adapter: nemo-tts
+    mode: pytorch-eager
+    reference_backend: nemo_reference
+    timing_scope: task-pipeline-call-wall
+    output_contract: audio-shape
+    adapter_options:
+      speaker_encoder_revision: e9124b5364a2c3e9b4f78da429a33cbca8f8c22b

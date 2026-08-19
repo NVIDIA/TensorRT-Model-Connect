@@ -86,7 +86,6 @@ def _add_selection_arguments(command: argparse.ArgumentParser) -> None:
         help="exact Accuracy binding; repeatable",
     )
     command.add_argument("--revision", default="HEAD")
-    command.add_argument("--catalog", type=Path, default=trtmc_validate.DEFAULT_CATALOG)
     command.add_argument("--suites", type=Path, default=trtmc_validate.DEFAULT_SUITES)
     command.add_argument("--models-dir", type=Path, default=trtmc_validate.DEFAULT_MODELS)
     command.add_argument("--perf-suite", type=Path, default=DEFAULT_PERF_SUITE)
@@ -716,8 +715,12 @@ def _resolve_request(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     platform = load_platform(arguments.platform)
     tasks = _selected_tasks(platform, arguments.task)
-    accuracy_catalog = trtmc_validate.load_catalog(arguments.catalog)
-    accuracy_suites = validation_catalog.load_suites(arguments.suites)
+    accuracy_catalog = trtmc_validate.load_catalog(
+        arguments.suites, arguments.models_dir
+    )
+    accuracy_suites = validation_catalog.load_suites(
+        arguments.suites, arguments.models_dir
+    )
     accuracy_suite_map = {suite["id"]: suite for suite in accuracy_suites}
     accuracy_models = trtmc_validate._validation_models(arguments.models_dir)
     trtmc_validate.audit_catalog(
@@ -731,7 +734,9 @@ def _resolve_request(
         task_models=accuracy_models,
     )
 
-    perf_suite = perf_matrix._read_yaml(arguments.perf_suite)
+    perf_suite = perf_matrix._read_yaml(
+        arguments.perf_suite, models_root=arguments.models_dir
+    )
     perf_cases = perf_matrix._cases(perf_suite)
     perf_exclusions = perf_matrix._excluded_profiles(perf_suite)
     perf_matrix._validate_coverage(perf_cases, perf_exclusions)
@@ -934,11 +939,11 @@ def _selected_perf_reference_contracts(
         manifest_path = Path(str(record["manifest"]))
         if not manifest_path.is_absolute():
             manifest_path = REPOSITORY / manifest_path
-        owner_path = (
-            manifest_path.parent.parent / "MODEL.toml"
-            if manifest_path.parent.name == "manifests"
-            else manifest_path.parent / "MODEL.toml"
-        )
+            owner_path = (
+                manifest_path.parents[2] / "MODEL.toml"
+                if manifest_path.parent.name == "manifests"
+                else manifest_path.parent / "MODEL.toml"
+            )
         try:
             owner = tomllib.loads(owner_path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError) as exc:
@@ -1019,8 +1024,6 @@ def _accuracy_command(
         command.extend(["--binding", f"{binding['model']}={binding['workload']}"])
     command.extend(
         [
-            "--catalog",
-            str(arguments.catalog),
             "--suites",
             str(arguments.suites),
             "--models-dir",

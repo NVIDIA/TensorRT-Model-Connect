@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  librispeech_clean_asr:
+    models:
+    - whisper-large-v3-turbo
+    - whisper-large-v3-turbo-tp4
+    - whisper-tiny-fp16
+    - whisper-tiny-fp16-tp2
+    default_models:
+    - whisper-large-v3-turbo
+    - whisper-tiny-fp16
+    qualification:
+      whisper-large-v3-turbo: {}
+      whisper-tiny-fp16: {}

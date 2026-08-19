@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+excluded_profiles:
+- model: fast-foundation-stereo
+  reason: The exact baseline is owned by the supplied rectified-stereo fixture archive and model-local L4 harness; the public release runner does not yet provide an equivalent redistributable stereo reference workload.

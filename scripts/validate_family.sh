@@ -80,22 +80,24 @@ strategy = sys.argv[2]
 binary = Path(sys.argv[3])
 out_dir = Path(sys.argv[4])
 
-matches: list[tuple[str, str]] = []
-for index_path in sorted((project / "src" / "runtime" / "models").glob("*/MODEL.toml")):
+matches: list[str] = []
+for index_path in sorted(
+    (project / "python" / "tensorrt_model_connect" / "models").glob("*/MODEL.toml")
+):
     raw = tomllib.loads(index_path.read_text(encoding="utf-8"))
     strategies = raw.get("runtime_strategies") or []
     if strategy in strategies:
         model_id = str(raw.get("id") or index_path.parent.name)
-        library = str(raw.get("runtime_library") or f"libtrtmc_model_{model_id}.so")
-        matches.append((model_id, library))
+        matches.append(model_id)
 
 if not matches:
     raise SystemExit(f"No runtime model plugin owns runtime_strategy={strategy!r}")
 if len(matches) > 1:
-    owners = ", ".join(model for model, _ in matches)
+    owners = ", ".join(matches)
     raise SystemExit(f"Multiple runtime model plugins own runtime_strategy={strategy!r}: {owners}")
 
-model_id, library = matches[0]
+model_id = matches[0]
+library = f"libtrtmc_model_{model_id}.so"
 src = binary.parent / "models" / model_id / library
 if not src.is_file():
     raise SystemExit(f"Runtime model plugin library not found: {src}")
@@ -126,7 +128,9 @@ project = Path(sys.argv[1])
 strategy = sys.argv[2]
 profile = sys.argv[3]
 
-for manifest_path in sorted((project / "src" / "runtime" / "models").glob("*/MODEL.toml")):
+for manifest_path in sorted(
+    (project / "python" / "tensorrt_model_connect" / "models").glob("*/MODEL.toml")
+):
     raw = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     profiles = raw.get("validation_profiles") or {}
     strategies = profiles.get(profile) if isinstance(profiles, dict) else None
@@ -266,14 +270,14 @@ while IFS= read -r -d '' manifest; do
     fi
     if [[ "$hf_id" == "$MODEL" ]] || [[ "$MODEL" == *"$manifest_name"* ]]; then
         E2E_MODEL="$manifest_name"
-        E2E_FAMILY="$(basename "$(dirname "$(dirname "$manifest")")")"
+        E2E_FAMILY="$(basename "$(dirname "$(dirname "$(dirname "$manifest")")")")"
         break
     fi
-done < <(find "${PROJECT_DIR}/tests/e2e/models" -maxdepth 3 -type f -name "*.json" -print0 | sort -z)
+done < <(find "${PROJECT_DIR}/python/tensorrt_model_connect/models" -maxdepth 4 -type f -path "*/tests/manifests/*.json" -print0 | sort -z)
 
 if [[ -n "$E2E_MODEL" ]] && [[ -x "$BINARY" ]]; then
     ENGINE_DIR="${ENGINE_DIR:-${PROJECT_DIR}/engines}"
-    E2E_NODE="${PROJECT_DIR}/tests/e2e/models/${E2E_FAMILY}/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]"
+    E2E_NODE="${PROJECT_DIR}/python/tensorrt_model_connect/models/${E2E_FAMILY}/tests/test_${E2E_FAMILY}_e2e.py::test_model_e2e[${E2E_MODEL}]"
     E2E_ARGS=(
         "$E2E_NODE"
         -v
@@ -291,7 +295,7 @@ elif [[ -z "$E2E_MODEL" ]]; then
     echo ""
     echo "==== E2E pytest ===="
     echo "WARN: no matching E2E manifest found for $MODEL"
-    echo "Create a manifest at tests/e2e/models/<family>/manifests/<name>.json and list it in tests/e2e/models/<family>/MODEL.toml before declaring success."
+    echo "Create a manifest at python/tensorrt_model_connect/models/<family>/tests/manifests/<name>.json and list it in python/tensorrt_model_connect/models/<family>/MODEL.toml before declaring success."
     STEPS+=("WARN  E2E pytest (no manifest -- create one)")
 elif [[ ! -x "$BINARY" ]]; then
     echo ""

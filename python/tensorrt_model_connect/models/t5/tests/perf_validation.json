@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "model": "google-t5/t5-small",
+      "pipeline_type": "t5_text_to_text",
+      "label": "C2-t5",
+      "benchmark": {
+        "label": "CPU argmax",
+        "gpu_argmax_label": "GPU argmax",
+        "metric": "tok/s",
+        "command": ["{binary}", "run", "{bundle}", "--prompt", "{prompt}", "--max-new-tokens", "{max_tokens}", "{hf_python_args}", "{config_args}"]
+      }
+    }
+  ]
+}

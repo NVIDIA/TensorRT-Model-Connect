@@ -12,7 +12,7 @@ from contextlib import contextmanager
 
 import pytest
 
-from tensorrt_model_connect import engine_builder, families, trt_compat
+from tensorrt_model_connect import engine_builder, models as families, trt_compat
 
 
 def _fake_trt() -> types.SimpleNamespace:
@@ -108,7 +108,7 @@ def test_public_build_resolves_once_and_dispatches_once(
     )
 
     assert [call[0] for call in calls] == ["resolve", "build"]
-    assert calls[1][3]["max_cache_length"] is None
+    assert "max_cache_length" not in calls[1][3]
     assert calls[1][3]["fp8_scales"] == "auto"
     assert calls[1][3]["tokenizer_source_model_id_or_path"] == "org/bert"
     assert calls[1][3]["tokenizer_source_revision"] == "revision-1"
@@ -122,11 +122,11 @@ def test_real_bert_candidate_is_loaded_and_called(
     monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
     monkeypatch.setattr(trt_compat, "_module", fake_trt)
     for module_name in tuple(sys.modules):
-        if module_name == "tensorrt_model_connect.families.bert" or module_name.startswith(
-            "tensorrt_model_connect.families.bert."
+        if module_name == "tensorrt_model_connect.models.bert" or module_name.startswith(
+            "tensorrt_model_connect.models.bert."
         ):
             sys.modules.pop(module_name, None)
-    bert_model = importlib.import_module("tensorrt_model_connect.families.bert.model")
+    bert_model = importlib.import_module("tensorrt_model_connect.models.bert.model")
     calls = []
     monkeypatch.setattr(
         bert_model,
@@ -215,8 +215,8 @@ def test_chronos_config_resolves_before_generic_t5(
     monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
     monkeypatch.setattr(trt_compat, "_module", fake_trt)
     for module_name in tuple(sys.modules):
-        if module_name == "tensorrt_model_connect.families.chronos_bolt" or module_name.startswith(
-            "tensorrt_model_connect.families.chronos_bolt."
+        if module_name == "tensorrt_model_connect.models.chronos_bolt" or module_name.startswith(
+            "tensorrt_model_connect.models.chronos_bolt."
         ):
             sys.modules.pop(module_name, None)
     (tmp_path / "config.json").write_text(
@@ -250,6 +250,17 @@ def test_engine_builder_contains_no_legacy_route() -> None:
         "getattr_static",
     ):
         assert forbidden not in source
+
+
+def test_public_build_has_only_identity_and_opaque_options() -> None:
+    signature = inspect.signature(engine_builder.build)
+
+    assert list(signature.parameters) == [
+        "model_id_or_path",
+        "output_path",
+        "options",
+    ]
+    assert signature.parameters["options"].kind is inspect.Parameter.VAR_KEYWORD
 
 
 def test_cli_keeps_graph_context_around_its_single_public_build(

@@ -18,8 +18,8 @@ Key files:
 On the native path, TensorRT backend DSO loading plus generic engine/context
 execution and tensor binding live under `src/runtime/backend/`. Decode loops,
 sampling, masks, and KV-cache policy are model-owned under
-`src/runtime/models/<family>/`. Optimized bundles instead use the generic host
-under `src/runtime/providers/` to verify and load their embedded implementation
-DSO.
+`python/tensorrt_model_connect/models/<family>/runtime/`. Optimized bundles
+instead use the generic host under `src/runtime/providers/` to verify and load
+their embedded implementation DSO.
 
 <!-- Collaborative review anchor: batch 2. -->

@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  seedtts_en_tts_intelligibility:
+    models:
+    - bark-large
+    - bark-large-tp4
+    - bark-small
+    - bark-small-fp32-l0
+    - bark-small-tp4
+    default_models:
+    - bark-large
+    - bark-small
+    family_override:
+      runtime_seed_parameter: audio_bark.seed
+    qualification:
+      bark-large: {}
+      bark-small: {}

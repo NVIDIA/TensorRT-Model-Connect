@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: gemma.generate
+  operation: generate
+  model: gemma-2-2b
+  workload:
+    testcase: gemma-2-2b
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward
+    output_contract: exact-text
+    precision: fp16

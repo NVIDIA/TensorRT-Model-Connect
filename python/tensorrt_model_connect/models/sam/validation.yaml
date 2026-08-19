@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  coco2017_prompted_segmentation:
+    models:
+    - sam-vit-base
+    - sam-vit-base-tp4
+    default_models:
+    - sam-vit-base
+    family_override:
+      prompt_mode: point
+      ground_truth_mask_field: instance_mask
+    qualification:
+      sam-vit-base: {}

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -13,7 +14,7 @@ from types import ModuleType
 from . import trt_compat
 from .config import ModelConfig
 from .engine_build_budget import enforce_single_full_bundle_build
-from .families import (
+from .models import (
     find_model,
     load_model_by_id,
     resolve_config_from_model_dir,
@@ -22,7 +23,6 @@ from .families import (
     resolve_nemo_archive_model_dir,
 )
 from .hf_snapshot import hf_snapshot_allow_patterns
-from .parallel_config import ParallelConfig
 
 
 def _setup_trt_import(rtx: bool) -> None:
@@ -182,42 +182,12 @@ def _dispatch_model_build(
 def build(
     model_id_or_path: str,
     output_path: str,
-    max_cache_length: int | None = None,
-    *,
-    model_revision: str | None = None,
-    decoder_engine_layout: str = "split",
-    dynamic_kv_cache: bool = False,
-    dynamic_kv_profile_rows_override: list[int] | None = None,
-    precision: str | None = None,
-    fp32_layers: list[int] | None = None,
-    quantize: str | None = None,
-    quant_scales: str | None = None,
-    quant_calibration_samples: int = 512,
-    verbose: bool = False,
-    kernel_artifacts: list[tuple[str, str]] | None = None,
-    fp8_scales: dict | str | None = None,
-    save_fp8_scales: str | None = None,
-    rtx: bool = False,
-    triattention_stats_path: str | None = None,
-    triattention_kv_budget: int | None = None,
-    triattention_divide_length: int = 128,
-    triattention_recent_window: int = 128,
-    triattention_score_aggregation: str = "mean",
-    triattention_count_prompt_tokens: bool = True,
-    triattention_protect_prefill: bool = True,
-    triattention_disable_mlr: bool = False,
-    triattention_disable_trig: bool = False,
-    family_build_options: dict | None = None,
-    parallel_config: ParallelConfig | None = None,
-    diffusion_overrides: dict | None = None,
-    build_timing_path: str | None = None,
-    max_batch_size: int = 1,
+    **options: object,
 ) -> None:
-    """Resolve a local or Hub model and delegate one complete family build."""
-    options = dict(locals())
-    options.pop("model_id_or_path")
-    options.pop("output_path")
-    options.pop("model_revision")
+    """Resolve a local or Hub model and pass opaque options to its builder."""
+    model_revision = options.pop("model_revision", None)
+    if model_revision is not None and not isinstance(model_revision, str):
+        raise TypeError("model_revision must be a string or None")
     options["tokenizer_source_model_id_or_path"] = model_id_or_path
     options["tokenizer_source_revision"] = model_revision
 

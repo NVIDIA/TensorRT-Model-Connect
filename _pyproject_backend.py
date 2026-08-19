@@ -94,10 +94,10 @@ def build_sdist(
 def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
     """Add the minimal canonical benchmark catalog to a source archive."""
 
-    catalog_root = Path.cwd() / "tests" / "e2e" / "models"
+    catalog_root = Path.cwd() / "python" / "tensorrt_model_connect" / "models"
     descriptors = sorted(catalog_root.glob("*/MODEL.toml"))
-    manifests = sorted(catalog_root.glob("*/manifests/*.json"))
-    assets = set(catalog_root.glob("*/data/Recording.wav"))
+    manifests = sorted(catalog_root.glob("*/tests/manifests/*.json"))
+    assets = set(catalog_root.glob("*/tests/data/Recording.wav"))
     if not descriptors or not manifests:
         raise RuntimeError(f"benchmark model catalog is empty or unavailable: {catalog_root}")
     for manifest in manifests:
@@ -109,7 +109,12 @@ def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
         for index, testcase in enumerate(raw.get("testcases", [])):
             if not isinstance(testcase, dict):
                 continue
-            for field in ("test_image", "prompt_file", "test_input_audio"):
+            for field in (
+                "test_image",
+                "prompt_file",
+                "test_input_audio",
+                "camera_intrinsics_file",
+            ):
                 if field in testcase:
                     references.append((f"testcases[{index}].{field}", testcase[field]))
         for field, declared in references:
@@ -117,15 +122,13 @@ def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
                 continue
             if not isinstance(declared, str) or not declared.strip():
                 raise RuntimeError(f"{field} in benchmark manifest {manifest} must be a path")
-            family = manifest.parent.parent.resolve()
+            model_tests = manifest.parent.parent.resolve()
             declared_path = Path(declared)
-            asset = (family / declared_path).resolve()
-            source_prefix = Path("tests/e2e/models") / family.name
-            if not asset.is_file() and declared_path.is_relative_to(source_prefix):
-                asset = (family / declared_path.relative_to(source_prefix)).resolve()
-            if not asset.is_relative_to(family) or not asset.is_file():
+            asset = (model_tests / declared_path).resolve()
+            if not asset.is_relative_to(model_tests) or not asset.is_file():
                 raise RuntimeError(
-                    f"{field} in benchmark manifest {manifest} is missing or outside {family}: "
+                    f"{field} in benchmark manifest {manifest} is missing or outside "
+                    f"{model_tests}: "
                     f"{asset}"
                 )
             assets.add(asset)

@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  vbench_ti2v_official_profile_parity:
+    models:
+    - wan22-ti2v-5b
+    default_models:
+    - wan22-ti2v-5b
+    qualification:
+      wan22-ti2v-5b: {}

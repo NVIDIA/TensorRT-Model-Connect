@@ -24,6 +24,7 @@
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
+#include "trtmc/config/schemas/platform.h"
 
 #include <any>
 #include <cstdint>
@@ -91,6 +92,7 @@ void register_demo_schema() {
             bool_field("protect_prefill", true, {Layer::SessionRequest, Layer::BundleDefault}),
             string_field("dump_scores_path", "", {Layer::SessionRequest}),
         }});
+    reg.register_schema(trtmc::config::schemas::make_platform_schema());
 }
 
 // ---- parse_set_token -------------------------------------------------------
@@ -372,11 +374,20 @@ void test_runtime_resolution_survives_unwritable_effective_config_sidecar() {
         R"({"defaults":{"triattention":{"kv_budget":4096}}})", "/dev/null/bundle.bundle", "",
         {"triattention.kv_budget=8192"});
 
-    check(resolved.has_value(), "runtime resolution: unwritable sidecar retains config");
-    if (resolved) {
-        check(resolved->get<std::int32_t>("triattention", "kv_budget") == 8192,
-              "runtime resolution: session override remains active");
-    }
+    check(resolved.get<std::int32_t>("triattention", "kv_budget") == 8192,
+          "runtime resolution: unwritable sidecar retains config");
+}
+
+void test_runtime_resolution_rejects_invalid_bundle_defaults() {
+    register_demo_schema();
+    expect_throws(
+        [] {
+            (void)trtmc::detail::resolve_runtime_config(
+                R"({"defaults":{"triattention":{"unknown_field":1}}})", "/dev/null/bundle.bundle",
+                "", {});
+        },
+        "unknown field: triattention.unknown_field",
+        "runtime resolution rejects invalid bundle defaults");
 }
 
 // ---- bundle defaults: block ------------------------------------------------
@@ -415,23 +426,6 @@ void test_extract_bundle_defaults_key_in_string_not_confused() {
           "extract_defaults: skips key-like string literal");
 }
 
-void test_filter_drops_unregistered_namespaces() {
-    SchemaRegistry& reg = SchemaRegistry::instance();
-    reg.clear_for_testing();
-    reg.register_schema(Schema{"known", {int_field("f", 0, {Layer::BundleDefault})}});
-
-    LayerContribution contrib;
-    contrib.layer = Layer::BundleDefault;
-    contrib.values["known"]["f"] = std::any{std::int64_t{1}};
-    contrib.values["stranger_danger"]["f"] = std::any{std::int64_t{2}};
-
-    auto dropped = trtmc::config::filter_to_registered_namespaces(contrib, reg);
-    check(dropped.size() == 1 && dropped.front() == "stranger_danger",
-          "filter: dropped unknown namespace");
-    check(contrib.values.count("known") == 1 && contrib.values.count("stranger_danger") == 0,
-          "filter: known kept, unknown removed");
-}
-
 void test_resolve_pipeline_config_merges_bundle_and_session(std::string tmp_dir) {
     namespace fs = std::filesystem;
     register_demo_schema();
@@ -461,7 +455,7 @@ void test_resolve_pipeline_config_merges_bundle_and_session(std::string tmp_dir)
           "resolve: source protect_prefill");
 }
 
-void test_resolve_pipeline_config_tolerates_unknown_defaults() {
+void test_resolve_pipeline_config_rejects_unknown_defaults() {
     SchemaRegistry& reg = SchemaRegistry::instance();
     reg.clear_for_testing();
     reg.register_schema(Schema{"known", {int_field("f", 5, {Layer::BundleDefault})}});
@@ -469,10 +463,9 @@ void test_resolve_pipeline_config_tolerates_unknown_defaults() {
         "known": {"f": 10},
         "not_yet_migrated": {"old": 1}
     }})";
-    auto res = trtmc::config::resolve_pipeline_config(header, "", {});
-    // Known namespace retained; unknown dropped at filter step.
-    check(res.bundle.get<std::int64_t>("known", "f") == 10, "resolve: known ns kept");
-    check(res.contributions.size() == 1, "resolve: only bundle_default layer survives");
+    expect_throws([&] { (void)trtmc::config::resolve_pipeline_config(header, "", {}, reg); },
+                  "unregistered namespace: not_yet_migrated",
+                  "resolve: unknown bundle-default namespace is rejected");
 }
 
 void test_bundle_defaults_contribution_produces_bundle_default_layer() {
@@ -532,13 +525,13 @@ int main() {
     test_bundle_to_effective_json_contains_source();
     test_try_write_effective_config_reports_unwritable_sidecar();
     test_runtime_resolution_survives_unwritable_effective_config_sidecar();
+    test_runtime_resolution_rejects_invalid_bundle_defaults();
 
     test_extract_bundle_defaults_finds_block();
     test_extract_bundle_defaults_absent_block();
     test_extract_bundle_defaults_key_in_string_not_confused();
     test_bundle_defaults_contribution_produces_bundle_default_layer();
-    test_filter_drops_unregistered_namespaces();
-    test_resolve_pipeline_config_tolerates_unknown_defaults();
+    test_resolve_pipeline_config_rejects_unknown_defaults();
     {
         namespace fs = std::filesystem;
         fs::path tmp = fs::temp_directory_path() / "test_resolve_pipeline";

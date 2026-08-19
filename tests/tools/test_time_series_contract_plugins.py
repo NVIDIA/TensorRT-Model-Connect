@@ -11,7 +11,7 @@ from tests.e2e_harness.registry import activate_model_plugins, reset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-E2E_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
+E2E_MODELS = REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
 
 
 def _case(name: str, reference_family: str, user_contract: str) -> E2ECase:
@@ -27,7 +27,7 @@ def _case(name: str, reference_family: str, user_contract: str) -> E2ECase:
 
 def _activate_family(family: str, reference_family: str):
     reset()
-    activate_model_plugins(E2E_MODELS / family)
+    activate_model_plugins(E2E_MODELS / family / "tests")
     return find_plugin(reference_family)
 
 

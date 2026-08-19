@@ -254,51 +254,6 @@ bool register_model_plugin_candidate(ModelPluginCandidate& candidate, const std:
     return false;
 }
 
-std::string alias_string(const char* value) {
-    return value == nullptr ? std::string{} : std::string(value);
-}
-
-std::string json_field_value_window(const std::string& config_text, const std::string& key) {
-    if (key.empty() || key == "_")
-        return "";
-    const auto pos = config_text.find("\"" + key + "\"");
-    if (pos == std::string::npos)
-        return "";
-    const auto colon = config_text.find(':', pos);
-    if (colon == std::string::npos)
-        return "";
-    return config_text.substr(colon + 1, 160);
-}
-
-bool json_field_is_truthy(const std::string& config_text, const std::string& key) {
-    const auto value = json_field_value_window(config_text, key);
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos)
-        return false;
-    return value.compare(first, 4, "true") == 0 || value[first] == '1';
-}
-
-bool legacy_alias_matches(const LegacyStrategyAlias& alias, const std::string& config_text) {
-    const std::string op = alias_string(alias.match_op);
-    const std::string key = alias_string(alias.config_key);
-    const std::string value = alias_string(alias.match_value);
-
-    if (op == "default")
-        return true;
-    if (op == "truthy")
-        return json_field_is_truthy(config_text, key);
-    if (op == "not_truthy")
-        return !json_field_is_truthy(config_text, key);
-    if (op == "contains")
-        return json_field_value_window(config_text, key).find(value) != std::string::npos;
-    if (op == "equals") {
-        const auto window = json_field_value_window(config_text, key);
-        return window.find("\"" + value + "\"") != std::string::npos ||
-               window.find(value) != std::string::npos;
-    }
-    return false;
-}
-
 [[noreturn]] void throw_load_error(const std::string& model_id, const std::string& library_name,
                                    const std::vector<std::string>& paths,
                                    const std::vector<std::string>& errors) {
@@ -331,25 +286,6 @@ std::string model_plugin_library_name(const std::string& model_id) {
             return std::string(entry.library_name);
     }
     return "libtrtmc_model_" + model_id + ".so";
-}
-
-std::optional<std::string> legacy_runtime_strategy_alias_target(const std::string& strategy,
-                                                                const std::string& config_text) {
-    const LegacyStrategyAlias* fallback = nullptr;
-    for (const auto& alias : legacy_runtime_strategy_alias_index()) {
-        if (strategy != alias_string(alias.legacy_strategy))
-            continue;
-        if (alias_string(alias.match_op) == "default") {
-            if (fallback == nullptr)
-                fallback = &alias;
-            continue;
-        }
-        if (legacy_alias_matches(alias, config_text))
-            return alias_string(alias.target_strategy);
-    }
-    if (fallback != nullptr)
-        return alias_string(fallback->target_strategy);
-    return std::nullopt;
 }
 
 void load_model_plugin_for_strategy(const std::string& strategy,

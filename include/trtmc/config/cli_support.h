@@ -115,8 +115,7 @@ std::string bundle_to_effective_json(const ConfigBundle& bundle);
 
 // Scan a bundle's header JSON text for the ``"defaults": { ... }`` object
 // value and return its contents as a parsed LayeredFileValues. Returns an
-// empty map when the key is absent, so old bundles with no ``defaults:``
-// block continue to load unchanged.
+// empty map when the optional key is absent.
 //
 // This is intentionally a targeted scanner rather than a general JSON DOM:
 // the header already has many top-level fields (``model_id``, ``sections``,
@@ -125,17 +124,6 @@ LayeredFileValues extract_bundle_defaults(const std::string& header_json);
 
 // Convenience: wrap ``extract_bundle_defaults`` as a BundleDefault layer.
 LayerContribution bundle_defaults_contribution(const std::string& header_json);
-
-// Drop namespaces from ``contrib`` that aren't known to ``registry`` —
-// typically used for the BundleDefault layer so old bundles carrying
-// defaults for clusters that haven't migrated yet don't fail-fast.
-//
-// Emits one stderr line per dropped namespace (informational — not an
-// error). Mutates ``contrib`` in place and returns the list of
-// dropped namespace names for diagnostics.
-std::vector<std::string>
-filter_to_registered_namespaces(LayerContribution& contrib,
-                                const SchemaRegistry& registry = SchemaRegistry::instance());
 
 // High-level helper used by PipelineFactory. Takes the bundle's raw
 // header JSON plus the session-layer CLI inputs and produces a merged

@@ -63,7 +63,7 @@ Diffusion inference is iterative like text generation, but the loop is over deno
 
 The build CLI also exposes `--context-parallel-size` (or `--cp-size`) for
 families that implement context parallelism. The current checked multi-device
-contract is `tests/e2e/models/flux/manifests/flux-schnell-l0-cp4.json`:
+contract is `python/tensorrt_model_connect/models/flux/tests/manifests/flux-schnell-l0-cp4.json`:
 it uses FLUX.1 Schnell, four ranks, `mpirun`, NCCL rendezvous, and four GPUs.
 The FLUX builder stores one shared rank-dynamic Ulysses denoiser plan while
 replicating weights and sharding sequence activations. Tensor-parallel and
@@ -76,7 +76,7 @@ the four-rank runtime path.
 ## PixArt-Sigma image generation
 
 This recipe mirrors the repository's
-`tests/e2e/models/pixart/manifests/pixart-sigma-1024-l0.json` contract: the
+`python/tensorrt_model_connect/models/pixart/tests/manifests/pixart-sigma-1024-l0.json` contract: the
 same checkpoint, FP16 precision, FP32 text-encoder selector, 256-token cache,
 512-by-512 spatial profile, prompt, and 20 denoising steps.
 
@@ -158,7 +158,7 @@ the exact bundle, software cohort, prompt, seed, and retained artifacts.
 Chronos-Bolt uses the neural-operator task surface: a numeric history enters as
 the branch input, and `solve()` returns the forecast vector. The repository's
 official contract is
-`tests/e2e/models/chronos_bolt/manifests/chronos-bolt-tiny-official.json`.
+`python/tensorrt_model_connect/models/chronos_bolt/tests/manifests/chronos-bolt-tiny-official.json`.
 The following example uses that manifest's real model ID, precision, bundle
 name, and input values.
 
@@ -178,7 +178,7 @@ The build requires the same TensorRT/CUDA GPU environment as the other engine
 builds on this page. Chronos-Bolt also declares a build-time Python profile
 named `chronos`. On first use, the CLI materializes the pinned dependencies
 from
-`python/tensorrt_model_connect/families/chronos_bolt/python_profile_requirements/chronos.lock.txt`,
+`python/tensorrt_model_connect/models/chronos_bolt/python_profile_requirements/chronos.lock.txt`,
 including `chronos-forecasting==2.2.2`. That step needs package access or a
 pre-populated profile/cache. A successful build exits with status 0 and creates
 `/tmp/chronos-bolt-tiny-official.bundle`.

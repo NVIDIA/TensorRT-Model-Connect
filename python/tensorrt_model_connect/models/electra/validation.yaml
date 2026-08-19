@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  stsbenchmark_encoder_embedding_parity:
+    models:
+    - electra-base-discriminator
+    - electra-base-discriminator-tp4
+    default_models:
+    - electra-base-discriminator
+    qualification:
+      electra-base-discriminator: {}

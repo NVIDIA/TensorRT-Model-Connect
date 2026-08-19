@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  vlm_mmmu_pro_vision_mcq:
+    models:
+    - internvl3-2b
+    - internvl3-2b-tp2
+    - internvl3-8b
+    - internvl3-8b-tp4
+    default_models:
+    - internvl3-2b
+    - internvl3-8b
+  vlm_mmmu_pro_vision_fixed_mcq:
+    models:
+    - internvl3-2b
+    - internvl3-2b-tp2
+    - internvl3-8b
+    - internvl3-8b-tp4
+    default_models:
+    - internvl3-2b
+    - internvl3-8b
+    qualification:
+      internvl3-8b: {}

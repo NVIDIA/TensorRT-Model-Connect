@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sana_wm"
+python_profile_specs = [
+  "sana_wm_reference|models/sana_wm/python_profile_requirements/sana_wm_reference.lock.txt|models/sana_wm/python_profile_reference_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|sana_wm_reference",
+]
+config_adapter = "model_config.py|config_from_dir"
+aliases = [
+  "sana-wm",
+  "sana_wm",
+  "sanamsvideocamctrl_1600m_p1_d20",
+]
+prefixes = [
+  "sana_wm",
+]
+hf_warm_dependencies = [
+  "stage-1-text-encoder|Efficient-Large-Model/gemma-2-2b-it",
+]
+hf_warm_files = [
+  "official-reference-license|Efficient-Large-Model/SANA-WM_bidirectional|LICENSE",
+]
+hf_allow_patterns = [
+  "README.md",
+  "config.yaml",
+  "model_index.json",
+  "pipeline*.py",
+  "asset/sana_wm/**",
+  "inference_video_scripts/**",
+  "scheduler/**",
+  "dit/**",
+  "vae/**",
+  "text_encoder/**",
+  "refiner/**",
+]
+runtime_plugins = [
+  "plugin.cpp|register_sana_wm_plugin",
+]
+runtime_config_schemas = [
+  "config_schema.cpp|register_sana_wm_schema",
+]
+runtime_strategies = [
+  "diffusion_sana_wm",
+]
+test_manifests = [
+  "tests/manifests/sana-wm-bidirectional.json",
+]
+
+[model_reference_cache]
+repository = "https://github.com/NVlabs/Sana.git"
+revision = "59629fdf790850797cb657bad014fce432bd713d"
+relative_path = "sana_wm/reference/Sana-59629fdf7908"
+entrypoint = "inference_video_scripts/wm/inference_sana_wm.py"
+environment_variable = "TRTMC_SANA_WM_REFERENCE_REPO"
+entrypoint_environment_variable = "SANA_WM_SCRIPT"
+
+[e2e_defaults.diffusion_media_generation]
+reference_backend = "hf_diffusers"
+oracle_level = "L1_external_reference"
+sana_wm_script_gating = false
+preflight_asset_fields = [
+  "test_image",
+]
+stages = [
+  { name = "end_to_end", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+  { input = "prompt_file", manifest = "prompt_file" },
+  { input = "camera_intrinsics", manifest = "camera_intrinsics" },
+  { input = "camera_intrinsics_file", manifest = "camera_intrinsics_file" },
+  { input = "action", manifest = "action" },
+  { input = "translation_speed", manifest = "translation_speed" },
+  { input = "rotation_speed_deg", manifest = "rotation_speed_deg" },
+  { input = "cfg_scale", manifest = "cfg_scale" },
+  { input = "fps", manifest = "fps" },
+  { input = "flow_shift", manifest = "flow_shift" },
+  { input = "no_action_overlay", manifest = "no_action_overlay" },
+  { input = "sana_wm_script", manifest = "sana_wm_script" },
+  { input = "sana_wm_native_plan_dir", manifest = "sana_wm_native_plan_dir" },
+  { input = "sana_wm_model_dir", manifest = "sana_wm_model_dir" },
+  { input = "sana_wm_tokenizer_dir", manifest = "sana_wm_tokenizer_dir" },
+  { input = "sana_wm_require_official_script", manifest = "sana_wm_require_official_script", default = true },
+  { input = "video_num_frames", manifest = "video_num_frames" },
+  { input = "video_height", manifest = "video_height", default = 704, required_manifest = "video_num_frames" },
+  { input = "video_width", manifest = "video_width", default = 1280, required_manifest = "video_num_frames" },
+  { input = "num_inference_steps", manifest = "num_inference_steps", default = 60, required_manifest = "video_num_frames" },
+]

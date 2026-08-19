@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "electra"
+aliases = [
+  "electra",
+]
+prefixes = [
+  "electra",
+]
+runtime_plugins = [
+  "plugin.cpp|register_electra_plugin",
+]
+runtime_strategies = [
+  "electra_encoder_only",
+]
+test_manifests = [
+  "tests/manifests/electra-base-discriminator-tp4.json",
+  "tests/manifests/electra-base-discriminator.json",
+]
+
+[e2e_defaults.encoder_only_nlp]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]

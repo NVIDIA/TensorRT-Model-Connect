@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  stsbenchmark_encoder_embedding_parity:
+    models:
+    - nemotron-embed-vl-1b-v2
+    - nemotron-embed-vl-1b-v2-tp4
+    default_models:
+    - nemotron-embed-vl-1b-v2
+    model_profiles:
+      nemotron-embed-vl-1b-v2:
+        gates:
+          min_vector_cosine: 0.99
+    qualification:
+      nemotron-embed-vl-1b-v2: {}
+  beir_scifact_reranking:
+    models:
+    - nemotron-rerank-vl-1b-v2
+    default_models:
+    - nemotron-rerank-vl-1b-v2
+    qualification:
+      nemotron-rerank-vl-1b-v2: {}

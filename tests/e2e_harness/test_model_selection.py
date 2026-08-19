@@ -17,7 +17,7 @@ class _Case:
 def test_read_e2e_models_file_supports_names_and_node_ids(tmp_path):
     models_file = tmp_path / "models.txt"
     models_file.write_text(
-        "model-a\ntests/e2e/models/f/test_f_e2e.py::test_model_e2e[model-b]\n# ignored\n",
+        "model-a\npython/tensorrt_model_connect/models/f/tests/test_f_e2e.py::test_model_e2e[model-b]\n# ignored\n",
         encoding="utf-8",
     )
 

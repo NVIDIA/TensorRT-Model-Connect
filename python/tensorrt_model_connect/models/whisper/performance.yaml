@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: whisper.transcribe
+  operation: transcribe
+  model: whisper-tiny-fp16
+  workload:
+    testcase: whisper-tiny-fp16
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-asr
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+additional_profiles:
+- model: whisper-large-v3-turbo
+  inherit: whisper.transcribe

@@ -383,13 +383,11 @@ def _lock_is_busy(path: Path) -> bool:
     return False
 
 
-
-
 def _copy_selection_inputs(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True)
     for path in source.rglob("*"):
         relative = path.relative_to(source)
-        selected = path.name == "MODEL.toml" or (
+        selected = path.name in {"MODEL.toml", "CMakeLists.txt"} or (
             path.parent.name == "manifests" and path.suffix == ".json"
         )
         python_test = path.name.startswith("test_") and path.suffix == ".py"
@@ -412,31 +410,20 @@ def _run_test_selection(
     projection_setup: Callable[[Path, dict[str, object]], None] | None = None,
 ) -> dict:
     source = tmp_path / f"{family}-{suite}"
-    e2e_source = REPO_ROOT / "tests" / "e2e" / "models" / family
-    e2e_target = source / "tests" / "e2e" / "models" / family
-    _copy_selection_inputs(e2e_source, e2e_target)
+    model_source = REPO_ROOT / "python" / "tensorrt_model_connect" / "models" / family
+    model_target = source / "python" / "tensorrt_model_connect" / "models" / family
+    _copy_selection_inputs(model_source, model_target)
+    (source / "tests" / "e2e").mkdir(parents=True)
     shutil.copy2(
         REPO_ROOT / "tests" / "e2e" / "timing_estimates.json",
         source / "tests" / "e2e" / "timing_estimates.json",
     )
 
-    runtime = source / "src" / "runtime" / "models" / "fixture_runtime"
-    runtime.mkdir(parents=True)
-    (runtime / "MODEL.toml").write_text(
-        'id = "fixture_runtime"\nruntime_library = "libtrtmc_model_fixture_runtime.so"\n',
-        encoding="utf-8",
-    )
-    family_source = REPO_ROOT / "python" / "tensorrt_model_connect" / "families" / family
-    family_root = source / "python" / "tensorrt_model_connect" / "families"
-    if family_source.is_dir():
-        _copy_selection_inputs(family_source, family_root / family)
-    else:
-        family_root.mkdir(parents=True)
     revision = "a" * 40
     projection: dict[str, object] = {
         "revision": revision,
         "model": family,
-        "runtime_model": "fixture_runtime",
+        "runtime_model": family,
         "e2e_family": family,
     }
     if projection_setup is not None:
@@ -472,12 +459,12 @@ def _run_test_selection(
 
 
 def _add_runtime_model(source: Path, model: str) -> None:
-    model_dir = source / "src" / "runtime" / "models" / model
-    model_dir.mkdir(parents=True)
-    (model_dir / "plugin.cpp").write_text("// fixture\n", encoding="utf-8")
+    model_dir = source / "python" / "tensorrt_model_connect" / "models" / model
+    runtime_dir = model_dir / "runtime"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "plugin.cpp").write_text("// fixture\n", encoding="utf-8")
     (model_dir / "MODEL.toml").write_text(
         f'id = "{model}"\n'
-        f'runtime_library = "libtrtmc_model_{model}.so"\n'
         f'runtime_plugins = ["plugin.cpp|register_{model}"]\n'
         f'runtime_strategies = ["{model}_strategy"]\n',
         encoding="utf-8",
@@ -572,16 +559,14 @@ def test_premerge_selects_one_nested_l0_replacement(
 
 
 def test_every_owned_e2e_family_has_one_premerge_smoke_case(tmp_path: Path) -> None:
-    model_root = REPO_ROOT / "tests" / "e2e" / "models"
+    model_root = REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
     families = sorted(path.parent.name for path in model_root.glob("*/MODEL.toml"))
 
     assert families
     for family in families:
         selection = _run_test_selection(tmp_path, family, "premerge")
         smoke_cases = [
-            case
-            for case in selection["e2e_cases"]
-            if case["test_category"] != "regression"
+            case for case in selection["e2e_cases"] if case["test_category"] != "regression"
         ]
         assert len(smoke_cases) == 1, family
         assert selection["e2e_cases"][0]["ci_tier"] != "nightly_only", family
@@ -602,9 +587,7 @@ def test_dinov3_premerge_uses_public_mirror_and_nightly_keeps_officials(
     premerge = _run_test_selection(tmp_path, "dinov3", "premerge")
     nightly = _run_test_selection(tmp_path, "dinov3", "nightly")
 
-    assert [case["name"] for case in premerge["e2e_cases"]] == [
-        "dinov3-vits16-timm-l0"
-    ]
+    assert [case["name"] for case in premerge["e2e_cases"]] == ["dinov3-vits16-timm-l0"]
     assert premerge["e2e_cases"][0]["ci_tier"] == "l0_only"
     assert {case["name"] for case in nightly["e2e_cases"]} == {
         "dinov3-convnext-tiny-pretrain-lvd1689m",
@@ -660,16 +643,27 @@ def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -
     assert all(case["ci_tier"] != "l0_only" for case in selection["e2e_cases"])
 
 
+def test_selection_reads_runtime_tests_from_the_owner_build(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "qwen", "premerge")
+
+    assert selection["runtime_tests"] == [
+        "test_c_abi_runtime_regression",
+        "test_qwen_native_kv_cache",
+        "test_qwen_sampler",
+        "test_qwen_tensor_names",
+    ]
+
+
 @pytest.mark.parametrize(
     ("family", "expected_family_tests"),
     (
-        ("flux", {"python/tensorrt_model_connect/families/flux/tests/test_family.py"}),
+        ("flux", {"python/tensorrt_model_connect/models/flux/tests/test_family.py"}),
         (
             "sana_wm",
             {
-                "python/tensorrt_model_connect/families/sana_wm/tests/test_family.py",
-                "python/tensorrt_model_connect/families/sana_wm/tests/test_native_plugin_builder.py",
-                "python/tensorrt_model_connect/families/sana_wm/tests/test_stage1_dit_builder.py",
+                "python/tensorrt_model_connect/models/sana_wm/tests/test_family.py",
+                "python/tensorrt_model_connect/models/sana_wm/tests/test_native_plugin_builder.py",
+                "python/tensorrt_model_connect/models/sana_wm/tests/test_stage1_dit_builder.py",
             },
         ),
     ),
@@ -688,8 +682,8 @@ def test_selection_includes_every_owned_python_family_test(
 def _selection_with_nested_adapter_and_unselected_sibling(
     tmp_path: Path,
 ) -> tuple[dict, str, str]:
-    selected_root = "tests/e2e/models/flux/optimized_adapter"
-    sibling_root = "tests/e2e/models/sibling_model/optimized_adapter"
+    selected_root = "python/tensorrt_model_connect/models/flux/tests/optimized_adapter"
+    sibling_root = "python/tensorrt_model_connect/models/sibling_model/tests/optimized_adapter"
 
     def project_adapter_tests(source: Path, _projection: dict[str, object]) -> None:
         selected_tests = source / selected_root
@@ -893,7 +887,7 @@ def test_nightly_capacity_requirement_uses_maximum_instead_of_sum(
     tmp_path: Path,
 ) -> None:
     def configure(source: Path, _projection: dict[str, object]) -> None:
-        manifests = source / "tests/e2e/models/flux/manifests"
+        manifests = source / "python/tensorrt_model_connect/models/flux/tests/manifests"
         requirements = {
             "flux-2-dev.json": 100000,
             "flux-2-dev-fp8.json": 200000,
@@ -922,7 +916,11 @@ def test_selector_rejects_invalid_gpu_capacity_requirements(
     value: object,
 ) -> None:
     def configure(source: Path, _projection: dict[str, object]) -> None:
-        path = next((source / "tests/e2e/models/convbert/manifests").glob("*.json"))
+        path = next(
+            (source / "python/tensorrt_model_connect/models/convbert/tests/manifests").glob(
+                "*.json"
+            )
+        )
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["e2e_parallel_resource"] = "exclusive_gpu"
         payload["e2e_min_free_gpu_memory_mib"] = value
@@ -941,7 +939,11 @@ def test_selector_rejects_gpu_capacity_on_a_shared_manifest(
     tmp_path: Path,
 ) -> None:
     def configure(source: Path, _projection: dict[str, object]) -> None:
-        path = next((source / "tests/e2e/models/convbert/manifests").glob("*.json"))
+        path = next(
+            (source / "python/tensorrt_model_connect/models/convbert/tests/manifests").glob(
+                "*.json"
+            )
+        )
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["e2e_parallel_resource"] = "shared"
         payload["e2e_min_free_gpu_memory_mib"] = 240000
@@ -960,7 +962,11 @@ def test_selector_rejects_testcase_level_gpu_capacity(
     tmp_path: Path,
 ) -> None:
     def configure(source: Path, _projection: dict[str, object]) -> None:
-        path = next((source / "tests/e2e/models/convbert/manifests").glob("*.json"))
+        path = next(
+            (source / "python/tensorrt_model_connect/models/convbert/tests/manifests").glob(
+                "*.json"
+            )
+        )
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["testcases"][0]["e2e_min_free_gpu_memory_mib"] = 240000
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -976,7 +982,11 @@ def test_selector_rejects_testcase_level_gpu_capacity(
 
 def test_selector_rejects_unknown_test_category(tmp_path: Path) -> None:
     def configure(source: Path, _projection: dict[str, object]) -> None:
-        path = next((source / "tests/e2e/models/convbert/manifests").glob("*.json"))
+        path = next(
+            (source / "python/tensorrt_model_connect/models/convbert/tests/manifests").glob(
+                "*.json"
+            )
+        )
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["testcases"][0]["test_category"] = "regresion"
         path.write_text(json.dumps(payload), encoding="utf-8")
@@ -1403,8 +1413,6 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert "offline HF cache readiness check failed" in warm
 
 
-
-
 def test_runner_removes_only_its_container_without_masking_exit_status() -> None:
     text = RUNNER.read_text(encoding="utf-8")
     cleanup = text.split("def _cleanup(self)", maxsplit=1)[1].split("def _signal", maxsplit=1)[0]
@@ -1414,8 +1422,6 @@ def test_runner_removes_only_its_container_without_masking_exit_status() -> None
     assert "self.lease.release()" in cleanup
     assert "for number in (signal.SIGINT, signal.SIGTERM)" in text
     assert "raise SystemExit(130 if number == signal.SIGINT else 143)" in text
-
-
 
 
 def test_every_host_container_has_exact_workflow_job_identity_labels(tmp_path: Path) -> None:
@@ -1643,8 +1649,6 @@ def test_orphan_reclamation_rejects_a_failed_remove_when_full_id_remains(
     assert f"could not remove orphaned model-proof container {orphan_id}" in result.stderr
     docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
     assert not any(" --inner " in f" {line} " for line in docker_lines)
-
-
 
 
 def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None:
@@ -4517,19 +4521,14 @@ def _proof_gpu_ids_if_present(docker_log: Path) -> list[str]:
 
 def test_runner_keeps_local_hugging_face_cache_fallbacks() -> None:
     source = RUNNER.read_text(encoding="utf-8")
-    assert (
-        'self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface"))'
-        in source
-    )
+    assert 'self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface"))' in source
     assert 'self.context.env.get("TRTMC_HF_HUB_CACHE"' in source
     assert "TRTMC_HF_MODULES_CACHE" not in source
 
 
 def test_model_proof_always_generates_strict_self_contained_html() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
-    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(
-        encoding="utf-8"
-    )
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
     for contract in (
         "report_rc = self._finalize_report(validation_rc)",
         'self.source / "scripts/generate_e2e_report.py"',
@@ -4557,9 +4556,7 @@ def test_model_proof_always_generates_strict_self_contained_html() -> None:
 def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     source = RUNNER.read_text(encoding="utf-8")
     allocator = (REPO_ROOT / "tools/ci/gpu_lease.py").read_text(encoding="utf-8")
-    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(
-        encoding="utf-8"
-    )
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
     host = source.split("def _run_host(self)", maxsplit=1)[1]
     warm = source.split("def _prepare_hf_cache(", maxsplit=1)[1].split(
         "def _validated_cache_evidence", maxsplit=1
@@ -4575,10 +4572,7 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert 'f"device={self.lease.gpu_id}"' in proof
     assert '"TRTMC_MODEL_PROOF_GPU_ID": str(self.lease.gpu_id)' in source
     assert '"TRTMC_MODEL_PROOF_GPU_SLOT_IDS": slots' in source
-    assert (
-        '"TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class'
-        in source
-    )
+    assert '"TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class' in source
     assert 'f"gpu-{gpu}-slot-{slot}.lock"' in allocator
     assert 'f"gpu-{gpu}-reservation.lock"' in allocator
     assert "TRTMC_GPU_ID must be present in TRTMC_MODEL_PROOF_GPU_IDS" in allocator

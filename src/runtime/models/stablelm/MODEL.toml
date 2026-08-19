@@ -1,9 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-id = "stablelm"
-runtime_library = "libtrtmc_model_stablelm.so"
-runtime_plugins = ["plugin.cpp|register_stablelm_plugin"]
-runtime_strategies = ["stablelm_decoder_kv_cache"]
-[validation_profiles]
-decoder_debug = ["stablelm_decoder_kv_cache"]

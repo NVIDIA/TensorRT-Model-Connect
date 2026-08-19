@@ -83,19 +83,16 @@ report that result instead of inventing documentation churn.
 | --- | --- |
 | `.github/workflows/internal-ci-bridge.yml`, `tools/ci/README.md` | premerge trigger and public/private evidence boundary |
 | `.github/workflows/pages.yml` | retained Source documentation deployment workflow |
-| Python family `MODEL.toml` and family code | build selection and family behavior |
-| C++ model `MODEL.toml`, registry, and runtime code | native strategies and dispatch |
-| E2E `MODEL.toml`, manifests, and sidecars | model support and validation |
+| Unified model `MODEL.toml`, `model.py`, `runtime/`, and `tests/` | build selection, native strategies, model behavior, support, and validation |
 | `tests/validation/*.yaml`, `tools/validation/` | validation workloads and engine |
 | `benchmarks/performance/*.yaml`, model perf profiles | performance contracts and reports |
 | public headers and executable `--help` | API and CLI references |
 | `plugins/trtmc-agent-skills/skills/` | repo-local automation guidance |
 
-Current model ownership spans:
+Current model ownership has one root:
 
-- `python/tensorrt_model_connect/families/<family>/`;
-- `src/runtime/models/<family>/`; and
-- `tests/e2e/models/<family>/`.
+- `python/tensorrt_model_connect/models/<family>/`, including its
+  `runtime/`, `tests/`, and optional `tools/` subdirectories.
 
 Do not resurrect removed Source workflows, retired task-evaluation commands,
 root graph helpers, or paths copied from another branch.
@@ -132,14 +129,14 @@ For paths, symbols, counts, and commands:
 python3 tools/check_doc_file_references.py --strict <changed-doc-directory>
 ```
 
-For model-support claims, cross-check all three ownership descriptors and the
+For model-support claims, cross-check the unified owner descriptor and the
 exact bundle/runtime path. Registration, build success, dry-run planning,
 parity, performance, and qualification are different claims.
 
 The supported Dev/QA entry point is `tools/trtmc_validate.py`. Workloads live
-in `tests/validation/workloads.yaml`, bindings in
-`tests/validation/model_workloads.yaml`, and implementation in
-`tools/validation/`. The persisted `task_eval` artifact key is intentional; do
+in `tests/validation/workloads.yaml`, bindings in each family's
+`validation.yaml`, and implementation in `tools/validation/`. The persisted
+`task_eval` artifact key is intentional; do
 not describe it as a live legacy CLI.
 
 ## Branch And PR Flow
@@ -192,9 +189,8 @@ Use `$write-git-messages` for the commit and PR text.
 Start from current repository ground truth:
 
 ```bash
-find python/tensorrt_model_connect/families/ -name "MODEL.toml" | sort
-find src/runtime/models/ -name "MODEL.toml" | sort
-find tests/e2e/models/ -path "*/manifests/*.json" | sort
+find python/tensorrt_model_connect/models/ -name "MODEL.toml" | sort
+find python/tensorrt_model_connect/models/ -path "*/tests/manifests/*.json" | sort
 find src/runtime/registry/ -type f \( -name "*.cpp" -o -name "*.h" \) | sort
 find src/runtime/domains/ -type f \( -name "*.cpp" -o -name "*.h" \) | sort
 find include/trtmc/ -type f -name "*.h" | sort
@@ -260,7 +256,7 @@ gap report. It is not a normative traceability matrix or a safety case.
 Recompute its snapshot from the manifests and test annotations:
 
 ```bash
-find tests/e2e/models/ -path "*/manifests/*.json" | sort
+find python/tensorrt_model_connect/models/ -path "*/tests/manifests/*.json" | sort
 rg -n "Trace:|Trace ID:" tests/builder tests/tools --glob "*.py"
 rg -n "Trace:|Trace ID:" tests/cpp --glob "*.cpp"
 ```

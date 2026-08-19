@@ -4,7 +4,7 @@
 """Shared speech-to-text comparator placeholder.
 
 Concrete speech-to-text comparator behavior belongs in
-``tests/e2e/models/<family>/e2e_plugins/comparators/``.
+``python/tensorrt_model_connect/models/<family>/e2e_plugins/comparators/``.
 """
 
 from __future__ import annotations

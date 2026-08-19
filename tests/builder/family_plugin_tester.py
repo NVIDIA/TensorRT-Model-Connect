@@ -9,7 +9,7 @@ and family-specific weight layouts).
 
 Usage in per-family test files:
     class ExamplePluginTester(FamilyPluginTester):
-        plugin_module = "tensorrt_model_connect.families.example"
+        plugin_module = "tensorrt_model_connect.models.example"
         model_type = "example_decoder"
 
     class TestExampleEngine(FamilyPluginTestMixin):
@@ -74,7 +74,7 @@ class FamilyPluginTester:
     """Base class for per-family plugin testers.
 
     Subclasses MUST set:
-        plugin_module: str  -- importable module path (e.g. "tensorrt_model_connect.families.example")
+        plugin_module: str  -- importable module path (e.g. "tensorrt_model_connect.models.example")
         model_type: str     -- HF model_type string (e.g. "example_decoder")
 
     Subclasses MAY override:

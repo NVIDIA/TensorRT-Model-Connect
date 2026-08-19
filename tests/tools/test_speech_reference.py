@@ -9,7 +9,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from tools.reference import speech
+from tensorrt_model_connect.models.canary.tools import reference as canary_reference
 
 
 def _install_fake_nemo_asr(
@@ -84,7 +84,7 @@ def test_canary_offline_reference_restores_cached_archive(
         model_class=_recording_model(from_pretrained_calls, restore_calls),
     )
 
-    responses = speech._run_nemo_asr(
+    responses = canary_reference.run(
         SimpleNamespace(
             model="nvidia/canary-1b-v2",
             model_revision=revision,
@@ -92,8 +92,8 @@ def test_canary_offline_reference_restores_cached_archive(
             device="cpu",
             predictions=tmp_path / "hf_predictions.json",
         ),
+        {"generation": {"sample_rate": 16000}},
         [],
-        {"sample_rate": 16000},
     )
 
     assert responses == []
@@ -126,7 +126,7 @@ def test_canary_online_reference_keeps_nemo_from_pretrained(
         model_class=_recording_model(from_pretrained_calls, restore_calls),
     )
 
-    responses = speech._run_nemo_asr(
+    responses = canary_reference.run(
         SimpleNamespace(
             model="nvidia/canary-1b-v2",
             model_revision="ignored-by-existing-online-path",
@@ -134,8 +134,8 @@ def test_canary_online_reference_keeps_nemo_from_pretrained(
             device="cpu",
             predictions=tmp_path / "hf_predictions.json",
         ),
+        {"generation": {"sample_rate": 16000}},
         [],
-        {"sample_rate": 16000},
     )
 
     assert responses == []

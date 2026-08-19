@@ -76,7 +76,7 @@ class E2EParallelConfig:
         parser.add_argument(
             "--manifest-dir",
             type=Path,
-            default=Path(env.get("TRTMC_E2E_MANIFEST_DIR", "tests/e2e/models")),
+            default=Path(env.get("TRTMC_E2E_MANIFEST_DIR", "python/tensorrt_model_connect/models")),
         )
         known, extra = parser.parse_known_args(arguments)
         for name in ("num_gpus", "workers_per_gpu", "progress_interval"):
@@ -247,7 +247,11 @@ class E2EParallelRunner:
                 for line in self.config.tests_file.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             )
-        test_files = sorted((self.context.repository / "tests/e2e/models").glob("*/test_*_e2e.py"))
+        test_files = sorted(
+            (self.context.repository / "python/tensorrt_model_connect/models").glob(
+                "*/tests/test_*_e2e.py"
+            )
+        )
         if not test_files:
             raise CiError("No model E2E collection files found.")
         selection = (

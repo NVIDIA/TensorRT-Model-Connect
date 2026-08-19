@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "lance"
+python_profile_specs = [
+  "lance_reference|models/lance/python_profile_requirements/lance_reference.lock.txt|models/lance/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|lance_reference",
+]
+model_dir_adapter = "prepare_model.py|resolve_model_dir"
+hf_allow_patterns = [
+  "Lance_3B/**",
+  "Qwen2.5-VL-ViT/**",
+]
+hf_required_files = [
+  "bytedance-research/Lance|Lance_3B/llm_config.json",
+  "bytedance-research/Lance|Lance_3B/model.safetensors",
+  "bytedance-research/Lance|Qwen2.5-VL-ViT/vit.safetensors",
+]
+aliases = [
+  "lance",
+]
+prefixes = [
+  "lance",
+]
+diff_framework_check_classes = [
+  "VLPipelineTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_lance_plugin",
+]
+runtime_strategies = [
+  "lance_vision_language",
+]
+test_manifests = [
+  "tests/manifests/lance-3b-x2t-image.json",
+]
+
+[model_reference_cache]
+repository = "https://github.com/bytedance/Lance.git"
+revision = "4baeee086648996f6ab12e673cbe461b0b149997"
+relative_path = "lance/reference/Lance-4baeee086648"
+entrypoint = "inference_lance.py"
+environment_variable = "TRTMC_LANCE_REFERENCE_REPO"
+
+[e2e_defaults.vision_language_generation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vision_encode", required = true },
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

@@ -38,12 +38,7 @@ DIFFUSION_SCHEDULER_OWNERS = ("flux", "pixart", "wan_t2v", "z_image")
 def scheduler_modules(request: pytest.FixtureRequest):
     """Return the scheduler module pair owned by one diffusion family."""
     family = str(request.param)
-    tools_package = _REPO_ROOT / "tools/families" / family / "schedulers"
-    module_root = (
-        f"tools.families.{family}.schedulers"
-        if tools_package.is_dir()
-        else f"tensorrt_model_connect.families.{family}.schedulers"
-    )
+    module_root = f"tensorrt_model_connect.models.{family}.schedulers"
     package = import_module(module_root)
     flow = import_module(f"{module_root}.flow_match_euler")
     base = import_module(f"{module_root}.base")

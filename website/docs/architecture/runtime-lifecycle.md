@@ -35,7 +35,7 @@ DSO, or factory is terminal.
 For a native bundle:
 
 1. `config.json` supplies `runtime_strategy` and strategy-specific metadata.
-2. Generated manifest data maps that strategy to one runtime owner and library.
+2. Generated manifest data maps that strategy to one model owner and its derived library.
 3. `PipelinePluginLoader` loads the owning
    `libtrtmc_model_<owner>.so`.
 4. The exported registrar publishes the declared `IPipelinePlugin` into
@@ -45,15 +45,14 @@ For a native bundle:
 7. The model plugin validates sections, creates modules and helpers, and
    returns a concrete `IPipeline`.
 
-Legacy native strategy aliases may be normalized through generated
-compatibility metadata. An unknown strategy, unavailable model DSO, undeclared
-registration, incompatible backend, or invalid required section fails
-explicitly.
+There is no legacy strategy-alias normalization. An unknown strategy,
+unavailable model DSO, undeclared registration, incompatible backend, or
+invalid required section fails explicitly.
 
-Native runtime manifests live at
-`src/runtime/models/<owner>/MODEL.toml`. CMake uses them to generate the
-strategy-to-library index and model registrar entry points; contributors do not
-append a family switch inside `PipelineFactory`.
+The owner manifest lives at
+`python/tensorrt_model_connect/models/<owner>/MODEL.toml`. CMake uses it to
+generate the strategy-to-library index and model registrar entry points;
+contributors do not append a family switch inside `PipelineFactory`.
 
 ## Optimized dispatch
 
@@ -129,11 +128,11 @@ For native construction, the factory currently supplies:
 Although `ConfigBundle` defines build-time and platform-profile layer types,
 this factory path does not inject separate contributions for them.
 
-Direct `PipelineFactory` calls diagnose a configuration-resolution exception
-and continue with a null run-time config so the model plugin can apply its local
-fallback. The CLI performs explicit config validation before dispatch and exits
-nonzero on invalid input. Library applications that require fail-fast config
-semantics must enforce that policy around the current factory behavior.
+Native `PipelineFactory` calls fail closed. Missing or malformed
+`config.json`, missing `runtime_strategy`, unknown schema namespaces or fields,
+invalid values, and invalid explicit overrides all terminate construction
+before the model plugin is created. A successful construction supplies a
+non-null resolved config to the plugin.
 
 ## Concurrency and pipeline pools
 
@@ -164,6 +163,6 @@ support. Use bundle inspection plus the owning build/profile contract.
 | Optimized host | `src/runtime/providers/optimized_runtime_host.cpp` |
 | Plugin context | `include/trtmc/runtime/pipeline_plugin.h` |
 | Backend abstraction | `include/trtmc/runtime/trt_backend.h`, `include/trtmc/runtime/trt_module.h` |
-| Model pipelines | `src/runtime/models/<owner>/` |
+| Model pipelines | `python/tensorrt_model_connect/models/<owner>/runtime/` |
 
 {/* Collaborative review anchor: batch 2. */}

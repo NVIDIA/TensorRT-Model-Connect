@@ -10,11 +10,11 @@ fallback backend and it does not add a synthetic native `runtime_strategy`.
 The current Qwen TensorRT Edge-LLM adapter is the concrete example:
 
 - builder capsule:
-  `python/tensorrt_model_connect/families/qwen/edge_llm_adapter/`;
+  `python/tensorrt_model_connect/models/qwen/edge_llm_adapter/`;
 - private runtime implementation:
-  `src/runtime/models/qwen/edge_llm_adapter/`;
+  `python/tensorrt_model_connect/models/qwen/runtime/edge_llm_adapter/`;
 - Source-side adapter and runtime contracts:
-  `tests/e2e/models/qwen/edge_llm_adapter/`.
+  `python/tensorrt_model_connect/models/qwen/tests/edge_llm_adapter/`.
 
 ## 1. Keep ownership inside the family
 
@@ -88,8 +88,8 @@ PYTHONPATH=python:. python3 tools/model_ci.py validate
 PYTHONPATH=python:. python3 -m pytest \
   tests/builder/test_optimized_runtime_orchestrator.py \
   tests/builder/test_optimized_runtime_capsules.py \
-  tests/e2e/models/qwen/edge_llm_adapter/test_adapter.py \
-  tests/e2e/models/qwen/edge_llm_adapter/test_runtime_contract.py -q
+  python/tensorrt_model_connect/models/qwen/tests/edge_llm_adapter/test_adapter.py \
+  python/tensorrt_model_connect/models/qwen/tests/edge_llm_adapter/test_runtime_contract.py -q
 ```
 
 These Source checks prove manifest, selection, packaging, identity, and

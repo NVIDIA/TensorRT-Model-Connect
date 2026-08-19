@@ -48,7 +48,9 @@ def test_tensor_rt_python_api_is_imported_only_through_compat_layer():
     """Builder code must route TensorRT Python API access through trt_compat."""
     violations: list[str] = []
     for path in sorted(TRTMC_BUILD_ROOT.rglob("*.py")):
-        if path in ALLOWED_TRT_BOUNDARY_FILES:
+        if path in ALLOWED_TRT_BOUNDARY_FILES or "tests" in path.relative_to(
+            TRTMC_BUILD_ROOT
+        ).parts:
             continue
         rel = path.relative_to(REPO_ROOT)
         tree = ast.parse(path.read_text(), filename=str(path))

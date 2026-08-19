@@ -12,7 +12,7 @@ Usage:
     python scripts/generate_e2e_report.py \\
       --artifacts-dir /tmp/e2e_artifacts/artifacts \\
       -o /tmp/e2e_artifacts/e2e_report.html \\
-      [--manifest-dir tests/e2e/models] \\
+      [--manifest-dir python/tensorrt_model_connect/models] \\
       [--project-dir .] \\
       [--title "E2E Report"]
 """
@@ -69,7 +69,7 @@ _TRTMC_ENGINE_TIMING_RE = re.compile(
 _TEST_CASE_RE = re.compile(r"(?:test_e2e|test_model_e2e)\[([^\]]+)\]")
 _CONSOLE_OUTCOME_RE = re.compile(
     r"(?:tests/test_e2e\.py::test_e2e|"
-    r"tests/e2e/models/[^\s:]+::test_model_e2e)\[([^\]]+)\]\s+"
+    r"python/tensorrt_model_connect/models/[^\s:]+::test_model_e2e)\[([^\]]+)\]\s+"
     r"(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b(.*)"
 )
 _PYTEST_TO_RESULT_STATUS = {
@@ -2387,7 +2387,14 @@ def _render_model_owned_evidence(
     if re.fullmatch(r"[a-z0-9_]+", family) is None:
         return None
     renderer_path = _path_within(
-        project_dir / "tests" / "e2e" / "models" / family / "e2e_plugins" / "report.py",
+        project_dir
+        / "python"
+        / "tensorrt_model_connect"
+        / "models"
+        / family
+        / "tests"
+        / "e2e_plugins"
+        / "report.py",
         project_dir,
     )
     if renderer_path is None:

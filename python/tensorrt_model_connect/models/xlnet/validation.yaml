@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  stsbenchmark_encoder_embedding_parity:
+    models:
+    - xlnet-base
+    - xlnet-base-tp4
+    default_models:
+    - xlnet-base
+    model_profiles:
+      xlnet-base:
+        gates:
+          min_vector_cosine: 0.95
+    model_overrides:
+      xlnet-base:
+        # Upstream XLNet retains FP32 relative-attention parameters that cannot
+        # participate in its FP16 einsum. Compare both sides in FP32.
+        comparison_precision: fp32
+    qualification:
+      xlnet-base: {}

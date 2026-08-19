@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 // @title: Build-time units and ownership
-// @description: Public build entry points resolve one family model module and call model.build exactly once; that module owns native or exact optimized construction and complete deployment-bundle assembly.
+// @description: Public build entry points resolve one model owner and call model.build exactly once; that same folder owns its descriptor, Python construction, native runtime, tests, and complete deployment bundle.
 digraph BuildOwnership {
   graph [
     bgcolor="#fbfcfe",
@@ -12,7 +12,7 @@ digraph BuildOwnership {
     splines="polyline",
     fontname="Arial",
     labelloc="t",
-    label=<<B>Build-time ownership</B><BR/><FONT POINT-SIZE="16">Shared entry points resolve and dispatch; one family model module owns the complete bundle.</FONT>>,
+    label=<<B>One model owner, one vertical implementation</B><BR/><FONT POINT-SIZE="16">Shared entry points resolve and dispatch; one folder owns build, runtime, tests, and bundle.</FONT>>,
     fontsize="28",
     fontcolor="#111827"
   ];
@@ -49,17 +49,18 @@ digraph BuildOwnership {
   }
 
   subgraph cluster_family {
-    label=<<B>Model-owned build units</B>>;
+    label=<<B>models/&lt;owner&gt;/</B>>;
     color="#2563eb";
     fillcolor="#eff6ff";
     style="rounded,filled";
     penwidth="2";
     fontsize="18";
     fontcolor="#1e3a8a";
-    descriptor [label=<<B>Family descriptor</B><BR/><FONT POINT-SIZE="16">MODEL.toml + match rules</FONT>>];
-    model [label=<<B>Family model.py</B><BR/><FONT POINT-SIZE="16">match · config · weights · route · bundle</FONT>>];
-    native [label=<<B>Native recipe</B><BR/><FONT POINT-SIZE="16">graph + TensorRT plans + sections</FONT>>];
-    optimized [label=<<B>Exact optimized profile</B><BR/><FONT POINT-SIZE="16">implementation + isolated adapter</FONT>>];
+    descriptor [label=<<B>Single MODEL.toml</B><BR/><FONT POINT-SIZE="16">identity · runtime · manifests</FONT>>];
+    model [label=<<B>model.py</B><BR/><FONT POINT-SIZE="16">match · config · weights · route · bundle</FONT>>];
+    native [label=<<B>runtime/</B><BR/><FONT POINT-SIZE="16">native recipe + model DSO sources</FONT>>];
+    optimized [label=<<B>Exact optimized profile</B><BR/><FONT POINT-SIZE="16">owner-local implementation + adapter</FONT>>];
+    evidence [label=<<B>tests/</B><BR/><FONT POINT-SIZE="16">unit · C++ · manifests · E2E evidence</FONT>>];
   }
 
   bundle [
@@ -67,12 +68,6 @@ digraph BuildOwnership {
     color="#b45309",
     label=<<FONT POINT-SIZE="20"><B>.bundle deployment contract</B></FONT><BR/><FONT POINT-SIZE="16">metadata · plans or embedded implementation · assets</FONT>>
   ];
-  evidence [
-    fillcolor="#ecfeff",
-    color="#0e7490",
-    label=<<B>Owned evidence</B><BR/><FONT POINT-SIZE="16">unit · E2E · exact-profile qualification</FONT>>
-  ];
-
   { rank=same; cli; python; }
   { rank=same; native; optimized; }
 
@@ -83,6 +78,6 @@ digraph BuildOwnership {
   model -> optimized;
   native -> bundle;
   optimized -> bundle;
-  evidence -> model [style="dashed", label="proves family contract"];
+  evidence -> model [style="dashed", label="proves owner contract"];
   evidence -> optimized [style="dashed", label="proves exact profile"];
 }

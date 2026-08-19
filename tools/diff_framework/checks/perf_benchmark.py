@@ -11,7 +11,6 @@ from diff_framework.protocol import DiffResult, TestContext
 class PerfBenchmarkTest:
     name = "perf_benchmark"
     description = "TRT vs HF inference performance comparison (2-way or 3-way with torch.compile)"
-    runtime_strategies = []
     requires_bundle = False
     requires_gpu = True
 

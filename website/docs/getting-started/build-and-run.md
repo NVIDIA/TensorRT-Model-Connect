@@ -56,7 +56,7 @@ use their own strategy keys and DSOs even when they implement the same public
 trtmc build openai/whisper-large-v3-turbo -o /tmp/whisper.bundle --precision fp16
 
 trtmc transcribe /tmp/whisper.bundle \
-  --audio tests/e2e/models/whisper/data/Recording.wav \
+  --audio python/tensorrt_model_connect/models/whisper/tests/data/Recording.wav \
   --max-new-tokens 224
 ```
 
@@ -80,7 +80,7 @@ path: they have larger artifacts, longer builds, and model-specific profiles.
 ## Segmentation
 
 This example follows the real
-`tests/e2e/models/segformer/manifests/segformer-b0-ade.json` manifest from model
+`python/tensorrt_model_connect/models/segformer/tests/manifests/segformer-b0-ade.json` manifest from model
 ID through inference:
 
 ```bash
@@ -89,7 +89,7 @@ trtmc build nvidia/segformer-b0-finetuned-ade-512-512 \
   --precision fp16
 
 trtmc segment /tmp/segformer-b0-ade.bundle \
-  --image tests/e2e/models/segformer/data/test_img.jpeg \
+  --image python/tensorrt_model_connect/models/segformer/tests/data/test_img.jpeg \
   --output /tmp/segformer-b0-ade-mask.png
 ```
 
@@ -116,7 +116,7 @@ current support evidence.
 ## Chronos-Bolt time-series forecasting
 
 This build-to-solve example follows
-`tests/e2e/models/chronos_bolt/manifests/chronos-bolt-tiny-official.json`:
+`python/tensorrt_model_connect/models/chronos_bolt/tests/manifests/chronos-bolt-tiny-official.json`:
 
 ```bash
 trtmc build amazon/chronos-bolt-tiny \

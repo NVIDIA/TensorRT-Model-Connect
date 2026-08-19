@@ -17,8 +17,8 @@ import pytest
 from tests.e2e_harness.manifest_loader import iter_manifest_paths
 
 E2E_DIR = Path(__file__).resolve().parent
-MODELS_DIR = E2E_DIR / "models"
 PROJECT_DIR = E2E_DIR.parents[1]
+MODELS_DIR = PROJECT_DIR / "python" / "tensorrt_model_connect" / "models"
 
 if os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1":
     import tensorrt_model_connect as _installed_package

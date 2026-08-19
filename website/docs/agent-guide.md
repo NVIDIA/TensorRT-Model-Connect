@@ -47,7 +47,7 @@ concrete conflict, and ask for human direction.
 ```text
 Read instructions
   → inspect exact repository state
-  → identify model/task/runtime owner
+  → identify model owner, task contract, and runtime strategy
   → make the smallest scoped change
   → run the smallest meaningful validation
   → report evidence and unrun boundaries

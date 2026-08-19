@@ -43,7 +43,7 @@ fast-foundation-stereo = [
     "timm>=1.0",
 ]
 chronos = ["chronos-forecasting>=2.2.2"]
-# clip: required by tests/e2e/models/flux/e2e_plugins/comparators/clip_metrics.py for
+# clip: required by python/tensorrt_model_connect/models/flux/tests/e2e_plugins/comparators/clip_metrics.py for
 # CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped
 # at runtime when absent, but all CLIP gates become no-ops without it.
 clip = ["open-clip-torch>=2.20", "Pillow>=9.0"]
@@ -51,11 +51,16 @@ validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
 
 [tool.conan-py-build.wheel]
 packages = ["python/tensorrt_model_connect"]
+exclude = [
+    "python/tensorrt_model_connect/models/*/runtime",
+    "python/tensorrt_model_connect/models/*/runtime/**",
+    "python/tensorrt_model_connect/models/*/tests",
+    "python/tensorrt_model_connect/models/*/tests/**",
+]
 
 [tool.conan-py-build.sdist]
 include = [
     "python",
-    "src/runtime/models/fast_foundation_stereo/native_plugins",
     "third_party",
 ]
 exclude = [
@@ -63,6 +68,8 @@ exclude = [
     "*.pyc",
     "python/tensorrt_model_connect/build",
     "python/tensorrt_model_connect/*.egg-info",
+    "python/tensorrt_model_connect/models/*/tests",
+    "python/tensorrt_model_connect/models/*/tests/**",
 ]
 
 [tool.pytest.ini_options]
@@ -70,7 +77,7 @@ testpaths = [
     "tests/builder",
     "tests/tools",
     "tests/e2e",
-    "python/tensorrt_model_connect/families",
+    "python/tensorrt_model_connect/models",
 ]
 markers = [
     "trt: tests requiring TensorRT + CUDA GPU",

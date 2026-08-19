@@ -25,7 +25,7 @@ _ATTENTION_BACKEND_ENV = "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"
 _ATTENTION_BACKENDS = frozenset({"flash_attn", "torch_sdpa"})
 _ATTENTION_COMPAT = (
     Path(__file__).resolve().parents[1]
-    / "tests/e2e/models/lance/e2e_plugins/references/lance_image_attention_compat"
+    / "python/tensorrt_model_connect/models/lance/tests/e2e_plugins/references/lance_image_attention_compat"
 )
 
 

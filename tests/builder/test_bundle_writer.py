@@ -187,6 +187,43 @@ class TestWriteBundle:
         assert not destination.exists()
         assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
 
+    @pytest.mark.parametrize("name", ("", "engine_plan"))
+    def test_invalid_or_duplicate_section_name_is_rejected(self, tmp_path, name):
+        destination = tmp_path / "invalid.bundle"
+        sections = [BundleSection("engine_plan", b"first")]
+        if name:
+            sections.append(BundleSection(name, b"second"))
+        else:
+            sections = [BundleSection(name, b"payload")]
+
+        with pytest.raises(ValueError, match="Invalid or duplicate"):
+            write_bundle(destination, BundleInfo(model_id="invalid"), sections)
+
+        assert not destination.exists()
+
+    def test_byte_sections_replace_destination_only_after_complete_write(
+        self, tmp_path, monkeypatch
+    ):
+        import tensorrt_model_connect.bundle_writer as writer
+
+        destination = tmp_path / "atomic.bundle"
+        destination.write_bytes(b"previous bundle")
+
+        def fail_write(*_args, **_kwargs):
+            raise RuntimeError("injected section write failure")
+
+        monkeypatch.setattr(writer, "_write_section", fail_write)
+
+        with pytest.raises(RuntimeError, match="injected section write failure"):
+            write_bundle(
+                destination,
+                BundleInfo(model_id="atomic"),
+                [BundleSection("engine_plan", b"new bundle")],
+            )
+
+        assert destination.read_bytes() == b"previous bundle"
+        assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
+
     def test_all_info_fields(self, tmp_path):
         info = BundleInfo(
             model_id="full-test",

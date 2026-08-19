@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmmu_pro_vision_plugin_parity:
+    models:
+    - phi4-multimodal
+    default_models:
+    - phi4-multimodal
+    qualification:
+      phi4-multimodal: {}

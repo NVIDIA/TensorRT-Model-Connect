@@ -22,8 +22,8 @@ def test_load_default_validation_models_reads_model_owned_sidecars(tmp_path: Pat
     mod = importlib.import_module("auto_perf_tune")
 
     owner_a = tmp_path / "model_a"
-    owner_a.mkdir()
-    (owner_a / "perf_validation.json").write_text(
+    (owner_a / "tests").mkdir(parents=True)
+    (owner_a / "tests" / "perf_validation.json").write_text(
         """
         {
           "models": [
@@ -34,11 +34,11 @@ def test_load_default_validation_models_reads_model_owned_sidecars(tmp_path: Pat
         encoding="utf-8",
     )
     owner_b = tmp_path / "model_b"
-    owner_b.mkdir()
-    (owner_b / "perf_validation.json").write_text(
+    (owner_b / "tests").mkdir(parents=True)
+    (owner_b / "tests" / "perf_validation.json").write_text(
         """
         [
-          {"model": "org/b", "pipeline_type": "embedding"}
+          {"model": "org/b", "pipeline_type": "eagle_vlm_embedding"}
         ]
         """,
         encoding="utf-8",
@@ -48,7 +48,11 @@ def test_load_default_validation_models_reads_model_owned_sidecars(tmp_path: Pat
 
     assert models == [
         {"model": "org/a", "pipeline_type": "qwen_decoder_kv_cache", "label": "a"},
-        {"model": "org/b", "pipeline_type": "embedding", "label": "model_b-1"},
+        {
+            "model": "org/b",
+            "pipeline_type": "eagle_vlm_embedding",
+            "label": "model_b-1",
+        },
     ]
 
 

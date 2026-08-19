@@ -3,9 +3,10 @@
 
 """Manifest loader — load, validate, and normalize E2E model manifests.
 
-Reads unified per-model JSON manifests from tests/e2e/models/ and model-owned
-tests/e2e/models/<family>/manifests/ directories. Each manifest describes one
-buildable model and contains one or more normalized E2E testcases.
+Reads the manifests declared by each
+``python/tensorrt_model_connect/models/<family>/MODEL.toml``. Each manifest
+describes one buildable model and contains one or more normalized E2E
+testcases.
 """
 
 from __future__ import annotations
@@ -13,7 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import warnings
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -31,12 +31,16 @@ from .contracts import (
     StageSpec,
 )
 from .python_profiles import PROFILE_PHASES, normalize_execution_profiles
-from .runtime_strategy_metadata import runtime_strategy_task_strategy
+from .runtime_strategy_metadata import load_runtime_strategy_catalog
 
 logger = logging.getLogger(__name__)
 
-# Default manifest directory (relative to project root)
-_DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "e2e" / "models"
+_DEFAULT_MODELS_DIR = (
+    Path(__file__).resolve().parents[2]
+    / "python"
+    / "tensorrt_model_connect"
+    / "models"
+)
 
 _THRESHOLD_SIDECAR_FIELDS = frozenset(
     {
@@ -67,6 +71,8 @@ _MODEL_ASSET_FIELDS = frozenset(
         "fp8_scales",
         "elf_replay_artifact",
         "upstream_replay_artifact",
+        "camera_intrinsics_file",
+        "model_assets",
     }
 )
 
@@ -83,10 +89,9 @@ def _resolve_model_asset_path(value: str, model_test_dir: Path) -> str:
         return value
 
     posix = PurePosixPath(value)
-    if posix.parts[:3] == ("tests", "e2e", "data"):
-        return str(model_test_dir / "data" / posix.name)
-    if posix.parts and posix.parts[0] == "data":
-        return str(model_test_dir / Path(*posix.parts))
+    candidate = model_test_dir / Path(*posix.parts)
+    if candidate.is_file():
+        return str(candidate)
 
     candidate = model_test_dir / "data" / value
     if candidate.is_file():
@@ -151,7 +156,7 @@ def _read_model_index(index_path: Path) -> dict[str, Any]:
 
 
 def _manifest_paths_from_model_index(index_path: Path) -> list[Path]:
-    """Return manifest paths declared by tests/e2e/models/<family>/MODEL.toml."""
+    """Return the manifest paths declared by one model's ``MODEL.toml``."""
     raw = _read_model_index(index_path)
     manifest_entries = raw.get("test_manifests", [])
     if not isinstance(manifest_entries, list):
@@ -186,7 +191,7 @@ def _load_threshold_sidecar(
     manifest_path: Path,
     testcase_name: str | None = None,
 ) -> dict[str, Any]:
-    """Load tests/e2e/models/<family>/thresholds/<case>.json if present."""
+    """Load the model-owned ``tests/thresholds/<case>.json`` if present."""
     sidecar_path = _threshold_sidecar_path(manifest_path, testcase_name)
     if not sidecar_path.is_file():
         return {}
@@ -274,7 +279,7 @@ def _merge_threshold_sidecar(
 
 
 def iter_manifest_paths(models_dir: str | Path | None = None) -> list[Path]:
-    """Return E2E manifest paths from indexed, flat, and nested layouts."""
+    """Return manifests declared by the selected model root or model test dir."""
     if models_dir is None:
         models_dir = _DEFAULT_MODELS_DIR
 
@@ -282,20 +287,15 @@ def iter_manifest_paths(models_dir: str | Path | None = None) -> list[Path]:
     if not models_dir.is_dir():
         return []
 
-    paths = set(models_dir.glob("*.json"))
     direct_index = models_dir / "MODEL.toml"
+    if models_dir.name == "tests" and (models_dir.parent / "MODEL.toml").is_file():
+        direct_index = models_dir.parent / "MODEL.toml"
     if direct_index.is_file():
-        paths.update(_manifest_paths_from_model_index(direct_index))
-    else:
-        paths.update(models_dir.glob("manifests/*.json"))
+        return sorted(_manifest_paths_from_model_index(direct_index))
 
-    indexed_model_dirs: set[Path] = set()
+    paths: set[Path] = set()
     for index_path in sorted(models_dir.glob("*/MODEL.toml")):
-        indexed_model_dirs.add(index_path.parent)
         paths.update(_manifest_paths_from_model_index(index_path))
-    for manifest_path in models_dir.glob("*/manifests/*.json"):
-        if manifest_path.parent.parent not in indexed_model_dirs:
-            paths.add(manifest_path)
     return sorted(paths)
 
 
@@ -330,18 +330,17 @@ def find_manifest_path(
 
 
 def _infer_task_strategy(manifest: dict) -> str:
-    """Return the model-owned task_strategy field when declared."""
-    if "task_strategy" in manifest:
-        return str(manifest["task_strategy"])
-    runtime_strategy = str(manifest.get("runtime_strategy") or "")
-    if not runtime_strategy:
-        return ""
-    return runtime_strategy_task_strategy(runtime_strategy) or runtime_strategy
+    """Return the required owner-manifest task strategy."""
+    task_strategy = manifest.get("task_strategy")
+    if not isinstance(task_strategy, str) or not task_strategy:
+        raise ValueError("task_strategy is required in every model manifest")
+    return task_strategy
 
 
 def _model_e2e_defaults(manifest_path: Path, task_strategy: str) -> dict[str, Any]:
     """Return family-owned E2E defaults for the manifest's task strategy."""
-    index_path = _model_test_dir_from_manifest_path(manifest_path) / "MODEL.toml"
+    model_test_dir = _model_test_dir_from_manifest_path(manifest_path)
+    index_path = model_test_dir.parent / "MODEL.toml"
     if not index_path.is_file():
         return {}
     raw = _read_model_index(index_path)
@@ -749,13 +748,6 @@ def _convert_skip_to_known_limitation(manifest: dict) -> dict | None:
 # Manifest schema validation
 # ---------------------------------------------------------------------------
 
-_LEGACY_RUNTIME_STRATEGY_ALIASES = frozenset(
-    {
-        "diffusion",
-        "text_to_audio",
-    }
-)
-_KNOWN_RUNTIME_STRATEGIES_CACHE: frozenset[str] | None = None
 _REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
     {
         "TRTMC_BARK_TIMING_CACHE_PATH",
@@ -766,49 +758,8 @@ _REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
 )
 
 
-def _runtime_model_manifests_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "src" / "runtime" / "models"
-
-
-def _read_runtime_model_manifest(path: Path) -> dict[str, Any]:
-    if tomllib is not None:
-        with path.open("rb") as f:
-            return tomllib.load(f)
-
-    parsed: dict[str, Any] = {}
-    text = path.read_text(encoding="utf-8")
-    single = re.search(r'(?m)^\s*runtime_strategy\s*=\s*"([^"]+)"', text)
-    if single:
-        parsed["runtime_strategy"] = single.group(1)
-    multi = re.search(r"(?ms)^\s*runtime_strategies\s*=\s*\[([^\]]*)\]", text)
-    if multi:
-        parsed["runtime_strategies"] = re.findall(r'"([^"]+)"', multi.group(1))
-    return parsed
-
-
 def _known_runtime_strategies() -> frozenset[str]:
-    global _KNOWN_RUNTIME_STRATEGIES_CACHE
-    if _KNOWN_RUNTIME_STRATEGIES_CACHE is not None:
-        return _KNOWN_RUNTIME_STRATEGIES_CACHE
-
-    strategies = set(_LEGACY_RUNTIME_STRATEGY_ALIASES)
-    for manifest in sorted(_runtime_model_manifests_dir().glob("*/MODEL.toml")):
-        try:
-            raw = _read_runtime_model_manifest(manifest)
-        except Exception as exc:
-            logger.warning("Failed to read runtime model manifest %s: %s", manifest, exc)
-            continue
-        values = raw.get("runtime_strategies")
-        if values is None:
-            values = [raw.get("runtime_strategy")]
-        if isinstance(values, str):
-            values = [values]
-        if not isinstance(values, list):
-            continue
-        strategies.update(value for value in values if isinstance(value, str) and value)
-
-    _KNOWN_RUNTIME_STRATEGIES_CACHE = frozenset(strategies)
-    return _KNOWN_RUNTIME_STRATEGIES_CACHE
+    return frozenset(load_runtime_strategy_catalog())
 
 
 def _validate_manifest(raw: dict, path: str) -> None:
@@ -945,15 +896,14 @@ def _validate_manifest(raw: dict, path: str) -> None:
                     f"got {type(val).__name__} ({val!r})"
                 )
 
-    # 4. Warn on unknown runtime_strategy
+    # 4. Reject unknown runtime_strategy
     rs = raw.get("runtime_strategy")
     known_runtime_strategies = _known_runtime_strategies()
     if rs is not None and rs not in known_runtime_strategies:
-        warnings.warn(
+        raise ValueError(
             f"Manifest {path!r} (name={raw.get('name')!r}): unknown "
             f"runtime_strategy {rs!r}. Known values: "
-            f"{sorted(known_runtime_strategies)}",
-            stacklevel=2,
+            f"{sorted(known_runtime_strategies)}"
         )
 
     execution_profiles = raw.get("execution_profiles")
@@ -1311,7 +1261,7 @@ def load_all_manifests(
 
     Args:
         models_dir: Directory containing flat *.json manifests or
-            <family>/manifests/*.json manifests. Defaults to tests/e2e/models/.
+            <family>/manifests/*.json manifests. Defaults to python/tensorrt_model_connect/models/.
         task_strategy_filter: If set, only return cases matching this
             task_strategy.
 

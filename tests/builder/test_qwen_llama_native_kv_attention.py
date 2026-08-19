@@ -13,8 +13,8 @@ import pytest
 trt = pytest.importorskip("tensorrt")
 
 _FAMILIES = (
-    "tensorrt_model_connect.families.qwen.graph_ops",
-    "tensorrt_model_connect.families.llama.graph_ops",
+    "tensorrt_model_connect.models.qwen.graph_ops",
+    "tensorrt_model_connect.models.llama.graph_ops",
 )
 
 

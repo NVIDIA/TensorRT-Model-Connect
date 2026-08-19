@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: canary.transcribe
+  operation: transcribe
+  model: canary-1b-v2
+  workload:
+    testcase: canary-1b-v2
+  baseline:
+    runner: task-reference
+    adapter: nemo-asr
+    mode: pytorch-eager
+    reference_backend: nemo_reference
+    timing_scope: task-pipeline-call-wall
+    asset_loading_included: true

@@ -6,7 +6,8 @@ the comparison command, and nightly model-proof CI.
 
 ## Modules
 
-- `catalog.py` loads workload definitions, projects E2E manifests, and resolves
+- `catalog.py` loads shared workload definitions, discovers owner-local
+  `validation.yaml` bindings, projects E2E manifests, and resolves
   model/workload compatibility.
 - `artifacts.py` validates the durable prediction artifact contract.
 - `model_plugin_contract.py` selects fixed model-manifest testcase/stage
@@ -63,8 +64,8 @@ A new workload is complete only when it has:
 3. a TRTMC runner using the same prepared inputs;
 4. an output comparator and explicit gates;
 5. native reproduction metadata for failed samples;
-6. a model binding and sample limit in
-   `tests/validation/model_workloads.yaml`.
+6. a shared `sample_limit` on that workload and a `qualification` binding in
+   `python/tensorrt_model_connect/models/<family>/validation.yaml`.
 
 Models without that complete contract stay visible as `not_compared`; E2E
 execution is never reported as reference consistency.

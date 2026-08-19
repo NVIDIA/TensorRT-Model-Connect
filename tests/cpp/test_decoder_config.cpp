@@ -10,7 +10,7 @@
 // Purpose:
 //   Validates BaseConfig parsing for decoder strategies across the C++ runtime:
 //   - BaseConfig parsing with an explicit runtime_strategy
-//   - Missing runtime_strategy stays empty for manifest-owned fallback handling
+//   - BaseConfig parsing does not invent a runtime strategy
 //   - GQA vs MHA attention_size computation
 //   - Tokenizer config fields
 //   - Cache length override and cap
@@ -214,7 +214,8 @@ static void test_decoder_cache_length_cap() {
 // -----------------------------------------------------------------------------
 // Intention: Verify parse_base_config does not provide a model-owned default.
 // Setup:     Config omits runtime_strategy.
-// Mechanism: Assert runtime_strategy stays empty; factory fallback is manifest-owned.
+// Mechanism: Assert runtime_strategy stays empty. PipelineFactory rejects this
+//            config before dispatch; the parser must not invent a fallback.
 // -----------------------------------------------------------------------------
 static void test_missing_runtime_strategy_stays_empty() {
     const std::string config = R"({

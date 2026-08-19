@@ -102,7 +102,7 @@ cached state until a stop condition is reached.
 
 These interfaces and implementations are model-owned in the current source
 tree. For example, Qwen uses `QwenInferenceState` and `QwenKvCache` under
-`src/runtime/models/qwen/`; LLaMA, Mistral, recurrent, and hybrid owners keep
+`python/tensorrt_model_connect/models/qwen/runtime/`; LLaMA, Mistral, recurrent, and hybrid owners keep
 their corresponding state classes under their own runtime directories.
 
 ## What TensorRT changes
@@ -127,8 +127,8 @@ intent, but they do not use the same artifact or dispatch path:
 | Concern | Hugging Face reference | TensorRT-Model-Connect |
 | --- | --- | --- |
 | Model execution | A framework model runs eagerly or through framework compilation. | Python builds native TensorRT plans or invokes an exact qualified provider; C++ runs the bundle through `IPipeline`. |
-| Family selection | Auto classes and checkpoint config select Python model code. | Family `MODEL.toml` descriptors and plugin matching select the owning builder. |
-| Weights | Framework modules load checkpoint tensors. | A native family mapper feeds a TensorRT graph, or a qualified family adapter owns conversion. |
+| Model selection | Auto classes and checkpoint config select Python model code. | The unified owner `MODEL.toml` and matching logic select one `model.py`. |
+| Weights | Framework modules load checkpoint tensors. | The owner-local mapper feeds a TensorRT graph, or an exact owner-local adapter owns conversion. |
 | Artifact | Checkpoint, config, and tokenizer files. | A self-describing `.bundle` bundle. |
 | Runtime dispatch | A Python model class. | A native strategy selects one model DSO/plugin, or `optimized_runtime.json` selects the embedded implementation DSO. |
 | Validation role | External reference oracle. | Deployment system being validated. |
@@ -156,14 +156,14 @@ content-addressed artifact tree containing its exact implementation DSO. The
 runtime still may need helper assets for tokenization or verification, but
 execution is driven by the bundle.
 
-## Family, runtime strategy, and task strategy
+## Model owner, runtime strategy, and task strategy
 
-Three names matter:
+Four identities matter across the native and optimized paths:
 
 | Name | Example | Meaning |
 | --- | --- | --- |
-| Family model module | `families/qwen/model.py`, `families/llama/model.py` | Required Python build entry point that owns one family's config → weights → engines/components → bundle recipe. |
-| Native runtime strategy | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Model-owned native C++ dispatch key. It selects exactly one runtime model DSO and then one registered `IPipelinePlugin`. |
+| Model owner | `python/tensorrt_model_connect/models/qwen/`, `python/tensorrt_model_connect/models/llama/` | One folder containing the descriptor, Python build entry, native runtime, tests, manifests, assets, and optional tools. |
+| Native runtime strategy | `qwen_decoder_kv_cache`, `llama_decoder_kv_cache`, `whisper_speech_to_text`, `diffusion_flux` | Model-owned native C++ dispatch key. It selects exactly one model DSO and then one registered `IPipelinePlugin`. |
 | Optimized implementation/profile | `qwen.tensorrt-edge-llm` plus an exact qualified profile | Delegated-runtime identity embedded in the bundle. It selects an integrity-checked implementation DSO without native strategy/registry/backend dispatch. |
 | Task strategy | `text_generation_causal`, `speech_to_text`, `diffusion_media_generation` | Shared E2E contract category used to choose runners, comparators, and CLI task shape. It is not runtime dispatch metadata. |
 
@@ -174,12 +174,12 @@ they deliberately do not share one runtime strategy or DSO. Their E2E manifests 
 
 <Diagram
   src="/img/diagrams/getting-started/family-runtime-task-identity.svg"
-  alt="Examples showing how Python model families map to native runtime strategies and shared task contracts"
-  caption="Family identifies the build owner, runtime strategy selects the native implementation shape, and task strategy names the shared behavior."
+  alt="Examples showing how unified model owners declare native runtime strategies and shared task contracts"
+  caption="The owner folder contains build, runtime, and tests; runtime strategy selects its native implementation, while task strategy names shared behavior."
 />
 
 Both paths preserve the same ownership rule: implementation details stay with
-the family, while shared tools reason about capability labels and task
+the model owner, while shared tools reason about capability labels and task
 strategies. Optimized profiles are exact model/revision/target qualifications,
 not generic task strategies.
 

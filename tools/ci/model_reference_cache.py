@@ -68,15 +68,11 @@ def parse_model_reference_contract(
     if suites is not None and (
         not isinstance(suites, list)
         or not suites
-        or any(
-            not isinstance(item, str) or item not in {"premerge", "nightly"}
-            for item in suites
-        )
+        or any(not isinstance(item, str) or item not in {"premerge", "nightly"} for item in suites)
         or len(suites) != len(set(suites))
     ):
         raise CiError(
-            "model_reference_cache.suites must be a unique non-empty list of "
-            "premerge or nightly"
+            "model_reference_cache.suites must be a unique non-empty list of premerge or nightly"
         )
 
     def relative(field: str) -> str:
@@ -87,18 +83,14 @@ def parse_model_reference_contract(
             or "\\" in value
             or any(character in value for character in "\r\n\t")
         ):
-            raise CiError(
-                f"model_reference_cache.{field} must be a non-empty POSIX path"
-            )
+            raise CiError(f"model_reference_cache.{field} must be a non-empty POSIX path")
         path = PurePosixPath(value)
         if (
             path.is_absolute()
             or path.as_posix() != value
             or any(part in {"", ".", ".."} for part in path.parts)
         ):
-            raise CiError(
-                f"model_reference_cache.{field} must be a canonical relative path"
-            )
+            raise CiError(f"model_reference_cache.{field} must be a canonical relative path")
         return value
 
     revision = raw.get("revision")
@@ -110,9 +102,7 @@ def parse_model_reference_contract(
         or not repository
         or any(character in repository for character in "\r\n\t")
     ):
-        raise CiError(
-            "model_reference_cache.repository must be a non-empty single-line string"
-        )
+        raise CiError("model_reference_cache.repository must be a non-empty single-line string")
     relative_path = relative("relative_path")
     if PurePosixPath(relative_path).parts[0] != family:
         raise CiError(
@@ -121,12 +111,10 @@ def parse_model_reference_contract(
     entrypoint = relative("entrypoint")
     environment_variable = raw.get("environment_variable", "")
     if not isinstance(environment_variable, str) or (
-        environment_variable
-        and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_variable)
+        environment_variable and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", environment_variable)
     ):
         raise CiError(
-            "model_reference_cache.environment_variable must be a valid environment "
-            "variable name"
+            "model_reference_cache.environment_variable must be a valid environment variable name"
         )
     if suites is not None and suite is not None and suite not in suites:
         return None
@@ -152,10 +140,7 @@ class ModelReferenceCacheWarmer:
         root = self._cache_root()
         contracts = self._contracts(suite)
         destinations = [self._warm_one(root, contract) for contract in contracts]
-        print(
-            f"Model reference cache ready: {len(destinations)} "
-            f"{suite} contract(s) under {root}"
-        )
+        print(f"Model reference cache ready: {len(destinations)} {suite} contract(s) under {root}")
         return destinations
 
     def warm_contract(self, contract: ModelReferenceContract) -> Path:
@@ -177,7 +162,7 @@ class ModelReferenceCacheWarmer:
         return root
 
     def _contracts(self, suite: str) -> list[ModelReferenceContract]:
-        models_root = self.context.repository / "tests/e2e/models"
+        models_root = self.context.repository / "python/tensorrt_model_connect/models"
         if not models_root.is_dir():
             raise CiError(f"E2E model ownership root is unavailable: {models_root}")
         contracts: list[ModelReferenceContract] = []
@@ -195,8 +180,7 @@ class ModelReferenceCacheWarmer:
                 continue
             if contract.relative_path in seen_destinations:
                 raise CiError(
-                    "duplicate model reference cache destination: "
-                    f"{contract.relative_path}"
+                    f"duplicate model reference cache destination: {contract.relative_path}"
                 )
             seen_destinations.add(contract.relative_path)
             contracts.append(contract)
@@ -215,14 +199,9 @@ class ModelReferenceCacheWarmer:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if os.path.lexists(destination):
                 self._validate_checkout(destination, contract)
-                print(
-                    f"  CACHED {contract.relative_path} "
-                    f"@ {contract.revision[:12]}"
-                )
+                print(f"  CACHED {contract.relative_path} @ {contract.revision[:12]}")
                 return destination
-            temporary = Path(
-                tempfile.mkdtemp(prefix=f".{destination.name}.", dir=parent)
-            )
+            temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.", dir=parent))
             try:
                 self._fetch_checkout(temporary, contract)
                 if os.path.lexists(destination):
@@ -237,10 +216,7 @@ class ModelReferenceCacheWarmer:
                         shutil.rmtree(temporary)
                     else:
                         temporary.unlink()
-            print(
-                f"  FETCHED {contract.relative_path} "
-                f"@ {contract.revision[:12]}"
-            )
+            print(f"  FETCHED {contract.relative_path} @ {contract.revision[:12]}")
             return destination
 
     @staticmethod
@@ -250,15 +226,11 @@ class ModelReferenceCacheWarmer:
         for part in relative.parts:
             current = current / part
             if current.is_symlink():
-                raise CiError(
-                    f"model reference cache path must not contain symlinks: {current}"
-                )
+                raise CiError(f"model reference cache path must not contain symlinks: {current}")
             try:
                 current.mkdir(exist_ok=True)
             except OSError as error:
-                raise CiError(
-                    f"model reference cache parent is unavailable: {current}"
-                ) from error
+                raise CiError(f"model reference cache parent is unavailable: {current}") from error
             if not current.is_dir() or not current.resolve().is_relative_to(root):
                 raise CiError(f"model reference cache parent is invalid: {current}")
         return current
@@ -324,12 +296,8 @@ class ModelReferenceCacheWarmer:
         contract: ModelReferenceContract,
     ) -> None:
         if source.is_symlink() or not source.is_dir():
-            raise CiError(
-                f"model reference cache destination is invalid: {contract.relative_path}"
-            )
-        revision = self.context.output(
-            ["git", "-C", source, "rev-parse", "HEAD^{commit}"]
-        )
+            raise CiError(f"model reference cache destination is invalid: {contract.relative_path}")
+        revision = self.context.output(["git", "-C", source, "rev-parse", "HEAD^{commit}"])
         if revision != contract.revision:
             raise CiError(
                 f"model reference cache revision mismatch for {contract.relative_path}: "

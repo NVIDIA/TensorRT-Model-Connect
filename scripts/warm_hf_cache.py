@@ -130,25 +130,25 @@ _DIFFUSERS_WEIGHT_COMPONENTS = {
 
 
 def _load_family_hf_required_files_by_id() -> dict[str, list[str]]:
-    from tensorrt_model_connect.families import family_hf_required_files_by_id
+    from tensorrt_model_connect.models import family_hf_required_files_by_id
 
     return family_hf_required_files_by_id()
 
 
 def _load_family_hf_allow_patterns() -> list[str]:
-    from tensorrt_model_connect.families import family_hf_allow_patterns
+    from tensorrt_model_connect.models import family_hf_allow_patterns
 
     return family_hf_allow_patterns()
 
 
 def _family_hf_warm_dependencies(family: object) -> list[tuple[str, str]]:
-    from tensorrt_model_connect.families import family_hf_warm_dependencies
+    from tensorrt_model_connect.models import family_hf_warm_dependencies
 
     return family_hf_warm_dependencies(family)
 
 
 def _family_hf_warm_files(family: object) -> list[tuple[str, str, str]]:
-    from tensorrt_model_connect.families import family_hf_warm_files
+    from tensorrt_model_connect.models import family_hf_warm_files
 
     return family_hf_warm_files(family)
 
@@ -156,7 +156,7 @@ def _family_hf_warm_files(family: object) -> list[tuple[str, str, str]]:
 def _family_hf_warm_file_specs(
     family: object,
 ) -> list[tuple[str, str, str, str]]:
-    from tensorrt_model_connect.families import family_hf_warm_file_specs
+    from tensorrt_model_connect.models import family_hf_warm_file_specs
 
     return family_hf_warm_file_specs(family)
 
@@ -268,10 +268,9 @@ if args.attempt_timeout_seconds <= 0:
 if args.fail_fast and not (args.strict or args.emit_cache_repos):
     parser.error("--fail-fast requires --strict or --emit-cache-repos")
 
-models_dir = ROOT / "tests" / "e2e" / "models"
+models_dir = ROOT / "python" / "tensorrt_model_connect" / "models"
 manifests = sorted({
-    *models_dir.glob("*.json"),
-    *models_dir.glob("*/manifests/*.json"),
+    *models_dir.glob("*/tests/manifests/*.json"),
 })
 
 # Optional filter: only consider models listed in --models-file

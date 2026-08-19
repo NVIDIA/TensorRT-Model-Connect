@@ -436,78 +436,17 @@ if(NOT _trtmc_has_tvm_ffi)
   message(STATUS "TVM-FFI kernel bridge disabled")
 endif()
 
-# --- Per-model runtime plugin DSOs ---
+# Model owners create their own runtime targets. This aggregate is intentionally
+# declared before tests so shared loader tests can depend on it.
 add_custom_target(trtmc_model_plugins)
-foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
-  string(MAKE_C_IDENTIFIER "${_trtmc_model}" _trtmc_model_var)
-  file(GLOB _trtmc_model_sources CONFIGURE_DEPENDS
-    "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/*.cpp")
-  if(CMAKE_CUDA_COMPILER)
-    file(GLOB _trtmc_model_cuda_sources CONFIGURE_DEPENDS
-      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/*.cu")
-    if(_trtmc_model_cuda_sources)
-      set_source_files_properties(${_trtmc_model_cuda_sources} PROPERTIES LANGUAGE CUDA)
-    endif()
-  else()
-    set(_trtmc_model_cuda_sources)
-  endif()
-  foreach(_trtmc_suppressed_source
-      IN LISTS TRTMC_MODEL_${_trtmc_model_var}_GNU_WARNING_SUPPRESSED_SOURCES)
-    set_source_files_properties(
-      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/${_trtmc_suppressed_source}"
-      PROPERTIES
-        COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-nonnull>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-free-nonheap-object>"
-    )
-  endforeach()
-  add_library(trtmc_model_${_trtmc_model} SHARED
-    ${_trtmc_model_sources}
-    ${_trtmc_model_cuda_sources}
-    ${TRTMC_MODEL_${_trtmc_model_var}_REGISTRATION_SOURCE}
-  )
-  add_dependencies(trtmc_model_plugins trtmc_model_${_trtmc_model})
-  target_include_directories(trtmc_model_${_trtmc_model}
-    PRIVATE
-      ${PROJECT_SOURCE_DIR}/src
-      ${PROJECT_SOURCE_DIR}/include
-  )
-  target_include_directories(trtmc_model_${_trtmc_model} SYSTEM PRIVATE
-    ${TRTMC_CUDA_INCLUDE_DIR}
-    ${_trtmc_nlohmann_json_include}
-    ${PROJECT_SOURCE_DIR}/third_party/stb
-  )
-  target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE
-    trtmc_core
-    ${TRTMC_CUDART_LIBRARY}
-  )
-  foreach(_trtmc_model_link_library IN LISTS TRTMC_MODEL_${_trtmc_model_var}_LINK_LIBRARIES)
-    if(_trtmc_model_link_library STREQUAL "cublas")
-      if(NOT TRTMC_CUBLAS_LIBRARY)
-        message(FATAL_ERROR
-          "Model '${_trtmc_model}' requires runtime_link_libraries=['cublas'], "
-          "but cuBLAS was not found")
-      endif()
-      target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE ${TRTMC_CUBLAS_LIBRARY})
-    else()
-      message(FATAL_ERROR
-        "Unknown runtime_link_libraries entry '${_trtmc_model_link_library}' "
-        "for model '${_trtmc_model}'")
-    endif()
-  endforeach()
-  target_compile_definitions(trtmc_model_${_trtmc_model} PRIVATE TRTMC_HAS_TRT=0)
-  target_compile_options(trtmc_model_${_trtmc_model}
-    PRIVATE
-      "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
-      "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
-  )
-  set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}"
-    BUILD_RPATH "\$ORIGIN/../.."
-    INSTALL_RPATH "\$ORIGIN/../.."
-  )
-  install(TARGETS trtmc_model_${_trtmc_model}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
-  )
-endforeach()
+
+option(TRTMC_BUILD_MODEL_KERNELS
+       "Build model-owned optimized CUDA kernels (TVM-FFI modules)" OFF)
+if(TRTMC_BUILD_MODEL_KERNELS AND NOT _trtmc_has_tvm_ffi)
+  message(FATAL_ERROR
+    "TRTMC_BUILD_MODEL_KERNELS=ON requires TVM-FFI (TRTMC_ENABLE_TVM_FFI=ON, "
+    "and a discoverable libtvm_ffi). Found none.")
+endif()
 
 # Build the TVM-FFI TensorRT plugin as a standalone shared library.
 if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
@@ -541,21 +480,6 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   )
 
   message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
-endif()
-
-# --- Optional: vendored diffusion CUDA kernels as TVM-FFI modules ---
-# Off by default. Requires TVM-FFI. Each kernel builds as a standalone .so
-# that the diffusion TRT graph loads via graph_ops.add_tvm_ffi_kernel().
-option(TRTMC_BUILD_DIFFUSION_KERNELS
-       "Build vendored optimized diffusion CUDA kernels (TVM-FFI modules)" OFF)
-
-if(TRTMC_BUILD_DIFFUSION_KERNELS)
-  if(NOT _trtmc_has_tvm_ffi)
-    message(FATAL_ERROR
-      "TRTMC_BUILD_DIFFUSION_KERNELS=ON requires TVM-FFI (TRTMC_ENABLE_TVM_FFI=ON, "
-      "and a discoverable libtvm_ffi). Found none.")
-  endif()
-  add_subdirectory(src/runtime/domains/diffusion/kernels)
 endif()
 
 # --- Backend DSO: standard TRT ---
@@ -797,6 +721,7 @@ function(trtmc_add_test TEST_NAME)
   if(NOT ARG_NO_SRC_INCLUDE)
     target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/src)
   endif()
+  target_include_directories(${TEST_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/tests/cpp)
   if(ARG_EXTRA_INCLUDES)
     target_include_directories(${TEST_NAME} PRIVATE ${ARG_EXTRA_INCLUDES})
   endif()
@@ -821,59 +746,6 @@ function(trtmc_add_test TEST_NAME)
     add_dependencies(trtmc_platform_cpp_tests ${TEST_NAME})
     set_tests_properties(${TEST_NAME} PROPERTIES LABELS "platform")
   endif()
-endfunction()
-
-function(_trtmc_manifest_csv_to_list VALUE OUTPUT_VAR)
-  if(NOT VALUE OR VALUE STREQUAL "_")
-    set(${OUTPUT_VAR} "" PARENT_SCOPE)
-    return()
-  endif()
-  string(REPLACE "," ";" _trtmc_values "${VALUE}")
-  set(${OUTPUT_VAR} ${_trtmc_values} PARENT_SCOPE)
-endfunction()
-
-function(trtmc_add_model_manifest_tests)
-  foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
-    string(MAKE_C_IDENTIFIER "${_trtmc_model}" _trtmc_model_var)
-    foreach(_trtmc_test_entry IN LISTS TRTMC_MODEL_${_trtmc_model_var}_TESTS)
-      string(REPLACE "|" ";" _trtmc_test_fields "${_trtmc_test_entry}")
-      list(LENGTH _trtmc_test_fields _trtmc_test_field_count)
-      if(NOT _trtmc_test_field_count EQUAL 5)
-        message(FATAL_ERROR
-          "Invalid runtime_tests entry '${_trtmc_test_entry}' for model '${_trtmc_model}'; "
-          "expected name|source|link_targets|extra_sources|options")
-      endif()
-      list(GET _trtmc_test_fields 0 _trtmc_test_name)
-      list(GET _trtmc_test_fields 1 _trtmc_test_source)
-      list(GET _trtmc_test_fields 2 _trtmc_link_targets_csv)
-      list(GET _trtmc_test_fields 3 _trtmc_extra_sources_csv)
-      list(GET _trtmc_test_fields 4 _trtmc_options_csv)
-
-      _trtmc_manifest_csv_to_list("${_trtmc_options_csv}" _trtmc_test_options)
-      trtmc_add_test(
-        ${_trtmc_test_name}
-        SOURCE "tests/cpp/models/${_trtmc_model}/${_trtmc_test_source}"
-        MODEL_OWNED
-        ${_trtmc_test_options}
-      )
-      if(NOT TARGET ${_trtmc_test_name})
-        continue()
-      endif()
-
-      _trtmc_manifest_csv_to_list("${_trtmc_link_targets_csv}" _trtmc_link_targets)
-      if(_trtmc_link_targets)
-        target_link_libraries(${_trtmc_test_name} PRIVATE ${_trtmc_link_targets})
-      endif()
-
-      _trtmc_manifest_csv_to_list("${_trtmc_extra_sources_csv}" _trtmc_extra_sources)
-      foreach(_trtmc_extra_source IN LISTS _trtmc_extra_sources)
-        target_sources(
-          ${_trtmc_test_name}
-          PRIVATE "src/runtime/models/${_trtmc_model}/${_trtmc_extra_source}"
-        )
-      endforeach()
-    endforeach()
-  endforeach()
 endfunction()
 
 # --- Tests ---
@@ -956,8 +828,6 @@ trtmc_add_test(test_device_tensor REQUIRES_GPU)
 
 # Pipelines (public API)
 trtmc_add_test(test_pipeline_api                NO_SRC_INCLUDE)
-trtmc_add_model_manifest_tests()
-
 # Tokenizers
 trtmc_add_test(test_vocab_tokenizer     NO_SRC_INCLUDE)
 trtmc_add_test(test_ipa_tokenizer)
@@ -973,9 +843,6 @@ trtmc_add_test(test_tokenizer_edge_cases)
 # Image I/O
 trtmc_add_test(test_image_reader        NO_SRC_INCLUDE)
 trtmc_add_test(test_trtmc_io             NO_SRC_INCLUDE)
-
-# Diffusion
-trtmc_add_test(test_diffusion_math)
 
 # Audio
 trtmc_add_test(test_wav_reader)
@@ -1027,6 +894,28 @@ if(TARGET test_tvm_ffi_plugin_v2 AND _trtmc_has_tvm_ffi)
   target_link_libraries(test_tvm_ffi_plugin_v2 PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
 endif()
 endif()
+
+# --- Model-owned runtime targets ---
+# Root policy is limited to discovery, aggregation, and installation. Each
+# runtime/CMakeLists.txt owns its exact sources, dependencies, warnings, tests,
+# and optional kernel subdirectories.
+foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
+  set(_trtmc_model_runtime_dir "${TRTMC_MODELS_ROOT}/${_trtmc_model}/runtime")
+  if(NOT EXISTS "${_trtmc_model_runtime_dir}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "Model '${_trtmc_model}' does not own runtime/CMakeLists.txt")
+  endif()
+  add_subdirectory(
+    "${_trtmc_model_runtime_dir}"
+    "${PROJECT_BINARY_DIR}/models/${_trtmc_model}/build")
+  if(NOT TARGET trtmc_model_${_trtmc_model})
+    message(FATAL_ERROR
+      "Model '${_trtmc_model}' runtime did not declare trtmc_model_${_trtmc_model}")
+  endif()
+  add_dependencies(trtmc_model_plugins trtmc_model_${_trtmc_model})
+  install(TARGETS trtmc_model_${_trtmc_model}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model})
+endforeach()
 
 # --- Install ---
 include(CMakePackageConfigHelpers)

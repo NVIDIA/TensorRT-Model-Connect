@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_continuation_parity:
+    models:
+    - gpt2-125m
+    - gpt2-125m-tp4
+    default_models:
+    - gpt2-125m
+    model_overrides:
+      gpt2-125m:
+        # Reserve the suite's 64 generated tokens inside GPT-2's 1024 limit.
+        prompt_token_limit: 960
+        prompt_truncation_side: left
+    qualification:
+      gpt2-125m: {}
+  wikitext103_distilgpt2_continuation_parity:
+    models:
+    - distilgpt2
+    default_models:
+    - distilgpt2
+    model_overrides:
+      distilgpt2:
+        build_generation_headroom: true
+    qualification:
+      distilgpt2: {}

@@ -64,6 +64,13 @@ const HF_TASKS = [
     hfUrl: 'https://huggingface.co/tasks/image-feature-extraction',
   },
   {
+    slug: 'depth-estimation',
+    label: 'Depth Estimation',
+    category: 'Computer Vision',
+    description: 'Stereo and monocular models that estimate per-pixel depth or disparity.',
+    hfUrl: 'https://huggingface.co/tasks/depth-estimation',
+  },
+  {
     slug: 'image-segmentation',
     label: 'Image Segmentation',
     category: 'Computer Vision',
@@ -148,6 +155,7 @@ const CLI_COMMANDS_BY_TASK_STRATEGY = {
   segmentation: ['segment'],
   speech_to_speech: ['speak'],
   speech_to_text: ['transcribe'],
+  stereo_disparity: ['disparity'],
   text_generation_causal: ['run'],
   text_to_audio: ['generate-audio'],
   vision_language_generation: ['run'],
@@ -314,6 +322,8 @@ function hfTasksForManifest(manifest) {
       return ['image-classification'];
     case 'image_feature_extraction':
       return ['image-feature-extraction'];
+    case 'stereo_disparity':
+      return ['depth-estimation'];
     case 'segmentation':
       return ['image-segmentation'];
     case 'prompted_segmentation':
@@ -499,17 +509,25 @@ function mergeConfigSchema(existing, incoming) {
 function collectFamilyConfigSchemas(repoRoot, family, runtimeOwners) {
   const schemas = parsePythonConfigSchemas(
     repoRoot,
-    `python/tensorrt_model_connect/families/${family}/runtime_config_schema.py`
+    `python/tensorrt_model_connect/models/${family}/runtime_config_schema.py`
   );
   const namespaces = new Set(schemas.map((schema) => schema.namespace));
   for (const owner of runtimeOwners) {
-    const metadataPath = path.join(repoRoot, 'src', 'runtime', 'models', owner, 'MODEL.toml');
+    const ownerRoot = path.join(
+      repoRoot,
+      'python',
+      'tensorrt_model_connect',
+      'models',
+      owner
+    );
+    const metadataPath = path.join(ownerRoot, 'MODEL.toml');
     if (!fs.existsSync(metadataPath)) continue;
     const metadata = fs.readFileSync(metadataPath, 'utf8');
     const schemaArray = metadata.match(/^runtime_config_schemas\s*=\s*\[(.*?)\]/ms);
     if (!schemaArray) continue;
     for (const entry of schemaArray[1].matchAll(/"([^"|]+)(?:\|[^"]+)?"/g)) {
-      const sourcePath = `src/runtime/models/${owner}/${entry[1]}`;
+      const sourcePath =
+        `python/tensorrt_model_connect/models/${owner}/runtime/${entry[1]}`;
       for (const schema of parseCppConfigSchemas(repoRoot, sourcePath)) {
         if (namespaces.has(schema.namespace)) {
           mergeConfigSchema(
@@ -732,14 +750,22 @@ const TRANSCRIPTION_STREAM_CONFIG_OPTIONS = {
 };
 
 function runtimeSourceFiles(repoRoot, owner) {
-  const directory = path.join(repoRoot, 'src', 'runtime', 'models', owner);
+  const directory = path.join(
+    repoRoot,
+    'python',
+    'tensorrt_model_connect',
+    'models',
+    owner,
+    'runtime'
+  );
   if (!fs.existsSync(directory)) return [];
   return readDirectory(directory, `runtime implementation for ${owner}`)
     .filter(
       (entry) => entry.isFile() && /\.(?:h|hpp|cpp|cc|cu)$/.test(entry.name)
     )
     .map((entry) => ({
-      sourcePath: `src/runtime/models/${owner}/${entry.name}`,
+      sourcePath:
+        `python/tensorrt_model_connect/models/${owner}/runtime/${entry.name}`,
       source: fs.readFileSync(path.join(directory, entry.name), 'utf8'),
     }));
 }
@@ -1182,6 +1208,18 @@ function commandContractForProfile(profile, capability) {
         ],
         evidence,
       };
+    case 'stereo_disparity':
+      return {
+        command: 'disparity',
+        purpose: 'Estimate a disparity map from one rectified stereo pair.',
+        syntax: 'trtmc disparity <bundle.bundle> --image <left> --right-image <right>',
+        options: [
+          option('--image <PATH>', 'Required', 'Left rectified RGB image.'),
+          option('--right-image <PATH>', 'Required', 'Right rectified RGB image.'),
+          option('--output <PATH>', 'Optional', 'Output FP32 disparity file.'),
+        ],
+        evidence,
+      };
     default:
       throw new Error(`No family CLI contract for task_strategy=${profile.taskStrategy}`);
   }
@@ -1191,6 +1229,7 @@ function collectFamilyCommandContracts(repoRoot, profiles, runtimeOwnersByStrate
   const capabilityByOwner = new Map();
   const grouped = new Map();
   for (const profile of profiles) {
+    if (profile.cliExemption) continue;
     const owners = runtimeOwnersByStrategy.get(profile.runtimeStrategy) || [];
     const capabilities = owners.map((owner) => {
       if (!capabilityByOwner.has(owner)) {
@@ -1324,56 +1363,52 @@ function manifestBuildConfiguration(manifest) {
   };
 }
 
-function collectManifestPaths(e2eModelsDirectory, entries) {
-  const manifestPaths = entries
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => path.join(e2eModelsDirectory, entry.name));
-
-  let e2eFamilyIndexCount = 0;
+function collectManifestPaths(modelsDirectory, entries) {
+  const manifestPaths = [];
   for (const entry of entries.filter((candidate) => candidate.isDirectory())) {
-    const familyDirectory = path.join(e2eModelsDirectory, entry.name);
-    if (fs.existsSync(path.join(familyDirectory, 'MODEL.toml'))) {
-      e2eFamilyIndexCount += 1;
-    }
-    const manifestsDirectory = path.join(familyDirectory, 'manifests');
+    const ownerDirectory = path.join(modelsDirectory, entry.name);
+    if (!fs.existsSync(path.join(ownerDirectory, 'MODEL.toml'))) continue;
+    const manifestsDirectory = path.join(ownerDirectory, 'tests', 'manifests');
     if (fs.existsSync(manifestsDirectory)) {
       manifestPaths.push(
-        ...readDirectory(manifestsDirectory, `E2E manifests for ${entry.name}`)
+        ...readDirectory(manifestsDirectory, `model manifests for ${entry.name}`)
           .filter((candidate) => candidate.isFile() && candidate.name.endsWith('.json'))
           .map((candidate) => path.join(manifestsDirectory, candidate.name))
       );
     }
   }
 
-  return {e2eFamilyIndexCount, manifestPaths: manifestPaths.sort()};
+  return manifestPaths.sort();
 }
 
 function collectModelSupportInventory(repoRoot) {
-  const familiesDirectory = path.join(
+  const modelsDirectory = path.join(
     repoRoot,
     'python',
     'tensorrt_model_connect',
-    'families'
+    'models'
   );
-  const familyEntries = readDirectory(familiesDirectory, 'Python family models');
+  const modelEntries = readDirectory(modelsDirectory, 'unified model owners');
   const hfMetadataById = collectHfModelMetadata(repoRoot);
-  const packageFamilies = familyEntries
+  const modelOwnerNames = modelEntries
     .filter(
       (entry) =>
         entry.isDirectory() &&
         !entry.name.startsWith('_') &&
-        fs.existsSync(path.join(familiesDirectory, entry.name, 'MODEL.toml')) &&
-        fs.existsSync(path.join(familiesDirectory, entry.name, 'model.py'))
+        fs.existsSync(path.join(modelsDirectory, entry.name, 'MODEL.toml')) &&
+        fs.existsSync(path.join(modelsDirectory, entry.name, 'model.py'))
     )
-    .map((entry) => entry.name);
-  const familyModelNames = [...new Set(packageFamilies)].sort();
-
-  const e2eModelsDirectory = path.join(repoRoot, 'tests', 'e2e', 'models');
-  const e2eEntries = readDirectory(e2eModelsDirectory, 'E2E model metadata');
-  const {e2eFamilyIndexCount, manifestPaths} = collectManifestPaths(
-    e2eModelsDirectory,
-    e2eEntries
+    .map((entry) => entry.name)
+    .sort();
+  const cliExemptionsByOwner = new Map(
+    modelOwnerNames.map((owner) => {
+      const metadata = fs.readFileSync(path.join(modelsDirectory, owner, 'MODEL.toml'), 'utf8');
+      const match = metadata.match(/^cli_exemption\s*=\s*"([^"]+)"/m);
+      return [owner, match ? match[1] : null];
+    })
   );
+
+  const manifestPaths = collectManifestPaths(modelsDirectory, modelEntries);
   const modelProfiles = manifestPaths
     .map((manifestPath) => {
       const manifest = readJson(manifestPath);
@@ -1393,6 +1428,7 @@ function collectModelSupportInventory(repoRoot) {
         );
       }
       const hfTasks = hfTasksForManifest(manifest);
+      const cliExemption = cliExemptionsByOwner.get(manifest.family) || null;
       return {
         profile: manifest.name,
         hfId: manifest.hf_id,
@@ -1402,7 +1438,8 @@ function collectModelSupportInventory(repoRoot) {
         runtimeStrategy: manifest.runtime_strategy || 'not declared',
         taskStrategy: manifest.task_strategy,
         hfTasks,
-        cliCommands: cliCommandsForManifest(manifest, hfTasks),
+        cliCommands: cliExemption ? [] : cliCommandsForManifest(manifest, hfTasks),
+        ...(cliExemption ? {cliExemption} : {}),
         testcases: Array.isArray(manifest.testcases)
           ? manifest.testcases.map((testcase) => testcase.name).filter(Boolean)
           : [],
@@ -1420,22 +1457,19 @@ function collectModelSupportInventory(repoRoot) {
         left.profile.localeCompare(right.profile)
     );
 
-  const runtimeModelsDirectory = path.join(repoRoot, 'src', 'runtime', 'models');
   const runtimeStrategyKeys = new Set();
   const runtimeOwnersByStrategy = new Map();
   const strategyArray = /^runtime_strategies\s*=\s*\[(.*?)\]/gms;
   const quotedValue = /"([^"]+)"/g;
-  for (const entry of readDirectory(runtimeModelsDirectory, 'runtime model metadata')) {
-    if (!entry.isDirectory()) continue;
-    const metadataPath = path.join(runtimeModelsDirectory, entry.name, 'MODEL.toml');
-    if (!fs.existsSync(metadataPath)) continue;
+  for (const owner of modelOwnerNames) {
+    const metadataPath = path.join(modelsDirectory, owner, 'MODEL.toml');
     const metadata = fs.readFileSync(metadataPath, 'utf8');
     for (const arrayMatch of metadata.matchAll(strategyArray)) {
       for (const valueMatch of arrayMatch[1].matchAll(quotedValue)) {
         const strategy = valueMatch[1];
         runtimeStrategyKeys.add(strategy);
         if (!runtimeOwnersByStrategy.has(strategy)) runtimeOwnersByStrategy.set(strategy, []);
-        runtimeOwnersByStrategy.get(strategy).push(entry.name);
+        runtimeOwnersByStrategy.get(strategy).push(owner);
       }
     }
   }
@@ -1485,10 +1519,9 @@ function collectModelSupportInventory(repoRoot) {
     );
   }
   return {
-    familyModelCount: familyModelNames.length,
-    familyModelNames,
+    modelOwnerCount: modelOwnerNames.length,
+    modelOwnerNames,
     e2eManifestCount: manifestPaths.length,
-    e2eFamilyIndexCount,
     runtimeStrategyKeyCount: runtimeStrategyKeys.size,
     modelProfiles,
     performanceSnapshot,

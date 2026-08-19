@@ -11,7 +11,6 @@ from diff_framework.protocol import DiffResult, TestContext
 class LayerDiffTest:
     name = "layer_diff"
     description = "Per-layer hidden state comparison: TRT vs HF transformers"
-    runtime_strategies = []
     requires_bundle = False
     requires_gpu = True
 

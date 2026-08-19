@@ -198,14 +198,14 @@ def build_evolve_prompt(
     ## Files You May Modify
 
     ### Python builder (engine construction):
-    - `python/tensorrt_model_connect/families/{family_name}/model.py` — complete model-owned build: config, weights, engine, and bundle
+    - `python/tensorrt_model_connect/models/{family_name}/model.py` — complete model-owned build: config, weights, engine, and bundle
     - Other files in that same family directory — optional graph helpers called only by its `model.py`
     - `python/tensorrt_model_connect/engine_builder.py` — shared model resolution and direct dispatch only
 
     ### C++ runtime (execution — for L1 Runtime optimizations):
-    - `src/runtime/models/{family_name}/kv_cache.h/cpp` — KV cache + decode step
-    - `src/runtime/models/{family_name}/decode_runtime.h/cpp` — argmax, mask building when the family has a separate decode runtime
-    - `src/runtime/models/{family_name}/sampler.h/cpp` — token sampling and GPU greedy selection
+    - `python/tensorrt_model_connect/models/{family_name}/runtime/kv_cache.h/cpp` — KV cache + decode step
+    - `python/tensorrt_model_connect/models/{family_name}/runtime/decode_runtime.h/cpp` — argmax, mask building when the model has a separate decode runtime
+    - `python/tensorrt_model_connect/models/{family_name}/runtime/sampler.h/cpp` — token sampling and GPU greedy selection
     - `src/runtime/core/trt_common.h/cpp` — CUDA wrappers
     - `CMakeLists.txt` — if adding new source files
 
@@ -382,9 +382,9 @@ def _build_search_space(focus_area: str | None = None) -> str:
         Output is bit-identical to CPU argmax.
 
         Key files:
-        - `src/runtime/models/<family>/argmax_kernel.cu` — GPU reduction kernel
-        - `src/runtime/models/<family>/sampler.cpp` — GpuGreedySampler
-        - `src/runtime/models/<family>/pipeline.cpp` — run_step_device()
+        - `python/tensorrt_model_connect/models/<family>/runtime/argmax_kernel.cu` — GPU reduction kernel
+        - `python/tensorrt_model_connect/models/<family>/runtime/sampler.cpp` — GpuGreedySampler
+        - `python/tensorrt_model_connect/models/<family>/runtime/pipeline.cpp` — run_step_device()
 
         **Benchmark with both enabled:**
         ```bash
@@ -482,7 +482,7 @@ def _infer_family(model: str) -> str:
     """Infer the family name from model-owned registry metadata."""
     model_type = str(model).split("/")[-1]
     try:
-        from tensorrt_model_connect.families import resolve_family_id
+        from tensorrt_model_connect.models import resolve_family_id
 
         family_id = resolve_family_id(model_type)
     except Exception:

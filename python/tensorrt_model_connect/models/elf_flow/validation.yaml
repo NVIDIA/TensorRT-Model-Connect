@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  wmt14_de_en_elf_diffusion_text:
+    models:
+    - elf-b-de-en-l0
+    default_models:
+    - elf-b-de-en-l0
+    qualification:
+      elf-b-de-en-l0: {}
+  xsum_elf_diffusion_text:
+    models:
+    - elf-b-xsum-l0
+    default_models:
+    - elf-b-xsum-l0
+    qualification:
+      elf-b-xsum-l0: {}
+  openwebtext_elf_diffusion_text:
+    models:
+    - elf-b-owt-l0
+    default_models:
+    - elf-b-owt-l0
+    qualification:
+      elf-b-owt-l0: {}

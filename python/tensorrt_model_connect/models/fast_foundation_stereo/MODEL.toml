@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "fast_foundation_stereo"
+config_adapter = "model.py|config_from_dir"
+model_dir_adapter = "prepare_model.py|resolve_model_dir"
+hf_allow_patterns = [
+  "cfg.yaml",
+  "model_best_bp2_serialize.pth",
+]
+hf_required_files = [
+  "nvidia/c-fast-foundationstereo|model_best_bp2_serialize.pth",
+]
+aliases = [
+  "fast-foundation-stereo",
+  "fast_foundation_stereo",
+  "foundation_stereo_lite",
+]
+prefixes = [
+  "fast_foundation_stereo",
+]
+architecture_patterns = ["FastFoundationStereo"]
+runtime_plugins = ["plugin.cpp|register_fast_foundation_stereo_plugin"]
+runtime_strategies = ["fast_foundation_stereo_disparity"]
+test_manifests = ["tests/manifests/fast-foundation-stereo.json"]
+
+[model_reference_cache]
+repository = "https://github.com/NVlabs/Fast-FoundationStereo.git"
+revision = "a290ba04c1b3ad1ec41a33974a157b2917b624d4"
+relative_path = "fast_foundation_stereo/reference/Fast-FoundationStereo-a290ba04c1b3"
+entrypoint = "core/foundation_stereo.py"
+environment_variable = "TRTMC_FAST_FOUNDATION_STEREO_SOURCE_DIR"
+
+[e2e_defaults.stereo_disparity]
+reference_backend = "fast_foundation_stereo_torch"
+oracle_level = "L1_external_reference"
+stages = [{ name = "full_inference", required = true }]

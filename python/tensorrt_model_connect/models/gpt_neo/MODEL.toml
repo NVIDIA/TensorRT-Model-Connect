@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "gpt_neo"
+capabilities = [
+  "split_decoder_roles",
+]
+aliases = [
+  "gpt_neo",
+  "gptneo",
+]
+prefixes = [
+  "gpt_neo",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "gpt_neo_decoder_kv_cache",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_gpt_neo_plugin",
+]
+runtime_strategies = [
+  "gpt_neo_decoder_kv_cache",
+]
+test_manifests = [
+  "tests/manifests/gpt-neo-125m-tp4.json",
+  "tests/manifests/gpt-neo-125m.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "gpt_neo_decoder_kv_cache",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

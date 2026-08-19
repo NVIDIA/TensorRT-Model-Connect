@@ -24,7 +24,7 @@ from typing import Any, Iterable
 
 
 SCHEMA_VERSION = 1
-FAMILIES_PACKAGE = "tensorrt_model_connect.families"
+MODELS_PACKAGE = "tensorrt_model_connect.models"
 APPROVED_FAMILIES_ROOT_IMPORTS = frozenset()
 MISPLACED_MODEL_PATHS = frozenset(
     {
@@ -81,7 +81,7 @@ class DynamicEntryPoint:
 
 
 def family_dirs(repo_root: Path, selected: tuple[str, ...]) -> list[Path]:
-    root = repo_root / "python/tensorrt_model_connect/families"
+    root = repo_root / "python/tensorrt_model_connect/models"
     discovered = sorted(
         path for path in root.iterdir() if (path / "model.py").is_file()
     )
@@ -175,6 +175,7 @@ def _family_modules(repo_root: Path, family_dir: Path) -> dict[str, ModuleInfo]:
         path
         for path in family_dir.rglob("*.py")
         if "__pycache__" not in path.parts
+        and path.relative_to(family_dir).parts[0] not in {"runtime", "tests", "tools"}
     )
     names: dict[Path, tuple[str, bool]] = {}
     for path in paths:
@@ -223,10 +224,8 @@ def _walk_strings(value: Any) -> Iterable[str]:
 
 def _manifest_path(repo_root: Path, family_dir: Path, raw: str) -> Path:
     path = Path(raw)
-    if raw.startswith("families/"):
+    if raw.startswith("models/"):
         return repo_root / "python/tensorrt_model_connect" / path
-    if raw.startswith("model/") or raw.startswith("weights/"):
-        return family_dir / path
     return family_dir / path
 
 
@@ -267,7 +266,7 @@ def _dynamic_entrypoints(
     entries: list[DynamicEntryPoint] = []
 
     model_path = family_dir / "model.py"
-    model_name = f"{FAMILIES_PACKAGE}.{family_dir.name}.model"
+    model_name = f"{MODELS_PACKAGE}.{family_dir.name}.model"
     model_exists = model_name in modules
     model_symbols = _module_bound_names(modules[model_name]) if model_exists else set()
     for required_symbol in ("matches", "build"):
@@ -357,6 +356,20 @@ def _scan_paths(repo_root: Path) -> list[Path]:
             and "__pycache__" not in path.parts
             and ".family-source-validation" not in path.parts
         )
+    models_root = repo_root / "python" / "tensorrt_model_connect" / "models"
+    if models_root.is_dir():
+        for owner in models_root.iterdir():
+            for relative in ("tests", "tools"):
+                root = owner / relative
+                if not root.is_dir():
+                    continue
+                paths.extend(
+                    path
+                    for path in root.rglob("*")
+                    if path.is_file()
+                    and path.suffix in TEXT_SCAN_SUFFIXES
+                    and "__pycache__" not in path.parts
+                )
     return sorted(paths)
 
 
@@ -370,7 +383,7 @@ def _external_module_roots(
     roots: set[str] = set()
     symbols: dict[str, set[str]] = defaultdict(set)
     sources: dict[str, list[str]] = defaultdict(list)
-    family_needle = f"{FAMILIES_PACKAGE}.{family_dir.name}."
+    family_needle = f"{MODELS_PACKAGE}.{family_dir.name}."
 
     for path in scan_paths:
         try:
@@ -432,7 +445,12 @@ def _convention_tool_roots(
             model_text,
         )
     )
-    manifests = repo_root / "tests/e2e/models" / family_dir.name / "manifests"
+    manifests = (
+        repo_root
+        / "python/tensorrt_model_connect/models"
+        / family_dir.name
+        / "tests/manifests"
+    )
     if manifests.is_dir() and not is_vision_language:
         for path in manifests.glob("*.json"):
             try:
@@ -444,23 +462,20 @@ def _convention_tool_roots(
                 break
 
     if is_vision_language:
-        tool_path = (
-            repo_root
-            / "tools/families"
-            / family_dir.name
-            / "vl_debug_runner.py"
-        )
         family_path = family_dir / "vl_debug_runner.py"
         if family_path.is_file():
-            module = f"{FAMILIES_PACKAGE}.{family_dir.name}.vl_debug_runner"
+            module = f"{MODELS_PACKAGE}.{family_dir.name}.vl_debug_runner"
             if module in modules:
                 roots.add(module)
                 sources[module].append("tools/diff_vl.py::<family-dispatch>")
-        elif not tool_path.is_file():
+        else:
             missing.append(
                 {
                     "source": "tools/diff_vl.py::<family-dispatch>",
-                    "path": f"tools/families/{family_dir.name}/vl_debug_runner.py",
+                    "path": (
+                        "python/tensorrt_model_connect/models/"
+                        f"{family_dir.name}/vl_debug_runner.py"
+                    ),
                     "reason": "missing_path",
                 }
             )
@@ -710,7 +725,7 @@ def _strategy_switches(
 
 def _sibling_imports(family: str, modules: dict[str, ModuleInfo]) -> list[dict[str, Any]]:
     violations: list[dict[str, Any]] = []
-    prefix = f"{FAMILIES_PACKAGE}."
+    prefix = f"{MODELS_PACKAGE}."
     for info in modules.values():
         for node in ast.walk(info.tree):
             targets: list[str] = []
@@ -785,7 +800,7 @@ def audit_family(
     family_dir = family_dir.resolve()
     family = family_dir.name
     modules = _family_modules(repo_root, family_dir)
-    package_module = f"{FAMILIES_PACKAGE}.{family}"
+    package_module = f"{MODELS_PACKAGE}.{family}"
     dynamic_entries, dynamic_roots, dynamic_symbols = _dynamic_entrypoints(
         repo_root, family_dir, modules
     )

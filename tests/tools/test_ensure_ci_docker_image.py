@@ -231,7 +231,7 @@ def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     shutil.copy2(REPO_ROOT / "tools" / "__init__.py", repo_root / "tools" / "__init__.py")
 
     package_root = repo_root / "python" / "tensorrt_model_connect"
-    families_root = package_root / "families"
+    families_root = package_root / "models"
     demo_root = families_root / "demo"
     demo_root.mkdir(parents=True)
     for source in (
@@ -241,7 +241,7 @@ def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     ):
         shutil.copy2(source, package_root / source.name)
     shutil.copy2(
-        REPO_ROOT / "python" / "tensorrt_model_connect" / "families" / "__init__.py",
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "models" / "__init__.py",
         families_root / "__init__.py",
     )
 
@@ -252,7 +252,7 @@ id = "demo"
 aliases = ["demo"]
 prefixes = ["demo"]
 python_profile_specs = [
-  "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
+  "demo|models/demo/requirements.lock.txt|models/demo/verify.py|true",
 ]
 default_execution_profiles = ["reference|demo"]
 """,
@@ -487,8 +487,8 @@ def test_profile_fingerprint_changes_for_semantic_profile_declaration(
 
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
-            "families/demo/verify.py|true",
-            "families/demo/verify.py|false",
+            "models/demo/verify.py|true",
+            "models/demo/verify.py|false",
         ),
         encoding="utf-8",
     )

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "nemotron"
+capabilities = [
+  "split_decoder_roles",
+]
+aliases = [
+  "nemotron",
+]
+prefixes = [
+  "nemotron",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "nemotron_decoder_kv_cache",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_nemotron_plugin",
+]
+runtime_strategies = [
+  "nemotron_decoder_kv_cache",
+]
+test_manifests = [
+  "tests/manifests/nemotron-hindi-4b.json",
+  "tests/manifests/nemotron-mini-4b.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "nemotron_decoder_kv_cache",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

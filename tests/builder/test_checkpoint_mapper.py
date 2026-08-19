@@ -21,11 +21,11 @@ import numpy as np
 import pytest
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
-from tensorrt_model_connect.families.qwen.config import ModelConfig
+from tensorrt_model_connect.models.qwen.config import ModelConfig
 
-_QWEN_ROOT = Path(__file__).resolve().parents[2] / "python/tensorrt_model_connect/families/qwen"
+_QWEN_ROOT = Path(__file__).resolve().parents[2] / "python/tensorrt_model_connect/models/qwen"
 _MAPPER_MODULE = "weights" if (_QWEN_ROOT / "weights/__init__.py").is_file() else "checkpoint_mapper"
-_mapper = import_module(f"tensorrt_model_connect.families.qwen.{_MAPPER_MODULE}")
+_mapper = import_module(f"tensorrt_model_connect.models.qwen.{_MAPPER_MODULE}")
 _transpose_2d = _mapper._transpose_2d
 _copy_to_numpy = _mapper._copy_to_numpy
 _repeat_head_norm = _mapper._repeat_head_norm

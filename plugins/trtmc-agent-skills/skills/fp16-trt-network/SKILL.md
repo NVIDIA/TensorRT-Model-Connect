@@ -32,7 +32,7 @@ Precision follows tensor dtypes, typed constants, and explicit
 `tensor.dtype` mutation to override inference in a strongly typed network.
 
 Keep changes in the owning family under
-`python/tensorrt_model_connect/families/<family>/`. Root graph helper modules
+`python/tensorrt_model_connect/models/<family>/`. Root graph helper modules
 are intentionally absent. Share a helper only within an ownership boundary
 where shape, dtype, and layout semantics genuinely match.
 

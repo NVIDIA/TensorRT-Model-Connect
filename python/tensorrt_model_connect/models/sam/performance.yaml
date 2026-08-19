@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: sam.segment_prompted
+  operation: segment_prompted
+  model: sam-vit-base
+  workload:
+    testcase: sam-vit-base
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-vision
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+    output_contract: segmentation-shape

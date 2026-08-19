@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_five_shot_mcq:
+    models:
+    - phi-moe
+    - phi-moe-l0
+    - phi-moe-l0-tp4
+    default_models:
+    - phi-moe
+    model_profiles:
+      phi-moe:
+        gates:
+          # Permit one disagreement in the smoke slice when task accuracy is
+          # preserved; the accuracy-drop gate remains strict.
+          min_prediction_agreement: 0.95
+    qualification:
+      phi-moe: {}

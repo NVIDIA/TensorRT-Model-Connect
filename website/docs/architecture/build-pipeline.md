@@ -51,7 +51,7 @@ Family discovery is descriptor-driven:
 3. A Diffusers pipeline class uses descriptor
    `diffusion_pipeline_classes` only; it has no all-package fallback.
 
-The resolver imports exactly `families.<id>.model`. Unknown inputs fail closed;
+The resolver imports exactly `models.<id>.model`. Unknown inputs fail closed;
 there is no `pkgutil` scan, package proxy, or manifest-selected Python module.
 
 ## 3. Select the build path

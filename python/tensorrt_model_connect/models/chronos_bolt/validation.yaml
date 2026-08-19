@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  etth1_time_series_parity:
+    models:
+    - chronos-bolt-tiny-official
+    - chronos-bolt-tiny-official-tp4
+    default_models:
+    - chronos-bolt-tiny-official
+    model_profiles:
+      chronos-bolt-tiny-official:
+        gates:
+          max_relative_l2: 1.0e-06
+          max_absolute_error: 8.0e-06
+    model_overrides:
+      chronos-bolt-tiny-official:
+        time_series:
+          input_columns:
+          - OT
+          target_columns:
+          - OT
+          input_key: branch_input
+          context_length: 512
+          prediction_length: 64
+          stride: 24
+          test_fraction: 0.2
+    qualification:
+      chronos-bolt-tiny-official: {}

@@ -57,6 +57,10 @@ std::cout << pipeline->generate("What is the capital of France? Answer in one wo
   helper kernels, and validation contracts as concrete blueprints for
   modification and customization. The shared Python entry point only resolves
   the owning family and calls `model.build()` once.
+- Find that complete implementation under one independent
+  `python/tensorrt_model_connect/models/<owner>/` source root: its descriptor,
+  Python builder, native runtime, tests, manifests, assets, and optional tools
+  move together and do not depend on sibling model folders.
 - Keep native TensorRT execution and exactly qualified optimized-runtime
   dispatch behind the same task-oriented application boundary.
 

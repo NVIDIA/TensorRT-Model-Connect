@@ -231,7 +231,7 @@ class TestFocusArea:
 
 class TestInferFamily:
     def test_uses_family_registry(self, monkeypatch):
-        from tensorrt_model_connect import families
+        from tensorrt_model_connect import models as families
 
         monkeypatch.setattr(
             families,

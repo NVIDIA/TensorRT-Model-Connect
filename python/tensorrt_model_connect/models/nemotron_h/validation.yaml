@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_five_shot_mcq:
+    models:
+    - nemotron-h-nano-9b
+    - nemotron-h-nano-9b-tp4
+    default_models:
+    - nemotron-h-nano-9b
+    qualification:
+      nemotron-h-nano-9b: {}

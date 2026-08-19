@@ -150,12 +150,8 @@ class DockerImageManager:
     def _read_requirements(self) -> ImageRequirements:
         registry = self._load_profile_registry()
         profiles = registry["profiles"]
-        profile_module = importlib.import_module(
-            "tensorrt_model_connect.python_profiles"
-        )
-        expected_profiles = ",".join(
-            profile_module.prebuilt_python_profile_names(registry)
-        )
+        profile_module = importlib.import_module("tensorrt_model_connect.python_profiles")
+        expected_profiles = ",".join(profile_module.prebuilt_python_profile_names(registry))
         if not expected_profiles:
             raise CiError("No family-owned Python execution profiles were declared")
 
@@ -175,7 +171,7 @@ class DockerImageManager:
             Path(".github/scripts/build-python-profiles.py"),
             package_root / "__init__.py",
             package_root / "python_profiles.py",
-            package_root / "families/__init__.py",
+            package_root / "models/__init__.py",
             *assets,
         }
         semantic_contract = {"version": registry.get("version"), "profiles": profiles}

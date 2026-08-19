@@ -98,7 +98,7 @@ def load_python_profile_registry() -> dict[str, Any]:
     if not isinstance(profiles, dict):
         raise ValueError("python_profiles.toml is missing a [profiles] table")
 
-    from .families import family_python_profile_specs
+    from .models import family_python_profile_specs
 
     for name, spec in family_python_profile_specs().items():
         if name in profiles:
@@ -247,7 +247,7 @@ def default_execution_profiles(
     registry = load_python_profile_registry()
 
     if family:
-        from .families import family_default_execution_profiles
+        from .models import family_default_execution_profiles
 
         _apply_declared_defaults(
             profiles,

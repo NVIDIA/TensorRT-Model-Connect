@@ -11,7 +11,7 @@ from tests.test_e2e import _case_matches_e2e_model, _parse_e2e_model_filters
 
 # Real regression fixture: the base case and nightly probes share one HF ID.
 _SHARED_HF_ID_REGRESSION_TEST = (
-    "tests/e2e/models/nemotron_speech_streaming/"
+    "python/tensorrt_model_connect/models/nemotron_speech_streaming/tests/"
     "test_nemotron_speech_streaming_e2e.py"
 )
 

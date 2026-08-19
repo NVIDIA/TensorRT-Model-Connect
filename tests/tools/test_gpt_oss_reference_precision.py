@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from tests.e2e.models.gpt_oss.e2e_plugins.references.hf_transformers import (
+from tensorrt_model_connect.models.gpt_oss.tests.e2e_plugins.references.hf_transformers import (
     _torch_dtype_for_case,
 )
 from tests.e2e_harness.manifest_loader import load_model_manifest
@@ -21,7 +21,15 @@ from tools.validation import engine as validation_engine
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-MANIFEST_DIR = REPO_ROOT / "tests" / "e2e" / "models" / "gpt_oss" / "manifests"
+MANIFEST_DIR = (
+    REPO_ROOT
+    / "python"
+    / "tensorrt_model_connect"
+    / "models"
+    / "gpt_oss"
+    / "tests"
+    / "manifests"
+)
 GPT_OSS_REVISION = "6cee5e81ee83917806bbde320786a8fb61efebee"
 
 

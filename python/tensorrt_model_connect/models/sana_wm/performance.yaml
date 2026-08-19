@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: sana_wm.generate_image
+  operation: generate_image
+  model: sana-wm-bidirectional
+  workload:
+    testcase: sana-wm-bidirectional
+  baseline:
+    runner: task-reference
+    adapter: upstream-sana-wm
+    mode: pytorch-eager
+    reference_backend: official_sana
+    timing_scope: task-pipeline-call-wall
+    output_contract: media-shape
+    python_profile: sana_wm_reference
+    adapter_options:
+      reference_commit: 59629fdf790850797cb657bad014fce432bd713d
+      intrinsics: assets/demo_0_intrinsics.npy

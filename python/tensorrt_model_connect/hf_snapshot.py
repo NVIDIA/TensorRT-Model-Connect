@@ -11,7 +11,7 @@ reject an otherwise complete Model Connect cache.
 
 from __future__ import annotations
 
-from .families import family_hf_allow_patterns
+from .models import family_hf_allow_patterns
 
 
 GENERIC_HF_ALLOW_PATTERNS: tuple[str, ...] = (

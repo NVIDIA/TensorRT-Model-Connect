@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "rwkv"
+capabilities = [
+  "disable_dual_profile_decoder",
+]
+aliases = [
+  "rwkv",
+]
+prefixes = [
+  "rwkv",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "rwkv_recurrent",
+]
+runtime_plugins = [
+  "plugin.cpp|register_rwkv_plugin",
+]
+runtime_strategies = [
+  "rwkv_recurrent",
+]
+test_manifests = [
+  "tests/manifests/rwkv-169m-tp4.json",
+  "tests/manifests/rwkv-169m.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "rwkv_recurrent",
+]
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

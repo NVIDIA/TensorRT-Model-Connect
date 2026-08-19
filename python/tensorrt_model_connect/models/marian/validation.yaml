@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  newstest2019_en_ru_marian_translation_parity:
+    models:
+    - marian-en-ru
+    default_models:
+    - marian-en-ru
+    qualification:
+      marian-en-ru: {}

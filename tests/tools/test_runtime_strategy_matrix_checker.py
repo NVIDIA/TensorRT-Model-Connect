@@ -1,413 +1,286 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for tools/check_runtime_strategy_matrix.py.
-
-Trace: ARCH-E2E-001, UD-E2E-STRATEGY-MATRIX
-Intent: Validate runtime strategy matrix checker C++ extraction, manifest scanning, and gap detection
-Preconditions: Synthetic C++ files and manifest directories with strategy strings are created
-Postconditions: Checker correctly extracts strategies from C++ source and identifies coverage gaps
-"""
+"""Tests for the owner-derived runtime-strategy control-plane checker."""
 
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from tests.e2e_harness.runtime_strategy_metadata import (
+    clear_runtime_strategy_metadata_cache,
+    load_runtime_strategy_catalog,
+)
 
 
-def _import_checker():
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _checker():
     return importlib.import_module("check_runtime_strategy_matrix")
 
 
-def test_extract_runtime_strategies_from_cpp_filters_to_known_candidates(
+def _write_owner(
+    models_dir: Path,
+    owner: str,
+    strategies: tuple[str, ...],
+    task_strategy: str,
+    *,
+    performance_mode: str | None = None,
+    diff_checks: tuple[str, ...] = (),
+    runner: bool = True,
+    comparator: bool = True,
+) -> Path:
+    owner_dir = models_dir / owner
+    manifests_dir = owner_dir / "tests" / "manifests"
+    manifests_dir.mkdir(parents=True)
+    descriptor = [
+        f'id = "{owner}"',
+        "runtime_strategies = [",
+        *(f'  "{strategy}",' for strategy in strategies),
+        "]",
+        "test_manifests = [",
+        *(f'  "tests/manifests/{index}.json",' for index in range(len(strategies))),
+        "]",
+    ]
+    if performance_mode is not None:
+        descriptor.append(f'performance_mode = "{performance_mode}"')
+    if diff_checks:
+        descriptor.extend(
+            [
+                "diff_framework_check_classes = [",
+                *(f'  "{name}",' for name in diff_checks),
+                "]",
+            ]
+        )
+    (owner_dir / "MODEL.toml").write_text("\n".join(descriptor) + "\n")
+
+    for index, strategy in enumerate(strategies):
+        (manifests_dir / f"{index}.json").write_text(
+            json.dumps(
+                {
+                    "name": f"{owner}-{index}",
+                    "hf_id": f"unit/{owner}",
+                    "family": owner,
+                    "runtime_strategy": strategy,
+                    "task_strategy": task_strategy,
+                }
+            )
+        )
+
+    plugins = owner_dir / "tests" / "e2e_plugins"
+    plugins.mkdir(parents=True)
+    if runner:
+        (plugins / "runner.py").write_text(
+            f'class UnitRunner:\n    def strategy_name(self):\n        return "{task_strategy}"\n'
+        )
+    if comparator:
+        (plugins / "comparator.py").write_text(
+            "class UnitComparator:\n"
+            "    def task_strategy(self):\n"
+            f'        return "{task_strategy}"\n'
+        )
+    return owner_dir
+
+
+def _write_diff_check(checks_dir: Path, class_name: str) -> None:
+    checks_dir.mkdir(parents=True, exist_ok=True)
+    (checks_dir / f"{class_name.lower()}.py").write_text(
+        f'class {class_name}:\n    name = "unit"\n'
+    )
+
+
+def test_repository_has_no_central_runtime_strategy_matrix() -> None:
+    assert not (REPO_ROOT / "tests" / "runtime_strategy_matrix.yaml").exists()
+
+
+def test_repository_control_plane_is_consistent() -> None:
+    assert _checker().validate_control_plane_paths() == []
+
+
+def test_catalog_derives_task_defaults_and_owner_performance_override(
     tmp_path: Path,
-):
-    mod = _import_checker()
-
-    cpp = tmp_path / "audio_strategy_builder.cpp"
-    cpp.write_text(
-        """
-        static constexpr std::array<std::string_view, 4> kStrategies = {
-            "text_to_audio",
-            "speech_to_text",
-            "speech_to_speech",
-            "omni_multimodal",
-        };
-        if (bundle_port.has_section("engine_plan")) {}
-        if (bundle_port.has_section("codec_engine_plan")) {}
-        """,
-        encoding="utf-8",
+) -> None:
+    models = tmp_path / "models"
+    _write_owner(models, "decoder", ("decoder_runtime",), "text_generation_causal")
+    _write_owner(
+        models,
+        "seq2seq",
+        ("seq2seq_runtime",),
+        "text_generation_causal",
+        performance_mode="enc_dec",
     )
+    clear_runtime_strategy_metadata_cache()
+    catalog = load_runtime_strategy_catalog(models)
 
-    strategies = mod.extract_runtime_strategies_from_cpp(
-        cpp,
-        {"text_to_audio", "speech_to_text", "speech_to_speech", "omni_multimodal", "diffusion"},
-    )
-    assert strategies == {
-        "text_to_audio",
-        "speech_to_text",
-        "speech_to_speech",
-        "omni_multimodal",
-    }
+    assert catalog["decoder_runtime"].performance_mode == "decode"
+    assert catalog["decoder_runtime"].cli_commands == ("run",)
+    assert catalog["seq2seq_runtime"].performance_mode == "enc_dec"
 
 
-def test_extract_runtime_strategies_from_cpp_files_aggregates_entrypoint_and_builders(
+def test_catalog_rejects_duplicate_runtime_strategy_owners(tmp_path: Path) -> None:
+    models = tmp_path / "models"
+    _write_owner(models, "alpha", ("duplicate_runtime",), "embedding")
+    _write_owner(models, "beta", ("duplicate_runtime",), "embedding")
+    clear_runtime_strategy_metadata_cache()
+    with pytest.raises(ValueError, match="declared by both"):
+        load_runtime_strategy_catalog(models)
+
+
+def test_catalog_rejects_manifest_strategy_outside_owner(tmp_path: Path) -> None:
+    models = tmp_path / "models"
+    owner = _write_owner(models, "alpha", ("alpha_runtime",), "embedding")
+    manifest = owner / "tests" / "manifests" / "0.json"
+    payload = json.loads(manifest.read_text())
+    payload["runtime_strategy"] = "foreign_runtime"
+    manifest.write_text(json.dumps(payload))
+    clear_runtime_strategy_metadata_cache()
+    with pytest.raises(ValueError, match="is not declared by owner"):
+        load_runtime_strategy_catalog(models)
+
+
+def test_catalog_rejects_missing_task_strategy(tmp_path: Path) -> None:
+    models = tmp_path / "models"
+    owner = _write_owner(models, "alpha", ("alpha_runtime",), "embedding")
+    manifest = owner / "tests" / "manifests" / "0.json"
+    payload = json.loads(manifest.read_text())
+    del payload["task_strategy"]
+    manifest.write_text(json.dumps(payload))
+    clear_runtime_strategy_metadata_cache()
+    with pytest.raises(ValueError, match="task_strategy is required"):
+        load_runtime_strategy_catalog(models)
+
+
+def test_catalog_rejects_performance_sidecar_for_foreign_strategy(
     tmp_path: Path,
-):
-    mod = _import_checker()
+) -> None:
+    models = tmp_path / "models"
+    owner = _write_owner(models, "alpha", ("alpha_runtime",), "embedding")
+    (owner / "tests" / "perf_validation.json").write_text(
+        json.dumps({"models": [{"model": "unit/alpha", "pipeline_type": "foreign_runtime"}]})
+    )
+    clear_runtime_strategy_metadata_cache()
+    with pytest.raises(ValueError, match="is not declared by owner"):
+        load_runtime_strategy_catalog(models)
 
-    trtmc_c = tmp_path / "trtmc_c.cpp"
-    trtmc_c.write_text(
-        """
-        static const std::unordered_map<std::string, int> kStrategyFamilies = {
-            {"qwen_decoder_kv_cache", 1},
-            {"diffusion", 2},
-        };
-        """,
-        encoding="utf-8",
+
+def test_checker_requires_owner_runner_and_comparator(tmp_path: Path) -> None:
+    models = tmp_path / "models"
+    _write_owner(
+        models,
+        "alpha",
+        ("alpha_runtime",),
+        "embedding",
+        runner=False,
+        comparator=False,
+    )
+    errors = _checker().validate_control_plane_paths(
+        models_dir=models, diff_checks_dir=tmp_path / "checks"
+    )
+    assert any("has no runner class" in error for error in errors)
+    assert any("has no comparator class" in error for error in errors)
+
+
+def test_checker_accepts_owner_cli_exemption_when_no_generic_command() -> None:
+    metadata = SimpleNamespace(
+        owner="specialized",
+        task_strategy="prompted_segmentation",
+        cli_commands=(),
+        cli_exemption="Uses a model-owned public C ABI.",
+        diff_framework_check_classes=(),
     )
 
-    builder = tmp_path / "vision_strategy_builder.cpp"
-    builder.write_text(
-        """
-        static constexpr std::array<std::string_view, 2> kStrategies = {
-            "qwen_vl_vision_language",
-            "segformer_segmentation",
-        };
-        """,
-        encoding="utf-8",
-    )
-
-    strategies = mod.extract_runtime_strategies_from_cpp_files(
-        [trtmc_c, builder],
-        {
-            "qwen_decoder_kv_cache",
-            "diffusion",
-            "qwen_vl_vision_language",
-            "segformer_segmentation",
+    assert _checker().validate_control_plane_data(
+        catalog={"specialized_runtime": metadata},
+        runner_classes_by_owner_task={
+            "specialized": {"prompted_segmentation": {"SpecializedRunner"}}
         },
-    )
-    assert strategies == {
-        "qwen_decoder_kv_cache",
-        "diffusion",
-        "qwen_vl_vision_language",
-        "segformer_segmentation",
-    }
-
-
-def test_extract_runtime_strategies_from_model_manifests(tmp_path: Path):
-    mod = _import_checker()
-
-    model_dir = tmp_path / "src" / "runtime" / "models"
-    (model_dir / "qwen").mkdir(parents=True)
-    (model_dir / "qwen" / "MODEL.toml").write_text(
-        'runtime_strategies = ["qwen_decoder_kv_cache"]\n',
-        encoding="utf-8",
-    )
-    (model_dir / "media_runtime").mkdir(parents=True)
-    (model_dir / "media_runtime" / "MODEL.toml").write_text(
-        'runtime_strategy = "diffusion_primary"\n',
-        encoding="utf-8",
-    )
-
-    assert mod.extract_runtime_strategies_from_model_manifests(model_dir) == {
-        "qwen_decoder_kv_cache",
-        "diffusion_primary",
-    }
-
-
-def test_model_local_e2e_plugin_discovery(tmp_path: Path):
-    mod = _import_checker()
-
-    runners_dir = (
-        tmp_path
-        / "tests"
-        / "e2e"
-        / "models"
-        / "example_decoder"
-        / "e2e_plugins"
-        / "runners"
-    )
-    runners_dir.mkdir(parents=True)
-    (runners_dir / "text_generation.py").write_text(
-        """
-class TextGenerationCausalRunner:
-    def strategy_name(self):
-        return "text_generation_causal"
-        """,
-        encoding="utf-8",
-    )
-    comparators_dir = (
-        tmp_path
-        / "tests"
-        / "e2e"
-        / "models"
-        / "example_decoder"
-        / "e2e_plugins"
-        / "comparators"
-    )
-    comparators_dir.mkdir(parents=True)
-    (comparators_dir / "text.py").write_text(
-        """
-class TextComparator:
-    def task_strategy(self):
-        return "text_generation_causal"
-        """,
-        encoding="utf-8",
-    )
-    flat_plugins = (
-        tmp_path / "tests" / "e2e" / "models" / "specialized" / "e2e_plugins"
-    )
-    flat_plugins.mkdir(parents=True)
-    (flat_plugins / "runner.py").write_text(
-        """
-class SpecializedRunner:
-    def strategy_name(self):
-        return "prompted_segmentation"
-        """,
-        encoding="utf-8",
-    )
-    (flat_plugins / "comparator.py").write_text(
-        """
-class SpecializedComparator:
-    def task_strategy(self):
-        return "prompted_segmentation"
-        """,
-        encoding="utf-8",
-    )
-
-    models_dir = tmp_path / "tests" / "e2e" / "models"
-    assert mod.extract_runner_classes_by_task_strategy(models_dir) == {
-        "text_generation_causal": {"TextGenerationCausalRunner"},
-        "prompted_segmentation": {"SpecializedRunner"},
-    }
-    assert mod.extract_comparator_classes_by_task_strategy(models_dir) == {
-        "text_generation_causal": {"TextComparator"},
-        "prompted_segmentation": {"SpecializedComparator"},
-    }
-
-
-def test_validate_matrix_data_requires_exemption_when_no_diff_check():
-    mod = _import_checker()
-    errors = mod.validate_matrix_data(
-        matrix={
-            "unit_recurrent": {
-                "task_strategy": "text_generation_causal",
-                "cli_commands": ["run"],
-                "runner_class": "TextGenerationCausalRunner",
-                "comparator_class": "TextComparator",
-                "diff_framework_check_classes": [],
-            }
+        comparator_classes_by_owner_task={
+            "specialized": {"prompted_segmentation": {"SpecializedComparator"}}
         },
-        cpp_runtime_strategies={"unit_recurrent"},
-        runtime_to_task_strategy={"unit_recurrent": "text_generation_causal"},
         diff_check_classes=set(),
-        runner_classes_by_task={"text_generation_causal": {"TextGenerationCausalRunner"}},
-        comparator_classes_by_task={"text_generation_causal": {"TextComparator"}},
+    ) == []
+
+
+def test_checker_requires_cli_exemption_when_no_generic_command() -> None:
+    metadata = SimpleNamespace(
+        owner="specialized",
+        task_strategy="prompted_segmentation",
+        cli_commands=(),
+        cli_exemption=None,
+        diff_framework_check_classes=(),
     )
 
-    assert any("diff_framework_exemption" in message for message in errors)
-
-
-def test_validate_matrix_data_accepts_cli_exemption_when_no_command():
-    mod = _import_checker()
-    errors = mod.validate_matrix_data(
-        matrix={
-            "unit_specialized": {
-                "task_strategy": "prompted_segmentation",
-                "cli_commands": [],
-                "cli_exemption": "Uses a model-owned public C ABI.",
-                "runner_class": "SpecializedRunner",
-                "comparator_class": "SpecializedComparator",
-                "diff_framework_check_classes": ["SpecializedDiffTest"],
-                "performance_mode": "multi_stage",
-            }
+    errors = _checker().validate_control_plane_data(
+        catalog={"specialized_runtime": metadata},
+        runner_classes_by_owner_task={
+            "specialized": {"prompted_segmentation": {"SpecializedRunner"}}
         },
-        cpp_runtime_strategies={"unit_specialized"},
-        runtime_to_task_strategy={"unit_specialized": "prompted_segmentation"},
-        diff_check_classes={"SpecializedDiffTest"},
-        runner_classes_by_task={"prompted_segmentation": {"SpecializedRunner"}},
-        comparator_classes_by_task={"prompted_segmentation": {"SpecializedComparator"}},
-    )
-
-    assert not errors
-
-
-def test_validate_matrix_data_detects_runtime_source_mismatch():
-    mod = _import_checker()
-    errors = mod.validate_matrix_data(
-        matrix={
-            "qwen_vl_vision_language": {
-                "task_strategy": "vision_language_generation",
-                "cli_commands": ["run"],
-                "runner_class": "VisionLanguageRunner",
-                "comparator_class": "VisionLanguageComparator",
-                "diff_framework_check_classes": ["VLPipelineTest"],
-            }
+        comparator_classes_by_owner_task={
+            "specialized": {"prompted_segmentation": {"SpecializedComparator"}}
         },
-        cpp_runtime_strategies={"qwen_vl_vision_language", "future_runtime_strategy"},
-        runtime_to_task_strategy={"qwen_vl_vision_language": "vision_language_generation"},
-        diff_check_classes={"VLPipelineTest"},
-        runner_classes_by_task={"vision_language_generation": {"VisionLanguageRunner"}},
-        comparator_classes_by_task={"vision_language_generation": {"VisionLanguageComparator"}},
+        diff_check_classes=set(),
     )
 
-    assert any("missing runtime strategies from runtime sources" in message for message in errors)
+    assert errors == [
+        "specialized_runtime: cli_exemption is required when no CLI command exists"
+    ]
 
 
-def test_validate_matrix_paths_supports_builder_source_extraction(tmp_path: Path):
-    mod = _import_checker()
+def test_checker_rejects_unknown_owner_diff_check(tmp_path: Path) -> None:
+    models = tmp_path / "models"
+    _write_owner(
+        models,
+        "alpha",
+        ("alpha_runtime",),
+        "embedding",
+        diff_checks=("MissingCheck",),
+    )
+    errors = _checker().validate_control_plane_paths(
+        models_dir=models, diff_checks_dir=tmp_path / "checks"
+    )
+    assert errors == [
+        "alpha_runtime: owner descriptor references unknown diff-framework classes ['MissingCheck']"
+    ]
 
-    matrix_path = tmp_path / "tests" / "runtime_strategy_matrix.yaml"
-    matrix_path.parent.mkdir(parents=True)
-    matrix_path.write_text(
-        """
-        {
-          "runtime_strategies": {
-            "qwen_decoder_kv_cache": {
-              "task_strategy": "text_generation_causal",
-              "performance_mode": "decode",
-              "cli_commands": ["run"],
-              "runner_class": "pkg.TextGenerationCausalRunner",
-              "comparator_class": "pkg.TextComparator",
-              "diff_framework_check_classes": ["LogitDiffTest"]
-            },
-            "qwen_vl_vision_language": {
-              "task_strategy": "vision_language_generation",
-              "performance_mode": "enc_dec",
-              "cli_commands": ["run"],
-              "runner_class": "pkg.VisionLanguageRunner",
-              "comparator_class": "pkg.VisionLanguageComparator",
-              "diff_framework_check_classes": ["VLPipelineTest"]
-            }
-          }
-        }
-        """,
-        encoding="utf-8",
-    )
 
-    e2e_models_dir = tmp_path / "tests" / "e2e" / "models"
-    text_manifest_dir = e2e_models_dir / "text" / "manifests"
-    text_manifest_dir.mkdir(parents=True)
-    (text_manifest_dir / "text.json").write_text(
-        """
-{
-  "name": "text",
-  "hf_id": "unit/text",
-  "family": "text",
-  "runtime_strategy": "qwen_decoder_kv_cache",
-  "task_strategy": "text_generation_causal"
-}
-        """,
-        encoding="utf-8",
+def test_checker_accepts_local_diff_check_and_nested_task_plugins(
+    tmp_path: Path,
+) -> None:
+    models = tmp_path / "models"
+    owner = _write_owner(
+        models,
+        "alpha",
+        ("alpha_runtime",),
+        "embedding",
+        diff_checks=("EmbeddingCheck",),
     )
-    vl_manifest_dir = e2e_models_dir / "vl" / "manifests"
-    vl_manifest_dir.mkdir(parents=True)
-    (vl_manifest_dir / "vl.json").write_text(
-        """
-{
-  "name": "vl",
-  "hf_id": "unit/vl",
-  "family": "vl",
-  "runtime_strategy": "qwen_vl_vision_language",
-  "task_strategy": "vision_language_generation"
-}
-        """,
-        encoding="utf-8",
+    plugins = owner / "tests" / "e2e_plugins"
+    (plugins / "runner.py").unlink()
+    (plugins / "comparator.py").unlink()
+    (plugins / "runners").mkdir()
+    (plugins / "comparators").mkdir()
+    (plugins / "runners" / "embedding.py").write_text(
+        'class EmbeddingRunner:\n    def strategy_name(self):\n        return "embedding"\n'
     )
+    (plugins / "comparators" / "embedding.py").write_text(
+        'class EmbeddingComparator:\n    def task_strategy(self):\n        return "embedding"\n'
+    )
+    checks = tmp_path / "checks"
+    _write_diff_check(checks, "EmbeddingCheck")
 
-    cpp_path = tmp_path / "src" / "cabi" / "api" / "trtmc_c.cpp"
-    cpp_path.parent.mkdir(parents=True)
-    cpp_path.write_text(
-        """
-        static const std::unordered_map<std::string, int> kStrategyFamilies = {
-            {"qwen_decoder_kv_cache", 1},
-            {"qwen_vl_vision_language", 2},
-        };
-        """,
-        encoding="utf-8",
-    )
+    assert _checker().validate_control_plane_paths(models_dir=models, diff_checks_dir=checks) == []
 
-    builders_dir = tmp_path / "src" / "runtime" / "builders"
-    (builders_dir / "text").mkdir(parents=True)
-    (builders_dir / "text" / "text_strategy_builder.cpp").write_text(
-        """
-        static constexpr std::array<std::string_view, 1> kStrategies = {"qwen_decoder_kv_cache"};
-        """,
-        encoding="utf-8",
-    )
-    (builders_dir / "vision").mkdir(parents=True)
-    (builders_dir / "vision" / "vision_strategy_builder.cpp").write_text(
-        """
-        static constexpr std::array<std::string_view, 1> kStrategies = {"qwen_vl_vision_language"};
-        """,
-        encoding="utf-8",
-    )
 
-    runners_dir = tmp_path / "tests" / "e2e_harness" / "runners"
-    runners_dir.mkdir(parents=True)
-    (runners_dir / "text_generation.py").write_text(
-        """
-class TextGenerationCausalRunner:
-    def strategy_name(self):
-        return "text_generation_causal"
-        """,
-        encoding="utf-8",
-    )
-    (runners_dir / "vision_language.py").write_text(
-        """
-class VisionLanguageRunner:
-    def strategy_name(self):
-        return "vision_language_generation"
-        """,
-        encoding="utf-8",
-    )
-
-    comparators_dir = tmp_path / "tests" / "e2e_harness" / "comparators"
-    comparators_dir.mkdir(parents=True)
-    (comparators_dir / "text.py").write_text(
-        """
-class TextComparator:
-    def task_strategy(self):
-        return "text_generation_causal"
-        """,
-        encoding="utf-8",
-    )
-    (comparators_dir / "vision_language.py").write_text(
-        """
-class VisionLanguageComparator:
-    def task_strategy(self):
-        return "vision_language_generation"
-        """,
-        encoding="utf-8",
-    )
-
-    diff_checks_dir = tmp_path / "tools" / "diff_framework" / "checks"
-    diff_checks_dir.mkdir(parents=True)
-    (diff_checks_dir / "text_checks.py").write_text(
-        """
-class LogitDiffTest:
-    name = "logit_diff"
-        """,
-        encoding="utf-8",
-    )
-    (diff_checks_dir / "vision_checks.py").write_text(
-        """
-class VLPipelineTest:
-    name = "vl_pipeline"
-        """,
-        encoding="utf-8",
-    )
-
-    errors = mod.validate_matrix_paths(
-        matrix_path=matrix_path,
-        cpp_path=cpp_path,
-        builders_dir=builders_dir,
-        runtime_registry_path=tmp_path / "missing_pipeline_factory.cpp",
-        runtime_models_dir=tmp_path / "missing_runtime_models",
-        e2e_models_dir=e2e_models_dir,
-        diff_checks_dir=diff_checks_dir,
-        runners_dir=runners_dir,
-        comparators_dir=comparators_dir,
-    )
-    assert errors == []
+def test_checker_cli_has_no_matrix_or_legacy_source_options() -> None:
+    parser = _checker().build_arg_parser()
+    option_strings = {option for action in parser._actions for option in action.option_strings}
+    assert "--models-dir" in option_strings
+    assert "--matrix" not in option_strings
+    assert "--runtime-models-dir" not in option_strings
+    assert "--e2e-models-dir" not in option_strings

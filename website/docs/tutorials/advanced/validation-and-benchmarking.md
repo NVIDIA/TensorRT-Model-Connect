@@ -39,7 +39,7 @@ semantics, and retained performance evidence, use the
 ENGINE_DIR=/tmp/trtmc-engines
 mkdir -p "${ENGINE_DIR}"
 PYTHONPATH=python:. python3 -m pytest \
-  'tests/e2e/models/qwen/test_qwen_e2e.py::test_model_e2e[qwen3-0.6b-fp16]' -v \
+  'python/tensorrt_model_connect/models/qwen/tests/test_qwen_e2e.py::test_model_e2e[qwen3-0.6b-fp16]' -v \
   --engine-dir "${ENGINE_DIR}" \
   --trtmc-binary ./build/trtmc \
   --model-plugin-dir ./build/models

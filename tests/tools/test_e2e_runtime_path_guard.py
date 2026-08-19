@@ -11,8 +11,9 @@ Postconditions: New runtime markers pass validation; legacy runtime markers trig
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+import pytest
 
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput
 from tests.e2e_harness.orchestrator import _validate_trt_runtime_path
@@ -28,6 +29,7 @@ def _make_case(strategy: str) -> E2ECase:
         hf_id="hf/test-model",
         family="unit",
         runtime_strategy=strategy,
+        task_strategy="text_generation_causal",
         bundle="guard-case.bundle",
         stages=[],
     )
@@ -43,33 +45,34 @@ def _make_ctx(tmp_path: Path) -> RunContext:
     )
 
 
-def _write_runtime_matrix(tmp_path: Path) -> Path:
-    matrix = tmp_path / "runtime_strategy_matrix.json"
-    matrix.write_text(
-        json.dumps({
-            "new_runtime_guard_strategies": ["unit_new_runtime"],
-            "runtime_strategies": {
-                "unit_new_runtime": {
-                    "task_strategy": "text_generation_causal",
-                    "performance_mode": "decode",
-                },
-                "unit_diffusion_runtime": {
-                    "task_strategy": "diffusion_media_generation",
-                    "performance_mode": "diffusion",
-                },
-                "unit_enc_dec_runtime": {
-                    "task_strategy": "speech_to_text",
-                    "performance_mode": "enc_dec",
-                },
-                "unit_multistage_runtime": {
-                    "task_strategy": "text_to_audio",
-                    "performance_mode": "multi_stage",
-                },
-            },
-        }),
-        encoding="utf-8",
-    )
-    return matrix
+def _write_runtime_owners(tmp_path: Path) -> Path:
+    models = tmp_path / "models"
+    for owner, strategy, task in (
+        ("decoder", "unit_new_runtime", "text_generation_causal"),
+        ("media", "unit_diffusion_runtime", "diffusion_media_generation"),
+        ("speech", "unit_enc_dec_runtime", "speech_to_text"),
+        ("audio", "unit_multistage_runtime", "text_to_audio"),
+    ):
+        root = models / owner
+        manifest = root / "tests" / "manifests" / "case.json"
+        manifest.parent.mkdir(parents=True)
+        (root / "MODEL.toml").write_text(
+            f'id = "{owner}"\n'
+            f'runtime_strategies = ["{strategy}"]\n'
+            'test_manifests = ["tests/manifests/case.json"]\n',
+            encoding="utf-8",
+        )
+        manifest.write_text(
+            "{\n"
+            f'  "name": "{owner}",\n'
+            f'  "hf_id": "unit/{owner}",\n'
+            f'  "family": "{owner}",\n'
+            f'  "runtime_strategy": "{strategy}",\n'
+            f'  "task_strategy": "{task}"\n'
+            "}\n",
+            encoding="utf-8",
+        )
+    return models
 
 
 def test_runtime_guard_accepts_new_runtime_marker_in_metadata(tmp_path: Path) -> None:
@@ -87,18 +90,19 @@ def test_runtime_guard_accepts_new_runtime_marker_in_metadata(tmp_path: Path) ->
 
 
 def test_runtime_guard_strategy_ownership_is_declarative(tmp_path: Path) -> None:
-    matrix = _write_runtime_matrix(tmp_path)
-    assert runtime_strategy_requires_new_runtime_guard("unit_new_runtime", matrix)
-    assert not runtime_strategy_requires_new_runtime_guard("future_unknown_strategy", matrix)
+    models = _write_runtime_owners(tmp_path)
+    assert runtime_strategy_requires_new_runtime_guard("unit_new_runtime", models)
+    assert not runtime_strategy_requires_new_runtime_guard("future_unknown_strategy", models)
 
 
 def test_runtime_strategy_performance_mode_comes_from_metadata(tmp_path: Path) -> None:
-    matrix = _write_runtime_matrix(tmp_path)
-    assert runtime_strategy_performance_mode("unit_new_runtime", matrix) == "decode"
-    assert runtime_strategy_performance_mode("unit_diffusion_runtime", matrix) == "diffusion"
-    assert runtime_strategy_performance_mode("unit_enc_dec_runtime", matrix) == "enc_dec"
-    assert runtime_strategy_performance_mode("unit_multistage_runtime", matrix) == "multi_stage"
-    assert runtime_strategy_performance_mode("future_unknown_strategy", matrix) == "decode"
+    models = _write_runtime_owners(tmp_path)
+    assert runtime_strategy_performance_mode("unit_new_runtime", models) == "decode"
+    assert runtime_strategy_performance_mode("unit_diffusion_runtime", models) == "diffusion"
+    assert runtime_strategy_performance_mode("unit_enc_dec_runtime", models) == "enc_dec"
+    assert runtime_strategy_performance_mode("unit_multistage_runtime", models) == "multi_stage"
+    with pytest.raises(ValueError, match="unknown runtime_strategy"):
+        runtime_strategy_performance_mode("future_unknown_strategy", models)
 
 
 def test_runtime_guard_rejects_legacy_runtime_marker(tmp_path: Path) -> None:

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  stsbenchmark_encoder_embedding_parity:
+    models:
+    - camembert-base
+    - camembert-base-tp4
+    - roberta-base
+    - roberta-base-tp4
+    - roberta-large
+    - roberta-large-tp4
+    - xlm-roberta-base
+    - xlm-roberta-base-tp4
+    default_models:
+    - camembert-base
+    - roberta-base
+    - roberta-large
+    - xlm-roberta-base
+    qualification:
+      camembert-base: {}
+      roberta-base: {}
+      roberta-large: {}
+      xlm-roberta-base: {}

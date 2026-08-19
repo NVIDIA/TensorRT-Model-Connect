@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "nemotron_speech_streaming"
+reference_entrypoint = "tools/reference.py|run"
+model_dir_adapter = "nemo_archive.py|resolve_model_dir"
+nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
+nemo_model_type = "nemotron_speech_streaming"
+nemo_target_patterns = [
+  "EncDecRNNT",
+  "Transducer",
+  "rnnt",
+]
+aliases = [
+  "enc_dec_rnnt_bpe",
+  "enc_dec_rnnt_bpe_with_prompt",
+  "fastconformer_cacheaware_rnnt",
+  "nemotron3_5_asr",
+  "nemotron_3_5_asr_streaming",
+  "nemotron_asr_streaming",
+  "nemotron_speech_streaming",
+  "nemotron_speech_streaming_rnnt",
+  "nemotronspeechstreaming",
+  "rnnt_bpe",
+]
+architecture_patterns = [
+  "Nemotron3_5AsrForRNNT",
+  "NemotronAsrStreamingForRNNT",
+]
+prefixes = [
+  "nemotron_speech_streaming",
+]
+runtime_plugins = [
+  "plugin.cpp|register_nemotron_speech_streaming_plugin",
+]
+runtime_strategies = [
+  "nemotron_speech_streaming_speech_to_text_rnnt",
+]
+test_manifests = [
+  "tests/manifests/nemotron-speech-streaming-en-0.6b-tp4.json",
+  "tests/manifests/nemotron-speech-streaming-en-0.6b.json",
+  "tests/manifests/nemotron-3.5-asr-streaming-0.6b.json",
+]
+
+[e2e_defaults.speech_to_text]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "audio", manifest = "test_input_audio" },
+]
+preflight_asset_fields = [
+  "test_input_audio",
+]

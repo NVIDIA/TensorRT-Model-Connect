@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: pixart.generate_image
+  operation: generate_image
+  model: pixart-sigma-1024
+  workload:
+    testcase: pixart-sigma-1024
+  baseline:
+    runner: task-reference
+    adapter: hf-diffusers
+    mode: hf-eager
+    reference_backend: hf_diffusers
+    timing_scope: task-pipeline-call-wall
+    output_contract: media-shape
+    adapter_options:
+      # Match the Accuracy/TRTMC component contract: FP32 T5 encoder, FP16 DiT
+      # inputs, and FP32 DiT outputs/scheduler bindings.
+      component_precision_contract: pixart_fp16_dit_fp32_t5

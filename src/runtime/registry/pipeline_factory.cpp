@@ -25,9 +25,9 @@
 #include "utils/json_helpers.h"
 
 #include <algorithm>
-#include <exception>
 #include <iostream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -74,21 +74,34 @@ void validate_staged_loading_policy(const BundleInfo& info, const std::string& m
     }
 }
 
+void validate_native_config_json(const std::string& config_text) {
+    try {
+        const auto config = nlohmann::json::parse(config_text);
+        if (!config.is_object())
+            throw std::runtime_error("config.json root must be an object");
+        const auto strategy = config.find("runtime_strategy");
+        if (strategy == config.end() || !strategy->is_string() ||
+            strategy->get_ref<const std::string&>().empty())
+            throw std::runtime_error("Bundle config missing runtime_strategy");
+    } catch (const nlohmann::json::exception& error) {
+        throw std::runtime_error(std::string("Invalid native bundle config.json: ") + error.what());
+    }
+}
+
 } // namespace
 
 PipelineBundleMaterialization materialize_pipeline_bundle(const std::string& bundle_path) {
     const auto info = ReadBundleHeader(bundle_path);
     const auto* config_info = find_nonempty_config_section(info);
 
-    // Preserve compatibility with legacy bundles that did not carry a
-    // config section (or carried an empty one). PipelineFactory will retain
-    // its existing manifest-default strategy resolution for those bundles.
     if (config_info == nullptr) {
-        return PipelineBundleMaterialization{ReadBundleFile(bundle_path), {}};
+        throw std::runtime_error("Native bundle must contain a non-empty config.json section: " +
+                                 bundle_path);
     }
 
     auto config_data = ReadBundleSection(bundle_path, *config_info);
     std::string config_text(config_data.begin(), config_data.end());
+    validate_native_config_json(config_text);
     const std::string policy_text = extract_json_object_text(config_text, "bundle_loading");
     if (policy_text.empty()) {
         return PipelineBundleMaterialization{ReadBundleFile(bundle_path), std::move(config_text)};
@@ -117,23 +130,11 @@ PipelineBundleMaterialization materialize_pipeline_bundle(const std::string& bun
 
 namespace {
 
-std::string normalize_legacy_strategy(const std::string& strategy, const std::string& config_text) {
-    auto alias = legacy_runtime_strategy_alias_target(strategy, config_text);
-    return alias.value_or(strategy);
-}
-
 std::string resolve_runtime_strategy(const std::string& config_text) {
     std::string strategy = extract_json_string(config_text, "runtime_strategy", "");
-    if (strategy.empty()) {
-        auto fallback = default_runtime_strategy();
-        if (!fallback || fallback->empty()) {
-            throw std::runtime_error(
-                "Bundle config missing runtime_strategy and no runtime model manifest declares "
-                "default_runtime_strategy");
-        }
-        strategy = *fallback;
-    }
-    return normalize_legacy_strategy(strategy, config_text);
+    if (strategy.empty())
+        throw std::runtime_error("Bundle config missing runtime_strategy");
+    return strategy;
 }
 
 IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
@@ -156,16 +157,12 @@ IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
 // TRTMC_DATA_DIR and TRTMC_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
 // Called once a bundle's layered runtime config has resolved.
 void apply_platform_config(const config::ConfigBundle& bundle) {
-    try {
-        const std::string source = bundle.get<std::string>("platform", "source_dir");
-        if (!source.empty())
-            set_source_dir(source);
-        const bool verbose_stderr = bundle.get<bool>("platform", "trt_log_stderr");
-        const std::string severity = bundle.get<std::string>("platform", "trt_log_min_severity");
-        configure_trt_logger(verbose_stderr, severity);
-    } catch (const std::exception&) {
-        // Schema absent or type mismatch — leave sinks at defaults.
-    }
+    const std::string source = bundle.get<std::string>("platform", "source_dir");
+    if (!source.empty())
+        set_source_dir(source);
+    const bool verbose_stderr = bundle.get<bool>("platform", "trt_log_stderr");
+    const std::string severity = bundle.get<std::string>("platform", "trt_log_min_severity");
+    configure_trt_logger(verbose_stderr, severity);
 }
 
 std::string bundle_trt_version_text(const BundleFile& bundle, const std::string& config_text) {
@@ -312,25 +309,18 @@ void reject_runtime_kernel_bindings_without_tvm_ffi(const BundleInfo& info,
 
 } // namespace
 
-std::optional<config::ConfigBundle>
-detail::resolve_runtime_config(const std::string& config_text, const std::string& bundle_path,
-                               const std::string& config_path,
-                               const std::vector<std::string>& set_tokens) {
-    try {
-        auto resolution = config::resolve_pipeline_config(config_text, config_path, set_tokens);
-        const auto sidecar =
-            config::try_write_effective_config_next_to(resolution.bundle, bundle_path);
-        if (!sidecar.path) {
-            std::cerr << "[trtmc.config] Failed to write effective config sidecar: "
-                      << sidecar.error << "\n          Resolved runtime config remains active.\n";
-        }
-        apply_platform_config(resolution.bundle);
-        return std::move(resolution.bundle);
-    } catch (const std::exception& e) {
-        std::cerr << "[trtmc.config] Failed to resolve runtime config: " << e.what()
-                  << "\n          Proceeding with schema defaults.\n";
-        return std::nullopt;
+config::ConfigBundle detail::resolve_runtime_config(const std::string& config_text,
+                                                    const std::string& bundle_path,
+                                                    const std::string& config_path,
+                                                    const std::vector<std::string>& set_tokens) {
+    auto resolution = config::resolve_pipeline_config(config_text, config_path, set_tokens);
+    const auto sidecar = config::try_write_effective_config_next_to(resolution.bundle, bundle_path);
+    if (!sidecar.path) {
+        std::cerr << "[trtmc.config] Failed to write effective config sidecar: " << sidecar.error
+                  << "\n          Resolved runtime config remains active.\n";
     }
+    apply_platform_config(resolution.bundle);
+    return std::move(resolution.bundle);
 }
 
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
@@ -359,7 +349,6 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
 
-    // Parse runtime_strategy and normalize legacy strings.
     std::string strategy = resolve_runtime_strategy(config_text);
 
     auto* plugin = lookup_plugin_or_throw(strategy, {});
@@ -377,12 +366,9 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         base_cfg.tokenizer_add_special_tokens_present = true;
     }
 
-    // Resolve the layered runtime config (BUNDLE_DEFAULT + SESSION_REQUEST).
-    // Best-effort: a malformed input prints to stderr and falls back to
-    // schema defaults so plugin construction isn't blocked.
-    std::optional<config::ConfigBundle> resolved =
-        detail::resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
-                                       /*set_tokens=*/{});
+    // Resolve and validate the layered runtime config before constructing the plugin.
+    config::ConfigBundle resolved = detail::resolve_runtime_config(
+        config_text, bundle_path, /*config_path=*/"", /*set_tokens=*/{});
 
     PipelineContext ctx{bundle,
                         base_cfg,
@@ -393,7 +379,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         runtime_cache_path,
                         cuda_graphs,
                         /*kv_cache_size_bytes=*/0,
-                        resolved ? &*resolved : nullptr};
+                        &resolved};
     std::unique_ptr<IPipeline> pipeline;
     {
 #if TRTMC_HAS_TVM_FFI
@@ -448,7 +434,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;
 
-    std::optional<config::ConfigBundle> resolved = detail::resolve_runtime_config(
+    config::ConfigBundle resolved = detail::resolve_runtime_config(
         config_text, bundle_path, options.config_path, options.set_tokens);
 
     PipelineContext ctx{bundle,
@@ -460,7 +446,7 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
                         options.runtime_cache_path,
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
-                        resolved ? &*resolved : nullptr};
+                        &resolved};
     std::unique_ptr<IPipeline> pipeline;
     {
 #if TRTMC_HAS_TVM_FFI
@@ -518,7 +504,7 @@ PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t po
 
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;
-    std::optional<config::ConfigBundle> resolved = detail::resolve_runtime_config(
+    config::ConfigBundle resolved = detail::resolve_runtime_config(
         config_text, bundle_path, options.config_path, options.set_tokens);
 
     PipelineContext ctx{bundle,
@@ -530,7 +516,7 @@ PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t po
                         options.runtime_cache_path,
                         options.cuda_graphs,
                         options.kv_cache_size_bytes,
-                        resolved ? &*resolved : nullptr};
+                        &resolved};
     std::vector<std::unique_ptr<IPipeline>> pipelines;
     {
 #if TRTMC_HAS_TVM_FFI

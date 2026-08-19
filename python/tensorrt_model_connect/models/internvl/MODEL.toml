@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "internvl"
+aliases = [
+  "internvl",
+  "internvl3",
+  "internvl_chat",
+]
+prefixes = [
+  "internvl",
+]
+diff_framework_check_classes = [
+  "VLPipelineTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_internvl_plugin",
+]
+runtime_strategies = [
+  "internvl_vision_language",
+]
+test_manifests = [
+  "tests/manifests/internvl3-2b-tp2.json",
+  "tests/manifests/internvl3-2b.json",
+  "tests/manifests/internvl3-8b-tp4.json",
+  "tests/manifests/internvl3-8b.json",
+]
+
+[e2e_defaults.vision_language_generation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vision_encode", required = true },
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

@@ -74,7 +74,7 @@ TASK_ADAPTERS = {
 
 
 def _write_fake_trtmc(path: Path) -> None:
-    manifest = REPOSITORY / "tests/e2e/models/gpt2/manifests/distilgpt2.json"
+    manifest = REPOSITORY / "python/tensorrt_model_connect/models/gpt2/tests/manifests/distilgpt2.json"
     path.write_text(
         f"""#!/usr/bin/env python3
 import argparse, json, subprocess
@@ -243,27 +243,45 @@ def _write_environment(
 
 
 def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
-    from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
+    from tensorrt_model_connect.models.wan2_2_ti2v.model_config import (
         OFFICIAL_NEGATIVE_PROMPT,
     )
 
     suite = perf_matrix._read_yaml(SUITE)
     cases = perf_matrix._cases(suite)
     raw_suite = yaml.safe_load(SUITE.read_text(encoding="utf-8"))
-    raw_entries = raw_suite["entries"]
-    raw_additional = raw_suite["additional_profiles"]
+    fragments = sorted(perf_matrix.MODELS_ROOT.glob("*/performance.yaml"))
+    raw_fragments = [
+        yaml.safe_load(fragment.read_text(encoding="utf-8"))
+        for fragment in fragments
+    ]
+    raw_entries = [
+        entry for fragment in raw_fragments for entry in fragment.get("entries", [])
+    ]
+    raw_additional = [
+        profile
+        for fragment in raw_fragments
+        for profile in fragment.get("additional_profiles", [])
+    ]
     excluded_profiles = perf_matrix._excluded_profiles(suite)
     ready_profiles = {
         entry.name
         for entry in perf_matrix.ManifestCatalog().entries()
         if entry.status == "ready" and not perf_matrix._is_l0_profile(entry.name)
     }
+    catalog_families = {
+        entry.name: entry.family for entry in perf_matrix.ManifestCatalog().entries()
+    }
 
     perf_matrix._validate_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 107
-    assert len(raw_entries) == 78
-    assert len(raw_additional) == 29
+    assert set(raw_suite) == {"schema_version", "name", "defaults"}
+    assert all(fragment["schema_version"] == perf_matrix.OWNER_SUITE_SCHEMA for fragment in raw_fragments)
+    assert {fragment.parent.name for fragment in fragments} == {
+        case["family"] for case in cases
+    } | {catalog_families[model] for model in excluded_profiles}
+    assert len(cases) == len(ready_profiles) - len(excluded_profiles)
+    assert len(raw_entries) + len(raw_additional) == len(cases)
     assert excluded_profiles == {
         "fast-foundation-stereo": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
         "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
@@ -277,8 +295,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(perf_matrix._is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 78
-    assert len({case["family"] for case in cases}) == 77
+    assert len({(case["family"], case["operation"]) for case in cases}) == len(
+        raw_entries
+    )
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
@@ -369,6 +388,69 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert diffusion_baseline["mode"] == "hf-eager"
     assert diffusion_baseline["model_class"] == "auto"
     assert diffusion_baseline["generation_method"] == "ar-generate"
+
+
+def test_model_owned_performance_rejects_redundant_family(tmp_path: Path) -> None:
+    owner = tmp_path / "models" / "owner_a"
+    owner.mkdir(parents=True)
+    (owner / "MODEL.toml").write_text("id = 'owner_a'\n", encoding="utf-8")
+    (owner / "performance.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": perf_matrix.OWNER_SUITE_SCHEMA,
+                "entries": [
+                    {
+                        "id": "owner_a.run",
+                        "family": "owner_b",
+                        "operation": "run",
+                        "model": "profile-a",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="must not declare family"):
+        perf_matrix._read_owner_performance(tmp_path / "models")
+
+
+def test_model_owned_performance_rejects_cross_owner_inheritance(tmp_path: Path) -> None:
+    owner = tmp_path / "models" / "owner_a"
+    owner.mkdir(parents=True)
+    (owner / "MODEL.toml").write_text("id = 'owner_a'\n", encoding="utf-8")
+    (owner / "performance.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": perf_matrix.OWNER_SUITE_SCHEMA,
+                "additional_profiles": [
+                    {"model": "profile-a", "inherit": "owner_b.run"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="same owner"):
+        perf_matrix._read_owner_performance(tmp_path / "models")
+
+
+def test_release_suite_rejects_central_model_configuration(tmp_path: Path) -> None:
+    suite = tmp_path / "release.yaml"
+    suite.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": perf_matrix.SUITE_SCHEMA,
+                "name": "invalid",
+                "defaults": {},
+                "entries": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(perf_matrix.PerfMatrixError, match="only shared schema/defaults"):
+        perf_matrix._read_yaml(suite, models_root=tmp_path / "models")
 
 
 def test_release_suite_rejects_unknown_explicit_exclusion() -> None:
@@ -1560,7 +1642,7 @@ def test_report_recovers_task_type_from_an_existing_result_manifest() -> None:
             "resolved_settings": {
                 "testcase": "codegen-350m",
                 "model": {
-                    "manifest": "codegen/manifests/codegen-350m.json",
+                    "manifest": "codegen/tests/manifests/codegen-350m.json",
                     "task_strategy": "text_generation_causal",
                 },
             },
@@ -2200,8 +2282,8 @@ def test_external_reference_adapter_rejects_a_missing_checkout(
 
 
 def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
-    raw = yaml.safe_load(SUITE.read_text(encoding="utf-8"))
-    rows = {row["id"]: row for row in raw["entries"]}
+    suite = perf_matrix._read_yaml(SUITE)
+    rows = {row["id"]: row for row in suite["entries"]}
 
     assert rows["mamba.generate"]["baseline"]["mode"] == "hf-eager"
     assert rows["rwkv.generate"]["baseline"]["mode"] == "hf-eager"

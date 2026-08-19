@@ -12,17 +12,18 @@ from types import SimpleNamespace
 
 import pytest
 
+from tensorrt_model_connect.models.deepseek_ocr.tools import (
+    reference as deepseek_reference,
+)
 from tools.reference import transformers_vlm
 from tools.validation import catalog as validation_catalog
 from tools.validation import engine as validation_engine
 
 
 _MANIFEST_PATH = (
-    validation_catalog.REPO_ROOT
-    / "tests"
-    / "e2e"
-    / "models"
+    validation_catalog.DEFAULT_MODELS_DIR
     / "deepseek_ocr"
+    / "tests"
     / "manifests"
     / "deepseek-ocr.json"
 )
@@ -226,16 +227,11 @@ def test_deepseek_ocr_fp16_reference_fails_before_model_loading(
 ) -> None:
     arguments = _write_vlm_inputs(tmp_path, dtype="float16")
 
-    def fail_if_loaded():
-        raise AssertionError("model dependencies must not load")
-
-    monkeypatch.setattr(transformers_vlm, "_runtime_dependencies", fail_if_loaded)
-
     with pytest.raises(
         ValueError,
         match="DeepSeek-OCR official remote-code reference requires.*BF16",
     ):
-        transformers_vlm.run(arguments)
+        deepseek_reference.run(arguments, {}, {}, [])
 
 
 def test_deepseek_ocr_bf16_runs_official_remote_infer_path(
@@ -259,30 +255,33 @@ def test_deepseek_ocr_bf16_runs_official_remote_infer_path(
 
     processor = Processor()
     model = Model()
-    monkeypatch.setattr(
-        transformers_vlm,
-        "_runtime_dependencies",
-        lambda: (SimpleNamespace(), SimpleNamespace(), SimpleNamespace()),
-    )
-
-    def fake_load_runtime(arguments, *_args):
+    def fake_load_runtime(arguments):
         assert arguments.dtype == "bfloat16"
-        return processor, model, "cpu"
+        return processor, model
 
-    monkeypatch.setattr(transformers_vlm, "_load_runtime", fake_load_runtime)
+    monkeypatch.setattr(deepseek_reference, "_load_runtime", fake_load_runtime)
 
-    transformers_vlm.run(arguments)
+    responses = deepseek_reference.run(
+        arguments,
+        {},
+        {"requests": [{"answer": "recognized text"}]},
+        [
+            {
+                "sample_id": "ocrbench_v2_000000",
+                "prompt": "Read the image.",
+                "images": ["/dataset/image.jpg"],
+            }
+        ],
+    )
 
     assert calls["processor"] is processor
     assert calls["prompt"] == "<image>\nRead the image."
     assert calls["image_file"] == "/dataset/image.jpg"
     assert calls["save_results"] is False
     assert calls["eval_mode"] is True
-    payload = json.loads(arguments.predictions.read_text(encoding="utf-8"))
-    wall_ms = payload["responses"][0].pop("wall_ms")
+    wall_ms = responses[0].pop("wall_ms")
     assert isinstance(wall_ms, float)
-    assert payload == {
-        "responses": [
+    assert responses == [
             {
                 "sample_id": "ocrbench_v2_000000",
                 "output_text": "recognized text",
@@ -291,4 +290,3 @@ def test_deepseek_ocr_bf16_runs_official_remote_infer_path(
                 "source": "hf",
             }
         ]
-    }

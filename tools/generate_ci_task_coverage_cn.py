@@ -31,7 +31,7 @@ except ModuleNotFoundError:  # pragma: no cover - used by Python 3.10 CI images
 from tests.e2e_harness.manifest_loader import iter_manifest_paths  # noqa: E402
 
 
-DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
+DEFAULT_MODELS_DIR = REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
 DEFAULT_OUTPUT = REPO_ROOT / "trtmc_ci_task_coverage_cn.html"
 MULTI_DEVICE_TIER = "multi_device"
 L0_ONLY_TIER = "l0_only"
@@ -481,7 +481,7 @@ def _render_html(records: list[CaseRecord]) -> str:
 <header>
   <h1>TRTMC CI 模型 / 任务覆盖报告（中文）</h1>
   <p>面向 QA 的 nightly E2E 覆盖视图：看当前 CI 覆盖了哪些模型、哪些任务类型，以及验证强度如何。</p>
-  <div class="source">Repo: {_html(REPO_ROOT)} · commit: {_html(_git_commit())} · generated: {_html(generated)} · 数据来源：当前 checkout 的 tests/e2e/models manifests</div>
+  <div class="source">Repo: {_html(REPO_ROOT)} · commit: {_html(_git_commit())} · generated: {_html(generated)} · 数据来源：当前 checkout 的 python/tensorrt_model_connect/models manifests</div>
 </header>
 <main>
   <section class="grid stats">

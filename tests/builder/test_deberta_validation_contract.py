@@ -14,10 +14,11 @@ from tools.validation import engine as validation_engine
 
 _MANIFEST_PATH = (
     validation_engine.REPO_ROOT
-    / "tests"
-    / "e2e"
+    / "python"
+    / "tensorrt_model_connect"
     / "models"
     / "deberta"
+    / "tests"
     / "manifests"
     / "deberta-base.json"
 )

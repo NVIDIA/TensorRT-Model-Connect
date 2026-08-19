@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_continuation_parity:
+    models:
+    - stablelm2-1.6b
+    - stablelm2-1.6b-tp4
+    default_models:
+    - stablelm2-1.6b
+    qualification:
+      stablelm2-1.6b: {}

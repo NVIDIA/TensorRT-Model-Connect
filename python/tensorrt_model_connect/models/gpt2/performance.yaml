@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: gpt2.generate
+  operation: generate
+  model: distilgpt2
+  workload:
+    testcase: distilgpt2
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward
+additional_profiles:
+- model: gpt2-125m
+  inherit: gpt2.generate

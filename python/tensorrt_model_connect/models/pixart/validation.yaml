@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  dpg_bench_diffusion_image:
+    models:
+    - pixart-sigma-1024
+    - pixart-sigma-1024-l0
+    - pixart-sigma-1024-tp4
+    default_models:
+    - pixart-sigma-1024
+    family_profile:
+      gates:
+        require_matching_initial_latents: 1
+        psnr: 2.0
+        ssim: -1.0
+    model_profiles:
+      pixart-sigma-1024:
+        # Calibrated from the fixed review slice: visually equivalent pairs
+        # score >=0.905 image-CLIP; a real count/layout divergence scores 0.552.
+        gates:
+          require_matching_initial_latents: 1
+          min_trt_hf_image_clip_cosine: 0.85
+          ssim: 0.75
+          psnr: 10.0
+    qualification:
+      pixart-sigma-1024: {}

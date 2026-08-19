@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import tensorrt_model_connect.families as families
+import tensorrt_model_connect.models as families
 
 
 def _model(*, owns: bool = True):
@@ -37,14 +37,14 @@ def test_load_model_by_id_imports_only_the_declared_model_module(
     monkeypatch,
     tmp_path,
 ) -> None:
-    family_dir = tmp_path / "families" / "example_family"
+    family_dir = tmp_path / "models" / "example_family"
     family_dir.mkdir(parents=True)
     (family_dir / "MODEL.toml").write_text(
         'id = "example_family"\n', encoding="utf-8"
     )
     imported = []
     model = _model()
-    monkeypatch.setattr(families, "__file__", str(tmp_path / "families/__init__.py"))
+    monkeypatch.setattr(families, "__file__", str(tmp_path / "models/__init__.py"))
     monkeypatch.setattr(
         families.importlib,
         "import_module",
@@ -52,16 +52,16 @@ def test_load_model_by_id_imports_only_the_declared_model_module(
     )
 
     assert families.load_model_by_id("example_family") is model
-    assert imported == ["tensorrt_model_connect.families.example_family.model"]
+    assert imported == ["tensorrt_model_connect.models.example_family.model"]
 
 
 def test_load_model_by_id_requires_build_and_matches(monkeypatch, tmp_path) -> None:
-    family_dir = tmp_path / "families" / "example_family"
+    family_dir = tmp_path / "models" / "example_family"
     family_dir.mkdir(parents=True)
     (family_dir / "MODEL.toml").write_text(
         'id = "example_family"\n', encoding="utf-8"
     )
-    monkeypatch.setattr(families, "__file__", str(tmp_path / "families/__init__.py"))
+    monkeypatch.setattr(families, "__file__", str(tmp_path / "models/__init__.py"))
     monkeypatch.setattr(
         families.importlib,
         "import_module",
@@ -69,6 +69,19 @@ def test_load_model_by_id_requires_build_and_matches(monkeypatch, tmp_path) -> N
     )
 
     with pytest.raises(TypeError, match=r"must define matches\(\)"):
+        families.load_model_by_id("example_family")
+
+
+@pytest.mark.parametrize("descriptor", ("", 'id = "other_family"\n'))
+def test_load_model_by_id_rejects_missing_or_mismatched_owner_id(
+    monkeypatch, tmp_path, descriptor
+) -> None:
+    family_dir = tmp_path / "models" / "example_family"
+    family_dir.mkdir(parents=True)
+    (family_dir / "MODEL.toml").write_text(descriptor, encoding="utf-8")
+    monkeypatch.setattr(families, "__file__", str(tmp_path / "models/__init__.py"))
+
+    with pytest.raises(ValueError, match="model id|Model id"):
         families.load_model_by_id("example_family")
 
 
@@ -99,7 +112,7 @@ def test_find_model_checks_only_metadata_candidates(monkeypatch) -> None:
 
 
 def test_unknown_family_id_and_model_return_none(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(families, "__file__", str(tmp_path / "families/__init__.py"))
+    monkeypatch.setattr(families, "__file__", str(tmp_path / "models/__init__.py"))
     monkeypatch.setattr(families, "_candidate_module_names", lambda _value: [])
     monkeypatch.setattr(
         families, "_candidate_module_names_from_config", lambda _value: []

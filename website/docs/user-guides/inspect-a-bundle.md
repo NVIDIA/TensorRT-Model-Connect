@@ -23,7 +23,7 @@ provider-owned artifact names, so a nonzero “no engine sections” result is n
 by itself proof that the optimized bundle is invalid.
 
 If native loading reports that no plugin is registered, compare the exact
-strategy with `src/runtime/models/<owner>/MODEL.toml`, confirm the owning model
+strategy with `python/tensorrt_model_connect/models/<owner>/MODEL.toml`, confirm the owning model
 DSO was built, and pass its directory with `--model-plugin-dir` if it is not in
 the default search path.
 

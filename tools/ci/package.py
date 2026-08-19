@@ -354,7 +354,7 @@ class WheelArchiveValidator:
                 name
                 for name in names
                 if name.endswith(
-                    "/families/wan2_2_ti2v/data/"
+                    "/models/wan2_2_ti2v/data/"
                     "wan22-ti2v-5b-921dbaf3-fp8-scales.json"
                 )
             ]
@@ -901,7 +901,10 @@ class WheelPackageManager:
             if not path.is_file():
                 raise CiError(f"{variable} does not exist: {path}")
         else:
-            paths = sorted((self.context.repository / "tests/e2e/models").glob(f"*/{filename}"))
+            models_root = (
+                self.context.repository / "python" / "tensorrt_model_connect" / "models"
+            )
+            paths = sorted(models_root.glob(f"*/tests/{filename}"))
             defaults = [
                 path for path in paths if self.context.read_json(path).get("default") is True
             ]

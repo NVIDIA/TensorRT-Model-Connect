@@ -407,7 +407,7 @@ the producing class remains the source of truth for optional evidence fields.
   ```json
   {
     "e2e_models": ["qwen3_5"],
-    "e2e_test_ids": ["tests/e2e/models/qwen3_5/test_qwen3_5_e2e.py::test_model_e2e[qwen3_5]"],
+    "e2e_test_ids": ["python/tensorrt_model_connect/models/qwen3_5/tests/test_qwen3_5_e2e.py::test_model_e2e[qwen3_5]"],
     "unit_tiers": ["cpp", "builder"],
     "cpp_tests": ["test_name"],
     "builder_tests": ["tests/builder/test_name.py"],
@@ -589,7 +589,7 @@ the producing class remains the source of truth for optional evidence fields.
   and publishes it atomically under a per-path lock. A model proof uses the
   same locked warmer for its selected contract, so a newly introduced pinned
   reference is prepared automatically on first use.
-- **Inputs:** The repository's `tests/e2e/models/*/MODEL.toml` files, the
+- **Inputs:** The repository's `python/tensorrt_model_connect/models/*/MODEL.toml` files, the
   `premerge` or `nightly` suite, `TRTMC_MODEL_REFERENCE_CACHE_ROOT`, and Git
   network access for a missing checkout. The CLI is
   `python3 -m tools.ci model-reference-cache warm --suite nightly`.
@@ -620,11 +620,11 @@ the producing class remains the source of truth for optional evidence fields.
     "owners": {"python": "qwen3_5", "runtime": "qwen3_5", "e2e": "qwen3_5"},
     "runtime_library": "libtrtmc_model_qwen3_5.so",
     "runtime_tests": ["test_qwen3_5"],
-    "python_tests": ["tests/e2e/models/qwen3_5/test_contract.py"],
+    "python_tests": ["python/tensorrt_model_connect/models/qwen3_5/tests/test_qwen3_5_family_plugin.py"],
     "suite": "premerge",
     "resource_class": "shared",
     "e2e_cases": [{"name": "qwen3_5", "model": "qwen3_5"}],
-    "e2e_test": "tests/e2e/models/qwen3_5/test_qwen3_5_e2e.py"
+    "e2e_test": "python/tensorrt_model_connect/models/qwen3_5/tests/test_qwen3_5_e2e.py"
   }
   ```
 

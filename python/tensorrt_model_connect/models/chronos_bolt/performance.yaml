@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: chronos_bolt.solve
+  operation: solve
+  model: chronos-bolt-tiny-official
+  workload:
+    testcase: chronos-bolt-tiny-official
+  baseline:
+    runner: task-reference
+    adapter: pytorch-timeseries
+    mode: pytorch-eager
+    reference_backend: torch_reference
+    timing_scope: task-model-call-wall
+    input_preparation_included: false

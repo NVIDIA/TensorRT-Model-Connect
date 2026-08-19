@@ -19,7 +19,7 @@ Manifest files remain authoritative; these numbers are not constants:
 
 | Measure | Snapshot value |
 | --- | ---: |
-| JSON manifests below `tests/e2e/models/*/manifests/` | 204 |
+| JSON manifests below `python/tensorrt_model_connect/models/*/tests/manifests/` | 204 |
 | Declared testcases | 241 |
 | Testcases with a non-empty `trace_id` | 215 |
 | Unique non-empty trace IDs | 214 |
@@ -27,8 +27,8 @@ Manifest files remain authoritative; these numbers are not constants:
 | Duplicate IDs | 1 |
 
 `IT-E2E-QIMG-01` is declared by both
-`tests/e2e/models/qwen_image/manifests/qwen-image.json` and
-`tests/e2e/models/qwen_image/manifests/qwen-image-2512.json`.
+`python/tensorrt_model_connect/models/qwen_image/tests/manifests/qwen-image.json` and
+`python/tensorrt_model_connect/models/qwen_image/tests/manifests/qwen-image-2512.json`.
 
 The repository also contains `Trace:` and `Trace ID:` annotations in selected
 Python and C++ tests. There is no dedicated tool that checks every

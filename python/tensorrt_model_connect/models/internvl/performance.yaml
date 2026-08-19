@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: internvl.generate
+  operation: generate
+  model: internvl3-2b
+  workload:
+    testcase: internvl3-2b
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-vlm
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false
+    output_contract: exact-token-ids
+additional_profiles:
+- model: internvl3-8b
+  inherit: internvl.generate

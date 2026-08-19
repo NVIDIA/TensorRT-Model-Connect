@@ -56,29 +56,30 @@ Run every single-device model whose catalog status is `ready`:
 python tools/trtmc_validate.py --all
 ```
 
-`--all` expands every workload listed under every model. There is no separate
-default, additional, or diagnostic workload category. A suite that exists in
-`workloads.yaml` and `sample_limits` but is not listed under a model is omitted
-from model and all-model runs; it can still be selected explicitly for a
-one-off experiment when its selectors match that model.
+`--all` expands every `qualification` binding in the model owners'
+`validation.yaml` files. There is no separate default, additional, or
+diagnostic workload category. A suite that exists in `workloads.yaml` but is
+not qualified by a model owner is omitted from model and all-model runs.
 
-The complete selection schema is intentionally just:
+The model-owned selection schema is intentionally direct:
 
 ```yaml
-sample_limits:
-  benchmark_a: 20
-  benchmark_b: -1  # all available samples
-
-models:
-  model-a:
-    workloads: [benchmark_a, benchmark_b]
+bindings:
+  benchmark_a:
+    models: [model-a]
+    qualification:
+      model-a: {}
+  benchmark_b:
+    models: [model-a]
+    qualification:
+      model-a: {}
 ```
 
 Selecting `model-a` runs both benchmarks as independent bindings.
 
-Configured sample counts are keyed by workload at the top of
-`model_workloads.yaml`. A heterogeneous full run resolves each binding's own
-sample count independently. Do not pass `--limit` for that path: it is a
+Configured sample counts use the shared suite's `sample_limit` in
+`workloads.yaml`. A heterogeneous full run resolves each binding's own sample
+count independently. Do not pass `--limit` for that path: it is a
 one-off override applied uniformly to every selected binding, with `--limit 0`
 retained as a compatibility spelling and `--limit -1` meaning the complete
 datasets. A positive limit larger than a dataset uses every available sample.
@@ -156,8 +157,8 @@ container may renumber a host GPU to logical device `0`. Validation refuses to
 start when it cannot resolve that selector to stable GPU identity, preventing
 an ambiguous report from being published.
 
-Dataset-backed workloads use the task-specific sample limits declared in
-`model_workloads.yaml`. Fast encoder and classification workloads use larger
+Dataset-backed workloads use the task-specific `sample_limit` declared in
+`workloads.yaml`. Fast encoder and classification workloads use larger
 slices, while generation-heavy image, video, and audio workloads use smaller
 slices. Set a workload to `-1` for its complete dataset. The runner never pads
 or repeats samples: when the configured limit exceeds the available count, it
@@ -223,7 +224,7 @@ exist, then prints the environment it used. Reference inference runs through
 `tools/trtmc_reference.py`, outside the validation engine process. Its result is keyed by
 the input slice and inference settings and reused from the shared reference
 cache when the key already exists. TRTMC variants may declare the same
-`reference_cache_identity` in `model_workloads.yaml` only when they use the
+`reference_cache_identity` in their owner-local `validation.yaml` only when they use the
 same reference model, prepared inputs, and inference contract. The explicit
 identity lets those variants share one cached reference result without
 weakening cache isolation for other models.
@@ -452,22 +453,17 @@ variants with the same reference computation can reuse an entry.
 
 1. Reuse or add a dataset workload in
    `tests/validation/workloads.yaml`. Dataset variants that can change build
-   shapes or profiles require distinct workload IDs.
-2. Add that workload under the model's `workloads` in `model_workloads.yaml`
-   when model and all-model runs should include it. Leave it unmapped for an
-   explicit-only experiment.
-3. Add its workload-owned limit to the top-level `sample_limits`; one value
-   is shared by every model using that dataset/workload contract.
+   shapes or profiles require distinct workload IDs. Put its shared
+   `sample_limit` on that suite.
+2. Add the model to the suite binding in
+   `python/tensorrt_model_connect/models/<family>/validation.yaml`.
+3. Add the model under that binding's `qualification` mapping when model and
+   all-model runs should include it.
 
 A model may list multiple workloads; selecting that model runs all of them as
 independent bindings. Callers can narrow a one-off run by passing one workload
-after the model name. If the aligned reference/TRTMC comparison is not
-implemented yet, declare only:
-
-```yaml
-model-name:
-  not_compared_reason: Aligned reference workload and output comparator are not implemented.
-```
+after the model name. Models without a `qualification` entry are not presented
+as reference-consistency coverage.
 
 Do not use `e2e` as a validation workload.
 

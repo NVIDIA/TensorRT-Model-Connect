@@ -104,10 +104,6 @@ def _model_asset(declared: str, model_root: Path, operation: str) -> tuple[Path,
     else:
         portable = path
         resolved = model_root / portable
-        source_prefix = Path("tests/e2e/models") / model_root.name
-        if not resolved.is_file() and path.is_relative_to(source_prefix):
-            portable = path.relative_to(source_prefix)
-            resolved = model_root / portable
     if not resolved.is_file():
         raise BenchmarkError(f"cannot read {operation} input {resolved}")
     return portable, resolved
@@ -279,28 +275,6 @@ def _prompt_from_file(testcase: Mapping[str, Any], model_root: Path) -> tuple[st
     return value, str(portable)
 
 
-def _sana_runtime(
-    testcase: Mapping[str, Any], image_path: str
-) -> tuple[dict[str, Any], dict[str, str]]:
-    if "action" not in testcase and "camera_intrinsics" not in testcase:
-        return {}, {}
-    config: dict[str, Any] = {"sana_wm.image_path": image_path}
-    for source, target in (
-        ("action", "sana_wm.action"),
-        ("translation_speed", "sana_wm.translation_speed"),
-        ("rotation_speed_deg", "sana_wm.rotation_speed_deg"),
-        ("video_num_frames", "sana_wm.num_frames"),
-        ("fps", "sana_wm.fps"),
-        ("flow_shift", "sana_wm.flow_shift"),
-    ):
-        if source in testcase:
-            config[target] = testcase[source]
-    intrinsics = testcase.get("camera_intrinsics")
-    if isinstance(intrinsics, list) and intrinsics:
-        config["sana_wm.intrinsics"] = ",".join(str(value) for value in intrinsics)
-    return {"config": config}, {"config": _MODEL_TESTCASE}
-
-
 def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
     inputs = testcase.get("inputs", {})
     if not isinstance(inputs, Mapping):
@@ -399,15 +373,18 @@ def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> Ca
         sources.update({"prompts": _MODEL_TESTCASE, "seeds": _MODEL_TESTCASE})
 
     declared_image = testcase.get("test_image")
-    runtime: dict[str, Any] = {}
-    runtime_sources: dict[str, str] = {}
+    runtime_config = testcase.get("runtime_config", {})
+    if not isinstance(runtime_config, Mapping):
+        raise BenchmarkError("generate_image runtime_config must be an object")
+    config = _flatten_runtime_config(runtime_config)
+    runtime: dict[str, Any] = {"config": config} if config else {}
+    runtime_sources: dict[str, str] = {"config": _MODEL_TESTCASE} if config else {}
     if declared_image is not None:
         image_path = _asset_field(testcase, model_root, "test_image", "generate_image")
         if batch_size != 1:
             raise BenchmarkError("image-conditioned generate_image supports batch_size=1 only")
         request["image_path"] = image_path
         sources["image_path"] = _MODEL_TESTCASE
-        runtime, runtime_sources = _sana_runtime(testcase, image_path)
     return _resolution(
         request,
         sources,

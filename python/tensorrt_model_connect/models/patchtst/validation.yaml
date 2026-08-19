@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  etth1_time_series_parity:
+    models:
+    - patchtst-etth1-regression-distribution
+    - patchtst-etth1-regression-distribution-tp4
+    - patchtst-granite-official
+    default_models:
+    - patchtst-etth1-regression-distribution
+    - patchtst-granite-official
+    model_profiles:
+      patchtst-etth1-regression-distribution:
+        gates:
+          max_relative_l2: 0.001
+          max_absolute_error: 0.001
+      patchtst-granite-official:
+        gates:
+          max_relative_l2: 0.0015
+          max_absolute_error: 0.035
+    model_overrides:
+      patchtst-etth1-regression-distribution:
+        time_series:
+          input_columns:
+          - HUFL
+          - HULL
+          - MUFL
+          - MULL
+          - LUFL
+          - LULL
+          target_columns:
+          - OT
+          input_key: field_input
+          context_length: 512
+          prediction_length: 1
+          stride: 24
+          test_fraction: 0.2
+      patchtst-granite-official:
+        time_series:
+          input_columns:
+          - HUFL
+          - HULL
+          - MUFL
+          - MULL
+          - LUFL
+          - LULL
+          - OT
+          target_columns:
+          - HUFL
+          - HULL
+          - MUFL
+          - MULL
+          - LUFL
+          - LULL
+          - OT
+          input_key: field_input
+          context_length: 512
+          prediction_length: 96
+          stride: 24
+          test_fraction: 0.2
+    qualification:
+      patchtst-etth1-regression-distribution: {}
+      patchtst-granite-official: {}

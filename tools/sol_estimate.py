@@ -415,7 +415,7 @@ def estimate_sol_for_workload(
     """
     if not pipeline_type:
         raise ValueError("pipeline_type is required")
-    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
+    mode = runtime_strategy_performance_mode(pipeline_type)
     bpp = BYTES_PER_PARAM[dtype]
 
     if mode == "decode":

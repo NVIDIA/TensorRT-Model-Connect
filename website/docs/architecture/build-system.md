@@ -53,13 +53,17 @@ behind model libraries.
 
 ## Manifest-generated native registration
 
-CMake scans `src/runtime/models/*/MODEL.toml`. Each descriptor declares:
+CMake scans `python/tensorrt_model_connect/models/*/MODEL.toml`. Each descriptor declares:
 
-- its model ID and output library;
+- its canonical model ID; the output library name is derived from that ID;
 - plugin source/registrar pairs;
 - unique native runtime strategies;
-- optional model-owned config schemas; and
-- focused C++ tests.
+- optional model-owned config schemas.
+
+Each owner's `runtime/CMakeLists.txt` separately declares its complete DSO
+target: exact C++/CUDA sources, link dependencies, warning exceptions, optional
+kernel subdirectories, and focused C++ tests. Root CMake only adds these owner
+subdirectories, aggregates their targets, and installs their DSOs.
 
 The configure step validates those declarations and generates:
 
@@ -141,7 +145,7 @@ instead.
 | `dist/tensorrt_model_connect-*.whl` | Built Python/native wheel |
 | Native `.bundle` | Plans/assets dispatched through an installed model/backend DSO |
 | Optimized `.bundle` | Descriptor plus embedded implementation DSO/artifact tree |
-| `website/build/` | Docusaurus production output |
+| website/build/ (generated, not checked in) | Docusaurus production output |
 
 ## Build-time versus run-time availability
 

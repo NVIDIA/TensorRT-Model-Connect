@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 // @title: Runtime units and ownership
-// @description: The CLI, Python wrapper, C++ API, and limited C-linkage surface enter shared factory and loader units with a bundle, which choose embedded optimized code or installed native model and backend DSOs before returning a concrete task pipeline.
+// @description: Public runtime surfaces enter shared lookup units with a bundle; native strategy lookup loads the DSO built from the same model owner folder, while optimized artifacts load their exact embedded implementation.
 digraph RuntimeOwnership {
   graph [
     bgcolor="#fbfcfe",
@@ -59,7 +59,7 @@ digraph RuntimeOwnership {
   model [
     fillcolor="#ecfccb",
     color="#4d7c0f",
-    label=<<B>Installed model DSO</B><BR/><FONT POINT-SIZE="16">IPipelinePlugin + model state</FONT>>
+    label=<<B>Owner runtime/ DSO</B><BR/><FONT POINT-SIZE="16">IPipelinePlugin + model state</FONT>>
   ];
   backend [
     fillcolor="#eff6ff",

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "starcoder2"
+validation_entrypoint = "tools/validation.py|transform_bundle_tokenizer"
+capabilities = [
+  "split_decoder_roles",
+]
+aliases = [
+  "starcoder2",
+]
+prefixes = [
+  "starcoder2",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "starcoder2_decoder_kv_cache",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_starcoder2_plugin",
+]
+runtime_strategies = [
+  "starcoder2_decoder_kv_cache",
+]
+test_manifests = [
+  "tests/manifests/starcoder2-3b-tp2.json",
+  "tests/manifests/starcoder2-3b.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "starcoder2_decoder_kv_cache",
+]
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

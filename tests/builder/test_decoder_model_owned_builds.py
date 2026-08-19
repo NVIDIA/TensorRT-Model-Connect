@@ -151,7 +151,7 @@ def test_decoder_family_owns_complete_bundle_build(
     tmp_path,
 ) -> None:
     model = importlib.import_module(
-        f"tensorrt_model_connect.families.{family}.model"
+        f"tensorrt_model_connect.models.{family}.model"
     )
     config = _config(family)
     written, roles = _patch_build_leaves(monkeypatch, model, config)
@@ -180,7 +180,7 @@ def test_qwen_owns_optimized_runtime_selection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    model = importlib.import_module("tensorrt_model_connect.families.qwen.model")
+    model = importlib.import_module("tensorrt_model_connect.models.qwen.model")
     config = _config("qwen")
     monkeypatch.setattr(model.ModelConfig, "from_dir", lambda _path: config)
     calls = []
@@ -210,7 +210,7 @@ def test_gpt2_dynamic_kv_uses_single_engine_and_serializes_rows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    model = importlib.import_module("tensorrt_model_connect.families.gpt2.model")
+    model = importlib.import_module("tensorrt_model_connect.models.gpt2.model")
     config = _config("gpt2")
     written, roles = _patch_build_leaves(monkeypatch, model, config)
     (tmp_path / "config.json").write_text(json.dumps(config.raw))
@@ -245,7 +245,7 @@ def test_gpt2_generation_config_owns_effective_eos(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    model = importlib.import_module("tensorrt_model_connect.families.gpt2.model")
+    model = importlib.import_module("tensorrt_model_connect.models.gpt2.model")
     config = _config("gpt2")
     config.raw["eos_token_id"] = model_eos
     written, _roles = _patch_build_leaves(monkeypatch, model, config)
@@ -269,7 +269,7 @@ def test_gpt2_generation_config_owns_effective_eos(
 def test_decoder_packages_do_not_eagerly_import_models() -> None:
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[2] / "python/tensorrt_model_connect/families"
+    root = Path(__file__).resolve().parents[2] / "python/tensorrt_model_connect/models"
     for family in ("bert", *FAMILIES):
         source = (root / family / "__init__.py").read_text(encoding="utf-8")
         assert "import model" not in source

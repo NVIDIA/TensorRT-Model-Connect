@@ -128,9 +128,10 @@ python3 tools/perf_matrix.py run \
   --entry <family.operation-or-profile-qualified-id>
 ```
 
-The entry ID is not a model name. The checked-in suite owns the workload,
-reference, measurement scope, warmups, iterations, and traffic-light margins.
-The environment owns machine-specific executables, caches, and storage.
+The entry ID is not a model name. The family's `performance.yaml` owns the
+workload and reference contract; the checked-in central suite owns shared
+measurement defaults. The environment owns machine-specific executables,
+caches, and storage.
 
 Use:
 

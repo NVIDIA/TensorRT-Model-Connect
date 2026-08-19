@@ -1,20 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for FFI kernel architecture: kernel setup and .so bundling.
+"""Tests for generic FFI kernel .so bundling.
 
 Intent:
     Validates the refactored FFI kernel architecture:
     1. Kernel .so files round-trip through the bundle format
-    2. FlashInfer kernel setup returns a valid (name, so_path) pair
 
 Preconditions:
     - Bundle tests: No special deps (pure Python)
-    - FlashInfer tests: FlashInfer + TVM-FFI + CUDA available
 
 Postconditions:
     - Bundle kernel manifest + .so sections survive write/read round-trip
-    - FlashInfer setup produces a registered kernel + valid .so path
 
 Trace IDs: ARCH-TVM-FFI-002, UD-FFI-ARCH-001, UT-FFI-ARCH-001
 """
@@ -127,8 +124,8 @@ class TestBundleKernelManifest:
 
         manifest = {
             "kernels": [
-                {"global_name": "flashinfer.decode_f16_d64", "func_name": "run",
-                 "section": "kernel_flashinfer_decode_f16_d64.so"},
+                {"global_name": "example.decode_f16_d64", "func_name": "run",
+                 "section": "kernel_example_decode_f16_d64.so"},
                 {"global_name": "cute.fused_swiglu", "func_name": "run",
                  "section": "kernel_cute_fused_swiglu.so"},
             ]
@@ -136,7 +133,7 @@ class TestBundleKernelManifest:
 
         sections = [
             BundleSection("config.json", b"{}"),
-            BundleSection("kernel_flashinfer_decode_f16_d64.so", fake_so_1),
+            BundleSection("kernel_example_decode_f16_d64.so", fake_so_1),
             BundleSection("kernel_cute_fused_swiglu.so", fake_so_2),
             BundleSection("kernel_manifest.json", json.dumps(manifest).encode()),
         ]
@@ -151,87 +148,24 @@ class TestBundleKernelManifest:
             header = json.loads(data[16 : 16 + header_len])
 
             assert len(header["sections"]) == 4  # config + 2 .so + manifest
-            assert "kernel_flashinfer_decode_f16_d64.so" in header["sections"]
+            assert "kernel_example_decode_f16_d64.so" in header["sections"]
             assert "kernel_cute_fused_swiglu.so" in header["sections"]
         finally:
             Path(bundle_path).unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Test 2: FlashInfer kernel setup (FlashInfer + TVM-FFI required)
+# Test 2: Engine builder opaque model options
 # ---------------------------------------------------------------------------
 
 
-def _flashinfer_available():
-    try:
-        import flashinfer  # noqa: F401
-        import tvm_ffi  # noqa: F401
-        return True
-    except ImportError:
-        return False
+class TestEngineBuilderModelOptions:
+    """Verify shared dispatch does not enumerate model-owned FFI options."""
 
-
-requires_flashinfer = pytest.mark.skipif(
-    not _flashinfer_available(),
-    reason="FlashInfer + TVM-FFI not available",
-)
-
-
-class TestFlashInferKernelSetup:
-    """Verify kernels/flashinfer_decode.setup() works correctly."""
-
-    @requires_flashinfer
-    @pytest.mark.gpu
-    @pytest.mark.trt
-    def test_setup_returns_valid_kernel_name_and_so_path(self):
-        """setup() returns (kernel_name, so_path) with valid .so file."""
-        from tensorrt_model_connect.kernels import flashinfer_decode
-
-        name, so_path = flashinfer_decode.setup(head_dim=64)
-
-        assert name == "flashinfer.decode_f16_d64"
-        assert Path(so_path).exists()
-        assert Path(so_path).stat().st_size > 0
-
-    @requires_flashinfer
-    @pytest.mark.gpu
-    @pytest.mark.trt
-    def test_setup_registers_tvm_ffi_global(self):
-        """setup() registers the kernel as a TVM-FFI global function."""
-        import tvm_ffi
-        from tensorrt_model_connect.kernels import flashinfer_decode
-
-        name, _ = flashinfer_decode.setup(head_dim=64)
-        func = tvm_ffi.get_global_func(name)
-        assert func is not None
-
-    @requires_flashinfer
-    @pytest.mark.gpu
-    @pytest.mark.trt
-    def test_setup_different_head_dims(self):
-        """setup() works for different head dimensions."""
-        from tensorrt_model_connect.kernels import flashinfer_decode
-
-        for hd in (64, 128):
-            name, so_path = flashinfer_decode.setup(head_dim=hd)
-            assert name == f"flashinfer.decode_f16_d{hd}"
-            assert Path(so_path).exists()
-
-
-# ---------------------------------------------------------------------------
-# Test 3: Engine builder kernel_artifacts parameter
-# ---------------------------------------------------------------------------
-
-
-class TestEngineBuilderKernelArtifacts:
-    """Verify build accepts kernel_artifacts and packages them."""
-
-    def test_build_signature_has_kernel_artifacts(self):
-        """build() accepts the kernel_artifacts keyword argument."""
+    def test_build_signature_has_opaque_options(self):
         import inspect
         from tensorrt_model_connect.engine_builder import build
 
         sig = inspect.signature(build)
-        assert "kernel_artifacts" in sig.parameters
-        param = sig.parameters["kernel_artifacts"]
-        assert param.default is None
+        assert list(sig.parameters) == ["model_id_or_path", "output_path", "options"]
+        assert sig.parameters["options"].kind is inspect.Parameter.VAR_KEYWORD

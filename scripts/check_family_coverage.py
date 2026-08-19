@@ -18,25 +18,21 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-FAMILIES_DIR = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
-MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
+MODELS_DIR = REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
 
 
 def iter_manifest_paths() -> list[Path]:
-    """Return E2E manifests from flat and model-owned layouts."""
+    """Return model-owned E2E manifests."""
     if not MODELS_DIR.is_dir():
         return []
-    return sorted({
-        *MODELS_DIR.glob("*.json"),
-        *MODELS_DIR.glob("*/manifests/*.json"),
-    })
+    return sorted(MODELS_DIR.glob("*/tests/manifests/*.json"))
 
 
 def discover_family_names() -> set[str]:
     """Return every directory that declares a family manifest."""
     return {
         path.name
-        for path in FAMILIES_DIR.iterdir()
+        for path in MODELS_DIR.iterdir()
         if path.is_dir()
         and (path / "MODEL.toml").is_file()
     }
@@ -58,7 +54,7 @@ def discover_manifest_families() -> dict[str, list[str]]:
 def main() -> int:
     family_names = discover_family_names()
     missing_model_entries = {
-        name for name in family_names if not (FAMILIES_DIR / name / "model.py").is_file()
+        name for name in family_names if not (MODELS_DIR / name / "model.py").is_file()
     }
     manifest_families = discover_manifest_families()
     covered = family_names & set(manifest_families)
@@ -94,7 +90,8 @@ def main() -> int:
             f"{', '.join(sorted(uncovered))}"
         )
         print(
-            "Add a JSON manifest in tests/e2e/models/<family>/manifests/ "
+            "Add a JSON manifest in "
+            "python/tensorrt_model_connect/models/<family>/tests/manifests/ "
             "with 'family' matching the family directory."
         )
         return 1

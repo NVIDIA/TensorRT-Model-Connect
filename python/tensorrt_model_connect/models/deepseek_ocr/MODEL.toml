@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "deepseek_ocr"
+reference_entrypoint = "tools/reference.py|run"
+python_profile_specs = [
+  "deepseek_ocr|models/deepseek_ocr/python_profile_requirements/deepseek_ocr.lock.txt|models/deepseek_ocr/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|deepseek_ocr",
+]
+capabilities = [
+  "debug_layer_outputs",
+]
+aliases = [
+  "deepseek_ocr",
+  "deepseek_vl_v2",
+  "deepseekocr",
+]
+prefixes = [
+  "deepseek_ocr",
+]
+debug_runner = "vl_debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "deepseek_ocr_vision_language",
+]
+diff_framework_check_classes = [
+  "VLPipelineTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_deepseek_ocr_plugin",
+]
+runtime_strategies = [
+  "deepseek_ocr_vision_language",
+]
+test_manifests = [
+  "tests/manifests/deepseek-ocr-l0-tp2.json",
+  "tests/manifests/deepseek-ocr-l0.json",
+  "tests/manifests/deepseek-ocr.json",
+]
+
+[e2e_defaults.vision_language_generation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vision_encode", required = true },
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

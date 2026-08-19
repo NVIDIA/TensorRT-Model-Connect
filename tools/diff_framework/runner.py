@@ -36,7 +36,7 @@ def _finalize_detection(
     *,
     raise_on_error: bool,
 ) -> str:
-    """Compatibility bridge for legacy string-return callers."""
+    """Return a detected strategy while preserving explicit failure semantics."""
     if detection.status == "error":
         if raise_on_error:
             if detection.error is not None:
@@ -52,7 +52,16 @@ def _finalize_detection(
 
 
 def _classify_detected_strategy(strategy: str, source: str) -> StrategyDetection:
-    if get_tests_for_strategy(strategy):
+    try:
+        tests = get_tests_for_strategy(strategy)
+    except ValueError as exc:
+        return StrategyDetection(
+            runtime_strategy=strategy,
+            status="error",
+            message=str(exc),
+            error=exc,
+        )
+    if tests:
         return StrategyDetection(runtime_strategy=strategy, status="ok")
     return StrategyDetection(
         runtime_strategy=strategy,
@@ -72,14 +81,12 @@ def detect_runtime_strategy(
 ) -> str | StrategyDetection:
     """Auto-detect runtime_strategy from the family model module.
 
-    Default return type is `str` for backward compatibility.
-    Set `with_status=True` to receive a StrategyDetection object with explicit
-    warning/skip/error semantics.
+    Set `with_status=True` to receive explicit warning/skip/error semantics.
     """
     try:
         from tensorrt_model_connect.engine_builder import _resolve_model
         from tensorrt_model_connect.config import ModelConfig
-        from tensorrt_model_connect.families import find_model
+        from tensorrt_model_connect.models import find_model
 
         model_dir = _resolve_model(model)
         config = ModelConfig.from_dir(model_dir)
@@ -121,7 +128,7 @@ def detect_runtime_strategy(
 
     if with_status:
         return detection
-    return _finalize_detection(detection, raise_on_error=False)
+    return _finalize_detection(detection, raise_on_error=True)
 
 
 def detect_runtime_strategy_from_bundle(
@@ -131,9 +138,7 @@ def detect_runtime_strategy_from_bundle(
 ) -> str | StrategyDetection:
     """Read runtime_strategy from a bundle's config.json.
 
-    Default return type is `str` for backward compatibility.
-    Set `with_status=True` to receive a StrategyDetection object with explicit
-    warning/skip/error semantics.
+    Set `with_status=True` to receive explicit warning/skip/error semantics.
     """
     import json
     import struct

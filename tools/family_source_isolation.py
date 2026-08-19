@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Materialize a source tree containing one model family.
+"""Materialize a source tree containing one complete model owner.
 
-The filtered tree keeps generic repository infrastructure, but narrows each
-model-owned root to the selected Python family and the runtime model plugins
-required by that family's E2E manifests.  Building and testing from the result
-therefore catches undeclared sibling-family dependencies.
+The filtered tree keeps generic repository infrastructure and exactly one
+model directory with its builder, runtime, tools, and tests.
 """
 
 from __future__ import annotations
@@ -27,17 +25,12 @@ except ModuleNotFoundError:  # Direct execution puts tools/ on sys.path.
     import model_plugin_isolation
 
 
-PYTHON_FAMILIES = PurePosixPath("python/tensorrt_model_connect/families")
-RUNTIME_MODELS = PurePosixPath("src/runtime/models")
-CPP_MODEL_TESTS = PurePosixPath("tests/cpp/models")
-E2E_MODELS = PurePosixPath("tests/e2e/models")
-FAMILY_TOOLS = PurePosixPath("tools/families")
-BUILDER_FAMILY_TESTS = PurePosixPath("tests/builder/families")
+MODELS_ROOT = PurePosixPath("python/tensorrt_model_connect/models")
 
 # This is registry infrastructure. Any additional shared family module must be
 # reviewed and added explicitly instead of silently becoming available to every
 # isolated family.
-APPROVED_SHARED_FAMILY_FILES = frozenset({"__init__.py"})
+APPROVED_SHARED_MODEL_FILES = frozenset({"__init__.py"})
 
 
 @dataclass(frozen=True)
@@ -49,35 +42,31 @@ class FamilySourceSelection:
 
 def resolve_selection(repo_root: Path, family: str) -> FamilySourceSelection:
     repo_root = repo_root.resolve()
-    family_dir = repo_root / PYTHON_FAMILIES / family
+    family_dir = repo_root / MODELS_ROOT / family
     if not (family_dir / "model.py").is_file():
         raise SystemExit(f"Unknown Python model family: {family}")
 
     manifests = model_plugin_isolation.discover_e2e_manifests(repo_root)
-    selected_models = {
-        name for name, manifest in manifests.items() if manifest.family == family
-    }
+    selected_models = {name for name, manifest in manifests.items() if manifest.family == family}
     runtime_plugins = model_plugin_isolation.discover_runtime_plugins(repo_root)
-    owners = {
-        plugin.model_id
-        for plugin in model_plugin_isolation.plugins_for_models(
-            selected_models, manifests, runtime_plugins
-        )
-    } if selected_models else set()
-
-    # A family without an E2E manifest can still own a same-named runtime
-    # plugin.  Keeping it makes the filtered tree useful while manifest
-    # coverage is being added; normal covered families use the mapping above.
-    if not owners and family in runtime_plugins:
-        owners.add(family)
-    if not owners:
+    runtime_owners = (
+        {
+            plugin.model_id
+            for plugin in model_plugin_isolation.plugins_for_models(
+                selected_models, manifests, runtime_plugins
+            )
+        }
+        if selected_models
+        else set()
+    )
+    if runtime_owners != {family}:
         raise SystemExit(
-            f"Family {family!r} has no E2E runtime mapping or same-named runtime plugin"
+            f"Model {family!r} runtime ownership is not self-contained: {sorted(runtime_owners)}"
         )
 
     return FamilySourceSelection(
         family=family,
-        runtime_models=tuple(sorted(owners)),
+        runtime_models=(family,),
         e2e_models=tuple(sorted(selected_models)),
     )
 
@@ -91,28 +80,11 @@ def _owned_child(path: PurePosixPath, root: PurePosixPath) -> str | None:
 
 
 def include_path(path: PurePosixPath, selection: FamilySourceSelection) -> bool:
-    child = _owned_child(path, PYTHON_FAMILIES)
+    child = _owned_child(path, MODELS_ROOT)
     if child is not None:
         if not child:
-            return path.name in APPROVED_SHARED_FAMILY_FILES
+            return path.name in APPROVED_SHARED_MODEL_FILES
         return child == selection.family
-
-    child = _owned_child(path, RUNTIME_MODELS)
-    if child is not None:
-        return not child or child in selection.runtime_models
-
-    child = _owned_child(path, CPP_MODEL_TESTS)
-    if child is not None:
-        return not child or child in selection.runtime_models
-
-    child = _owned_child(path, E2E_MODELS)
-    if child is not None:
-        return not child or child == selection.family
-
-    for root in (FAMILY_TOOLS, BUILDER_FAMILY_TESTS):
-        child = _owned_child(path, root)
-        if child is not None:
-            return not child or child == selection.family
 
     return True
 
@@ -130,11 +102,7 @@ def tracked_files(repo_root: Path) -> tuple[PurePosixPath, ...]:
         check=True,
         capture_output=True,
     )
-    return tuple(
-        PurePosixPath(os.fsdecode(raw))
-        for raw in result.stdout.split(b"\0")
-        if raw
-    )
+    return tuple(PurePosixPath(os.fsdecode(raw)) for raw in result.stdout.split(b"\0") if raw)
 
 
 def selected_worktree_files(
@@ -142,14 +110,7 @@ def selected_worktree_files(
     selection: FamilySourceSelection,
 ) -> tuple[PurePosixPath, ...]:
     """Include new files only from roots owned by the selected family."""
-    roots = (
-        PYTHON_FAMILIES / selection.family,
-        FAMILY_TOOLS / selection.family,
-        BUILDER_FAMILY_TESTS / selection.family,
-        E2E_MODELS / selection.family,
-        *(RUNTIME_MODELS / model for model in selection.runtime_models),
-        *(CPP_MODEL_TESTS / model for model in selection.runtime_models),
-    )
+    roots = (MODELS_ROOT / selection.family,)
     files: set[PurePosixPath] = set()
     for relative_root in roots:
         root = repo_root / relative_root
@@ -158,8 +119,7 @@ def selected_worktree_files(
         files.update(
             PurePosixPath(path.relative_to(repo_root).as_posix())
             for path in root.rglob("*")
-            if (path.is_file() or path.is_symlink())
-            and "__pycache__" not in path.parts
+            if (path.is_file() or path.is_symlink()) and "__pycache__" not in path.parts
         )
     return tuple(sorted(files))
 

@@ -2,7 +2,7 @@
 <svg width="885" height="548" role="img" aria-labelledby="architecture-runtime-ownership-svg-title architecture-runtime-ownership-svg-description" preserveAspectRatio="xMidYMid meet"
  viewBox="0.00 0.00 885.00 548.00" xmlns="http://www.w3.org/2000/svg">
 <title id="architecture-runtime-ownership-svg-title">Runtime units and ownership</title>
-<desc id="architecture-runtime-ownership-svg-description">The CLI, Python wrapper, C++ API, and limited C-linkage surface enter shared factory and loader units with a bundle, which choose embedded optimized code or installed native model and backend DSOs before returning a concrete task pipeline.</desc>
+<desc id="architecture-runtime-ownership-svg-description">Public runtime surfaces enter shared lookup units with a bundle; native strategy lookup loads the DSO built from the same model owner folder, while optimized artifacts load their exact embedded implementation.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(25.2 523)">
 <polygon fill="#fbfcfe" stroke="none" points="-25.2,25.2 -25.2,-523 860.16,-523 860.16,25.2 -25.2,25.2"/>
 <text xml:space="preserve" text-anchor="start" x="287.59" y="-469.6" font-family="Arial" font-weight="bold" font-size="28.00" fill="#111827">Runtime ownership</text>
@@ -60,7 +60,7 @@
 <g id="node5" class="node">
 <title>model</title>
 <path fill="#ecfccb" stroke="#4d7c0f" stroke-width="2" d="M575.25,-181.4C575.25,-181.4 363.66,-181.4 363.66,-181.4 357.66,-181.4 351.66,-175.4 351.66,-169.4 351.66,-169.4 351.66,-138.8 351.66,-138.8 351.66,-132.8 357.66,-126.8 363.66,-126.8 363.66,-126.8 575.25,-126.8 575.25,-126.8 581.25,-126.8 587.25,-132.8 587.25,-138.8 587.25,-138.8 587.25,-169.4 587.25,-169.4 587.25,-175.4 581.25,-181.4 575.25,-181.4"/>
-<text xml:space="preserve" text-anchor="start" x="386.8" y="-156.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Installed model DSO</text>
+<text xml:space="preserve" text-anchor="start" x="386.33" y="-156.3" font-family="Arial" font-weight="bold" font-size="17.00" fill="#111827">Owner runtime/ DSO</text>
 <text xml:space="preserve" text-anchor="start" x="366.06" y="-140.2" font-family="Arial" font-size="16.00" fill="#111827">IPipelinePlugin + model state</text>
 </g>
 <!-- shared&#45;&gt;model -->

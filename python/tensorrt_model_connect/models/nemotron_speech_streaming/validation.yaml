@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  librispeech_clean_asr_streaming:
+    models:
+    - nemotron-3.5-asr-streaming-0.6b
+    - nemotron-speech-streaming-en-0.6b
+    - nemotron-speech-streaming-en-0.6b-tp4
+    default_models:
+    - nemotron-3.5-asr-streaming-0.6b
+    - nemotron-speech-streaming-en-0.6b
+    model_profiles:
+      nemotron-3.5-asr-streaming-0.6b:
+        generation:
+          language: en-US
+          streaming:
+            enabled: true
+            chunk_ms: 1120
+            att_context_size:
+            - 56
+            - 13
+    qualification:
+      nemotron-3.5-asr-streaming-0.6b: {}
+      nemotron-speech-streaming-en-0.6b: {}

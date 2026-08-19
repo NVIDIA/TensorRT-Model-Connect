@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: flux.generate_image
+  operation: generate_image
+  model: flux-schnell
+  workload:
+    testcase: flux-schnell
+  baseline:
+    runner: task-reference
+    adapter: hf-diffusers
+    mode: hf-eager
+    reference_backend: hf_diffusers
+    timing_scope: task-pipeline-call-wall
+    output_contract: media-shape
+additional_profiles:
+- model: flux-2-dev
+  inherit: flux.generate_image
+- model: flux-2-dev-fp8
+  inherit: flux.generate_image

@@ -12,7 +12,6 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import random
 import re
 import struct
 import sys
@@ -21,19 +20,16 @@ from typing import Any, Mapping, Sequence
 import wave
 
 
+REPOSITORY = Path(__file__).resolve().parents[2]
+PYTHON_SOURCE = REPOSITORY / "python"
+for source_root in (REPOSITORY, PYTHON_SOURCE):
+    if str(source_root) not in sys.path:
+        sys.path.insert(0, str(source_root))
+
+from tools.model_entrypoint import load_model_entrypoint  # noqa: E402
+
+
 SCHEMA_VERSION = "trtmc.native-reference-reproduction/v1"
-MAGPIE_SPEAKER_ENCODER_REPO = "Edresson/Speaker_Encoder_H_ASP"
-MAGPIE_SPEAKER_ENCODER_FILENAME = "pytorch_model.bin"
-MAGPIE_SPEAKER_ENCODER_URL = (
-    "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/"
-    "pytorch_model.bin"
-)
-NEMOTRON35_OPTIONAL_CTC_STATE_KEYS = frozenset(
-    {
-        "ctc_decoder.decoder_layers.0.bias",
-        "ctc_decoder.decoder_layers.0.weight",
-    }
-)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -74,11 +70,6 @@ def _selected_rows(
 
 def _generation(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
     value = manifest.get("generation", {})
-    return value if isinstance(value, Mapping) else {}
-
-
-def _scoring(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
-    value = manifest.get("scoring", {})
     return value if isinstance(value, Mapping) else {}
 
 
@@ -192,20 +183,6 @@ def _write_predictions(
     with arguments.raw_output.open("w", encoding="utf-8") as raw_file:
         for row in responses:
             raw_file.write(json.dumps(dict(row), ensure_ascii=False) + "\n")
-
-
-def _is_nemo_asr(arguments: argparse.Namespace) -> bool:
-    values = (
-        arguments.reference_family.lower(),
-        arguments.family.lower(),
-        arguments.model.lower(),
-    )
-    return (
-        values[0] in {"asr_canary", "asr_nemo"}
-        or values[1] in {"canary", "nemotron_speech_streaming"}
-        or "canary" in values[2]
-        or "nemotron-speech-streaming" in values[2]
-    )
 
 
 def _transcription_text(value: Any) -> str:
@@ -357,368 +334,6 @@ def _run_whisper_asr(
     return responses
 
 
-def _run_nemotron35_asr(
-    arguments: argparse.Namespace,
-    prompts: Sequence[Mapping[str, Any]],
-    generation: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    archive = _resolve_nemotron35_archive(arguments)
-    torch, model = _load_nemotron35_model(arguments, archive)
-    target_rate = int(generation.get("sample_rate", 16000) or 16000)
-    output_dir = arguments.predictions.parent / "hf_canary_audio"
-    responses = []
-    original_forward = model.forward
-
-    def forward_with_extended_prompt(*args: Any, **kwargs: Any) -> Any:
-        args, kwargs = _extend_nemotron35_prompt_for_forward(
-            torch,
-            args,
-            kwargs,
-        )
-        return original_forward(*args, **kwargs)
-
-    model.forward = forward_with_extended_prompt
-    try:
-        for prompt in prompts:
-            audio, _source = _audio_for_prompt(prompt, target_rate)
-            sample_id = str(prompt.get("sample_id", ""))
-            wav_path = output_dir / _safe_sample_filename(sample_id, ".wav")
-            _write_wav_pcm16(wav_path, audio, target_rate)
-            manifest_path = output_dir / _safe_sample_filename(
-                sample_id,
-                ".manifest.jsonl",
-            )
-            language = str(
-                prompt.get("language")
-                or generation.get("language")
-                or "auto"
-            )
-            manifest_path.write_text(
-                json.dumps(
-                    {
-                        "audio_filepath": str(wav_path),
-                        "duration": len(audio) / target_rate,
-                        "text": "",
-                        "lang": language,
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            started = time.perf_counter()
-            transcriptions = model.transcribe(
-                str(manifest_path),
-                batch_size=1,
-                verbose=False,
-            )
-            responses.append(
-                _asr_row(
-                    prompt,
-                    _transcription_text(transcriptions),
-                    (time.perf_counter() - started) * 1000.0,
-                )
-            )
-    finally:
-        model.forward = original_forward
-        del model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    return responses
-
-
-def _extend_nemotron35_prompt_for_forward(
-    torch_module: Any,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-) -> tuple[tuple[Any, ...], dict[str, Any]]:
-    prompt = kwargs.get("prompt")
-    if prompt is None or prompt.shape[1] == 0:
-        return args, kwargs
-    updated_kwargs = dict(kwargs)
-    updated_kwargs["prompt"] = torch_module.cat(
-        (prompt, prompt[:, -1:, :]),
-        dim=1,
-    )
-    return args, updated_kwargs
-
-
-def _resolve_nemo_archive(
-    arguments: argparse.Namespace,
-    *,
-    model_label: str,
-) -> Path:
-    model_path = Path(arguments.model)
-    if model_path.is_file() and model_path.suffix == ".nemo":
-        return model_path
-    if model_path.is_dir():
-        archives = sorted(model_path.glob("*.nemo"))
-    else:
-        from huggingface_hub import snapshot_download
-
-        snapshot = Path(
-            snapshot_download(
-                repo_id=arguments.model,
-                allow_patterns=["*.nemo"],
-                local_files_only=arguments.local_files_only,
-                **(
-                    {"revision": arguments.model_revision}
-                    if arguments.model_revision
-                    else {}
-                ),
-            )
-        )
-        archives = sorted(snapshot.glob("*.nemo"))
-    if not archives:
-        raise FileNotFoundError(
-            f"{model_label} NeMo archive is missing for {arguments.model}"
-        )
-    return archives[0]
-
-
-def _resolve_nemotron35_archive(arguments: argparse.Namespace) -> Path:
-    return _resolve_nemo_archive(
-        arguments,
-        model_label="Nemotron 3.5 ASR",
-    )
-
-
-def _load_nemotron35_model(
-    arguments: argparse.Namespace,
-    archive: Path,
-) -> tuple[Any, Any]:
-    import torch
-    from nemo.collections.asr.models import (
-        EncDecHybridRNNTCTCBPEModelWithPrompt,
-    )
-    from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
-
-    class Nemotron35SaveRestoreConnector(SaveRestoreConnector):
-        def load_instance_with_state_dict(
-            self,
-            instance: Any,
-            state_dict: Mapping[str, Any],
-            strict: bool,
-        ) -> None:
-            del strict
-            incompatible = instance.load_state_dict(state_dict, strict=False)
-            missing = frozenset(incompatible.missing_keys)
-            unexpected = frozenset(incompatible.unexpected_keys)
-            allowed_missing = NEMOTRON35_OPTIONAL_CTC_STATE_KEYS
-            if missing not in (frozenset(), allowed_missing) or unexpected:
-                raise RuntimeError(
-                    "Nemotron 3.5 ASR archive state_dict mismatch: "
-                    f"missing={sorted(missing)}, "
-                    f"unexpected={sorted(unexpected)}"
-                )
-            instance._set_model_restore_state(is_being_restored=False)
-
-    device = torch.device(arguments.device)
-    model = EncDecHybridRNNTCTCBPEModelWithPrompt.restore_from(
-        str(archive),
-        map_location=device,
-        strict=False,
-        save_restore_connector=Nemotron35SaveRestoreConnector(),
-    )
-    model.eval()
-    if hasattr(model, "to"):
-        model.to(device)
-    return torch, model
-
-
-def _load_nemo_asr_model(arguments: argparse.Namespace, nemo_asr: Any) -> Any:
-    if arguments.local_files_only:
-        archive = _resolve_nemo_archive(
-            arguments,
-            model_label="ASR",
-        )
-        return nemo_asr.models.ASRModel.restore_from(
-            restore_path=str(archive),
-            map_location=arguments.device,
-        )
-    return nemo_asr.models.ASRModel.from_pretrained(
-        arguments.model,
-        map_location=arguments.device,
-    )
-
-
-def _run_nemo_asr(
-    arguments: argparse.Namespace,
-    prompts: Sequence[Mapping[str, Any]],
-    generation: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    if "nemotron-3.5-asr-streaming" in arguments.model.lower():
-        return _run_nemotron35_asr(arguments, prompts, generation)
-    target_rate = int(generation.get("sample_rate", 16000) or 16000)
-    output_dir = arguments.predictions.parent / "hf_canary_audio"
-    try:
-        import nemo.collections.asr as nemo_asr
-    except ImportError:
-        return _run_pipeline_asr(
-            arguments,
-            prompts,
-            target_rate,
-            output_dir,
-        )
-    model = _load_nemo_asr_model(arguments, nemo_asr)
-    if arguments.device != "cpu" and hasattr(model, "to"):
-        model = model.to(arguments.device)
-    model.eval()
-    responses = []
-    for prompt in prompts:
-        audio, _source = _audio_for_prompt(prompt, target_rate)
-        wav_path = output_dir / _safe_sample_filename(
-            str(prompt.get("sample_id", "")),
-            ".wav",
-        )
-        _write_wav_pcm16(wav_path, audio, target_rate)
-        started = time.perf_counter()
-        transcription = model.transcribe([str(wav_path)], batch_size=1)
-        responses.append(
-            _asr_row(
-                prompt,
-                _transcription_text(transcription),
-                (time.perf_counter() - started) * 1000.0,
-            )
-        )
-    del model
-    gc.collect()
-    return responses
-
-
-def _run_pipeline_asr(
-    arguments: argparse.Namespace,
-    prompts: Sequence[Mapping[str, Any]],
-    target_rate: int,
-    output_dir: Path,
-) -> list[dict[str, Any]]:
-    import torch
-    from transformers import pipeline
-
-    device = (
-        0
-        if arguments.device.startswith("cuda") and torch.cuda.is_available()
-        else -1
-    )
-    transcriber = pipeline(
-        "automatic-speech-recognition",
-        model=arguments.model,
-        torch_dtype=_model_dtype(torch, arguments.dtype),
-        device=device,
-        trust_remote_code=arguments.trust_remote_code,
-        model_kwargs={"local_files_only": True}
-        if arguments.local_files_only
-        else {},
-    )
-    responses = []
-    for prompt in prompts:
-        audio, _source = _audio_for_prompt(prompt, target_rate)
-        wav_path = output_dir / _safe_sample_filename(
-            str(prompt.get("sample_id", "")),
-            ".wav",
-        )
-        _write_wav_pcm16(wav_path, audio, target_rate)
-        started = time.perf_counter()
-        result = transcriber({"raw": audio, "sampling_rate": target_rate})
-        responses.append(
-            _asr_row(
-                prompt,
-                _transcription_text(result),
-                (time.perf_counter() - started) * 1000.0,
-            )
-        )
-    return responses
-
-
-def _resolve_magpie_archive(arguments: argparse.Namespace) -> Path:
-    model_path = Path(arguments.model)
-    if model_path.is_file() and model_path.suffix == ".nemo":
-        return model_path
-    if model_path.is_dir():
-        archives = sorted(model_path.glob("*.nemo"))
-        if not archives:
-            raise FileNotFoundError(
-                f"Magpie NeMo archive is missing under {arguments.model}"
-            )
-        return archives[0]
-
-    from huggingface_hub import hf_hub_download
-
-    download_kwargs = {
-        "repo_id": arguments.model,
-        "filename": "magpie_tts_multilingual_357m.nemo",
-        "local_files_only": arguments.local_files_only,
-    }
-    if arguments.model_revision:
-        download_kwargs["revision"] = arguments.model_revision
-    return Path(hf_hub_download(**download_kwargs))
-
-
-def _load_tts_runtime(arguments: argparse.Namespace, torch: Any) -> tuple[Any, Any]:
-    if "magpie" in arguments.model.lower():
-        import fsspec
-        from huggingface_hub import hf_hub_download
-        from nemo.collections.tts.models import MagpieTTSModel
-
-        speaker_checkpoint = hf_hub_download(
-            repo_id=MAGPIE_SPEAKER_ENCODER_REPO,
-            filename=MAGPIE_SPEAKER_ENCODER_FILENAME,
-            local_files_only=arguments.local_files_only,
-        )
-        original_fsspec_open = fsspec.open
-
-        def offline_fsspec_open(path: Any, *args: Any, **kwargs: Any) -> Any:
-            normalized = str(path).split("?", 1)[0]
-            if normalized == MAGPIE_SPEAKER_ENCODER_URL:
-                path = speaker_checkpoint
-            return original_fsspec_open(path, *args, **kwargs)
-
-        fsspec.open = offline_fsspec_open
-        model = MagpieTTSModel.restore_from(
-            restore_path=str(_resolve_magpie_archive(arguments))
-        )
-        return None, model.eval().to(torch.device(arguments.device))
-    from transformers import AutoProcessor, BarkModel, logging
-
-    logging.set_verbosity_error()
-    load_kwargs = {
-        "trust_remote_code": arguments.trust_remote_code,
-        "local_files_only": arguments.local_files_only,
-    }
-    if arguments.model_revision:
-        load_kwargs["revision"] = arguments.model_revision
-    processor = AutoProcessor.from_pretrained(arguments.model, **load_kwargs)
-    model = BarkModel.from_pretrained(
-        arguments.model,
-        torch_dtype=_model_dtype(torch, arguments.dtype),
-        **load_kwargs,
-    )
-    return processor, model.eval().to(torch.device(arguments.device))
-
-
-def _generate_tts_audio(
-    model: Any,
-    processor: Any,
-    prompt: Mapping[str, Any],
-    device: Any,
-) -> tuple[Any, int]:
-    if processor is None:
-        audio_tensor, audio_length = model.do_tts(
-            transcript=str(prompt.get("prompt", "")),
-            language=str(prompt.get("language", "en") or "en"),
-            use_cfg=True,
-        )
-        audio = audio_tensor.detach().cpu().numpy().reshape(-1)
-        length = int(audio_length.item()) if audio_length.numel() else len(audio)
-        return audio[:length], 22050
-    inputs = _to_device(
-        processor(str(prompt.get("prompt", "")), return_tensors="pt"),
-        device,
-    )
-    audio = model.generate(**inputs).detach().cpu().numpy().reshape(-1)
-    return audio, int(model.generation_config.sample_rate)
-
 
 def _transcribe_tts(
     arguments: argparse.Namespace,
@@ -762,72 +377,6 @@ def _transcribe_tts(
         outputs = [outputs]
     return [_transcription_text(output).strip() for output in outputs]
 
-
-def _run_tts(
-    arguments: argparse.Namespace,
-    prompts: Sequence[Mapping[str, Any]],
-    manifest: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    import numpy as np
-    import torch
-
-    generation = _generation(manifest)
-    seed = arguments.seed
-    if seed is None:
-        seed = int(generation.get("seed", 42))
-    device = torch.device(arguments.device)
-    processor, model = _load_tts_runtime(arguments, torch)
-    output_dir = arguments.predictions.parent / "hf_audio"
-    responses = []
-    for prompt in prompts:
-        eval_index = int(prompt.get("eval_index", 0))
-        sample_seed = seed + eval_index
-        random.seed(sample_seed)
-        np.random.seed(sample_seed)
-        torch.manual_seed(sample_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(sample_seed)
-        started = time.perf_counter()
-        with torch.inference_mode():
-            audio, sample_rate = _generate_tts_audio(
-                model,
-                processor,
-                prompt,
-                device,
-            )
-        wav_path = output_dir / _safe_sample_filename(
-            str(prompt.get("sample_id", "")),
-            ".wav",
-        )
-        _write_wav_pcm16(wav_path, audio, sample_rate)
-        metrics = _wav_metrics(wav_path)
-        responses.append(
-            {
-                "sample_id": str(prompt.get("sample_id", "")),
-                "output_text": "",
-                "wav_path": str(wav_path),
-                "wav_exists": True,
-                "rms": metrics["rms"],
-                "duration_s": metrics["duration_s"],
-                "sample_rate": metrics["sample_rate"],
-                "wall_ms": (time.perf_counter() - started) * 1000.0,
-                "source": "hf",
-            }
-        )
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    scoring = _scoring(manifest)
-    transcripts = _transcribe_tts(
-        arguments,
-        [Path(row["wav_path"]) for row in responses],
-        str(scoring.get("asr_model", "openai/whisper-large-v3-turbo")),
-    )
-    for row, transcript in zip(responses, transcripts, strict=True):
-        row["output_text"] = transcript
-        row["asr_transcript"] = transcript
-    return responses
 
 
 def _reproduction_command(arguments: argparse.Namespace) -> list[str]:
@@ -902,14 +451,15 @@ def run(arguments: argparse.Namespace) -> None:
         arguments.sample_id,
     )
     dataset_kind = str(manifest.get("dataset_kind", ""))
-    if dataset_kind == "seedtts_json":
-        responses = _run_tts(arguments, prompts, manifest)
+    owner_runner = load_model_entrypoint(arguments.family, "reference_entrypoint")
+    if owner_runner is not None:
+        responses = owner_runner(arguments, manifest, prompts)
     elif dataset_kind == "asr_chat_json":
-        generation = _generation(manifest)
-        if _is_nemo_asr(arguments):
-            responses = _run_nemo_asr(arguments, prompts, generation)
-        else:
-            responses = _run_whisper_asr(arguments, prompts, generation)
+        responses = _run_whisper_asr(arguments, prompts, _generation(manifest))
+    elif dataset_kind == "seedtts_json":
+        raise ValueError(
+            f"model owner {arguments.family!r} does not declare a TTS reference entrypoint"
+        )
     else:
         raise ValueError(f"unsupported speech dataset kind: {dataset_kind!r}")
     _write_predictions(arguments, responses)

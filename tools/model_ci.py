@@ -4,12 +4,10 @@
 
 """Exact model ownership, impact, and positive source projection for CI.
 
-The directory name below a ``MODEL.toml`` ownership root is its physical owner.
-E2E ``runtime_strategy`` metadata normalizes the rare logical/runtime name
-split into one independently testable module. Impact analysis selects only
-modules touched by a diff. A model projection starts empty and materializes
-tracked Git blobs for one module plus an explicit platform allowlist; sibling
-model files are never copied.
+Each directory below the single ``models`` root owns its builder, runtime, and
+tests. Impact analysis selects only modules touched by a diff. A projection
+starts empty and materializes tracked Git blobs for one owner plus an explicit
+platform allowlist; sibling model files are never copied.
 """
 
 from __future__ import annotations
@@ -28,16 +26,12 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
 
 
-MODEL_ROOTS = (
-    "python/tensorrt_model_connect/families",
-    "src/runtime/models",
-    "tests/e2e/models",
-    "tests/cpp/models",
-)
+MODEL_ROOT = "python/tensorrt_model_connect/models"
+MODEL_ROOTS = (MODEL_ROOT,)
 
 MODEL_ROOT_PLATFORM_FILES = frozenset(
     {
-        "python/tensorrt_model_connect/families/__init__.py",
+        f"{MODEL_ROOT}/__init__.py",
     }
 )
 
@@ -73,7 +67,6 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tests/builder/conftest.py",
         "tests/builder/debug_runner_test_support.py",
         "tests/e2e_partition.py",
-        "tests/runtime_strategy_matrix.yaml",
         "tests/validation/workloads.yaml",
         "tests/test_e2e.py",
         "tests/test_e2e_selection.py",
@@ -235,12 +228,6 @@ PLATFORM_PREFIXES = (
     "third_party/",
 )
 
-# Broad platform changes still use a representative fallback matrix, but some
-# shared surfaces have known model consumers whose owned contracts must always
-# run. Keep this list narrow and evidence-based so a tokenizer change cannot be
-# certified only by unrelated fallback models.
-PLATFORM_CONSUMERS_BY_PREFIX = (("src/tokenizer/", frozenset({"flux", "sam3"})),)
-
 CI_OR_TOOLING_PREFIXES = (
     ".agents/",
     ".ci/",
@@ -279,7 +266,7 @@ class OwnershipCatalog:
     owners_by_root: dict[str, dict[str, str]]
     runtime_models: dict[str, tuple[str, ...]]
     e2e_families: dict[str, tuple[str, ...]]
-    legacy_shared_runtime: tuple[str, ...]
+    platform_consumers: dict[str, tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -345,7 +332,7 @@ def _toml_strings(text: str, key: str) -> tuple[str, ...]:
 
 
 def _manifest_location(path: str) -> tuple[str, str] | None:
-    for root in MODEL_ROOTS[:-1]:
+    for root in MODEL_ROOTS:
         prefix = f"{root}/"
         if not path.startswith(prefix):
             continue
@@ -401,8 +388,6 @@ def _required_gpu_count(payload: dict[str, object], path: str) -> int:
 def _validate_e2e_manifest_device_tiers(
     payload: dict[str, object],
     path: str,
-    *,
-    allow_legacy_tier: bool = False,
 ) -> None:
     defaults = {key: value for key, value in payload.items() if key != "testcases"}
     testcases = payload.get("testcases")
@@ -417,11 +402,7 @@ def _validate_e2e_manifest_device_tiers(
         effective_cases = [defaults]
     for testcase in effective_cases:
         required = _required_gpu_count(testcase, path)
-        if (
-            required > 1
-            and testcase.get("ci_tier") != "multi_device"
-            and not allow_legacy_tier
-        ):
+        if required > 1 and testcase.get("ci_tier") != "multi_device":
             name = testcase.get("name", payload.get("name", "<unnamed>"))
             raise ModelCIError(
                 f"E2E testcase {name!r} requires {required} GPUs but is not "
@@ -432,16 +413,12 @@ def _validate_e2e_manifest_device_tiers(
 def discover_catalog(
     repo_root: Path,
     revision: str,
-    *,
-    allow_legacy_shared_runtime: bool = False,
-    allow_legacy_device_tier: bool = False,
 ) -> OwnershipCatalog:
     """Discover model IDs from MODEL.toml blobs at one Git revision."""
     _validate_model_roots()
     resolved = _resolve_revision(repo_root, revision)
     entries = _read_tree(repo_root, resolved)
-    manifest_roots_by_physical: dict[str, list[str]] = {}
-    manifest_text: dict[tuple[str, str], str] = {}
+    manifests: dict[str, str] = {}
     seen_locations: set[tuple[str, str]] = set()
     for entry in entries:
         location = _manifest_location(entry.path)
@@ -468,40 +445,47 @@ def discover_catalog(
         if location in seen_locations:
             raise ModelCIError(f"duplicate model ownership manifest: {entry.path}")
         seen_locations.add(location)
-        manifest_roots_by_physical.setdefault(declared_id, []).append(root)
-        manifest_text[(root, declared_id)] = text
-    if not manifest_roots_by_physical:
+        manifests[declared_id] = text
+    if not manifests:
         raise ModelCIError(f"no MODEL.toml ownership manifests found at {resolved}")
 
-    runtime_root = "src/runtime/models"
-    e2e_root = "tests/e2e/models"
-    runtime_ids = {
-        model for model, roots in manifest_roots_by_physical.items() if runtime_root in roots
-    }
-    e2e_ids = {model for model, roots in manifest_roots_by_physical.items() if e2e_root in roots}
     strategy_owner: dict[str, str] = {}
-    for runtime_id in sorted(runtime_ids):
-        text = manifest_text[(runtime_root, runtime_id)]
+    platform_consumers: dict[str, set[str]] = {}
+    for model, text in sorted(manifests.items()):
         strategies = _toml_strings(text, "runtime_strategies") or _toml_strings(
             text, "runtime_strategy"
         )
+        if not strategies:
+            raise ModelCIError(f"model {model!r} declares no runtime strategy")
         for strategy in strategies:
             previous = strategy_owner.get(strategy)
-            if previous is not None and previous != runtime_id:
+            if previous is not None and previous != model:
                 raise ModelCIError(
-                    f"runtime strategy {strategy!r} is owned by both {previous!r} "
-                    f"and {runtime_id!r}"
+                    f"runtime strategy {strategy!r} is owned by both {previous!r} and {model!r}"
                 )
-            strategy_owner[strategy] = runtime_id
+            strategy_owner[strategy] = model
+        for prefix in _toml_strings(text, "ci_platform_prefixes"):
+            pure = PurePosixPath(prefix)
+            if (
+                not prefix.endswith("/")
+                or pure.is_absolute()
+                or pure.as_posix() != prefix.rstrip("/")
+                or any(part in {"", ".", ".."} for part in pure.parts)
+                or prefix.startswith(f"{MODEL_ROOT}/")
+            ):
+                raise ModelCIError(
+                    f"model {model!r} declares unsafe ci_platform_prefix {prefix!r}"
+                )
+            platform_consumers.setdefault(prefix, set()).add(model)
 
-    e2e_runtime_candidates: dict[str, set[str]] = {model: set() for model in e2e_ids}
-    e2e_prefix = f"{e2e_root}/"
+    model_prefix = f"{MODEL_ROOT}/"
+    manifest_counts = {model: 0 for model in manifests}
     for entry in entries:
-        if not entry.path.startswith(e2e_prefix) or "/manifests/" not in entry.path:
+        if not entry.path.startswith(model_prefix) or "/tests/manifests/" not in entry.path:
             continue
-        relative = entry.path[len(e2e_prefix) :]
-        family = relative.split("/", 1)[0]
-        if family not in e2e_ids or not entry.path.endswith(".json"):
+        relative = entry.path[len(model_prefix) :]
+        model = relative.split("/", 1)[0]
+        if model not in manifests or not entry.path.endswith(".json"):
             continue
         try:
             payload = json.loads(_read_blob(repo_root, entry.object_id))
@@ -509,101 +493,54 @@ def discover_catalog(
             raise ModelCIError(f"invalid E2E manifest JSON: {entry.path}") from exc
         if not isinstance(payload, dict):
             raise ModelCIError(f"E2E manifest must contain an object: {entry.path}")
-        _validate_e2e_manifest_device_tiers(
-            payload,
-            entry.path,
-            allow_legacy_tier=allow_legacy_device_tier,
-        )
+        _validate_e2e_manifest_device_tiers(payload, entry.path)
         strategy = payload.get("runtime_strategy")
-        if strategy is None:
-            continue
-        runtime_id = strategy_owner.get(str(strategy))
-        if runtime_id is None:
+        owner = strategy_owner.get(str(strategy)) if strategy is not None else None
+        if owner is None:
             raise ModelCIError(
                 f"E2E manifest uses unowned runtime strategy {strategy!r}: {entry.path}"
             )
-        e2e_runtime_candidates[family].add(runtime_id)
-
-    e2e_to_runtime: dict[str, str] = {}
-    for family in sorted(e2e_ids):
-        candidates = e2e_runtime_candidates[family]
-        if family in runtime_ids:
-            candidates.add(family)
-        if len(candidates) > 1:
+        if owner != model:
             raise ModelCIError(
-                f"E2E family {family!r} depends on multiple runtime models: {sorted(candidates)}"
+                f"model {model!r} uses runtime strategy {strategy!r} owned by {owner!r}: "
+                f"{entry.path}"
             )
-        if candidates:
-            e2e_to_runtime[family] = next(iter(candidates))
+        declared_family = payload.get("family")
+        if declared_family not in (None, model):
+            raise ModelCIError(
+                f"E2E manifest family {declared_family!r} does not match owner {model!r}: "
+                f"{entry.path}"
+            )
+        manifest_counts[model] += 1
 
-    runtime_to_logical: dict[str, str] = {}
-    legacy_shared_runtime: set[str] = set()
-    for runtime_id in sorted(runtime_ids):
-        logical_owners = sorted(
-            family for family, candidate in e2e_to_runtime.items() if candidate == runtime_id
+    missing_manifests = sorted(model for model, count in manifest_counts.items() if count == 0)
+    if missing_manifests:
+        raise ModelCIError(f"model owners have no E2E manifests: {missing_manifests}")
+
+    paths = {entry.path for entry in entries}
+    for model in sorted(manifests):
+        required = (
+            f"{MODEL_ROOT}/{model}/model.py",
+            f"{MODEL_ROOT}/{model}/runtime/plugin.cpp",
         )
-        if len(logical_owners) > 1:
-            if not allow_legacy_shared_runtime:
-                raise ModelCIError(
-                    f"runtime model {runtime_id!r} is shared by multiple model modules: "
-                    f"{logical_owners}"
-                )
-            # Old merge bases can predate the one-runtime-owner invariant. Keep
-            # their shared runtime root as a conservative platform-like owner;
-            # a change to it fans out below because it is absent from the head
-            # catalog's logical modules.
-            runtime_to_logical[runtime_id] = runtime_id
-            legacy_shared_runtime.add(runtime_id)
-        else:
-            runtime_to_logical[runtime_id] = logical_owners[0] if logical_owners else runtime_id
+        missing = [path for path in required if path not in paths]
+        if missing:
+            raise ModelCIError(f"model {model!r} is missing owned source: {missing}")
 
-    owners_by_root: dict[str, dict[str, str]] = {root: {} for root in MODEL_ROOTS}
-    for physical_id, roots in manifest_roots_by_physical.items():
-        for root in roots:
-            if root == runtime_root:
-                logical = runtime_to_logical[physical_id]
-            else:
-                logical = physical_id
-            owners_by_root[root][physical_id] = logical
-
-    cpp_root = "tests/cpp/models"
-    cpp_prefix = f"{cpp_root}/"
-    cpp_children = {
-        entry.path[len(cpp_prefix) :].split("/", 1)[0]
-        for entry in entries
-        if entry.path.startswith(cpp_prefix) and "/" in entry.path[len(cpp_prefix) :]
-    }
-    logical_ids = set(e2e_ids) | set(manifest_roots_by_physical)
-    for child in cpp_children:
-        if child in runtime_to_logical:
-            owners_by_root[cpp_root][child] = runtime_to_logical[child]
-        elif child in logical_ids:
-            owners_by_root[cpp_root][child] = child
-
-    models = sorted(logical for owners in owners_by_root.values() for logical in owners.values())
-    models = sorted(set(models) - legacy_shared_runtime)
-    manifests: dict[str, list[str]] = {model: [] for model in models}
-    for root, owners in owners_by_root.items():
-        for physical, logical in owners.items():
-            if logical not in manifests:
-                continue
-            prefix = f"{root}/{physical}/"
-            if any(entry.path.startswith(prefix) for entry in entries):
-                manifests[logical].append(f"{root}/{physical}")
-    runtime_models: dict[str, tuple[str, ...]] = {}
-    for runtime_id, logical in runtime_to_logical.items():
-        runtime_models.setdefault(logical, ())
-        runtime_models[logical] = tuple(sorted({*runtime_models[logical], runtime_id}))
-    e2e_families = {model: (model,) for model in sorted(e2e_ids) if model in models}
+    models = tuple(sorted(manifests))
+    owners_by_root = {MODEL_ROOT: {model: model for model in models}}
     return OwnershipCatalog(
         resolved,
         entries,
-        tuple(models),
-        {model: tuple(sorted(roots)) for model, roots in manifests.items()},
+        models,
+        {model: (f"{MODEL_ROOT}/{model}",) for model in models},
         owners_by_root,
-        runtime_models,
-        e2e_families,
-        tuple(sorted(legacy_shared_runtime)),
+        {model: (model,) for model in models},
+        {model: (model,) for model in models},
+        {
+            prefix: tuple(sorted(consumers))
+            for prefix, consumers in sorted(platform_consumers.items())
+        },
     )
 
 
@@ -649,11 +586,10 @@ def _merge_unit_scope(current: str, requested: str) -> str:
 
 
 def _platform_consumers(path: str, catalog: OwnershipCatalog) -> tuple[str, ...]:
-    known_models = set(catalog.models)
     consumers: set[str] = set()
-    for prefix, models in PLATFORM_CONSUMERS_BY_PREFIX:
+    for prefix, models in catalog.platform_consumers.items():
         if path.startswith(prefix):
-            consumers.update(models & known_models)
+            consumers.update(models)
     return tuple(sorted(consumers))
 
 
@@ -762,8 +698,7 @@ def _is_validation_optional_extra_only_change(
         if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
     ]
     return bool(changed_lines) and all(
-        _VALIDATION_OPTIONAL_EXTRA_RE.fullmatch(line) is not None
-        for line in changed_lines
+        _VALIDATION_OPTIONAL_EXTRA_RE.fullmatch(line) is not None for line in changed_lines
     )
 
 
@@ -855,7 +790,7 @@ def _scheduled_models(
     for model in selected_models:
         cases: list[dict[str, object]] = []
         for family in catalog.e2e_families.get(model, ()):
-            prefix = f"tests/e2e/models/{family}/manifests/"
+            prefix = f"{MODEL_ROOT}/{family}/tests/manifests/"
             for entry in catalog.entries:
                 if not entry.path.startswith(prefix) or not entry.path.endswith(".json"):
                     continue
@@ -893,14 +828,10 @@ def _scheduled_models(
         production_cases = [case for case in cases if case["tier"] != "l0_only"]
         nightly_cases = production_cases or cases
         if not nightly_cases and exclusive_gpu_first:
-            raise ModelCIError(
-                f"model {model!r} has no active single-GPU nightly E2E case"
-            )
+            raise ModelCIError(f"model {model!r} has no active single-GPU nightly E2E case")
         expected_cases = sorted(str(case["name"]) for case in nightly_cases)
         if len(expected_cases) != len(set(expected_cases)):
-            raise ModelCIError(
-                f"model {model!r} has duplicate active nightly E2E case names"
-            )
+            raise ModelCIError(f"model {model!r} has duplicate active nightly E2E case names")
         expected_cases_by_model[model] = expected_cases
         exclusive_gpu[model] = any(
             case["resource_class"] == "exclusive_gpu" for case in nightly_cases
@@ -933,9 +864,7 @@ def _scheduled_models(
         )
         selected_estimate = candidates[0]["estimated_seconds"] if candidates else None
         estimates[model] = (
-            float(selected_estimate)
-            if isinstance(selected_estimate, (int, float))
-            else None
+            float(selected_estimate) if isinstance(selected_estimate, (int, float)) else None
         )
 
     return (
@@ -948,10 +877,7 @@ def _scheduled_models(
                 model,
             ),
         ),
-        {
-            model: expected_cases_by_model[model]
-            for model in sorted(expected_cases_by_model)
-        },
+        {model: expected_cases_by_model[model] for model in sorted(expected_cases_by_model)},
     )
 
 
@@ -971,13 +897,7 @@ def calculate_impact(
         ).strip()
     except ModelCIError:
         comparison_base = base_sha
-    base_catalog = discover_catalog(
-        repo_root,
-        comparison_base,
-        allow_legacy_shared_runtime=True,
-        allow_legacy_device_tier=True,
-    )
-    head_catalog = discover_catalog(repo_root, head, allow_legacy_shared_runtime=True)
+    head_catalog = discover_catalog(repo_root, head)
     affected: set[str] = set()
     fallback_selected: set[str] = set()
     broad_change = False
@@ -990,16 +910,21 @@ def calculate_impact(
     serialized_changes: list[dict[str, object]] = []
     for change in _diff_entries(repo_root, comparison_base, head_sha):
         classifications: list[dict[str, object]] = []
-        path_catalogs = (
-            (change.old_path, base_catalog),
-            (change.new_path, head_catalog),
-        )
-        seen_path_revision: set[tuple[str, str]] = set()
-        for path, catalog in path_catalogs:
-            if path is None or (path, catalog.revision) in seen_path_revision:
+        paths = (change.old_path, change.new_path)
+        seen_paths: set[str] = set()
+        for path in paths:
+            if path is None or path in seen_paths:
                 continue
-            seen_path_revision.add((path, catalog.revision))
-            kind, owner = _classify_path(path, catalog)
+            seen_paths.add(path)
+            try:
+                kind, owner = _classify_path(path, head_catalog)
+            except ModelCIError:
+                if path != change.old_path or not path.startswith(f"{MODEL_ROOT}/"):
+                    raise
+                # A removed owner is absent from the head catalog by definition.
+                # Treat its deleted files as a broad change without interpreting
+                # an obsolete ownership layout.
+                kind, owner = "platform", None
             if path == "pyproject.toml" and pyproject_validation_only:
                 kind = "unit_tests"
             item = {"path": path, "kind": kind}
@@ -1030,11 +955,7 @@ def calculate_impact(
             }
         )
     direct_affected = set(affected)
-    if (
-        affected - set(head_catalog.models)
-        or affected.intersection(base_catalog.legacy_shared_runtime)
-        or affected.intersection(head_catalog.legacy_shared_runtime)
-    ):
+    if affected - set(head_catalog.models):
         broad_change = True
     if broad_change:
         affected.intersection_update(head_catalog.models)
@@ -1062,8 +983,7 @@ def calculate_impact(
             mode = "fallback"
         else:
             raise ModelCIError(
-                "platform or CI/tooling change requires --platform-change-policy "
-                "fallback or all"
+                "platform or CI/tooling change requires --platform-change-policy fallback or all"
             )
     elif affected:
         mode = "models"
@@ -1082,7 +1002,7 @@ def calculate_impact(
         run_unit_tests=unit_scope != "none" or broad_change,
         unit_scope="all" if broad_change else unit_scope,
     )
-    result["base_revision"] = base_catalog.revision
+    result["base_revision"] = comparison_base
     result["head_revision"] = head_catalog.revision
     return result
 
@@ -1201,7 +1121,7 @@ def create_projection(
                 excluded_model_files += 1
             continue
         if under_model_root:
-            # Legacy/unregistered model-root content is unavailable too.
+            # Unregistered model-root content is unavailable too.
             excluded_model_files += 1
             continue
         if _is_platform_projection_path(entry.path):

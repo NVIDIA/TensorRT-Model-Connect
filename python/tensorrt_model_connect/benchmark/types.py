@@ -80,7 +80,7 @@ class ModelDescriptor:
             "task_strategy": self.task_strategy,
             "runtime_strategy": self.runtime_strategy,
             "precision": self.precision,
-            "manifest": f"{self.family}/manifests/{self.manifest_path.name}",
+            "manifest": f"{self.family}/tests/manifests/{self.manifest_path.name}",
             "manifest_sha256": manifest_sha256,
             "bundle_name": self.bundle_name,
             "build": dict(self.build_settings),

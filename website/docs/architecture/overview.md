@@ -28,7 +28,7 @@ checkpoint, engine, bundle, DSO, prefill, or KV cache are new to you.
 
 The diagram shows two artifact shapes, not two user-selected public APIs.
 `trtmc build` and the Python `build()` function resolve the model family,
-import `families/<id>/model.py`, and call `model.build()` exactly once. That
+import `models/<id>/model.py`, and call `model.build()` exactly once. That
 family module owns the complete native recipe and any exact optimized-profile
 selection. Shared code does not retry another builder.
 
@@ -96,7 +96,8 @@ parity from the existence of a family package alone.
 | --- | --- |
 | Build CLI | `python/tensorrt_model_connect/build_cli.py` |
 | Public Python build API | `python/tensorrt_model_connect/engine_builder.py` |
-| Family discovery | `python/tensorrt_model_connect/families/__init__.py` |
+| Model discovery | `python/tensorrt_model_connect/models/__init__.py` |
+| Per-model vertical owner | `python/tensorrt_model_connect/models/<owner>/MODEL.toml`, `model.py`, `runtime/`, and `tests/` |
 | Optimized selection and packaging | `python/tensorrt_model_connect/runtime_provider/` |
 | Bundle writer and reader | `python/tensorrt_model_connect/bundle_writer.py`, `src/bundle/` |
 | Public task API | `include/trtmc/pipeline.h` |

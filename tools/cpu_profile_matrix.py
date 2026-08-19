@@ -63,10 +63,7 @@ class StrategySpec(NamedTuple):
 
 def _family_handler_paths(filename: str) -> list[Path]:
     repo_root = Path(__file__).resolve().parents[1]
-    roots = (
-        Path(__file__).resolve().parent / "families",
-        repo_root / "python/tensorrt_model_connect/families",
-    )
+    roots = (repo_root / "python/tensorrt_model_connect/models",)
     handlers: dict[str, Path] = {}
     for root in reversed(roots):
         handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})

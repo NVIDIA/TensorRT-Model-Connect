@@ -9,7 +9,7 @@ Each contract test plugin handles one or more reference families and defines:
 3. How to verify the user-facing contract (exact text, ranking, mask overlap, etc.).
 
 Plugins are auto-discovered from this directory by __init__.py, following the
-same pattern as builder family plugins in python/tensorrt_model_connect/families/.
+same pattern as builder family plugins in python/tensorrt_model_connect/models/.
 
 Concrete contract behavior belongs in model-owned ``e2e_plugins/contract.py``
 files. This shared module only carries the structural protocol used by the

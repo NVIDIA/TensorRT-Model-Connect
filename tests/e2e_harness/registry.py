@@ -232,7 +232,8 @@ def discover_plugins() -> None:
 def activate_model_plugins(model_dir: str | Path | None) -> None:
     """Reset registry state and register plugins from one model folder.
 
-    Model-owned plugins live in ``tests/e2e/models/<family>/e2e_plugins/*.py``.
+    Model-owned plugins live in
+    ``tensorrt_model_connect.models.<family>.tests.e2e_plugins``.
     Each module may expose ``runner``, ``reference``, ``comparator``, or
     ``plugin`` objects implementing the E2E protocol contracts.
     """
@@ -247,8 +248,8 @@ def activate_model_plugins(model_dir: str | Path | None) -> None:
         _discovered = True
         return
 
-    family = re.sub(r"[^0-9A-Za-z_]+", "_", Path(model_dir).name)
-    package_prefix = f"tests.e2e.models.{family}.e2e_plugins"
+    family = re.sub(r"[^0-9A-Za-z_]+", "_", Path(model_dir).parent.name)
+    package_prefix = f"tensorrt_model_connect.models.{family}.tests.e2e_plugins"
     _discovered = True
     for plugin_path in sorted(plugin_dir.glob("*.py")):
         if plugin_path.name.startswith("_"):

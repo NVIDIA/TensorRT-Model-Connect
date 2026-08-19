@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: gpt_neo.generate
+  operation: generate
+  model: gpt-neo-125m
+  workload:
+    testcase: gpt-neo-125m
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward

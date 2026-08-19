@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-FAMILIES_DIR = ROOT / "python" / "tensorrt_model_connect" / "families"
+FAMILIES_DIR = ROOT / "python" / "tensorrt_model_connect" / "models"
 BUILDERS_DIR = ROOT / "python" / "tensorrt_model_connect" / "builders"
 
 REMOVED_SHARED_BUILDER_MODULES = (
@@ -102,7 +102,7 @@ def test_shared_builder_modules_are_removed() -> None:
 
 
 def test_family_standard_decoder_builders_honor_split_roles() -> None:
-    """Family builders can be tiny local shims or owned implementations."""
+    """Every remaining standard decoder file owns its implementation."""
     missing: list[str] = []
     for path in _family_files("standard_decoder_builder.py"):
         text = _builder_contract_text(path, local_module="default_decoder")

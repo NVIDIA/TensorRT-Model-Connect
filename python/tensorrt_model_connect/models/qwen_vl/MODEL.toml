@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "qwen_vl"
+capabilities = [
+  "debug_layer_outputs",
+]
+aliases = [
+  "qwen2_5_vl",
+  "qwen2_vl",
+  "qwen3_vl",
+  "qwen_vl",
+  "qwenvl",
+]
+prefixes = [
+  "qwen_vl",
+]
+debug_runner = "vl_debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "qwen_vl_vision_language",
+]
+diff_framework_check_classes = [
+  "VLPipelineTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_qwen_vl_plugin",
+]
+runtime_strategies = [
+  "qwen_vl_vision_language",
+]
+test_manifests = [
+  "tests/manifests/qwen25vl-3b-tp2.json",
+  "tests/manifests/qwen25vl-3b.json",
+  "tests/manifests/qwen3-vl-2b-tp4.json",
+  "tests/manifests/qwen3-vl-2b.json",
+]
+
+[e2e_defaults.vision_language_generation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vision_encode", required = true },
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

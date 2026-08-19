@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: falcon.generate
+  operation: generate
+  model: falcon-rw-1b
+  workload:
+    testcase: falcon-rw-1b
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward

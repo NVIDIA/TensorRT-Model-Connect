@@ -39,11 +39,11 @@ def bert_model(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
     monkeypatch.setattr(trt_compat, "_module", fake_trt)
     for module_name in tuple(sys.modules):
-        if module_name == "tensorrt_model_connect.families.bert" or module_name.startswith(
-            "tensorrt_model_connect.families.bert."
+        if module_name == "tensorrt_model_connect.models.bert" or module_name.startswith(
+            "tensorrt_model_connect.models.bert."
         ):
             sys.modules.pop(module_name, None)
-    return importlib.import_module("tensorrt_model_connect.families.bert.model")
+    return importlib.import_module("tensorrt_model_connect.models.bert.model")
 
 
 def _config() -> types.SimpleNamespace:

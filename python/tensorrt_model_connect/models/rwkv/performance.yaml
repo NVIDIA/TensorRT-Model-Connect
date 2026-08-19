@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: rwkv.generate
+  operation: generate
+  model: rwkv-169m
+  workload:
+    testcase: rwkv-169m
+  baseline:
+    runner: hf-transformers
+    mode: hf-eager

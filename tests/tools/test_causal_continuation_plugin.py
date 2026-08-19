@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from tests.e2e.models.bart.e2e_plugins.contract import BartCausalContinuationPlugin
+from tensorrt_model_connect.models.bart.tests.e2e_plugins.contract import BartCausalContinuationPlugin
 from tests.e2e_harness.contracts import E2ECase, StageOutput, StageStatus, ThresholdProfile
 
 

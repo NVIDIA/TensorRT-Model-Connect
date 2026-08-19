@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "mamba"
+capabilities = [
+  "disable_dual_profile_decoder",
+]
+aliases = [
+  "mamba",
+]
+prefixes = [
+  "mamba",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "mamba_ssm_recurrent",
+]
+diff_framework_check_classes = [
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_mamba_plugin",
+]
+runtime_strategies = [
+  "mamba_ssm_recurrent",
+]
+test_manifests = [
+  "tests/manifests/mamba-130m-tp4.json",
+  "tests/manifests/mamba-130m.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "mamba_ssm_recurrent",
+]
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sam3"
+ci_platform_prefixes = ["src/tokenizer/"]
+aliases = [
+  "sam3",
+  "sam3-video",
+  "sam3_video",
+]
+prefixes = [
+  "sam3",
+]
+runtime_plugins = [
+  "plugin.cpp|register_sam3_plugin",
+]
+runtime_strategies = [
+  "sam3_prompted_segmentation",
+]
+test_manifests = [
+  "tests/manifests/sam3.json",
+]
+
+[e2e_defaults.prompted_segmentation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+  { input = "point_x", manifest = "point_x" },
+  { input = "point_y", manifest = "point_y" },
+  { input = "num_expected_masks", manifest = "num_expected_masks" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

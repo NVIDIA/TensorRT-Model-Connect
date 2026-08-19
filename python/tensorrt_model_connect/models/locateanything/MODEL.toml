@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "locateanything"
+reference_entrypoint = "tools/reference.py|run"
+aliases = [
+  "locateanything",
+]
+prefixes = [
+  "locateanything",
+]
+diff_framework_check_classes = [
+  "VLPipelineTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_locateanything_plugin",
+]
+runtime_strategies = [
+  "locateanything_vision_language",
+]
+test_manifests = [
+  "tests/manifests/locateanything-3b.json",
+]
+
+[e2e_defaults.vision_language_generation]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vision_encode", required = true },
+  { name = "full_generation", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

@@ -5,7 +5,7 @@ title: Runtime Strategies
 This page describes native runtime strategies. A runtime strategy is the
 model-owned C++ dispatch key stored in a native bundle's `config.json`. Each
 key belongs to exactly one
-`src/runtime/models/<owner>/MODEL.toml` and resolves to that owner's
+`python/tensorrt_model_connect/models/<owner>/MODEL.toml` and resolves to that owner's
 `libtrtmc_model_<owner>.so`.
 
 Optimized-runtime bundles are intentionally outside this inventory. They carry
@@ -27,8 +27,15 @@ selects that path before reading a native strategy.
 | Numeric operators | `chronos_bolt_trt`, `patchtsmixer_trt`, `patchtst_trt`, `timesfm_trt` |
 
 The complete live list is the union of the `runtime_strategies` arrays in the
-runtime model manifests. At this revision it contains 81 unique keys for 80
-runtime owners.
+unified owner descriptors. At this revision it contains 83 unique keys for 82
+model owners.
+
+There is no central runtime-strategy matrix. Each owner's declared JSON
+manifests bind its native strategy to exactly one `task_strategy`; shared task
+defaults provide generic CLI/performance behavior, while a genuine owner
+exception such as seq2seq performance mode stays in that owner's root
+descriptor. The checker fails on duplicate owners, cross-owner manifests,
+missing runner/comparator plugins, or unknown local diff checks.
 
 ## Runtime strategy versus task strategy
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from tests.e2e_harness.contracts import E2ECase, StageOutput, ThresholdProfile
-from tests.e2e.models.qwen.e2e_plugins.contract import QwenSamplingPlugin
+from tensorrt_model_connect.models.qwen.tests.e2e_plugins.contract import QwenSamplingPlugin
 
 
 plugin = QwenSamplingPlugin()

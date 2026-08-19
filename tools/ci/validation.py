@@ -11,26 +11,27 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from tools.validation import catalog as validation_catalog
+
 from .context import CiContext
 from .process import CiError
 
 
 class ValidationPolicy:
-    """Map runtime plugins to the reviewed nightly validation model IDs."""
-
-    MODELS = {
-        "chronos_bolt": ("chronos-bolt-tiny-official",),
-        "patchtsmixer": ("patchtsmixer-granite-official",),
-        "patchtst": (
-            "patchtst-etth1-regression-distribution",
-            "patchtst-granite-official",
-        ),
-        "timesfm": ("timesfm-2.0-500m-official",),
-    }
+    """Discover reviewed nightly validation models from their owner fragment."""
 
     @classmethod
     def models(cls, suite: str, runtime_model: str) -> tuple[str, ...]:
-        return cls.MODELS.get(runtime_model, ()) if suite == "nightly" else ()
+        if suite != "nightly":
+            return ()
+        try:
+            return validation_catalog.qualification_models_for_owner(
+                "etth1_time_series_parity", runtime_model
+            )
+        except (OSError, ValueError) as exc:
+            raise CiError(
+                f"cannot resolve owner-local validation for {runtime_model!r}: {exc}"
+            ) from exc
 
 
 class ValidationDatasetPreparer:

@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  full_duplex_bench_behavior_parity:
+    models:
+    - personaplex-7b
+    default_models:
+    - personaplex-7b
+    model_overrides:
+      personaplex-7b:
+        comparison_precision: bf16
+        trtmc_fp32_layers:
+        - 2
+        - 3
+    qualification:
+      personaplex-7b: {}
+  full_duplex_bench_speech_parity:
+    models:
+    - personaplex-7b
+    default_models:
+    - personaplex-7b
+    model_overrides:
+      personaplex-7b:
+        comparison_precision: bf16
+        trtmc_fp32_layers:
+        - 2
+        - 3

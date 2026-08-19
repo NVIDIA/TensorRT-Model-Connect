@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_five_shot_mcq:
+    models:
+    - mistral-7b
+    - mistral-7b-l0
+    default_models:
+    - mistral-7b
+    qualification:
+      mistral-7b: {}
+  flores200_en_fr_riva_translation_parity:
+    models:
+    - riva-translate-4b
+    default_models:
+    - riva-translate-4b
+    model_overrides:
+      riva-translate-4b:
+        build_generation_headroom: true
+    qualification:
+      riva-translate-4b: {}

@@ -36,16 +36,15 @@ def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Pa
     """Locate model-owned adapter source trees without interpreting their contents."""
 
     source = Path(source_folder)
-    families_root = source / "python" / "tensorrt_model_connect" / "families"
-    runtime_root = source / "src" / "runtime" / "models"
+    models_root = source / "python" / "tensorrt_model_connect" / "models"
     adapters: list[tuple[str, str, Path, Path]] = []
-    if not families_root.is_dir():
+    if not models_root.is_dir():
         return ()
-    for manifest in sorted(families_root.glob("*/*/IMPLEMENTATION.toml")):
+    for manifest in sorted(models_root.glob("*/*/IMPLEMENTATION.toml")):
         builder = manifest.parent
         family = builder.parent.name
         adapter = builder.name
-        runtime = runtime_root / family / adapter
+        runtime = builder.parent / "runtime" / adapter
         if not runtime.is_dir():
             raise ConanException(
                 "Model-owned build adapter "
@@ -58,14 +57,14 @@ def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Pa
 def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, package: Path) -> None:
     """Copy canonical E2E model descriptors into the installed Python package."""
 
-    source = Path(source_folder) / "tests" / "e2e" / "models"
+    source = Path(source_folder) / "python" / "tensorrt_model_connect" / "models"
     descriptors = sorted(source.glob("*/MODEL.toml"))
-    manifests = sorted(source.glob("*/manifests/*.json"))
-    benchmark_assets = set(source.glob("*/data/Recording.wav"))
+    manifests = sorted(source.glob("*/tests/manifests/*.json"))
+    benchmark_assets = set(source.glob("*/tests/data/Recording.wav"))
     if not descriptors or not manifests:
         raise ConanException(f"benchmark model catalog is empty or unavailable: {source}")
     missing_descriptors = [
-        manifest for manifest in manifests if not (manifest.parent.parent / "MODEL.toml").is_file()
+        manifest for manifest in manifests if not (manifest.parents[2] / "MODEL.toml").is_file()
     ]
     if missing_descriptors:
         paths = ", ".join(str(path) for path in missing_descriptors)
@@ -79,7 +78,12 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
         for index, testcase in enumerate(raw.get("testcases", [])):
             if not isinstance(testcase, dict):
                 continue
-            for field in ("test_image", "prompt_file", "test_input_audio"):
+            for field in (
+                "test_image",
+                "prompt_file",
+                "test_input_audio",
+                "camera_intrinsics_file",
+            ):
                 if field in testcase:
                     references.append((f"testcases[{index}].{field}", testcase[field]))
         for field, declared in references:
@@ -87,15 +91,13 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
                 continue
             if not isinstance(declared, str) or not declared.strip():
                 raise ConanException(f"{field} in benchmark manifest {manifest} must be a path")
-            family = manifest.parent.parent.resolve()
+            model_tests = manifest.parent.parent.resolve()
             declared_path = Path(declared)
-            asset = (family / declared_path).resolve()
-            source_prefix = Path("tests/e2e/models") / family.name
-            if not asset.is_file() and declared_path.is_relative_to(source_prefix):
-                asset = (family / declared_path.relative_to(source_prefix)).resolve()
-            if not asset.is_relative_to(family) or not asset.is_file():
+            asset = (model_tests / declared_path).resolve()
+            if not asset.is_relative_to(model_tests) or not asset.is_file():
                 raise ConanException(
-                    f"{field} in benchmark manifest {manifest} is missing or outside {family}: "
+                    f"{field} in benchmark manifest {manifest} is missing or outside "
+                    f"{model_tests}: "
                     f"{asset}"
                 )
             benchmark_assets.add(asset)
@@ -113,7 +115,7 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
         )
 
     packaged_descriptors = sorted(destination.glob("*/MODEL.toml"))
-    packaged_manifests = sorted(destination.glob("*/manifests/*.json"))
+    packaged_manifests = sorted(destination.glob("*/tests/manifests/*.json"))
     missing_assets = [
         source_path
         for source_path in benchmark_assets
@@ -220,9 +222,11 @@ class TensorRTModelConnectConan(ConanFile):
             / "scripts"
         )
         _stage_benchmark_catalog(self, self.source_folder, package_module)
-        runtime_models = Path(self.source_folder) / "src/runtime/models"
-        for source in sorted(runtime_models.glob("*/native_plugins")):
-            destination = package_module / "families" / source.parent.name / "native_plugins"
+        models_root = (
+            Path(self.source_folder) / "python" / "tensorrt_model_connect" / "models"
+        )
+        for source in sorted(models_root.glob("*/native_plugins")):
+            destination = package_module / "models" / source.parent.name / "native_plugins"
             copy(self, "*", src=str(source), dst=str(destination))
         copy(self, "trtmc", src=self.build_folder, dst=str(package_bin), keep_path=False)
         copy(self, "trtmc", src=self.build_folder, dst=str(wheel_data_scripts), keep_path=False)
@@ -272,7 +276,7 @@ class TensorRTModelConnectConan(ConanFile):
         for family, adapter, builder_source, runtime_source in _model_owned_adapters(
             self.source_folder
         ):
-            packaged_adapter = package_module / "families" / family / adapter
+            packaged_adapter = package_module / "models" / family / adapter
             copy(
                 self,
                 "*",

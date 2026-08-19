@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "bark"
+reference_entrypoint = "tools/reference.py|run"
+aliases = [
+  "bark",
+]
+prefixes = [
+  "bark",
+]
+hf_warm_dependencies = [
+  "tts-asr-verifier|openai/whisper-large-v3-turbo",
+]
+runtime_plugins = [
+  "plugin.cpp|register_bark_plugin",
+]
+runtime_config_schemas = [
+  "config_schema.cpp|register_audio_bark_schema",
+]
+runtime_strategies = [
+  "text_to_audio_bark",
+]
+test_manifests = [
+  "tests/manifests/bark-large-tp4.json",
+  "tests/manifests/bark-large.json",
+  "tests/manifests/bark-small-fp32-l0.json",
+  "tests/manifests/bark-small-tp4.json",
+  "tests/manifests/bark-small.json",
+]
+
+[e2e_defaults.text_to_audio]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

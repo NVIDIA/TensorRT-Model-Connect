@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shlex
 import sys
+import tomllib
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +27,123 @@ def test_validation_entrypoints_use_narrow_engine_boundaries():
     for entrypoint in ("trtmc_validate.py", "trtmc_reference.py"):
         source = (trtmc_validate.REPO_ROOT / "tools" / entrypoint).read_text(encoding="utf-8")
         assert "validation import engine" not in source
+
+
+def test_owner_validation_supplies_repository_dataset_paths() -> None:
+    suites = validation_catalog.load_suites()
+
+    assert validation_catalog.suite_by_id(
+        suites, "dinov3_image_feature_extraction_parity"
+    )["dataset"]["default_path"] == (
+        "python/tensorrt_model_connect/models/dinov3/tests/data/validation.json"
+    )
+    assert validation_catalog.suite_by_id(
+        suites, "minimax_h3_official_profile_parity"
+    )["dataset"]["default_path"] == (
+        "python/tensorrt_model_connect/models/minimax_h3/tests/validation/"
+        "minimax-h3-768p.json"
+    )
+
+
+def test_validation_catalog_rejects_an_owner_without_a_fragment(tmp_path: Path) -> None:
+    owner = tmp_path / "models" / "fixture"
+    owner.mkdir(parents=True)
+    (owner / "MODEL.toml").write_text('id = "fixture"\n', encoding="utf-8")
+    suites = tmp_path / "workloads.json"
+    suites.write_text(
+        json.dumps(
+            {
+                "schema_version": validation_catalog.SUITES_SCHEMA,
+                "suites": [{"id": "fixture-suite"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing validation bindings"):
+        validation_catalog.load_suites(suites, tmp_path / "models")
+
+
+def test_owner_qualification_discovery_fails_closed_when_applicable_model_is_missing(
+    tmp_path: Path,
+) -> None:
+    owner = tmp_path / "models" / "fixture"
+    manifests = owner / "tests" / "manifests"
+    manifests.mkdir(parents=True)
+    (owner / "MODEL.toml").write_text(
+        'id = "fixture"\ntest_manifests = ["tests/manifests/fixture.json"]\n',
+        encoding="utf-8",
+    )
+    (manifests / "fixture.json").write_text(
+        json.dumps(
+            {
+                "name": "fixture",
+                "family": "fixture",
+                "hf_id": "example/fixture",
+                "runtime_strategy": "fixture",
+                "task_strategy": "neural_operator",
+                "user_contract": "time_series_point_forecast",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (owner / "validation.yaml").write_text(
+        json.dumps(
+            {
+                "schema_version": validation_catalog.OWNER_VALIDATION_SCHEMA,
+                "bindings": {"time": {"models": ["fixture"]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    suites = tmp_path / "workloads.json"
+    suites.write_text(
+        json.dumps(
+            {
+                "schema_version": validation_catalog.SUITES_SCHEMA,
+                "suites": [
+                    {
+                        "id": "time",
+                        "selectors": {
+                            "task_strategies": ["neural_operator"],
+                            "user_contracts": ["time_series_point_forecast"],
+                        },
+                    },
+                    {"id": "unrelated-suite"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="has no owner-local qualification"):
+        validation_catalog.qualification_models_for_owner(
+            "time",
+            "fixture",
+            path=suites,
+            models_dir=tmp_path / "models",
+        )
+
+    (owner / "validation.yaml").write_text(
+        json.dumps(
+            {
+                "schema_version": validation_catalog.OWNER_VALIDATION_SCHEMA,
+                "bindings": {
+                    "time": {
+                        "models": ["fixture"],
+                        "qualification": {"fixture": {}},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert validation_catalog.qualification_models_for_owner(
+        "time",
+        "fixture",
+        path=suites,
+        models_dir=tmp_path / "models",
+    ) == ("fixture",)
 
 
 def test_model_workload_catalog_covers_every_ready_model():
@@ -100,7 +218,7 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     )
     assert suite["dataset"] == {
         "kind": "model_plugin_json",
-        "default_path": ("tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"),
+        "default_path": ("python/tensorrt_model_connect/models/minimax_h3/tests/validation/minimax-h3-768p.json"),
     }
     assert suite["scoring"] == {"scorer": "model_plugin_parity"}
     assert suite["gates"] == {"min_sample_pass_rate": 1.0}
@@ -129,13 +247,13 @@ def test_dataset_path_keeps_repository_owned_default_with_dataset_root(tmp_path:
     suite = {
         "id": "repo-owned",
         "dataset": {
-            "default_path": "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
+            "default_path": "python/tensorrt_model_connect/models/minimax_h3/tests/validation/minimax-h3-768p.json"
         },
     }
 
     assert trtmc_validate._dataset_path(suite, tmp_path / "datasets") == (
         trtmc_validate.REPO_ROOT
-        / "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
+        / "python/tensorrt_model_connect/models/minimax_h3/tests/validation/minimax-h3-768p.json"
     )
 
 
@@ -1666,47 +1784,90 @@ def test_resolve_binding_keeps_unimplemented_model_visible_but_not_runnable():
         trtmc_validate.resolve_binding(catalog, "model-a", "workload-a")
 
 
-def test_catalog_rejects_e2e_as_reference_consistency_workload(tmp_path):
-    catalog_path = tmp_path / "model_workloads.yaml"
-    catalog_path.write_text(
-        """
-version: 1
-sample_limits:
-  workload-a: 1
-models:
-  model-a:
-    workloads: [e2e]
-""",
+def _write_model_owned_catalog(
+    tmp_path: Path,
+    *,
+    suite_id: str,
+    sample_limit: int,
+    extra_binding_field: str = "",
+) -> tuple[Path, Path]:
+    suites = tmp_path / "workloads.yaml"
+    models = tmp_path / "models"
+    owner = models / "family-a"
+    manifests = owner / "tests" / "manifests"
+    manifests.mkdir(parents=True)
+    suites.write_text(
+        "\n".join(
+            (
+                f"schema_version: {validation_catalog.SUITES_SCHEMA}",
+                "suites:",
+                f"  - id: {suite_id}",
+                f"    sample_limit: {sample_limit}",
+            )
+        )
+        + "\n",
         encoding="utf-8",
+    )
+    (owner / "MODEL.toml").write_text(
+        'id = "family-a"\ntest_manifests = ["tests/manifests/model-a.json"]\n',
+        encoding="utf-8",
+    )
+    (manifests / "model-a.json").write_text(
+        json.dumps(
+            {
+                "name": "model-a",
+                "family": "family-a",
+                "hf_id": "example/model-a",
+                "runtime_strategy": "family_a_runtime",
+                "task_strategy": "family_a_task",
+                "user_contract": "family_a_contract",
+                "reference_backend": "hf_transformers",
+            }
+        ),
+        encoding="utf-8",
+    )
+    extra = f"\n    {extra_binding_field}: obsolete" if extra_binding_field else ""
+    (owner / "validation.yaml").write_text(
+        "\n".join(
+            (
+                f"schema_version: {validation_catalog.OWNER_VALIDATION_SCHEMA}",
+                "bindings:",
+                f"  {suite_id}:",
+                "    models: [model-a]",
+                "    qualification:",
+                "      model-a: {}",
+            )
+        )
+        + extra
+        + "\n",
+        encoding="utf-8",
+    )
+    return suites, models
+
+
+def test_catalog_rejects_e2e_as_reference_consistency_workload(tmp_path):
+    suites, models = _write_model_owned_catalog(
+        tmp_path, suite_id="e2e", sample_limit=1
     )
 
     with pytest.raises(
         trtmc_validate.ValidationError,
         match="cannot use e2e",
     ):
-        trtmc_validate.load_catalog(catalog_path)
+        trtmc_validate.load_catalog(suites, models)
 
 
 @pytest.mark.parametrize("invalid_limit", [0, -2])
 def test_catalog_sample_limit_is_full_or_positive(tmp_path, invalid_limit):
-    catalog_path = tmp_path / "model_workloads.yaml"
-    catalog_path.write_text(
-        f"""
-version: 1
-sample_limits:
-  workload-a: {invalid_limit}
-models:
-  model-a:
-    workloads: [workload-a]
-""",
-        encoding="utf-8",
+    suites, models = _write_model_owned_catalog(
+        tmp_path, suite_id="workload-a", sample_limit=invalid_limit
     )
 
     with pytest.raises(
         trtmc_validate.ValidationError,
         match="must be -1 or a positive integer",
     ):
-        trtmc_validate.load_catalog(catalog_path)
+        trtmc_validate.load_catalog(suites, models)
 
 
 @pytest.mark.parametrize(
@@ -1714,22 +1875,15 @@ models:
     ["default", "additional_workloads", "diagnostic_workloads"],
 )
 def test_catalog_rejects_obsolete_workload_categories(tmp_path, obsolete_field):
-    catalog_path = tmp_path / "model_workloads.yaml"
-    catalog_path.write_text(
-        f"""
-version: 1
-sample_limits:
-  workload-a: 5
-models:
-  model-a:
-    workloads: [workload-a]
-    {obsolete_field}: workload-a
-""",
-        encoding="utf-8",
+    suites, models = _write_model_owned_catalog(
+        tmp_path,
+        suite_id="workload-a",
+        sample_limit=5,
+        extra_binding_field=obsolete_field,
     )
 
-    with pytest.raises(trtmc_validate.ValidationError, match="uses obsolete fields"):
-        trtmc_validate.load_catalog(catalog_path)
+    with pytest.raises(trtmc_validate.ValidationError, match="unsupported fields"):
+        trtmc_validate.load_catalog(suites, models)
 
 
 def test_catalog_rejects_cache_identity_across_different_reference_contracts(
@@ -2691,9 +2845,20 @@ def test_reference_sources_create_once_then_reuse(
     assert f"Using reference source: {warm}" in warm_output
 
 
+def _owner_reference_contract(owner: str) -> dict[str, object]:
+    path = (
+        trtmc_validate.REPO_ROOT
+        / "python/tensorrt_model_connect/models"
+        / owner
+        / "MODEL.toml"
+    )
+    return tomllib.loads(path.read_text(encoding="utf-8"))["model_reference_cache"]
+
+
 def test_elf_reference_source_is_pinned_to_upstream_pytorch_implementation() -> None:
-    assert trtmc_validate.ELF_SOURCE.revision == ("b29d8833609e9ab7f67cd9da39435ac5cea04837")
-    assert trtmc_validate.ELF_SOURCE.relative_checkout == Path("elf/reference/ELF-b29d8833609e")
+    contract = _owner_reference_contract("elf_flow")
+    assert contract["revision"] == "b29d8833609e9ab7f67cd9da39435ac5cea04837"
+    assert contract["relative_path"] == "elf_flow/reference/ELF-b29d8833609e"
 
 
 def test_reference_sources_select_model_specific_inputs(
@@ -2712,16 +2877,15 @@ def test_reference_sources_select_model_specific_inputs(
 
     monkeypatch.setattr(trtmc_validate, "_ensure_reference_source", prepare)
 
-    elf = trtmc_validate.ensure_reference_sources("elf_flow", tmp_path)
+    elf_contract = _owner_reference_contract("elf_flow")
+    sana_contract = _owner_reference_contract("sana_wm")
+    elf = trtmc_validate.ensure_reference_sources(
+        "elf_flow", tmp_path, elf_contract
+    )
     sana = trtmc_validate.ensure_reference_sources(
         "sana_wm",
         tmp_path,
-        {
-            "repository": trtmc_validate.SANA_WM_SOURCE.repository,
-            "revision": trtmc_validate.SANA_WM_SOURCE.revision,
-            "relative_path": str(trtmc_validate.SANA_WM_SOURCE.relative_checkout),
-            "entrypoint": str(trtmc_validate.SANA_WM_SOURCE.entrypoint),
-        },
+        sana_contract,
     )
     wan22 = trtmc_validate.ensure_reference_sources(
         "wan2_2_ti2v",
@@ -2747,15 +2911,16 @@ def test_reference_sources_select_model_specific_inputs(
     )
     common = trtmc_validate.ensure_reference_sources("bert", tmp_path)
 
-    assert prepared == ["ELF", "sana_wm", "wan2_2_ti2v", "lance"]
-    assert elf.elf_reference_repo == tmp_path / trtmc_validate.ELF_SOURCE.relative_checkout
+    assert prepared == ["elf_flow", "sana_wm", "wan2_2_ti2v", "lance"]
+    elf_checkout = tmp_path / str(elf_contract["relative_path"])
+    assert elf.comparison_arguments == ("--elf-reference-repo", str(elf_checkout))
     assert elf.environment["TRTMC_STORAGE_ROOT"] == str(tmp_path)
     assert sana.environment["SANA_WM_SCRIPT"] == str(
         tmp_path
-        / trtmc_validate.SANA_WM_SOURCE.relative_checkout
-        / trtmc_validate.SANA_WM_SOURCE.entrypoint
+        / str(sana_contract["relative_path"])
+        / str(sana_contract["entrypoint"])
     )
-    assert common.elf_reference_repo is None
+    assert common.comparison_arguments == ()
     assert common.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
     assert wan22.environment == {
         "TRTMC_STORAGE_ROOT": str(tmp_path),
@@ -2787,12 +2952,14 @@ def test_reference_sources_keep_outputs_separate_from_pinned_checkouts(
     selection = trtmc_validate.ensure_reference_sources(
         "elf_flow",
         output_cache,
+        _owner_reference_contract("elf_flow"),
         source_cache_root=source_cache,
     )
 
     assert selection.environment["TRTMC_STORAGE_ROOT"] == str(output_cache)
-    assert selection.elf_reference_repo == (
-        source_cache / trtmc_validate.ELF_SOURCE.relative_checkout
+    assert selection.comparison_arguments == (
+        "--elf-reference-repo",
+        str(source_cache / "elf_flow/reference/ELF-b29d8833609e"),
     )
 
 
@@ -4770,7 +4937,10 @@ def test_comparison_command_passes_elf_reference_checkout(tmp_path):
     arguments.limit = 1
     reference_sources = trtmc_validate.ReferenceSourceSelection(
         environment={},
-        elf_reference_repo=tmp_path / "sources" / "elf",
+        comparison_arguments=(
+            "--elf-reference-repo",
+            str(tmp_path / "sources" / "elf"),
+        ),
     )
 
     command = trtmc_validate._comparison_command(
@@ -4783,7 +4953,7 @@ def test_comparison_command_passes_elf_reference_checkout(tmp_path):
     )
 
     assert command[command.index("--elf-reference-repo") + 1] == str(
-        reference_sources.elf_reference_repo
+        tmp_path / "sources" / "elf"
     )
 
 
@@ -4808,7 +4978,10 @@ def test_run_binding_wires_reference_source_command_and_environment(
             "TRTMC_STORAGE_ROOT": str(tmp_path / "references"),
             "EXTERNAL_REFERENCE_SENTINEL": "present",
         },
-        elf_reference_repo=tmp_path / "references" / "elf",
+        comparison_arguments=(
+            "--elf-reference-repo",
+            str(tmp_path / "references" / "elf"),
+        ),
     )
     captured: dict[str, object] = {}
 
@@ -4857,7 +5030,9 @@ def test_run_binding_wires_reference_source_command_and_environment(
     )
 
     command = captured["command"]
-    assert command[command.index("--elf-reference-repo") + 1] == str(selection.elf_reference_repo)
+    assert command[command.index("--elf-reference-repo") + 1] == str(
+        tmp_path / "references" / "elf"
+    )
     assert captured["environment"]["EXTERNAL_REFERENCE_SENTINEL"] == "present"
 
 

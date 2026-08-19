@@ -16,10 +16,28 @@ from pathlib import Path
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
+
 from _pyproject_backend import _append_benchmark_catalog_to_sdist
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_distribution_excludes_colocated_runtime_and_test_sources_from_wheels() -> None:
+    package = tomllib.loads((REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "tool"
+    ]["conan-py-build"]
+    wheel_excludes = set(package["wheel"]["exclude"])
+    sdist_excludes = set(package["sdist"]["exclude"])
+
+    assert "python/tensorrt_model_connect/models/*/runtime/**" in wheel_excludes
+    assert "python/tensorrt_model_connect/models/*/tests/**" in wheel_excludes
+    assert "python/tensorrt_model_connect/models/*/tests/**" in sdist_excludes
+    assert "python/tensorrt_model_connect/models/*/runtime/**" not in sdist_excludes
 
 
 def _manifest_audio_assets(manifest: Path) -> tuple[Path, ...]:
@@ -27,7 +45,6 @@ def _manifest_audio_assets(manifest: Path) -> tuple[Path, ...]:
 
     raw = json.loads(manifest.read_text(encoding="utf-8"))
     family = manifest.parent.parent.resolve()
-    source_prefix = Path("tests/e2e/models") / family.name
     assets: set[Path] = set()
     for testcase in raw.get("testcases", []):
         declared = testcase.get("test_input_audio") if isinstance(testcase, dict) else None
@@ -36,12 +53,6 @@ def _manifest_audio_assets(manifest: Path) -> tuple[Path, ...]:
         assert isinstance(declared, str) and declared
         path = Path(declared).expanduser()
         candidate = path if path.is_absolute() else family / path
-        if (
-            not candidate.is_file()
-            and not path.is_absolute()
-            and path.is_relative_to(source_prefix)
-        ):
-            candidate = family / path.relative_to(source_prefix)
         resolved = candidate.resolve()
         assert resolved.is_relative_to(family) and resolved.is_file()
         assets.add(resolved)
@@ -140,10 +151,11 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     benchmark_script = source / "scripts/trtmc-bench"
     benchmark_script.parent.mkdir(parents=True, exist_ok=True)
     benchmark_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-    catalog_family = source / "tests/e2e/models/example"
+    model_root = source / "python/tensorrt_model_connect/models/example"
+    catalog_family = model_root / "tests"
     (catalog_family / "manifests").mkdir(parents=True)
-    (catalog_family / "MODEL.toml").write_text(
-        'id = "example"\ntest_manifests = ["manifests/example.json"]\n',
+    (model_root / "MODEL.toml").write_text(
+        'id = "example"\ntest_manifests = ["tests/manifests/example.json"]\n',
         encoding="utf-8",
     )
     (catalog_family / "manifests/example.json").write_text(
@@ -216,9 +228,9 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
 ) -> None:
     recipe_module = _load_conan_recipe(monkeypatch)
     source = tmp_path / "source"
-    builder = source / "python/tensorrt_model_connect/families/model_a/runtime_a"
-    runtime = source / "src/runtime/models/model_a/runtime_a"
-    native_plugins = source / "src/runtime/models/model_a/native_plugins"
+    builder = source / "python/tensorrt_model_connect/models/model_a/runtime_a"
+    runtime = source / "python/tensorrt_model_connect/models/model_a/runtime/runtime_a"
+    native_plugins = source / "python/tensorrt_model_connect/models/model_a/native_plugins"
     builder.mkdir(parents=True)
     runtime.mkdir(parents=True)
     native_plugins.mkdir()
@@ -244,7 +256,7 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
 
     module = _package(recipe_module, source, tmp_path)
 
-    packaged = module / "families" / "model_a" / "runtime_a"
+    packaged = module / "models" / "model_a" / "runtime_a"
     assert {
         path.relative_to(packaged).as_posix() for path in packaged.rglob("*") if path.is_file()
     } == {
@@ -255,7 +267,7 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
         "runtime/adapter.cpp",
     }
     assert (packaged / "IMPLEMENTATION.toml").read_text(encoding="utf-8") == "not valid TOML ["
-    assert {path.name for path in (module / "families/model_a/native_plugins").iterdir()} == {
+    assert {path.name for path in (module / "models/model_a/native_plugins").iterdir()} == {
         "CMakeLists.txt",
         "plugin.cu",
     }
@@ -268,12 +280,12 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert benchmark_script.read_bytes().startswith(b"#!python\n")
     catalog = module / "benchmark" / "_catalog" / "example"
     assert (catalog / "MODEL.toml").is_file()
-    assert (catalog / "manifests" / "example.json").is_file()
-    assert (catalog / "data/Recording.wav").is_file()
-    assert (catalog / "data/fp8-scales.json").is_file()
-    assert (catalog / "data/test_img.jpeg").is_file()
-    assert (catalog / "data/prompt.txt").is_file()
-    assert (catalog / "data/transcription.wav").is_file()
+    assert (catalog / "tests/manifests/example.json").is_file()
+    assert (catalog / "tests/data/Recording.wav").is_file()
+    assert (catalog / "tests/data/fp8-scales.json").is_file()
+    assert (catalog / "tests/data/test_img.jpeg").is_file()
+    assert (catalog / "tests/data/prompt.txt").is_file()
+    assert (catalog / "tests/data/transcription.wav").is_file()
 
 
 def test_package_stages_the_complete_canonical_benchmark_catalog(
@@ -287,25 +299,28 @@ def test_package_stages_the_complete_canonical_benchmark_catalog(
         recipe_module.TensorRTModelConnectConan(), REPOSITORY_ROOT, package
     )
 
-    source = REPOSITORY_ROOT / "tests/e2e/models"
+    source = REPOSITORY_ROOT / "python/tensorrt_model_connect/models"
     installed = package / "benchmark/_catalog"
     assert len(list(installed.glob("*/MODEL.toml"))) == len(list(source.glob("*/MODEL.toml")))
-    assert len(list(installed.glob("*/manifests/*.json"))) == len(
-        list(source.glob("*/manifests/*.json"))
+    assert len(list(installed.glob("*/tests/manifests/*.json"))) == len(
+        list(source.glob("*/tests/manifests/*.json"))
     )
-    assert len(list(installed.glob("*/data/Recording.wav"))) == len(
-        list(source.glob("*/data/Recording.wav"))
+    assert len(list(installed.glob("*/tests/data/Recording.wav"))) == len(
+        list(source.glob("*/tests/data/Recording.wav"))
     )
-    assert (installed / "gpt2/manifests/distilgpt2.json").is_file()
-    assert (installed / "whisper/data/Recording.wav").is_file()
-    assert (installed / "whisper/data/librispeech-test-clean-6930-75918-0003.wav").is_file()
-    assert (installed / "flux/data/flux2-fp8-scales.json").is_file()
-    assert (installed / "qwen_image/data/test_img.jpeg").is_file()
-    assert (installed / "sana_wm/assets/demo_0.png").is_file()
-    assert (installed / "sana_wm/assets/demo_0.txt").is_file()
+    assert (installed / "gpt2/tests/manifests/distilgpt2.json").is_file()
+    assert (installed / "whisper/tests/data/Recording.wav").is_file()
+    assert (
+        installed / "whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav"
+    ).is_file()
+    assert (installed / "flux/tests/data/flux2-fp8-scales.json").is_file()
+    assert (installed / "qwen_image/tests/data/test_img.jpeg").is_file()
+    assert (installed / "sana_wm/tests/assets/demo_0.png").is_file()
+    assert (installed / "sana_wm/tests/assets/demo_0.txt").is_file()
+    assert (installed / "sana_wm/tests/assets/demo_0_intrinsics.npy").is_file()
     missing_audio_assets = [
         asset.relative_to(source).as_posix()
-        for manifest in source.glob("*/manifests/*.json")
+        for manifest in source.glob("*/tests/manifests/*.json")
         for asset in _manifest_audio_assets(manifest)
         if not (installed / asset.relative_to(source)).is_file()
     ]
@@ -320,9 +335,13 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     project.mkdir()
     pyproject = project / "pyproject.toml"
     pyproject.write_text("[build-system]\n", encoding="utf-8")
-    family = project / "tests/e2e/models/example"
+    model_root = project / "python/tensorrt_model_connect/models/example"
+    family = model_root / "tests"
     (family / "manifests").mkdir(parents=True)
-    (family / "MODEL.toml").write_text('id = "example"\n', encoding="utf-8")
+    (model_root / "MODEL.toml").write_text(
+        'id = "example"\ntest_manifests = ["tests/manifests/example.json"]\n',
+        encoding="utf-8",
+    )
     (family / "manifests/example.json").write_text(
         '{"fp8_scales": "data/fp8-scales.json", '
         '"testcases": [{"test_image": "data/test_img.jpeg", '
@@ -346,8 +365,8 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
 
     with tarfile.open(archive, "r:gz") as source:
         names = set(source.getnames())
-    prefix = "example-0.1.0/tests/e2e/models/example"
-    assert f"{prefix}/MODEL.toml" in names
+    prefix = "example-0.1.0/python/tensorrt_model_connect/models/example/tests"
+    assert "example-0.1.0/python/tensorrt_model_connect/models/example/MODEL.toml" in names
     assert f"{prefix}/manifests/example.json" in names
     assert f"{prefix}/data/Recording.wav" in names
     assert f"{prefix}/data/fp8-scales.json" in names
@@ -363,7 +382,7 @@ def test_package_rejects_builder_without_matching_runtime(
 ) -> None:
     recipe_module = _load_conan_recipe(monkeypatch)
     source = tmp_path / "source"
-    builder = source / "python/tensorrt_model_connect/families/model_a/runtime_a"
+    builder = source / "python/tensorrt_model_connect/models/model_a/runtime_a"
     builder.mkdir(parents=True)
     (builder / "IMPLEMENTATION.toml").write_text("not parsed [", encoding="utf-8")
 

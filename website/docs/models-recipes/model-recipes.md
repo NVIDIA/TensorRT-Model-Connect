@@ -14,7 +14,7 @@ Model recipes are organized in three levels:
    TRTMC task/head contract, and every family-owned `--set` configuration key.
 
 Every recipe row is generated from a model-owned manifest under
-`tests/e2e/models/<family>/manifests/`. A manifest declares an executable test
+`python/tensorrt_model_connect/models/<family>/tests/manifests/`. A manifest declares an executable test
 contract; it is not, by itself, a current hardware pass receipt. Family config
 tables are generated from registered Python or C++ config schemas rather than
 maintained by hand. Use

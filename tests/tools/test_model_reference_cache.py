@@ -70,7 +70,7 @@ def _write_owner(
     environment_variable: str = "",
     suites: tuple[str, ...] | None = None,
 ) -> Path:
-    owner = repository / "tests/e2e/models" / family / "MODEL.toml"
+    owner = repository / "python/tensorrt_model_connect/models" / family / "MODEL.toml"
     owner.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"id = {json.dumps(family)}",

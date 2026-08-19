@@ -30,7 +30,7 @@ class TestLoadConfigFromBundleExtended:
 
     def test_missing_config_section_returns_empty(self, tmp_path):
         """Bundle without a config.json section returns empty dict."""
-        from tensorrt_model_connect.families.qwen.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_config_from_bundle
 
         header = {"num_layers": 2, "max_cache_length": 64}
         bundle = make_bundle_bytes(header, engine_plan=b"FAKE")
@@ -43,7 +43,7 @@ class TestLoadConfigFromBundleExtended:
 
     def test_config_with_nested_values(self, tmp_path):
         """Config section with nested JSON is correctly round-tripped."""
-        from tensorrt_model_connect.families.qwen.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_config_from_bundle
 
         config_data = json.dumps({
             "model_type": "example_decoder",
@@ -79,7 +79,7 @@ class TestLoadPreprocessorConfigFromBundle:
 
     def test_present(self, tmp_path):
         """Extracts and parses preprocessor_config.json section."""
-        from tensorrt_model_connect.families.qwen_vl.vl_debug_runner import (
+        from tensorrt_model_connect.models.qwen_vl.vl_debug_runner import (
             load_preprocessor_config_from_bundle,
         )
 
@@ -108,7 +108,7 @@ class TestLoadPreprocessorConfigFromBundle:
 
     def test_missing_returns_empty(self, tmp_path):
         """Bundle without preprocessor_config.json returns empty dict."""
-        from tensorrt_model_connect.families.qwen_vl.vl_debug_runner import (
+        from tensorrt_model_connect.models.qwen_vl.vl_debug_runner import (
             load_preprocessor_config_from_bundle,
         )
 
@@ -153,7 +153,7 @@ class TestMultiSectionBundle:
 
     def test_engine_plan_extracted(self, tmp_path):
         """load_engine_from_bundle extracts the correct engine_plan section."""
-        from tensorrt_model_connect.families.qwen.debug_runner import load_engine_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_engine_from_bundle
 
         path, engine_plan, _, _ = self._build_multi_section_bundle(tmp_path)
         plan, hdr = load_engine_from_bundle(path)
@@ -162,7 +162,7 @@ class TestMultiSectionBundle:
 
     def test_config_section_extracted(self, tmp_path):
         """load_config_from_bundle extracts config.json from multi-section bundle."""
-        from tensorrt_model_connect.families.qwen.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_config_from_bundle
 
         path, _, _, _ = self._build_multi_section_bundle(tmp_path)
         cfg = load_config_from_bundle(path)
@@ -170,7 +170,7 @@ class TestMultiSectionBundle:
 
     def test_arbitrary_section_extracted(self, tmp_path):
         """load_section_from_bundle can extract tokenizer.json from bundle."""
-        from tensorrt_model_connect.families.qwen.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_section_from_bundle
 
         path, _, _, tokenizer_data = self._build_multi_section_bundle(tmp_path)
         data = load_section_from_bundle(path, "tokenizer.json")
@@ -180,7 +180,7 @@ class TestMultiSectionBundle:
 
     def test_unknown_section_returns_none(self, tmp_path):
         """Requesting a non-existent section returns None (graceful)."""
-        from tensorrt_model_connect.families.qwen.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_section_from_bundle
 
         path, _, _, _ = self._build_multi_section_bundle(tmp_path)
         result = load_section_from_bundle(path, "totally_unknown_section")
@@ -195,7 +195,7 @@ class TestLoadSectionInvalidBundle:
     """load_section_from_bundle should raise on corrupted bundles."""
 
     def test_invalid_magic_raises(self, tmp_path):
-        from tensorrt_model_connect.families.qwen.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_section_from_bundle
 
         path = tmp_path / "bad.bundle"
         path.write_bytes(b"GARBAGE_DATA_NOT_A_BUNDLE")

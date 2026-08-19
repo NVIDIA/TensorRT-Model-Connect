@@ -251,8 +251,7 @@ class E2ERunner:
         if not version:
             raise CiError("TensorRT reported an empty version for timing-cache isolation")
         suffix = (
-            f"trt{version}-"
-            f"opt{self.context.env.get('TRTMC_BUILDER_OPTIMIZATION_LEVEL', 'default')}"
+            f"trt{version}-opt{self.context.env.get('TRTMC_BUILDER_OPTIMIZATION_LEVEL', 'default')}"
         )
         if self.context.env.get("TRTMC_MAX_NUM_TACTICS"):
             suffix += f"-tactics{self.context.env['TRTMC_MAX_NUM_TACTICS']}"
@@ -272,7 +271,11 @@ class E2ERunner:
             if not path.is_file():
                 raise CiError(f"{variable} does not exist: {path}")
         else:
-            configs = sorted((self.context.repository / "tests/e2e/models").glob(f"*/{filename}"))
+            configs = sorted(
+                (self.context.repository / "python/tensorrt_model_connect/models").glob(
+                    f"*/tests/{filename}"
+                )
+            )
             defaults = [
                 path for path in configs if self.context.read_json(path).get("default") is True
             ]

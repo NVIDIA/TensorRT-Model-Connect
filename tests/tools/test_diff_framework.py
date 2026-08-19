@@ -64,7 +64,7 @@ def _mock_model_strategy_detection(
 
     fake_config.ModelConfig = _FakeModelConfig
 
-    fake_families = types.ModuleType("tensorrt_model_connect.families")
+    fake_families = types.ModuleType("tensorrt_model_connect.models")
     if plugin_found:
         model = types.SimpleNamespace()
         if runtime_strategy is not None:
@@ -80,7 +80,7 @@ def _mock_model_strategy_detection(
     monkeypatch.setitem(sys.modules, "tensorrt_model_connect", fake_pkg)
     monkeypatch.setitem(sys.modules, "tensorrt_model_connect.engine_builder", fake_engine_builder)
     monkeypatch.setitem(sys.modules, "tensorrt_model_connect.config", fake_config)
-    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.families", fake_families)
+    monkeypatch.setitem(sys.modules, "tensorrt_model_connect.models", fake_families)
 
 
 def _write_synthetic_bundle(path: Path, config: dict):
@@ -255,27 +255,24 @@ class TestRunner:
         with pytest.raises(ValueError, match="Unknown test"):
             runner.run_tests(ctx, test_names=["nonexistent_test_xyz"])
 
-    def test_detect_runtime_strategy_unknown_reports_skip(self, monkeypatch):
+    def test_detect_runtime_strategy_unknown_reports_error(self, monkeypatch):
         runner = _import_runner()
         _mock_model_strategy_detection(
             monkeypatch, runtime_strategy="future_runtime_strategy")
 
         result = runner.detect_runtime_strategy(
             "test/model", with_status=True)
-        assert result.status == "skip"
+        assert result.status == "error"
         assert result.runtime_strategy == "future_runtime_strategy"
-        assert "no diff tests are registered" in result.message
+        assert "unknown runtime_strategy" in result.message
 
-    def test_detect_runtime_strategy_unknown_warns_without_fallback(
-        self, monkeypatch
-    ):
+    def test_detect_runtime_strategy_unknown_fails_without_fallback(self, monkeypatch):
         runner = _import_runner()
         _mock_model_strategy_detection(
             monkeypatch, runtime_strategy="future_runtime_strategy")
 
-        with pytest.warns(RuntimeWarning, match="no diff tests are registered"):
-            strategy = runner.detect_runtime_strategy("test/model")
-        assert strategy == "future_runtime_strategy"
+        with pytest.raises(ValueError, match="unknown runtime_strategy"):
+            runner.detect_runtime_strategy("test/model")
 
     def test_detect_runtime_strategy_missing_model_warns_without_fallback(
         self, monkeypatch
@@ -292,7 +289,7 @@ class TestRunner:
             strategy = runner.detect_runtime_strategy("test/model")
         assert strategy == ""
 
-    def test_detect_bundle_unknown_strategy_reports_skip(self, tmp_path):
+    def test_detect_bundle_unknown_strategy_reports_error(self, tmp_path):
         runner = _import_runner()
         bundle = tmp_path / "unknown_strategy.bundle"
         _write_synthetic_bundle(
@@ -300,13 +297,12 @@ class TestRunner:
 
         result = runner.detect_runtime_strategy_from_bundle(
             str(bundle), with_status=True)
-        assert result.status == "skip"
+        assert result.status == "error"
         assert result.runtime_strategy == "future_runtime_strategy"
-        assert "no diff tests are registered" in result.message
+        assert "unknown runtime_strategy" in result.message
 
-        with pytest.warns(RuntimeWarning, match="no diff tests are registered"):
-            strategy = runner.detect_runtime_strategy_from_bundle(str(bundle))
-        assert strategy == "future_runtime_strategy"
+        with pytest.raises(ValueError, match="unknown runtime_strategy"):
+            runner.detect_runtime_strategy_from_bundle(str(bundle))
 
     def test_detect_bundle_missing_runtime_strategy_warns_without_fallback(
         self, tmp_path

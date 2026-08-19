@@ -13,9 +13,9 @@ Choose the smallest extension point that matches the change.
   caption="Start with the owning extension path; the required source units and validation evidence follow from that choice."
 />
 
-Model support has two distinct ownership paths. Native support owns a Python
-`model.py` build recipe, unique `runtime_strategy`, model DSO, and native E2E
-JSON manifest. Exact-qualified optimized support stays inside an existing family
+Model support has two artifact paths inside one ownership tree. Native support
+owns a Python `model.py` build recipe, unique `runtime_strategy`, model DSO,
+and native E2E JSON manifest in one folder. Exact-qualified optimized support stays inside an existing family
 and owns its implementation/profile manifests, isolated adapter, embedded
 implementation DSO, Source-side contract tests, and profile semantic-source
 digest; it does not need a synthetic native strategy or model DSO. Any
@@ -23,9 +23,9 @@ target-hardware qualification is separately retained external evidence.
 
 | Goal | Extension point |
 | --- | --- |
-| Add native support for a model, even when its task resembles an existing model | [Add a Model Family](add-model-family.md): add a Python family package, a unique model-owned runtime strategy/DSO, and a native E2E JSON manifest. |
+| Add native support for a model, even when its task resembles an existing model | [Add a Model Family](add-model-family.md): add one owner folder containing its Python builder, unique runtime strategy/DSO, tests, and native E2E manifest. |
 | Add a delegated optimized implementation for an existing family | [Add an Optimized Runtime Implementation](add-optimized-runtime.md): add a family-owned implementation manifest, exact profile, isolated adapter, embedded implementation DSO, semantic-source digest, and Source contract tests. Do not add a synthetic native strategy for it. |
-| Add native behavior or another native strategy to an existing model | [Add a Runtime Strategy](add-runtime-strategy.md) under `src/runtime/models/<owner>/` and its `MODEL.toml`. |
+| Add native behavior or another native strategy to an existing model | [Add a Runtime Strategy](add-runtime-strategy.md) under `python/tensorrt_model_connect/models/<owner>/runtime/` and its `MODEL.toml`. |
 | Run a new task contract or state model | Extend the public contract only if existing `IPipeline` methods cannot express it, then add the owning model implementation. |
 | Add a new user-facing knob | [Add a Config Schema](add-config-schema.md) and consume it in the owning unit. |
 | Add a new CLI task | Add a command only when the public task cannot fit an existing command. |

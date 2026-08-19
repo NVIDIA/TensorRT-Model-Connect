@@ -27,6 +27,12 @@ def _load_reference_module():
     return module
 
 
+def _load_internlm_reference_module():
+    from tensorrt_model_connect.models.internlm.tests.tools import transformers_text
+
+    return transformers_text
+
+
 def _arguments() -> argparse.Namespace:
     return argparse.Namespace(
         max_new_tokens=None,
@@ -103,6 +109,7 @@ def test_internlm_reference_uses_pinned_independent_fast_tokenizer(
     tmp_path: Path,
 ) -> None:
     module = _load_reference_module()
+    owner_module = _load_internlm_reference_module()
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     tokenizer_path = tmp_path / "official-tokenizer.json"
@@ -120,13 +127,13 @@ def test_internlm_reference_uses_pinned_independent_fast_tokenizer(
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        module,
+        owner_module,
         "_resolve_cached_model_ref",
         lambda *_args, **_kwargs: model_dir,
     )
     monkeypatch.setattr(
-        module,
-        "_resolve_internlm_reference_tokenizer_json",
+        owner_module,
+        "_resolve_reference_tokenizer_json",
         lambda _model_dir, *, local_files_only: tokenizer_path,
     )
     captured: dict[str, object] = {}
@@ -164,7 +171,7 @@ def test_internlm_reference_tokenizer_honors_online_cache_preparation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    module = _load_reference_module()
+    module = _load_internlm_reference_module()
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     (model_dir / "tokenizer.model").write_bytes(b"official-source-model")
@@ -176,9 +183,9 @@ def test_internlm_reference_tokenizer_honors_online_cache_preparation(
         module,
         "_sha256_file",
         lambda path: (
-            module._INTERNLM_SOURCE_MODEL_SHA256
+            module._SOURCE_MODEL_SHA256
             if path.name == "tokenizer.model"
-            else module._INTERNLM_TOKENIZER_SHA256
+            else module._TOKENIZER_SHA256
         ),
     )
 
@@ -193,7 +200,7 @@ def test_internlm_reference_tokenizer_honors_online_cache_preparation(
     )
 
     assert (
-        module._resolve_internlm_reference_tokenizer_json(
+        module._resolve_reference_tokenizer_json(
             model_dir,
             local_files_only=False,
         )

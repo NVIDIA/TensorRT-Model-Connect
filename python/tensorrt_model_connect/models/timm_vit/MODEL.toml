@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timm_vit"
+aliases = [
+  "timm_vit",
+  "timmvit",
+  "vision_transformer",
+  "vit_base_patch16_224",
+]
+prefixes = [
+  "timm_vit",
+  "vit_",
+]
+runtime_plugins = [
+  "plugin.cpp|register_timm_vit_plugin",
+]
+runtime_strategies = [
+  "timm_vit_image_classification",
+]
+test_manifests = [
+  "tests/manifests/timm-vit-base-p16-224-augreg-in21k-ft-in1k-tp4.json",
+  "tests/manifests/timm-vit-base-p16-224-augreg-in21k-ft-in1k.json",
+]
+
+[e2e_defaults.image_classification]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+]
+preflight_asset_fields = [
+  "test_image",
+]

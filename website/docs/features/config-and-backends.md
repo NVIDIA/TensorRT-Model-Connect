@@ -33,10 +33,10 @@ Schema sources live under:
 
 Model-owned schemas instead live beside their owners:
 
-- Python: `python/tensorrt_model_connect/families/<family>/runtime_config_schema.py`
-- C++: `src/runtime/models/<owner>/config_schema.cpp`
+- Python: `python/tensorrt_model_connect/models/<family>/runtime_config_schema.py`
+- C++: `python/tensorrt_model_connect/models/<owner>/runtime/config_schema.cpp`
 - Registration: the owner's `runtime_config_schemas` entry in
-  `src/runtime/models/<owner>/MODEL.toml`
+  `python/tensorrt_model_connect/models/<owner>/MODEL.toml`
 
 ## Live schema catalog
 
@@ -125,14 +125,13 @@ The C++ CLI pre-validates explicit `--config`/`--set` values against registered
 schemas and exits nonzero on invalid input. That validation does not turn the
 result into a native `ConfigBundle` for an optimized implementation.
 
-Direct `PipelineFactory` callers on the native path have a different current
-error behavior: the factory catches a resolution error, prints
-`[trtmc.config] Failed to resolve runtime config`, and continues with
-`runtime_config == nullptr`; the owning native plugin then chooses its local
-fallback behavior. Successful resolution writes
-`<bundle>.effective_config.json`; a failed factory resolution does not write a
-new effective-config file. Callers using the factory API must treat that
-warning as an error if silent fallback is unacceptable.
+Direct `PipelineFactory` callers on the native path use the same fail-closed
+contract. A missing or empty native `config.json`, a missing
+`runtime_strategy`, malformed JSON, an unknown schema namespace or field, an
+invalid value, or an invalid explicit override terminates pipeline loading.
+Successful resolution writes `<bundle>.effective_config.json`. Failure to
+write that diagnostic sidecar is non-fatal because it does not change the
+resolved configuration passed to the model plugin.
 
 ## Native backend DSOs
 

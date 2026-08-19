@@ -12,7 +12,7 @@ FAMILY_DIR = (
     Path(__file__).resolve().parents[2]
     / "python"
     / "tensorrt_model_connect"
-    / "families"
+    / "models"
     / "sana_wm"
 )
 

@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  mmlu_five_shot_mcq:
+    models:
+    - gpt-oss-20b
+    - gpt-oss-20b-l0
+    - gpt-oss-20b-l0-tp4
+    default_models:
+    - gpt-oss-20b
+    family_override:
+      prompt_renderer: gpt_oss_harmony_mcq
+      answer_parser: gpt_oss_harmony_final_mcq
+      require_valid_prediction: true
+      # The official MXFP4 reference dequantizes experts to BF16 while TRTMC
+      # builds the dequantized engine in FP16.
+      reference_precision: bf16
+      allow_reference_precision_mismatch: true
+      build_generation_headroom: true
+      generation:
+        max_new_tokens: 8
+        apply_chat_template: false
+        enable_thinking: false
+    qualification:
+      gpt-oss-20b: {}

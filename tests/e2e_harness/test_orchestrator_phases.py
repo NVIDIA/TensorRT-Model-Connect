@@ -143,6 +143,7 @@ def test_manifest_build_env_resolves_model_relative_paths(tmp_path: Path) -> Non
         hf_id="unit/model",
         family="unit",
         runtime_strategy="unit_runtime",
+        task_strategy="text_generation_causal",
         metadata={
             "model_test_dir": str(model_dir),
             "build_env": {
@@ -172,6 +173,7 @@ def test_manifest_build_env_requires_injected_values(
         hf_id="unit/model",
         family="unit",
         runtime_strategy="unit_runtime",
+        task_strategy="text_generation_causal",
         metadata={
             "build_env": {
                 "TRTMC_BARK_TIMING_CACHE_PATH": {
@@ -248,7 +250,7 @@ def test_ci_engine_build_guard_passes_manifest_identity_to_builder(
     case.metadata.update(
         {
             "model_name": "unit-model-config",
-            "manifest_path": "/src/tests/e2e/models/unit/manifests/unit.json",
+            "manifest_path": "/src/python/tensorrt_model_connect/models/unit/tests/manifests/unit.json",
         }
     )
     ctx = _make_ctx(tmp_path, case)

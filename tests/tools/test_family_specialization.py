@@ -15,7 +15,7 @@ def _write(path: Path, text: str) -> None:
 
 
 def _demo_repo(tmp_path: Path) -> Path:
-    family = tmp_path / "python/tensorrt_model_connect/families/demo"
+    family = tmp_path / "python/tensorrt_model_connect/models/demo"
     _write(
         family / "MODEL.toml",
         'id = "demo"\ndebug_runner = "runtime.py|runner_from_bundle"\n',
@@ -48,8 +48,8 @@ def _demo_repo(tmp_path: Path) -> Path:
     _write(family / "dead.py", "def dead():\n    return None\n")
     _write(family / "tool_runner.py", "class ToolRunner:\n    pass\n")
     _write(
-        tmp_path / "tools/families/demo/use_runner.py",
-        "from tensorrt_model_connect.families.demo.tool_runner import ToolRunner\n",
+        family / "tools/use_runner.py",
+        "from tensorrt_model_connect.models.demo.tool_runner import ToolRunner\n",
     )
     return tmp_path
 
@@ -58,19 +58,33 @@ def test_audit_classifies_production_tool_and_unreachable_modules(tmp_path: Path
     family = specialization.audit_repo(_demo_repo(tmp_path), ("demo",))["families"][0]
 
     assert family["production_modules"] == [
-        "tensorrt_model_connect.families.demo",
-        "tensorrt_model_connect.families.demo.model",
-        "tensorrt_model_connect.families.demo.runtime",
+        "tensorrt_model_connect.models.demo",
+        "tensorrt_model_connect.models.demo.model",
+        "tensorrt_model_connect.models.demo.runtime",
     ]
     assert family["tool_test_only_modules"] == [
-        "tensorrt_model_connect.families.demo.tool_runner"
+        "tensorrt_model_connect.models.demo.tool_runner"
     ]
     assert family["unreachable_modules"] == [
-        "tensorrt_model_connect.families.demo.config",
-        "tensorrt_model_connect.families.demo.dead",
-        "tensorrt_model_connect.families.demo.weights",
+        "tensorrt_model_connect.models.demo.config",
+        "tensorrt_model_connect.models.demo.dead",
+        "tensorrt_model_connect.models.demo.weights",
     ]
     assert family["missing_dynamic_entrypoints"] == []
+
+
+def test_audit_treats_owner_tests_as_external_consumers(tmp_path: Path) -> None:
+    repo = _demo_repo(tmp_path)
+    family = repo / "python/tensorrt_model_connect/models/demo"
+    _write(
+        family / "tests/test_weights.py",
+        "from tensorrt_model_connect.models.demo.weights import WeightDict\n",
+    )
+
+    result = specialization.audit_repo(repo, ("demo",))["families"][0]
+
+    assert "tensorrt_model_connect.models.demo.weights" in result["tool_test_only_modules"]
+    assert not any(".tests." in row["module"] for row in result["modules"])
 
 
 def test_audit_reports_symbols_and_fixed_switches(tmp_path: Path) -> None:
@@ -84,7 +98,7 @@ def test_audit_reports_symbols_and_fixed_switches(tmp_path: Path) -> None:
             "function": "build_decoder",
             "parameter": "norm_type",
             "value": "rmsnorm",
-            "definitions": ["tensorrt_model_connect.families.demo.model"],
+            "definitions": ["tensorrt_model_connect.models.demo.model"],
             "call_sites": [{"path": "model.py", "line": 16}],
         }
     ]
@@ -99,7 +113,7 @@ def test_audit_reports_symbols_and_fixed_switches(tmp_path: Path) -> None:
 
 def test_audit_does_not_fix_switch_with_default_only_call(tmp_path: Path) -> None:
     repo = _demo_repo(tmp_path)
-    model = repo / "python/tensorrt_model_connect/families/demo/model.py"
+    model = repo / "python/tensorrt_model_connect/models/demo/model.py"
     _write(
         model,
         "def build_decoder(*, norm_type='rmsnorm'):\n    return norm_type\n\n"
@@ -117,11 +131,11 @@ def test_audit_does_not_fix_switch_with_default_only_call(tmp_path: Path) -> Non
 
 def test_audit_reports_missing_manifest_paths_and_sibling_imports(tmp_path: Path) -> None:
     repo = _demo_repo(tmp_path)
-    family = repo / "python/tensorrt_model_connect/families/demo"
+    family = repo / "python/tensorrt_model_connect/models/demo"
     _write(family / "MODEL.toml", 'id = "demo"\ndebug_runner = "missing.py|runner"\n')
     _write(
         family / "model.py",
-        "from tensorrt_model_connect.families.other.model import build as other_build\n\n"
+        "from tensorrt_model_connect.models.other.model import build as other_build\n\n"
         "def matches(config):\n    return True\n\n"
         "def build(model_dir, output_path, **options):\n    return other_build\n",
     )
@@ -140,14 +154,14 @@ def test_audit_reports_missing_manifest_paths_and_sibling_imports(tmp_path: Path
         {
             "path": "model.py",
             "line": 1,
-            "target": "tensorrt_model_connect.families.other.model",
+            "target": "tensorrt_model_connect.models.other.model",
         }
     ]
 
 
 def test_audit_reports_missing_model_build_symbol(tmp_path: Path) -> None:
     repo = _demo_repo(tmp_path)
-    model = repo / "python/tensorrt_model_connect/families/demo/model.py"
+    model = repo / "python/tensorrt_model_connect/models/demo/model.py"
     _write(model, "def matches(config):\n    return True\n")
 
     result = specialization.audit_repo(repo, ("demo",))["families"][0]
@@ -164,10 +178,10 @@ def test_audit_resolves_and_requires_vision_language_runner_convention(
     tmp_path: Path,
 ) -> None:
     repo = _demo_repo(tmp_path)
-    family = repo / "python/tensorrt_model_connect/families/demo"
+    family = repo / "python/tensorrt_model_connect/models/demo"
     model = (family / "model.py").read_text(encoding="utf-8")
     _write(family / "model.py", "runtime_strategy = 'demo_vision_language'\n\n" + model)
-    tool = repo / "tools/families/demo/vl_debug_runner.py"
+    tool = family / "vl_debug_runner.py"
     _write(tool, "class VLTrtRunner:\n    pass\n")
 
     assert specialization.audit_repo(repo, ("demo",))["families"][0][
@@ -180,14 +194,14 @@ def test_audit_resolves_and_requires_vision_language_runner_convention(
     ]
     assert {
         "source": "tools/diff_vl.py::<family-dispatch>",
-        "path": "tools/families/demo/vl_debug_runner.py",
+        "path": "python/tensorrt_model_connect/models/demo/vl_debug_runner.py",
         "reason": "missing_path",
     } in missing
 
 
 def test_audit_tracks_self_module_graph_aliases(tmp_path: Path) -> None:
     repo = _demo_repo(tmp_path)
-    model = repo / "python/tensorrt_model_connect/families/demo/model.py"
+    model = repo / "python/tensorrt_model_connect/models/demo/model.py"
     _write(
         model,
         "import sys\n\n"

@@ -644,7 +644,7 @@ def _run_segmentation_engine_parity_subprocess(hf_id, image_path):
         "# TRT\n"
         "from tensorrt_model_connect.engine_builder import _resolve_model\n"
         "from tensorrt_model_connect.config import ModelConfig\n"
-        "from tensorrt_model_connect.families import find_model\n"
+        "from tensorrt_model_connect.models import find_model\n"
         "model_dir = _resolve_model(hf_id)\n"
         "config = ModelConfig.from_dir(model_dir)\n"
         "family_model = find_model(config)\n"

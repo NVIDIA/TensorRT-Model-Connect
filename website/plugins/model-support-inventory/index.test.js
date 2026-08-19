@@ -28,12 +28,22 @@ test('collects support inventory from repository metadata', (context) => {
 
   writeFixture(
     repoRoot,
-    'python/tensorrt_model_connect/families/alpha/model.py'
+    'python/tensorrt_model_connect/models/alpha/model.py'
   );
-  writeFixture(repoRoot, 'python/tensorrt_model_connect/families/alpha/MODEL.toml');
   writeFixture(
     repoRoot,
-    'python/tensorrt_model_connect/families/alpha/runtime_config_schema.py',
+    'python/tensorrt_model_connect/models/alpha/MODEL.toml',
+    [
+      'id = "alpha"',
+      'runtime_strategies = ["decoder", "shared"]',
+      'runtime_config_schemas = ["config_schema.cpp|register_alpha_schema"]',
+      'test_manifests = ["tests/manifests/small.json"]',
+      '',
+    ].join('\n')
+  );
+  writeFixture(
+    repoRoot,
+    'python/tensorrt_model_connect/models/alpha/runtime_config_schema.py',
     [
       '_SESSION = frozenset({Layer.SESSION_REQUEST, Layer.PLATFORM_PROFILE})',
       'SCHEMA = Schema(',
@@ -89,22 +99,29 @@ test('collects support inventory from repository metadata', (context) => {
   );
   writeFixture(
     repoRoot,
-    'python/tensorrt_model_connect/families/beta/model.py'
-  );
-  writeFixture(repoRoot, 'python/tensorrt_model_connect/families/beta/MODEL.toml');
-  writeFixture(
-    repoRoot,
-    'python/tensorrt_model_connect/families/_private.py'
+    'python/tensorrt_model_connect/models/beta/model.py'
   );
   writeFixture(
     repoRoot,
-    'python/tensorrt_model_connect/families/base.py'
+    'python/tensorrt_model_connect/models/beta/MODEL.toml',
+    [
+      'id = "beta"',
+      'runtime_strategies = ["shared", "encoder"]',
+      'test_manifests = ["tests/manifests/base.json"]',
+      '',
+    ].join('\n')
   );
-  writeFixture(repoRoot, 'tests/e2e/models/legacy.json', '{}');
-  writeFixture(repoRoot, 'tests/e2e/models/alpha/MODEL.toml');
   writeFixture(
     repoRoot,
-    'tests/e2e/models/alpha/manifests/small.json',
+    'python/tensorrt_model_connect/models/_private.py'
+  );
+  writeFixture(
+    repoRoot,
+    'python/tensorrt_model_connect/models/base.py'
+  );
+  writeFixture(
+    repoRoot,
+    'python/tensorrt_model_connect/models/alpha/tests/manifests/small.json',
     JSON.stringify({
       name: 'alpha-small',
       hf_id: 'example/alpha-small',
@@ -115,10 +132,9 @@ test('collects support inventory from repository metadata', (context) => {
       precision: 'fp16',
     })
   );
-  writeFixture(repoRoot, 'tests/e2e/models/beta/MODEL.toml');
   writeFixture(
     repoRoot,
-    'tests/e2e/models/beta/manifests/base.json',
+    'python/tensorrt_model_connect/models/beta/tests/manifests/base.json',
     JSON.stringify({
       name: 'beta-base-tp2',
       hf_id: 'example/beta-base',
@@ -130,16 +146,7 @@ test('collects support inventory from repository metadata', (context) => {
   );
   writeFixture(
     repoRoot,
-    'src/runtime/models/alpha/MODEL.toml',
-    [
-      'runtime_strategies = ["decoder", "shared"]',
-      'runtime_config_schemas = ["config_schema.cpp|register_alpha_schema"]',
-      '',
-    ].join('\n')
-  );
-  writeFixture(
-    repoRoot,
-    'src/runtime/models/alpha/config_schema.cpp',
+    'python/tensorrt_model_connect/models/alpha/runtime/config_schema.cpp',
     [
       'Schema make_alpha_schema() {',
       '  const std::set<Layer> session = {Layer::SessionRequest, Layer::PlatformProfile};',
@@ -155,7 +162,7 @@ test('collects support inventory from repository metadata', (context) => {
   );
   writeFixture(
     repoRoot,
-    'src/runtime/models/alpha/pipeline.h',
+    'python/tensorrt_model_connect/models/alpha/runtime/pipeline.h',
     [
       'class AlphaPipeline final : public IPipeline {',
       '  TextResult generate(const std::string& prompt, const GenerateConfig& cfg) override;',
@@ -165,7 +172,7 @@ test('collects support inventory from repository metadata', (context) => {
   );
   writeFixture(
     repoRoot,
-    'src/runtime/models/alpha/pipeline.cpp',
+    'python/tensorrt_model_connect/models/alpha/runtime/pipeline.cpp',
     [
       'TextResult AlphaPipeline::generate(const std::string& prompt, const GenerateConfig& cfg) {',
       '  auto token_limit = cfg.max_new_tokens;',
@@ -177,11 +184,6 @@ test('collects support inventory from repository metadata', (context) => {
   );
   writeFixture(
     repoRoot,
-    'src/runtime/models/beta/MODEL.toml',
-    'runtime_strategies = [\n  "shared",\n  "encoder",\n]\n'
-  );
-  writeFixture(
-    repoRoot,
     'src/cli/args.cpp',
     'static const char* known_cmds[] = {"run", "inspect", "encode", nullptr};\n'
   );
@@ -189,17 +191,15 @@ test('collects support inventory from repository metadata', (context) => {
   const inventory = collectModelSupportInventory(repoRoot);
   assert.deepEqual(
     {
-      familyModelCount: inventory.familyModelCount,
-      familyModelNames: inventory.familyModelNames,
+      modelOwnerCount: inventory.modelOwnerCount,
+      modelOwnerNames: inventory.modelOwnerNames,
       e2eManifestCount: inventory.e2eManifestCount,
-      e2eFamilyIndexCount: inventory.e2eFamilyIndexCount,
       runtimeStrategyKeyCount: inventory.runtimeStrategyKeyCount,
     },
     {
-      familyModelCount: 2,
-      familyModelNames: ['alpha', 'beta'],
-      e2eManifestCount: 3,
-      e2eFamilyIndexCount: 2,
+      modelOwnerCount: 2,
+      modelOwnerNames: ['alpha', 'beta'],
+      e2eManifestCount: 2,
       runtimeStrategyKeyCount: 3,
     }
   );
@@ -216,7 +216,7 @@ test('collects support inventory from repository metadata', (context) => {
       cliCommands: ['encode'],
       testcases: [],
       fp32Layers: [],
-      sourcePath: 'tests/e2e/models/beta/manifests/base.json',
+      sourcePath: 'python/tensorrt_model_connect/models/beta/tests/manifests/base.json',
       hfModelType: 'beta',
       hfArchitectures: ['BetaModel'],
       hfArchitectureSource: 'config.architectures',
@@ -240,7 +240,7 @@ test('collects support inventory from repository metadata', (context) => {
       cliCommands: ['run'],
       testcases: [],
       fp32Layers: [],
-      sourcePath: 'tests/e2e/models/alpha/manifests/small.json',
+      sourcePath: 'python/tensorrt_model_connect/models/alpha/tests/manifests/small.json',
       hfModelType: 'alpha',
       hfArchitectures: ['AlphaForCausalLM'],
       hfArchitectureSource: 'config.architectures',
@@ -271,7 +271,8 @@ test('collects support inventory from repository metadata', (context) => {
       family: 'alpha',
       taskStrategy: 'text_generation_causal',
       manifestHfId: 'example/alpha-small',
-      manifestSourcePath: 'tests/e2e/models/alpha/manifests/small.json',
+      manifestSourcePath:
+        'python/tensorrt_model_connect/models/alpha/tests/manifests/small.json',
     },
   ]);
   assert.deepEqual(
@@ -298,8 +299,8 @@ test('collects support inventory from repository metadata', (context) => {
           },
         ],
         sourcePaths: [
-          'python/tensorrt_model_connect/families/alpha/runtime_config_schema.py',
-          'src/runtime/models/alpha/config_schema.cpp',
+          'python/tensorrt_model_connect/models/alpha/runtime/config_schema.cpp',
+          'python/tensorrt_model_connect/models/alpha/runtime_config_schema.py',
         ],
       },
     ]
@@ -332,7 +333,7 @@ test('fails closed when a source-of-truth directory is missing', (context) => {
 
   assert.throws(
     () => collectModelSupportInventory(repoRoot),
-    /Unable to read Python family models/
+    /Unable to read unified model owners/
   );
 });
 
@@ -342,7 +343,7 @@ test('derives image input and generation options from runtime code', (context) =
 
   writeFixture(
     repoRoot,
-    'src/runtime/models/text_only/pipeline.cpp',
+    'python/tensorrt_model_connect/models/text_only/runtime/pipeline.cpp',
     [
       'TextResult TextOnlyPipeline::generate(',
       '    const std::string& prompt, const GenerateConfig& request) {',
@@ -354,7 +355,7 @@ test('derives image input and generation options from runtime code', (context) =
   );
   writeFixture(
     repoRoot,
-    'src/runtime/models/vision_language/pipeline.h',
+    'python/tensorrt_model_connect/models/vision_language/runtime/pipeline.h',
     [
       'class VisionLanguagePipeline final : public IPipeline {',
       '  TextResult generate(const std::string& prompt, const GenerateConfig& cfg) override;',

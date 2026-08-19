@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// @title: Family, runtime strategy, and task strategy are different identities
-// @description: Qwen, Llama, and Whisper examples show that Python build ownership maps to a model-owned native runtime strategy, while multiple implementations can satisfy the same shared task contract.
+// @title: Model owner, runtime strategy, and task strategy are different identities
+// @description: Qwen, Llama, and Whisper each keep Python, native runtime, and evidence in one owner folder; every owner declares a native strategy while multiple owners can satisfy one shared task contract.
 digraph IdentityLayers {
   graph [
     bgcolor="#fbfcfe",
@@ -12,7 +12,7 @@ digraph IdentityLayers {
     splines="ortho",
     fontname="Arial",
     labelloc="t",
-    label=<<B>Three identities answer three different questions</B><BR/><FONT POINT-SIZE="16">Who builds it? Which native implementation runs it? Which shared behavior does it provide?</FONT>>,
+    label=<<B>One owner, two dispatch identities</B><BR/><FONT POINT-SIZE="16">Which folder owns it? Which native implementation runs it? Which shared behavior does it provide?</FONT>>,
     fontsize="28",
     fontcolor="#101828"
   ];
@@ -29,9 +29,9 @@ digraph IdentityLayers {
   ];
   edge [color="#64748b", penwidth="2.2", arrowsize="0.8"];
 
-  qwen [fillcolor="#eff6ff", color="#2563eb", label=<<B>qwen family</B><BR/><FONT POINT-SIZE="16">Python build owner</FONT>>];
-  llama [fillcolor="#eff6ff", color="#2563eb", label=<<B>llama family</B><BR/><FONT POINT-SIZE="16">Python build owner</FONT>>];
-  whisper [fillcolor="#eff6ff", color="#2563eb", label=<<B>whisper family</B><BR/><FONT POINT-SIZE="16">Python build owner</FONT>>];
+  qwen [fillcolor="#eff6ff", color="#2563eb", label=<<B>qwen owner</B><BR/><FONT POINT-SIZE="16">model.py · runtime/ · tests/</FONT>>];
+  llama [fillcolor="#eff6ff", color="#2563eb", label=<<B>llama owner</B><BR/><FONT POINT-SIZE="16">model.py · runtime/ · tests/</FONT>>];
+  whisper [fillcolor="#eff6ff", color="#2563eb", label=<<B>whisper owner</B><BR/><FONT POINT-SIZE="16">model.py · runtime/ · tests/</FONT>>];
 
   qwen_runtime [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>qwen_decoder_kv_cache</B><BR/><FONT POINT-SIZE="16">libtrtmc_model_qwen.so</FONT>>];
   llama_runtime [fillcolor="#ecfccb", color="#4d7c0f", label=<<B>llama_decoder_kv_cache</B><BR/><FONT POINT-SIZE="16">libtrtmc_model_llama.so</FONT>>];

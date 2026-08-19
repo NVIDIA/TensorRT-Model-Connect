@@ -56,8 +56,8 @@ metadata.
 
 ## Native payload
 
-A native bundle normally contains `config.json` plus model-owned plans and
-assets. Common section shapes include:
+A native bundle must contain a non-empty, valid JSON object in `config.json`
+plus model-owned plans and assets. Common section shapes include:
 
 | Task shape | Typical sections |
 | --- | --- |
@@ -80,6 +80,11 @@ record the result.
 For native dispatch, `runtime_strategy` is the critical identity. It selects
 one model owner in the generated runtime index; loading that model DSO
 registers the concrete `IPipelinePlugin`.
+
+There is no compatibility fallback for a native bundle that omits
+`config.json`, carries malformed configuration, omits `runtime_strategy`, or
+contributes values outside the registered runtime-config schemas. Those are
+terminal load errors.
 
 `task_strategy` is not the bundle dispatch key. It belongs to E2E task
 orchestration and may group several model-owned native strategies.

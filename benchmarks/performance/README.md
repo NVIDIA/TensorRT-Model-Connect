@@ -6,9 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # Performance matrix
 
 `tools/perf_matrix.py` compares TRTMC with the reference backend declared by each
-entry in `release.yaml`. TRTMC measurements always use `trtmc-bench`; reference
-frameworks run in separate Python processes and do not add dependencies to
-`trtmc-bench`.
+model owner. `release.yaml` contains only the shared suite schema and defaults;
+the tool discovers `python/tensorrt_model_connect/models/*/performance.yaml`
+directly. TRTMC measurements always use `trtmc-bench`; reference frameworks run
+in separate Python processes and do not add dependencies to `trtmc-bench`.
 
 The suite contains one row for every release-relevant single-process model
 profile marked `ready` in the benchmark catalog. Profiles whose names contain an
@@ -97,7 +98,13 @@ It is not a model input or testcase name. The default is the complete matrix.
 
 ## Suite configuration
 
-The suite owns the comparison semantics. Every entry explicitly declares:
+The central suite owns only shared comparison defaults. Each model owner keeps
+its entries, additional profiles, and explicit exclusions in one local
+`performance.yaml`. The loader scans owner directories directly and rejects
+unknown schemas, cross-owner entries or inheritance, duplicates, and empty
+fragments. There is no performance registry.
+
+Every owner-local entry explicitly declares:
 
 - the family, operation, and model profile;
 - its workload source;
@@ -107,7 +114,8 @@ The suite owns the comparison semantics. Every entry explicitly declares:
 - the output-equivalence contract;
 - the green/yellow/red equivalence margin.
 
-The current workload source is an explicitly named model testcase:
+The current workload source is an explicitly named model testcase. For example,
+`models/gpt2/performance.yaml` contains:
 
 ```yaml
 - id: gpt2.generate
@@ -135,7 +143,7 @@ structured outputs.
 
 The first profile for a family-operation declares the complete reviewed
 comparison contract. Further catalog profiles name that contract explicitly and
-may override only profile-specific settings:
+may override only profile-specific settings in the same owner-local file:
 
 ```yaml
 additional_profiles:
@@ -148,7 +156,8 @@ while retaining the reviewed Qwen timing, reference, and output contracts. A
 profile with different replay inputs or reference assets declares those
 overrides in the same block.
 
-A ready profile can be omitted only with an explicit reason:
+A ready profile can be omitted only with an explicit reason in its owner's
+`performance.yaml`:
 
 ```yaml
 excluded_profiles:

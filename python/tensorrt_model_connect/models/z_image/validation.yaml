@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  dpg_bench_diffusion_image:
+    models:
+    - z-image-turbo
+    - z-image-turbo-l0
+    - z-image-turbo-l0-tp2
+    default_models:
+    - z-image-turbo
+    family_profile:
+      gates:
+        require_matching_initial_latents: 1
+        psnr: 5.0
+        ssim: 0.1
+    qualification:
+      z-image-turbo: {}

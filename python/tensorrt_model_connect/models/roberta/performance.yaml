@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: roberta.encode
+  operation: encode
+  model: camembert-base
+  workload:
+    testcase: camembert-base
+  baseline:
+    runner: hf-transformers
+    mode: torch-compile
+    compile_scope: model.forward
+additional_profiles:
+- model: roberta-base
+  inherit: roberta.encode
+- model: roberta-large
+  inherit: roberta.encode
+- model: xlm-roberta-base
+  inherit: roberta.encode

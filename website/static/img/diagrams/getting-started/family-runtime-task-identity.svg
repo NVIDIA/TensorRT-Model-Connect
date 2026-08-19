@@ -1,103 +1,103 @@
 <!-- Generated from the adjacent pinned DOT source by website/scripts/render-diagrams.mjs. -->
-<svg width="755" height="299" role="img" aria-labelledby="getting-started-family-runtime-task-identity-svg-title getting-started-family-runtime-task-identity-svg-description" preserveAspectRatio="xMidYMid meet"
- viewBox="0.00 0.00 755.00 299.00" xmlns="http://www.w3.org/2000/svg">
-<title id="getting-started-family-runtime-task-identity-svg-title">Family, runtime strategy, and task strategy are different identities</title>
-<desc id="getting-started-family-runtime-task-identity-svg-description">Qwen, Llama, and Whisper examples show that Python build ownership maps to a model-owned native runtime strategy, while multiple implementations can satisfy the same shared task contract.</desc>
+<svg width="816" height="299" role="img" aria-labelledby="getting-started-family-runtime-task-identity-svg-title getting-started-family-runtime-task-identity-svg-description" preserveAspectRatio="xMidYMid meet"
+ viewBox="0.00 0.00 816.00 299.00" xmlns="http://www.w3.org/2000/svg">
+<title id="getting-started-family-runtime-task-identity-svg-title">Model owner, runtime strategy, and task strategy are different identities</title>
+<desc id="getting-started-family-runtime-task-identity-svg-description">Qwen, Llama, and Whisper each keep Python, native runtime, and evidence in one owner folder; every owner declares a native strategy while multiple owners can satisfy one shared task contract.</desc>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(21.6 277.32)">
-<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-277.32 733.49,-277.32 733.49,21.6 -21.6,21.6"/>
-<text xml:space="preserve" text-anchor="start" x="32.32" y="-227.52" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">Three identities answer three different questions</text>
-<text xml:space="preserve" text-anchor="start" x="30" y="-210.32" font-family="Arial" font-size="16.00" fill="#101828">Who builds it? Which native implementation runs it? Which shared behavior does it provide?</text>
+<polygon fill="#fbfcfe" stroke="none" points="-21.6,21.6 -21.6,-277.32 793.92,-277.32 793.92,21.6 -21.6,21.6"/>
+<text xml:space="preserve" text-anchor="start" x="155.13" y="-227.52" font-family="Arial" font-weight="bold" font-size="28.00" fill="#101828">One owner, two dispatch identities</text>
+<text xml:space="preserve" text-anchor="start" x="34.43" y="-210.32" font-family="Arial" font-size="16.00" fill="#101828">Which folder owns it? Which native implementation runs it? Which shared behavior does it provide?</text>
 <!-- qwen -->
 <g id="node1" class="node">
 <title>qwen</title>
-<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M150.01,-127.72C150.01,-127.72 12,-127.72 12,-127.72 6,-127.72 0,-121.72 0,-115.72 0,-115.72 0,-88 0,-88 0,-82 6,-76 12,-76 12,-76 150.01,-76 150.01,-76 156.01,-76 162.01,-82 162.01,-88 162.01,-88 162.01,-115.72 162.01,-115.72 162.01,-121.72 156.01,-127.72 150.01,-127.72"/>
-<text xml:space="preserve" text-anchor="start" x="32.35" y="-104.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">qwen family</text>
-<text xml:space="preserve" text-anchor="start" x="12.96" y="-87.96" font-family="Arial" font-size="16.00" fill="#101828">Python build owner</text>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M210.44,-127.72C210.44,-127.72 12,-127.72 12,-127.72 6,-127.72 0,-121.72 0,-115.72 0,-115.72 0,-88 0,-88 0,-82 6,-76 12,-76 12,-76 210.44,-76 210.44,-76 216.44,-76 222.44,-82 222.44,-88 222.44,-88 222.44,-115.72 222.44,-115.72 222.44,-121.72 216.44,-127.72 210.44,-127.72"/>
+<text xml:space="preserve" text-anchor="start" x="62.1" y="-104.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">qwen owner</text>
+<text xml:space="preserve" text-anchor="start" x="12.96" y="-87.96" font-family="Arial" font-size="16.00" fill="#101828">model.py · runtime/ · tests/</text>
 </g>
 <!-- qwen_runtime -->
 <g id="node4" class="node">
 <title>qwen_runtime</title>
-<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M432.99,-127.72C432.99,-127.72 226.02,-127.72 226.02,-127.72 220.02,-127.72 214.02,-121.72 214.02,-115.72 214.02,-115.72 214.02,-88 214.02,-88 214.02,-82 220.02,-76 226.02,-76 226.02,-76 432.99,-76 432.99,-76 438.99,-76 444.99,-82 444.99,-88 444.99,-88 444.99,-115.72 444.99,-115.72 444.99,-121.72 438.99,-127.72 432.99,-127.72"/>
-<text xml:space="preserve" text-anchor="start" x="226.98" y="-104.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">qwen_decoder_kv_cache</text>
-<text xml:space="preserve" text-anchor="start" x="243.24" y="-87.96" font-family="Arial" font-size="16.00" fill="#101828">libtrtmc_model_qwen.so</text>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M493.42,-127.72C493.42,-127.72 286.45,-127.72 286.45,-127.72 280.45,-127.72 274.45,-121.72 274.45,-115.72 274.45,-115.72 274.45,-88 274.45,-88 274.45,-82 280.45,-76 286.45,-76 286.45,-76 493.42,-76 493.42,-76 499.42,-76 505.42,-82 505.42,-88 505.42,-88 505.42,-115.72 505.42,-115.72 505.42,-121.72 499.42,-127.72 493.42,-127.72"/>
+<text xml:space="preserve" text-anchor="start" x="287.41" y="-104.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">qwen_decoder_kv_cache</text>
+<text xml:space="preserve" text-anchor="start" x="303.67" y="-87.96" font-family="Arial" font-size="16.00" fill="#101828">libtrtmc_model_qwen.so</text>
 </g>
 <!-- qwen&#45;&gt;qwen_runtime -->
 <g id="edge1" class="edge">
 <title>qwen&#45;&gt;qwen_runtime</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M162.72,-101.86C162.72,-101.86 202.19,-101.86 202.19,-101.86"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="202.19,-104.66 210.19,-101.86 202.19,-99.06 202.19,-104.66"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M222.98,-101.86C222.98,-101.86 262.72,-101.86 262.72,-101.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="262.72,-104.66 270.72,-101.86 262.72,-99.06 262.72,-104.66"/>
 </g>
 <!-- llama -->
 <g id="node2" class="node">
 <title>llama</title>
-<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M150.01,-51.72C150.01,-51.72 12,-51.72 12,-51.72 6,-51.72 0,-45.72 0,-39.72 0,-39.72 0,-12 0,-12 0,-6 6,0 12,0 12,0 150.01,0 150.01,0 156.01,0 162.01,-6 162.01,-12 162.01,-12 162.01,-39.72 162.01,-39.72 162.01,-45.72 156.01,-51.72 150.01,-51.72"/>
-<text xml:space="preserve" text-anchor="start" x="32.34" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">llama family</text>
-<text xml:space="preserve" text-anchor="start" x="12.96" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">Python build owner</text>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M210.44,-51.72C210.44,-51.72 12,-51.72 12,-51.72 6,-51.72 0,-45.72 0,-39.72 0,-39.72 0,-12 0,-12 0,-6 6,0 12,0 12,0 210.44,0 210.44,0 216.44,0 222.44,-6 222.44,-12 222.44,-12 222.44,-39.72 222.44,-39.72 222.44,-45.72 216.44,-51.72 210.44,-51.72"/>
+<text xml:space="preserve" text-anchor="start" x="62.09" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">llama owner</text>
+<text xml:space="preserve" text-anchor="start" x="12.96" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">model.py · runtime/ · tests/</text>
 </g>
 <!-- llama_runtime -->
 <g id="node5" class="node">
 <title>llama_runtime</title>
-<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M433.01,-51.72C433.01,-51.72 226.01,-51.72 226.01,-51.72 220.01,-51.72 214.01,-45.72 214.01,-39.72 214.01,-39.72 214.01,-12 214.01,-12 214.01,-6 220.01,0 226.01,0 226.01,0 433.01,0 433.01,0 439.01,0 445.01,-6 445.01,-12 445.01,-12 445.01,-39.72 445.01,-39.72 445.01,-45.72 439.01,-51.72 433.01,-51.72"/>
-<text xml:space="preserve" text-anchor="start" x="226.97" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">llama_decoder_kv_cache</text>
-<text xml:space="preserve" text-anchor="start" x="243.25" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">libtrtmc_model_llama.so</text>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M493.43,-51.72C493.43,-51.72 286.44,-51.72 286.44,-51.72 280.44,-51.72 274.44,-45.72 274.44,-39.72 274.44,-39.72 274.44,-12 274.44,-12 274.44,-6 280.44,0 286.44,0 286.44,0 493.43,0 493.43,0 499.43,0 505.43,-6 505.43,-12 505.43,-12 505.43,-39.72 505.43,-39.72 505.43,-45.72 499.43,-51.72 493.43,-51.72"/>
+<text xml:space="preserve" text-anchor="start" x="287.4" y="-28.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">llama_decoder_kv_cache</text>
+<text xml:space="preserve" text-anchor="start" x="303.68" y="-11.96" font-family="Arial" font-size="16.00" fill="#101828">libtrtmc_model_llama.so</text>
 </g>
 <!-- llama&#45;&gt;llama_runtime -->
 <g id="edge3" class="edge">
 <title>llama&#45;&gt;llama_runtime</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M162.72,-25.86C162.72,-25.86 202.19,-25.86 202.19,-25.86"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="202.19,-28.66 210.19,-25.86 202.19,-23.06 202.19,-28.66"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M222.98,-25.86C222.98,-25.86 262.72,-25.86 262.72,-25.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="262.72,-28.66 270.72,-25.86 262.72,-23.06 262.72,-28.66"/>
 </g>
 <!-- whisper -->
 <g id="node3" class="node">
 <title>whisper</title>
-<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M150.01,-203.72C150.01,-203.72 12,-203.72 12,-203.72 6,-203.72 0,-197.72 0,-191.72 0,-191.72 0,-164 0,-164 0,-158 6,-152 12,-152 12,-152 150.01,-152 150.01,-152 156.01,-152 162.01,-158 162.01,-164 162.01,-164 162.01,-191.72 162.01,-191.72 162.01,-197.72 156.01,-203.72 150.01,-203.72"/>
-<text xml:space="preserve" text-anchor="start" x="21.96" y="-180.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">whisper family</text>
-<text xml:space="preserve" text-anchor="start" x="12.96" y="-163.96" font-family="Arial" font-size="16.00" fill="#101828">Python build owner</text>
+<path fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" d="M210.44,-203.72C210.44,-203.72 12,-203.72 12,-203.72 6,-203.72 0,-197.72 0,-191.72 0,-191.72 0,-164 0,-164 0,-158 6,-152 12,-152 12,-152 210.44,-152 210.44,-152 216.44,-152 222.44,-158 222.44,-164 222.44,-164 222.44,-191.72 222.44,-191.72 222.44,-197.72 216.44,-203.72 210.44,-203.72"/>
+<text xml:space="preserve" text-anchor="start" x="51.71" y="-180.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">whisper owner</text>
+<text xml:space="preserve" text-anchor="start" x="12.96" y="-163.96" font-family="Arial" font-size="16.00" fill="#101828">model.py · runtime/ · tests/</text>
 </g>
 <!-- whisper_runtime -->
 <g id="node6" class="node">
 <title>whisper_runtime</title>
-<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M429.2,-203.72C429.2,-203.72 229.81,-203.72 229.81,-203.72 223.81,-203.72 217.81,-197.72 217.81,-191.72 217.81,-191.72 217.81,-164 217.81,-164 217.81,-158 223.81,-152 229.81,-152 229.81,-152 429.2,-152 429.2,-152 435.2,-152 441.2,-158 441.2,-164 441.2,-164 441.2,-191.72 441.2,-191.72 441.2,-197.72 435.2,-203.72 429.2,-203.72"/>
-<text xml:space="preserve" text-anchor="start" x="230.77" y="-180.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">whisper_speech_to_text</text>
-<text xml:space="preserve" text-anchor="start" x="234.8" y="-163.96" font-family="Arial" font-size="16.00" fill="#101828">libtrtmc_model_whisper.so</text>
+<path fill="#ecfccb" stroke="#4d7c0f" stroke-width="1.6" d="M489.63,-203.72C489.63,-203.72 290.24,-203.72 290.24,-203.72 284.24,-203.72 278.24,-197.72 278.24,-191.72 278.24,-191.72 278.24,-164 278.24,-164 278.24,-158 284.24,-152 290.24,-152 290.24,-152 489.63,-152 489.63,-152 495.63,-152 501.63,-158 501.63,-164 501.63,-164 501.63,-191.72 501.63,-191.72 501.63,-197.72 495.63,-203.72 489.63,-203.72"/>
+<text xml:space="preserve" text-anchor="start" x="291.2" y="-180.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">whisper_speech_to_text</text>
+<text xml:space="preserve" text-anchor="start" x="295.23" y="-163.96" font-family="Arial" font-size="16.00" fill="#101828">libtrtmc_model_whisper.so</text>
 </g>
 <!-- whisper&#45;&gt;whisper_runtime -->
 <g id="edge5" class="edge">
 <title>whisper&#45;&gt;whisper_runtime</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M162.72,-177.86C162.72,-177.86 205.77,-177.86 205.77,-177.86"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="205.77,-180.66 213.77,-177.86 205.77,-175.06 205.77,-180.66"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M222.98,-177.86C222.98,-177.86 266.37,-177.86 266.37,-177.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="266.37,-180.66 274.37,-177.86 266.37,-175.06 266.37,-180.66"/>
 </g>
 <!-- text_task -->
 <g id="node7" class="node">
 <title>text_task</title>
-<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6" d="M699.89,-89.72C699.89,-89.72 509.01,-89.72 509.01,-89.72 503.01,-89.72 497.01,-83.72 497.01,-77.72 497.01,-77.72 497.01,-50 497.01,-50 497.01,-44 503.01,-38 509.01,-38 509.01,-38 699.89,-38 699.89,-38 705.89,-38 711.89,-44 711.89,-50 711.89,-50 711.89,-77.72 711.89,-77.72 711.89,-83.72 705.89,-89.72 699.89,-89.72"/>
-<text xml:space="preserve" text-anchor="start" x="509.97" y="-66.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">text_generation_causal</text>
-<text xml:space="preserve" text-anchor="start" x="532.41" y="-49.96" font-family="Arial" font-size="16.00" fill="#101828">shared task contract</text>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6" d="M760.32,-89.72C760.32,-89.72 569.43,-89.72 569.43,-89.72 563.43,-89.72 557.43,-83.72 557.43,-77.72 557.43,-77.72 557.43,-50 557.43,-50 557.43,-44 563.43,-38 569.43,-38 569.43,-38 760.32,-38 760.32,-38 766.32,-38 772.32,-44 772.32,-50 772.32,-50 772.32,-77.72 772.32,-77.72 772.32,-83.72 766.32,-89.72 760.32,-89.72"/>
+<text xml:space="preserve" text-anchor="start" x="570.39" y="-66.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">text_generation_causal</text>
+<text xml:space="preserve" text-anchor="start" x="592.84" y="-49.96" font-family="Arial" font-size="16.00" fill="#101828">shared task contract</text>
 </g>
 <!-- qwen_runtime&#45;&gt;text_task -->
 <g id="edge2" class="edge">
 <title>qwen_runtime&#45;&gt;text_task</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M445.71,-82.86C445.71,-82.86 485.21,-82.86 485.21,-82.86"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="485.21,-85.66 493.21,-82.86 485.21,-80.06 485.21,-85.66"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M506.14,-82.86C506.14,-82.86 545.64,-82.86 545.64,-82.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="545.64,-85.66 553.64,-82.86 545.64,-80.06 545.64,-85.66"/>
 </g>
 <!-- llama_runtime&#45;&gt;text_task -->
 <g id="edge4" class="edge">
 <title>llama_runtime&#45;&gt;text_task</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M445.71,-44.86C445.71,-44.86 485.21,-44.86 485.21,-44.86"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="485.21,-47.66 493.21,-44.86 485.21,-42.06 485.21,-47.66"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M506.14,-44.86C506.14,-44.86 545.64,-44.86 545.64,-44.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="545.64,-47.66 553.64,-44.86 545.64,-42.06 545.64,-47.66"/>
 </g>
 <!-- speech_task -->
 <g id="node8" class="node">
 <title>speech_task</title>
-<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6" d="M677.44,-203.72C677.44,-203.72 531.45,-203.72 531.45,-203.72 525.45,-203.72 519.45,-197.72 519.45,-191.72 519.45,-191.72 519.45,-164 519.45,-164 519.45,-158 525.45,-152 531.45,-152 531.45,-152 677.44,-152 677.44,-152 683.44,-152 689.44,-158 689.44,-164 689.44,-164 689.44,-191.72 689.44,-191.72 689.44,-197.72 683.44,-203.72 677.44,-203.72"/>
-<text xml:space="preserve" text-anchor="start" x="542.56" y="-180.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">speech_to_text</text>
-<text xml:space="preserve" text-anchor="start" x="532.41" y="-163.96" font-family="Arial" font-size="16.00" fill="#101828">shared task contract</text>
+<path fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.6" d="M737.87,-203.72C737.87,-203.72 591.88,-203.72 591.88,-203.72 585.88,-203.72 579.88,-197.72 579.88,-191.72 579.88,-191.72 579.88,-164 579.88,-164 579.88,-158 585.88,-152 591.88,-152 591.88,-152 737.87,-152 737.87,-152 743.87,-152 749.87,-158 749.87,-164 749.87,-164 749.87,-191.72 749.87,-191.72 749.87,-197.72 743.87,-203.72 737.87,-203.72"/>
+<text xml:space="preserve" text-anchor="start" x="602.99" y="-180.06" font-family="Arial" font-weight="bold" font-size="17.00" fill="#101828">speech_to_text</text>
+<text xml:space="preserve" text-anchor="start" x="592.84" y="-163.96" font-family="Arial" font-size="16.00" fill="#101828">shared task contract</text>
 </g>
 <!-- whisper_runtime&#45;&gt;speech_task -->
 <g id="edge6" class="edge">
 <title>whisper_runtime&#45;&gt;speech_task</title>
-<path fill="none" stroke="#64748b" stroke-width="2.2" d="M441.73,-177.86C441.73,-177.86 507.36,-177.86 507.36,-177.86"/>
-<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="507.36,-180.66 515.36,-177.86 507.36,-175.06 507.36,-180.66"/>
+<path fill="none" stroke="#64748b" stroke-width="2.2" d="M502.16,-177.86C502.16,-177.86 567.79,-177.86 567.79,-177.86"/>
+<polygon fill="#64748b" stroke="#64748b" stroke-width="2.2" points="567.79,-180.66 575.79,-177.86 567.79,-175.06 567.79,-180.66"/>
 </g>
 </g>
 </svg>

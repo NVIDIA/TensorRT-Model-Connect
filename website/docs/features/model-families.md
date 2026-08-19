@@ -2,10 +2,11 @@
 title: Model Families
 ---
 
-A model family is a model-owned Python build package. Its
-`families/<family>/MODEL.toml` supplies discovery metadata, and its local
-modules own config adaptation, checkpoint mapping, graph construction, and
-bundle metadata.
+A model family is one self-contained owner tree. Its
+`python/tensorrt_model_connect/models/<family>/MODEL.toml` supplies build,
+runtime, and E2E discovery metadata; sibling `model.py`, `runtime/`, and
+`tests/` content owns the vertical implementation without depending on another
+model folder.
 
 ## What a family model does
 
@@ -22,9 +23,9 @@ Every family exposes one required `model.py`. It:
 
 ## Native TensorRT families
 
-Native family packages live in
-`python/tensorrt_model_connect/families/<family>/`. At this revision there are
-80 package manifests. Use the repository validator for the live inventory:
+Native model owners live in
+`python/tensorrt_model_connect/models/<family>/`. At this revision there are
+82 package descriptors. Use the repository validator for the live inventory:
 
 ```bash
 python3 tools/model_ci.py validate
@@ -51,7 +52,7 @@ The current LocateAnything runtime supports the model's fixed 448×448,
 single-image slow/autoregressive path. It preserves `<ref>`, `<box>`, and
 `<0>` through `<1000>` tokens, including four-coordinate boxes and
 two-coordinate points. Use the task helpers in
-`tensorrt_model_connect.families.locateanything.task_contract` to construct the
+`tensorrt_model_connect.models.locateanything.task_contract` to construct the
 official detection, single/multi grounding, text, GUI, and pointing prompts or
 to parse structured outputs.
 
@@ -64,7 +65,7 @@ dataset-backed IoU accuracy validation.
 `MODEL.toml` bounds lookup through IDs, aliases, prefixes,
 `architecture_patterns`, and `diffusion_pipeline_classes`. After selecting a
 candidate, the resolver imports exactly
-`tensorrt_model_connect.families.<family>.model`, requires `matches(config)`
+`tensorrt_model_connect.models.<family>.model`, requires `matches(config)`
 and `build(model_dir, output_path, **options)`, and calls `build()` directly.
 There is no package scan, package-level proxy, compatibility fallback, or
 manifest-configured Python entrypoint.

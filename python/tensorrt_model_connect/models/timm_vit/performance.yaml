@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-owner/v1
+entries:
+- id: timm_vit.classify
+  operation: classify
+  model: timm-vit-base-p16-224-augreg-in21k-ft-in1k
+  workload:
+    testcase: timm-vit-base-p16-224-augreg-in21k-ft-in1k
+  baseline:
+    runner: task-reference
+    adapter: hf-transformers-vision
+    mode: hf-eager
+    reference_backend: hf_transformers
+    timing_scope: task-model-call-wall
+    input_preparation_included: false

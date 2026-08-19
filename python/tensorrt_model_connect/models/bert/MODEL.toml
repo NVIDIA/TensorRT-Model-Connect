@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "bert"
+aliases = [
+  "bert",
+]
+prefixes = [
+  "bert",
+]
+runtime_plugins = [
+  "plugin.cpp|register_bert_plugin",
+]
+runtime_strategies = [
+  "bert_encoder_only",
+]
+test_manifests = [
+  "tests/manifests/all-minilm-l6-v2.json",
+  "tests/manifests/bert-base-uncased-tp4.json",
+  "tests/manifests/bert-base-uncased.json",
+  "tests/manifests/bge-small-en-v1.5.json",
+  "tests/manifests/paraphrase-multilingual-minilm-l12-v2.json",
+]
+
+[e2e_defaults.encoder_only_nlp]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_inference", required = true },
+]

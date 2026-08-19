@@ -401,12 +401,6 @@ class E2ECase:
     execution_profiles: Dict[str, str] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        """Use the runtime selector as a generic fallback if not set."""
-        if not self.task_strategy:
-            self.task_strategy = self.runtime_strategy
-
-
 @dataclass
 class E2EModel:
     """One buildable model bundle with one or more E2E testcases."""

@@ -51,7 +51,9 @@ NSYS_DEB_URL = (
     "https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/"
     "NsightSystems-linux-cli-public-2026.2.1.210-3763964.deb"
 )
-DEFAULT_PERF_VALIDATION_ROOT = PROJECT_ROOT / "tests" / "e2e" / "models"
+DEFAULT_PERF_VALIDATION_ROOT = (
+    PROJECT_ROOT / "python" / "tensorrt_model_connect" / "models"
+)
 
 # Default prompts by mode
 DEFAULT_PROMPTS = {
@@ -436,7 +438,7 @@ def auto_tune_model(
     """Run full auto-tune loop for one model."""
     if not pipeline_type:
         raise ValueError("pipeline_type is required")
-    mode = runtime_strategy_performance_mode(pipeline_type, default="decode")
+    mode = runtime_strategy_performance_mode(pipeline_type)
     prompt = DEFAULT_PROMPTS.get(mode, "Hello")
     safe_name = model.split("/")[-1].lower().replace("-", "_")
 
@@ -647,7 +649,7 @@ def load_default_validation_models(
 ) -> list[dict]:
     """Load model-owned default performance validation entries."""
     models: list[dict] = []
-    for path in sorted(root.glob("*/perf_validation.json")):
+    for path in sorted(root.glob("*/tests/perf_validation.json")):
         with path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
         entries = raw.get("models", raw) if isinstance(raw, dict) else raw
@@ -663,7 +665,7 @@ def load_default_validation_models(
                     f"{path}: entry {index} must declare pipeline_type"
                 )
             item["pipeline_type"] = pipeline_type
-            item.setdefault("label", f"{path.parent.name}-{index}")
+            item.setdefault("label", f"{path.parent.parent.name}-{index}")
             models.append(item)
     return models
 
@@ -686,10 +688,7 @@ def run_batch(models: list[dict], output_dir: str, dry_run: bool) -> list[TuneRe
             r = TuneResult(
                 model=entry["model"],
                 pipeline_type=entry.get("pipeline_type", ""),
-                mode=runtime_strategy_performance_mode(
-                    entry.get("pipeline_type", ""),
-                    default="",
-                ),
+                mode="",
                 status="failed", error=str(e))
             results.append(r)
 

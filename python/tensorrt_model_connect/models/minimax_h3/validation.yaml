@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  minimax_h3_official_profile_parity:
+    dataset:
+      default_path: python/tensorrt_model_connect/models/minimax_h3/tests/validation/minimax-h3-768p.json
+    models:
+    - minimax-h3-768p
+    default_models:
+    - minimax-h3-768p
+    model_overrides:
+      minimax-h3-768p:
+        reference_source_revision: current
+    qualification:
+      minimax-h3-768p: {}

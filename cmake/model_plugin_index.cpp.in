@@ -16,15 +16,4 @@ const std::vector<ModelPluginInfo>& runtime_model_plugin_index() {
     return entries;
 }
 
-const std::vector<LegacyStrategyAlias>& legacy_runtime_strategy_alias_index() {
-    static const std::vector<LegacyStrategyAlias> entries = {
-@TRTMC_LEGACY_STRATEGY_ALIAS_ENTRIES@
-    };
-    return entries;
-}
-
-std::optional<std::string> default_runtime_strategy() {
-    @TRTMC_DEFAULT_RUNTIME_STRATEGY_RETURN@
-}
-
 } // namespace trtmc

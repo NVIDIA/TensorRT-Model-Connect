@@ -30,9 +30,6 @@ import time
 from typing import Any, Callable, Iterable, Mapping, Sequence
 import uuid as uuidlib
 
-import yaml
-
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_ROOT = REPO_ROOT / "python"
 for import_root in (REPO_ROOT, PYTHON_ROOT):
@@ -67,9 +64,8 @@ from tools import qualification_report  # noqa: E402
 from tools.validation.gate_policy import evaluate_shadow_gates  # noqa: E402
 
 
-DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
 DEFAULT_SUITES = REPO_ROOT / "tests" / "validation" / "workloads.yaml"
-DEFAULT_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
+DEFAULT_MODELS = REPO_ROOT / "python" / "tensorrt_model_connect" / "models"
 DEFAULT_OUTPUT = REPO_ROOT / "artifacts" / "trtmc-validate"
 DEFAULT_ENGINE_DIR = DEFAULT_OUTPUT / "engines"
 DEFAULT_REFERENCE_CACHE = DEFAULT_OUTPUT / "references"
@@ -141,23 +137,7 @@ class ReferenceSource:
 @dataclass(frozen=True)
 class ReferenceSourceSelection:
     environment: Mapping[str, str]
-    elf_reference_repo: Path | None = None
-
-
-ELF_SOURCE = ReferenceSource(
-    name="ELF",
-    repository="https://github.com/lillian039/ELF.git",
-    revision="b29d8833609e9ab7f67cd9da39435ac5cea04837",
-    relative_checkout=Path("elf/reference/ELF-b29d8833609e"),
-    entrypoint=Path("src"),
-)
-SANA_WM_SOURCE = ReferenceSource(
-    name="SANA-WM",
-    repository="https://github.com/NVlabs/Sana.git",
-    revision="59629fdf790850797cb657bad014fce432bd713d",
-    relative_checkout=Path("sana_wm/reference/Sana-59629fdf7908"),
-    entrypoint=Path("inference_video_scripts/wm/inference_sana_wm.py"),
-)
+    comparison_arguments: tuple[str, ...] = ()
 
 
 def _validate_model_spec(path: Path, name: Any, spec: Any) -> None:
@@ -219,13 +199,18 @@ def _validate_sample_limits(path: Path, raw: Mapping[str, Any]) -> None:
             )
 
 
-def load_catalog(path: Path = DEFAULT_CATALOG) -> dict[str, Any]:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or raw.get("version") != 1:
-        raise ValidationError(f"{path}: expected version: 1")
+def load_catalog(
+    path: Path = DEFAULT_SUITES,
+    models_dir: Path = DEFAULT_MODELS,
+) -> dict[str, Any]:
+    try:
+        suites = validation_catalog.load_suites(path, models_dir)
+        raw = validation_catalog.qualification_catalog(suites)
+    except (OSError, ValueError) as exc:
+        raise ValidationError(str(exc)) from exc
     models = raw.get("models")
     if not isinstance(models, dict) or not models:
-        raise ValidationError(f"{path}: models must be a non-empty mapping")
+        raise ValidationError(f"{path}: model-owned qualification is empty")
     _validate_sample_limits(path, raw)
     for name, spec in models.items():
         _validate_model_spec(path, name, spec)
@@ -682,7 +667,7 @@ def ensure_reference_sources(
 ) -> ReferenceSourceSelection:
     environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
     checkout_root = source_cache_root or cache_root
-    declared_source = None
+    comparison_arguments: tuple[str, ...] = ()
     if model_reference_cache:
         required = ("repository", "revision", "relative_path", "entrypoint")
         missing = [field for field in required if not model_reference_cache.get(field)]
@@ -708,19 +693,38 @@ def ensure_reference_sources(
                     f"{environment_variable!r}"
                 )
             environment[environment_variable] = str(checkout)
-
-    if family == "elf_flow":
-        checkout = _ensure_reference_source(ELF_SOURCE, checkout_root)
-        return ReferenceSourceSelection(
-            environment=environment,
-            elf_reference_repo=checkout,
-        )
-    if family == "sana_wm":
-        if declared_source is None:
-            declared_source = SANA_WM_SOURCE
-            checkout = _ensure_reference_source(declared_source, checkout_root)
-        environment["SANA_WM_SCRIPT"] = str(checkout / declared_source.entrypoint)
-    return ReferenceSourceSelection(environment=environment)
+        entrypoint_environment_variable = str(
+            model_reference_cache.get("entrypoint_environment_variable", "") or ""
+        ).strip()
+        if entrypoint_environment_variable:
+            if (
+                re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_]*",
+                    entrypoint_environment_variable,
+                )
+                is None
+            ):
+                raise ValidationError(
+                    f"{family} model reference entrypoint_environment_variable is invalid: "
+                    f"{entrypoint_environment_variable!r}"
+                )
+            environment[entrypoint_environment_variable] = str(
+                checkout / declared_source.entrypoint
+            )
+        comparison_argument = str(
+            model_reference_cache.get("comparison_argument", "") or ""
+        ).strip()
+        if comparison_argument:
+            if re.fullmatch(r"--[a-z][a-z0-9-]*", comparison_argument) is None:
+                raise ValidationError(
+                    f"{family} model reference comparison_argument is invalid: "
+                    f"{comparison_argument!r}"
+                )
+            comparison_arguments = (comparison_argument, str(checkout))
+    return ReferenceSourceSelection(
+        environment=environment,
+        comparison_arguments=comparison_arguments,
+    )
 
 
 def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
@@ -887,13 +891,8 @@ def _comparison_command(
     command.extend(["--hf-device", getattr(arguments, "hf_device", "cuda")])
     if getattr(arguments, "hf_device_map", ""):
         command.extend(["--hf-device-map", arguments.hf_device_map])
-    if reference_sources and reference_sources.elf_reference_repo:
-        command.extend(
-            [
-                "--elf-reference-repo",
-                str(reference_sources.elf_reference_repo),
-            ]
-        )
+    if reference_sources:
+        command.extend(reference_sources.comparison_arguments)
     return command
 
 
@@ -3865,7 +3864,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the resolved, non-blocking gate-policy census as JSON",
     )
-    parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--suites", type=Path, default=DEFAULT_SUITES)
     parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS)
     parser.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT)
@@ -3988,8 +3986,10 @@ def _load_validation_inputs(
     tuple[str, ...],
     dict[str, dict[str, Any]],
 ]:
-    catalog = load_catalog(arguments.catalog)
-    suites_list = validation_catalog.load_suites(arguments.suites)
+    catalog = load_catalog(arguments.suites, arguments.models_dir)
+    suites_list = validation_catalog.load_suites(
+        arguments.suites, arguments.models_dir
+    )
     suites = {suite["id"]: suite for suite in suites_list}
     ready = ready_model_names(arguments.models_dir)
     task_models = _validation_models(arguments.models_dir)
@@ -4437,7 +4437,6 @@ def _worker_command(
         "--model-worker",
     ]
     for option, value in (
-        ("--catalog", arguments.catalog),
         ("--suites", arguments.suites),
         ("--models-dir", arguments.models_dir),
         ("--output", arguments.output),

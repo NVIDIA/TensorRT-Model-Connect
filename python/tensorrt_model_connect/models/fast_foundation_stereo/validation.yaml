@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  fast_foundation_stereo_synthetic_parity:
+    dataset:
+      default_path: python/tensorrt_model_connect/models/fast_foundation_stereo/tests/validation/fast-foundation-stereo.json
+    models:
+    - fast-foundation-stereo
+    default_models:
+    - fast-foundation-stereo
+    qualification:
+      fast-foundation-stereo: {}

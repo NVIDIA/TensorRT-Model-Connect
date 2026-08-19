@@ -43,11 +43,11 @@ sys.path.insert(0, "python")
 
 
 def _load_owned_graph_ops():
-    families = Path("python") / "tensorrt_model_connect" / "families"
-    for family_dir in sorted(families.iterdir()):
+    models = Path("python") / "tensorrt_model_connect" / "models"
+    for family_dir in sorted(models.iterdir()):
         if (family_dir / "MODEL.toml").is_file() and (family_dir / "graph_ops.py").is_file():
             return importlib.import_module(
-                f"tensorrt_model_connect.families.{family_dir.name}.graph_ops")
+                f"tensorrt_model_connect.models.{family_dir.name}.graph_ops")
     raise RuntimeError("No family-owned graph_ops.py found")
 
 

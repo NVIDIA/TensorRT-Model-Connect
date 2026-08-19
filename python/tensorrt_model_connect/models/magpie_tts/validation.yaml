@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  seedtts_en_tts_intelligibility:
+    models:
+    - magpie-tts-357m
+    - magpie-tts-357m-tp4
+    default_models:
+    - magpie-tts-357m
+    qualification:
+      magpie-tts-357m: {}

@@ -9,7 +9,7 @@ A `.bundle` bundle is the portable handoff between the Python builder and C++ ru
 ## Learning objectives
 
 By the end of this lab, you should be able to classify a bundle as native or
-platform-specialized, identify its family/runtime ownership, and route a load
+platform-specialized, identify its model owner and runtime strategy, and route a load
 failure to the artifact, model DSO, backend, or provider boundary.
 
 The source-ownership checks near the end require a repository checkout; bundle
@@ -169,7 +169,7 @@ Examples:
 | `qwen_vl` | `qwen_vl_vision_language` | Qwen-VL image encoder plus text decoder. |
 | `internvl` | `internvl_vision_language` | InternVL image encoder plus text decoder. |
 | `flux` | `diffusion_flux` | Flux text-to-image denoising pipeline. |
-| `wan_t2v` | `diffusion_wan` | Wan text-to-video denoising pipeline; runtime owner directory is `wan`. |
+| `wan_t2v` | `diffusion_wan` | Wan text-to-video denoising pipeline owned entirely by `wan_t2v`. |
 | `pixart` | `diffusion_pixart` | Image diffusion generation. |
 
 :::tip Progress check
@@ -182,7 +182,7 @@ and how an E2E `task_strategy` groups them under the same user-visible task.
 
 If `runtime_strategy` is present but runtime creation fails with "No plugin registered", check:
 
-- The owning `src/runtime/models/<owner>/MODEL.toml` declares the strategy,
+- The owning `python/tensorrt_model_connect/models/<owner>/MODEL.toml` declares the strategy,
   runtime library, and `plugin.cpp|registrar` pair.
 - The plugin uses `REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST` with the same
   strategy and registrar.
@@ -195,13 +195,13 @@ If `runtime_strategy` is present but runtime creation fails with "No plugin regi
 | Check | Command or source |
 | --- | --- |
 | Bundle header parses | `trtmc inspect model.bundle` |
-| Qwen strategy is declared | `rg -n 'qwen_decoder_kv_cache' src/runtime/models/qwen/MODEL.toml` |
-| Qwen registrar is implemented | `rg -n 'REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST' src/runtime/models/qwen/plugin.cpp` |
+| Qwen strategy is declared | `rg -n 'qwen_decoder_kv_cache' python/tensorrt_model_connect/models/qwen/MODEL.toml` |
+| Qwen registrar is implemented | `rg -n 'REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST' python/tensorrt_model_connect/models/qwen/runtime/plugin.cpp` |
 | Runtime DSO was built | `find build/models/qwen -name 'libtrtmc_model_qwen.so' -print` |
 | Native engine sections exist | `trtmc inspect model.bundle --list-engines` |
 | Optimized descriptor/artifact section names exist | `trtmc inspect model.bundle` |
 | Exact optimized descriptor identity is valid | Family-owned provider qualification and bundle-contract tests; the current inspector is only a section-presence check. |
-| E2E manifest matches expected contract | `tests/e2e/models/<family>/manifests/<model>.json` |
+| E2E manifest matches expected contract | `python/tensorrt_model_connect/models/<family>/tests/manifests/<model>.json` |
 
 Inspecting the bundle should become muscle memory. It tells you whether you are debugging the builder, the artifact, the runtime loader, or request execution.
 

@@ -60,7 +60,7 @@ class CppCoverageEngine:
         excludes = self._words("GCOVR_EXCLUDES") or [
             str(self.repository / "tests"),
             str(self.repository / "build.*"),
-            str(self.repository / "src/runtime/models"),
+            str(self.repository / "python/tensorrt_model_connect/models"),
             ".*/CMakeFiles/.*/CompilerIdCXX/.*",
         ]
         thresholds = {
@@ -633,7 +633,7 @@ branch = True
 omit =
     */tests/*
     */__pycache__/*
-    */tensorrt_model_connect/families/*
+    */tensorrt_model_connect/models/*
 
 [report]
 show_missing = True

@@ -2,10 +2,11 @@
 
 :::info Implementation-history snapshot
 
-This plan records the migration toward model-owned Builder, Runtime, and E2E
-trees. The migration has since landed: current discovery is driven by the
-three per-family `MODEL.toml` descriptors. Paths under “Target Shape” are
-design notation, not copy-and-paste scaffolding instructions. Use the
+This plan records the earlier migration toward model-owned Builder, Runtime,
+and E2E trees. That intermediate three-root design has since been replaced by
+one `python/tensorrt_model_connect/models/<owner>/` folder and one
+`MODEL.toml` per model. Paths under “Target Shape” are historical design
+notation, not copy-and-paste scaffolding instructions. Use the
 [current Add a Model Family guide](../extend/add-model-family.md) and the live
 descriptor files for current onboarding. Command-looking `text` blocks below
 are preserved acceptance sketches from the migration and are not a replayable
@@ -22,7 +23,7 @@ runtime/<model>/
 test/<model>/
 ```
 
-For this repository, the current equivalents are:
+At the time of this snapshot, the repository equivalents were:
 
 ```text
 python/tensorrt_model_connect/families/<model>/
@@ -54,10 +55,9 @@ code that couples unrelated models.
    - plugin lookup/loading
 8. Nothing else should be shared by default.
 
-In particular, the migration retired broad root-level model helper modules.
-Current graph operations that encode model behavior are owned below
-`python/tensorrt_model_connect/families/<model>/`; model-independent
-infrastructure stays shared only when ownership tests permit it.
+In particular, that migration retired broad root-level model helper modules.
+The path below records the intermediate layout; current model code now lives
+under one `python/tensorrt_model_connect/models/<owner>/` root.
 
 ## Target Shape
 

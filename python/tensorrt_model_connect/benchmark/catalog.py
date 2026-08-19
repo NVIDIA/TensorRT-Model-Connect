@@ -46,8 +46,8 @@ def default_manifest_root() -> Path:
         return Path(configured).expanduser()
     module = Path(__file__).resolve()
     candidates = (
-        module.parents[3] / "tests/e2e/models",
         module.parent / "_catalog",
+        module.parents[3] / "python/tensorrt_model_connect/models",
     )
     for candidate in candidates:
         if candidate.is_dir():
@@ -83,7 +83,7 @@ class ManifestCatalog:
                     CatalogEntry(
                         name=path.stem,
                         operation="-",
-                        family=path.parent.parent.name,
+                        family=path.parents[2].name,
                         precision="-",
                         hf_id="-",
                         status="invalid",
@@ -148,7 +148,6 @@ class ManifestCatalog:
         for family_root in sorted(path for path in self.root.iterdir() if path.is_dir()):
             descriptor = family_root / "MODEL.toml"
             if not descriptor.is_file():
-                paths.extend(sorted((family_root / "manifests").glob("*.json")))
                 continue
             try:
                 with descriptor.open("rb") as stream:
@@ -344,7 +343,7 @@ def _catalog_entry(
 
 
 def _model_defaults(path: Path, task_strategy: str) -> Mapping[str, Any]:
-    descriptor = path.parent.parent / "MODEL.toml"
+    descriptor = path.parents[2] / "MODEL.toml"
     if not descriptor.is_file():
         return {}
     try:

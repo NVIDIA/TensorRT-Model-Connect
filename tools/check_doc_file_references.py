@@ -176,19 +176,18 @@ def _get_actual_counts(repo_root: Path) -> dict:
     counts = {}
 
     # E2E manifests
-    manifest_dir = repo_root / "tests" / "e2e" / "models"
+    manifest_dir = repo_root / "python" / "tensorrt_model_connect" / "models"
     if manifest_dir.is_dir():
         counts["manifests"] = len(
             {
-                *manifest_dir.glob("*.json"),
-                *manifest_dir.glob("*/manifests/*.json"),
+                *manifest_dir.glob("*/tests/manifests/*.json"),
             }
         )
     else:
         counts["manifests"] = 0
 
     # Canonical family build entry modules.
-    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "models"
     if families_dir.is_dir():
         family_models = [
             directory / "model.py"
@@ -292,11 +291,11 @@ def extract_numerical_claims(
                         continue  # ambiguous context, skip
                 elif claim_kind == "manifests":
                     actual_key = "manifests"
-                    label = "E2E model manifests (tests/e2e/models/<family>/manifests/*.json)"
+                    label = "E2E model manifests (python/tensorrt_model_connect/models/<family>/tests/manifests/*.json)"
                 elif claim_kind == "models_e2e":
                     # "N models" claims -- map to manifest count
                     actual_key = "manifests"
-                    label = "E2E model manifests (tests/e2e/models/<family>/manifests/*.json)"
+                    label = "E2E model manifests (python/tensorrt_model_connect/models/<family>/tests/manifests/*.json)"
                 elif claim_kind == "family_models":
                     actual_key = "family_models"
                     label = "family model build entries (<family>/model.py)"
@@ -437,7 +436,7 @@ def main() -> int:
     counts = getattr(report, "_actual_counts", {})
     if counts:
         print("=== Actual file counts ===")
-        print(f"  E2E manifests (tests/e2e/models/<family>/manifests/*.json): {counts.get('manifests', '?')}")
+        print(f"  E2E manifests (python/tensorrt_model_connect/models/<family>/tests/manifests/*.json): {counts.get('manifests', '?')}")
         print(f"  Family model build entries (<family>/model.py):    {counts.get('family_models', '?')}")
         print(f"  Family dir total .py files:                        {counts.get('families_total_py', '?')}")
         print(f"  C++ test files (tests/cpp/*.cpp):                  {counts.get('cpp_tests', '?')}")

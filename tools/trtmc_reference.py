@@ -18,6 +18,11 @@ import sys
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYTHON_ROOT = REPO_ROOT / "python"
@@ -33,7 +38,7 @@ from tools.validation.artifacts import (  # noqa: E402
 CACHE_SCHEMA = "trtmc.reference-cache/v1"
 CACHE_IMPLEMENTATION = 1
 REFERENCE_CACHE_IDENTITY_IMPLEMENTATION = 2
-MODEL_OWNED_REFERENCE_IDENTITY_IMPLEMENTATION = 1
+MODEL_OWNED_REFERENCE_IDENTITY_IMPLEMENTATION = 2
 _CACHE_METADATA = "reference.json"
 _WORK_METADATA = "hf_cache.json"
 _NATIVE_RUN_LOG = "hf_native_run.log"
@@ -170,8 +175,6 @@ def _model_owned_reference_identity(args: argparse.Namespace) -> str:
     except (OSError, json.JSONDecodeError):
         return ""
     dataset_kind = str(work_manifest.get("dataset_kind", "") or "")
-    if dataset_kind not in _NATIVE_PLUGIN_DATASET_KINDS:
-        return ""
     task_config = work_manifest.get("task_eval", {})
     task_config = task_config if isinstance(task_config, dict) else {}
     manifest_ref = str(task_config.get("model_manifest", "") or "")
@@ -183,19 +186,50 @@ def _model_owned_reference_identity(args: argparse.Namespace) -> str:
     if not model_manifest.is_file():
         return ""
 
-    model_root = (
-        model_manifest.parent.parent
-        if model_manifest.parent.name == "manifests"
-        else model_manifest.parent
+    model_root = next(
+        (
+            candidate
+            for candidate in (model_manifest.parent, *model_manifest.parents)
+            if (candidate / "MODEL.toml").is_file()
+        ),
+        None,
     )
+    if model_root is None:
+        return ""
     sources: list[tuple[str, Path]] = []
     if not str(getattr(args, "reference_cache_identity", "") or ""):
         sources.append((f"manifest/{model_manifest.name}", model_manifest))
     owner_manifest = model_root / "MODEL.toml"
     if owner_manifest.is_file():
         sources.append(("MODEL.toml", owner_manifest))
-    plugins_root = model_root / "e2e_plugins"
-    if plugins_root.is_dir():
+        with owner_manifest.open("rb") as stream:
+            owner_metadata = tomllib.load(stream)
+        declaration = owner_metadata.get("reference_entrypoint")
+        if declaration is not None:
+            if not isinstance(declaration, str):
+                raise ReferenceError(
+                    f"{owner_manifest}: reference_entrypoint must be a string"
+                )
+            relative_path, separator, symbol = declaration.partition("|")
+            if not separator or not relative_path or not symbol:
+                raise ReferenceError(
+                    f"{owner_manifest}: reference_entrypoint must be "
+                    "'relative/path.py|callable'"
+                )
+            entrypoint = (model_root / relative_path).resolve()
+            try:
+                entrypoint.relative_to(model_root.resolve())
+            except ValueError as exc:
+                raise ReferenceError(
+                    f"{owner_manifest}: reference_entrypoint escapes its owner"
+                ) from exc
+            if entrypoint.is_symlink() or not entrypoint.is_file():
+                raise ReferenceError(
+                    f"{owner_manifest}: reference_entrypoint is not a regular file"
+                )
+            sources.append((f"reference_entrypoint/{relative_path}", entrypoint))
+    plugins_root = model_root / "tests" / "e2e_plugins"
+    if dataset_kind in _NATIVE_PLUGIN_DATASET_KINDS and plugins_root.is_dir():
         sources.extend(
             (
                 f"e2e_plugins/{path.relative_to(plugins_root).as_posix()}",

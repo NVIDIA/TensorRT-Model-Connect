@@ -29,7 +29,7 @@ class TestLoadEngineFromBundle:
     """Tests for load_engine_from_bundle() bundle parsing."""
 
     def test_roundtrip(self, tmp_path):
-        from tensorrt_model_connect.families.qwen.debug_runner import load_engine_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_engine_from_bundle
 
         header = {
             "model_id": "test-model",
@@ -49,7 +49,7 @@ class TestLoadEngineFromBundle:
         assert hdr["num_layers"] == 4
 
     def test_invalid_magic(self, tmp_path):
-        from tensorrt_model_connect.families.qwen.debug_runner import load_engine_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_engine_from_bundle
 
         path = tmp_path / "bad.bundle"
         path.write_bytes(b"NOT_A_BUNDLE_xxxxxxxxxxxx")
@@ -58,7 +58,7 @@ class TestLoadEngineFromBundle:
             load_engine_from_bundle(str(path))
 
     def test_named_engine_section(self, tmp_path):
-        from tensorrt_model_connect.families.qwen.debug_runner import load_engine_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_engine_from_bundle
 
         header = {
             "model_id": "test-model",
@@ -88,7 +88,7 @@ class TestLoadVisionEngineFromBundle:
     """Tests for load_vision_engine_from_bundle()."""
 
     def test_with_vision_section(self, tmp_path):
-        from tensorrt_model_connect.families.qwen_vl.vl_debug_runner import (
+        from tensorrt_model_connect.models.qwen_vl.vl_debug_runner import (
             load_vision_engine_from_bundle,
         )
 
@@ -106,7 +106,7 @@ class TestLoadVisionEngineFromBundle:
         assert hdr["num_layers"] == 2
 
     def test_without_vision_section(self, tmp_path):
-        from tensorrt_model_connect.families.qwen_vl.vl_debug_runner import (
+        from tensorrt_model_connect.models.qwen_vl.vl_debug_runner import (
             load_vision_engine_from_bundle,
         )
 
@@ -129,7 +129,7 @@ class TestBundleSectionUtils:
     """Tests for section loading utilities."""
 
     def test_load_section_missing(self, tmp_path):
-        from tensorrt_model_connect.families.qwen.debug_runner import load_section_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_section_from_bundle
 
         header = {"num_layers": 1, "max_cache_length": 32}
         bundle = make_bundle_bytes(header, engine_plan=b"X")
@@ -141,7 +141,7 @@ class TestBundleSectionUtils:
         assert result is None
 
     def test_load_config_from_bundle(self, tmp_path):
-        from tensorrt_model_connect.families.qwen.debug_runner import load_config_from_bundle
+        from tensorrt_model_connect.models.qwen.debug_runner import load_config_from_bundle
 
         # Build a bundle with a config.json section
         config_data = json.dumps({"model_type": "example_decoder"}).encode("utf-8")

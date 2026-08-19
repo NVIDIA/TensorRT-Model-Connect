@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "timesfm"
+aliases = [
+  "times_fm",
+  "timesfm",
+]
+prefixes = [
+  "times_fm",
+  "timesfm",
+]
+runtime_plugins = [
+  "plugin.cpp|register_timesfm_plugin",
+]
+runtime_strategies = [
+  "timesfm_trt",
+]
+test_manifests = [
+  "tests/manifests/timesfm-2.0-500m-official-tp4.json",
+  "tests/manifests/timesfm-2.0-500m-official.json",
+]
+
+[e2e_defaults.neural_operator]
+reference_backend = "torch_reference"
+oracle_level = "L2_internal_reference"
+stages = [
+  { name = "full_inference", required = true },
+]
+input_fields = [
+  { input = "field_input", manifest = "field_input" },
+  { input = "branch_input", manifest = "branch_input" },
+  { input = "trunk_input", manifest = "trunk_input" },
+  { input = "output_field", manifest = "output_field" },
+]

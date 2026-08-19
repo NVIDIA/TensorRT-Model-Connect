@@ -84,13 +84,15 @@ def test_extract_path_references_captures_backtick_path_with_1_based_line_no() -
     # enumerate() start=1 convention is preserved.
     content = (
         "first line of the doc\n"
-        "see `src/runtime/models/qwen/plugin.cpp` for the impl\n"
+        "see `python/tensorrt_model_connect/models/qwen/runtime/plugin.cpp` for the impl\n"
         "third line\n"
     )
 
     refs = cdfr.extract_path_references(content, "website/docs/wiki/any.md")
 
-    assert refs == [(2, "src/runtime/models/qwen/plugin.cpp")]
+    assert refs == [
+        (2, "python/tensorrt_model_connect/models/qwen/runtime/plugin.cpp")
+    ]
 
 
 def test_extract_path_references_skips_wildcard_glob() -> None:
@@ -143,7 +145,7 @@ def test_extract_path_references_h_cpp_shorthand_yields_two_entries_same_line() 
 
 
 def test_actual_counts_use_canonical_family_model_entries(tmp_path: Path) -> None:
-    families = tmp_path / "python/tensorrt_model_connect/families"
+    families = tmp_path / "python/tensorrt_model_connect/models"
     for name in ("alpha", "beta"):
         path = families / name / "model.py"
         path.parent.mkdir(parents=True)

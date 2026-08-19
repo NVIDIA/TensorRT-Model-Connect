@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "llama"
+capabilities = [
+  "split_decoder_roles",
+  "debug_layer_outputs",
+]
+aliases = [
+  "LLaMA",
+  "llama",
+]
+prefixes = [
+  "llama",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "llama_decoder_kv_cache",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_llama_plugin",
+]
+runtime_strategies = [
+  "llama_decoder_kv_cache",
+]
+test_manifests = [
+  "tests/manifests/falcon3-1b.json",
+  "tests/manifests/minitron-4b-depth.json",
+  "tests/manifests/minitron-4b-width-l0.json",
+  "tests/manifests/minitron-4b-width.json",
+  "tests/manifests/minitron-4b-width-regression-native-kv-chunked-prefill.json",
+  "tests/manifests/nemotron-nano-4b.json",
+  "tests/manifests/tinyllama-1.1b.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "llama_decoder_kv_cache",
+]
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+input_fields = [
+  { input = "prompt_repeat", manifest = "prompt_repeat" },
+  { input = "expected_prompt_tokens", manifest = "expected_prompt_tokens" },
+]
+stages = [
+  { name = "full_generation", required = true },
+]

@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  etth1_time_series_parity:
+    models:
+    - timesfm-2.0-500m-official
+    - timesfm-2.0-500m-official-tp4
+    default_models:
+    - timesfm-2.0-500m-official
+    model_profiles:
+      timesfm-2.0-500m-official:
+        gates:
+          max_relative_l2: 0.004
+          max_absolute_error: 0.007
+    model_overrides:
+      timesfm-2.0-500m-official:
+        time_series:
+          input_columns:
+          - OT
+          target_columns:
+          - OT
+          input_key: branch_input
+          context_length: 2048
+          prediction_length: 128
+          stride: 24
+          test_fraction: 0.2
+          frequency: 0
+    qualification:
+      timesfm-2.0-500m-official: {}

@@ -65,7 +65,7 @@ def _write_manifest(manifest_dir: Path, name: str, **fields: object) -> None:
 
 
 def _test_id(name: str) -> str:
-    return f"tests/e2e/models/unit_family/test_unit_family_e2e.py::test_model_e2e[{name}]"
+    return f"python/tensorrt_model_connect/models/unit_family/tests/test_unit_family_e2e.py::test_model_e2e[{name}]"
 
 
 def test_diffusion_family_strategies_are_large() -> None:
@@ -382,7 +382,7 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
                         model = line.strip()
                         if model:
                             print(
-                                "tests/e2e/models/fake_family/"
+                                "python/tensorrt_model_connect/models/fake_family/tests/"
                                 f"test_fake_family_e2e.py::test_model_e2e[{model}]"
                             )
                     raise SystemExit(0)
@@ -448,12 +448,12 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
     tests_file.write_text(
         "\n".join(
             [
-                "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-a]",
-                "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-b]",
-                "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-a]",
-                "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-b]",
-                "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-a]",
-                "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-b]",
+                "python/tensorrt_model_connect/models/media_family/tests/test_media_family_e2e.py::test_model_e2e[exclusive-media-a]",
+                "python/tensorrt_model_connect/models/media_family/tests/test_media_family_e2e.py::test_model_e2e[exclusive-media-b]",
+                "python/tensorrt_model_connect/models/encoder_family/tests/test_encoder_family_e2e.py::test_model_e2e[encoder-a]",
+                "python/tensorrt_model_connect/models/encoder_family/tests/test_encoder_family_e2e.py::test_model_e2e[encoder-b]",
+                "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-a]",
+                "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-b]",
                 "",
             ]
         ),
@@ -522,14 +522,14 @@ def test_run_e2e_parallel_pipelines_exclusive_then_shared_work(tmp_path: Path) -
         for test in worker_tests
     }
     assert exclusive_tests == {
-        "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-a]",
-        "tests/e2e/models/media_family/test_media_family_e2e.py::test_model_e2e[exclusive-media-b]",
+        "python/tensorrt_model_connect/models/media_family/tests/test_media_family_e2e.py::test_model_e2e[exclusive-media-a]",
+        "python/tensorrt_model_connect/models/media_family/tests/test_media_family_e2e.py::test_model_e2e[exclusive-media-b]",
     }
     assert shared_tests == {
-        "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-a]",
-        "tests/e2e/models/encoder_family/test_encoder_family_e2e.py::test_model_e2e[encoder-b]",
-        "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-a]",
-        "tests/e2e/models/decoder_family/test_decoder_family_e2e.py::test_model_e2e[decoder-b]",
+        "python/tensorrt_model_connect/models/encoder_family/tests/test_encoder_family_e2e.py::test_model_e2e[encoder-a]",
+        "python/tensorrt_model_connect/models/encoder_family/tests/test_encoder_family_e2e.py::test_model_e2e[encoder-b]",
+        "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-a]",
+        "python/tensorrt_model_connect/models/decoder_family/tests/test_decoder_family_e2e.py::test_model_e2e[decoder-b]",
     }
     assert len(list(result_dir.glob("console-gpu*-w*.log"))) == 6
 
@@ -567,16 +567,16 @@ def test_run_e2e_parallel_collects_model_entries_when_models_file_is_present(
                     )
                     if "group" in selected:
                         print(
-                            "tests/e2e/models/fake_family/"
+                            "python/tensorrt_model_connect/models/fake_family/tests/"
                             "test_fake_family_e2e.py::test_model_e2e[group]"
                         )
                     if "solo" in selected:
                         print(
-                            "tests/e2e/models/fake_family/"
+                            "python/tensorrt_model_connect/models/fake_family/tests/"
                             "test_fake_family_e2e.py::test_model_e2e[solo]"
                         )
                     print(
-                        "tests/e2e/models/other_family/"
+                        "python/tensorrt_model_connect/models/other_family/tests/"
                         "test_other_family_e2e.py::test_model_e2e[unrelated]"
                     )
                     raise SystemExit(0)
@@ -633,8 +633,8 @@ def test_run_e2e_parallel_collects_model_entries_when_models_file_is_present(
     tests_file.write_text(
         "\n".join(
             [
-                "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[group]",
-                "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[solo]",
+                "python/tensorrt_model_connect/models/fake_family/tests/test_fake_family_e2e.py::test_model_e2e[group]",
+                "python/tensorrt_model_connect/models/fake_family/tests/test_fake_family_e2e.py::test_model_e2e[solo]",
                 "",
             ]
         ),
@@ -688,13 +688,18 @@ def test_run_e2e_parallel_collects_model_entries_when_models_file_is_present(
         for test in worker_tests
     }
     assert scheduled == {
-        "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[group]",
-        "tests/e2e/models/fake_family/test_fake_family_e2e.py::test_model_e2e[solo]",
+        "python/tensorrt_model_connect/models/fake_family/tests/test_fake_family_e2e.py::test_model_e2e[group]",
+        "python/tensorrt_model_connect/models/fake_family/tests/test_fake_family_e2e.py::test_model_e2e[solo]",
     }
 
 
 def test_gpt_oss_20b_is_marked_exclusive_gpu() -> None:
-    manifest_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
+    manifest_dir = (
+        Path(__file__).resolve().parents[2]
+        / "python"
+        / "tensorrt_model_connect"
+        / "models"
+    )
 
     for manifest_name in ("gpt-oss-20b", "gpt-oss-20b-l0"):
         manifest_path = find_manifest_path(manifest_name, manifest_dir)

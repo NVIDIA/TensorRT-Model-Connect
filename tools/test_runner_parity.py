@@ -109,7 +109,7 @@ def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
 def run_python(bundle: str, prompt: str,
                max_new_tokens: int) -> tuple[str, list[int]]:
     """Run Python debug runner, return (text, token_ids)."""
-    from tensorrt_model_connect.families import resolve_debug_runner
+    from tensorrt_model_connect.models import resolve_debug_runner
 
     header_raw, sections, data_start = _read_bundle_header(bundle)
     tmpdir = _extract_bundle_files(bundle, sections, data_start)

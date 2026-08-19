@@ -12,8 +12,8 @@ Usage:
     python3 tools/test_impact.py [--base REF] [--head REF] [--json] [--verbose]
     python3 tools/test_impact.py --files path/to/file1.py,path/to/file2.cpp
     python3 tools/test_impact.py --validate
-    python3 tools/test_impact.py --e2e-suite nightly --files src/runtime/models/qwen/plugin.cpp
-    python3 tools/test_impact.py --files python/tensorrt_model_connect/families/example/model.py --cap 15
+    python3 tools/test_impact.py --e2e-suite nightly --files python/tensorrt_model_connect/models/qwen/runtime/plugin.cpp
+    python3 tools/test_impact.py --files python/tensorrt_model_connect/models/example/model.py --cap 15
 """
 
 import argparse
@@ -288,7 +288,7 @@ def _parse_runtime_model_manifest(manifest_path: Path) -> List[str]:
 
 
 def _scan_cpp_runtime_model_manifests(models_dir: Path) -> Dict[str, List[str]]:
-    """Build src/runtime/models/<name>/MODEL.toml -> runtime strategies map."""
+    """Build models/<name>/MODEL.toml -> runtime strategies map."""
     scoped: Dict[str, List[str]] = {}
     if not models_dir.is_dir():
         return scoped
@@ -300,12 +300,12 @@ def _scan_cpp_runtime_model_manifests(models_dir: Path) -> Dict[str, List[str]]:
 
 
 def _scan_model_owned_diff_rules(models_dir: Path) -> Tuple[ModelOwnedDiffRuleSpec, ...]:
-    """Load model-owned diff narrowing rules from tests/e2e/models/<id>."""
+    """Load model-owned diff narrowing rules from models/<id>/tests."""
     specs: List[ModelOwnedDiffRuleSpec] = []
     if not models_dir.is_dir():
         return ()
-    for rules_path in sorted(models_dir.glob("*/impact_diff_rules.json")):
-        owner = rules_path.parent.name
+    for rules_path in sorted(models_dir.glob("*/tests/impact_diff_rules.json")):
+        owner = rules_path.parents[1].name
         try:
             raw_rules = json.loads(rules_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -339,12 +339,10 @@ def _scan_model_owned_diff_rules(models_dir: Path) -> Tuple[ModelOwnedDiffRuleSp
 
 
 def _iter_e2e_manifest_paths(models_dir: Path) -> List[Path]:
-    """Return flat legacy and model-owned E2E manifest paths."""
+    """Return model-owned E2E manifest paths."""
     if not models_dir.is_dir():
         return []
-    paths = set(models_dir.glob("*.json"))
-    paths.update(models_dir.glob("*/manifests/*.json"))
-    return sorted(paths)
+    return sorted(models_dir.glob("*/tests/manifests/*.json"))
 
 
 _MODEL_ASSET_FIELDS = {
@@ -369,17 +367,17 @@ def _manifest_asset_repo_path(value: str, manifest_path: Path, models_dir: Path)
             return path.as_posix()
 
     normalized = value.replace("\\", "/")
-    if normalized.startswith("tests/e2e/"):
+    if normalized.startswith("python/tensorrt_model_connect/models/"):
         return normalized
     if normalized.startswith("data/"):
         if manifest_path.parent.name == "manifests":
-            family_dir = manifest_path.parent.parent
-            return _repo_relative(family_dir / normalized)
+            tests_dir = manifest_path.parent.parent
+            return _repo_relative(tests_dir / normalized)
         return _repo_relative(models_dir.parent / normalized)
     if "/" not in normalized:
         if manifest_path.parent.name == "manifests":
-            family_dir = manifest_path.parent.parent
-            return _repo_relative(family_dir / "data" / normalized)
+            tests_dir = manifest_path.parent.parent
+            return _repo_relative(tests_dir / "data" / normalized)
         return _repo_relative(models_dir.parent / "data" / normalized)
     return normalized
 
@@ -591,9 +589,9 @@ def _threshold_profile_task_strategy_routes(
 
 def build_impact_map(repo_root: Path) -> ImpactMap:
     """Build the impact map by scanning manifests and family model modules."""
-    models_dir = repo_root / "tests" / "e2e" / "models"
-    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
-    runtime_models_dir = repo_root / "src" / "runtime" / "models"
+    models_dir = repo_root / "python" / "tensorrt_model_connect" / "models"
+    families_dir = models_dir
+    runtime_models_dir = models_dir
     harness_dir = repo_root / "tests" / "e2e_harness"
     default_reference_backend_by_task = _literal_string_dict_assignment(
         harness_dir / "manifest_loader.py", "_DEFAULT_REFERENCE_BACKEND"
@@ -727,14 +725,14 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     for path, token in scoped_cpp_tokens.items():
         strategies: Set[str] = set()
         if runtime_models_dir.is_dir():
-            for cpp_file in sorted(runtime_models_dir.glob("*/*.cpp")):
+            for cpp_file in sorted(runtime_models_dir.glob("*/runtime/*.cpp")):
                 try:
                     content = cpp_file.read_text(encoding="utf-8")
                 except OSError:
                     continue
                 if token not in content:
                     continue
-                strategies.update(cpp_runtime_model_strategies.get(cpp_file.parent.name, []))
+                strategies.update(cpp_runtime_model_strategies.get(cpp_file.parents[1].name, []))
         if strategies:
             path_scope_overrides[path] = _models_for_scoped_strategies(strategies)
 
@@ -872,7 +870,12 @@ def _apply_l0_replacements(
 def _infer_unit_tiers(path: str) -> List[str]:
     """Infer which unit test tiers a file change implies."""
     tiers: List[str] = []
-    if path.startswith("python/tensorrt_model_connect/"):
+    if path.startswith("python/tensorrt_model_connect/models/"):
+        if "/runtime/" in path or "/tests/cpp/" in path:
+            tiers.append("cpp")
+        else:
+            tiers.append("builder")
+    elif path.startswith("python/tensorrt_model_connect/"):
         tiers.append("builder")
     if (
         path.startswith("src/")
@@ -893,7 +896,11 @@ def _infer_unit_tiers(path: str) -> List[str]:
 def _infer_rebuild_cpp(path: str) -> bool:
     """Does this file change require a C++ rebuild?"""
     return (
-        path.startswith("src/")
+        (
+            path.startswith("python/tensorrt_model_connect/models/")
+            and ("/runtime/" in path or "/tests/cpp/" in path)
+        )
+        or path.startswith("src/")
         or path.startswith("include/")
         or path == "CMakeLists.txt"
         or path.startswith("cmake/")
@@ -1126,7 +1133,10 @@ def _model_owned_e2e_test_id(model: str, imap: ImpactMap) -> str:
     family = str(metadata.get("family", "") or "").strip()
     if not family:
         return f"tests/test_e2e.py::test_e2e[{model}]"
-    return f"tests/e2e/models/{family}/test_{family}_e2e.py::test_model_e2e[{model}]"
+    return (
+        "python/tensorrt_model_connect/models/"
+        f"{family}/tests/test_{family}_e2e.py::test_model_e2e[{model}]"
+    )
 
 
 def _model_owned_e2e_test_ids(models: List[str], imap: ImpactMap) -> List[str]:
@@ -1140,6 +1150,15 @@ def _known_cpp_runtime_model(
 ) -> bool:
     del path
     return bool(imap.cpp_runtime_model_strategies.get(match.group(1), []))
+
+
+def _known_model_owner(
+    path: str,
+    imap: ImpactMap,
+    match: re.Match[str],
+) -> bool:
+    del path
+    return match.group(1) in imap.family_to_models
 
 
 def _unknown_cpp_runtime_model(
@@ -1236,9 +1255,9 @@ def _catch_all_resolver(
 
 
 def _is_family_builder_test(path: str) -> bool:
-    return (
+    return not Path(path).name.endswith("_e2e.py") and (
         re.match(
-            r"^python/tensorrt_model_connect/families/[A-Za-z]\w*/tests/.+\.py$",
+            r"^python/tensorrt_model_connect/models/[A-Za-z]\w*/tests/.+\.py$",
             path,
         )
         is not None
@@ -1250,108 +1269,70 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=10,
             name="manifest",
-            matcher=_regex_rule(r"tests/e2e/models/(?:[^/]+/manifests/)?([^/]+)\.json$"),
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/models/[^/]+/tests/manifests/([^/]+)\.json$"
+            ),
             resolver=_match_result("manifest", _manifest_models),
             covered_by=("TestSafetyNet.test_manifest_self",),
         ),
         ClassificationRule(
             priority=11,
-            name="e2e_model_index",
-            matcher=_regex_rule(r"tests/e2e/models/([^/]+)/MODEL\.toml$"),
-            resolver=_match_result("e2e_model_index", _family_models),
+            name="model_index",
+            matcher=_regex_rule(r"python/tensorrt_model_connect/models/([^/]+)/MODEL\.toml$"),
+            resolver=_match_result("model_index", _family_models),
             covered_by=("TestSafetyNet.test_e2e_model_index_self",),
         ),
         ClassificationRule(
             priority=12,
-            name="e2e_model_threshold",
-            matcher=_regex_rule(r"tests/e2e/models/([^/]+)/thresholds/([^/]+)\.json$"),
-            resolver=_match_result("e2e_model_threshold", _e2e_model_threshold_models),
+            name="model_threshold",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/models/([^/]+)/tests/thresholds/([^/]+)\.json$"
+            ),
+            resolver=_match_result("model_threshold", _e2e_model_threshold_models),
             covered_by=("TestSafetyNet.test_e2e_model_owned_threshold_self",),
+        ),
+        ClassificationRule(
+            priority=15,
+            name="model_qualification_fragment",
+            matcher=_regex_rule(
+                r"python/tensorrt_model_connect/models/([^/]+)/(?:validation|performance)\.yaml$",
+                _known_model_owner,
+            ),
+            resolver=_match_result(
+                "model_qualification_fragment", _family_models, ["tools"], False
+            ),
+            covered_by=("TestFamilyModel.test_model_qualification_fragment",),
         ),
         ClassificationRule(
             priority=14,
             name="standalone_gpu_test_support",
-            matcher=_regex_rule(
-                r"(?:tests/e2e/models/[^/]+/(?:run_[^/]+_fi|"
-                r"test_flashinfer_(?:plugin|trt_attention)|"
-                r"test_[^/]+_flashinfer)\.py|tests/test_tvm_ffi_e2e\.py)$"
-            ),
-            resolver=_match_result(
-                "standalone_gpu_test_support",
-                _no_models,
-                ["tools"],
-                False,
-            ),
+            matcher=_path_equals("tests/test_tvm_ffi_e2e.py"),
+            resolver=_match_result("standalone_gpu_test_support", _no_models, ["tools"], False),
             covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
         ),
         ClassificationRule(
             priority=17,
-            name="e2e_model_owned_test",
-            # A public E2E family directory is an ownership boundary for every
-            # file type; more specific manifest and asset rules run first.
+            name="model_package",
+            # One directory owns its builder, runtime, tests, and resources.
             matcher=_regex_rule(
-                r"tests/e2e/models/([^/]+)/.+$"
+                r"python/tensorrt_model_connect/models/([^/]+)/.+$",
+                _known_model_owner,
             ),
-            resolver=_match_result("e2e_model_owned_test", _family_models),
+            resolver=_match_result("model_package", _family_models),
             covered_by=(
                 "TestSafetyNet.test_e2e_model_owned_test_self",
                 "TestE2EDataFiles.test_unlisted_family_asset_maps_to_family",
             ),
         ),
         ClassificationRule(
-            priority=16,
-            name="family_unit_builder",
-            matcher=lambda path, _imap: (
-                RuleContext(path) if _is_family_builder_test(path) else None
-            ),
-            resolver=_match_result("family_unit_builder", _no_models),
-            covered_by=("TestUnitTiers.test_family_unit_builder",),
-        ),
-        ClassificationRule(
-            priority=15,
-            name="family_model_index",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/families/([A-Za-z]\w*)/MODEL\.toml$"
-            ),
-            resolver=_match_result("family_model_index", _family_models),
-            covered_by=("TestFamilyOwnedBuilder.test_family_model_index",),
-        ),
-        ClassificationRule(
-            priority=20,
-            name="family_package",
-            # Family packages own code, build files, and other resources. The
-            # underscore-prefixed internal directory remains shared.
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"families/([A-Za-z]\w*)/.+$"
-            ),
-            resolver=_match_result("family_package", _family_models),
-            covered_by=(
-                "TestFamilyModel.test_family_only_change",
-                "TestFamilyModel.test_family_resource",
-                "TestFamilyOwnedBuilder.test_family_local_model_implementation",
-            ),
-        ),
-        ClassificationRule(
             priority=40,
-            name="family_registry",
-            matcher=_path_equals("python/tensorrt_model_connect/families/__init__.py"),
-            resolver=_match_result("family_registry", _all_models),
+            name="model_registry",
+            matcher=_path_equals("python/tensorrt_model_connect/models/__init__.py"),
+            resolver=_match_result("model_registry", _all_models),
             covered_by=(
                 "TestFamilyModel.test_family_registry_all_models",
                 "TestFamilyModel.test_family_init_all_models",
             ),
-        ),
-        ClassificationRule(
-            priority=19,
-            name="python_profile_requirements",
-            matcher=_regex_rule(
-                r"python/tensorrt_model_connect/"
-                r"families/([^/]+)/(?:profiles/requirements|python_profile_requirements)/"
-                r"[^/]+\.lock\.txt$"
-            ),
-            resolver=_match_result("python_profile_requirements", _python_profile_models),
-            covered_by=("TestSharedModules.test_python_profile_requirements_scope",),
         ),
         ClassificationRule(
             priority=18,
@@ -1366,9 +1347,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 ["tools"],
                 False,
             ),
-            covered_by=(
-                "TestUnitTiers.test_validation_reference_requirements_trigger_tools_tier",
-            ),
+            covered_by=("TestUnitTiers.test_validation_reference_requirements_trigger_tools_tier",),
         ),
         ClassificationRule(
             priority=90,
@@ -1398,29 +1377,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_startswith("python/tensorrt_model_connect/"),
             resolver=_match_result("shared_builder_module", _all_models),
             covered_by=("TestSharedModules.test_shared_module_all_models",),
-        ),
-        ClassificationRule(
-            priority=110,
-            name="cpp_runtime_model",
-            matcher=_regex_rule(
-                r"src/runtime/models/([^/]+)/.+$",
-                _known_cpp_runtime_model,
-            ),
-            resolver=_match_result(
-                "cpp_runtime_model",
-                _runtime_strategy_models(_cpp_runtime_model_strategies),
-            ),
-            covered_by=("TestCppScope.test_cpp_runtime_model_scope",),
-        ),
-        ClassificationRule(
-            priority=120,
-            name="cpp_runtime_model_unknown",
-            matcher=_regex_rule(
-                r"src/runtime/models/([^/]+)/.+$",
-                _unknown_cpp_runtime_model,
-            ),
-            resolver=_match_result("cpp_runtime_model_unknown", _all_models),
-            covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
         ),
         ClassificationRule(
             priority=220,
@@ -1669,7 +1625,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 {
                     "tests/e2e/timing_estimates.json",
                     "tests/e2e_partition.py",
-                    "tests/runtime_strategy_matrix.yaml",
                 }
             ),
             resolver=_match_result(
@@ -1754,7 +1709,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="model_plugin_validation_tool",
             matcher=_path_in(
                 {
-                    "tools/e2e_origin_main_parity.py",
                     "tools/model_plugin_isolation.py",
                 }
             ),
@@ -1762,23 +1716,10 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_model_plugin_validation_tools",),
         ),
         ClassificationRule(
-            priority=447,
-            name="family_development_tool",
-            matcher=_regex_rule(r"tools/families/([A-Za-z]\w*)/.+\.py$"),
-            resolver=_match_result(
-                "family_development_tool",
-                _family_models,
-                ["tools"],
-                False,
-            ),
-            covered_by=("TestFamilyModel.test_family_development_tool",),
-        ),
-        ClassificationRule(
             priority=448,
             name="family_ownership_tool",
             matcher=_path_in(
                 {
-                    "tools/families/__init__.py",
                     "tools/family_source_isolation.py",
                     "tools/family_specialization.py",
                     "tools/prune_family_helpers.py",
@@ -1795,15 +1736,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=449,
             name="e2e_report_tool",
-            matcher=_path_in({
-                "scripts/generate_e2e_report.py",
-                "scripts/generate_e2e_report_assets/e2e_report.css",
-                "scripts/generate_e2e_report_assets/e2e_report.js",
-                "scripts/reporting/__init__.py",
-                "scripts/reporting/vlm_assessment.py",
-            }),
+            matcher=_path_in(
+                {
+                    "scripts/generate_e2e_report.py",
+                    "scripts/generate_e2e_report_assets/e2e_report.css",
+                    "scripts/generate_e2e_report_assets/e2e_report.js",
+                    "scripts/reporting/__init__.py",
+                    "scripts/reporting/vlm_assessment.py",
+                }
+            ),
             resolver=_match_result(
-                "e2e_report_tool", _no_models, ["tools"], False,
+                "e2e_report_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_e2e_report_tools",),
         ),
@@ -1861,7 +1807,10 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="nightly_artifact_selector_tool",
             matcher=_path_equals("tools/select_latest_attempt_artifact.py"),
             resolver=_match_result(
-                "nightly_artifact_selector_tool", _no_models, ["tools"], False,
+                "nightly_artifact_selector_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_nightly_artifact_selector_tool",),
         ),
@@ -1872,12 +1821,17 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 r"(?:tools/model_(?:checks|selection)\.py|"
                 r"tests/model_checks/(?:environments|platforms)/[^/]+\.yaml)$"
             ),
+            resolver=_match_result("model_checks_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_model_checks_tool_triggers_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=481,
+            name="model_entrypoint_loader",
+            matcher=_path_equals("tools/model_entrypoint.py"),
             resolver=_match_result(
-                "model_checks_tool", _no_models, ["tools"], False
+                "model_entrypoint_loader", _all_models, ["tools"], False
             ),
-            covered_by=(
-                "TestUnitTiers.test_model_checks_tool_triggers_tools_tier",
-            ),
+            covered_by=("TestUnitTiers.test_model_entrypoint_loader_is_broad",),
         ),
         ClassificationRule(
             priority=483,
@@ -1893,42 +1847,39 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                     "tools/reporting_html.py",
                 }
             ),
-            resolver=_match_result(
-                "report_generation_tool", _no_models, ["tools"], False
-            ),
-            covered_by=(
-                "TestUnitTiers.test_report_generation_tool_triggers_tools_tier",
-            ),
+            resolver=_match_result("report_generation_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_report_generation_tool_triggers_tools_tier",),
         ),
         ClassificationRule(
             priority=485,
             name="model_ci_tool",
             matcher=_path_equals("tools/model_ci.py"),
             resolver=_match_result(
-                "model_ci_tool", _no_models, ["tools"], False,
+                "model_ci_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_model_ci_tool",),
         ),
         ClassificationRule(
             priority=486,
             name="validation_engine_tool",
-            matcher=_path_in({
-                "tools/validation/engine.py",
-                "tools/elf_hf_reference.py",
-                "tools/full_duplex_bench_score.py",
-                "tools/prepare_elf_validation_datasets.py",
-                "tools/prepare_full_duplex_bench_validation.py",
-                "tools/prepare_media_validation_datasets.py",
-                "tools/prepare_model_plugin_validation_datasets.py",
-                "tools/prepare_refcoco_validation_dataset.py",
-                "tools/prepare_vision_validation_datasets.py",
-            }),
-            resolver=_match_result(
-                "validation_engine_tool", _no_models, ["tools"], False
+            matcher=_path_in(
+                {
+                    "tools/validation/engine.py",
+                    "tools/elf_hf_reference.py",
+                    "tools/full_duplex_bench_score.py",
+                    "tools/prepare_elf_validation_datasets.py",
+                    "tools/prepare_full_duplex_bench_validation.py",
+                    "tools/prepare_media_validation_datasets.py",
+                    "tools/prepare_model_plugin_validation_datasets.py",
+                    "tools/prepare_refcoco_validation_dataset.py",
+                    "tools/prepare_vision_validation_datasets.py",
+                }
             ),
-            covered_by=(
-                "TestUnitTiers.test_validation_engine_tool_triggers_tools_tier",
-            ),
+            resolver=_match_result("validation_engine_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_validation_engine_tool_triggers_tools_tier",),
         ),
         ClassificationRule(
             priority=487,
@@ -1945,19 +1896,8 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=488,
             name="validation_workload_config",
             matcher=_path_equals("tests/validation/workloads.yaml"),
-            resolver=_match_result(
-                "validation_workload_config", _no_models, ["tools"], False
-            ),
-            covered_by=(
-                "TestUnitTiers.test_validation_workload_config_triggers_tools_tier",
-            ),
-        ),
-        ClassificationRule(
-            priority=489,
-            name="validation_config",
-            matcher=_path_equals("tests/validation/model_workloads.yaml"),
-            resolver=_match_result("validation_config", _no_models, ["tools"], False),
-            covered_by=("TestUnitTiers.test_validation_config_triggers_tools_tier",),
+            resolver=_match_result("validation_workload_config", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_validation_workload_config_triggers_tools_tier",),
         ),
         ClassificationRule(
             priority=490,
@@ -1970,12 +1910,8 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=491,
             name="source_container_contract",
             matcher=_path_in({"Dockerfile.dev.aarch64", "Dockerfile.dev.x86"}),
-            resolver=_match_result(
-                "source_container_contract", _no_models, ["tools"], False
-            ),
-            covered_by=(
-                "TestNoImpact.test_source_dockerfiles_trigger_tools_tier",
-            ),
+            resolver=_match_result("source_container_contract", _no_models, ["tools"], False),
+            covered_by=("TestNoImpact.test_source_dockerfiles_trigger_tools_tier",),
         ),
         ClassificationRule(
             priority=492,
@@ -2051,37 +1987,19 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_select_latest_attempt_artifact.py",
     ),
-    "tools/model_ci.py": (
-        "tests/tools/test_model_ci.py",
-    ),
-    "scripts/generate_e2e_report.py": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/generate_e2e_report_assets/e2e_report.css": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/generate_e2e_report_assets/e2e_report.js": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/reporting/__init__.py": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/reporting/vlm_assessment.py": (
-        "tests/tools/test_generate_report.py",
-    ),
+    "tools/model_ci.py": ("tests/tools/test_model_ci.py",),
+    "scripts/generate_e2e_report.py": ("tests/tools/test_generate_report.py",),
+    "scripts/generate_e2e_report_assets/e2e_report.css": ("tests/tools/test_generate_report.py",),
+    "scripts/generate_e2e_report_assets/e2e_report.js": ("tests/tools/test_generate_report.py",),
+    "scripts/reporting/__init__.py": ("tests/tools/test_generate_report.py",),
+    "scripts/reporting/vlm_assessment.py": ("tests/tools/test_generate_report.py",),
     "tools/ci/e2e_scheduler.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",
     ),
-    "tools/ci/e2e_schedule.py": (
-        "tests/tools/test_schedule_e2e.py",
-    ),
-    "scripts/hf_cache_download_worker.py": (
-        "tests/tools/test_warm_hf_cache_static.py",
-    ),
-    "scripts/warm_hf_cache.py": (
-        "tests/tools/test_warm_hf_cache_static.py",
-    ),
+    "tools/ci/e2e_schedule.py": ("tests/tools/test_schedule_e2e.py",),
+    "scripts/hf_cache_download_worker.py": ("tests/tools/test_warm_hf_cache_static.py",),
+    "scripts/warm_hf_cache.py": ("tests/tools/test_warm_hf_cache_static.py",),
     "tests/e2e_harness/model_runner.py": ("tests/tools/test_model_e2e_runner.py",),
 }
 
@@ -2098,7 +2016,10 @@ def _explicit_tools_test_targets(changed_files: List[str]) -> List[str]:
 def _is_model_owned_python_unit_test(path: str) -> bool:
     """Return True for model-owned pytest files that are safe as unit targets."""
     normalized = path.replace("\\", "/").strip("/")
-    if not re.match(r"^tests/e2e/models/[^/]+/(?:.+/)?test_[^/]+\.py$", normalized):
+    if not re.match(
+        r"^python/tensorrt_model_connect/models/[^/]+/tests/(?:.+/)?test_[^/]+\.py$",
+        normalized,
+    ):
         return False
     return not Path(normalized).name.endswith("_e2e.py")
 
@@ -2126,26 +2047,20 @@ def _model_owned_python_test_targets(
 
     targets: Set[str] = set()
     for family in _model_families_for_models(models, imap):
-        model_test_dir = repo_root / "tests" / "e2e" / "models" / family
+        model_test_dir = (
+            repo_root / "python" / "tensorrt_model_connect" / "models" / family / "tests"
+        )
         if model_test_dir.is_dir():
             for test_path in sorted(model_test_dir.rglob("test_*.py")):
                 if test_path.name.endswith("_e2e.py"):
                     continue
                 targets.add(_repo_relative(test_path, repo_root))
 
-        family_package_tests = (
-            repo_root / "python" / "tensorrt_model_connect" / "families" / family / "tests"
-        )
-        if family_package_tests.is_dir():
-            for test_path in sorted(family_package_tests.rglob("test_*.py")):
-                targets.add(_repo_relative(test_path, repo_root))
-
     return sorted(targets)
 
 
 _MODEL_OWNED_COVERAGE_FALLBACK_RULES = {
-    "cpp_runtime_model",
-    "family_package",
+    "model_package",
     "python_profile_requirements",
     "specialized_builder",
 }
@@ -2278,7 +2193,7 @@ def analyze_impact(
         all_models.update(match.models)
         if match.rule == "e2e_waives_model_lines":
             preserve_l0_models.update(match.models)
-        if match.rule in ("manifest", "e2e_data_file", "e2e_model_threshold"):
+        if match.rule in ("manifest", "e2e_data_file", "model_threshold"):
             exact_models.update(match.models)
         all_tiers.update(match.unit_tiers)
         rebuild_cpp = rebuild_cpp or match.rebuild_cpp
@@ -2583,9 +2498,8 @@ def _line_matches_allowed_tokens(line: str, allowed_tokens: Tuple[str, ...]) -> 
 def _scoped_models_from_path(path: str, imap: ImpactMap) -> List[str]:
     match = classify_file(path, imap)
     candidate_rule_names = {
-        "cpp_runtime_model",
         "e2e_data_file",
-        "family_package",
+        "model_package",
         "manifest",
         "python_profile_requirements",
         "specialized_builder",
@@ -2840,8 +2754,11 @@ class HarnessSharedFp8ScalesRule(DiffRefinementRule):
         "CILane,",
         'fp8_scales = case.metadata.get("fp8_scales")',
         "if fp8_scales:",
-        "# Resolve relative to tests/e2e/data/",
-        'scales_path = Path(__file__).parent.parent / "e2e" / "data" / fp8_scales',
+        "scales_path = Path(fp8_scales)",
+        "if not scales_path.is_absolute():",
+        'model_test_dir = case.metadata.get("model_test_dir", "")',
+        "if model_test_dir:",
+        "scales_path = Path(model_test_dir) / fp8_scales",
         "if scales_path.is_file():",
         'cmd.extend(["--fp8-scales", str(scales_path)])',
     }
@@ -2902,71 +2819,12 @@ class KnownModelTimingEstimateRule(DiffRefinementRule):
         )
 
 
-class RuntimeStrategyMatrixRule(DiffRefinementRule):
-    name = "runtime_strategy_matrix_known_strategies"
-    path = "tests/runtime_strategy_matrix.yaml"
-    allowed_tokens = (
-        "cli_exemption",
-        "cli_commands",
-        "comparator_class",
-        "diff_framework_check_classes",
-        "diff_framework_exemption",
-        "neural_operator",
-        "no_diff_framework_check_currently_registers_runtime_strategies",
-        "performance_mode",
-        "runner_class",
-        "solve",
-        "task_strategy",
-        "tests.e2e_harness.comparators",
-        "tests.e2e_harness.runners",
-    )
-
-    @staticmethod
-    def _strategies_from_lines(lines: List[str], imap: ImpactMap) -> List[str]:
-        strategies: Set[str] = set()
-        for line in lines:
-            match = re.match(r'"([^"]+)":\s*\{', line.strip())
-            if match and match.group(1) in imap.strategy_to_models:
-                strategies.add(match.group(1))
-        return sorted(strategies)
-
-    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
-        if path != self.path:
-            return False
-        strategies = self._strategies_from_lines(lines, imap)
-        if not strategies:
-            return False
-        normalized_lines = [
-            _normalize_diff_line(line)
-            for line in lines
-            if any(ch.isalnum() for ch in _normalize_diff_line(line))
-        ]
-        strategy_tokens = tuple(strategies)
-        return all(
-            any(token in line for token in strategy_tokens)
-            or any(token in line for token in self.allowed_tokens)
-            for line in normalized_lines
-        )
-
-    def refine(
-        self,
-        path: str,
-        match: RuleMatch,
-        lines: List[str],
-        imap: ImpactMap,
-    ) -> RuleMatch:
-        del path
-        return RuleMatch(
-            self.name,
-            _models_for_runtime_strategies(self._strategies_from_lines(lines, imap), imap),
-            match.unit_tiers,
-            match.rebuild_cpp,
-        )
-
-
 class HarnessReferenceVlGeneratedOnlyDecodeRule(DiffRefinementRule):
     name = "harness_reference_vl_generated_only_decode"
-    path = "tests/e2e/models/internvl/e2e_plugins/references/hf_transformers.py"
+    path = (
+        "python/tensorrt_model_connect/models/internvl/tests/"
+        "e2e_plugins/references/hf_transformers.py"
+    )
     allowed_tokens = (
         "decode_vl_generated_text",
         "vl_generation",
@@ -3068,7 +2926,6 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     PyprojectValidationOptionalDependenciesRule(),
     HarnessSharedFp8ScalesRule(),
     KnownModelTimingEstimateRule(),
-    RuntimeStrategyMatrixRule(),
     IdentifierDiffRefinementRule(
         "pyproject_known_profiles",
         paths=("pyproject.toml",),
@@ -3438,7 +3295,7 @@ def validate_map(
     """Validate impact map consistency. Returns list of error strings."""
     errors: List[str] = []
     warnings: List[str] = []
-    families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
+    families_dir = repo_root / "python" / "tensorrt_model_connect" / "models"
 
     def _family_model_exists(family: str) -> bool:
         return (families_dir / family / "model.py").is_file()
@@ -3500,8 +3357,7 @@ def validate_map(
 
     # 7. Every rule pattern matches at least one real file (spot checks)
     spot_checks = {
-        "families_dir": families_dir.is_dir(),
-        "models_dir": (repo_root / "tests" / "e2e" / "models").is_dir(),
+        "models_dir": families_dir.is_dir(),
         "src_dir": (repo_root / "src").is_dir(),
         "tests_e2e_harness": (repo_root / "tests" / "e2e_harness").is_dir(),
     }

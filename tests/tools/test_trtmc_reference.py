@@ -11,6 +11,16 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from tensorrt_model_connect.models.locateanything.tools import (
+    reference as locateanything_reference,
+)
+from tensorrt_model_connect.models.magpie_tts.tools import (
+    reference as magpie_reference,
+)
+from tensorrt_model_connect.models.nemotron_speech_streaming.tools import (
+    reference as nemotron_reference,
+)
+from tools.model_entrypoint import load_model_entrypoint
 from tools.reference import (
     elf_prepared,
     plugin_reference,
@@ -381,12 +391,17 @@ def test_plugin_reference_cache_key_tracks_model_owned_implementation(
 ) -> None:
     cache_dir = tmp_path / "cache"
     model_dir = tmp_path / "z_image"
-    manifest_path = model_dir / "manifests" / "z-image-turbo.json"
+    manifest_path = model_dir / "tests" / "manifests" / "z-image-turbo.json"
     reference_path = (
-        model_dir / "e2e_plugins" / "references" / "hf_diffusers.py"
+        model_dir / "tests" / "e2e_plugins" / "references" / "hf_diffusers.py"
     )
     manifest_path.parent.mkdir(parents=True)
     reference_path.parent.mkdir(parents=True)
+    (model_dir / "MODEL.toml").write_text(
+        'id = "z_image"\n'
+        'test_manifests = ["tests/manifests/z-image-turbo.json"]\n',
+        encoding="utf-8",
+    )
     manifest_path.write_text(
         json.dumps(
             {
@@ -891,48 +906,12 @@ def test_transformers_vlm_moves_all_model_state_to_requested_dtype(
     }
 
 
-def test_transformers_vlm_dispatches_locateanything_to_manual_runtime(
-    monkeypatch,
-) -> None:
-    arguments = transformers_vlm.build_parser().parse_args(
-        [
-            "--model",
-            "nvidia/LocateAnything-3B",
-            "--prompts",
-            "/tmp/prompts.jsonl",
-            "--answers",
-            "/tmp/answers.json",
-            "--manifest",
-            "/tmp/manifest.json",
-            "--predictions",
-            "/tmp/predictions.json",
-            "--raw-output",
-            "/tmp/raw.jsonl",
-        ]
-    )
-    expected = (object(), object(), "cuda")
-    captured = {}
+def test_transformers_vlm_discovers_locateanything_owner_entrypoint() -> None:
+    entrypoint = load_model_entrypoint("locateanything", "reference_entrypoint")
 
-    def fake_load(args, torch_module, transformers_module):
-        captured.update(
-            args=args,
-            torch_module=torch_module,
-            transformers_module=transformers_module,
-        )
-        return expected
-
-    monkeypatch.setattr(
-        transformers_vlm, "_load_locateanything_runtime", fake_load
-    )
-    result = transformers_vlm._load_runtime(
-        arguments,
-        "torch-module",
-        "transformers-module",
-        object(),
-    )
-
-    assert result == expected
-    assert captured["args"] is arguments
+    assert entrypoint is not None
+    assert "locateanything_reference_entrypoint" in entrypoint.__module__
+    assert entrypoint.__name__ == "run"
 
 
 def test_locateanything_reference_forces_slow_ar_generation(monkeypatch) -> None:
@@ -972,7 +951,7 @@ def test_locateanything_reference_forces_slow_ar_generation(monkeypatch) -> None
             return ["<ref>vehicle</ref><box><300><200><800><700></box>"]
 
     import numpy as np
-    from tensorrt_model_connect.families.locateanything import vl_debug_runner
+    from tensorrt_model_connect.models.locateanything import vl_debug_runner
 
     monkeypatch.setattr(
         vl_debug_runner,
@@ -983,8 +962,8 @@ def test_locateanything_reference_forces_slow_ar_generation(monkeypatch) -> None
         },
     )
 
-    result = transformers_vlm._locateanything_response(
-        torch_module=Torch(),
+    result = locateanything_reference._response(
+        torch=Torch(),
         tokenizer=Tokenizer(),
         model=Model(),
         device="cuda",
@@ -1523,7 +1502,7 @@ def test_magpie_reference_restores_exact_pinned_archive(
 
     def fake_hf_hub_download(**kwargs):
         download_calls.append(kwargs)
-        if kwargs["repo_id"] == speech.MAGPIE_SPEAKER_ENCODER_REPO:
+        if kwargs["repo_id"] == magpie_reference.SPEAKER_ENCODER_REPO:
             return str(speaker_checkpoint)
         return str(archive)
 
@@ -1536,7 +1515,7 @@ def test_magpie_reference_restores_exact_pinned_archive(
         def restore_from(cls, **kwargs):
             import fsspec
 
-            fsspec.open(speech.MAGPIE_SPEAKER_ENCODER_URL)
+            fsspec.open(magpie_reference.SPEAKER_ENCODER_URL)
             restore_kwargs.update(kwargs)
             return cls()
 
@@ -1572,17 +1551,16 @@ def test_magpie_reference_restores_exact_pinned_archive(
         local_files_only=True,
         device="cuda",
     )
-    processor, model = speech._load_tts_runtime(
+    model = magpie_reference._load_runtime(
         arguments,
         SimpleNamespace(device=lambda name: f"device:{name}"),
     )
 
-    assert processor is None
     assert isinstance(model, FakeModel)
     assert download_calls == [
         {
-            "repo_id": speech.MAGPIE_SPEAKER_ENCODER_REPO,
-            "filename": speech.MAGPIE_SPEAKER_ENCODER_FILENAME,
+            "repo_id": magpie_reference.SPEAKER_ENCODER_REPO,
+            "filename": magpie_reference.SPEAKER_ENCODER_FILENAME,
             "local_files_only": True,
         },
         {
@@ -1834,7 +1812,7 @@ def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
     fake_model = FakeModel()
     original_forward = fake_model.forward
     monkeypatch.setattr(
-        speech,
+        nemotron_reference,
         "_load_nemotron35_model",
         lambda _arguments, resolved_archive: (
             fake_torch,
@@ -1842,12 +1820,12 @@ def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
         ),
     )
     monkeypatch.setattr(
-        speech,
-        "_resolve_nemotron35_archive",
+        nemotron_reference,
+        "_resolve_archive",
         lambda _arguments: archive,
     )
     monkeypatch.setattr(
-        speech,
+        nemotron_reference,
         "_audio_for_prompt",
         lambda _prompt, _rate: ([0.0] * 8000, Path("source.wav")),
     )
@@ -1856,7 +1834,7 @@ def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"wav")
 
-    monkeypatch.setattr(speech, "_write_wav_pcm16", write_fake_wav)
+    monkeypatch.setattr(nemotron_reference, "_write_wav_pcm16", write_fake_wav)
     arguments = SimpleNamespace(
         model="nvidia/nemotron-3.5-asr-streaming-0.6b",
         device="cuda",
@@ -1865,7 +1843,7 @@ def test_nemotron35_asr_restores_nemo_archive_and_uses_language_manifest(
         predictions=tmp_path / "predictions" / "hf_predictions.json",
     )
 
-    responses = speech._run_nemotron35_asr(
+    responses = nemotron_reference._run_nemotron35(
         arguments,
         [{"sample_id": "asr-1", "language": "en-US"}],
         {"sample_rate": 16000},
@@ -1899,7 +1877,7 @@ def test_nemotron35_forward_adapter_extends_prompt_by_one_frame() -> None:
             assert dim == 1
             return extended_prompt
 
-    args, kwargs = speech._extend_nemotron35_prompt_for_forward(
+    args, kwargs = nemotron_reference._extend_prompt_for_forward(
         FakeTorch(),
         (),
         {"prompt": prompt, "input_signal": object()},
@@ -2009,7 +1987,7 @@ def test_nemotron35_model_uses_hybrid_prompt_nemo_loader(
         save_restore_module,
     )
 
-    returned_torch, returned_model = speech._load_nemotron35_model(
+    returned_torch, returned_model = nemotron_reference._load_nemotron35_model(
         SimpleNamespace(device="cuda"),
         archive,
     )
@@ -2125,7 +2103,7 @@ def test_model_plugin_reference_runs_manifest_owned_official_reference(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    from tests.e2e.models.lance.e2e_plugins.references import lance_official
+    from tensorrt_model_connect.models.lance.tests.e2e_plugins.references import lance_official
     from tests.e2e_harness.contracts import StageOutput
 
     monkeypatch.setattr(
@@ -2145,7 +2123,7 @@ def test_model_plugin_reference_runs_manifest_owned_official_reference(
     )
     manifest_path = (
         trtmc_reference.REPO_ROOT
-        / "tests/e2e/models/lance/manifests/lance-3b-x2t-image.json"
+        / "python/tensorrt_model_connect/models/lance/tests/manifests/lance-3b-x2t-image.json"
     )
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text(

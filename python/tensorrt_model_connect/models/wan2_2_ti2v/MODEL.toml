@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "wan2_2_ti2v"
+aliases = [
+  "ti2v",
+]
+diffusion_pipeline_classes = [
+  "WanModel",
+]
+hf_allow_patterns = [
+  "config.json",
+  "diffusion_pytorch_model*.safetensors",
+  "diffusion_pytorch_model.safetensors.index.json",
+  "Wan2.2_VAE.pth",
+  "models_t5_umt5-xxl-enc-bf16.pth",
+  "google/umt5-xxl/tokenizer.json",
+]
+hf_required_files = [
+  "Wan-AI/Wan2.2-TI2V-5B|config.json",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model.safetensors.index.json",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model-00001-of-00003.safetensors",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model-00002-of-00003.safetensors",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model-00003-of-00003.safetensors",
+  "Wan-AI/Wan2.2-TI2V-5B|Wan2.2_VAE.pth",
+  "Wan-AI/Wan2.2-TI2V-5B|models_t5_umt5-xxl-enc-bf16.pth",
+  "Wan-AI/Wan2.2-TI2V-5B|google/umt5-xxl/tokenizer.json",
+]
+runtime_plugins = [
+  "plugin.cpp|register_wan2_2_ti2v_plugin",
+]
+runtime_config_schemas = [
+  "config_schema.cpp|register_wan2_2_ti2v_schema",
+]
+runtime_strategies = [
+  "diffusion_wan2_2_ti2v",
+]
+test_manifests = [
+  "tests/manifests/wan22-ti2v-5b-l0.json",
+  "tests/manifests/wan22-ti2v-5b.json",
+]
+
+[model_reference_cache]
+repository = "https://github.com/Wan-Video/Wan2.2.git"
+revision = "42bf4cfaa384bc21833865abc2f9e6c0e67233dc"
+relative_path = "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"
+entrypoint = "wan/textimage2video.py"
+environment_variable = "TRTMC_WAN_REFERENCE_REPO"
+suites = [
+  "nightly",
+]
+
+[e2e_defaults.diffusion_media_generation]
+reference_backend = "invariant_only"
+oracle_level = "L4_invariants"
+stages = [
+  { name = "end_to_end", required = true },
+]
+input_fields = [
+  { input = "video_num_frames", manifest = "video_num_frames" },
+  { input = "video_height", manifest = "video_height" },
+  { input = "video_width", manifest = "video_width" },
+  { input = "num_inference_steps", manifest = "num_inference_steps" },
+  { input = "guidance_scale", manifest = "guidance_scale" },
+  { input = "flow_shift", manifest = "flow_shift" },
+  { input = "fps", manifest = "fps" },
+  { input = "text_max_length", manifest = "text_max_length" },
+]
+build_cli_args = [
+  { flag = "--video-height", input = "video_height" },
+  { flag = "--video-width", input = "video_width" },
+  { flag = "--video-num-frames", input = "video_num_frames" },
+  { flag = "--num-inference-steps", input = "num_inference_steps" },
+]

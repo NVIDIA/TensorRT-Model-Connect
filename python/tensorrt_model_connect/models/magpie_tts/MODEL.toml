@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "magpie_tts"
+reference_entrypoint = "tools/reference.py|run"
+python_profile_specs = [
+  "magpie_tts_reference|models/magpie_tts/python_profile_requirements/magpie_tts_reference.lock.txt|models/magpie_tts/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|magpie_tts_reference",
+]
+nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
+nemo_model_type = "magpie_tts"
+nemo_target_patterns = [
+  "MagpieTTS",
+  "magpietts",
+]
+aliases = [
+  "decoder_ce",
+  "magpie_tts",
+  "magpietts",
+]
+prefixes = [
+  "magpie_tts",
+]
+hf_warm_dependencies = [
+  "tts-asr-verifier|openai/whisper-large-v3-turbo",
+  "magpie-nanocodec|nvidia/nemo-nano-codec-22khz-1.89kbps-21.5fps",
+  "magpie-byt5-tokenizer|google/byt5-small",
+  "magpie-wavlm-discriminator|microsoft/wavlm-base-plus",
+]
+hf_warm_files = [
+  "magpie-speaker-encoder|Edresson/Speaker_Encoder_H_ASP|pytorch_model.bin",
+]
+runtime_plugins = [
+  "plugin.cpp|register_magpie_plugin",
+]
+runtime_config_schemas = [
+  "config_schema.cpp|register_audio_magpie_schema",
+]
+runtime_strategies = [
+  "text_to_audio_magpie",
+]
+test_manifests = [
+  "tests/manifests/magpie-tts-357m-tp4.json",
+  "tests/manifests/magpie-tts-357m.json",
+]
+
+[e2e_defaults.text_to_audio]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

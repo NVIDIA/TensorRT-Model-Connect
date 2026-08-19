@@ -4,8 +4,8 @@
 
 """Diffusion pipeline debug entrypoint.
 
-Concrete pipeline-debug behavior is owned by model-family modules under
-``tools/families/*/debug_diffusion_pipeline.py``. This
+Concrete pipeline-debug behavior is owned by model modules under
+``python/tensorrt_model_connect/models/*/debug_diffusion_pipeline.py``. This
 shared tool only discovers and dispatches to those handlers.
 """
 
@@ -22,10 +22,7 @@ from typing import Any
 
 def _family_roots() -> tuple[Path, ...]:
     repo_root = Path(__file__).resolve().parents[1]
-    return (
-        Path(__file__).resolve().parent / "families",
-        repo_root / "python/tensorrt_model_connect/families",
-    )
+    return (repo_root / "python/tensorrt_model_connect/models",)
 
 
 def _family_handler_paths(filename: str) -> list[Path]:

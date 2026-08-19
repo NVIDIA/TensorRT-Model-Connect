@@ -23,11 +23,11 @@ def test_hf_and_trtmc_share_exact_family_latents(
     tmp_path, family: str, model_type: str, shape: tuple[int, int, int, int]
 ) -> None:
     if family == "flux":
-        from tests.e2e.models.flux.e2e_plugins.parity import ensure_initial_latents
+        from tensorrt_model_connect.models.flux.tests.e2e_plugins.parity import ensure_initial_latents
     elif family == "qwen_image":
-        from tests.e2e.models.qwen_image.e2e_plugins.parity import ensure_initial_latents
+        from tensorrt_model_connect.models.qwen_image.tests.e2e_plugins.parity import ensure_initial_latents
     else:
-        from tests.e2e.models.z_image.e2e_plugins.parity import ensure_initial_latents
+        from tensorrt_model_connect.models.z_image.tests.e2e_plugins.parity import ensure_initial_latents
 
     case = E2ECase(
         name=f"{family}-sample",

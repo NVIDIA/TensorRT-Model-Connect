@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "mistral"
+capabilities = [
+  "split_decoder_roles",
+  "debug_layer_outputs",
+]
+aliases = [
+  "Mistral",
+  "mistral",
+]
+prefixes = [
+  "mistral",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "mistral_decoder_kv_cache",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_mistral_plugin",
+]
+runtime_strategies = [
+  "mistral_decoder_kv_cache",
+]
+test_manifests = [
+  "tests/manifests/mistral-7b-l0.json",
+  "tests/manifests/mistral-7b.json",
+  "tests/manifests/riva-translate-4b.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "mistral_decoder_kv_cache",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

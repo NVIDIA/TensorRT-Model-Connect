@@ -247,10 +247,11 @@ def test_default_catalog_falls_back_to_installed_package_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     package = tmp_path / "site-packages/tensorrt_model_connect/benchmark"
-    installed_catalog = package / "_catalog" / "installed" / "manifests"
+    installed_family = package / "_catalog" / "installed"
+    installed_catalog = installed_family / "tests" / "manifests"
     installed_catalog.mkdir(parents=True)
-    (installed_catalog.parent / "MODEL.toml").write_text(
-        'id = "installed"\ntest_manifests = ["manifests/installed.json"]\n',
+    (installed_family / "MODEL.toml").write_text(
+        'id = "installed"\ntest_manifests = ["tests/manifests/installed.json"]\n',
         encoding="utf-8",
     )
     (installed_catalog / "installed.json").write_text(
@@ -297,7 +298,7 @@ def test_cli_lists_supported_models(capsys: pytest.CaptureFixture[str]) -> None:
 def test_catalog_exposes_every_declared_profile_and_family() -> None:
     entries = ManifestCatalog().entries()
     expected_manifests: list[Path] = []
-    descriptors = sorted((REPOSITORY_ROOT / "tests/e2e/models").glob("*/MODEL.toml"))
+    descriptors = sorted((REPOSITORY_ROOT / "python/tensorrt_model_connect/models").glob("*/MODEL.toml"))
     for descriptor in descriptors:
         with descriptor.open("rb") as stream:
             declared = tomllib.load(stream)["test_manifests"]
@@ -387,12 +388,12 @@ def test_future_family_reuses_existing_task_adapter_without_benchmark_changes(
     tmp_path: Path,
 ) -> None:
     family = tmp_path / "catalog/wan2_2_ti2v"
-    manifests = family / "manifests"
+    manifests = family / "tests" / "manifests"
     manifests.mkdir(parents=True)
     (family / "MODEL.toml").write_text(
         'id = "wan2_2_ti2v"\n'
         'plugin = "wan2_2_ti2v"\n'
-        'test_manifests = ["manifests/wan2.2-ti2v-5b.json"]\n'
+        'test_manifests = ["tests/manifests/wan2.2-ti2v-5b.json"]\n'
         "[e2e_defaults.diffusion_media_generation]\n"
         "build_cli_args = [\n"
         '  { flag = "--video-height", input = "video_height" },\n'
@@ -490,7 +491,7 @@ def test_catalog_rejects_distributed_profiles_not_supported_by_worker() -> None:
 
 
 def test_model_identity_does_not_depend_on_catalog_install_path(tmp_path: Path) -> None:
-    source = Path("tests/e2e/models/gpt2/manifests/distilgpt2.json")
+    source = Path("python/tensorrt_model_connect/models/gpt2/tests/manifests/distilgpt2.json")
     models = []
     for layout in ("source-checkout", "installed-wheel"):
         manifest = tmp_path / layout / "gpt2/manifests/distilgpt2.json"
@@ -579,7 +580,7 @@ def test_auto_build_reuses_model_defaults_and_largest_diffusion_shape(tmp_path: 
 def test_pinned_hf_revision_is_auditable_and_forwarded_to_builder(tmp_path: Path) -> None:
     manifest = (
         REPOSITORY_ROOT
-        / "tests/e2e/models/magpie_tts/manifests/magpie-tts-357m.json"
+        / "python/tensorrt_model_connect/models/magpie_tts/tests/manifests/magpie-tts-357m.json"
     )
     model = ManifestCatalog._load(manifest)
     plan = BundleBuilder(tmp_path / "cache")._plan(model, ())
@@ -626,20 +627,25 @@ def test_auto_build_requires_and_passes_manifest_fp8_scales(
     if catalog_layout == "installed":
         package = tmp_path / "site-packages/tensorrt_model_connect/benchmark"
         family = package / "_catalog/flux"
-        manifest = family / "manifests/flux-2-dev-fp8.json"
+        manifest = family / "tests/manifests/flux-2-dev-fp8.json"
         manifest.parent.mkdir(parents=True)
+        (family / "MODEL.toml").write_text(
+            'id = "flux"\n'
+            'test_manifests = ["tests/manifests/flux-2-dev-fp8.json"]\n',
+            encoding="utf-8",
+        )
         manifest.write_bytes(
             (
                 REPOSITORY_ROOT
-                / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json"
+                / "python/tensorrt_model_connect/models/flux/tests/manifests/flux-2-dev-fp8.json"
             ).read_bytes()
         )
-        scales = family / "data/flux2-fp8-scales.json"
+        scales = family / "tests/data/flux2-fp8-scales.json"
         scales.parent.mkdir()
         scales.write_bytes(
             (
                 REPOSITORY_ROOT
-                / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
+                / "python/tensorrt_model_connect/models/flux/tests/data/flux2-fp8-scales.json"
             ).read_bytes()
         )
         monkeypatch.delenv("TRTMC_BENCH_MANIFEST_ROOT", raising=False)
@@ -663,7 +669,7 @@ def test_manifest_declared_fp8_scales_fail_closed_when_missing(tmp_path: Path) -
     manifest = tmp_path / "flux/manifests/missing-fp8-scales.json"
     manifest.parent.mkdir(parents=True)
     raw = json.loads(
-        (REPOSITORY_ROOT / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json").read_text(
+        (REPOSITORY_ROOT / "python/tensorrt_model_connect/models/flux/tests/manifests/flux-2-dev-fp8.json").read_text(
             encoding="utf-8"
         )
     )
@@ -675,12 +681,17 @@ def test_manifest_declared_fp8_scales_fail_closed_when_missing(tmp_path: Path) -
 
 def test_fp8_scale_contents_participate_in_bundle_cache_identity(tmp_path: Path) -> None:
     family = tmp_path / "catalog/flux"
-    manifest = family / "manifests/flux-2-dev-fp8.json"
+    manifest = family / "tests/manifests/flux-2-dev-fp8.json"
     manifest.parent.mkdir(parents=True)
-    scales = family / "data/flux2-fp8-scales.json"
+    (family / "MODEL.toml").write_text(
+        'id = "flux"\n'
+        'test_manifests = ["tests/manifests/flux-2-dev-fp8.json"]\n',
+        encoding="utf-8",
+    )
+    scales = family / "tests/data/flux2-fp8-scales.json"
     scales.parent.mkdir()
     scales.write_text('{"version": 1}\n', encoding="utf-8")
-    source = REPOSITORY_ROOT / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json"
+    source = REPOSITORY_ROOT / "python/tensorrt_model_connect/models/flux/tests/manifests/flux-2-dev-fp8.json"
     manifest.write_bytes(source.read_bytes())
 
     catalog = ManifestCatalog(tmp_path / "catalog")
@@ -700,12 +711,17 @@ def test_build_environment_asset_contents_participate_in_bundle_cache_identity(
     tmp_path: Path,
 ) -> None:
     family = tmp_path / "catalog/qwen_image"
-    manifest = family / "manifests/qwen-image-edit-2511.json"
+    manifest = family / "tests/manifests/qwen-image-edit-2511.json"
     manifest.parent.mkdir(parents=True)
-    image = family / "data/test_img.jpeg"
+    (family / "MODEL.toml").write_text(
+        'id = "qwen_image"\n'
+        'test_manifests = ["tests/manifests/qwen-image-edit-2511.json"]\n',
+        encoding="utf-8",
+    )
+    image = family / "tests/data/test_img.jpeg"
     image.parent.mkdir()
     image.write_bytes(b"first-image")
-    source = REPOSITORY_ROOT / "tests/e2e/models/qwen_image/manifests/qwen-image-edit-2511.json"
+    source = REPOSITORY_ROOT / "python/tensorrt_model_connect/models/qwen_image/tests/manifests/qwen-image-edit-2511.json"
     manifest.write_bytes(source.read_bytes())
 
     catalog = ManifestCatalog(tmp_path / "catalog")
@@ -727,9 +743,14 @@ def test_required_build_environment_asset_participates_in_bundle_cache_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     family = tmp_path / "catalog/qwen_image"
-    manifest = family / "manifests/qwen-image-edit-2511.json"
+    manifest = family / "tests/manifests/qwen-image-edit-2511.json"
     manifest.parent.mkdir(parents=True)
-    source = REPOSITORY_ROOT / "tests/e2e/models/qwen_image/manifests/qwen-image-edit-2511.json"
+    (family / "MODEL.toml").write_text(
+        'id = "qwen_image"\n'
+        'test_manifests = ["tests/manifests/qwen-image-edit-2511.json"]\n',
+        encoding="utf-8",
+    )
+    source = REPOSITORY_ROOT / "python/tensorrt_model_connect/models/qwen_image/tests/manifests/qwen-image-edit-2511.json"
     raw = json.loads(source.read_text(encoding="utf-8"))
     raw["build_env"]["TRTMC_BARK_TIMING_CACHE_PATH"] = {
         "required_from_env": True,
@@ -740,7 +761,7 @@ def test_required_build_environment_asset_participates_in_bundle_cache_identity(
     }
     manifest.write_text(json.dumps(raw), encoding="utf-8")
 
-    condition_image = family / "data/test_img.jpeg"
+    condition_image = family / "tests/data/test_img.jpeg"
     condition_image.parent.mkdir()
     condition_image.write_bytes(b"condition-image")
     image = tmp_path / "injected-private-asset"
@@ -846,6 +867,11 @@ def test_sana_runtime_config_resolves_manifest_assets_for_native_worker(tmp_path
     assert case.operation == "generate_image"
     assert case.request["media_type"] == "video"
     assert case.runtime["config"]["sana_wm.image_path"] == "assets/demo_0.png"
+    assert case.runtime["config"]["sana_wm.action"] == "w-80,jw-40,w-40,lw-60,w-100"
+    assert case.runtime["config"]["sana_wm.num_frames"] == 321
+    assert case.runtime["config"]["sana_wm.intrinsics"] == (
+        "797.87866,830.0503,844.2675,463.7225"
+    )
     worker_config = case.worker_request()["runtime"]["config"]
     assert Path(worker_config["sana_wm.image_path"]).is_file()
 
@@ -1506,7 +1532,7 @@ def test_cli_rebuilds_stale_managed_bundle_found_by_bundle_root(
 
 def test_builder_source_digest_tracks_generic_and_family_build_inputs(tmp_path: Path) -> None:
     package_root = tmp_path / "tensorrt_model_connect"
-    family_root = package_root / "families" / "distilbert"
+    family_root = package_root / "models" / "distilbert"
     family_root.mkdir(parents=True)
     generic_builder = package_root / "engine_builder.py"
     family_builder = family_root / "model.py"

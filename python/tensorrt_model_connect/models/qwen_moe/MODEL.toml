@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "qwen_moe"
+capabilities = [
+  "disable_dual_profile_decoder",
+]
+aliases = [
+  "qwen2_moe",
+  "qwen3_moe",
+  "qwen_moe",
+  "qwenmoe",
+]
+prefixes = [
+  "qwen_moe",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "qwen_moe_decoder_moe",
+]
+diff_framework_check_classes = [
+  "LayerDiffTest",
+  "LayerProfileTest",
+  "LogitDiffTest",
+  "PerfBenchmarkTest",
+  "RunnerParityTest",
+]
+runtime_plugins = [
+  "plugin.cpp|register_qwen_moe_plugin",
+]
+runtime_strategies = [
+  "qwen_moe_decoder_moe",
+]
+test_manifests = [
+  "tests/manifests/qwen3-moe-30b-a3b-tp4.json",
+  "tests/manifests/qwen3-moe-30b-a3b.json",
+  "tests/manifests/qwen3-moe-tiny-random.json",
+]
+
+[validation_profiles]
+decoder_debug = [
+  "qwen_moe_decoder_moe",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

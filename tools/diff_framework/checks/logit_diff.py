@@ -11,7 +11,6 @@ from diff_framework.protocol import DiffResult, TestContext
 class LogitDiffTest:
     name = "logit_diff"
     description = "Per-step logit comparison: TRT vs HF transformers"
-    runtime_strategies = []
     requires_bundle = False
     requires_gpu = True
 

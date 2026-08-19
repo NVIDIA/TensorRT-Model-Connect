@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  stsbenchmark_encoder_embedding_parity:
+    models:
+    - modernbert-base
+    - modernbert-base-tp4
+    default_models:
+    - modernbert-base
+    model_profiles:
+      modernbert-base:
+        gates:
+          min_vector_cosine: 0.995
+    qualification:
+      modernbert-base: {}

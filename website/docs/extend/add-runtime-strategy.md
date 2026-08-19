@@ -4,13 +4,13 @@ title: Add a Runtime Strategy
 
 This page adds a **native** runtime strategy. A native runtime strategy is a
 model-owned dispatch key. At configure time, each
-`src/runtime/models/<owner>/MODEL.toml` claims one or more unique strategies
+`python/tensorrt_model_connect/models/<owner>/MODEL.toml` claims one or more unique strategies
 and maps them to one model DSO. At load time, the bundle's strategy selects
 that DSO before `PipelineRegistry` looks up the registered plugin.
 
-Use this guide to add another strategy to an existing runtime owner. For a new
-model, follow [Add a Model Family](add-model-family.md); every new supported
-model needs the Python family, model-owned runtime DSO, and E2E descriptor.
+Use this guide to add another strategy to an existing owner. For a new model,
+follow [Add a Model Family](add-model-family.md); every supported model keeps
+its Python builder, runtime DSO, tests, and manifests in one folder.
 
 Do not create a synthetic native strategy for a delegated optimized runtime.
 That path uses a family-owned implementation manifest/profile, an embedded
@@ -20,7 +20,7 @@ That path uses a family-owned implementation manifest/profile, an embedded
 
 Before editing, record:
 
-- runtime owner, such as `qwen`;
+- model owner, such as `qwen`;
 - unique strategy key, such as `qwen_decoder_kv_cache`;
 - existing `IPipeline` method that exposes the task;
 - bundle sections and config fields the plugin consumes;
@@ -35,7 +35,7 @@ source patterns, but a strategy can have only one manifest owner.
 Keep the plugin, pipeline, state, sampler, and model-specific helpers under:
 
 ```text
-src/runtime/models/<owner>/
+python/tensorrt_model_connect/models/<owner>/runtime/
 ```
 
 The `IPipelinePlugin::create()` implementation should:
@@ -62,10 +62,13 @@ Add the plugin/registrar pair and strategy to the owner's manifest:
 
 ```toml
 id = "example"
-runtime_library = "libtrtmc_model_example.so"
 runtime_plugins = ["plugin.cpp|register_example_plugin"]
 runtime_strategies = ["example_runtime_strategy"]
 ```
+
+The canonical ID derives the `trtmc_model_example` target and
+`libtrtmc_model_example.so`; there is no separate library-name or runtime-owner
+alias.
 
 `cmake/trtmc_pipeline_plugins.cmake` discovers model manifests automatically.
 Do not add a source entry to a central CMake list. Configuration rejects a
@@ -73,14 +76,15 @@ missing source, malformed registrar pair, duplicate strategy, or strategy
 without an owner. It generates the strategy-to-DSO index and one registrar
 translation unit for the model DSO.
 
-If the owner has focused C++ tests or model-owned config schemas, declare them
-in the same manifest with `runtime_tests` or `runtime_config_schemas`.
+Declare model-owned config schemas in the manifest with
+`runtime_config_schemas`. Declare the DSO sources, dependencies, warning
+exceptions, optional kernels, and focused C++ tests in the owner's
+`runtime/CMakeLists.txt`; the root build contains no per-model source list.
 
 ## 4. Emit the exact key
 
-The Python family `model.py` must emit the exact model-owned strategy in bundle
-`config.json`. Keep the corresponding Python descriptor in
-`python/tensorrt_model_connect/families/<family>/MODEL.toml`.
+The owner's `model.py` must emit the exact model-owned strategy in bundle
+`config.json`. Its declaration lives in the same root `MODEL.toml`.
 
 The E2E manifest then records both axes:
 
@@ -104,20 +108,21 @@ python3 tools/model_ci.py validate
 ```
 
 Configure the project after replacing `example` with the real owner. Read the
-owner's `runtime_tests` entries and build both its model DSO and the exact test
-target that exercises the new strategy:
+owner's runtime build declaration and build both its model DSO and the exact
+test target that exercises the new strategy:
 
 ```bash
 cmake -S . -B build -DTRTMC_BUILD_TESTS=ON
-rg -n 'runtime_tests|test_' src/runtime/models/example/MODEL.toml
+rg -n 'trtmc_add_test\(|add_library\(' \
+  python/tensorrt_model_connect/models/example/runtime/CMakeLists.txt
 cmake --build build --target trtmc_model_example test_example_runtime
 ctest --test-dir build --output-on-failure --no-tests=error \
   -R '^test_example_runtime$'
 ```
 
-`runtime_tests` executables are `EXCLUDE_FROM_ALL`: building only
+Model-owned test executables are `EXCLUDE_FROM_ALL`: building only
 `trtmc_model_example` does not build them. Substitute the literal target name
-declared in the manifest; if you intentionally want every configured C++ unit
+declared in `runtime/CMakeLists.txt`; if you intentionally want every configured C++ unit
 target, build `trtmc_cpp_tests` before running CTest.
 
 Finally run the exact E2E model manifest with the newly built model plugin:

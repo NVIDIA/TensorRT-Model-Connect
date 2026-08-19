@@ -29,7 +29,7 @@ coverage unnecessary.
 | C++ runtime | `tests/cpp/` and model-declared runtime tests | Public API behavior, bundle parsing, DSO loading, config, state, plugins, backends |
 | Tooling | `tests/tools/` | CI selection, validators, reports, comparison utilities, packaging logic |
 | E2E harness | `tests/e2e_harness/` | Manifest loading, orchestration, runners, reference backends, comparators |
-| Model E2E | `tests/e2e/models/<family>/` | Exact checkpoint, task, bundle, runtime, and output contract |
+| Model E2E | `python/tensorrt_model_connect/models/<family>/tests/` | Exact checkpoint, task, bundle, runtime, and output contract |
 | Optimized Source contract | Family implementation/profile, capsule, adapter, and runtime-contract tests | Exact selection, packaging, identity, semantic-source digest, and fail-closed behavior |
 | External target qualification | Separately retained controlled-environment evidence | Exact implementation/profile compatibility and model behavior on the declared target |
 | Performance | Separately retained controlled-environment evidence | Latency/throughput under declared hardware, software, inputs, and methodology |
@@ -39,11 +39,10 @@ and generated inventory rather than copying counts into design claims.
 
 ## Native evidence contract
 
-A native model claim spans three ownership roots:
-
-1. the Python family descriptor, required `model.py`, and local build helpers;
-2. the C++ model descriptor, DSO, and strategy registration; and
-3. the E2E descriptor and exact model manifest.
+A native model claim stays inside one
+`python/tensorrt_model_connect/models/<owner>/` root. Its single
+`MODEL.toml` indexes the required `model.py`, native runtime strategy and DSO
+sources, focused C++ tests, and exact E2E manifests.
 
 Useful evidence covers:
 
@@ -123,7 +122,7 @@ The canonical evidence sources are:
 - `tests/cpp/`
 - `tests/tools/`
 - `tests/e2e_harness/`
-- `tests/e2e/models/`
+- `python/tensorrt_model_connect/models/<owner>/tests/`
 - `tools/model_ci.py`
 - `tools/test_impact.py`
 

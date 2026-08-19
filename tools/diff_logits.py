@@ -45,10 +45,7 @@ STANDARD_PROMPTS = [
 
 def _family_handler_paths(filename: str) -> list[Path]:
     repo_root = Path(__file__).resolve().parents[1]
-    roots = (
-        Path(__file__).resolve().parent / "families",
-        repo_root / "python/tensorrt_model_connect/families",
-    )
+    roots = (repo_root / "python/tensorrt_model_connect/models",)
     handlers: dict[str, Path] = {}
     for root in reversed(roots):
         handlers.update({path.parent.name: path for path in root.glob(f"*/{filename}")})
@@ -91,7 +88,7 @@ def build_trt_engine(model_id_or_path, max_cache_length, verbose):
     """Build TRT engine and return (engine_plan_bytes, config, model_dir)."""
     from tensorrt_model_connect.engine_builder import _resolve_model
     from tensorrt_model_connect.config import ModelConfig
-    from tensorrt_model_connect.families import find_model
+    from tensorrt_model_connect.models import find_model
 
     model_dir = _resolve_model(model_id_or_path)
     config = ModelConfig.from_dir(model_dir)

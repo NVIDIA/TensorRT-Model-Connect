@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "ltx_video"
+aliases = [
+  "ltx",
+  "ltx-video",
+  "ltx_video",
+  "ltxpipeline",
+  "ltxvideo",
+]
+prefixes = [
+  "ltx_video",
+]
+diffusion_pipeline_classes = [
+  "LTXPipeline",
+]
+hf_allow_patterns = [
+  "model_index.json",
+  "scheduler/**",
+  "text_encoder/**",
+  "text_encoder_2/**",
+  "transformer/**",
+  "vae/**",
+  "tokenizer/**",
+  "tokenizer_2/**",
+  "*/config.json",
+  "*/model.safetensors",
+  "*/model-*.safetensors",
+  "*/model.safetensors.index.json",
+  "*/diffusion_pytorch_model.safetensors",
+  "*/diffusion_pytorch_model-*.safetensors",
+  "*/diffusion_pytorch_model.safetensors.index.json",
+  "scheduler/*",
+  "tokenizer/*",
+]
+runtime_plugins = [
+  "plugin.cpp|register_ltx_video_plugin",
+]
+runtime_strategies = [
+  "diffusion_ltx",
+]
+test_manifests = [
+  "tests/manifests/ltx-video-l0.json",
+]
+
+[e2e_defaults.diffusion_media_generation]
+reference_backend = "hf_diffusers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "vae_decode", required = false },
+  { name = "end_to_end", required = true },
+]
+input_fields = [
+  { input = "image_height", manifest = "image_height" },
+  { input = "image_width", manifest = "image_width" },
+  { input = "video_num_frames", manifest = "video_num_frames" },
+  { input = "video_height", manifest = "video_height", default = 480, required_manifest = "video_num_frames" },
+  { input = "video_width", manifest = "video_width", default = 832, required_manifest = "video_num_frames" },
+  { input = "num_inference_steps", manifest = "num_inference_steps", default = 30, required_manifest = "video_num_frames" },
+  { input = "guidance_scale", manifest = "guidance_scale" },
+]
+preflight_requirements = [
+  { kind = "python_module_available", args = { module = "diffusers", phase = "build" }, gating = true },
+  { kind = "python_module_available", args = { module = "ftfy", phase = "build" }, gating = true },
+]
+build_cli_args = [
+  { flag = "--image-height", input = "image_height" },
+  { flag = "--image-width", input = "image_width" },
+  { flag = "--video-height", input = "video_height" },
+  { flag = "--video-width", input = "video_width" },
+  { flag = "--video-num-frames", input = "video_num_frames" },
+  { flag = "--num-inference-steps", input = "num_inference_steps" },
+]

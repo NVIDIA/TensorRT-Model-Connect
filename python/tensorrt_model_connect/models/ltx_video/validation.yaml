@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.validation-owner/v1
+bindings:
+  vbench_t2v_diffusion_video:
+    models:
+    - ltx-video-l0
+    default_models:
+    - ltx-video-l0
+    family_profile:
+      generation:
+        text_max_length: 128
+      gates:
+        psnr: 5.0
+        ssim: 0.1
