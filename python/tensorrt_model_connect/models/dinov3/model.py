@@ -20,7 +20,6 @@ import sys
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
-from tensorrt_model_connect.config import ModelConfig
 
 from . import graph_ops
 from .checkpoint_mapper import (
@@ -33,6 +32,7 @@ from .checkpoint_mapper import (
     target_dtype,
     transpose_linear,
 )
+from .config import ModelConfig
 
 
 trt = trt_compat.get_trt()

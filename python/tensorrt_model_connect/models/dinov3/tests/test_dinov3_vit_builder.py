@@ -15,9 +15,9 @@ from safetensors.numpy import save_file
 
 trt = pytest.importorskip("tensorrt", reason="TensorRT is required for DINOv3 builders")
 
-from tensorrt_model_connect.config import ModelConfig  # noqa: E402
 from tensorrt_model_connect.models import resolve_family_id  # noqa: E402
 import tensorrt_model_connect.models.dinov3.model as model  # noqa: E402
+from tensorrt_model_connect.models.dinov3.config import ModelConfig  # noqa: E402
 from tensorrt_model_connect.models.dinov3.model import (  # noqa: E402
     build_vit_engine,
     load_vit_weights,
@@ -168,6 +168,8 @@ def test_model_owned_build_parses_the_concrete_model_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert model.ModelConfig is ModelConfig
+
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
