@@ -10,10 +10,11 @@ bindings:
     - codegen-350m
     model_profiles:
       codegen-350m:
-        gates:
+        sample_acceptance:
           # Greedy continuations are deterministic; every token divergence is
           # an accuracy regression.
-          min_exact_match_rate: 1.0
+          min_pass_rate: 1.0
+          min_allowed_failures: 0
     model_overrides:
       codegen-350m:
         build_generation_headroom: true

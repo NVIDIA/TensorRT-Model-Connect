@@ -11,8 +11,8 @@ bindings:
     - segformer-b0-ade
     model_overrides:
       segformer-b0-ade:
-        # E2E keeps a stable FP32 oracle. Validation compares the FP16 bundle
-        # with an FP16 reference to measure equal-precision backend parity.
-        reference_precision: fp16
+        # Keep the reference in FP32: the HF FP16 path can diverge materially
+        # from both HF FP32 and the FP16 TensorRT engine.
+        reference_precision: fp32
     qualification:
       segformer-b0-ade: {}

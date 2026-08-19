@@ -313,17 +313,20 @@ def build_segformer_tp_engine(
     target_H = H_in // 4
     target_W = W_in // 4
 
+    # --- Decode Head (always FP32) ---
     projected = []
     for i, (feat, feat_H, feat_W, feat_hidden) in enumerate(stage_outputs):
+        feat = graph_ops.begin_fp32_decode_head(network, feat)
         to_2d = network.add_shuffle(feat)
         to_2d.first_transpose = trt.Permutation([0, 2, 3, 1])
         to_2d.reshape_dims = (feat_H * feat_W, feat_hidden)
 
         proj = graph_ops.add_matmul_rhs_constant(
             network, to_2d.get_output(0), feat_hidden, decoder_hidden_size,
-            weights[f"decode_head.linear_c{i}.weight"])
+            weights[f"decode_head.linear_c{i}.weight"], dtype=np.float32)
         proj = graph_ops.add_bias_sum(
-            network, proj, decoder_hidden_size, weights[f"decode_head.linear_c{i}.bias"])
+            network, proj, decoder_hidden_size,
+            weights[f"decode_head.linear_c{i}.bias"], dtype=np.float32)
 
         to_4d2 = network.add_shuffle(proj)
         to_4d2.reshape_dims = (1, feat_H, feat_W, decoder_hidden_size)
@@ -348,8 +351,8 @@ def build_segformer_tp_engine(
         concat.get_output(0),
         num_output_maps=decoder_hidden_size,
         kernel_shape=(1, 1),
-        kernel=trt.Weights(np.ascontiguousarray(fuse_w)),
-        bias=trt.Weights(np.ascontiguousarray(fuse_b)))
+        kernel=trt.Weights(np.ascontiguousarray(fuse_w, dtype=np.float32)),
+        bias=trt.Weights(np.ascontiguousarray(fuse_b, dtype=np.float32)))
 
     bn_w = weights["decode_head.bn.weight"]
     bn_b = weights["decode_head.bn.bias"]
@@ -359,9 +362,11 @@ def build_segformer_tp_engine(
     bn_shift = bn_b - bn_mean * bn_scale
 
     bn_scale_t = graph_ops.add_constant(
-        network, (1, decoder_hidden_size, 1, 1), bn_scale.reshape(1, -1, 1, 1))
+        network, (1, decoder_hidden_size, 1, 1),
+        bn_scale.reshape(1, -1, 1, 1), dtype=np.float32)
     bn_shift_t = graph_ops.add_constant(
-        network, (1, decoder_hidden_size, 1, 1), bn_shift.reshape(1, -1, 1, 1))
+        network, (1, decoder_hidden_size, 1, 1),
+        bn_shift.reshape(1, -1, 1, 1), dtype=np.float32)
 
     bn_scaled = network.add_elementwise(
         fuse_conv.get_output(0), bn_scale_t, trt.ElementWiseOperation.PROD)
@@ -376,8 +381,8 @@ def build_segformer_tp_engine(
         relu.get_output(0),
         num_output_maps=num_classes,
         kernel_shape=(1, 1),
-        kernel=trt.Weights(np.ascontiguousarray(cls_w)),
-        bias=trt.Weights(np.ascontiguousarray(cls_b)))
+        kernel=trt.Weights(np.ascontiguousarray(cls_w, dtype=np.float32)),
+        bias=trt.Weights(np.ascontiguousarray(cls_b, dtype=np.float32)))
 
     logits = cls_conv.get_output(0)
     logits.name = "logits"

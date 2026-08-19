@@ -40,7 +40,9 @@ suites:
     min_max_cache_length: 0
   gates:
     max_accuracy_drop_from_hf: 0.01
-    min_prediction_agreement: 0.98
+  sample_acceptance:
+    min_pass_rate: 0.98
+    min_allowed_failures: 1
   ci:
     eligible: false
     lane: local_only
@@ -79,10 +81,11 @@ suites:
     scorer: continuation
   build:
     min_max_cache_length: 0
-  gates:
-    # Samples are the pass/fail unit. Allow one non-tied divergence in the
-    # smoke slice; exact HF argmax ties remain diagnostic but gate-equivalent.
-    min_tie_adjusted_exact_match_rate: 0.9
+  gates: {}
+  sample_acceptance:
+    # Exact HF argmax ties remain diagnostic but sample-pass equivalent.
+    min_pass_rate: 0.9
+    min_allowed_failures: 1
   ci:
     eligible: false
     lane: local_only
@@ -160,10 +163,12 @@ suites:
     do_sample: false
   scoring:
     scorer: continuation
-  gates:
-    # Samples are the pass/fail unit. Exact HF argmax ties remain visible in
-    # raw diagnostics but are gate-equivalent.
-    min_tie_adjusted_exact_match_rate: 0.9
+  gates: {}
+  sample_acceptance:
+    # Exact HF argmax ties remain visible in raw diagnostics but are
+    # sample-pass equivalent.
+    min_pass_rate: 0.9
+    min_allowed_failures: 0
   ci:
     eligible: false
     lane: local_only
@@ -324,7 +329,9 @@ suites:
     min_max_cache_length: 512
   gates:
     max_accuracy_drop_from_hf: 0.02
-    min_prediction_agreement: 0.95
+  sample_acceptance:
+    min_pass_rate: 0.95
+    min_allowed_failures: 0
   ci:
     eligible: false
     lane: local_only
@@ -368,7 +375,9 @@ suites:
     min_max_cache_length: 1024
   gates:
     max_accuracy_drop_from_hf: 0.02
-    min_prediction_agreement: 0.95
+  sample_acceptance:
+    min_pass_rate: 0.95
+    min_allowed_failures: 0
   ci:
     eligible: false
     lane: local_only
@@ -456,7 +465,9 @@ suites:
     min_max_cache_length: 1024
   gates:
     max_accuracy_drop_from_hf: 0.02
-    min_prediction_agreement: 0.95
+  sample_acceptance:
+    min_pass_rate: 0.95
+    min_allowed_failures: 0
   ci:
     eligible: false
     lane: local_only
@@ -587,7 +598,9 @@ suites:
     min_max_cache_length: 1024
   gates:
     max_pass_rate_drop_from_hf: 0.05
-    min_correctness_agreement: 0.95
+  sample_acceptance:
+    min_pass_rate: 0.95
+    min_allowed_failures: 0
   ci:
     eligible: false
     lane: local_only

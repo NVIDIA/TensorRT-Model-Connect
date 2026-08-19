@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,7 +14,8 @@ import pytest
 
 pytest.importorskip("tensorrt", reason="TensorRT is required for SegFormer graph tests")
 
-from tensorrt_model_connect.models.segformer import graph_ops  # noqa: E402
+from tensorrt_model_connect.models.segformer import graph_ops, model  # noqa: E402
+from tensorrt_model_connect.models.segformer import segformer_tp_builder  # noqa: E402
 
 
 def test_numerical_contract_preserves_checkpoint_eps_and_exact_gelu() -> None:
@@ -75,3 +77,16 @@ def test_decode_head_boundary_casts_fp16_features_to_fp32() -> None:
     assert calls == [(fp16_feature, graph_ops.trt.float32)]
     assert graph_ops.begin_fp32_decode_head(network, fp32_feature) is fp32_feature
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "builder",
+    (model.build_engine, segformer_tp_builder.build_segformer_tp_engine),
+)
+def test_all_decode_heads_use_the_fp32_boundary(builder) -> None:
+    source = inspect.getsource(builder)
+    decode_head = source.split("# --- Decode Head (always FP32) ---", 1)[1]
+
+    assert "graph_ops.begin_fp32_decode_head" in decode_head
+    assert "dtype=np.float32" in decode_head
+    assert "dtype=work_np_dtype" not in decode_head

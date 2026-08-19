@@ -660,7 +660,7 @@ class HfTransformersReference:
             output_path = {output_path!r}
 
             processor = AutoImageProcessor.from_pretrained(
-                hf_id, trust_remote_code=trust_remote_code, use_fast=False)
+                hf_id, trust_remote_code=trust_remote_code)
             model = AutoModelForSemanticSegmentation.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
                 torch_dtype={torch_dtype_expr})

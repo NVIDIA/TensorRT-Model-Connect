@@ -12,9 +12,9 @@ bindings:
     - phi-moe
     model_profiles:
       phi-moe:
-        gates:
+        sample_acceptance:
           # Permit one disagreement in the smoke slice when task accuracy is
           # preserved; the accuracy-drop gate remains strict.
-          min_prediction_agreement: 0.95
+          min_pass_rate: 0.95
     qualification:
       phi-moe: {}

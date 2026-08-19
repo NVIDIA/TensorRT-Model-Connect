@@ -602,12 +602,17 @@ def build_engine(
         _mark_debug(to_4d_t.get_output(0), f"debug_stage{stage_idx}")
         x = to_4d_t.get_output(0)
 
-    # --- Decode Head ---
+    # --- Decode Head (always FP32) ---
     target_H = H_in // 4
     target_W = W_in // 4
 
     projected = []
     for i, (feat, feat_H, feat_W, feat_hidden) in enumerate(stage_outputs):
+        # Keep the encoder in the requested precision, but perform the
+        # lightweight decode head in FP32. Small FP16 tactic differences near
+        # class boundaries can otherwise flip argmax labels.
+        feat = graph_ops.begin_fp32_decode_head(network, feat)
+
         # Reshape to 2D: [1, C, H, W] -> [H*W, C]
         to_2d = network.add_shuffle(feat)
         to_2d.first_transpose = trt.Permutation([0, 2, 3, 1])
@@ -620,14 +625,14 @@ def build_engine(
             feat_hidden,
             decoder_hidden_size,
             weights[f"decode_head.linear_c{i}.weight"],
-            dtype=work_np_dtype,
+            dtype=np.float32,
         )
         proj = graph_ops.add_bias_sum(
             network,
             proj,
             decoder_hidden_size,
             weights[f"decode_head.linear_c{i}.bias"],
-            dtype=work_np_dtype,
+            dtype=np.float32,
         )
 
         # Reshape to 4D: [H*W, D] -> [1, D, H, W]
@@ -660,8 +665,8 @@ def build_engine(
         concat.get_output(0),
         num_output_maps=decoder_hidden_size,
         kernel_shape=(1, 1),
-        kernel=trt.Weights(np.ascontiguousarray(fuse_w, dtype=work_np_dtype)),
-        bias=trt.Weights(np.ascontiguousarray(fuse_b, dtype=work_np_dtype)),
+        kernel=trt.Weights(np.ascontiguousarray(fuse_w, dtype=np.float32)),
+        bias=trt.Weights(np.ascontiguousarray(fuse_b, dtype=np.float32)),
     )
 
     # BatchNorm (fused: gamma * (x - mean) / sqrt(var + eps) + beta)
@@ -673,10 +678,10 @@ def build_engine(
     bn_shift = bn_b - bn_mean * bn_scale
 
     bn_scale_t = graph_ops.add_constant(
-        network, (1, decoder_hidden_size, 1, 1), bn_scale.reshape(1, -1, 1, 1), dtype=work_np_dtype
+        network, (1, decoder_hidden_size, 1, 1), bn_scale.reshape(1, -1, 1, 1), dtype=np.float32
     )
     bn_shift_t = graph_ops.add_constant(
-        network, (1, decoder_hidden_size, 1, 1), bn_shift.reshape(1, -1, 1, 1), dtype=work_np_dtype
+        network, (1, decoder_hidden_size, 1, 1), bn_shift.reshape(1, -1, 1, 1), dtype=np.float32
     )
 
     bn_scaled = network.add_elementwise(
@@ -696,8 +701,8 @@ def build_engine(
         relu.get_output(0),
         num_output_maps=num_classes,
         kernel_shape=(1, 1),
-        kernel=trt.Weights(np.ascontiguousarray(cls_w, dtype=work_np_dtype)),
-        bias=trt.Weights(np.ascontiguousarray(cls_b, dtype=work_np_dtype)),
+        kernel=trt.Weights(np.ascontiguousarray(cls_w, dtype=np.float32)),
+        bias=trt.Weights(np.ascontiguousarray(cls_b, dtype=np.float32)),
     )
 
     # Output: [1, num_classes, H/4, W/4]
