@@ -289,6 +289,8 @@ def _optimized_public_options(options: dict) -> dict:
         public_options["precision"] = "fp32"
     if public_options.get("max_cache_length") is None:
         public_options["max_cache_length"] = 256
+    if public_options.get("max_batch_size") is None:
+        public_options["max_batch_size"] = 1
     return public_options
 
 

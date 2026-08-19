@@ -95,9 +95,7 @@ def _import_qwen_model(monkeypatch: pytest.MonkeyPatch):
         ActivationType=types.SimpleNamespace(SIGMOID="sigmoid", TANH="tanh", RELU="relu"),
         ReduceOperation=types.SimpleNamespace(AVG="avg", SUM="sum", MAX="max"),
         UnaryOperation=types.SimpleNamespace(SQRT="sqrt", RECIP="recip", EXP="exp"),
-        NetworkDefinitionCreationFlag=types.SimpleNamespace(
-            EXPLICIT_BATCH=0, STRONGLY_TYPED=1
-        ),
+        NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         BuilderFlag=types.SimpleNamespace(TF32="tf32"),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
         Permutation=lambda value: tuple(value),
@@ -106,14 +104,25 @@ def _import_qwen_model(monkeypatch: pytest.MonkeyPatch):
         bfloat16="bfloat16",
         int32="int32",
     )
-    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
-    monkeypatch.setattr(trt_compat, "_module", fake_trt)
-    for module_name in tuple(sys.modules):
-        if module_name == "tensorrt_model_connect.models.qwen" or module_name.startswith(
-            "tensorrt_model_connect.models.qwen."
-        ):
-            sys.modules.pop(module_name, None)
-    return importlib.import_module("tensorrt_model_connect.models.qwen.model")
+    qwen_prefix = "tensorrt_model_connect.models.qwen"
+    saved_modules = {
+        module_name: module
+        for module_name, module in sys.modules.items()
+        if module_name == qwen_prefix or module_name.startswith(f"{qwen_prefix}.")
+    }
+    try:
+        with monkeypatch.context() as patch:
+            patch.setitem(sys.modules, "tensorrt", fake_trt)
+            patch.setattr(trt_compat, "_module", fake_trt)
+            for module_name in saved_modules:
+                sys.modules.pop(module_name, None)
+            model = importlib.import_module(f"{qwen_prefix}.model")
+    finally:
+        for module_name in tuple(sys.modules):
+            if module_name == qwen_prefix or module_name.startswith(f"{qwen_prefix}."):
+                sys.modules.pop(module_name, None)
+        sys.modules.update(saved_modules)
+    return model
 
 
 TENSORRT_VERSION = DEPENDENCY_LOCK["tensorrt"]["version"]
@@ -645,9 +654,7 @@ def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned(
     manifest = load_implementation_manifest(MANIFEST_PATH)
     with (CAPSULE_ROOT / "dependency.lock").open("rb") as dependency_file:
         dependency = tomllib.load(dependency_file)
-    monkeypatch.setenv(
-        "TRTMC_PACKAGE_TENSORRT_VERSION", dependency["tensorrt"]["version"]
-    )
+    monkeypatch.setenv("TRTMC_PACKAGE_TENSORRT_VERSION", dependency["tensorrt"]["version"])
     project_dependencies = set(
         project_backend._resolved_project_metadata(REPOSITORY_ROOT)["dependencies"]
     )
@@ -1102,18 +1109,14 @@ def test_unqualified_qwen_requests_return_native_fallback_without_adapter_error(
     assert "No qualified Qwen Edge-LLM profile matches" in probe.reason
 
 
-def test_native_python_default_leaves_precision_to_the_model_family() -> None:
-    import inspect
+def test_qwen_model_owns_optimized_public_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    qwen_model = _import_qwen_model(monkeypatch)
 
-    from tensorrt_model_connect.engine_builder import build
+    defaults = qwen_model._optimized_public_options({})
 
-    defaults = {
-        name: parameter.default
-        for name, parameter in inspect.signature(build).parameters.items()
-        if name not in {"model_id_or_path", "output_path"}
-    }
-
-    assert defaults["precision"] is None
+    assert defaults["precision"] == MC_DEFAULT_DEPLOYMENT["precision"]
     assert defaults["max_cache_length"] == MC_DEFAULT_DEPLOYMENT["max_cache_length"]
     assert defaults["max_batch_size"] == MC_DEFAULT_DEPLOYMENT["max_batch_size"]
 
@@ -1217,6 +1220,7 @@ def test_public_cli_default_and_explicit_profiles_select_edgellm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.build_cli as build_cli
+
     qwen_model = _import_qwen_model(monkeypatch)
 
     captured = {}

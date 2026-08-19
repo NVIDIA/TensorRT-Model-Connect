@@ -4,7 +4,7 @@
 schema_version = 1
 profile_id = "qwen3-1.7b-fp16--a100-pcie80-sm80--edgellm0.9-trt11.1"
 qualification_state = "qualified"
-qualified_semantic_sha256 = "f6d90faa8a953f7df5c6291c60a896943b6438e1a3c94e5a371092764ef73f94"
+qualified_semantic_sha256 = "df1b09eb0e20afd2b0683b8ad4effcbb8c7e00a1e26d514184e59e968e405f15"
 operation = "text-generation-v1"
 precision = "fp16"
 quantization = "none"
