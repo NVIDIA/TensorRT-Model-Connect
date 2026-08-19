@@ -313,6 +313,33 @@ def add_gelu_new(
     return result.get_output(0)
 
 
+def add_activation(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    activation_type: str,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
+    if activation_type in ("gelu_new", "gelu"):
+        return add_gelu_new(network, inp, dtype=dtype)
+    elif activation_type == "relu":
+        act = network.add_activation(inp, trt.ActivationType.RELU)
+        return act.get_output(0)
+    elif activation_type in ("relu2", "squared_relu"):
+        relu = network.add_activation(inp, trt.ActivationType.RELU)
+        sq = network.add_elementwise(
+            relu.get_output(0), relu.get_output(0),
+            trt.ElementWiseOperation.PROD)
+        return sq.get_output(0)
+    elif activation_type == "silu":
+        sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
+        swish = network.add_elementwise(
+            inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+        return swish.get_output(0)
+    else:
+        raise ValueError(f"Unsupported activation: {activation_type}")
+
+
 def add_gelu_erf(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
