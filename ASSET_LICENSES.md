@@ -42,9 +42,9 @@ distributed under the Apache License 2.0 with the rest of the project:
 The following project overview diagrams were supplied by the project maintainer
 for inclusion and redistribution under the Apache License 2.0:
 
-- `What-is-MC.png`; SHA-256
+- `website/static/img/readme/model-connect-overview.png`; SHA-256
   `15e97bc498406629d32eb043e474f835ee88ea6ba4d78cd5ea0cd91c0954b2f4`
-- `TRT-Stack.png`; SHA-256
+- `website/static/img/readme/tensorrt-stack.png`; SHA-256
   `de08eb9b63d6d7808bf11c8893005514d26282b4377f1988b2bdc30366ccad16`
 
 ## Maintainer voice recording and derived ASR probes

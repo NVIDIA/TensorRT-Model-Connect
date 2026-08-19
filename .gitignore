@@ -127,6 +127,7 @@ recovery-*-clone/
 /tmp/
 engines
 *.png
+!website/static/img/readme/*.png
 *.wav
 *.bundle
 *.ttrtb
