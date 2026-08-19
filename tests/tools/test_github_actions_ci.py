@@ -791,6 +791,7 @@ def test_github_stage_wrapper_removes_exact_container_on_cancellation(
     env = os.environ.copy()
     env.update(
         {
+            "BASH_ENV": "",
             "PATH": f"{fake_bin}:{env['PATH']}",
             "DOCKER_LOG": str(docker_log),
             "DOCKER_EXEC_STARTED": str(exec_started),
