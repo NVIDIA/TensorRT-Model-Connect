@@ -30,7 +30,7 @@ LEGACY_PROFILE_ROOT_ENV = "TRTMC_E2E_PROFILE_ROOT"
 PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
 DEFAULT_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_PROFILE_LAYOUT_VERSION = "overlay-v3-exact-pins"
+_PROFILE_LAYOUT_VERSION = "overlay-v4-content-addressed"
 _DEFAULT_PROFILE_BUILD_JOBS = "4"
 _PROFILE_INSTALL_TIMEOUT_SECONDS = 7200
 _EXACT_REQUIREMENT_RE = re.compile(
@@ -203,6 +203,30 @@ def _prebuilt_only() -> bool:
         "yes",
         "on",
     }
+
+
+def _profile_cache_key(
+    *,
+    base_python: str,
+    requirements_text: str,
+    verification_script: str,
+    system_site_packages: bool,
+) -> str:
+    """Return a location-independent key for one exact Python environment."""
+    payload = {
+        "base_python": base_python,
+        "layout_version": _PROFILE_LAYOUT_VERSION,
+        "requirements": requirements_text,
+        "system_site_packages": system_site_packages,
+        "verification_script": verification_script,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(b"trtmc-python-profile\0" + encoded).hexdigest()[:12]
 
 
 def _profile_spec(profile_name: str) -> dict[str, Any]:
@@ -437,17 +461,12 @@ def _materialize_venv_profile(
         verification_script = _read_package_text(verification_script_file).strip()
     system_site_packages = bool(spec.get("system_site_packages", True))
 
-    hash_input = "\n".join(
-        [
-            base_python,
-            _PROFILE_LAYOUT_VERSION,
-            requirements_spec,
-            requirements_text,
-            verification_script,
-            f"system_site_packages={int(system_site_packages)}",
-        ]
-    ).encode("utf-8")
-    profile_hash = hashlib.sha256(hash_input).hexdigest()[:12]
+    profile_hash = _profile_cache_key(
+        base_python=base_python,
+        requirements_text=requirements_text,
+        verification_script=verification_script,
+        system_site_packages=system_site_packages,
+    )
 
     root = profile_root()
     env_dir = root / f"{profile_name}-{profile_hash}"

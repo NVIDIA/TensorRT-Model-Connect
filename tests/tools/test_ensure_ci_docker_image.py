@@ -255,6 +255,12 @@ python_profile_specs = [
   "demo|models/demo/requirements.lock.txt|models/demo/verify.py|true",
 ]
 default_execution_profiles = ["reference|demo"]
+
+[model_reference_cache]
+repository = "https://example.invalid/reference.git"
+revision = "0123456789abcdef0123456789abcdef01234567"
+relative_path = "demo/reference/source-0123456789ab"
+entrypoint = "src/reference.py"
 """,
         encoding="utf-8",
     )
@@ -477,6 +483,16 @@ def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(
     )
     ownership_changed = _resolved_image_for_repo(tmp_path / "ownership-change", repo_root)
     assert ownership_changed == baseline
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'entrypoint = "src/reference.py"',
+            'entrypoint = "src/evaluate.py"',
+        ),
+        encoding="utf-8",
+    )
+    reference_changed = _resolved_image_for_repo(tmp_path / "reference-change", repo_root)
+    assert reference_changed == baseline
 
 
 def test_profile_fingerprint_changes_for_semantic_profile_declaration(

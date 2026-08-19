@@ -64,6 +64,61 @@ def test_python_profile_key_preserves_non_virtualenv_interpreter_path(tmp_path):
     assert shared_profiles._absolute_python(str(interpreter)) == str(interpreter)
 
 
+def test_python_profile_cache_key_ignores_requirements_location(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    first = tmp_path / "first" / "requirements.lock.txt"
+    second = tmp_path / "second" / "renamed.lock.txt"
+    for path in (first, second):
+        path.parent.mkdir()
+        path.write_text("example-package==1.2.3\n", encoding="utf-8")
+
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+    monkeypatch.setenv(shared_profiles.PREBUILT_ONLY_ENV, "1")
+
+    errors = []
+    for requirements in (first, second):
+        with pytest.raises(RuntimeError) as error:
+            shared_profiles._materialize_venv_profile(
+                "moved-profile",
+                {
+                    "requirements": str(requirements),
+                    "verification_script": "import example_package",
+                    "system_site_packages": True,
+                },
+                "/opt/venv/bin/python",
+            )
+        errors.append(str(error.value))
+
+    assert errors[0] == errors[1]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("base_python", "/opt/other/bin/python"),
+        ("requirements_text", "example-package==2.0.0\n"),
+        ("verification_script", "import example_package; print('verified')"),
+        ("system_site_packages", False),
+    ),
+)
+def test_python_profile_cache_key_tracks_environment_inputs(
+    field: str,
+    value: object,
+) -> None:
+    inputs = {
+        "base_python": "/opt/venv/bin/python",
+        "requirements_text": "example-package==1.2.3\n",
+        "verification_script": "import example_package",
+        "system_site_packages": True,
+    }
+    baseline = shared_profiles._profile_cache_key(**inputs)
+    inputs[field] = value
+
+    assert shared_profiles._profile_cache_key(**inputs) != baseline
+
+
 def test_resolve_case_profile_names_apply_manifest_profiles():
     case = _make_case(
         runtime_strategy="example_decoder_decoder_kv_cache",
