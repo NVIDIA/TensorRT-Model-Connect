@@ -10,8 +10,10 @@ Postconditions: All standard decoder weight keys are present with correct shapes
 """
 import pytest
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import (
+from tensorrt_model_connect.models.mistral.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.mistral.tests._family_plugin_test_mixin import (
     FamilyPluginTestMixin,
     requires_trt,
 )

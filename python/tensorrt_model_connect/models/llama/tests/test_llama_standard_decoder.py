@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
-from tests.builder.conftest import requires_trt
+from tensorrt_model_connect.models.llama.tests._trt_test_support import requires_trt
 
 
 def _make_weights(hidden: int, vocab: int, num_layers: int,

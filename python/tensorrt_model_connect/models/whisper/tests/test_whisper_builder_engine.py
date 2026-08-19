@@ -48,8 +48,13 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.parallel_config import ParallelConfig
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.whisper.tests._family_plugin_tester import (
+    FamilyPluginTester,
+    TinyModelSpec,
+)
+from tensorrt_model_connect.models.whisper.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 # Whisper dimensions kept tiny for fast tests.

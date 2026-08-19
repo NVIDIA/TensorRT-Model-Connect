@@ -14,8 +14,12 @@ Postconditions: Fused QKV is correctly split from group-interleaved layout, non-
 """
 import numpy as np
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.internlm.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.internlm.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class InternLMPluginTester(FamilyPluginTester):

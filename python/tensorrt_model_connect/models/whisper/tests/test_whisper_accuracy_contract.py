@@ -93,9 +93,11 @@ def test_hf_reference_uses_the_manifest_generation_budget(
     monkeypatch.setattr(
         hf_transformers, "run_reference_subprocess", _capture_reference
     )
+    audio_path = tmp_path / "input.wav"
+    audio_path.write_bytes(b"test audio fixture")
     case = SimpleNamespace(
         metadata={"reference_precision": "fp32"},
-        inputs={"audio": str(tmp_path / "input.wav"), "max_new_tokens": 120},
+        inputs={"audio": str(audio_path), "max_new_tokens": 120},
         hf_id="openai/whisper-tiny",
         name="whisper-tiny-fp16",
     )

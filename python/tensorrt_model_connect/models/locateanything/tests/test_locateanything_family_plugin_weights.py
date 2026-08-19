@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import importlib
 
-from tests.builder.family_plugin_test_support import (
+from tensorrt_model_connect.models.locateanything.tests._family_plugin_test_support import (
     ModelConfig,
     _rand,
     _write_config,
@@ -19,7 +19,9 @@ from tests.builder.family_plugin_test_support import (
 )
 
 
-def test_locateanything_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_locateanything_decode_role_dispatches_to_dual_profile_builder(
+    monkeypatch,
+) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.models.locateanything.default_decoder")
     calls: dict[str, object] = {}
@@ -30,11 +32,19 @@ def test_locateanything_embed_input_dispatches_to_dual_profile_builder(monkeypat
 
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
     config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
+    weights = {}
     result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+        config, weights, 31, precision="fp16"
+    )
 
     assert result == b"locateanything-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
+    build_config, build_weights, max_cache_length, kwargs = calls["build"]
+    assert build_config is config
+    assert build_weights is weights
+    assert max_cache_length == 31
+    assert kwargs["precision"] == "fp16"
+    assert kwargs["profile_mode"] == "dual_profile"
+    assert "embed_input" not in kwargs
 
 
 class TestLocateAnythingPlugin:

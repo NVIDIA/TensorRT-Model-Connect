@@ -43,8 +43,13 @@ try:
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.rwkv.tests._family_plugin_tester import (
+    FamilyPluginTester,
+    TinyModelSpec,
+)
+from tensorrt_model_connect.models.rwkv.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class RWKVPluginTester(FamilyPluginTester):

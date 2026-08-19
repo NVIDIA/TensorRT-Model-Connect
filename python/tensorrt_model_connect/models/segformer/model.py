@@ -149,8 +149,8 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
 
             # Attention Q/K/V/O
             for proj in ("query", "key", "value"):
-                w = _load_tensor(readers, f"{blk_prefix}.attention.{proj}.weight")
-                b = _load_tensor(readers, f"{blk_prefix}.attention.{proj}.bias")
+                w = _load_tensor(readers, f"{blk_prefix}.attention.self.{proj}.weight")
+                b = _load_tensor(readers, f"{blk_prefix}.attention.self.{proj}.bias")
                 weights[f"{w_prefix}.attn.{proj[0]}.weight"] = _transpose_2d(w, f"attn_{proj}")
                 weights[f"{w_prefix}.attn.{proj[0]}.bias"] = b.astype(np.float32)
 
@@ -161,13 +161,17 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
 
             # SR (sequence reduction) if sr_ratio > 1
             if sr > 1:
-                sr_w = _load_tensor(readers, f"{blk_prefix}.attention.sr.weight")
-                sr_b = _load_tensor(readers, f"{blk_prefix}.attention.sr.bias")
+                sr_w = _load_tensor(readers, f"{blk_prefix}.attention.self.sr.weight")
+                sr_b = _load_tensor(readers, f"{blk_prefix}.attention.self.sr.bias")
                 weights[f"{w_prefix}.attn.sr.weight"] = sr_w.astype(np.float32)
                 weights[f"{w_prefix}.attn.sr.bias"] = sr_b.astype(np.float32)
 
-                sr_ln_w = _load_tensor(readers, f"{blk_prefix}.attention.layer_norm.weight")
-                sr_ln_b = _load_tensor(readers, f"{blk_prefix}.attention.layer_norm.bias")
+                sr_ln_w = _load_tensor(
+                    readers, f"{blk_prefix}.attention.self.layer_norm.weight"
+                )
+                sr_ln_b = _load_tensor(
+                    readers, f"{blk_prefix}.attention.self.layer_norm.bias"
+                )
                 weights[f"{w_prefix}.attn.sr_norm.weight"] = sr_ln_w.astype(np.float32)
                 weights[f"{w_prefix}.attn.sr_norm.bias"] = sr_ln_b.astype(np.float32)
 

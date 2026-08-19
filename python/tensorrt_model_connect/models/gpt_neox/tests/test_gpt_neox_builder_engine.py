@@ -36,8 +36,12 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 pytest.importorskip("safetensors.numpy")
 pytest.importorskip("tensorrt_model_connect.config")
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.gpt_neox.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.gpt_neox.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class GPTNeoXPluginTester(FamilyPluginTester):

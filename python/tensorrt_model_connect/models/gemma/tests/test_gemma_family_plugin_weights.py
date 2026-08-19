@@ -13,7 +13,7 @@ import math
 
 import numpy as np
 
-from tests.builder.family_plugin_test_support import (
+from tensorrt_model_connect.models.gemma.tests._family_plugin_test_support import (
     ModelConfig,
     _rand,
     _write_config,

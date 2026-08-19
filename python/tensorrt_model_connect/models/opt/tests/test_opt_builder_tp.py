@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -58,7 +59,42 @@ def test_opt_plugin_routes_parallel_builds(monkeypatch) -> None:
     assert result == b"opt-tp-plan"
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 23
-    assert kwargs["parallel_config"] == parallel
-    assert kwargs["activation"] == "relu"
-    assert kwargs["mlp_type"] == "gelu_fc"
-    assert kwargs["verbose"] is True
+    assert kwargs == {
+        "precision": "fp32",
+        "quant_ctx": None,
+        "verbose": True,
+        "parallel_config": parallel,
+    }
+
+
+def test_opt_tp_mlp_uses_fixed_relu(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.models.opt.default_dual_profile_decoder_tp"
+    )
+    matmul = Mock(side_effect=["fc1", "output"])
+    activation = Mock(return_value="activated")
+    monkeypatch.setattr(module.graph_ops, "add_activation", activation)
+    weights = {
+        "layer.0.w_fc1": "fc1-weight",
+        "layer.0.w_fc2": "fc2-weight",
+    }
+
+    result = module._gelu_fc_mlp(
+        "network",
+        "input",
+        matmul=matmul,
+        weights=weights,
+        prefix="layer.0",
+        hidden=16,
+        mlp_size=32,
+        work_np_dtype="work-dtype",
+    )
+
+    assert result == "output"
+    activation.assert_called_once_with(
+        "network", "fc1", "relu", dtype="work-dtype"
+    )
+    assert matmul.call_args_list == [
+        call("input", 16, 32, "fc1-weight", "layer.0.w_fc1"),
+        call("activated", 32, 16, "fc2-weight", "layer.0.w_fc2"),
+    ]

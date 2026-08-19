@@ -132,9 +132,9 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         hf_prefix = f"{hf_root}.encoder.layer.{layer_idx}"
 
         # Q, K, V projections — HF stores [out, in], transpose to [in, out]
-        q_w = _load_tensor(readers, f"{hf_prefix}.attention.query.weight")
-        k_w = _load_tensor(readers, f"{hf_prefix}.attention.key.weight")
-        v_w = _load_tensor(readers, f"{hf_prefix}.attention.value.weight")
+        q_w = _load_tensor(readers, f"{hf_prefix}.attention.self.query.weight")
+        k_w = _load_tensor(readers, f"{hf_prefix}.attention.self.key.weight")
+        v_w = _load_tensor(readers, f"{hf_prefix}.attention.self.value.weight")
 
         weights[f"{prefix}.w_q"] = np.ascontiguousarray(q_w.T.astype(np.float32))
         weights[f"{prefix}.w_k"] = np.ascontiguousarray(k_w.T.astype(np.float32))
@@ -143,15 +143,15 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         # QKV biases
         weights[f"{prefix}.q_bias"] = _load_tensor(
             readers,
-            f"{hf_prefix}.attention.query.bias",
+            f"{hf_prefix}.attention.self.query.bias",
         ).astype(np.float32)
         weights[f"{prefix}.k_bias"] = _load_tensor(
             readers,
-            f"{hf_prefix}.attention.key.bias",
+            f"{hf_prefix}.attention.self.key.bias",
         ).astype(np.float32)
         weights[f"{prefix}.v_bias"] = _load_tensor(
             readers,
-            f"{hf_prefix}.attention.value.bias",
+            f"{hf_prefix}.attention.self.value.bias",
         ).astype(np.float32)
 
         # Output projection

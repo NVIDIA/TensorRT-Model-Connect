@@ -513,7 +513,7 @@ def load_weights(model_dir: str, config: ModelConfig, *, precision: str = "fp32"
         weights[f"{pfx}.w_o"] = _t2d(state_dict[f"{src}.self_attention.o_net.weight"])
 
         # LayerNorm gamma (bias=False, so beta=0)
-        weights[f"{pfx}.attn_norm"] = _to_np(state_dict[f"{src}.norm_weight"])
+        weights[f"{pfx}.attn_norm"] = _to_np(state_dict[f"{src}.norm_self.weight"])
 
         # Conv1d FFN with kernel_size=3: keep 3D shape [out, in, K]
         # for TRT convolution
@@ -546,7 +546,7 @@ def load_weights(model_dir: str, config: ModelConfig, *, precision: str = "fp32"
         weights[f"{pfx}.w_o"] = _t2d(state_dict[f"{src}.self_attention.o_net.weight"])
 
         # Self-attention LayerNorm gamma
-        weights[f"{pfx}.input_norm"] = _to_np(state_dict[f"{src}.norm_weight"])
+        weights[f"{pfx}.input_norm"] = _to_np(state_dict[f"{src}.norm_self.weight"])
 
         # Cross-attention: ASYMMETRIC (1 head, d_head=128)
         # Q: [128, 768] -> transpose to [768, 128]
@@ -598,7 +598,7 @@ def load_weights(model_dir: str, config: ModelConfig, *, precision: str = "fp32"
         weights["lt_in_proj_w"] = _to_np(state_dict["local_transformer_in_projection.weight"]).T
         weights["lt_in_proj_b"] = _to_np(state_dict["local_transformer_in_projection.bias"])
         lt_src = "local_transformer.layers.0"
-        weights["lt_norm_self"] = _to_np(state_dict[f"{lt_src}.norm_weight"])
+        weights["lt_norm_self"] = _to_np(state_dict[f"{lt_src}.norm_self.weight"])
         weights["lt_qkv_net"] = _to_np(state_dict[f"{lt_src}.self_attention.qkv_net.weight"]).T
         weights["lt_o_net"] = _to_np(state_dict[f"{lt_src}.self_attention.o_net.weight"]).T
         weights["lt_norm_ff"] = _to_np(state_dict[f"{lt_src}.norm_pos_ff.weight"])

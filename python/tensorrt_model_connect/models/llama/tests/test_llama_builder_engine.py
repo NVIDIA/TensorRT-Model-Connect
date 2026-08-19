@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import pytest
 
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
-from tests.builder.family_plugin_test_mixin import (
+from tensorrt_model_connect.models.llama.tests._family_plugin_tester import (
+    FamilyPluginTester,
+    TinyModelSpec,
+)
+from tensorrt_model_connect.models.llama.tests._family_plugin_test_mixin import (
     FamilyPluginTestMixin,
     requires_trt,
 )

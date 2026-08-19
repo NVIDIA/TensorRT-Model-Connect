@@ -48,8 +48,13 @@ pytest.importorskip(
 
 from tensorrt_model_connect.checkpoint_mapper import WeightDict
 from tensorrt_model_connect.parallel_config import ParallelConfig
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.bark.tests._family_plugin_tester import (
+    FamilyPluginTester,
+    TinyModelSpec,
+)
+from tensorrt_model_connect.models.bark.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 # Bark sub-model dimensions kept tiny for fast tests.

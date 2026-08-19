@@ -26,8 +26,12 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 
 from tensorrt_model_connect.config import ModelConfig
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.falcon.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.falcon.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class FalconPluginTester(FamilyPluginTester):

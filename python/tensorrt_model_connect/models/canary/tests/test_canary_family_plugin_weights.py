@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tests.builder.family_plugin_test_support import (
+from tensorrt_model_connect.models.canary.tests._family_plugin_test_support import (
     ModelConfig,
     ParallelConfig,
     WeightDict,

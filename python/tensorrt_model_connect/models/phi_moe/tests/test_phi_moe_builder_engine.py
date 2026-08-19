@@ -47,8 +47,12 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 pytest.importorskip("safetensors.numpy", reason="safetensors not available")
 pytest.importorskip("tensorrt_model_connect.config", reason="tensorrt_model_connect requires tensorrt")
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.phi_moe.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.phi_moe.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 # Number of experts kept tiny for fast engine builds.

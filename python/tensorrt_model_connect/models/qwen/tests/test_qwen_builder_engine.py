@@ -14,8 +14,13 @@ import pytest
 
 pytest.importorskip("tensorrt", reason="Qwen builder tests require TensorRT")
 
-from tests.builder.family_plugin_tester import FamilyPluginTester, TinyModelSpec
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.qwen.tests._family_plugin_tester import (
+    FamilyPluginTester,
+    TinyModelSpec,
+)
+from tensorrt_model_connect.models.qwen.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class QwenPluginTester(FamilyPluginTester):

@@ -9,7 +9,9 @@ import json
 from importlib import import_module
 from unittest.mock import patch
 
-from tests.builder.debug_runner_test_support import make_bundle_bytes
+from tensorrt_model_connect.models.qwen.tests._debug_runner_test_support import (
+    make_bundle_bytes,
+)
 
 
 def test_qwen_debug_runner_forwards_engine_section_and_communicator(tmp_path) -> None:

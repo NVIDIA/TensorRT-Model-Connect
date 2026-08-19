@@ -118,7 +118,7 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         prefix = f"layer.{layer_idx}"
         hf_prefix = f"deberta.encoder.layer.{layer_idx}"
 
-        in_proj_w = _load_tensor(readers, f"{hf_prefix}.attention.in_proj.weight")
+        in_proj_w = _load_tensor(readers, f"{hf_prefix}.attention.self.in_proj.weight")
         in_proj_np = np.array(in_proj_w, dtype=np.float32)
 
         # DeBERTa interleaves QKV per head in in_proj
@@ -131,8 +131,8 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         weights[f"{prefix}.w_k"] = np.ascontiguousarray(k_w.T)
         weights[f"{prefix}.w_v"] = np.ascontiguousarray(v_w.T)
 
-        q_bias = _load_tensor(readers, f"{hf_prefix}.attention.q_bias")
-        v_bias = _load_tensor(readers, f"{hf_prefix}.attention.v_bias")
+        q_bias = _load_tensor(readers, f"{hf_prefix}.attention.self.q_bias")
+        v_bias = _load_tensor(readers, f"{hf_prefix}.attention.self.v_bias")
         weights[f"{prefix}.q_bias"] = np.array(q_bias, dtype=np.float32).flatten()
         weights[f"{prefix}.v_bias"] = np.array(v_bias, dtype=np.float32).flatten()
 
@@ -147,14 +147,20 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         weights[f"{prefix}.post_attn_norm_beta"] = attn_ln_b
 
         if "c2p" in pos_att_type:
-            pos_proj_w = _load_tensor(readers, f"{hf_prefix}.attention.pos_proj.weight")
+            pos_proj_w = _load_tensor(
+                readers, f"{hf_prefix}.attention.self.pos_proj.weight"
+            )
             weights[f"{prefix}.pos_proj"] = np.ascontiguousarray(
                 np.array(pos_proj_w, dtype=np.float32).T
             )
 
         if "p2c" in pos_att_type:
-            pos_q_w = _load_tensor(readers, f"{hf_prefix}.attention.pos_q_proj.weight")
-            pos_q_b = _load_tensor(readers, f"{hf_prefix}.attention.pos_q_proj.bias")
+            pos_q_w = _load_tensor(
+                readers, f"{hf_prefix}.attention.self.pos_q_proj.weight"
+            )
+            pos_q_b = _load_tensor(
+                readers, f"{hf_prefix}.attention.self.pos_q_proj.bias"
+            )
             weights[f"{prefix}.pos_q_proj"] = np.ascontiguousarray(
                 np.array(pos_q_w, dtype=np.float32).T
             )

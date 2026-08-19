@@ -23,7 +23,10 @@ import math
 import numpy as np
 import pytest
 
-from tests.builder.conftest import requires_trt, run_trt_graph
+from tensorrt_model_connect.models.qwen.tests._trt_test_support import (
+    requires_trt,
+    run_trt_graph,
+)
 
 try:
     from tensorrt_model_connect.models.qwen import graph_blocks, graph_ops

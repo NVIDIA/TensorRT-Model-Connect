@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from tests.builder.debug_runner_test_support import make_bundle_bytes
+from tensorrt_model_connect.models.bart.tests._debug_runner_test_support import (
+    make_bundle_bytes,
+)
 
 
 def test_bart_debug_runner_prefers_current_cross_attention_mask_name() -> None:

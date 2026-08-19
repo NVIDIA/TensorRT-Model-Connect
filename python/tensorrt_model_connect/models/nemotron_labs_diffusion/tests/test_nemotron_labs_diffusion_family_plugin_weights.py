@@ -15,7 +15,7 @@ import importlib
 import numpy as np
 import pytest
 
-from tests.builder.family_plugin_test_support import (
+from tensorrt_model_connect.models.nemotron_labs_diffusion.tests._family_plugin_test_support import (
     ModelConfig,
     _rand,
     _write_config,

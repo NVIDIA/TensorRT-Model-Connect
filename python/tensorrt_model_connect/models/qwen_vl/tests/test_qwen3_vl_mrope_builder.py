@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tests.builder.conftest import requires_trt
+from tensorrt_model_connect.models.qwen_vl.tests._trt_test_support import (
+    requires_trt,
+)
 
 pytest.importorskip(
     "tensorrt_model_connect",

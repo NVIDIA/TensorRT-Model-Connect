@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from tests.builder.debug_runner_test_support import make_bundle_bytes
+from tensorrt_model_connect.models.m2m_100.tests._debug_runner_test_support import (
+    make_bundle_bytes,
+)
 
 
 def test_m2m_100_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> None:

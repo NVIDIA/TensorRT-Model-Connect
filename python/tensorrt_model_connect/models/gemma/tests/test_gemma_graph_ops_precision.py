@@ -12,7 +12,10 @@ import pytest
 trt = pytest.importorskip("tensorrt")
 
 from tensorrt_model_connect.models.gemma import graph_ops  # noqa: E402
-from tests.builder.conftest import requires_trt, run_trt_graph  # noqa: E402
+from tensorrt_model_connect.models.gemma.tests._trt_test_support import (  # noqa: E402
+    requires_trt,
+    run_trt_graph,
+)
 
 
 class _Tensor:

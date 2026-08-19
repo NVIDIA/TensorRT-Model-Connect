@@ -30,7 +30,10 @@ try:
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
-from tests.builder.conftest import requires_trt, run_trt_graph
+from tensorrt_model_connect.models.qwen_vl.tests._trt_test_support import (
+    requires_trt,
+    run_trt_graph,
+)
 
 
 @pytest.fixture

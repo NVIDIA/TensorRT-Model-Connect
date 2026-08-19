@@ -8,8 +8,12 @@ Intent: Validate the Granite family plugin weight loading and standard decoder k
 Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All standard decoder weight keys are present with correct shapes and the engine builds successfully.
 """
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.granite.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.granite.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class GranitePluginTester(FamilyPluginTester):

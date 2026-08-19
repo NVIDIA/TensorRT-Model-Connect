@@ -21,8 +21,12 @@ Postconditions: All weight keys map correctly from BLOOM's HF layout, fused QKV 
 """
 import numpy as np
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.bloom.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.bloom.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class BloomPluginTester(FamilyPluginTester):

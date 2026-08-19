@@ -22,8 +22,12 @@ import json
 
 import numpy as np
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.gpt2.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.gpt2.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class GPT2PluginTester(FamilyPluginTester):

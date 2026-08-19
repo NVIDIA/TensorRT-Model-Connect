@@ -11,7 +11,7 @@ from __future__ import annotations
 
 
 
-from tests.builder.family_plugin_test_support import (
+from tensorrt_model_connect.models.internvl.tests._family_plugin_test_support import (
     ModelConfig,
     _rand,
     _write_config,

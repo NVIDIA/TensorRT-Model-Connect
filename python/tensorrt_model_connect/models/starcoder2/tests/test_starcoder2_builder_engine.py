@@ -44,8 +44,12 @@ try:
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.starcoder2.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.starcoder2.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class StarCoder2PluginTester(FamilyPluginTester):

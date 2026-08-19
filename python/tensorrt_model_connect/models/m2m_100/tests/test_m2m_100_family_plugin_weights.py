@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.builder.family_plugin_test_support import (
+from tensorrt_model_connect.models.m2m_100.tests._family_plugin_test_support import (
     ModelConfig,
     _rand,
     _write_config,

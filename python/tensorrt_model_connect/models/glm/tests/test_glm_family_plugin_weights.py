@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tests.builder.family_plugin_test_support import (
+from tensorrt_model_connect.models.glm.tests._family_plugin_test_support import (
     ModelConfig,
     _rand,
     _write_config,

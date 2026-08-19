@@ -135,9 +135,9 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         hf_prefix = _pfx(f"encoder.layer.{layer_idx}")
 
         # Q, K, V projections
-        q_w = _load_tensor(readers, f"{hf_prefix}.attention.query.weight")
-        k_w = _load_tensor(readers, f"{hf_prefix}.attention.key.weight")
-        v_w = _load_tensor(readers, f"{hf_prefix}.attention.value.weight")
+        q_w = _load_tensor(readers, f"{hf_prefix}.attention.self.query.weight")
+        k_w = _load_tensor(readers, f"{hf_prefix}.attention.self.key.weight")
+        v_w = _load_tensor(readers, f"{hf_prefix}.attention.self.value.weight")
 
         weights[f"{prefix}.w_q"] = np.ascontiguousarray(q_w.T.astype(np.float32))
         weights[f"{prefix}.w_k"] = np.ascontiguousarray(k_w.T.astype(np.float32))
@@ -145,37 +145,39 @@ def load_weights(model_dir: str, config: ModelConfig) -> WeightDict:
 
         # QKV biases
         weights[f"{prefix}.q_bias"] = _load_tensor(
-            readers, f"{hf_prefix}.attention.query.bias"
+            readers, f"{hf_prefix}.attention.self.query.bias"
         ).astype(np.float32)
         weights[f"{prefix}.k_bias"] = _load_tensor(
-            readers, f"{hf_prefix}.attention.key.bias"
+            readers, f"{hf_prefix}.attention.self.key.bias"
         ).astype(np.float32)
         weights[f"{prefix}.v_bias"] = _load_tensor(
-            readers, f"{hf_prefix}.attention.value.bias"
+            readers, f"{hf_prefix}.attention.self.value.bias"
         ).astype(np.float32)
 
         # ConvBERT-specific: SeparableConv1D weights
         sep_dw = _load_tensor(
-            readers, f"{hf_prefix}.attention.key_conv_attn_layer.depthwise.weight"
+            readers, f"{hf_prefix}.attention.self.key_conv_attn_layer.depthwise.weight"
         )
         sep_pw = _load_tensor(
-            readers, f"{hf_prefix}.attention.key_conv_attn_layer.pointwise.weight"
+            readers, f"{hf_prefix}.attention.self.key_conv_attn_layer.pointwise.weight"
         )
-        sep_bias = _load_tensor(readers, f"{hf_prefix}.attention.key_conv_attn_layer.bias")
+        sep_bias = _load_tensor(
+            readers, f"{hf_prefix}.attention.self.key_conv_attn_layer.bias"
+        )
 
         weights[f"{prefix}.sep_conv_dw"] = sep_dw.astype(np.float32)
         weights[f"{prefix}.sep_conv_pw"] = sep_pw.astype(np.float32)
         weights[f"{prefix}.sep_conv_bias"] = sep_bias.squeeze(-1).astype(np.float32)
 
         # conv_kernel_layer: linear [all_head_size -> num_heads * kernel_size]
-        ck_w = _load_tensor(readers, f"{hf_prefix}.attention.conv_kernel_layer.weight")
-        ck_b = _load_tensor(readers, f"{hf_prefix}.attention.conv_kernel_layer.bias")
+        ck_w = _load_tensor(readers, f"{hf_prefix}.attention.self.conv_kernel_layer.weight")
+        ck_b = _load_tensor(readers, f"{hf_prefix}.attention.self.conv_kernel_layer.bias")
         weights[f"{prefix}.conv_kernel_w"] = np.ascontiguousarray(ck_w.T.astype(np.float32))
         weights[f"{prefix}.conv_kernel_bias"] = ck_b.astype(np.float32)
 
         # conv_out_layer: linear [hidden -> all_head_size]
-        co_w = _load_tensor(readers, f"{hf_prefix}.attention.conv_out_layer.weight")
-        co_b = _load_tensor(readers, f"{hf_prefix}.attention.conv_out_layer.bias")
+        co_w = _load_tensor(readers, f"{hf_prefix}.attention.self.conv_out_layer.weight")
+        co_b = _load_tensor(readers, f"{hf_prefix}.attention.self.conv_out_layer.bias")
         weights[f"{prefix}.conv_out_w"] = np.ascontiguousarray(co_w.T.astype(np.float32))
         weights[f"{prefix}.conv_out_bias"] = co_b.astype(np.float32)
 

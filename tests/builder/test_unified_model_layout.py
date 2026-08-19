@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 import tomllib
 
@@ -29,6 +30,25 @@ def _owners() -> list[Path]:
 def _manifest(owner: Path) -> dict[str, object]:
     with (owner / "MODEL.toml").open("rb") as stream:
         return tomllib.load(stream)
+
+
+def _central_builder_test_imports(source: str) -> list[str]:
+    imports: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imports.extend(
+                module if alias.name == "*" else f"{module}.{alias.name}"
+                for alias in node.names
+            )
+    return sorted(
+        dependency
+        for dependency in imports
+        if dependency == "tests.builder"
+        or dependency.startswith("tests.builder.")
+    )
 
 
 def test_only_the_unified_model_owner_root_exists() -> None:
@@ -117,6 +137,25 @@ def test_model_owned_e2e_assets_never_probe_the_shared_legacy_tree() -> None:
         source = path.read_text(encoding="utf-8")
         assert "_MODEL_TEST_DIR = Path(__file__).resolve().parents[2]" in source, path
         assert "Model-owned image asset not found" in source, path
+
+
+def test_owner_tests_never_depend_on_central_builder_tests() -> None:
+    owner_test_sources = sorted(MODELS_ROOT.glob("*/tests/**/*.py"))
+    assert owner_test_sources
+
+    for path in owner_test_sources:
+        source = path.read_text(encoding="utf-8")
+        assert not _central_builder_test_imports(source), path
+
+
+def test_owner_test_dependency_guard_rejects_builder_but_allows_e2e_harness() -> None:
+    forbidden = "from tests.builder.family_plugin_test_support import ModelConfig"
+    alternate_forbidden = "from tests import builder"
+    allowed = "from tests.e2e_harness import model_registry"
+
+    assert _central_builder_test_imports(forbidden)
+    assert _central_builder_test_imports(alternate_forbidden)
+    assert not _central_builder_test_imports(allowed)
 
 
 def test_active_report_guard_scans_owner_test_manifests() -> None:

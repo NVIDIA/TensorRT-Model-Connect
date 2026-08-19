@@ -20,8 +20,12 @@ Postconditions: All weight keys map correctly from OPT's non-standard HF layout,
 """
 import numpy as np
 
-from tests.builder.family_plugin_tester import FamilyPluginTester
-from tests.builder.family_plugin_test_mixin import FamilyPluginTestMixin
+from tensorrt_model_connect.models.opt.tests._family_plugin_tester import (
+    FamilyPluginTester,
+)
+from tensorrt_model_connect.models.opt.tests._family_plugin_test_mixin import (
+    FamilyPluginTestMixin,
+)
 
 
 class OPTPluginTester(FamilyPluginTester):
