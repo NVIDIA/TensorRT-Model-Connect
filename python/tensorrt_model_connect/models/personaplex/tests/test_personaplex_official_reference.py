@@ -203,7 +203,7 @@ def test_official_reference_runs_same_audio_and_frame_budget(
     assert captured[0] == "env"
     assert captured[1].startswith("PYTHONPATH=")
     assert captured[2] == "/profiles/personaplex/bin/python"
-    assert captured[3].endswith("/personaplex/official_reference.py")
+    assert Path(captured[3]) == MODEL_DIR / "official_reference.py"
     assert captured[captured.index("--input-wav") + 1] == str(input_wav)
     assert captured[captured.index("--max-frames") + 1] == "5"
     assert captured[captured.index("--official-repo") + 1] == str(source)

@@ -105,7 +105,7 @@ def test_reference_runs_direct_official_hf_command_and_materializes_audio(
     )
 
     assert captured[0] == "/profiles/qwen/bin/python"
-    assert captured[1].endswith("/qwen3_omni/official_hf_audio.py")
+    assert Path(captured[1]) == MODEL_DIR / "official_hf_audio.py"
     assert captured[captured.index("--prompt") + 1] == OFFICIAL_PROMPT
     assert captured[captured.index("--speaker") + 1] == "Ethan"
     assert captured[captured.index("--thinker-max-new-tokens") + 1] == "16"
