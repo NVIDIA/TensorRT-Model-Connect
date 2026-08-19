@@ -59,6 +59,7 @@ from tools.reporting_html import (  # noqa: E402
     sorted_filter_values,
 )
 from tools.validation import catalog as validation_catalog  # noqa: E402
+from tools.validation.gate_census import build_gate_census  # noqa: E402
 from tools import trtmc_disagreements  # noqa: E402
 from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools import model_selection  # noqa: E402
@@ -3835,6 +3836,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--list", action="store_true", help="list model-first workloads")
+    parser.add_argument(
+        "--gate-census",
+        action="store_true",
+        help="print the resolved, non-blocking gate-policy census as JSON",
+    )
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--suites", type=Path, default=DEFAULT_SUITES)
     parser.add_argument("--models-dir", type=Path, default=DEFAULT_MODELS)
@@ -5111,6 +5117,34 @@ def _run_bindings(
 
 def _main(arguments: argparse.Namespace) -> int:
     catalog, suites, ready, task_models = _load_validation_inputs(arguments)
+    if arguments.gate_census:
+        if any(
+            (
+                arguments.list,
+                arguments.all,
+                arguments.model,
+                arguments.workload,
+                arguments.selected_models,
+                arguments.model_selection,
+                arguments.selected_bindings,
+                arguments.selected_workloads,
+            )
+        ):
+            raise ValidationError(
+                "--gate-census is a global inventory and cannot select models or workloads"
+            )
+        print(
+            json.dumps(
+                build_gate_census(
+                    catalog=catalog,
+                    suites=suites,
+                    task_models=task_models,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     if arguments.list:
         for name, spec in catalog["models"].items():
             not_compared_reason = str(spec.get("not_compared_reason", "") or "")

@@ -160,12 +160,114 @@ def _effective_gate(
     return {"kind": "continuous", "sample_count": sample_count}
 
 
+def _effective_target(
+    *,
+    kind: str,
+    required: float,
+    sample_count: int,
+) -> dict[str, Any]:
+    effective = _effective_gate(
+        kind=kind,
+        actual=required,
+        required=required,
+        sample_count=sample_count,
+    )
+    effective.pop("observed_drop_count", None)
+    effective.pop("observed_passes", None)
+    effective.pop("observed_failures", None)
+    return effective
+
+
 def _passed(actual: float, operator: str, required: float) -> bool:
     if operator == ">=":
         return actual >= required
     if operator == "<=":
         return actual <= required
     return actual == required
+
+
+def describe_shadow_gate_policy(
+    *,
+    configured_gates: Mapping[str, Any],
+    sample_count: int | None,
+    policy_mode: str = "blocking",
+    metric_kinds: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Describe configured gate targets without requiring runtime metrics."""
+
+    gates: list[dict[str, Any]] = []
+    issues: list[dict[str, Any]] = []
+    if policy_mode not in {"blocking", "observation_only"}:
+        issues.append({"code": "unsupported_policy_mode", "value": policy_mode})
+    if policy_mode == "blocking" and not configured_gates:
+        issues.append({"code": "empty_gate_policy"})
+    sample_count_available = (
+        isinstance(sample_count, int)
+        and not isinstance(sample_count, bool)
+        and sample_count > 0
+    )
+    if configured_gates and not sample_count_available:
+        issues.append({"code": "sample_count_unavailable"})
+    resolved_metric_kinds = metric_kinds or {}
+    for gate_name in resolved_metric_kinds:
+        if gate_name not in configured_gates:
+            issues.append({"code": "metric_kind_without_gate", "gate": str(gate_name)})
+    for gate, required_value in configured_gates.items():
+        gate_name = str(gate)
+        spec = _gate_spec(gate_name)
+        if spec is None:
+            issues.append({"code": "unsupported_gate", "gate": gate_name})
+            continue
+        metric_name, operator = spec
+        metric_name, _ = _metric_names(gate_name, metric_name, {})
+        try:
+            required = _finite_number(required_value)
+        except (TypeError, ValueError):
+            issues.append(
+                {
+                    "code": "invalid_threshold",
+                    "gate": gate_name,
+                    "value": _issue_value(required_value),
+                }
+            )
+            continue
+        configured_kind = str(resolved_metric_kinds.get(gate_name, "") or "")
+        if configured_kind and configured_kind not in _METRIC_KINDS:
+            issues.append(
+                {
+                    "code": "unsupported_metric_kind",
+                    "gate": gate_name,
+                    "value": configured_kind,
+                }
+            )
+            continue
+        kind = "exact" if operator == "==" else _metric_kind(metric_name, configured_kind)
+        if not sample_count_available:
+            effective = {"kind": kind, "sample_count": None}
+        elif kind == "exact":
+            effective = {"kind": kind, "sample_count": sample_count}
+        else:
+            effective = _effective_target(
+                kind=kind,
+                required=required,
+                sample_count=sample_count,
+            )
+        gates.append(
+            {
+                "gate": gate_name,
+                "metric": metric_name,
+                "operator": operator,
+                "required": required,
+                "effective": effective,
+            }
+        )
+    return {
+        "schema_version": "trtmc.validation-gate-policy-description/v1",
+        "policy_mode": policy_mode,
+        "sample_count": sample_count,
+        "gates": gates,
+        "issues": issues,
+    }
 
 
 def evaluate_shadow_gates(

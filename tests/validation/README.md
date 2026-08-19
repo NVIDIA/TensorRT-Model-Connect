@@ -182,6 +182,20 @@ qualification snapshot, or CI disposition. Unsupported gate names, unavailable
 metrics, non-numeric values, and missing sample counts are explicit `issues` in
 the analysis rather than implicit passes.
 
+Audit the resolved policy inventory without running any model:
+
+```bash
+python tools/trtmc_validate.py --gate-census > gate-census.json
+```
+
+The deterministic JSON groups models that resolve to the same gate variant and
+shows the workload-owned rationale, configured sample count, effective integer
+threshold, and unresolved review items. `minimum_sample_count_unapproved` and
+`sample_scaling_policy_unapproved` are census findings, not runtime failures;
+they keep owner decisions visible without changing current traffic lights or CI
+behavior. A suite that has no selected model or sample limit remains visible in
+the census even though it cannot appear in a model run.
+
 Override the configured limit for one run, or request the complete dataset
 explicitly:
 

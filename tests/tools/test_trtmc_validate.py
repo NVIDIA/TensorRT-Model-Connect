@@ -340,6 +340,187 @@ def test_list_shows_mapped_workloads_and_sample_limits(capsys, monkeypatch):
     assert capsys.readouterr().out.strip() == "model-a: workload-a (5 samples)"
 
 
+def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
+    catalog = {
+        "models": {
+            "default-model": {"workloads": ["quality"]},
+            "strict-model": {"workloads": ["quality"]},
+            "observer": {"workloads": ["diagnostic"]},
+        },
+        "sample_limits": {"quality": 20, "diagnostic": 5},
+    }
+    suites = {
+        "quality": {
+            "id": "quality",
+            "description": "Sampled quality parity.",
+            "gates": {"min_prediction_agreement": 0.98},
+            "model_profiles": {
+                "strict-model": {"gates": {"min_prediction_agreement": 1.0}}
+            },
+        },
+        "diagnostic": {
+            "id": "diagnostic",
+            "description": "Diagnostic only.",
+            "gates": {},
+            "gate_policy": "observation_only",
+        },
+        "unbound": {
+            "id": "unbound",
+            "description": "Not selected by the current model inventory.",
+            "gates": {"min_sample_pass_rate": 1.0},
+        },
+    }
+    task_models = {
+        name: {
+            "name": name,
+            "family": "fixture",
+            "task_strategy": "fixture",
+            "runtime_strategy": "fixture",
+            "user_contract": "fixture",
+            "skip": "",
+        }
+        for name in catalog["models"]
+    }
+
+    census = trtmc_validate.build_gate_census(
+        catalog=catalog,
+        suites=suites,
+        task_models=task_models,
+    )
+
+    assert census["schema_version"] == "trtmc.validation-gate-census/v1"
+    assert census["summary"] == {
+        "suites": 3,
+        "bindings": 3,
+        "variants": 4,
+        "blocking_variants": 3,
+        "observation_only_variants": 1,
+        "invalid_variants": 1,
+        "review_required_suites": 2,
+    }
+    quality = next(row for row in census["suites"] if row["id"] == "quality")
+    assert quality["owner"] == {"kind": "workload", "id": "quality"}
+    assert quality["rationale"] == "Sampled quality parity."
+    assert quality["configured_sample_count"] == 20
+    assert [variant["models"] for variant in quality["variants"]] == [
+        ["default-model"],
+        ["strict-model"],
+    ]
+    assert quality["review"] == [
+        {"code": "minimum_sample_count_unapproved"},
+        {
+            "code": "sample_scaling_policy_unapproved",
+            "gates": ["min_prediction_agreement"],
+        },
+    ]
+    diagnostic = next(row for row in census["suites"] if row["id"] == "diagnostic")
+    assert diagnostic["review"] == []
+    unbound = next(row for row in census["suites"] if row["id"] == "unbound")
+    assert unbound["review"] == [
+        {"code": "no_selected_models"},
+        {"code": "sample_limit_unconfigured"},
+        {"code": "minimum_sample_count_unapproved"},
+        {
+            "code": "sample_scaling_policy_unapproved",
+            "gates": ["min_sample_pass_rate"],
+        },
+    ]
+
+
+def test_gate_census_cli_prints_machine_readable_json(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_load_validation_inputs",
+        lambda arguments: (
+            {"models": {}, "sample_limits": {}},
+            {},
+            (),
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        trtmc_validate,
+        "build_gate_census",
+        lambda **kwargs: {
+            "schema_version": "trtmc.validation-gate-census/v1",
+            "summary": {"suites": 0},
+            "suites": [],
+        },
+    )
+
+    arguments = trtmc_validate.build_parser().parse_args(["--gate-census"])
+
+    assert trtmc_validate._main(arguments) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "schema_version": "trtmc.validation-gate-census/v1",
+        "summary": {"suites": 0},
+        "suites": [],
+    }
+
+
+def test_gate_census_cli_rejects_model_selection(monkeypatch) -> None:
+    monkeypatch.setattr(
+        trtmc_validate,
+        "_load_validation_inputs",
+        lambda arguments: (
+            {"models": {}, "sample_limits": {}},
+            {},
+            (),
+            {},
+        ),
+    )
+    arguments = trtmc_validate.build_parser().parse_args(
+        ["gpt2-125m", "--gate-census"]
+    )
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="global inventory",
+    ):
+        trtmc_validate._main(arguments)
+
+
+def test_default_gate_census_covers_every_suite_and_binding() -> None:
+    catalog = trtmc_validate.load_catalog()
+    suites = {
+        suite["id"]: suite for suite in validation_catalog.load_suites()
+    }
+    task_models = trtmc_validate._validation_models(trtmc_validate.DEFAULT_MODELS)
+
+    census = trtmc_validate.build_gate_census(
+        catalog=catalog,
+        suites=suites,
+        task_models=task_models,
+    )
+
+    assert {row["id"] for row in census["suites"]} == set(suites)
+    assert census["summary"]["bindings"] == sum(
+        len(spec.get("workloads", [])) for spec in catalog["models"].values()
+    )
+    invalid = [
+        row["id"]
+        for row in census["suites"]
+        if any(variant["policy"]["issues"] for variant in row["variants"])
+    ]
+    assert invalid == ["refcoco_grounding"]
+    mmlu = next(row for row in census["suites"] if row["id"] == "mmlu_five_shot_mcq")
+    assert len(mmlu["variants"]) == 2
+    assert [
+        variant["policy"]["gates"][1]["effective"]["allowed_failures"]
+        for variant in mmlu["variants"]
+    ] == [0, 1]
+    asr = next(row for row in census["suites"] if row["id"] == "librispeech_clean_asr")
+    assert asr["variants"][0]["policy"]["gates"][1]["effective"]["kind"] == (
+        "continuous"
+    )
+    marian = next(
+        row
+        for row in census["suites"]
+        if row["id"] == "newstest2019_en_ru_marian_translation_parity"
+    )
+    assert marian["review"] == []
+
+
 def test_resolve_bindings_selects_multiple_explicit_workloads():
     catalog = {
         "sample_limits": {"workload-a": 5, "workload-b": 5},

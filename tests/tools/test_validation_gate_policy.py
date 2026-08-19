@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from tools.validation.gate_policy import evaluate_shadow_gates
+from tools.validation.gate_policy import (
+    describe_shadow_gate_policy,
+    evaluate_shadow_gates,
+)
 from tools.validation.catalog import load_suites
 
 
@@ -36,6 +39,65 @@ def test_rate_gate_expands_against_actual_sample_count() -> None:
         ],
         "issues": [],
     }
+
+
+def test_policy_description_expands_threshold_without_runtime_metrics() -> None:
+    description = describe_shadow_gate_policy(
+        configured_gates={"min_prediction_agreement": 0.98},
+        sample_count=20,
+    )
+
+    assert description == {
+        "schema_version": "trtmc.validation-gate-policy-description/v1",
+        "policy_mode": "blocking",
+        "sample_count": 20,
+        "gates": [
+            {
+                "gate": "min_prediction_agreement",
+                "metric": "prediction_agreement_rate",
+                "operator": ">=",
+                "required": 0.98,
+                "effective": {
+                    "kind": "proportion",
+                    "required_passes": 20,
+                    "allowed_failures": 0,
+                    "resolution": 0.05,
+                },
+            }
+        ],
+        "issues": [],
+    }
+
+
+def test_policy_description_preserves_continuous_override() -> None:
+    description = describe_shadow_gate_policy(
+        configured_gates={"min_prediction_agreement": 0.9},
+        sample_count=10,
+        metric_kinds={"min_prediction_agreement": "continuous"},
+    )
+
+    assert description["gates"][0]["effective"] == {
+        "kind": "continuous",
+        "sample_count": 10,
+    }
+
+
+def test_policy_description_keeps_gate_visible_without_sample_count() -> None:
+    description = describe_shadow_gate_policy(
+        configured_gates={"min_prediction_agreement": 0.9},
+        sample_count=None,
+    )
+
+    assert description["gates"] == [
+        {
+            "gate": "min_prediction_agreement",
+            "metric": "prediction_agreement_rate",
+            "operator": ">=",
+            "required": 0.9,
+            "effective": {"kind": "proportion", "sample_count": None},
+        }
+    ]
+    assert description["issues"] == [{"code": "sample_count_unavailable"}]
 
 
 def test_accuracy_drop_gate_exposes_discrete_loss_budget() -> None:
