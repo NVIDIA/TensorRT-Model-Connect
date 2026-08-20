@@ -162,6 +162,8 @@ entries:
     model: deepseek-ocr
     workload:
       testcase: deepseek-ocr
+      runtime:
+        cuda_graphs: true
     baseline:
       runner: task-reference
       adapter: hf-transformers-vlm

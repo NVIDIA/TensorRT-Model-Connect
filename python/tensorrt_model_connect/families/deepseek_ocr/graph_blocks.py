@@ -51,7 +51,8 @@ def make_matmul_fn(network, dtype, quant_ctx):
 
         def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
             return graph_ops.add_matmul_rhs_constant(
-                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype,
+                fp32_accumulation=dtype == np.float32,
             )
 
         return matmul
@@ -388,6 +389,65 @@ def add_swiglu_mlp(
         gated.get_output(0), mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down"
     )
     return mlp_out
+
+
+def add_routed_swiglu_experts(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    top_indices: trt.ITensor,
+    routing_weights: trt.ITensor,
+    *,
+    hidden_size: int,
+    top_k: int,
+    w_gate: np.ndarray,
+    w_up: np.ndarray,
+    w_down: np.ndarray,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Compute only the top-k routed experts selected for each token."""
+    inp_4d = network.add_shuffle(inp)
+    inp_4d.reshape_dims = (-1, 1, 1, hidden_size)
+
+    def packed_weight(values: np.ndarray) -> trt.ITensor:
+        tensor = graph_ops.add_constant(
+            network, values.shape, values, dtype=dtype)
+        if tensor.dtype != inp.dtype:
+            tensor = network.add_cast(tensor, inp.dtype).get_output(0)
+        return tensor
+
+    gate_weights = packed_weight(w_gate)
+    up_weights = packed_weight(w_up)
+    down_weights = packed_weight(w_down)
+    selected_gate = network.add_gather(gate_weights, top_indices, 0)
+    selected_up = network.add_gather(up_weights, top_indices, 0)
+    gate = network.add_matrix_multiply(
+        inp_4d.get_output(0), trt.MatrixOperation.NONE,
+        selected_gate.get_output(0), trt.MatrixOperation.NONE).get_output(0)
+    up = network.add_matrix_multiply(
+        inp_4d.get_output(0), trt.MatrixOperation.NONE,
+        selected_up.get_output(0), trt.MatrixOperation.NONE).get_output(0)
+
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(
+        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(
+        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+
+    selected_down = network.add_gather(down_weights, top_indices, 0)
+    down = network.add_matrix_multiply(
+        gated.get_output(0), trt.MatrixOperation.NONE,
+        selected_down.get_output(0), trt.MatrixOperation.NONE).get_output(0)
+    output = network.add_shuffle(down)
+    output.reshape_dims = (-1, top_k, hidden_size)
+
+    route_weights = network.add_shuffle(routing_weights)
+    route_weights.reshape_dims = (-1, top_k, 1)
+    weighted = network.add_elementwise(
+        output.get_output(0), route_weights.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    return network.add_reduce(
+        weighted.get_output(0), trt.ReduceOperation.SUM, 1 << 1,
+        keep_dims=False).get_output(0)
 
 
 def add_gelu_fc_mlp(

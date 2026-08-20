@@ -73,7 +73,7 @@ class DeepSeekOCRPlugin:
         return model_type.lower() in ("deepseek_vl_v2",)
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -81,8 +81,29 @@ class DeepSeekOCRPlugin:
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
+        if precision == "fp16":
+            work_np_dtype = np.float16
+        elif precision == "fp32":
+            work_np_dtype = np.float32
+        else:
+            raise ValueError(
+                f"Unsupported DeepSeek-OCR precision {precision!r}; "
+                "expected fp32 or fp16")
         # MoE config from raw
         raw = config.raw
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in raw.get("_fp32_layers", ()))
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer < 0 or layer > num_layers)
+        if invalid_fp32_layers:
+            raise ValueError(
+                "fp32_layers contains out-of-range indices: "
+                f"{invalid_fp32_layers}")
+        use_fp32_io = (
+            precision == "fp16" and num_layers in requested_fp32_layers)
+        io_precision = "fp32" if use_fp32_io else precision
+        io_np_dtype = np.float32 if use_fp32_io else work_np_dtype
         n_routed_experts = raw.get("n_routed_experts", 64)
         n_shared_experts = raw.get("n_shared_experts", 2)
         num_experts_per_tok = raw.get("num_experts_per_tok", 6)
@@ -102,7 +123,8 @@ class DeepSeekOCRPlugin:
         embedding = _load_tensor(readers, f"{lang_prefix}model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-        weights["embedding"] = embedding.astype(np.float32)
+        embedding = embedding.astype(io_np_dtype)
+        weights["embedding"] = embedding
 
         attention_size = 0
         kv_attention_size = 0
@@ -110,15 +132,19 @@ class DeepSeekOCRPlugin:
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
             hf_prefix = f"{lang_prefix}model.layers.{layer_idx}"
+            layer_precision = (
+                "fp32" if layer_idx in requested_fp32_layers else precision)
+            layer_np_dtype = (
+                np.float32 if layer_precision == "fp32" else np.float16)
 
             # RMSNorm weights
             input_norm = _load_tensor(
                 readers, f"{hf_prefix}.input_layernorm.weight")
-            weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
+            weights[f"{prefix}.input_norm"] = input_norm.astype(layer_np_dtype)
 
             post_norm = _load_tensor(
                 readers, f"{hf_prefix}.post_attention_layernorm.weight")
-            weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
+            weights[f"{prefix}.post_attn_norm"] = post_norm.astype(layer_np_dtype)
 
             # Standard Q/K/V/O attention projections (no biases)
             q_raw = _load_tensor(
@@ -135,10 +161,10 @@ class DeepSeekOCRPlugin:
             if kv_attention_size == 0:
                 kv_attention_size = k_raw.shape[0]
 
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", precision=layer_precision)
+            k_t = _transpose_2d(k_raw, "k_proj", precision=layer_precision)
+            v_t = _transpose_2d(v_raw, "v_proj", precision=layer_precision)
+            o_t = _transpose_2d(o_raw, "o_proj", precision=layer_precision)
             del q_raw, k_raw, v_raw, o_raw
 
             weights[f"{prefix}.w_q"] = q_t
@@ -154,10 +180,14 @@ class DeepSeekOCRPlugin:
                 router_raw = _load_tensor(
                     readers, f"{hf_prefix}.mlp.gate.weight")
                 weights[f"{prefix}.router"] = _transpose_2d(
-                    router_raw, "router")
+                    router_raw, "router", precision=layer_precision)
                 del router_raw
 
-                # Per-expert weights
+                # Pack the expert dimension once during checkpoint loading so
+                # routing can gather only the selected experts at runtime.
+                expert_gate_weights = []
+                expert_up_weights = []
+                expert_down_weights = []
                 for e in range(n_routed_experts):
                     exp_hf = f"{hf_prefix}.mlp.experts.{e}"
                     gate_raw = _load_tensor(
@@ -167,13 +197,29 @@ class DeepSeekOCRPlugin:
                     down_raw = _load_tensor(
                         readers, f"{exp_hf}.down_proj.weight")
 
-                    weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(
-                        gate_raw, f"expert_{e}_gate")
-                    weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(
-                        up_raw, f"expert_{e}_up")
-                    weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(
-                        down_raw, f"expert_{e}_down")
+                    expert_gate_weights.append(
+                        _transpose_2d(
+                            gate_raw, f"expert_{e}_gate",
+                            precision=layer_precision))
+                    expert_up_weights.append(
+                        _transpose_2d(
+                            up_raw, f"expert_{e}_up",
+                            precision=layer_precision))
+                    expert_down_weights.append(
+                        _transpose_2d(
+                            down_raw, f"expert_{e}_down",
+                            precision=layer_precision))
                     del gate_raw, up_raw, down_raw
+
+                weights[f"{prefix}.experts.w_gate"] = np.stack(
+                    expert_gate_weights, axis=0)
+                expert_gate_weights.clear()
+                weights[f"{prefix}.experts.w_up"] = np.stack(
+                    expert_up_weights, axis=0)
+                expert_up_weights.clear()
+                weights[f"{prefix}.experts.w_down"] = np.stack(
+                    expert_down_weights, axis=0)
+                expert_down_weights.clear()
 
                 # Shared expert weights
                 shared_hf = f"{hf_prefix}.mlp.shared_experts"
@@ -185,11 +231,11 @@ class DeepSeekOCRPlugin:
                     readers, f"{shared_hf}.down_proj.weight")
 
                 weights[f"{prefix}.shared.w_gate"] = _transpose_2d(
-                    s_gate_raw, "shared_gate")
+                    s_gate_raw, "shared_gate", precision=layer_precision)
                 weights[f"{prefix}.shared.w_up"] = _transpose_2d(
-                    s_up_raw, "shared_up")
+                    s_up_raw, "shared_up", precision=layer_precision)
                 weights[f"{prefix}.shared.w_down"] = _transpose_2d(
-                    s_down_raw, "shared_down")
+                    s_down_raw, "shared_down", precision=layer_precision)
                 del s_gate_raw, s_up_raw, s_down_raw
             else:
                 # Dense SwiGLU MLP
@@ -201,29 +247,30 @@ class DeepSeekOCRPlugin:
                     readers, f"{hf_prefix}.mlp.down_proj.weight")
 
                 weights[f"{prefix}.w_gate"] = _transpose_2d(
-                    gate_raw, "gate_proj")
+                    gate_raw, "gate_proj", precision=layer_precision)
                 weights[f"{prefix}.w_up"] = _transpose_2d(
-                    up_raw, "up_proj")
+                    up_raw, "up_proj", precision=layer_precision)
                 weights[f"{prefix}.w_down"] = _transpose_2d(
-                    down_raw, "down_proj")
+                    down_raw, "down_proj", precision=layer_precision)
                 del gate_raw, up_raw, down_raw
 
         # Final norm
         final_norm_key = f"{lang_prefix}model.norm.weight"
         if _has_tensor(readers, final_norm_key):
             weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+                readers, final_norm_key).astype(io_np_dtype)
         else:
-            weights["final_norm"] = np.ones(hidden, dtype=np.float32)
+            weights["final_norm"] = np.ones(hidden, dtype=io_np_dtype)
 
         # LM head
         lm_head_key = f"{lang_prefix}lm_head.weight"
         if _has_tensor(readers, lm_head_key):
             weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+                _load_tensor(readers, lm_head_key), "lm_head",
+                precision=io_precision)
         else:
             weights["w_out"] = _transpose_2d(
-                embedding.copy(), "embedding_tied")
+                embedding.copy(), "embedding_tied", precision=io_precision)
 
         # Store metadata
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
@@ -344,31 +391,61 @@ class DeepSeekOCRPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                trt.float32, (-1, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                trt.float32, (-1, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
-        def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False) -> None:
+        def _add_profile(
+            opt_sq: int,
+            max_sq: int,
+            *,
+            cache_min_rows: int,
+            cache_opt_rows: int,
+            cache_max_rows: int,
+            fixed: bool = False,
+        ) -> None:
             profile = builder.create_optimization_profile()
             min_sq = opt_sq if fixed else 1
             profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
             profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
             profile.set_shape(
                 "attention_mask",
-                (min_sq, max_cache_length + min_sq),
-                (opt_sq, max_cache_length + opt_sq),
-                (max_sq, max_cache_length + max_sq))
+                (min_sq, cache_min_rows + min_sq),
+                (opt_sq, cache_opt_rows + opt_sq),
+                (max_sq, cache_max_rows + max_sq))
             profile.set_shape(
                 "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
             profile.set_shape(
                 "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+            for layer_idx in range(num_layers):
+                profile.set_shape(
+                    graph_ops.layer_tensor_name("cache_k", layer_idx),
+                    (cache_min_rows, kv_attention_size),
+                    (cache_opt_rows, kv_attention_size),
+                    (cache_max_rows, kv_attention_size))
+                profile.set_shape(
+                    graph_ops.layer_tensor_name("cache_v", layer_idx),
+                    (cache_min_rows, kv_attention_size),
+                    (cache_opt_rows, kv_attention_size),
+                    (cache_max_rows, kv_attention_size))
             trt_config.add_optimization_profile(profile)
 
-        _add_profile(opt_prefill_length, max_prefill_length)
-        _add_profile(1, 1, fixed=True)
+        _add_profile(
+            opt_prefill_length,
+            max_prefill_length,
+            cache_min_rows=max_cache_length,
+            cache_opt_rows=max_cache_length,
+            cache_max_rows=max_cache_length)
+        _add_profile(
+            1,
+            1,
+            cache_min_rows=1,
+            cache_opt_rows=min(max_cache_length, MAX_SEQUENCE_PREFILL_LENGTH),
+            cache_max_rows=max_cache_length,
+            fixed=True)
 
         if work_trt_dtype != trt.float32:
             attention_mask = network.add_cast(
@@ -646,9 +723,11 @@ def _add_swiglu_expert(
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
     gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype)
+        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype,
+        fp32_accumulation=dtype == np.float32)
     up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
+        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype,
+        fp32_accumulation=dtype == np.float32)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
@@ -658,7 +737,7 @@ def _add_swiglu_expert(
 
     down = graph_ops.add_matmul_rhs_constant(
         network, gated.get_output(0), intermediate_size, hidden_size, w_down,
-        dtype=dtype)
+        dtype=dtype, fp32_accumulation=dtype == np.float32)
     return down
 
 
@@ -686,7 +765,7 @@ def _add_moe_with_shared_experts(
     1. Router logits -> softmax -> top-k selection
     2. If norm_topk_prob: renormalize selected weights to sum to 1.0
        Else: scale by routed_scaling_factor (default 1.0, i.e. use raw softmax probs)
-    3. Compute all routed expert outputs, select top-k, weighted sum
+    3. Gather and compute only the top-k routed expert outputs, then sum them
     4. Compute shared expert output (always active, applied to original input)
     5. Final = routed_output + shared_output
     """
@@ -725,41 +804,23 @@ def _add_moe_with_shared_experts(
     else:
         final_weights = top_values
 
-    # 5. Compute every routed expert and derive its per-row gate from the
-    # dynamic [Sq, top_k] routing result. This keeps the same dense expert
-    # evaluation strategy as the legacy Sq=1 graph while supporting sequence
-    # prefill without assuming a fixed first dimension.
-    result = None
-    for e in range(n_routed_experts):
-        exp_out = _add_swiglu_expert(
-            network, inp, hidden_size, moe_intermediate,
-            weights[f"{prefix}.expert.{e}.w_gate"],
-            weights[f"{prefix}.expert.{e}.w_up"],
-            weights[f"{prefix}.expert.{e}.w_down"],
-            dtype=dtype,
-        )
-        expert_index = graph_ops.add_constant(
-            network, (1, 1), np.array([[e]], dtype=np.int32), dtype=np.int32)
-        selected = network.add_elementwise(
-            top_indices, expert_index, trt.ElementWiseOperation.EQUAL).get_output(0)
-        selected = network.add_cast(selected, final_weights.dtype).get_output(0)
-        selected_weights = network.add_elementwise(
-            final_weights, selected, trt.ElementWiseOperation.PROD).get_output(0)
-        expert_weight = network.add_reduce(
-            selected_weights, trt.ReduceOperation.SUM, 1 << 1,
-            keep_dims=True).get_output(0)
-        scaled_expert = network.add_elementwise(
-            exp_out, expert_weight, trt.ElementWiseOperation.PROD)
+    # 5. Gather each token's selected expert weights before the three SwiGLU
+    # matmuls. The packed tensors are [experts, in, out], so this remains
+    # dynamic over the prefill sequence dimension without evaluating all 64.
+    result = graph_blocks.add_routed_swiglu_experts(
+        network,
+        inp,
+        top_indices,
+        final_weights,
+        hidden_size=hidden_size,
+        top_k=num_experts_per_tok,
+        w_gate=weights[f"{prefix}.experts.w_gate"],
+        w_up=weights[f"{prefix}.experts.w_up"],
+        w_down=weights[f"{prefix}.experts.w_down"],
+        dtype=dtype,
+    )
 
-        if result is None:
-            result = scaled_expert.get_output(0)
-        else:
-            sum_layer = network.add_elementwise(
-                result, scaled_expert.get_output(0),
-                trt.ElementWiseOperation.SUM)
-            result = sum_layer.get_output(0)
-
-    # 7. Shared expert output (always active, applied to original input)
+    # 6. Shared expert output (always active, applied to original input)
     shared_out = _add_swiglu_expert(
         network, inp, hidden_size, shared_intermediate,
         weights[f"{prefix}.shared.w_gate"],
@@ -768,7 +829,7 @@ def _add_moe_with_shared_experts(
         dtype=dtype,
     )
 
-    # 8. Combine: routed_output + shared_output
+    # 7. Combine: routed_output + shared_output
     combined = network.add_elementwise(
         result, shared_out, trt.ElementWiseOperation.SUM)
 

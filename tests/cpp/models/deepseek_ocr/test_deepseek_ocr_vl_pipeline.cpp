@@ -60,6 +60,7 @@ static trtmc::TrtLogger g_logger;
 struct CountingTextStats {
     int32_t calls{0};
     std::unordered_map<std::string, std::vector<int64_t>> shapes;
+    std::unordered_map<std::string, std::vector<int64_t>> bound_shapes;
     std::unordered_map<std::string, std::vector<float>> float_values;
 };
 
@@ -123,6 +124,9 @@ class CountingTextModule final : public trtmc::ITrtModule {
         return nullptr;
     }
     void bind_external(const std::string&, void*) override {}
+    void bind_external(const std::string& name, void*, const std::vector<int64_t>& shape) override {
+        stats_->bound_shapes[name] = shape;
+    }
     int32_t input_rank(const std::string& name) const override {
         return name == "token_id" || name == "position_id" ? 1 : 2;
     }
@@ -756,6 +760,10 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
           "sequence prefill: image embedding selected by position");
     check(prefill_stats->float_values["deepstack_active"] == std::vector<float>({1.0F, 0.0F, 0.0F}),
           "sequence prefill: deepstack selected by position");
+    check(prefill_stats->bound_shapes["cache_k_0"] == std::vector<int64_t>({8, 4}),
+          "sequence prefill: dynamic K cache binds at full profile length");
+    check(prefill_stats->bound_shapes["cache_v_0"] == std::vector<int64_t>({8, 4}),
+          "sequence prefill: dynamic V cache binds at full profile length");
 
     cudaStreamDestroy(stream);
 }

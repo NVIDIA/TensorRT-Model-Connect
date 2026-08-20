@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from . import graph_blocks, graph_ops
 from .prefill_config import sequence_prefill_profile_lengths
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
 from .standard_decoder_builder import _apply_norm
@@ -89,6 +89,9 @@ def shard_deepseek_ocr_weights(
 
         if key.endswith((".w_q", ".w_k", ".w_v", ".w_gate", ".w_up")):
             out[key] = _slice_last_dim(value, parallel.rank, parallel.tp_size)
+        elif key.endswith(".experts.w_down"):
+            out[key] = np.ascontiguousarray(
+                np.array_split(value, parallel.tp_size, axis=-2)[parallel.rank])
         elif key.endswith((".w_o", ".w_down")):
             out[key] = _slice_first_dim(value, parallel.rank, parallel.tp_size)
         else:
@@ -184,34 +187,17 @@ def _add_moe_tp(
     else:
         scaled_weights = top_values
 
-    routed_local = None
-    for expert_idx in range(n_routed_experts):
-        expert_output = _add_swiglu_local(
-            network, inp, hidden_size, moe_intermediate,
-            weights[f"{prefix}.expert.{expert_idx}.w_gate"],
-            weights[f"{prefix}.expert.{expert_idx}.w_up"],
-            weights[f"{prefix}.expert.{expert_idx}.w_down"],
-        )
-        expert_index = graph_ops.add_constant(
-            network, (1, 1), np.array([[expert_idx]], dtype=np.int32),
-            dtype=np.int32)
-        selected = network.add_elementwise(
-            top_indices, expert_index, trt.ElementWiseOperation.EQUAL).get_output(0)
-        selected = network.add_cast(selected, scaled_weights.dtype).get_output(0)
-        selected_weights = network.add_elementwise(
-            scaled_weights, selected, trt.ElementWiseOperation.PROD).get_output(0)
-        expert_weight = network.add_reduce(
-            selected_weights, trt.ReduceOperation.SUM, 1 << 1,
-            keep_dims=True).get_output(0)
-        scaled = network.add_elementwise(
-            expert_output, expert_weight,
-            trt.ElementWiseOperation.PROD)
-        if routed_local is None:
-            routed_local = scaled.get_output(0)
-        else:
-            summed = network.add_elementwise(
-                routed_local, scaled.get_output(0), trt.ElementWiseOperation.SUM)
-            routed_local = summed.get_output(0)
+    routed_local = graph_blocks.add_routed_swiglu_experts(
+        network,
+        inp,
+        top_indices,
+        scaled_weights,
+        hidden_size=hidden_size,
+        top_k=num_experts_per_tok,
+        w_gate=weights[f"{prefix}.experts.w_gate"],
+        w_up=weights[f"{prefix}.experts.w_up"],
+        w_down=weights[f"{prefix}.experts.w_down"],
+    )
 
     shared_local = _add_swiglu_local(
         network, inp, hidden_size, shared_intermediate,

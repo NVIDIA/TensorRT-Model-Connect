@@ -243,10 +243,16 @@ void DeepseekOcrKvCache::bind_to(TrtModule& module) {
 
 void DeepseekOcrKvCache::bind_cache_inputs(TrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
+    const std::vector<int64_t> cache_shape{max_length_, kv_dim_};
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        module.bind_external(names_.cache_k[li], cache_k_[li].data());
-        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        if (module.input_is_dynamic(names_.cache_k[li])) {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
+            module.bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
+        } else {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data());
+            module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        }
     }
 }
 
