@@ -1,12 +1,16 @@
 <div align="center">
 
-<h1>Public Preview: TensorRT-Model-Connect</h1>
+<h1>TensorRT-Model-Connect</h1>
 
 <p><strong>Deploy supported Hugging Face models for end-to-end TensorRT inference in just two commands.</strong></p>
 
 [Documentation](https://nvidia.github.io/TensorRT-Model-Connect/)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Model Support](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[API Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
 
 </div>
+
+> **Public Preview** — TensorRT-Model-Connect is evolving rapidly and is
+> intended for evaluation and feedback. APIs, scope, and direction may change.
+> See [Project status](#project-status).
 
 <a id="example-code"></a>
 
@@ -128,6 +132,15 @@ documentation corrections.
 
 Do not disclose suspected security vulnerabilities in a public issue. Follow
 [SECURITY.md](SECURITY.md) to report them privately to NVIDIA PSIRT.
+
+<a id="project-status"></a>
+
+## 🧪 Project status
+
+TensorRT-Model-Connect is an experimental project. Its APIs, scope, and
+direction may evolve as we learn from users. This preview is intended to inform
+future decisions and does not establish a specific product roadmap or release
+timeline.
 
 <a id="contributing"></a>
 
