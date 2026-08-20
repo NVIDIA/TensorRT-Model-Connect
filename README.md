@@ -1,8 +1,8 @@
 <div align="center">
 
-<h1>TensorRT-Model-Connect</h1>
+<h1>Public Preview: TensorRT-Model-Connect</h1>
 
-<p><strong>Public Preview — Deploy supported Hugging Face models for end-to-end TensorRT inference in just two commands.</strong></p>
+<p><strong>Deploy supported Hugging Face models for end-to-end TensorRT inference in just two commands.</strong></p>
 
 [Documentation](https://nvidia.github.io/TensorRT-Model-Connect/)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[Model Support](https://nvidia.github.io/TensorRT-Model-Connect/models-recipes/overview)&nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp;[API Reference](https://nvidia.github.io/TensorRT-Model-Connect/api/overview)
 
