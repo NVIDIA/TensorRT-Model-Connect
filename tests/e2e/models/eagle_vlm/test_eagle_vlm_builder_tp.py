@@ -186,6 +186,40 @@ def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
     assert calls == [fp16_call] * 4 + [fp32_call] * 33
 
 
+def test_eagle_vlm_reranker_executes_actual_sequence_length() -> None:
+    import tensorrt as trt
+
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.eagle_vlm.plugin")
+
+    class RerankerConfig(_Config):
+        raw = {"is_reranker": True}
+        rms_norm_eps = 1e-5
+        rope_theta = 10_000.0
+
+    plan = plugin_module._build_eagle_engine(
+        RerankerConfig(),
+        _weights(),
+        max_cache_length=32,
+        is_reranker=True,
+        precision="fp16",
+    )
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+
+    assert engine is not None
+    assert tuple(engine.get_tensor_shape("input_ids")) == (-1,)
+    assert tuple(engine.get_tensor_shape("attention_mask")) == (-1,)
+    assert tuple(
+        tuple(shape) for shape in engine.get_tensor_profile_shape("input_ids", 0)
+    ) == ((1,), (32,), (32,))
+    assert tuple(
+        tuple(shape) for shape in engine.get_tensor_profile_shape("attention_mask", 0)
+    ) == ((1,), (32,), (32,))
+    io_names = {engine.get_tensor_name(index) for index in range(engine.num_io_tensors)}
+    assert "input_embed" not in io_names
+    assert "use_input_embed" not in io_names
+
+
 def test_eagle_vlm_tp_shards_text_backbone_weights() -> None:
     from tensorrt_model_connect.families.eagle_vlm import tp_builder
 

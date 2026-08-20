@@ -353,6 +353,8 @@ def _build_eagle_engine(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     seq_length = max_cache_length  # max sequence length for the encoder
+    if seq_length < 1:
+        raise ValueError("Eagle VLM max_cache_length must be positive")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -360,19 +362,34 @@ def _build_eagle_engine(
     trt_config = builder.create_builder_config()
 
     # --- Inputs ---
-    # input_ids: [seq_length] token IDs (padded to max length)
-    input_ids = network.add_input("input_ids", trt.int32, (seq_length,))
-    # attention_mask: [seq_length] — 1 for real tokens, 0 for padding.
-    # Used to mask out padding positions in bidirectional attention.
-    attention_mask_input = network.add_input("attention_mask", trt.int32, (seq_length,))
-    # input_embed: [seq_length, hidden] — pre-computed features for image tokens
-    input_embed = network.add_input("input_embed", trt.float32, (seq_length, hidden))
-    # use_input_embed: [seq_length] — per-position flag (0.0=use token lookup, 1.0=use input_embed)
-    use_input_embed = network.add_input("use_input_embed", trt.float32, (seq_length,))
-    if work_trt_dtype != trt.float32:
-        input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
-        use_input_embed = network.add_cast(
-            use_input_embed, work_trt_dtype).get_output(0)
+    # Text reranking has no public image-input path. Give it a dynamic token
+    # dimension so short query/document pairs do not execute the full cache
+    # capacity. Embedding keeps the static multimodal input contract.
+    if is_reranker:
+        input_ids = network.add_input("input_ids", trt.int32, (-1,))
+        attention_mask_input = network.add_input("attention_mask", trt.int32, (-1,))
+        profile = builder.create_optimization_profile()
+        opt_seq = min(128, seq_length)
+        profile.set_shape("input_ids", (1,), (opt_seq,), (seq_length,))
+        profile.set_shape("attention_mask", (1,), (opt_seq,), (seq_length,))
+        trt_config.add_optimization_profile(profile)
+        sequence_shape = network.add_shape(input_ids).get_output(0)
+        runtime_sequence_length = None
+    else:
+        input_ids = network.add_input("input_ids", trt.int32, (seq_length,))
+        # attention_mask: 1 for real tokens, 0 for padding.
+        attention_mask_input = network.add_input(
+            "attention_mask", trt.int32, (seq_length,))
+        # Pre-computed features and selector for image-token positions.
+        input_embed = network.add_input(
+            "input_embed", trt.float32, (seq_length, hidden))
+        use_input_embed = network.add_input(
+            "use_input_embed", trt.float32, (seq_length,))
+        if work_trt_dtype != trt.float32:
+            input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
+            use_input_embed = network.add_cast(
+                use_input_embed, work_trt_dtype).get_output(0)
+        runtime_sequence_length = seq_length
 
     # --- Embedding with input_embed bypass ---
     embedding_table = graph_ops.add_constant(
@@ -381,26 +398,25 @@ def _build_eagle_engine(
     gather = network.add_gather(embedding_table, input_ids, 0)
     token_embed = gather.get_output(0)
 
-    # Select: hidden[i] = input_embed[i] * use[i] + token_embed[i] * (1 - use[i])
-    # Reshape use_input_embed [seq_length] -> [seq_length, 1] for broadcasting
-    use_reshape = network.add_shuffle(use_input_embed)
-    use_reshape.reshape_dims = (seq_length, 1)
-    ones_bcast = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-        dtype=work_np_dtype)
-    inv_use = network.add_elementwise(
-        ones_bcast, use_reshape.get_output(0),
-        trt.ElementWiseOperation.SUB)  # [seq_length, 1]: 1 where token, 0 where embed
-    embed_part = network.add_elementwise(
-        input_embed, use_reshape.get_output(0),
-        trt.ElementWiseOperation.PROD)  # input_embed * use
-    token_part = network.add_elementwise(
-        token_embed, inv_use.get_output(0),
-        trt.ElementWiseOperation.PROD)  # token_embed * (1 - use)
-    merged = network.add_elementwise(
-        embed_part.get_output(0), token_part.get_output(0),
-        trt.ElementWiseOperation.SUM)
-    hidden_state = merged.get_output(0)
+    if is_reranker:
+        hidden_state = token_embed
+    else:
+        # Select image features only at positions marked by use_input_embed.
+        use_reshape = network.add_shuffle(use_input_embed)
+        use_reshape.reshape_dims = (seq_length, 1)
+        ones_bcast = graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        inv_use = network.add_elementwise(
+            ones_bcast, use_reshape.get_output(0), trt.ElementWiseOperation.SUB)
+        embed_part = network.add_elementwise(
+            input_embed, use_reshape.get_output(0), trt.ElementWiseOperation.PROD)
+        token_part = network.add_elementwise(
+            token_embed, inv_use.get_output(0), trt.ElementWiseOperation.PROD)
+        merged = network.add_elementwise(
+            embed_part.get_output(0), token_part.get_output(0),
+            trt.ElementWiseOperation.SUM)
+        hidden_state = merged.get_output(0)
 
     # --- RoPE tables ---
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
@@ -432,9 +448,16 @@ def _build_eagle_engine(
         network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
     sin_half_tensor = graph_ops.add_constant(
         network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
-    rope_position_ids = graph_ops.add_constant(
+    all_rope_position_ids = graph_ops.add_constant(
         network, (seq_length,), np.arange(seq_length, dtype=np.int32),
         dtype=np.int32)
+    if is_reranker:
+        position_slice = network.add_slice(
+            all_rope_position_ids, start=(0,), shape=(1,), stride=(1,))
+        position_slice.set_input(2, sequence_shape)
+        rope_position_ids = position_slice.get_output(0)
+    else:
+        rope_position_ids = all_rope_position_ids
     eps_tensor = graph_ops.add_constant(
         network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
@@ -477,15 +500,23 @@ def _build_eagle_engine(
     pad_penalty = network.add_elementwise(
         inv_mask.get_output(0), neg_large,
         trt.ElementWiseOperation.PROD)  # [seq_length]: 0.0 for real, -1e10 for pad
-    pad_mask_row = network.add_shuffle(pad_penalty.get_output(0))
-    pad_mask_row.reshape_dims = (1, seq_length)
-    query_zeros = graph_ops.add_constant(
-        network, (seq_length, 1),
-        np.zeros((seq_length, 1), dtype=work_np_dtype),
-        dtype=work_np_dtype)
-    pad_mask_2d = network.add_elementwise(
-        query_zeros, pad_mask_row.get_output(0), trt.ElementWiseOperation.SUM)
-    pad_mask_4d = graph_ops.add_2d_mask_to_4d(network, pad_mask_2d.get_output(0))
+    if is_reranker:
+        # [1, 1, 1, S] broadcasts across query positions without materializing
+        # an S-by-S mask.
+        dynamic_mask = network.add_shuffle(pad_penalty.get_output(0))
+        dynamic_mask.reshape_dims = (1, 1, 1, -1)
+        pad_mask_4d = dynamic_mask.get_output(0)
+    else:
+        pad_mask_row = network.add_shuffle(pad_penalty.get_output(0))
+        pad_mask_row.reshape_dims = (1, seq_length)
+        query_zeros = graph_ops.add_constant(
+            network, (seq_length, 1),
+            np.zeros((seq_length, 1), dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        pad_mask_2d = network.add_elementwise(
+            query_zeros, pad_mask_row.get_output(0), trt.ElementWiseOperation.SUM)
+        pad_mask_4d = graph_ops.add_2d_mask_to_4d(
+            network, pad_mask_2d.get_output(0))
     tail_pad_mask_4d = pad_mask_4d
     if keep_reranker_tail_fp32 and pad_mask_4d.dtype != trt.float32:
         tail_pad_mask_4d = network.add_cast(
@@ -535,17 +566,17 @@ def _build_eagle_engine(
         q_rope = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
             layer_cos_half_tensor, layer_sin_half_tensor, rope_position_ids,
-            head_dim, sequence_length=seq_length)
+            head_dim, sequence_length=runtime_sequence_length)
         k_rope = graph_ops.add_apply_rope_native(
             network, k, num_kv_heads, head_dim,
             layer_cos_half_tensor, layer_sin_half_tensor, rope_position_ids,
-            head_dim, sequence_length=seq_length)
+            head_dim, sequence_length=runtime_sequence_length)
 
         attn_concat = graph_ops.add_attention_from_rows(
             network, q_rope, k_rope, v,
             num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
-            q_seq=seq_length, kv_seq=seq_length,
+            q_seq=runtime_sequence_length, kv_seq=runtime_sequence_length,
             mask=layer_pad_mask_4d,
             scale=attn_scale)
 
