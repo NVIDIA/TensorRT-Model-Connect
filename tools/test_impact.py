@@ -1887,7 +1887,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             priority=482,
             name="model_checks_tool",
             matcher=_regex_rule(
-                r"(?:tools/model_(?:checks|selection)\.py|"
+                r"(?:tools/(?:campaign_shards|model_(?:checks|selection))\.py|"
                 r"tests/model_checks/(?:environments|platforms)/[^/]+\.yaml)$"
             ),
             resolver=_match_result(

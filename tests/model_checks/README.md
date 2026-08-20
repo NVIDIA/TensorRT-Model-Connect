@@ -107,12 +107,40 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --resume
 ```
 
+## Shard a campaign
+
+Sharding is an opt-in runner capability; no checked-in CI workflow enables it.
+Run the same selection and run ID on independent hosts or GPUs that share the
+campaign results directory. The index is zero-based:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform gb300 --all --run-id gb300-all --shard 0/2
+
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform gb300 --all --run-id gb300-all --shard 1/2
+```
+
+Each worker writes only below `shards/<index>-of-<count>/`. Run exactly one
+consolidator to publish the campaign-level Accuracy and Perf reports while the
+workers are active:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py consolidate \
+  "$TRTMC_CHECK_STORAGE_ROOT/results/gb300-all" --watch
+```
+
+The immutable campaign inventory determines assignment by case order modulo
+the shard count. Resume one failed shard with the same selection, `--shard`,
+run ID, and `--resume`. A shard uses its own writable Perf bundle cache, so
+independent workers never build into the same cache directory.
+
 ## Platforms
 
 Use `--platform gb300`, `--platform auto-thor`, or `--platform l4t-thor`.
 Platform files under `tests/model_checks/platforms/` define task order and
-model exclusions. An excluded model runs no Accuracy suite or Perf entry;
-Accuracy suites remain in the report as `not compared`. Files under
+model exclusions. An excluded model runs no Accuracy suite or Perf entry and
+does not appear in qualification reports. Files under
 `tests/model_checks/environments/` define paths and retention.
 
 Checked-in environments delete Accuracy engines and Perf bundles after each

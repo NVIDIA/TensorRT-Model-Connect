@@ -12,7 +12,8 @@ import sys
 import pytest
 import yaml
 
-from tools import model_checks
+from tools import campaign_shards, model_checks, qualification_report
+from tools.execution_ledger import ExecutionLedger
 
 
 def _platform(*, serial: bool = True, excluded_models=()):
@@ -836,6 +837,193 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
     assert "perf" not in request["commands"]
 
 
+def test_sharded_dry_runs_partition_one_campaign_without_enabling_ci(
+    tmp_path, monkeypatch
+):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    selection = [
+        "run",
+        "--platform",
+        "gb300",
+        "--model",
+        "distilgpt2",
+        "--model",
+        "qwen25vl-3b",
+        "--run-id",
+        "sharded-unit",
+        "--dry-run",
+    ]
+
+    assert model_checks.main([*selection, "--shard", "0/2"]) == 0
+    assert model_checks.main([*selection, "--shard", "1/2"]) == 0
+
+    run_root = storage / "results" / "sharded-unit"
+    campaign = json.loads((run_root / "campaign.json").read_text(encoding="utf-8"))
+    assert campaign["shard_count"] == 2
+    assert [case["shard"] for case in campaign["cases"]] == [0, 1, 0, 1]
+    accuracy_bindings = []
+    perf_entries = []
+    for label in ("000-of-002", "001-of-002"):
+        request = json.loads(
+            (run_root / "shards" / label / "request.json").read_text(encoding="utf-8")
+        )
+        command = request["commands"]["accuracy"]
+        accuracy_bindings.append(command[command.index("--binding") + 1])
+        perf_command = request["commands"]["perf"]
+        perf_entries.append(perf_command[perf_command.index("--entry") + 1])
+        assert request["shard"]["name"] == label
+    assert accuracy_bindings == [
+        "distilgpt2=wikitext103_distilgpt2_continuation_parity",
+        "qwen25vl-3b=vlm_mmmu_pro_vision_fixed_mcq",
+    ]
+    assert perf_entries == ["gpt2.generate", "qwen_vl.generate@qwen25vl-3b"]
+
+
+def test_shard_requires_an_explicit_shared_run_id(capsys):
+    with pytest.raises(SystemExit):
+        model_checks.main(
+            [
+                "run",
+                "--platform",
+                "gb300",
+                "--model",
+                "distilgpt2",
+                "--shard",
+                "0/2",
+            ]
+        )
+    assert "--shard requires an explicit shared --run-id" in capsys.readouterr().err
+
+
+def test_consolidator_preserves_campaign_order_and_receipt_results(
+    tmp_path, monkeypatch
+):
+    run_root = tmp_path / "campaign"
+    cases = [
+        {
+            "binding_id": f"accuracy:model-{suffix}:suite",
+            "task": "accuracy",
+            "id": f"model-{suffix}::suite",
+            "report": {"model": f"model-{suffix}", "workload": "suite"},
+            "shard": index,
+        }
+        for index, suffix in enumerate(("a", "b"))
+    ]
+    selection = {"platform": "gb300", "models": []}
+    campaign = campaign_shards.open_campaign(
+        run_root,
+        {
+            "run_id": "campaign",
+            "platform": "gb300",
+            "revision": "a" * 40,
+            "shard_count": 2,
+            "selection": selection,
+            "cases": cases,
+        },
+    )
+    for index, case in enumerate(cases):
+        label = campaign_shards.shard_name(index, 2)
+        shard_root = run_root / "shards" / label
+        output = shard_root / "accuracy"
+        shard_root.mkdir(parents=True)
+        (shard_root / "request.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "campaign",
+                    "revision": "a" * 40,
+                    "platform": "gb300",
+                    "selection": selection,
+                    "shard": {"index": index, "count": 2, "name": label},
+                }
+            ),
+            encoding="utf-8",
+        )
+        ledger = ExecutionLedger.open(
+            output,
+            campaign_id=label,
+            task_kind="accuracy",
+            fingerprint="fixture",
+            cases=[{"id": case["id"], "report": case["report"]}],
+        )
+        result = "green" if index == 0 else "red"
+        ledger.begin(case["id"], stage="compare")
+        ledger.finish(case["id"], result=result, payload={"fixture": True})
+        qualification_report.materialize_report(
+            output,
+            report_kind="accuracy",
+            title="Shard",
+            identity={"run_id": label, "disposition": "completed"},
+            run={"hostname": label},
+            results=[
+                {
+                    **case["report"],
+                    "id": case["id"],
+                    "state": "terminal",
+                    "result": result,
+                    "precision": {"reference": "fp16", "candidate": "fp16"},
+                    "debug": {"logs": [], "command_artifacts": []},
+                }
+            ],
+        )
+    monkeypatch.setattr(model_checks, "_refresh_shard_report", lambda *_args: None)
+
+    assert model_checks._consolidate_once(run_root) is True
+
+    report = json.loads(
+        (run_root / "accuracy" / "report.json").read_text(encoding="utf-8")
+    )
+    assert [row["id"] for row in report["results"]] == [case["id"] for case in cases]
+    assert report["accounting"]["outcomes"] == {
+        "green": 1,
+        "red": 1,
+        "white": 0,
+        "yellow": 0,
+    }
+    assert set(report["receipt_sources"]) == {case["id"] for case in cases}
+    assert campaign["schema_version"] == campaign_shards.CAMPAIGN_SCHEMA
+
+
+def test_shard_resume_reuses_the_same_member_directory(tmp_path, monkeypatch):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
+    selection = [
+        "run",
+        "--platform",
+        "gb300",
+        "--task",
+        "accuracy",
+        "--model",
+        "distilgpt2",
+        "--run-id",
+        "shard-resume-unit",
+        "--shard",
+        "0/1",
+    ]
+    assert model_checks.main([*selection, "--dry-run"]) == 0
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(model_checks.subprocess, "run", run)
+
+    assert model_checks.main([*selection, "--resume"]) == 0
+    assert commands[-1][-1] == "--resume-existing"
+    assert (
+        storage
+        / "results/shard-resume-unit/shards/000-of-001/result.json"
+    ).is_file()
+
+
 def test_l4t_dry_run_passes_managed_hf_cache_seed_to_accuracy(tmp_path, monkeypatch):
     storage = tmp_path / "storage"
     seed = storage / "cache-staging/model"
@@ -1055,6 +1243,28 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
     assert commands[-1][-1] == "--resume-existing"
     result = json.loads((storage / "results/resume-unit/result.json").read_text(encoding="utf-8"))
     assert result["resumed"] is True
+
+
+def test_unsharded_resume_accepts_request_written_before_shard_fields(tmp_path):
+    request = {
+        "schema_version": "trtmc.model-check-run/v1",
+        "run_id": "legacy",
+        "revision": "HEAD",
+        "platform": "gb300",
+        "platform_source": "platform.yaml",
+        "platform_config": {},
+        "environment_source": "environment.yaml",
+        "environment_config": {},
+        "perf_environment_config": None,
+        "selection": {},
+        "commands": {},
+        "shard": None,
+    }
+    previous = {key: value for key, value in request.items() if key not in {"revision", "shard"}}
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(previous), encoding="utf-8")
+
+    model_checks._verify_resume_request(path, request)
 
 
 def test_perf_resume_command_requires_one_existing_run(tmp_path):

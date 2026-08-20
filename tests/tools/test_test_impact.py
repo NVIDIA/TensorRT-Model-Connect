@@ -1747,6 +1747,7 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/campaign_shards.py",
             "tools/model_checks.py",
             "tools/model_selection.py",
             "tests/model_checks/environments/gb300.yaml",
