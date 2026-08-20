@@ -172,6 +172,8 @@ class ModernbertPlugin:
         intermediate = config.intermediate_size
         eps = config.raw.get("norm_eps", config.rms_norm_eps)
         max_seq = max_cache_length
+        if max_seq < 1:
+            raise ValueError("ModernBERT max_cache_length must be positive")
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
         elif precision == "fp32":
@@ -191,8 +193,14 @@ class ModernbertPlugin:
         trt_config.clear_flag(trt.BuilderFlag.TF32)
 
         # Inputs
-        input_ids = network.add_input("input_ids", trt.int32, (max_seq,))
-        attention_mask_input = network.add_input("attention_mask", trt.int32, (max_seq,))
+        input_ids = network.add_input("input_ids", trt.int32, (-1,))
+        attention_mask_input = network.add_input("attention_mask", trt.int32, (-1,))
+        profile = builder.create_optimization_profile()
+        opt_seq = min(16, max_seq)
+        profile.set_shape("input_ids", (1,), (opt_seq,), (max_seq,))
+        profile.set_shape("attention_mask", (1,), (opt_seq,), (max_seq,))
+        trt_config.add_optimization_profile(profile)
+        sequence_shape = network.add_shape(input_ids).get_output(0)
 
         # Attention mask: [seq] int -> [1, 1, 1, seq] additive float mask.
         mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
@@ -210,7 +218,7 @@ class ModernbertPlugin:
             inv_mask.get_output(0), neg_large, trt.ElementWiseOperation.PROD
         )
         pad_mask_4d = network.add_shuffle(pad_penalty.get_output(0))
-        pad_mask_4d.reshape_dims = (1, 1, 1, max_seq)
+        pad_mask_4d.reshape_dims = (1, 1, 1, -1)
 
         # Pre-compute RoPE tables for both theta values
         rope_tables = {}
@@ -227,9 +235,14 @@ class ModernbertPlugin:
                 dtype=work_np_dtype)
             rope_tables[theta] = (cos, sin)
 
-        pos_indices = graph_ops.add_constant(
+        all_pos_indices = graph_ops.add_constant(
             network, (max_seq,), np.arange(max_seq, dtype=np.int32), dtype=np.int32
         )
+        pos_slice = network.add_slice(
+            all_pos_indices, start=(0,), shape=(1,), stride=(1,)
+        )
+        pos_slice.set_input(2, sequence_shape)
+        pos_indices = pos_slice.get_output(0)
 
         # Embedding
         embed_table = graph_ops.add_constant(
@@ -283,7 +296,7 @@ class ModernbertPlugin:
                 sin_table,
                 pos_indices,
                 head_dim,
-                sequence_length=max_seq,
+                sequence_length=None,
             )
             k = graph_ops.add_apply_rope_native(
                 network,
@@ -294,7 +307,7 @@ class ModernbertPlugin:
                 sin_table,
                 pos_indices,
                 head_dim,
-                sequence_length=max_seq,
+                sequence_length=None,
             )
 
             context_flat = graph_ops.add_attention_from_rows(
@@ -304,8 +317,8 @@ class ModernbertPlugin:
                 v,
                 num_heads=num_heads,
                 head_dim=head_dim,
-                q_seq=max_seq,
-                kv_seq=max_seq,
+                q_seq=None,
+                kv_seq=None,
                 mask=pad_mask_4d.get_output(0),
             )
 

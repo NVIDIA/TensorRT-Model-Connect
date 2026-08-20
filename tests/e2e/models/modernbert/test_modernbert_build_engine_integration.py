@@ -77,6 +77,8 @@ class TestModernbertBuildEngine:
         return t
 
     def test_build_engine_returns_bytes(self, tmp_path):
+        import tensorrt as trt
+
         from tensorrt_model_connect.families.modernbert import plugin
 
         config = {
@@ -98,3 +100,17 @@ class TestModernbertBuildEngine:
 
         assert isinstance(engine, bytes)
         assert len(engine) > 0
+
+        runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+        deserialized = runtime.deserialize_cuda_engine(engine)
+        assert deserialized is not None
+        assert tuple(deserialized.get_tensor_shape("input_ids")) == (-1,)
+        assert tuple(deserialized.get_tensor_shape("attention_mask")) == (-1,)
+        assert tuple(
+            tuple(shape)
+            for shape in deserialized.get_tensor_profile_shape("input_ids", 0)
+        ) == ((1,), (16,), (32,))
+        assert tuple(
+            tuple(shape)
+            for shape in deserialized.get_tensor_profile_shape("attention_mask", 0)
+        ) == ((1,), (16,), (32,))
