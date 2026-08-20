@@ -314,13 +314,16 @@ latencies are separate fields. Metrics, Logs, and Commands remain separate
 report entries. The run environment snapshot is published at
 `artifacts/run/environment.json`.
 
-For valid comparisons, `report.json` also publishes a non-blocking
-`measurement_stability` shadow analysis. It checks the existing ten raw samples
-on each side: the first-five and last-five medians must differ by at most 5%,
-and at least eight samples must lie within 5% of that side's median. The report
-shows `Stable`, `Retry recommended`, or `Not evaluated` in Metrics. This shadow
-evidence does not trigger a retry, change the traffic light, or affect the run
-exit code.
+For valid comparisons, `report.json` publishes `measurement_stability`. It
+checks the ten raw samples on each side: the first-five and last-five medians
+must differ by at most 5%, and at least eight samples must lie within 5% of that
+side's median. A settled first measurement is classified immediately. An
+unsettled measurement starts both Reference and TRTMC once more in fresh
+processes while reusing the prepared bundle. If the second measurement remains
+unsettled, the case is white (`measurement_inconclusive`) and is excluded from
+the comparable-result denominator. Metrics retains both measurements' raw
+samples, and Logs and Commands retain the four leaf executions. Legacy results
+without enforced evidence continue to render their stored shadow analysis.
 
 The preparation receipt uses schema `trtmc.perf-bundle-preparation/v1`, scope
 `test_task`, and the performance run's exact `git_commit`. Each entry under

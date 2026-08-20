@@ -99,13 +99,20 @@
             "type": ["object", "null"],
             "required": ["mode", "status", "policy", "reference", "trtmc"],
             "properties": {
-              "mode": {"const": "shadow"},
+              "mode": {"enum": ["shadow", "enforced"]},
               "status": {
-                "enum": ["stable", "retry_recommended", "not_evaluated"]
+                "enum": [
+                  "stable",
+                  "stable_after_retry",
+                  "retry_recommended",
+                  "not_evaluated",
+                  "measurement_inconclusive"
+                ]
               },
               "policy": {"type": "object"},
               "reference": {"type": "object"},
-              "trtmc": {"type": "object"}
+              "trtmc": {"type": "object"},
+              "attempts": {"type": "array"}
             }
           },
           "samples": {

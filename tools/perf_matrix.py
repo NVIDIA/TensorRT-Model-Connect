@@ -1779,18 +1779,32 @@ def _materialize_command_logs(
     command: MutableMapping[str, Any],
     *,
     case_attempt: int = 1,
+    measurement_attempt: int = 1,
 ) -> list[dict[str, str]]:
     directory = output / "artifacts" / _slug(case_id) / "logs"
     directory.mkdir(parents=True, exist_ok=True)
     links = []
     attempt_suffix = "" if case_attempt == 1 else f".case-attempt-{case_attempt}"
+    measurement_suffix = (
+        "" if measurement_attempt == 1 else f".measurement-{measurement_attempt}"
+    )
     for stream in ("stdout", "stderr"):
-        path = directory / f"{side}{attempt_suffix}.{stream}.log"
+        path = directory / (
+            f"{side}{attempt_suffix}{measurement_suffix}.{stream}.log"
+        )
         path.write_text(str(command.pop(stream, "")), encoding="utf-8")
         href = path.relative_to(output).as_posix()
         command[f"{stream}_log"] = href
         side_label = "TRTMC" if side == "trtmc" else "Reference"
-        links.append({"label": f"{side_label} {stream}", "href": href})
+        measurement_label = (
+            "" if measurement_attempt == 1 else f" measurement {measurement_attempt}"
+        )
+        links.append(
+            {
+                "label": f"{side_label}{measurement_label} {stream}",
+                "href": href,
+            }
+        )
     diagnostic = command.get("diagnostic")
     if isinstance(diagnostic, MutableMapping):
         materialized = []
@@ -1804,7 +1818,9 @@ def _materialize_command_logs(
             if not source.is_file():
                 continue
             suffix = "".join(source.suffixes) or ".log"
-            path = directory / f"{side}{attempt_suffix}.{_slug(label)}{suffix}"
+            path = directory / (
+                f"{side}{attempt_suffix}{measurement_suffix}.{_slug(label)}{suffix}"
+            )
             shutil.copyfile(source, path)
             record = {"label": label, "href": path.relative_to(output).as_posix()}
             materialized.append(record)
@@ -1985,8 +2001,8 @@ _TIMING_STABILITY_MEDIAN_BAND_PERCENT = 5.0
 _TIMING_STABILITY_MIN_IN_BAND = 8
 
 
-def _timing_stability_shadow(values: Sequence[Any]) -> dict[str, Any]:
-    """Describe timing stability without changing the qualification result."""
+def _timing_stability(values: Sequence[Any]) -> dict[str, Any]:
+    """Decide whether one side's ten timed samples are settled."""
 
     if len(values) != _TIMING_STABILITY_SAMPLE_COUNT:
         return {
@@ -2038,26 +2054,23 @@ def _timing_stability_shadow(values: Sequence[Any]) -> dict[str, Any]:
     }
 
 
-def _measurement_stability_shadow(
-    row: Mapping[str, Any], result: str | None
-) -> dict[str, Any] | None:
-    if result not in qualification_report.RGB_RESULTS:
-        return None
-    baseline = row.get("baseline", {})
-    candidate = row.get("candidate", {})
-    baseline = baseline if isinstance(baseline, Mapping) else {}
-    candidate = candidate if isinstance(candidate, Mapping) else {}
-    reference = _timing_stability_shadow(baseline.get("samples_ms", []))
-    trtmc = _timing_stability_shadow(candidate.get("samples_ms", []))
+def _measurement_stability_evidence(
+    baseline: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    mode: str,
+) -> dict[str, Any]:
+    reference = _timing_stability(baseline.get("samples_ms", []))
+    trtmc = _timing_stability(candidate.get("samples_ms", []))
     side_statuses = {reference["status"], trtmc["status"]}
     if side_statuses == {"stable"}:
         status = "stable"
     elif "unstable" in side_statuses:
-        status = "retry_recommended"
+        status = "retry_recommended" if mode == "shadow" else "unstable"
     else:
         status = "not_evaluated"
-    return {
-        "mode": "shadow",
+    evidence = {
+        "mode": mode,
         "status": status,
         "policy": {
             "required_samples": _TIMING_STABILITY_SAMPLE_COUNT,
@@ -2070,6 +2083,26 @@ def _measurement_stability_shadow(
         "reference": reference,
         "trtmc": trtmc,
     }
+    return evidence
+
+
+def _measurement_stability(
+    row: Mapping[str, Any], result: str | None
+) -> dict[str, Any] | None:
+    stored = row.get("measurement_stability")
+    if isinstance(stored, Mapping):
+        return deepcopy(dict(stored))
+    if result not in qualification_report.RGB_RESULTS:
+        return None
+    baseline = row.get("baseline", {})
+    candidate = row.get("candidate", {})
+    baseline = baseline if isinstance(baseline, Mapping) else {}
+    candidate = candidate if isinstance(candidate, Mapping) else {}
+    return _measurement_stability_evidence(
+        baseline,
+        candidate,
+        mode="shadow",
+    )
 
 
 def _normalized_text(value: Any) -> str:
@@ -2468,48 +2501,77 @@ def _case_row(
     return row
 
 
-def _run_supported_case(
+def _run_measurement(
     case: Mapping[str, Any],
     resolved: Mapping[str, Any],
     options: RunOptions,
     case_work: Path,
     row: MutableMapping[str, Any],
     *,
+    measurement_attempt: int,
     case_attempt: int = 1,
     progress: Callable[[str, Mapping[str, Any]], None] | None = None,
-) -> None:
+) -> tuple[dict[str, Any], dict[str, Any], str, dict[str, Any]] | None:
     environment = _case_command_environment(options, case_work)
     digest = _workload_digest(resolved)
-    candidate_dir = case_work / "trtmc"
-    baseline_path = case_work / "baseline.json"
-    candidate_argv = [*_candidate_base_argv(case, options), "--output", str(candidate_dir)]
+    commands = row.setdefault("commands", {})
+    order = (
+        ("trtmc", "baseline")
+        if _stable_even(str(case["id"]))
+        else ("baseline", "trtmc")
+    )
+    measurement_work = (
+        case_work
+        if measurement_attempt == 1
+        else case_work / f"measurement-{measurement_attempt}"
+    )
+    measurement_work.mkdir(parents=True, exist_ok=True)
+    candidate_dir = measurement_work / "trtmc"
+    baseline_path = measurement_work / "baseline.json"
+    candidate_argv = [
+        *_candidate_base_argv(case, options),
+        "--output",
+        str(candidate_dir),
+    ]
     baseline_argv, profile = _baseline_argv(case, resolved, baseline_path, options)
     row["resolved_settings"]["baseline_python_profile"] = profile
     reference_precision = baseline_argv[baseline_argv.index("--precision") + 1]
     row["resolved_settings"]["baseline_precision"] = reference_precision
-    commands = row.setdefault("commands", {})
-    commands.update({
-        "trtmc": {
-            "argv": candidate_argv,
-            "rendered": shlex.join(candidate_argv),
+    suffix = "" if measurement_attempt == 1 else f"_measurement_{measurement_attempt}"
+    command_keys = {
+        "trtmc": f"trtmc{suffix}",
+        "baseline": f"baseline{suffix}",
+    }
+    for side, argv in (("trtmc", candidate_argv), ("baseline", baseline_argv)):
+        commands[command_keys[side]] = {
+            "argv": argv,
+            "rendered": shlex.join(argv),
             "cwd": str(REPOSITORY),
-        },
-        "baseline": {
-            "argv": baseline_argv,
-            "rendered": shlex.join(baseline_argv),
-            "cwd": str(REPOSITORY),
-        },
-    })
+        }
     if getattr(options, "verbose", False):
-        print(f"[{case['id']}] TRTMC: {commands['trtmc']['rendered']}", flush=True)
-        print(f"[{case['id']}] baseline: {commands['baseline']['rendered']}", flush=True)
-    order = ("trtmc", "baseline") if _stable_even(str(case["id"])) else ("baseline", "trtmc")
+        label = "" if measurement_attempt == 1 else " remeasurement"
+        print(
+            f"[{case['id']}] TRTMC{label}: "
+            f"{commands[command_keys['trtmc']]['rendered']}",
+            flush=True,
+        )
+        print(
+            f"[{case['id']}] baseline{label}: "
+            f"{commands[command_keys['baseline']]['rendered']}",
+            flush=True,
+        )
     for side in order:
         argv = candidate_argv if side == "trtmc" else baseline_argv
+        stage = "candidate" if side == "trtmc" else "reference"
+        if measurement_attempt > 1:
+            stage = f"remeasure-{stage}"
         if progress is not None:
             progress(
-                "candidate" if side == "trtmc" else "reference",
-                {"commands": deepcopy(row["commands"])},
+                stage,
+                {
+                    "commands": deepcopy(row["commands"]),
+                    "logs": deepcopy(row.get("logs", [])),
+                },
             )
         _wait_for_gpu_memory_headroom(
             minimum_free_fraction=options.minimum_gpu_free_fraction
@@ -2522,25 +2584,27 @@ def _run_supported_case(
                 side,
                 command,
                 case_attempt=case_attempt,
+                measurement_attempt=measurement_attempt,
             )
         )
-        commands[side] = command
+        commands[command_keys[side]] = command
         if command["exit_code"] != 0:
             row["status"] = "failed"
-            row["reason"] = f"{side} command failed with rc={command['exit_code']}"
+            row["reason"] = (
+                f"{side} measurement {measurement_attempt} command failed "
+                f"with rc={command['exit_code']}"
+            )
             diagnostic = command.get("diagnostic", {})
             diagnostic = diagnostic if isinstance(diagnostic, Mapping) else {}
-            row["failure_stage"] = str(
-                diagnostic.get("stage")
-                or ("candidate" if side == "trtmc" else "reference")
-            )
+            row["failure_stage"] = str(diagnostic.get("stage") or stage)
             row["failure_domain"] = str(
                 diagnostic.get("domain") or "harness/unknown"
             )
             row["failure_code"] = str(
                 diagnostic.get("code") or "execution_failure"
             )
-            return
+            row.pop("measurement_stability", None)
+            return None
     candidate = _candidate_result(candidate_dir, digest)
     candidate["precision"] = str(resolved["model"]["precision"])
     baseline = _read_baseline(baseline_path)
@@ -2551,10 +2615,91 @@ def _run_supported_case(
         request=resolved["request"],
         reference_precision=reference_precision,
     )
-    row["candidate"] = candidate
-    row["baseline"] = baseline
-    row["comparison"] = comparison
-    row["status"] = status
+    return candidate, baseline, status, comparison
+
+
+def _run_supported_case(
+    case: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+    options: RunOptions,
+    case_work: Path,
+    row: MutableMapping[str, Any],
+    *,
+    case_attempt: int = 1,
+    progress: Callable[[str, Mapping[str, Any]], None] | None = None,
+) -> None:
+    measurement_attempts: list[dict[str, Any]] = []
+    for measurement_attempt in (1, 2):
+        measured = _run_measurement(
+            case,
+            resolved,
+            options,
+            case_work,
+            row,
+            measurement_attempt=measurement_attempt,
+            case_attempt=case_attempt,
+            progress=progress,
+        )
+        if measured is None:
+            return
+        candidate, baseline, status, comparison = measured
+        row.update(
+            candidate=candidate,
+            baseline=baseline,
+            comparison=comparison,
+            status=status,
+        )
+        if status not in qualification_report.RGB_RESULTS:
+            row.pop("measurement_stability", None)
+            return
+
+        stability = _measurement_stability_evidence(
+            baseline,
+            candidate,
+            mode="enforced",
+        )
+        measurement_attempts.append(
+            {
+                "attempt": measurement_attempt,
+                "result": status,
+                "reference": {
+                    "samples_ms": deepcopy(baseline.get("samples_ms", [])),
+                    "stability": deepcopy(stability["reference"]),
+                },
+                "trtmc": {
+                    "samples_ms": deepcopy(candidate.get("samples_ms", [])),
+                    "stability": deepcopy(stability["trtmc"]),
+                },
+            }
+        )
+        row["measurement_stability"] = {
+            **stability,
+            "attempts": deepcopy(measurement_attempts),
+        }
+        if stability["status"] == "stable":
+            if measurement_attempt == 2:
+                row["measurement_stability"]["status"] = "stable_after_retry"
+            return
+        if stability["status"] == "not_evaluated":
+            row["status"] = "measurement-inconclusive"
+            row["reason"] = "timing stability requires ten valid samples per side"
+            row["failure_stage"] = "measure"
+            row["failure_domain"] = "harness/unknown"
+            row["failure_code"] = "measurement_inconclusive"
+            row["measurement_stability"]["status"] = "measurement_inconclusive"
+            return
+        if measurement_attempt == 1:
+            print(
+                f"[{case['id']}] timing is not settled; measuring once more",
+                flush=True,
+            )
+
+    row["status"] = "measurement-inconclusive"
+    row["reason"] = "timing did not settle after one remeasurement"
+    row["failure_stage"] = "measure"
+    row["failure_domain"] = "harness/unknown"
+    row["failure_code"] = "measurement_inconclusive"
+    row["measurement_stability"]["status"] = "measurement_inconclusive"
 
 
 def _stable_even(value: str) -> bool:
@@ -2862,7 +3007,10 @@ def _perf_output_validation(
     contract = str(resolved.get("output_contract", "") or "Not recorded")
     comparison = row.get("comparison", {})
     comparison = comparison if isinstance(comparison, Mapping) else {}
-    if str(row.get("status")) in qualification_report.RGB_RESULTS:
+    if str(row.get("status")) in {
+        *qualification_report.RGB_RESULTS,
+        "measurement-inconclusive",
+    }:
         status = "Pass"
         reason = None
     elif str(row.get("status")) == "contract-mismatch":
@@ -2902,7 +3050,7 @@ def _public_perf_result(row: Mapping[str, Any]) -> dict[str, Any]:
             "precision": _perf_precision(row),
             "output_validation": _perf_output_validation(row, result),
             "latency": _perf_latency(row, result),
-            "measurement_stability": _measurement_stability_shadow(row, result),
+            "measurement_stability": _measurement_stability(row, result),
             "issue": _perf_issue(row, result),
             "debug": {
                 "logs": [dict(record) for record in row.get("logs", [])],

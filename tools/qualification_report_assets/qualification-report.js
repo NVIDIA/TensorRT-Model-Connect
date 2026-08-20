@@ -216,21 +216,32 @@
 
   function timingStability(value) {
     if (!value) return null;
-    const labels = { stable: "Stable", retry_recommended: "Retry recommended", not_evaluated: "Not evaluated", unstable: "Unstable" };
+    const labels = { stable: "Stable", stable_after_retry: "Stable after remeasurement", retry_recommended: "Retry recommended", not_evaluated: "Not evaluated", unstable: "Unstable", measurement_inconclusive: "Inconclusive after remeasurement" };
     const control = el("details", "gate-evidence");
-    control.append(el("summary", "", `Timing stability (shadow) · ${labels[value.status] || value.status}`));
+    control.append(el("summary", "", `Timing stability · ${labels[value.status] || value.status}`));
     const body = el("div", "evidence-body");
     const policy = value.policy || {};
     add(body, el("div", "gate-fact", `${policy.required_samples ?? 10} samples · first/last half ≤${number(policy.max_half_median_change_percent ?? 5, 2)}% · at least ${policy.minimum_samples_within_band ?? 8}/${policy.required_samples ?? 10} within median ±${number(policy.median_band_percent ?? 5, 2)}%`));
-    [["Reference", value.reference], ["TRTMC", value.trtmc]].forEach(([name, side]) => {
+    const sideEvidence = (name, side, samples) => {
       if (!side) return;
       if (side.status === "not_evaluated") {
         body.append(el("div", "gate-fact", `${name} · Not evaluated · ${side.sample_count ?? 0} samples`));
         return;
       }
       body.append(el("div", "gate-fact", `${name} · ${labels[side.status] || side.status} · first 5 ${number(side.first_half_median_ms, 3)} ms · last 5 ${number(side.second_half_median_ms, 3)} ms · ${side.samples_within_band}/${side.sample_count} within band`));
-    });
-    body.append(el("div", "detail", "Shadow evidence only; the current result is unchanged."));
+      if (Array.isArray(samples)) body.append(el("div", "detail", `${name} raw latency (ms) · ${samples.map((sample) => number(sample, 3)).join(", ")}`));
+    };
+    if (Array.isArray(value.attempts) && value.attempts.length) {
+      value.attempts.forEach((attempt) => {
+        body.append(el("h4", "", `Measurement ${attempt.attempt}`));
+        sideEvidence("Reference", attempt.reference?.stability, attempt.reference?.samples_ms);
+        sideEvidence("TRTMC", attempt.trtmc?.stability, attempt.trtmc?.samples_ms);
+      });
+    } else {
+      sideEvidence("Reference", value.reference);
+      sideEvidence("TRTMC", value.trtmc);
+    }
+    if (value.mode === "shadow") body.append(el("div", "detail", "Shadow evidence only; the current result is unchanged."));
     control.append(body);
     return control;
   }
@@ -312,7 +323,8 @@
   function commands(row) {
     const records = [];
     Object.entries(row.commands || {}).forEach(([name, command]) => {
-      if (command?.rendered) records.push([name === "trtmc" ? "TRTMC" : name === "baseline" ? "Reference" : name, `${command.cwd ? `cwd: ${command.cwd}\n` : ""}$ ${command.rendered}`]);
+      const labels = { trtmc: "TRTMC", baseline: "Reference", trtmc_measurement_2: "TRTMC measurement 2", baseline_measurement_2: "Reference measurement 2" };
+      if (command?.rendered) records.push([labels[name] || name, `${command.cwd ? `cwd: ${command.cwd}\n` : ""}$ ${command.rendered}`]);
     });
     const value = el("div");
     if (records.length) value.append(details("Commands", records));

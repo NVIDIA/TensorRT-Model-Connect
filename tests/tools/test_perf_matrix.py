@@ -634,8 +634,8 @@ def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
     assert "mode" in comparison["reason"]
 
 
-def test_timing_stability_shadow_accepts_a_settled_measurement() -> None:
-    stability = perf_matrix._timing_stability_shadow(
+def test_timing_stability_accepts_a_settled_measurement() -> None:
+    stability = perf_matrix._timing_stability(
         [100.0, 101.0, 99.0, 100.0, 100.0, 101.0, 100.0, 99.0, 100.0, 100.0]
     )
 
@@ -644,8 +644,8 @@ def test_timing_stability_shadow_accepts_a_settled_measurement() -> None:
     assert stability["samples_within_band"] == 10
 
 
-def test_timing_stability_shadow_flags_a_measurement_that_is_still_falling() -> None:
-    stability = perf_matrix._timing_stability_shadow(
+def test_timing_stability_flags_a_measurement_that_is_still_falling() -> None:
+    stability = perf_matrix._timing_stability(
         [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
     )
 
@@ -653,8 +653,8 @@ def test_timing_stability_shadow_flags_a_measurement_that_is_still_falling() -> 
     assert stability["half_median_change_percent"] > 5.0
 
 
-def test_timing_stability_shadow_rejects_scattered_samples_even_without_drift() -> None:
-    stability = perf_matrix._timing_stability_shadow(
+def test_timing_stability_rejects_scattered_samples_even_without_drift() -> None:
+    stability = perf_matrix._timing_stability(
         [100.0, 80.0, 120.0, 100.0, 100.0, 100.0, 80.0, 120.0, 100.0, 100.0]
     )
 
@@ -663,8 +663,8 @@ def test_timing_stability_shadow_rejects_scattered_samples_even_without_drift() 
     assert stability["status"] == "unstable"
 
 
-def test_timing_stability_shadow_accepts_exactly_eight_samples_in_band() -> None:
-    stability = perf_matrix._timing_stability_shadow(
+def test_timing_stability_accepts_exactly_eight_samples_in_band() -> None:
+    stability = perf_matrix._timing_stability(
         [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 120.0, 120.0]
     )
 
@@ -672,8 +672,8 @@ def test_timing_stability_shadow_accepts_exactly_eight_samples_in_band() -> None
     assert stability["status"] == "stable"
 
 
-def test_timing_stability_shadow_does_not_judge_a_nonstandard_sample_count() -> None:
-    stability = perf_matrix._timing_stability_shadow([10.0, 11.0])
+def test_timing_stability_does_not_judge_a_nonstandard_sample_count() -> None:
+    stability = perf_matrix._timing_stability([10.0, 11.0])
 
     assert stability == {
         "status": "not_evaluated",
@@ -846,9 +846,13 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     monkeypatch.setattr(
         perf_matrix,
         "_candidate_result",
-        lambda _directory, _digest: {},
+        lambda _directory, _digest: {"samples_ms": [10.0] * 10},
     )
-    monkeypatch.setattr(perf_matrix, "_read_baseline", lambda _path: {})
+    monkeypatch.setattr(
+        perf_matrix,
+        "_read_baseline",
+        lambda _path: {"samples_ms": [10.0] * 10},
+    )
     monkeypatch.setattr(
         perf_matrix,
         "_classify",
@@ -892,6 +896,128 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     output = capsys.readouterr().out
     assert "[example] TRTMC: candidate" in output
     assert "[example] baseline: baseline --precision fp16" in output
+
+
+def test_unsettled_measurement_is_retried_once_in_fresh_processes(
+    tmp_path, monkeypatch
+) -> None:
+    falling = [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
+    settled = [10.0] * 10
+    commands_run = []
+    monkeypatch.setattr(perf_matrix, "_command_environment", lambda: {})
+    monkeypatch.setattr(perf_matrix, "_workload_digest", lambda _resolved: "digest")
+    monkeypatch.setattr(
+        perf_matrix,
+        "_candidate_base_argv",
+        lambda _case, _options: ["candidate"],
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_baseline_argv",
+        lambda _case, _resolved, output, _options: (
+            ["baseline", "--precision", "fp16", "--output", str(output)],
+            "base",
+        ),
+    )
+    monkeypatch.setattr(perf_matrix, "_wait_for_gpu_memory_headroom", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_command",
+        lambda argv, _environment, _timeout: commands_run.append(argv[0])
+        or {"exit_code": 0, "stdout": "ok", "stderr": ""},
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_candidate_result",
+        lambda directory, _digest: {
+            "samples_ms": settled if "measurement-2" in str(directory) else falling
+        },
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_read_baseline",
+        lambda _path: {"samples_ms": settled},
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_classify",
+        lambda *_args, **_kwargs: ("green", {}),
+    )
+    monkeypatch.setattr(perf_matrix, "_stable_even", lambda _value: True)
+
+    row = {"resolved_settings": {}}
+    perf_matrix._run_supported_case(
+        {"id": "example"},
+        {"model": {"precision": "fp16"}, "request": {}},
+        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0, verbose=False),
+        tmp_path / "work",
+        row,
+    )
+
+    assert commands_run == ["candidate", "baseline", "candidate", "baseline"]
+    assert row["status"] == "green"
+    assert row["measurement_stability"]["status"] == "stable_after_retry"
+    assert [attempt["attempt"] for attempt in row["measurement_stability"]["attempts"]] == [1, 2]
+    assert set(row["commands"]) == {
+        "trtmc",
+        "baseline",
+        "trtmc_measurement_2",
+        "baseline_measurement_2",
+    }
+    assert len(row["logs"]) == 8
+    assert any("measurement-2" in record["href"] for record in row["logs"])
+
+
+def test_measurement_that_remains_unsettled_has_no_performance_light(
+    tmp_path, monkeypatch
+) -> None:
+    falling = [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
+    monkeypatch.setattr(perf_matrix, "_command_environment", lambda: {})
+    monkeypatch.setattr(perf_matrix, "_workload_digest", lambda _resolved: "digest")
+    monkeypatch.setattr(perf_matrix, "_candidate_base_argv", lambda *_args: ["candidate"])
+    monkeypatch.setattr(
+        perf_matrix,
+        "_baseline_argv",
+        lambda _case, _resolved, _output, _options: (
+            ["baseline", "--precision", "fp16"],
+            "base",
+        ),
+    )
+    monkeypatch.setattr(perf_matrix, "_wait_for_gpu_memory_headroom", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_command",
+        lambda *_args: {"exit_code": 0, "stdout": "", "stderr": ""},
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_candidate_result",
+        lambda *_args: {"samples_ms": falling},
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_read_baseline",
+        lambda _path: {"samples_ms": [10.0] * 10},
+    )
+    monkeypatch.setattr(perf_matrix, "_classify", lambda *_args, **_kwargs: ("yellow", {}))
+    monkeypatch.setattr(perf_matrix, "_stable_even", lambda _value: True)
+
+    row = {"resolved_settings": {}}
+    perf_matrix._run_supported_case(
+        {"id": "example"},
+        {"model": {"precision": "fp16"}, "request": {}},
+        Namespace(timeout_seconds=30, minimum_gpu_free_fraction=0, verbose=False),
+        tmp_path / "work",
+        row,
+    )
+    public = perf_matrix._public_perf_result(row)
+
+    assert row["status"] == "measurement-inconclusive"
+    assert public["result"] == "white"
+    assert public["issue"]["code"] == "measurement_inconclusive"
+    assert public["output_validation"]["status"] == "Pass"
+    assert public["latency"] == {"reference_ms": None, "candidate_ms": None}
+    assert public["measurement_stability"]["status"] == "measurement_inconclusive"
 
 
 @pytest.mark.parametrize(
@@ -2100,7 +2226,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
         "reference_ms": 20.45,
         "candidate_ms": 10.45,
     }
-    assert public_row["measurement_stability"]["mode"] == "shadow"
+    assert public_row["measurement_stability"]["mode"] == "enforced"
     assert public_row["measurement_stability"]["status"] == "stable"
     assert public_row["issue"] is None
     assert all(
@@ -2132,7 +2258,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert "Failures" in frontend
     assert "Reference latency" in frontend
     assert "TRTMC latency" in frontend
-    assert "Timing stability (shadow)" in frontend
+    assert "Timing stability" in frontend
 
     baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
     request = baseline_argv[baseline_argv.index("--request-json") + 1]
