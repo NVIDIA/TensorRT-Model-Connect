@@ -332,6 +332,10 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert by_id["opt.generate"]["workload"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
+    assert (
+        by_id["llama.generate@minitron-4b-width"]["baseline"]["precision"]
+        == "fp16"
+    )
     assert by_id["nemotron_h.generate"]["baseline"]["mode"] == "hf-eager"
     assert by_id["nemotron_h.generate"]["workload"]["runtime"] == {
         "cuda_graphs": True

@@ -18,10 +18,8 @@ def test_falcon3_split_decoder_build_reserves_an_exclusive_gpu() -> None:
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
 
 
-def test_native_minitron_manifests_use_family_build_defaults() -> None:
+def test_native_minitron_regression_uses_family_build_defaults() -> None:
     for manifest_name in (
-        "minitron-4b-width.json",
-        "minitron-4b-width-l0.json",
         "minitron-4b-width-regression-native-kv-chunked-prefill.json",
     ):
         manifest_path = Path(__file__).parent / "manifests" / manifest_name
@@ -32,6 +30,30 @@ def test_native_minitron_manifests_use_family_build_defaults() -> None:
         assert "max_cache_length" not in manifest, manifest_name
         assert "precision" not in case.metadata, manifest_name
         assert "max_cache_length" not in case.inputs, manifest_name
+
+
+def test_minitron_width_release_profiles_use_qualified_runtime_contract() -> None:
+    expected_cache_lengths = {
+        "minitron-4b-width.json": None,
+        "minitron-4b-width-l0.json": 256,
+    }
+    for manifest_name, expected_cache_length in expected_cache_lengths.items():
+        manifest_path = Path(__file__).parent / "manifests" / manifest_name
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        case = load_manifest(manifest_path)
+
+        assert manifest["precision"] == "fp16", manifest_name
+        assert manifest["build_args"] == {
+            "decoder_engine_layout": "dual_profile"
+        }, manifest_name
+        if expected_cache_length is None:
+            assert "max_cache_length" not in manifest, manifest_name
+            assert "max_cache_length" not in case.inputs, manifest_name
+        else:
+            assert manifest["max_cache_length"] == expected_cache_length, manifest_name
+            assert case.inputs["max_cache_length"] == expected_cache_length, manifest_name
+        assert case.metadata["precision"] == "fp16", manifest_name
+        assert case.metadata["reference_precision"] == "fp16", manifest_name
 
 
 def test_native_minitron_regression_exceeds_one_prefill_profile() -> None:

@@ -1015,6 +1015,8 @@ additional_profiles:
     inherit: llama.generate
   - model: minitron-4b-width
     inherit: llama.generate
+    baseline:
+      precision: fp16
   - model: nemotron-mini-4b
     inherit: nemotron.generate
   - model: nemotron-nano-4b

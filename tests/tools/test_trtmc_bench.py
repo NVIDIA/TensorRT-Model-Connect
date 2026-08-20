@@ -171,6 +171,19 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
         assert (case.operation, case.measurement.warmup, case.measurement.iterations) == expected
 
 
+def test_benchmark_uses_qualified_minitron_width_precision(tmp_path: Path) -> None:
+    model = ManifestCatalog().resolve("minitron-4b-width")
+    case = resolve_case(model, _bundle(tmp_path, model.bundle_name))
+
+    options = benchmark_builder._build_options(model, (case,))
+
+    assert model.precision == "fp16"
+    assert model.identity()["precision"] == "fp16"
+    assert options["precision"] == "fp16"
+    assert options["max_cache_length"] == 256
+    assert options["decoder_engine_layout"] == "dual_profile"
+
+
 def test_operation_registry_declares_supported_task_semantics() -> None:
     operations = {operation.name: operation for operation in registered_operations()}
     adapters = {adapter.task_strategy: adapter for adapter in registered_task_adapters()}

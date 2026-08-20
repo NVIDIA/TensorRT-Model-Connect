@@ -5,6 +5,11 @@
   "family": "llama",
   "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
+  "precision": "fp16",
+  "max_cache_length": 256,
+  "build_args": {
+    "decoder_engine_layout": "dual_profile"
+  },
   "trust_remote_code": false,
   "testcases": [
     {
@@ -13,10 +18,10 @@
       "ci_tier": "l0_only",
       "reference_family": "causal_base_continuation",
       "user_contract": "continuation_parity",
-      "reference_precision": "fp32",
+      "reference_precision": "fp16",
       "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
       "max_new_tokens": 8,
-      "notes": "PR L0 repro for Minitron width-pruned 4B. Uses the same checkpoint, llama_decoder_kv_cache runtime, runner, comparator, continuation artifact contract, and full cache budget with shorter decode budget."
+      "notes": "PR L0 repro for Minitron width-pruned 4B. Uses the same checkpoint, llama_decoder_kv_cache runtime, runner, comparator, continuation artifact contract, and a bounded cache budget with shorter decode budget."
     }
   ]
 }
