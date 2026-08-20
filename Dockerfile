@@ -194,6 +194,10 @@ FROM ci-common AS ci-runtime
 ARG TENSORRT_VERSION
 ARG TENSORRT_APT_VERSION
 
+ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
+ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
+ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       "libnvinfer-dev=${TENSORRT_APT_VERSION}" \
@@ -204,17 +208,22 @@ RUN apt-get update && \
       "libnvonnxparsers-dev=${TENSORRT_APT_VERSION}" \
       "libnvonnxparsers11=${TENSORRT_APT_VERSION}" && \
     rm -rf /var/lib/apt/lists/* && \
-    pip install --no-cache-dir "tensorrt==${TENSORRT_VERSION}"
-
-ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
-ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
-ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
+    pip install --no-cache-dir "tensorrt==${TENSORRT_VERSION}" && \
+    TENSORRT_MAJOR="${TENSORRT_VERSION%%.*}" && \
+    test -f "$TRT_LIB_DIR/libnvinfer.so.$TENSORRT_MAJOR" && \
+    test -f "$TRT_LIB_DIR/libnvonnxparser.so.$TENSORRT_MAJOR" && \
+    { test -e "$TRT_LIB_DIR/libnvinfer.so" || \
+      ln -s "libnvinfer.so.$TENSORRT_MAJOR" "$TRT_LIB_DIR/libnvinfer.so"; } && \
+    { test -e "$TRT_LIB_DIR/libnvonnxparser.so" || \
+      ln -s "libnvonnxparser.so.$TENSORRT_MAJOR" "$TRT_LIB_DIR/libnvonnxparser.so"; }
 
 RUN EXPECTED_TENSORRT_VERSION="$TENSORRT_VERSION" python3 -c \
-      'import ctypes, importlib.metadata as m, os; from pathlib import Path; expected = os.environ["EXPECTED_TENSORRT_VERSION"]; versions = tuple(map(int, expected.split("."))); assert all(m.version(name) == expected for name in ("tensorrt", "tensorrt_cu13", "tensorrt_cu13_bindings", "tensorrt_cu13_libs")); import tensorrt; assert tensorrt.__version__ == expected; include = Path("/usr/include/aarch64-linux-gnu"); header = (include / "NvInferVersion.h").read_text().splitlines(); assert (include / "NvOnnxParser.h").is_file(); assert all(f"#define TRT_{name}_ENTERPRISE {value}" in header for name, value in zip(("MAJOR", "MINOR", "PATCH", "BUILD"), versions)); major = versions[0]; libraries = Path(m.distribution("tensorrt_cu13_libs").locate_file("tensorrt_libs")); assert (libraries / f"libnvonnxparser.so.{major}").is_file(); assert next(libraries.glob("libnvinfer_builder_resource_sm110.so.*"), None) is not None; library = ctypes.CDLL(str(libraries / f"libnvinfer.so.{major}")); functions = tuple(getattr(library, f"getInferLib{name}Version") for name in ("Major", "Minor", "Patch", "Build")); [setattr(function, "restype", ctypes.c_int32) for function in functions]; assert tuple(function() for function in functions) == versions' && \
+      'import ctypes, importlib.metadata as m, os; from pathlib import Path; expected = os.environ["EXPECTED_TENSORRT_VERSION"]; versions = tuple(map(int, expected.split("."))); assert all(m.version(name) == expected for name in ("tensorrt", "tensorrt_cu13", "tensorrt_cu13_bindings", "tensorrt_cu13_libs")); import tensorrt; assert tensorrt.__version__ == expected; include = Path("/usr/include/aarch64-linux-gnu"); header = (include / "NvInferVersion.h").read_text().splitlines(); assert (include / "NvOnnxParser.h").is_file(); assert all(f"#define TRT_{name}_ENTERPRISE {value}" in header for name, value in zip(("MAJOR", "MINOR", "PATCH", "BUILD"), versions)); major = versions[0]; libraries = Path(m.distribution("tensorrt_cu13_libs").locate_file("tensorrt_libs")); versioned = tuple(libraries / f"{name}.so.{major}" for name in ("libnvinfer", "libnvonnxparser")); linker = tuple(libraries / f"{name}.so" for name in ("libnvinfer", "libnvonnxparser")); assert all(path.is_file() for path in versioned); assert all(path.is_symlink() and path.resolve() == target.resolve() for path, target in zip(linker, versioned)); assert next(libraries.glob("libnvinfer_builder_resource_sm110.so.*"), None) is not None; library = ctypes.CDLL(str(versioned[0])); functions = tuple(getattr(library, f"getInferLib{name}Version") for name in ("Major", "Minor", "Patch", "Build")); [setattr(function, "restype", ctypes.c_int32) for function in functions]; assert tuple(function() for function in functions) == versions' && \
     printf '#include <NvInferRuntime.h>\n#include <NvOnnxParser.h>\nint main() { return getInferLibVersion() > 0 ? 0 : 1; }\n' | \
-      c++ -x c++ - -I"$TRT_INC_DIR" -I/usr/local/cuda/include -L"$TRT_LIB_DIR" \
+      c++ -x c++ - -I"$TRT_INC_DIR" -I/usr/local/cuda/include \
         -Wl,-rpath,"$TRT_LIB_DIR" -Wl,--no-as-needed \
-        -lnvinfer -lnvonnxparser -o /tmp/trtmc-trt-link-probe && \
+        -x none \
+        "$TRT_LIB_DIR/libnvinfer.so" "$TRT_LIB_DIR/libnvonnxparser.so" \
+        -o /tmp/trtmc-trt-link-probe && \
     /tmp/trtmc-trt-link-probe && \
     rm -f /tmp/trtmc-trt-link-probe

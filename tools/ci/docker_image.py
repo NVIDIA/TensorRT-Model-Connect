@@ -113,7 +113,9 @@ class ImageRequirements:
                 "headers": ["NvInferVersion.h", "NvOnnxParser.h"],
                 "header_version": self.tensorrt,
                 "native_libraries": [
+                    "libnvinfer.so",
                     f"libnvinfer.so.{self.tensorrt_major}",
+                    "libnvonnxparser.so",
                     f"libnvonnxparser.so.{self.tensorrt_major}",
                     "libnvinfer_builder_resource_sm110.so.*",
                 ],
@@ -524,11 +526,18 @@ if configured_library_root.resolve() != library_root.resolve() or library_search
     raise SystemExit("TRT_LIB_DIR and LD_LIBRARY_PATH must select tensorrt_cu13_libs")
 required_files = (
     Path(os.environ["TRT_INC_DIR"]) / "NvOnnxParser.h",
+    library_root / "libnvinfer.so",
     library_root / f"libnvinfer.so.{major}",
+    library_root / "libnvonnxparser.so",
     library_root / f"libnvonnxparser.so.{major}",
 )
 if missing := [str(path) for path in required_files if not path.is_file()]:
     raise SystemExit("missing TensorRT overlay files: " + ", ".join(missing))
+for linker_name in ("libnvinfer.so", "libnvonnxparser.so"):
+    linker = library_root / linker_name
+    versioned = library_root / f"{linker_name}.{major}"
+    if not linker.is_symlink() or linker.resolve() != versioned.resolve():
+        raise SystemExit(f"invalid TensorRT linker symlink: {linker}")
 if next(library_root.glob("libnvinfer_builder_resource_sm110.so.*"), None) is None:
     raise SystemExit("missing TensorRT SM110 builder resource")
 print("TENSORRT_OVERLAY_FILES=present")

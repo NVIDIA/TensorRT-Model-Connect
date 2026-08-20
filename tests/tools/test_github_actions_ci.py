@@ -621,11 +621,16 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     ):
         assert f'"{distribution}"' in overlay
     assert 'pip install --no-cache-dir "tensorrt==${TENSORRT_VERSION}"' in overlay
+    assert 'ln -s "libnvinfer.so.$TENSORRT_MAJOR"' in overlay
+    assert 'ln -s "libnvonnxparser.so.$TENSORRT_MAJOR"' in overlay
     assert "NvInferVersion.h" in overlay
     assert "NvOnnxParser.h" in overlay
     assert "libnvonnxparser.so" in overlay
     assert "libnvinfer_builder_resource_sm110.so" in overlay
     assert "getInferLibVersion" in overlay
+    assert "-x none" in overlay
+    assert '"$TRT_LIB_DIR/libnvinfer.so" "$TRT_LIB_DIR/libnvonnxparser.so"' in overlay
+    assert "-lnvinfer -lnvonnxparser" not in overlay
     assert "#include <NvInferRuntime.h>" in overlay
     assert "-I/usr/local/cuda/include" in overlay
     assert "c++ -x c++" in overlay

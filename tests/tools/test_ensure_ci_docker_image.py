@@ -530,7 +530,9 @@ def test_source_contract_describes_parameterized_tensorrt_overlay(tmp_path: Path
         "headers": ["NvInferVersion.h", "NvOnnxParser.h"],
         "header_version": "11.2.1.2",
         "native_libraries": [
+            "libnvinfer.so",
             "libnvinfer.so.11",
+            "libnvonnxparser.so",
             "libnvonnxparser.so.11",
             "libnvinfer_builder_resource_sm110.so.*",
         ],
