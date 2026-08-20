@@ -122,6 +122,99 @@ def _gelu_fc_mlp(
     return fc2
 
 
+def _refine_topk_logits_fp32(
+    network: trt.INetworkDefinition,
+    logits: trt.ITensor,
+    last_hidden: trt.ITensor,
+    *,
+    hidden: int,
+    out_vocab: int,
+    lm_head_weight: np.ndarray,
+    lm_head_bias: np.ndarray | None,
+    top_k: int = 4,
+) -> trt.ITensor:
+    """Recompute the leading FP16 LM-head candidates in FP32.
+
+    The full-vocabulary projection remains an FP16 GEMM.  Re-evaluating a
+    handful of leading candidates avoids architecture-dependent greedy-choice
+    flips.  The fused plugin selects the candidates itself and reads only
+    their two weight rows, avoiding TensorRT TopK and Gather overhead.
+    """
+    candidate_count = min(top_k, out_vocab)
+    if candidate_count < 2:
+        return logits
+    # Store the refinement table as (vocab, hidden) so the fused kernel can
+    # read the two selected rows contiguously.
+    weight_rows = graph_ops.add_constant(
+        network,
+        (out_vocab, hidden),
+        np.asarray(lm_head_weight).reshape(hidden, out_vocab).T,
+        dtype=np.float32,
+    )
+    bias_values = (
+        lm_head_bias
+        if lm_head_bias is not None
+        else np.zeros(out_vocab, dtype=np.float32)
+    )
+    bias = graph_ops.add_constant(
+        network, (out_vocab,), bias_values, dtype=np.float32)
+
+    trt_compat.load_native_backend_plugins()
+    creator = trt_compat.get_plugin_creator("Top4LogitsRefinement", "1")
+    if creator is not None:
+        plugin = creator.create_plugin(
+            "top4_logits_refinement", trt.PluginFieldCollection([]))
+        if plugin is None:
+            raise RuntimeError("Top4LogitsRefinement plugin creation failed")
+        layer = network.add_plugin_v2(
+            [logits, last_hidden, weight_rows, bias], plugin)
+        return layer.get_output(0)
+
+    # Portable fallback for builders compiled without the fused CUDA plugin.
+    candidates = network.add_topk(
+        logits, trt.TopKOperation.MAX, candidate_count, 1 << 1)
+    candidate_indices = candidates.get_output(1)  # (1, K), int32
+    flat_indices_layer = network.add_shuffle(candidate_indices)
+    flat_indices_layer.reshape_dims = (candidate_count,)
+    flat_indices = flat_indices_layer.get_output(0)
+    selected_weights = network.add_gather(
+        weight_rows, flat_indices, 0).get_output(0)
+
+    hidden_fp32 = network.add_cast(last_hidden, trt.float32).get_output(0)
+    products = network.add_elementwise(
+        selected_weights,
+        hidden_fp32,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    refined = network.add_reduce(
+        products,
+        trt.ReduceOperation.SUM,
+        1 << 1,
+        False,
+    ).get_output(0)
+    refined_row = network.add_shuffle(refined)
+    refined_row.reshape_dims = (1, candidate_count)
+    refined_logits = refined_row.get_output(0)
+
+    selected_bias = network.add_gather(
+        bias, flat_indices, 0).get_output(0)
+    refined_logits = network.add_elementwise(
+        refined, selected_bias,
+        trt.ElementWiseOperation.SUM).get_output(0)
+    refined_row = network.add_shuffle(refined_logits)
+    refined_row.reshape_dims = (1, candidate_count)
+    refined_logits = refined_row.get_output(0)
+
+    scatter = network.add_scatter(
+        logits,
+        candidate_indices,
+        refined_logits,
+        trt.ScatterMode.ELEMENT,
+    )
+    scatter.axis = 1
+    return scatter.get_output(0)
+
+
 # ---------------------------------------------------------------------------
 # Config guard.
 # ---------------------------------------------------------------------------
@@ -600,27 +693,32 @@ def build_dual_profile_decoder_engine(
 
     out_vocab = (weights["w_out"].shape[1]
                  if isinstance(weights["w_out"], np.ndarray) else vocab)
-    lm_head_dtype = work_np_dtype
-    # Phi-3 FP16 MMLU decisions can sit one ULP apart. Preserve the fast
-    # batched prefill graph while preventing the final vocab projection from
-    # flipping those narrow greedy choices relative to the FP16 HF reference.
-    if precision == "fp16" and str(config.model_type).lower() == "phi3":
-        last_hidden = network.add_cast(last_hidden, trt.float32).get_output(0)
-        lm_head_dtype = np.float32
+    # Keep the full-vocabulary projection in the configured model precision.
+    # The public logits tensor remains FP32 through the output cast below.
     logits = graph_ops.add_matmul_rhs_constant(
         network, last_hidden, hidden, out_vocab, weights["w_out"],
-        dtype=lm_head_dtype)
+        dtype=work_np_dtype)
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, lm_bias, dtype=lm_head_dtype)
+            network, logits, out_vocab, lm_bias, dtype=work_np_dtype)
     else:
-        zero_bias = np.zeros(out_vocab, dtype=lm_head_dtype)
+        zero_bias = np.zeros(out_vocab, dtype=work_np_dtype)
         logits = graph_ops.add_bias_sum(
-            network, logits, out_vocab, zero_bias, dtype=lm_head_dtype)
+            network, logits, out_vocab, zero_bias, dtype=work_np_dtype)
 
     if work_trt_dtype != trt.float32:
         logits = network.add_cast(logits, trt.float32).get_output(0)
+    if precision == "fp16" and str(config.model_type).lower() == "phi3":
+        logits = _refine_topk_logits_fp32(
+            network,
+            logits,
+            last_hidden,
+            hidden=hidden,
+            out_vocab=out_vocab,
+            lm_head_weight=weights["w_out"],
+            lm_head_bias=lm_bias,
+        )
     logits.name = "logits"
     network.mark_output(logits)
 

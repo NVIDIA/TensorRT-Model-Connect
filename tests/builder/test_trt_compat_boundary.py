@@ -170,6 +170,38 @@ def test_trt_compat_proxy_wraps_version_sensitive_builder_calls(monkeypatch):
     ]
 
 
+def test_get_plugin_creator_uses_trt11_registry_api(monkeypatch):
+    creator = object()
+    registry = types.SimpleNamespace(
+        get_creator=lambda name, version, namespace: (
+            creator if (name, version, namespace) == ("Plugin", "1", "") else None
+        )
+    )
+    monkeypatch.setattr(
+        trt_compat,
+        "get_trt",
+        lambda: types.SimpleNamespace(get_plugin_registry=lambda: registry),
+    )
+
+    assert trt_compat.get_plugin_creator("Plugin", "1") is creator
+
+
+def test_get_plugin_creator_falls_back_to_trt10_registry_api(monkeypatch):
+    creator = object()
+    registry = types.SimpleNamespace(
+        get_plugin_creator=lambda name, version, namespace: (
+            creator if (name, version, namespace) == ("Plugin", "1", "") else None
+        )
+    )
+    monkeypatch.setattr(
+        trt_compat,
+        "get_trt",
+        lambda: types.SimpleNamespace(get_plugin_registry=lambda: registry),
+    )
+
+    assert trt_compat.get_plugin_creator("Plugin", "1") is creator
+
+
 def test_trt_compat_applies_builder_env_and_persists_timing_cache(monkeypatch, tmp_path):
     calls: list[tuple] = []
     cache_path = tmp_path / "trt.cache"

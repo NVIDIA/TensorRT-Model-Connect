@@ -565,6 +565,12 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
     src/runtime/backend/trt_module_impl.cpp
     src/runtime/backend/trt_backend.cpp
   )
+  if(CMAKE_CUDA_COMPILER)
+    target_sources(trtmc_backend_trt PRIVATE
+      src/plugins/top4_logits_refinement_plugin.cpp
+      src/plugins/top4_logits_refinement_kernel.cu
+    )
+  endif()
   target_include_directories(trtmc_backend_trt
     PRIVATE
       ${PROJECT_SOURCE_DIR}/include

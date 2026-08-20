@@ -207,6 +207,19 @@ def load_native_backend_plugins() -> None:
     raise RuntimeError("Cannot find the packaged TensorRT backend plugin library")
 
 
+def get_plugin_creator(name: str, version: str, namespace: str = "") -> Any | None:
+    """Resolve a plugin creator across TensorRT 10 and 11 registry APIs."""
+
+    registry = get_trt().get_plugin_registry()
+    get_creator = getattr(registry, "get_creator", None)
+    if callable(get_creator):
+        return get_creator(name, version, namespace)
+    get_plugin_creator = getattr(registry, "get_plugin_creator", None)
+    if callable(get_plugin_creator):
+        return get_plugin_creator(name, version, namespace)
+    return None
+
+
 def add_matrix_multiply(
     network: Any,
     lhs: Any,
