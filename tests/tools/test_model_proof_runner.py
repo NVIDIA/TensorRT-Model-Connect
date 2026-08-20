@@ -613,6 +613,31 @@ def test_dinov3_premerge_uses_public_mirror_and_nightly_keeps_officials(
     assert all(case["ci_tier"] == "nightly_only" for case in nightly["e2e_cases"])
 
 
+def test_sam2_nightly_model_proof_uses_the_public_core_case(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "sam2", "nightly")
+
+    assert [case["name"] for case in selection["e2e_cases"]] == [
+        "sam2-public-core-l0"
+    ]
+    assert selection["e2e_cases"][0]["ci_tier"] == "l0_only"
+
+
+def test_model_proof_rejects_an_empty_exclusion_reason(tmp_path: Path) -> None:
+    def invalidate_reason(source: Path, _projection: dict[str, object]) -> None:
+        manifest = source / "tests/e2e/models/sam2/manifests/sam2-l4-local.json"
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["model_proof_exclusion_reason"] = " "
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CiError, match="must be a nonempty string"):
+        _run_test_selection(
+            tmp_path,
+            "sam2",
+            "nightly",
+            projection_setup=invalidate_reason,
+        )
+
+
 @pytest.mark.parametrize(
     ("family", "smoke_case", "regression_case"),
     (

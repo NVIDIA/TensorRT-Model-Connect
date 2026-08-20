@@ -816,6 +816,17 @@ def _result(
     }
 
 
+def _model_proof_excluded(payload: dict[str, object], path: str) -> bool:
+    if "model_proof_exclusion_reason" not in payload:
+        return False
+    reason = payload["model_proof_exclusion_reason"]
+    if not isinstance(reason, str) or not reason.strip():
+        raise ModelCIError(
+            f"model_proof_exclusion_reason must be a nonempty string: {path}"
+        )
+    return True
+
+
 def _scheduled_models(
     repo_root: Path,
     catalog: OwnershipCatalog,
@@ -870,6 +881,7 @@ def _scheduled_models(
                     raise ModelCIError(f"invalid E2E manifest JSON: {entry.path}") from exc
                 if manifest.get("skip_reason") or manifest.get("skip"):
                     continue
+                manifest_excluded = _model_proof_excluded(manifest, entry.path)
                 testcases = manifest.get("testcases", [])
                 if not isinstance(testcases, list):
                     continue
@@ -877,6 +889,9 @@ def _scheduled_models(
                     if not isinstance(testcase, dict):
                         continue
                     if testcase.get("skip_reason") or testcase.get("skip"):
+                        continue
+                    testcase_excluded = _model_proof_excluded(testcase, entry.path)
+                    if manifest_excluded or testcase_excluded:
                         continue
                     name = str(testcase.get("name") or "")
                     if not name:

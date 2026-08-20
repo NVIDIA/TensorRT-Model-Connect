@@ -187,6 +187,17 @@ class ModelProofSelector:
             tests.append(fields[0])
         return tests
 
+    @staticmethod
+    def _model_proof_excluded(data: dict[str, object], path: Path) -> bool:
+        if "model_proof_exclusion_reason" not in data:
+            return False
+        reason = data["model_proof_exclusion_reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise CiError(
+                f"model_proof_exclusion_reason must be a nonempty string: {path}"
+            )
+        return True
+
     def _reference_cache(
         self, owner: dict[str, object], family: str, owner_manifest: Path
     ) -> dict[str, str] | None:
@@ -208,6 +219,7 @@ class ModelProofSelector:
             data = json.loads(path.read_text(encoding="utf-8"))
             if data.get("skip_reason") or data.get("skip"):
                 continue
+            manifest_excluded = self._model_proof_excluded(data, path)
             resource = str(data.get("e2e_parallel_resource") or "shared")
             if resource not in {"shared", "exclusive_gpu"}:
                 raise CiError(f"E2E manifest has invalid e2e_parallel_resource: {path}")
@@ -242,6 +254,9 @@ class ModelProofSelector:
                         f"{path}"
                     )
                 if testcase.get("skip_reason") or testcase.get("skip"):
+                    continue
+                testcase_excluded = self._model_proof_excluded(testcase, path)
+                if manifest_excluded or testcase_excluded:
                     continue
                 name = str(testcase.get("name") or "")
                 if not name:

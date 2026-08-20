@@ -73,6 +73,9 @@ def test_l0_manifest_is_threshold_free_and_keeps_nightly_separate() -> None:
     assert testcase["oracle_level"] == "L4_invariants"
     assert not requires_threshold_sidecar({**l0, **testcase})
     assert nightly["ci_tier"] == "nightly_only"
+    assert "externally provisioned local L4 bundle" in nightly[
+        "model_proof_exclusion_reason"
+    ]
     assert nightly["testcases"][0]["test_category"] == "regression"
 
 
