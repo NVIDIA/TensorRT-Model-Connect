@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import graph_ops as _graph_ops
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -30,6 +31,7 @@ from .checkpoint_mapper import (
 from ...parallel_config import normalize_parallel_config
 from .standard_decoder_builder import build_standard_decoder_engine
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+from .model import build as _build_model_bundle
 
 
 class GPT2Plugin:
@@ -205,3 +207,5 @@ class GPT2Plugin:
 
 
 plugin = GPT2Plugin()
+plugin.build = _build_model_bundle
+plugin.graph_ops = _graph_ops

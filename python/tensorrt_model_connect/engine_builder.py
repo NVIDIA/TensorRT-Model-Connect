@@ -934,11 +934,39 @@ def build_bundle(
             low-VRAM single-engine/multi-profile layout.
         verbose: Print detailed logs.
     """
+    model_options = dict(locals())
+    model_options.pop("model_dir")
+    model_options.pop("output_path")
+
     if decoder_engine_layout not in ("split", "dual_profile"):
         raise ValueError(
             "decoder_engine_layout must be 'split' or 'dual_profile', "
             f"got {decoder_engine_layout!r}")
     _setup_trt_import(rtx)
+    model_dir_path = Path(model_dir)
+    diffusion_entrypoint = _resolve_diffusion_entrypoint(model_dir_path)
+    if diffusion_entrypoint is not None:
+        _, selected_plugin = diffusion_entrypoint
+    else:
+        selected_plugin = find_plugin(ModelConfig.from_dir(model_dir_path))
+    declared_build = (
+        inspect.getattr_static(selected_plugin, "build", None)
+        if selected_plugin is not None
+        else None
+    )
+    if declared_build is not None:
+        family_build = getattr(selected_plugin, "build")
+        if not callable(family_build):
+            raise TypeError(
+                f"Family {selected_plugin.name} build attribute is not callable"
+            )
+        family_build(
+            str(model_dir_path),
+            output_path,
+            options=model_options,
+        )
+        return
+
     parallel = normalize_parallel_config(parallel_config)
     try:
         print(
@@ -950,7 +978,6 @@ def build_bundle(
             "TensorRT Python bindings are required for raw TRT builds. "
             "Install a matching tensorrt package in the active Python environment."
         ) from exc
-    model_dir_path = Path(model_dir)
     t0 = time.monotonic()
     build_timing = _new_build_timing(build_timing_path)
     build_timing["model_dir"] = str(model_dir_path)

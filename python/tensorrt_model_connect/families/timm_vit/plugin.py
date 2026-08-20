@@ -479,3 +479,5 @@ class TimmVitPlugin:
 
 
 plugin = TimmVitPlugin()
+plugin.build = graph_ops.build
+plugin.graph_ops = graph_ops
