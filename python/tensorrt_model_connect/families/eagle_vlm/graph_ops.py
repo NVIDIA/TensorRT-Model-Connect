@@ -612,32 +612,39 @@ def _repeat_kv_heads_4d(
         raise ValueError(f"num_heads={num_heads} must be divisible by num_kv_heads={num_kv_heads}")
 
     repeat = num_heads // num_kv_heads
-    if num_kv_heads == 1:
-        concat = network.add_concatenation([x_4d] * repeat)
-        concat.axis = 1
-        return concat.get_output(0)
-
     x_shape = network.add_shape(x_4d).get_output(0)
     batch = network.add_slice(x_shape, start=(0,), shape=(1,), stride=(1,))
     one = add_constant(network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
     seq = network.add_slice(x_shape, start=(2,), shape=(1,), stride=(1,))
+    kv_heads = add_constant(
+        network, (1,), np.array([num_kv_heads], dtype=np.int64), dtype=np.int64)
     dim = add_constant(network, (1,), np.array([head_dim], dtype=np.int64), dtype=np.int64)
-    slice_shape = network.add_concatenation(
-        [batch.get_output(0), one, seq.get_output(0), dim]
+    expanded_shape = network.add_concatenation(
+        [batch.get_output(0), kv_heads, one, seq.get_output(0), dim]
     )
-    slice_shape.axis = 0
+    expanded_shape.axis = 0
+    expanded = network.add_shuffle(x_4d)
+    expanded.set_input(1, expanded_shape.get_output(0))
 
-    repeated = []
-    for head_idx in range(num_kv_heads):
-        head_slice = network.add_slice(
-            x_4d, start=(0, head_idx, 0, 0), shape=(1, 1, 1, head_dim), stride=(1, 1, 1, 1)
-        )
-        head_slice.set_input(2, slice_shape.get_output(0))
-        repeated.extend([head_slice.get_output(0)] * repeat)
+    repeats = add_constant(
+        network,
+        (1, 1, repeat, 1, 1),
+        np.zeros((1, 1, repeat, 1, 1), dtype=np.float32),
+        dtype=np.float32,
+    )
+    repeats = _cast_back_to_trt_dtype(network, repeats, x_4d.dtype)
+    tiled = network.add_elementwise(
+        expanded.get_output(0), repeats, trt.ElementWiseOperation.SUM)
 
-    concat = network.add_concatenation(repeated)
-    concat.axis = 1
-    return concat.get_output(0)
+    heads = add_constant(
+        network, (1,), np.array([num_heads], dtype=np.int64), dtype=np.int64)
+    output_shape = network.add_concatenation(
+        [batch.get_output(0), heads, seq.get_output(0), dim]
+    )
+    output_shape.axis = 0
+    output = network.add_shuffle(tiled.get_output(0))
+    output.set_input(1, output_shape.get_output(0))
+    return output.get_output(0)
 
 
 def _add_decomposed_attention_core(

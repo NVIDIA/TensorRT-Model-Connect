@@ -9,7 +9,7 @@ Shared test code is limited to filesystem and serialization helpers.
 
 from __future__ import annotations
 
-
+import importlib
 
 from tests.builder.family_plugin_test_support import (
     ModelConfig,
@@ -142,6 +142,33 @@ class TestEagleVLMPlugin:
         assert vl_cfg["preprocessor_type"] == "simple_chw"
         # After 2x2 pixel_shuffle merge: (384//14//2)^2 = 13^2 = 169
         assert vl_cfg["num_vision_tokens"] == (384 // 14 // 2) ** 2
+
+    def test_reranker_does_not_build_unreachable_vision_engine(
+        self, monkeypatch, tmp_path,
+    ):
+        plugin_module = importlib.import_module(
+            "tensorrt_model_connect.families.eagle_vlm.plugin")
+
+        config = {
+            "model_type": "llama_nemotron_vl_rerank",
+            "is_reranker": True,
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": self.LAYERS,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+            "vision_config": {"hidden_size": 64},
+        }
+        _write_config(tmp_path, config)
+        cfg = ModelConfig.from_dir(tmp_path)
+
+        def fail_if_loaded(*_args, **_kwargs):
+            raise AssertionError("reranking must not load vision weights")
+
+        monkeypatch.setattr(
+            plugin_module, "_load_vision_weights", fail_if_loaded)
+
+        assert plugin_module.plugin.build_vision_engine(str(tmp_path), cfg, {}) is None
 
     def test_bundle_config_overrides_embedding(self, tmp_path):
         """Bundle config overrides: embedding mode."""

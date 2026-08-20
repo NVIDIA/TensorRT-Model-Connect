@@ -90,7 +90,7 @@ def test_eagle_vlm_prefers_rope_parameters_over_legacy_alias() -> None:
     assert plugin_module._resolve_rope_scaling(Config())["factor"] == 8.0
 
 
-def test_eagle_vlm_fp16_reranker_keeps_residual_and_norms_in_fp32(
+def test_eagle_vlm_fp16_reranker_keeps_transformer_compute_in_fp32(
     monkeypatch,
 ) -> None:
     plugin_module = importlib.import_module(
@@ -205,11 +205,11 @@ def test_eagle_vlm_fp16_reranker_keeps_residual_and_norms_in_fp32(
         "dtype": np.float32,
     }
     assert norm_calls == [fp32_call] * (2 * num_layers + 1)
-    assert matmul_dtypes == [np.float16] * (7 * num_layers)
-    assert matmul_input_dtypes == [trt.float16] * (7 * num_layers)
-    assert matmul_fp32_compute == ([True] * 3 + [False] * 4) * num_layers
+    assert matmul_dtypes == [np.float32] * (7 * num_layers)
+    assert matmul_input_dtypes == [trt.float32] * (7 * num_layers)
+    assert matmul_fp32_compute == [False] * (7 * num_layers)
     assert attention_fp32 == [True] * num_layers
-    assert mlp_dtypes == [np.float16] * num_layers
+    assert mlp_dtypes == [np.float32] * num_layers
 
 
 def test_eagle_vlm_reranker_executes_actual_sequence_length() -> None:

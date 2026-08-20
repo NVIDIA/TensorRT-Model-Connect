@@ -521,9 +521,10 @@ class TestAddAttentionCore:
         np.testing.assert_allclose(out.astype(np.float32), ref, atol=1e-3)
 
     @requires_trt
-    def test_batched_gqa_preserves_each_batch_row(self):
+    @pytest.mark.parametrize("num_kv_heads", [1, 2])
+    def test_batched_gqa_preserves_each_batch_row(self, num_kv_heads):
         """Decomposed GQA repeats KV heads without collapsing batch."""
-        batch, sequence, num_heads, num_kv_heads, head_dim = 2, 3, 4, 2, 16
+        batch, sequence, num_heads, head_dim = 2, 3, 4, 16
         rng = np.random.default_rng(31)
         q = rng.standard_normal(
             (batch, sequence, num_heads * head_dim)).astype(np.float32)

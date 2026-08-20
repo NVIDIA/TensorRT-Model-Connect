@@ -116,6 +116,11 @@ class EagleVLMPlugin:
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
+        # The reranking runtime accepts only query/document tokens and the
+        # text engine exposes no image inputs. Do not build or package an
+        # unreachable vision engine for this mode.
+        if _is_reranker(config):
+            return None
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
             return None
@@ -425,11 +430,11 @@ def _build_eagle_engine(
             trt.ElementWiseOperation.SUM)
         hidden_state = merged.get_output(0)
 
-    # Preserve the reranker's residual stream, norms, attention, and Q/K/V
-    # outputs in FP32. Output and MLP projections remain FP16 because they
-    # dominate latency and are less directly coupled to attention ordering.
-    stable_reranker_residual = is_reranker and work_np_dtype != np.float32
-    if stable_reranker_residual and hidden_state.dtype != trt.float32:
+    # Preserve the reranker's transformer computation in FP32. Ranking can
+    # hinge on score margins below FP16 resolution, so an FP16 projection in
+    # any layer can change the ordering even when task top-1 remains correct.
+    reranker_fp32_compute = is_reranker and work_np_dtype != np.float32
+    if reranker_fp32_compute and hidden_state.dtype != trt.float32:
         hidden_state = network.add_cast(hidden_state, trt.float32).get_output(0)
 
     # --- RoPE tables ---
@@ -464,7 +469,7 @@ def _build_eagle_engine(
         network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
     stable_cos_half_tensor = cos_half_tensor
     stable_sin_half_tensor = sin_half_tensor
-    if stable_reranker_residual:
+    if reranker_fp32_compute:
         stable_cos_half_tensor = graph_ops.add_constant(
             network, cos_half_np.shape, cos_half_np, dtype=np.float32)
         stable_sin_half_tensor = graph_ops.add_constant(
@@ -487,7 +492,7 @@ def _build_eagle_engine(
     else:
         rope_position_ids = all_rope_position_ids
     norm_scalar_shape = (1, 1, 1) if is_reranker else (1, 1)
-    norm_np_dtype = np.float32 if stable_reranker_residual else work_np_dtype
+    norm_np_dtype = np.float32 if reranker_fp32_compute else work_np_dtype
     eps_tensor = graph_ops.add_constant(
         network, norm_scalar_shape, np.array([config.rms_norm_eps], dtype=norm_np_dtype),
         dtype=norm_np_dtype)
@@ -547,21 +552,17 @@ def _build_eagle_engine(
             network, hidden_state, hidden,
             weights[f"{prefix}.input_norm"],
             None, eps_tensor, "rmsnorm", dtype=norm_np_dtype)
-        compute_norm1 = norm1
-        if stable_reranker_residual and compute_norm1.dtype != work_trt_dtype:
-            compute_norm1 = network.add_cast(
-                compute_norm1, work_trt_dtype).get_output(0)
 
         # Self-attention: Q, K, V projections
         q = graph_ops.add_matmul_rhs_constant(
-            network, compute_norm1, hidden, attention_size, weights[f"{prefix}.w_q"],
-            dtype=work_np_dtype, fp32_compute=stable_reranker_residual)
+            network, norm1, hidden, attention_size, weights[f"{prefix}.w_q"],
+            dtype=norm_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
-            network, compute_norm1, hidden, kv_attention_size, weights[f"{prefix}.w_k"],
-            dtype=work_np_dtype, fp32_compute=stable_reranker_residual)
+            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_k"],
+            dtype=norm_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
-            network, compute_norm1, hidden, kv_attention_size, weights[f"{prefix}.w_v"],
-            dtype=work_np_dtype, fp32_compute=stable_reranker_residual)
+            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_v"],
+            dtype=norm_np_dtype)
 
         q_rope = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
@@ -579,18 +580,12 @@ def _build_eagle_engine(
             q_seq=runtime_sequence_length, kv_seq=runtime_sequence_length,
             mask=pad_mask_4d,
             scale=attn_scale,
-            fp32_accumulation=stable_reranker_residual)
+            fp32_accumulation=reranker_fp32_compute)
 
         # Output projection
-        compute_attn_concat = attn_concat
-        if stable_reranker_residual and compute_attn_concat.dtype != work_trt_dtype:
-            compute_attn_concat = network.add_cast(
-                compute_attn_concat, work_trt_dtype).get_output(0)
         proj_out = graph_ops.add_matmul_rhs_constant(
-            network, compute_attn_concat, attention_size, hidden,
-            weights[f"{prefix}.w_o"], dtype=work_np_dtype)
-        if stable_reranker_residual and proj_out.dtype != trt.float32:
-            proj_out = network.add_cast(proj_out, trt.float32).get_output(0)
+            network, attn_concat, attention_size, hidden,
+            weights[f"{prefix}.w_o"], dtype=norm_np_dtype)
 
         # Residual
         residual1 = network.add_elementwise(
@@ -602,17 +597,10 @@ def _build_eagle_engine(
             network, residual1.get_output(0), hidden,
             weights[f"{prefix}.post_attn_norm"],
             None, eps_tensor, "rmsnorm", dtype=norm_np_dtype)
-        compute_norm2 = norm2
-        if stable_reranker_residual and compute_norm2.dtype != work_trt_dtype:
-            compute_norm2 = network.add_cast(
-                compute_norm2, work_trt_dtype).get_output(0)
-
         mlp_out = graph_blocks.add_swiglu_mlp(
-            network, compute_norm2, weights=weights, prefix=prefix,
+            network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden, mlp_size=mlp_size,
-            dtype=work_np_dtype)
-        if stable_reranker_residual and mlp_out.dtype != trt.float32:
-            mlp_out = network.add_cast(mlp_out, trt.float32).get_output(0)
+            dtype=norm_np_dtype)
 
         # Final residual
         residual2 = network.add_elementwise(
