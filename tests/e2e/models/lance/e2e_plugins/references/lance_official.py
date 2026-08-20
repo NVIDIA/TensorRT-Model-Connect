@@ -31,18 +31,6 @@ _IMAGE_REFERENCE_COMPAT = Path(__file__).with_name("lance_image_compat")
 _IMAGE_REFERENCE_ATTENTION_COMPAT = Path(__file__).with_name(
     "lance_image_attention_compat"
 )
-_ATTENTION_BACKEND_ENV = "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"
-_ATTENTION_BACKENDS = frozenset({"flash_attn", "torch_sdpa"})
-
-
-def _attention_backend(environment: dict[str, str]) -> str:
-    attention_backend = environment.get(_ATTENTION_BACKEND_ENV, "flash_attn").strip()
-    if attention_backend not in _ATTENTION_BACKENDS:
-        raise RuntimeError(
-            "unsupported Lance reference attention backend "
-            f"{attention_backend!r}; expected one of {sorted(_ATTENTION_BACKENDS)}"
-        )
-    return attention_backend
 
 
 def _image_reference_environment(
@@ -51,15 +39,13 @@ def _image_reference_environment(
     """Expose only the optional imports needed by upstream's image path."""
     environment = dict(os.environ if base is None else base)
     existing = environment.get("PYTHONPATH", "").strip()
-    attention_backend = _attention_backend(environment)
-    attention_compat = (
-        str(_IMAGE_REFERENCE_ATTENTION_COMPAT)
-        if attention_backend == "torch_sdpa"
-        else ""
-    )
     environment["PYTHONPATH"] = os.pathsep.join(
         value
-        for value in (attention_compat, str(_IMAGE_REFERENCE_COMPAT), existing)
+        for value in (
+            str(_IMAGE_REFERENCE_ATTENTION_COMPAT),
+            str(_IMAGE_REFERENCE_COMPAT),
+            existing,
+        )
         if value
     )
     return environment
@@ -68,18 +54,8 @@ def _image_reference_environment(
 def _image_reference_vit_path(
     artifact_dir: Path,
     vit_path: Path,
-    *,
-    attention_backend: str,
 ) -> Path:
     """Create a run-owned VIT view that selects SDPA without editing HF cache."""
-    if attention_backend == "flash_attn":
-        return vit_path
-    if attention_backend != "torch_sdpa":
-        raise RuntimeError(
-            "unsupported Lance reference attention backend "
-            f"{attention_backend!r}; expected one of {sorted(_ATTENTION_BACKENDS)}"
-        )
-
     source_config = vit_path / "config.json"
     try:
         config = json.loads(source_config.read_text(encoding="utf-8"))
@@ -268,7 +244,6 @@ class LanceOfficialReference:
         reference_vit_path = _image_reference_vit_path(
             artifact_dir,
             vit_path,
-            attention_backend=_attention_backend(environment),
         )
         request_path.write_text(
             json.dumps(

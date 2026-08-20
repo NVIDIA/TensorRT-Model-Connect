@@ -12,8 +12,6 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
-import pytest
-
 from tests.e2e.models.lance.e2e_plugins.references import lance_official
 
 
@@ -78,10 +76,8 @@ def test_lance_image_reference_provides_decord_import_without_video_support() ->
     assert environment["PYTHONPATH"].endswith(":/existing/python/path")
 
 
-def test_lance_image_reference_adds_explicit_sdpa_fallback() -> None:
-    environment = lance_official._image_reference_environment(
-        {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"}
-    )
+def test_lance_image_reference_uses_sdpa_fallback() -> None:
+    environment = lance_official._image_reference_environment({})
 
     assert environment["PYTHONPATH"].split(os.pathsep)[:2] == [
         str(lance_official._IMAGE_REFERENCE_ATTENTION_COMPAT),
@@ -103,12 +99,7 @@ def test_lance_sdpa_fallback_is_importable_without_distribution_metadata() -> No
                 "else:\n raise AssertionError('fallback must not publish metadata')"
             ),
         ],
-        env=lance_official._image_reference_environment(
-            {
-                **os.environ,
-                "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa",
-            }
-        ),
+        env=lance_official._image_reference_environment(dict(os.environ)),
         capture_output=True,
         text=True,
     )
@@ -137,7 +128,6 @@ def test_lance_sdpa_vit_overlay_preserves_checkpoint_and_changes_only_config(
     overlay = lance_official._image_reference_vit_path(
         tmp_path / "artifacts",
         vit_path,
-        attention_backend="torch_sdpa",
     )
 
     assert overlay != vit_path
@@ -150,39 +140,6 @@ def test_lance_sdpa_vit_overlay_preserves_checkpoint_and_changes_only_config(
     assert json.loads(config_path.read_text(encoding="utf-8"))[
         "_attn_implementation"
     ] == "flash_attention_2"
-
-
-def test_lance_native_flash_attention_uses_original_vit_checkpoint(
-    tmp_path: Path,
-) -> None:
-    vit_path = tmp_path / "Qwen2.5-VL-ViT"
-    vit_path.mkdir()
-
-    assert (
-        lance_official._image_reference_vit_path(
-            tmp_path / "artifacts",
-            vit_path,
-            attention_backend="flash_attn",
-        )
-        == vit_path
-    )
-
-
-def test_lance_image_reference_keeps_explicit_native_flash_attention() -> None:
-    environment = lance_official._image_reference_environment(
-        {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "flash_attn"}
-    )
-
-    assert str(lance_official._IMAGE_REFERENCE_ATTENTION_COMPAT) not in environment[
-        "PYTHONPATH"
-    ].split(os.pathsep)
-
-
-def test_lance_image_reference_rejects_unknown_attention_backend() -> None:
-    with pytest.raises(RuntimeError, match="unsupported Lance reference attention backend"):
-        lance_official._image_reference_environment(
-            {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "automatic"}
-        )
 
 
 def test_lance_image_reference_keeps_upstream_visual_generation_contract(
@@ -235,10 +192,6 @@ def test_lance_image_reference_keeps_upstream_visual_generation_contract(
         lambda *_args: str(artifact_dir),
     )
     monkeypatch.setattr(lance_official.subprocess, "run", run)
-    monkeypatch.setenv(
-        "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND",
-        "torch_sdpa",
-    )
     monkeypatch.setattr(
         lance_official,
         "save_full_stderr",

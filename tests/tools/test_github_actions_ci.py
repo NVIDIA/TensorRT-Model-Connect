@@ -559,22 +559,25 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
     assert '"no:cacheprovider"' in architecture_contract
 
 
-def test_source_tensorrt_install_contract_uses_the_official_public_release() -> None:
+def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert (
-        "ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3"
-        "@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541"
+        "ARG CUDA_IMAGE=nvidia/cuda:13.3.0-devel-ubuntu24.04"
+        "@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52"
         in dockerfile
     )
-    assert "FROM ${TENSORRT_IMAGE} AS ci-base" in dockerfile
-    assert "ARG TENSORRT_VERSION=11.1.0.106" in dockerfile
-    assert "#define TRT_MAJOR_ENTERPRISE 11" in dockerfile
-    assert "#define TRT_MINOR_ENTERPRISE 1" in dockerfile
-    assert "#define TRT_PATCH_ENTERPRISE 0" in dockerfile
-    assert "#define TRT_BUILD_ENTERPRISE 106" in dockerfile
+    assert dockerfile.count("ARG TENSORRT_VERSION=11.1.0.106") == 1
+    assert dockerfile.count("ARG TENSORRT_APT_VERSION=11.1.0.106-1+cuda13.3") == 1
+    assert "ARG TENSORRT_VERSION\n" in dockerfile
+    assert "ARG TENSORRT_APT_VERSION\n" in dockerfile
+    assert "RUN python3.12 -m venv $VIRTUAL_ENV" in dockerfile
+    assert "--system-site-packages" not in dockerfile
     assert "ENV TRT_ROOT=" not in dockerfile
     assert "ENV PIP_FIND_LINKS=" not in dockerfile
-    assert "ENV TRT_LIB_DIR=/usr/lib/aarch64-linux-gnu" in dockerfile
+    assert (
+        "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs"
+        in dockerfile
+    )
     assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
     assert "ghcr.io" not in dockerfile
     assert "TENSORRT_SDK_IMAGE" not in dockerfile
@@ -583,7 +586,49 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     from_lines = [
         line for line in dockerfile.splitlines() if line.startswith("FROM ")
     ]
-    assert from_lines[-1] == "FROM ci-base AS ci-runtime"
+    assert from_lines == [
+        "FROM ${CUDA_IMAGE} AS ci-common-base",
+        "FROM ci-common-base AS python-profile-builder",
+        "FROM ci-common-base AS ci-common",
+        "FROM ci-common AS ci-runtime",
+    ]
+
+    common = dockerfile.split("FROM ci-common-base AS ci-common", maxsplit=1)[1].split(
+        "FROM ci-common AS ci-runtime", maxsplit=1
+    )[0]
+    assert "COPY --from=python-profile-builder" in common
+    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in common
+    assert 'find_spec("tensorrt") is None' in common
+    assert "NvInferVersion.h" in common
+    assert "NvOnnxParser.h" in common
+
+    overlay = dockerfile.split("FROM ci-common AS ci-runtime", maxsplit=1)[1]
+    for package in (
+        "libnvinfer-dev",
+        "libnvinfer-headers-dev",
+        "libnvinfer-headers-plugin-dev",
+        "libnvinfer-safe-headers-dev",
+        "libnvinfer11",
+        "libnvonnxparsers-dev",
+        "libnvonnxparsers11",
+    ):
+        assert f'"{package}=${{TENSORRT_APT_VERSION}}"' in overlay
+    for distribution in (
+        "tensorrt",
+        "tensorrt_cu13",
+        "tensorrt_cu13_bindings",
+        "tensorrt_cu13_libs",
+    ):
+        assert f'"{distribution}"' in overlay
+    assert 'pip install --no-cache-dir "tensorrt==${TENSORRT_VERSION}"' in overlay
+    assert "NvInferVersion.h" in overlay
+    assert "NvOnnxParser.h" in overlay
+    assert "libnvonnxparser.so" in overlay
+    assert "libnvinfer_builder_resource_sm110.so" in overlay
+    assert "getInferLibVersion" in overlay
+    assert "#include <NvInferRuntime.h>" in overlay
+    assert "-I/usr/local/cuda/include" in overlay
+    assert "c++ -x c++" in overlay
 
     source_dockerfiles = {
         "aarch64": (REPO_ROOT / "Dockerfile.dev.aarch64").read_text(
@@ -636,6 +681,7 @@ def test_source_tensorrt_install_contract_uses_the_official_public_release() -> 
     assert '"$REPO_ROOT/Dockerfile"' in ci_docker_build
     assert "Dockerfile.dev.aarch64" not in ci_docker_build
     assert "Dockerfile.dev.x86" not in ci_docker_build
+    assert "--target" not in ci_docker_build
 
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert 'dynamic = ["version", "dependencies"]' in pyproject

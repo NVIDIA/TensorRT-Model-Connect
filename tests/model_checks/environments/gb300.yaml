@@ -4,9 +4,6 @@
 schema_version: trtmc.model-check-environment/v1
 id: gb300
 
-environment_variables:
-  TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND: torch_sdpa
-
 storage:
   root: ${TRTMC_CHECK_STORAGE_ROOT}
   results_root: ${TRTMC_CHECK_STORAGE_ROOT}/results

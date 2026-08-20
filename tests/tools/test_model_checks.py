@@ -480,19 +480,19 @@ def test_task_environment_exports_checked_in_environment_variables(
     tmp_path,
     monkeypatch,
 ):
-    monkeypatch.setenv("TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND", "ambient")
+    monkeypatch.setenv("TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF", "ambient")
 
     environment = model_checks._task_environment(
         {
             "storage": {"python_profiles_root": str(tmp_path / "profiles")},
             "environment_variables": {
-                "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"
+                "TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF": "disable"
             },
         }
     )
 
-    assert environment["TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"] == "torch_sdpa"
-    assert os.environ["TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"] == "ambient"
+    assert environment["TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF"] == "disable"
+    assert os.environ["TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF"] == "ambient"
 
 
 def test_task_environment_rejects_missing_executable_directory(tmp_path):
@@ -724,22 +724,21 @@ def test_l4t_environment_selects_qualified_tensorrt_libraries() -> None:
     [
         (
             "l4t-thor",
-            {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"},
+            {},
         ),
         (
             "gb300",
-            {"TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa"},
+            {},
         ),
         (
             "auto-thor",
             {
-                "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND": "torch_sdpa",
                 "TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF": "disable",
             },
         ),
     ],
 )
-def test_checked_in_environment_selects_lance_reference_attention_backend(
+def test_checked_in_environment_contains_only_platform_controls(
     platform,
     expected_environment,
 ) -> None:
@@ -748,7 +747,7 @@ def test_checked_in_environment_selects_lance_reference_attention_backend(
         "model-check environment",
     )
 
-    assert environment["environment_variables"] == expected_environment
+    assert environment.get("environment_variables", {}) == expected_environment
 
 
 def test_l4t_excludes_consolidated_not_compared_models() -> None:

@@ -3790,7 +3790,7 @@ def test_lance_image_only_decord_stub_rejects_video_use() -> None:
         modules["decord"].VideoReader("video.mp4")
 
 
-def test_lance_reference_loads_explicit_sdpa_attention_compat(
+def test_lance_reference_loads_sdpa_attention_compat(
     tmp_path: Path, monkeypatch
 ) -> None:
     runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
@@ -3800,13 +3800,28 @@ def test_lance_reference_loads_explicit_sdpa_attention_compat(
         "import flash_attn\nATTENTION = flash_attn.flash_attn_varlen_func.__module__\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND", "torch_sdpa")
     monkeypatch.delitem(sys.modules, "flash_attn", raising=False)
 
     upstream = runner["_load_upstream"](reference_repo)
 
     assert upstream.ATTENTION.endswith("flash_attn")
     assert "lance_image_attention_compat" in sys.modules["flash_attn"].__file__
+
+
+def test_lance_reference_selects_sdpa_in_a_run_owned_vit_view(tmp_path: Path) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
+    vit_path = tmp_path / "Qwen2.5-VL-ViT"
+    vit_path.mkdir()
+    config = vit_path / "config.json"
+    config.write_text('{"_attn_implementation": "flash_attention_2"}\n')
+    weights = vit_path / "vit.safetensors"
+    weights.write_bytes(b"weights")
+
+    overlay = runner["_sdpa_vit_path"](tmp_path / "run", vit_path)
+
+    assert json.loads((overlay / "config.json").read_text())["_attn_implementation"] == "sdpa"
+    assert (overlay / "vit.safetensors").resolve() == weights.resolve()
+    assert json.loads(config.read_text())["_attn_implementation"] == "flash_attention_2"
 
 
 def test_lance_git_revision_scopes_safe_directory(tmp_path: Path, monkeypatch) -> None:

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -12,7 +13,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tools.ci.docker_image import WorkflowImageLock
+import pytest
+
+from tools.ci.docker_image import CiError, DockerImageManager, WorkflowImageLock
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -21,6 +24,29 @@ DEFAULT_PROFILES = (
     "chronos,deepseek_ocr,elf_flow,elf_flow_reference,internlm,lance_reference,magpie_tts_reference,"
     "nemotron_h_reference,phi4_multimodal,reference_common,sana_wm_reference"
 )
+TENSORRT_VERSION = "11.1.0.106"
+TENSORRT_APT_VERSION = "11.1.0.106-1+cuda13.3"
+TENSORRT_DISTRIBUTIONS = {
+    name: TENSORRT_VERSION
+    for name in (
+        "tensorrt",
+        "tensorrt_cu13",
+        "tensorrt_cu13_bindings",
+        "tensorrt_cu13_libs",
+    )
+}
+TENSORRT_APT_PACKAGES = {
+    name: TENSORRT_APT_VERSION
+    for name in (
+        "libnvinfer-dev",
+        "libnvinfer-headers-dev",
+        "libnvinfer-headers-plugin-dev",
+        "libnvinfer-safe-headers-dev",
+        "libnvinfer11",
+        "libnvonnxparsers-dev",
+        "libnvonnxparsers11",
+    )
+}
 
 
 def _record_lock_open_modes(monkeypatch, lock_path: Path, *, lose_create_race=False) -> list[str]:
@@ -112,6 +138,11 @@ if [ "${1:-}" = "run" ]; then
   fi
   cat <<'EOF'
 TENSORRT_VERSION=11.1.0.106
+TENSORRT_PYTHON_DISTRIBUTIONS={"tensorrt":"11.1.0.106","tensorrt_cu13":"11.1.0.106","tensorrt_cu13_bindings":"11.1.0.106","tensorrt_cu13_libs":"11.1.0.106"}
+TENSORRT_APT_PACKAGES={"libnvinfer-dev":"11.1.0.106-1+cuda13.3","libnvinfer-headers-dev":"11.1.0.106-1+cuda13.3","libnvinfer-headers-plugin-dev":"11.1.0.106-1+cuda13.3","libnvinfer-safe-headers-dev":"11.1.0.106-1+cuda13.3","libnvinfer11":"11.1.0.106-1+cuda13.3","libnvonnxparsers-dev":"11.1.0.106-1+cuda13.3","libnvonnxparsers11":"11.1.0.106-1+cuda13.3"}
+TENSORRT_HEADER_VERSION=11.1.0.106
+TENSORRT_OVERLAY_FILES=present
+TENSORRT_NATIVE_VERSION=11.1.0.106
 MODELOPT_VERSION=0.44.0
 NLOHMANN_JSON_HEADER=present
 EOF
@@ -265,7 +296,9 @@ default_execution_profiles = ["reference|demo"]
     (demo_root / "verify.py").write_text("import demo_package\n", encoding="utf-8")
 
     (repo_root / "Dockerfile").write_text(
-        "ARG TENSORRT_VERSION=11.1.0.106\nARG MODELOPT_VERSION=0.44.0\n",
+        "ARG TENSORRT_VERSION=11.1.0.106\n"
+        "ARG TENSORRT_APT_VERSION=11.1.0.106-1+cuda13.3\n"
+        "ARG MODELOPT_VERSION=0.44.0\n",
         encoding="utf-8",
     )
     return repo_root, manifest, requirements
@@ -432,6 +465,185 @@ def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:
     assert "prebuilt Python profiles differ" in result.stdout
 
 
+def test_tensorrt_overlay_contract_reports_each_mismatch(tmp_path: Path) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    manager = DockerImageManager(repo_root)
+    requirements = manager._read_requirements()
+    actual = {
+        "TENSORRT_VERSION": TENSORRT_VERSION,
+        "TENSORRT_PYTHON_DISTRIBUTIONS": json.dumps(
+            TENSORRT_DISTRIBUTIONS, separators=(",", ":"), sort_keys=True
+        ),
+        "TENSORRT_APT_PACKAGES": json.dumps(
+            TENSORRT_APT_PACKAGES, separators=(",", ":"), sort_keys=True
+        ),
+        "TENSORRT_HEADER_VERSION": TENSORRT_VERSION,
+        "TENSORRT_OVERLAY_FILES": "present",
+        "TENSORRT_NATIVE_VERSION": TENSORRT_VERSION,
+        "MODELOPT_VERSION": "0.44.0",
+        "NLOHMANN_JSON_HEADER": "present",
+        "NEMO_PROMPT_RNNT": "available",
+        "PYTHON_PROFILES": "demo,reference_common",
+    }
+    mismatches = (
+        ("TENSORRT_PYTHON_DISTRIBUTIONS", "{}", "Python distribution versions"),
+        ("TENSORRT_APT_PACKAGES", "{}", "APT package versions"),
+        ("TENSORRT_HEADER_VERSION", "11.1.0.105", "C++ header version"),
+        ("TENSORRT_OVERLAY_FILES", "missing", "header or native library is missing"),
+        ("TENSORRT_NATIVE_VERSION", "11.1.0.105", "native runtime version"),
+    )
+
+    for key, wrong_value, reason in mismatches:
+        observed = {**actual, key: wrong_value}
+        assert any(reason in item for item in manager._version_mismatches(observed, requirements))
+
+
+def test_source_contract_describes_parameterized_tensorrt_overlay(tmp_path: Path) -> None:
+    __import__("tensorrt_model_connect.python_profiles")
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    manager = DockerImageManager(repo_root)
+
+    default_contract = manager.source_contract()
+    selected_json = manager.source_contract_json(
+        tensorrt_version="11.2.1.2",
+        tensorrt_apt_version="11.2.1.2-1+cuda13.3",
+    )
+    selected_contract = json.loads(selected_json)
+
+    assert selected_contract == manager.source_contract(
+        tensorrt_version="11.2.1.2",
+        tensorrt_apt_version="11.2.1.2-1+cuda13.3",
+    )
+    assert selected_contract["schema_version"] == 1
+    assert selected_contract["environment_contract_version"] == 1
+    assert (
+        selected_contract["common_input_fingerprint"]
+        == default_contract["common_input_fingerprint"]
+    )
+    assert selected_contract["input_fingerprint"] != default_contract["input_fingerprint"]
+    assert selected_contract["python_profiles"] == ["demo", "reference_common"]
+    assert selected_contract["tensorrt"] == {
+        "version": "11.2.1.2",
+        "apt_version": "11.2.1.2-1+cuda13.3",
+        "python_distributions": {name: "11.2.1.2" for name in TENSORRT_DISTRIBUTIONS},
+        "apt_packages": {name: "11.2.1.2-1+cuda13.3" for name in TENSORRT_APT_PACKAGES},
+        "headers": ["NvInferVersion.h", "NvOnnxParser.h"],
+        "header_version": "11.2.1.2",
+        "native_libraries": [
+            "libnvinfer.so.11",
+            "libnvonnxparser.so.11",
+            "libnvinfer_builder_resource_sm110.so.*",
+        ],
+        "native_library_distribution": "tensorrt_cu13_libs",
+        "native_runtime_version": "11.2.1.2",
+    }
+
+
+def test_source_contract_loads_profiles_without_ambient_pythonpath(tmp_path: Path) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; "
+            "from tools.ci.docker_image import DockerImageManager; "
+            "print(','.join(DockerImageManager(Path.cwd(), {}).source_contract()"
+            "['python_profiles']))",
+        ],
+        cwd=repo_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "demo,reference_common"
+
+
+def test_validate_image_contract_returns_the_verified_source_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    manager = DockerImageManager(repo_root)
+    expected = manager._read_requirements()
+    actual = {
+        "TENSORRT_VERSION": expected.tensorrt,
+        "TENSORRT_PYTHON_DISTRIBUTIONS": json.dumps(
+            expected.python_distributions, separators=(",", ":"), sort_keys=True
+        ),
+        "TENSORRT_APT_PACKAGES": json.dumps(
+            expected.apt_packages, separators=(",", ":"), sort_keys=True
+        ),
+        "TENSORRT_OVERLAY_FILES": "present",
+        "TENSORRT_HEADER_VERSION": expected.tensorrt,
+        "TENSORRT_NATIVE_VERSION": expected.tensorrt,
+        "MODELOPT_VERSION": expected.modelopt,
+        "NLOHMANN_JSON_HEADER": "present",
+        "NEMO_PROMPT_RNNT": "available",
+        "PYTHON_PROFILES": expected.python_profiles,
+    }
+    monkeypatch.setattr(manager, "_query_fingerprint", lambda _: expected.fingerprint)
+    monkeypatch.setattr(manager, "_query_versions", lambda _: actual)
+
+    assert manager.validate_image_contract("example.invalid/runtime@sha256:test") == (
+        expected.contract()
+    )
+
+
+def test_validate_image_contract_fails_closed_on_a_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    manager = DockerImageManager(repo_root)
+    expected = manager._read_requirements()
+    monkeypatch.setattr(manager, "_query_fingerprint", lambda _: expected.fingerprint)
+    monkeypatch.setattr(manager, "_query_versions", lambda _: {})
+
+    with pytest.raises(CiError, match="TensorRT version mismatch"):
+        manager.validate_image_contract("example.invalid/runtime@sha256:test")
+
+
+@pytest.mark.parametrize(
+    ("keyword", "value", "message"),
+    (
+        ("tensorrt_version", "11.2", "TENSORRT_VERSION must be an exact four-part version"),
+        ("tensorrt_version", "", "TENSORRT_VERSION must be an exact four-part version"),
+        (
+            "tensorrt_apt_version",
+            "11.2.*",
+            "TENSORRT_APT_VERSION must be an exact package version",
+        ),
+        (
+            "tensorrt_apt_version",
+            "",
+            "TENSORRT_APT_VERSION must be an exact package version",
+        ),
+    ),
+)
+def test_source_contract_rejects_non_exact_overlay_versions(
+    tmp_path: Path,
+    keyword: str,
+    value: str,
+    message: str,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    with pytest.raises(CiError, match=message):
+        DockerImageManager(repo_root).source_contract(**{keyword: value})
+
+
+def test_source_contract_rejects_mixed_tensorrt_overlay_versions(tmp_path: Path) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    with pytest.raises(CiError, match="must select the same TensorRT version"):
+        DockerImageManager(repo_root).source_contract(
+            tensorrt_version="11.2.1.2",
+            tensorrt_apt_version=TENSORRT_APT_VERSION,
+        )
+
+
 def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 
@@ -447,6 +659,10 @@ def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> No
     assert '"--user"' in script
     assert '"65534:65534"' in script
     assert '"--read-only"' in script
+    assert '"tensorrt_cu13_bindings"' in script
+    assert '"libnvonnxparsers-dev"' in script
+    assert "getInferLibBuildVersion" in script
+    assert "source_contract_json" in script
 
 
 def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(

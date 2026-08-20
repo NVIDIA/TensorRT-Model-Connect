@@ -23,7 +23,25 @@ from .process import CiError, CommandRunner, GitHubFiles
 
 
 FINGERPRINT_LABEL = "org.nvidia.trtmc.ci-input-fingerprint"
+ENVIRONMENT_CONTRACT_VERSION = 1
 IMMUTABLE_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+EXACT_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
+EXACT_APT_VERSION = re.compile(r"[0-9][0-9A-Za-z.+:~_-]*")
+TENSORRT_DISTRIBUTIONS = (
+    "tensorrt",
+    "tensorrt_cu13",
+    "tensorrt_cu13_bindings",
+    "tensorrt_cu13_libs",
+)
+TENSORRT_APT_PACKAGES = (
+    "libnvinfer-dev",
+    "libnvinfer-headers-dev",
+    "libnvinfer-headers-plugin-dev",
+    "libnvinfer-safe-headers-dev",
+    "libnvinfer11",
+    "libnvonnxparsers-dev",
+    "libnvonnxparsers11",
+)
 
 
 @dataclass(frozen=True)
@@ -59,10 +77,50 @@ class ImageRequirements:
     """Source-derived contract that the Docker image must satisfy."""
 
     inputs: tuple[Path, ...]
+    common_fingerprint: str
     fingerprint: str
     tensorrt: str
+    tensorrt_apt: str
     modelopt: str
     python_profiles: str
+
+    @property
+    def python_distributions(self) -> dict[str, str]:
+        return {name: self.tensorrt for name in TENSORRT_DISTRIBUTIONS}
+
+    @property
+    def apt_packages(self) -> dict[str, str]:
+        return {name: self.tensorrt_apt for name in TENSORRT_APT_PACKAGES}
+
+    @property
+    def tensorrt_major(self) -> str:
+        return self.tensorrt.split(".", 1)[0]
+
+    def contract(self) -> dict[str, object]:
+        """Return the source-owned runtime contract for an overlay image."""
+        return {
+            "schema_version": 1,
+            "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
+            "common_input_fingerprint": self.common_fingerprint,
+            "input_fingerprint": self.fingerprint,
+            "modelopt_version": self.modelopt,
+            "python_profiles": self.python_profiles.split(","),
+            "tensorrt": {
+                "version": self.tensorrt,
+                "apt_version": self.tensorrt_apt,
+                "python_distributions": self.python_distributions,
+                "apt_packages": self.apt_packages,
+                "headers": ["NvInferVersion.h", "NvOnnxParser.h"],
+                "header_version": self.tensorrt,
+                "native_libraries": [
+                    f"libnvinfer.so.{self.tensorrt_major}",
+                    f"libnvonnxparser.so.{self.tensorrt_major}",
+                    "libnvinfer_builder_resource_sm110.so.*",
+                ],
+                "native_library_distribution": "tensorrt_cu13_libs",
+                "native_runtime_version": self.tensorrt,
+            },
+        }
 
 
 class WorkflowImageLock:
@@ -141,21 +199,66 @@ class DockerImageManager:
             self._write_stamp(stamp, image_id)
             print(
                 f"CI Docker image '{image}' verified: TensorRT {versions['TENSORRT_VERSION']}, "
-                f"modelopt {versions['MODELOPT_VERSION']}, nlohmann/json headers, NeMo prompt "
-                f"RNN-T and prebuilt Python profiles ({versions['PYTHON_PROFILES']}) present, "
+                f"exact Python, APT header, C++ header, and native runtime contracts, modelopt "
+                f"{versions['MODELOPT_VERSION']}, nlohmann/json headers, NeMo prompt RNN-T and "
+                f"prebuilt Python profiles ({versions['PYTHON_PROFILES']}) present, "
                 f"image {image_id}"
             )
             return image_id
 
-    def _read_requirements(self) -> ImageRequirements:
-        registry = self._load_profile_registry()
+    def source_contract(
+        self,
+        *,
+        tensorrt_version: str | None = None,
+        tensorrt_apt_version: str | None = None,
+    ) -> dict[str, object]:
+        """Return a JSON-compatible contract for one parameterized TRT overlay."""
+        return self._read_requirements(
+            tensorrt_version=tensorrt_version,
+            tensorrt_apt_version=tensorrt_apt_version,
+        ).contract()
+
+    def source_contract_json(
+        self,
+        *,
+        tensorrt_version: str | None = None,
+        tensorrt_apt_version: str | None = None,
+    ) -> str:
+        """Serialize ``source_contract`` deterministically for external validation."""
+        return json.dumps(
+            self.source_contract(
+                tensorrt_version=tensorrt_version,
+                tensorrt_apt_version=tensorrt_apt_version,
+            ),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def validate_image_contract(
+        self,
+        image: str,
+        *,
+        tensorrt_version: str | None = None,
+        tensorrt_apt_version: str | None = None,
+    ) -> dict[str, object]:
+        """Validate one immutable overlay image against its Source contract."""
+        expected = self._read_requirements(
+            tensorrt_version=tensorrt_version,
+            tensorrt_apt_version=tensorrt_apt_version,
+        )
+        self._validate(image, expected, self._query_versions(image))
+        return expected.contract()
+
+    def _read_requirements(
+        self,
+        *,
+        tensorrt_version: str | None = None,
+        tensorrt_apt_version: str | None = None,
+    ) -> ImageRequirements:
+        registry, profile_names = self._load_profile_registry()
         profiles = registry["profiles"]
-        profile_module = importlib.import_module(
-            "tensorrt_model_connect.python_profiles"
-        )
-        expected_profiles = ",".join(
-            profile_module.prebuilt_python_profile_names(registry)
-        )
+        expected_profiles = ",".join(profile_names)
         if not expected_profiles:
             raise CiError("No family-owned Python execution profiles were declared")
 
@@ -178,30 +281,83 @@ class DockerImageManager:
             package_root / "families/__init__.py",
             *assets,
         }
-        semantic_contract = {"version": registry.get("version"), "profiles": profiles}
-        semantic_payload = json.dumps(
-            semantic_contract, ensure_ascii=True, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
-        semantic_fingerprint = hashlib.sha256(semantic_payload).hexdigest()
-        fingerprint = self._fingerprint_inputs(tuple(sorted(inputs)), semantic_fingerprint)
-
         dockerfile_text = (self.config.repository / self.config.dockerfile).read_text(
             encoding="utf-8"
         )
-        tensorrt = self._docker_argument(dockerfile_text, "TENSORRT_VERSION")
+        tensorrt = self._exact_tensorrt_version(
+            self._docker_argument(dockerfile_text, "TENSORRT_VERSION")
+            if tensorrt_version is None
+            else tensorrt_version
+        )
+        tensorrt_apt = self._exact_apt_version(
+            self._docker_argument(dockerfile_text, "TENSORRT_APT_VERSION")
+            if tensorrt_apt_version is None
+            else tensorrt_apt_version
+        )
+        if not tensorrt_apt.startswith(f"{tensorrt}-"):
+            raise CiError(
+                "TENSORRT_APT_VERSION must select the same TensorRT version as TENSORRT_VERSION"
+            )
+        common_semantic_contract = {
+            "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
+            "version": registry.get("version"),
+            "profiles": profiles,
+        }
+        common_semantic_payload = json.dumps(
+            common_semantic_contract,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        common_semantic_fingerprint = hashlib.sha256(common_semantic_payload).hexdigest()
+        common_fingerprint = self._fingerprint_inputs(
+            tuple(sorted(inputs)), common_semantic_fingerprint
+        )
+        overlay_payload = json.dumps(
+            {"apt_version": tensorrt_apt, "version": tensorrt},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        fingerprint = hashlib.sha256(
+            b"tensorrt-overlay\0"
+            + common_fingerprint.encode("ascii")
+            + b"\0"
+            + overlay_payload
+        ).hexdigest()
+
         modelopt = self._docker_argument(dockerfile_text, "MODELOPT_VERSION")
         return ImageRequirements(
-            tuple(sorted(inputs)), fingerprint, tensorrt, modelopt, expected_profiles
+            tuple(sorted(inputs)),
+            common_fingerprint,
+            fingerprint,
+            tensorrt,
+            tensorrt_apt,
+            modelopt,
+            expected_profiles,
         )
 
-    def _load_profile_registry(self) -> dict[str, object]:
+    def _load_profile_registry(self) -> tuple[dict[str, object], tuple[str, ...]]:
         package_path = str(self.config.repository / "python")
+        package_name = "tensorrt_model_connect"
+        previous_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if name == package_name or name.startswith(f"{package_name}.")
+        }
+        for name in previous_modules:
+            sys.modules.pop(name, None)
         sys.path.insert(0, package_path)
         try:
             module = importlib.import_module("tensorrt_model_connect.python_profiles")
-            return module.load_python_profile_registry()
+            registry = module.load_python_profile_registry()
+            return registry, module.prebuilt_python_profile_names(registry)
         finally:
             sys.path.remove(package_path)
+            for name in tuple(sys.modules):
+                if name == package_name or name.startswith(f"{package_name}."):
+                    sys.modules.pop(name, None)
+            sys.modules.update(previous_modules)
 
     def _fingerprint_inputs(self, inputs: tuple[Path, ...], semantic: str) -> str:
         digest = hashlib.sha256()
@@ -224,6 +380,18 @@ class DockerImageManager:
         if not match:
             raise CiError(f"Could not find ARG {name} in Dockerfile")
         return match.group(1).strip()
+
+    @staticmethod
+    def _exact_tensorrt_version(value: str) -> str:
+        if not EXACT_TENSORRT_VERSION.fullmatch(value):
+            raise CiError("TENSORRT_VERSION must be an exact four-part version")
+        return value
+
+    @staticmethod
+    def _exact_apt_version(value: str) -> str:
+        if not EXACT_APT_VERSION.fullmatch(value):
+            raise CiError("TENSORRT_APT_VERSION must be an exact package version")
+        return value
 
     def _verification_stamp(self, fingerprint: str) -> Path | None:
         run_id = self.env.get("GITHUB_RUN_ID", "")
@@ -293,14 +461,90 @@ class DockerImageManager:
 
     def _query_versions(self, image: str) -> dict[str, str]:
         probe = r"""
+import ctypes
 import importlib.metadata as metadata
 import json
+import os
+import re
+import subprocess
 from pathlib import Path
 
 import tensorrt
 from nemo.collections.asr.models.rnnt_bpe_models_prompt import EncDecRNNTBPEModelWithPrompt
 
 print(f"TENSORRT_VERSION={tensorrt.__version__}")
+distributions = {
+    name: metadata.version(name)
+    for name in (
+        "tensorrt",
+        "tensorrt_cu13",
+        "tensorrt_cu13_bindings",
+        "tensorrt_cu13_libs",
+    )
+}
+print("TENSORRT_PYTHON_DISTRIBUTIONS=" + json.dumps(distributions, separators=(",", ":"), sort_keys=True))
+apt_packages = {}
+for package in (
+    "libnvinfer-dev",
+    "libnvinfer-headers-dev",
+    "libnvinfer-headers-plugin-dev",
+    "libnvinfer-safe-headers-dev",
+    "libnvinfer11",
+    "libnvonnxparsers-dev",
+    "libnvonnxparsers11",
+):
+    result = subprocess.run(
+        ["dpkg-query", "-W", "-f=${Version}", package],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    apt_packages[package] = result.stdout.strip()
+print("TENSORRT_APT_PACKAGES=" + json.dumps(apt_packages, separators=(",", ":"), sort_keys=True))
+
+header = Path(os.environ["TRT_INC_DIR"]) / "NvInferVersion.h"
+header_text = header.read_text(encoding="utf-8")
+header_parts = []
+for name in ("MAJOR", "MINOR", "PATCH", "BUILD"):
+    values = []
+    for macro in (f"TRT_{name}_ENTERPRISE", f"NV_TENSORRT_{name}"):
+        match = re.search(rf"^#define\s+{macro}\s+([0-9]+)\b", header_text, re.MULTILINE)
+        if match:
+            values.append(match.group(1))
+    if not values or len(set(values)) != 1:
+        raise SystemExit(f"could not resolve one TensorRT {name.lower()} value from {header}")
+    header_parts.append(values[0])
+print("TENSORRT_HEADER_VERSION=" + ".".join(header_parts))
+
+library_root = Path(metadata.distribution("tensorrt_cu13_libs").locate_file("tensorrt_libs"))
+major = header_parts[0]
+configured_library_root = Path(os.environ["TRT_LIB_DIR"])
+library_search = os.environ.get("LD_LIBRARY_PATH", "").split(":", 1)[0]
+if configured_library_root.resolve() != library_root.resolve() or library_search != str(configured_library_root):
+    raise SystemExit("TRT_LIB_DIR and LD_LIBRARY_PATH must select tensorrt_cu13_libs")
+required_files = (
+    Path(os.environ["TRT_INC_DIR"]) / "NvOnnxParser.h",
+    library_root / f"libnvinfer.so.{major}",
+    library_root / f"libnvonnxparser.so.{major}",
+)
+if missing := [str(path) for path in required_files if not path.is_file()]:
+    raise SystemExit("missing TensorRT overlay files: " + ", ".join(missing))
+if next(library_root.glob("libnvinfer_builder_resource_sm110.so.*"), None) is None:
+    raise SystemExit("missing TensorRT SM110 builder resource")
+print("TENSORRT_OVERLAY_FILES=present")
+
+library = ctypes.CDLL(str(library_root / f"libnvinfer.so.{major}"))
+native_parts = []
+for symbol in (
+    "getInferLibMajorVersion",
+    "getInferLibMinorVersion",
+    "getInferLibPatchVersion",
+    "getInferLibBuildVersion",
+):
+    function = getattr(library, symbol)
+    function.restype = ctypes.c_int32
+    native_parts.append(str(function()))
+print("TENSORRT_NATIVE_VERSION=" + ".".join(native_parts))
 print("MODELOPT_VERSION=" + metadata.version("nvidia-modelopt"))
 print("NLOHMANN_JSON_HEADER=" + ("present" if Path("/usr/include/nlohmann/json.hpp").is_file() else "missing"))
 print("NEMO_PROMPT_RNNT=available")
@@ -351,6 +595,31 @@ print("PYTHON_PROFILES=" + ",".join(sorted(profiles)))
     def _version_mismatches(actual: dict[str, str], expected: ImageRequirements) -> list[str]:
         checks = (
             ("TENSORRT_VERSION", expected.tensorrt, "TensorRT version mismatch"),
+            (
+                "TENSORRT_PYTHON_DISTRIBUTIONS",
+                json.dumps(expected.python_distributions, separators=(",", ":"), sort_keys=True),
+                "TensorRT Python distribution versions mismatch",
+            ),
+            (
+                "TENSORRT_APT_PACKAGES",
+                json.dumps(expected.apt_packages, separators=(",", ":"), sort_keys=True),
+                "TensorRT APT package versions mismatch",
+            ),
+            (
+                "TENSORRT_OVERLAY_FILES",
+                "present",
+                "TensorRT header or native library is missing",
+            ),
+            (
+                "TENSORRT_HEADER_VERSION",
+                expected.tensorrt,
+                "TensorRT C++ header version mismatch",
+            ),
+            (
+                "TENSORRT_NATIVE_VERSION",
+                expected.tensorrt,
+                "TensorRT native runtime version mismatch",
+            ),
             ("MODELOPT_VERSION", expected.modelopt, "modelopt version mismatch"),
         )
         reasons = [

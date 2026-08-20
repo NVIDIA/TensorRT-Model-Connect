@@ -21,8 +21,6 @@ import types
 from typing import Any, Iterator, Sequence
 
 
-_ATTENTION_BACKEND_ENV = "TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND"
-_ATTENTION_BACKENDS = frozenset({"flash_attn", "torch_sdpa"})
 _ATTENTION_COMPAT = (
     Path(__file__).resolve().parents[1]
     / "tests/e2e/models/lance/e2e_plugins/references/lance_image_attention_compat"
@@ -148,6 +146,32 @@ def _model_paths(arguments: argparse.Namespace) -> tuple[Path, Path, Path, str]:
     return model_path, vit_path, vae_path, _snapshot_revision(root)
 
 
+def _sdpa_vit_path(root: Path, vit_path: Path) -> Path:
+    """Create a run-owned VIT view that selects PyTorch SDPA."""
+    source_config = vit_path / "config.json"
+    try:
+        config = json.loads(source_config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Lance VIT has no valid config: {source_config}") from exc
+    if not isinstance(config, dict):
+        raise RuntimeError(f"Lance VIT config must contain an object: {source_config}")
+
+    overlay = root / "vit_torch_sdpa"
+    overlay.mkdir(parents=True)
+    for source in vit_path.iterdir():
+        if source.name != "config.json":
+            (overlay / source.name).symlink_to(
+                source.resolve(),
+                target_is_directory=source.is_dir(),
+            )
+    config["_attn_implementation"] = "sdpa"
+    (overlay / "config.json").write_text(
+        json.dumps(config, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return overlay
+
+
 def _dataset_payload(*, image: Path, prompt: str, instruction: str, count: int) -> dict[str, Any]:
     sample = {
         "interleave_array": [str(image.resolve()), [instruction, prompt, ""]],
@@ -184,21 +208,15 @@ def _decord_image_only_stub() -> dict[str, types.ModuleType]:
     return {"decord": decord, "decord.video_reader": video_reader}
 
 
-def _configure_attention_backend() -> None:
-    backend = os.environ.get(_ATTENTION_BACKEND_ENV, "flash_attn").strip()
-    if backend not in _ATTENTION_BACKENDS:
-        raise RuntimeError(
-            "unsupported Lance reference attention backend "
-            f"{backend!r}; expected one of {sorted(_ATTENTION_BACKENDS)}"
-        )
-    if backend == "torch_sdpa":
-        compat = str(_ATTENTION_COMPAT)
-        if compat not in sys.path:
-            sys.path.insert(0, compat)
+def _configure_attention_compatibility() -> None:
+    """Expose the repository-owned SDPA implementation as ``flash_attn``."""
+    compat = str(_ATTENTION_COMPAT)
+    if compat not in sys.path:
+        sys.path.insert(0, compat)
 
 
 def _load_upstream(reference_repo: Path) -> Any:
-    _configure_attention_backend()
+    _configure_attention_compatibility()
     try:
         import decord  # noqa: F401
     except ImportError:
@@ -392,10 +410,11 @@ def run(arguments: argparse.Namespace) -> int:
             ),
             encoding="utf-8",
         )
+        reference_vit_path = _sdpa_vit_path(root, vit_path)
         samples, answers = _run_upstream(
             arguments,
             model_path,
-            vit_path,
+            reference_vit_path,
             vae_path,
             dataset,
             root / "results",

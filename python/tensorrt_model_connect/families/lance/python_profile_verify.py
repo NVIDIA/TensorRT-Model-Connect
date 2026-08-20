@@ -8,10 +8,8 @@ import imageio
 import numpy
 import scipy
 import sklearn
-from flash_attn import flash_attn_varlen_func
 from transformers.cache_utils import SlidingWindowCache
 
-assert metadata.version("flash-attn") == "2.8.3"
 assert metadata.version("huggingface-hub") == "0.29.1"
 assert metadata.version("imageio") == "2.34.0"
 assert metadata.version("numpy") == "1.26.4"
@@ -25,9 +23,7 @@ assert callable(imageio.imread)
 assert numpy.__version__ == "1.26.4"
 assert scipy.__version__ == "1.12.0"
 assert sklearn.__version__ == "1.4.2"
-assert callable(flash_attn_varlen_func)
 assert SlidingWindowCache is not None
 print(
-    f"flash-attn={metadata.version('flash-attn')} "
-    f"transformers={metadata.version('transformers')}"
+    f"attention=torch-sdpa transformers={metadata.version('transformers')}"
 )

@@ -8,9 +8,6 @@ library_dirs:
   - ${TRTMC_CHECK_STORAGE_ROOT}/runtime/TensorRT-11.0.2.2/lib
 executable_dirs:
   - /usr/local/cuda/bin
-environment_variables:
-  TRTMC_LANCE_REFERENCE_ATTENTION_BACKEND: torch_sdpa
-
 storage:
   root: ${TRTMC_CHECK_STORAGE_ROOT}
   results_root: ${TRTMC_CHECK_STORAGE_ROOT}/results

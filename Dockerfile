@@ -1,15 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Repository-wide ARM64 development container. It provides the TensorRT,
-# CUDA, Python, and all declared execution-profile dependencies used to develop
-# and build any TRTMC model supported by the selected target. Project source is
-# mounted at runtime; this image does not contain a model or choose a runtime.
+# Repository-wide ARM64 development container. Common CUDA, Python, tooling,
+# and model execution profiles are built once; the final stage adds one exact
+# TensorRT version as an immutable overlay. Project source is mounted at
+# runtime, so the image does not contain a model or choose an application.
 
-ARG TENSORRT_IMAGE=nvcr.io/nvidia/tensorrt:26.07-py3@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541
-FROM ${TENSORRT_IMAGE} AS ci-base
-
+ARG CUDA_IMAGE=nvidia/cuda:13.3.0-devel-ubuntu24.04@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52
 ARG TENSORRT_VERSION=11.1.0.106
+ARG TENSORRT_APT_VERSION=11.1.0.106-1+cuda13.3
+FROM ${CUDA_IMAGE} AS ci-common-base
+
 ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 ARG TORCH_VERSION=2.12.0+cu130
 ARG TORCHVISION_VERSION=0.27.0+cu130
@@ -36,34 +37,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12-venv \
     python3-pip \
     lcov \
+    nlohmann-json3-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# The pinned NVIDIA NGC image is the official TensorRT 11.1 ARM64 development
-# release. Validate the Python binding, C++ headers, runtime library, and Thor
-# (SM110) builder resource before adding any project dependencies.
-RUN python3.12 -c \
-      "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__" && \
-    grep -q "#define TRT_MAJOR_ENTERPRISE 11" \
-      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
-    grep -q "#define TRT_MINOR_ENTERPRISE 1" \
-      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
-    grep -q "#define TRT_PATCH_ENTERPRISE 0" \
-      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
-    grep -q "#define TRT_BUILD_ENTERPRISE 106" \
-      /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
-    test -f /usr/lib/aarch64-linux-gnu/libnvinfer.so.11 && \
-    test -f /usr/lib/aarch64-linux-gnu/libnvinfer_builder_resource_sm110.so.11.1.0
 
 # ── Python venv with all deps ───────────────────────────────────────────────
 ENV VIRTUAL_ENV=/opt/venv
-RUN python3.12 -m venv --system-site-packages $VIRTUAL_ENV
+RUN python3.12 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# The venv inherits the official TensorRT binding from the NGC image. CMake
-# derives the backend ABI alias from the matching NvInferVersion.h.
-RUN pip install -U pip && \
-    python3.12 -c \
-      "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__"
+RUN pip install -U pip
 
 # CUDA Python bindings (needed by debug_runner.py / diff tools). Match the
 # CUDA 13.0 Python stack pulled by PyTorch.
@@ -144,17 +126,10 @@ RUN pip install --force-reinstall \
       "torchaudio==${TORCHAUDIO_VERSION}" \
       --index-url "${PYTORCH_CUDA_INDEX}" && \
     pip install "setuptools>=80,<82" && \
-    LD_LIBRARY_PATH="/opt/venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64" \
-      python3 -c "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__" && \
     python3 -c "import torch; assert torch.__version__ == '${TORCH_VERSION}', torch.__version__" && \
     python3 -c "import importlib.metadata as m; assert m.version('nvidia-modelopt') == '${MODELOPT_VERSION}', m.version('nvidia-modelopt')"
 
 # ── Environment ─────────────────────────────────────────────────────────────
-# Pre-compute paths so cmake / runtime find TRT without manual exports
-ENV TRT_LIB_DIR=/usr/lib/aarch64-linux-gnu
-ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
-ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
-
 # ARM64 Blackwell targets use the system CUDA 13 cuBLAS kernels. Keep PyTorch/HF
 # reference inference on the system cuBLAS instead of pip-installed CUDA libs.
 ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
@@ -164,18 +139,11 @@ ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 #   python3 -m pytest --help | grep -- '--cov' && \
 #   gcovr --version && lcov --version && genhtml --version
 
-# Keep the final layer small and cache-friendly. Isolated validation runs have
-# networking disabled, so CMake must find nlohmann/json in the image instead of
-# falling back to FetchContent during each isolated scratch build.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends nlohmann-json3-dev && \
-    rm -rf /var/lib/apt/lists/*
-
 # Build every family-declared Python execution profile while network access is
 # available. The family-owned lock and verification files are the only package
 # source of truth; python_profiles.py additionally rejects non-exact pins and
 # verifies every installed distribution before marking a profile ready.
-FROM ci-base AS python-profile-builder
+FROM ci-common-base AS python-profile-builder
 
 ENV PYTHONPATH=/opt/trtmc-profile-source
 ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
@@ -187,8 +155,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     pip install "maturin==1.14.1"
 # Avoid compiling profile-local CUDA extensions for every architecture known
-# to a GPU-less Docker build. Keep 10.0 as the existing default; Jetson AGX
-# Thor callers pass 11.0 for SM110.
+# to a GPU-less Docker build. Keep 10.0 as the GB300 target.
 COPY python/tensorrt_model_connect /opt/trtmc-profile-source/tensorrt_model_connect
 COPY .github/scripts/build-python-profiles.py /opt/trtmc-build-python-profiles.py
 RUN python3 /opt/trtmc-build-python-profiles.py \
@@ -197,7 +164,7 @@ RUN python3 /opt/trtmc-build-python-profiles.py \
 # Do not retain the full builder source tree in the development image. Only the
 # verified virtual environments cross the stage boundary, so sibling model
 # implementations cannot satisfy imports in an isolated source projection.
-FROM ci-base AS ci-runtime
+FROM ci-common-base AS ci-common
 
 COPY --from=python-profile-builder \
     /opt/trtmc-python-profiles /opt/trtmc-python-profiles
@@ -206,6 +173,48 @@ ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
 # the image after changing their lock or verification files.
 ENV TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1
 
-WORKDIR /workspace/tensorrt-model-connect
+# Keep the reusable common layer independent of every TensorRT release. The
+# version overlay below is the only stage allowed to add bindings, headers, or
+# native runtime libraries.
+RUN python3 -c \
+      'import importlib.metadata as m, importlib.util; assert importlib.util.find_spec("tensorrt") is None; missing = ("tensorrt", "tensorrt_cu13", "tensorrt_cu13_bindings", "tensorrt_cu13_libs"); assert all(not tuple(m.distributions(name=name)) for name in missing)' && \
+    test ! -e /usr/include/aarch64-linux-gnu/NvInferVersion.h && \
+    test ! -e /usr/include/aarch64-linux-gnu/NvOnnxParser.h && \
+    test -z "$(find /opt/venv -name 'libnvinfer.so*' -print -quit)" && \
+    test -z "$(find /opt/venv -name 'libnvonnxparser.so*' -print -quit)"
 
+WORKDIR /workspace/tensorrt-model-connect
 CMD ["bash"]
+
+# Add one exact TensorRT toolchain without rebuilding common dependencies or
+# execution profiles. The same target is built with different version arguments
+# to produce immutable TRT 11.1 and TRT 11.2 overlays.
+FROM ci-common AS ci-runtime
+
+ARG TENSORRT_VERSION
+ARG TENSORRT_APT_VERSION
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      "libnvinfer-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-headers-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-headers-plugin-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-safe-headers-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer11=${TENSORRT_APT_VERSION}" \
+      "libnvonnxparsers-dev=${TENSORRT_APT_VERSION}" \
+      "libnvonnxparsers11=${TENSORRT_APT_VERSION}" && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir "tensorrt==${TENSORRT_VERSION}"
+
+ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
+ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
+ENV LD_LIBRARY_PATH="$TRT_LIB_DIR:/usr/local/cuda/lib64"
+
+RUN EXPECTED_TENSORRT_VERSION="$TENSORRT_VERSION" python3 -c \
+      'import ctypes, importlib.metadata as m, os; from pathlib import Path; expected = os.environ["EXPECTED_TENSORRT_VERSION"]; versions = tuple(map(int, expected.split("."))); assert all(m.version(name) == expected for name in ("tensorrt", "tensorrt_cu13", "tensorrt_cu13_bindings", "tensorrt_cu13_libs")); import tensorrt; assert tensorrt.__version__ == expected; include = Path("/usr/include/aarch64-linux-gnu"); header = (include / "NvInferVersion.h").read_text().splitlines(); assert (include / "NvOnnxParser.h").is_file(); assert all(f"#define TRT_{name}_ENTERPRISE {value}" in header for name, value in zip(("MAJOR", "MINOR", "PATCH", "BUILD"), versions)); major = versions[0]; libraries = Path(m.distribution("tensorrt_cu13_libs").locate_file("tensorrt_libs")); assert (libraries / f"libnvonnxparser.so.{major}").is_file(); assert next(libraries.glob("libnvinfer_builder_resource_sm110.so.*"), None) is not None; library = ctypes.CDLL(str(libraries / f"libnvinfer.so.{major}")); functions = tuple(getattr(library, f"getInferLib{name}Version") for name in ("Major", "Minor", "Patch", "Build")); [setattr(function, "restype", ctypes.c_int32) for function in functions]; assert tuple(function() for function in functions) == versions' && \
+    printf '#include <NvInferRuntime.h>\n#include <NvOnnxParser.h>\nint main() { return getInferLibVersion() > 0 ? 0 : 1; }\n' | \
+      c++ -x c++ - -I"$TRT_INC_DIR" -I/usr/local/cuda/include -L"$TRT_LIB_DIR" \
+        -Wl,-rpath,"$TRT_LIB_DIR" -Wl,--no-as-needed \
+        -lnvinfer -lnvonnxparser -o /tmp/trtmc-trt-link-probe && \
+    /tmp/trtmc-trt-link-probe && \
+    rm -f /tmp/trtmc-trt-link-probe

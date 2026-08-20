@@ -4,9 +4,8 @@
 """Packed-attention compatibility for Lance reference environments.
 
 Lance imports FlashAttention's packed, dense, rotary, and padding helpers while
-loading its official image-reference modules. Platforms without a qualified
-FlashAttention package can explicitly select this PyTorch implementation. It is
-never selected by CPU architecture inference.
+loading its official image-reference modules. The reference runner always maps
+those imports to this PyTorch SDPA implementation.
 """
 
 from __future__ import annotations
