@@ -28,6 +28,7 @@ from tests.builder.owned_graph_modules import load_family_graph_ops, load_graph_
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 graph_ops = load_graph_ops()
+eagle_vlm_graph_ops = load_family_graph_ops("eagle_vlm")
 qwen_graph_ops = load_family_graph_ops("qwen")
 qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 
@@ -518,6 +519,48 @@ class TestAddAttentionCore:
 
         assert out.dtype == np.float16
         np.testing.assert_allclose(out.astype(np.float32), ref, atol=1e-3)
+
+    @requires_trt
+    def test_batched_gqa_preserves_each_batch_row(self):
+        """Decomposed GQA repeats KV heads without collapsing batch."""
+        batch, sequence, num_heads, num_kv_heads, head_dim = 2, 3, 4, 2, 16
+        rng = np.random.default_rng(31)
+        q = rng.standard_normal(
+            (batch, sequence, num_heads * head_dim)).astype(np.float32)
+        k = rng.standard_normal(
+            (batch, sequence, num_kv_heads * head_dim)).astype(np.float32)
+        v = rng.standard_normal(
+            (batch, sequence, num_kv_heads * head_dim)).astype(np.float32)
+
+        def build(network, trt_inputs):
+            return {
+                "out": eagle_vlm_graph_ops.add_attention_from_rows(
+                    network,
+                    trt_inputs["q"],
+                    trt_inputs["k"],
+                    trt_inputs["v"],
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    q_seq=None,
+                    kv_seq=None,
+                    fp32_accumulation=True,
+                )
+            }
+
+        out = _run_strongly_typed(build, {"q": q, "k": k, "v": v})["out"]
+
+        qh = q.reshape(batch, sequence, num_heads, head_dim).transpose(0, 2, 1, 3)
+        kh = k.reshape(batch, sequence, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
+        vh = v.reshape(batch, sequence, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
+        repeat = num_heads // num_kv_heads
+        ref = _ref_sdpa(
+            qh,
+            np.repeat(kh, repeat, axis=1),
+            np.repeat(vh, repeat, axis=1),
+        )
+        ref = ref.transpose(0, 2, 1, 3).reshape(batch, sequence, -1)
+        np.testing.assert_allclose(out, ref, atol=1e-3)
 
     @requires_trt
     def test_causal_equals_no_mask_for_single_query(self):

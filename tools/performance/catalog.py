@@ -353,6 +353,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "media-shape",
         "normalized-text",
         "ocr-text",
+        "reranking-order",
         "segmentation-shape",
         "token-agreement",
     }:

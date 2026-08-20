@@ -922,14 +922,7 @@ Json run_rerank(trtmc::IPipeline& pipeline, const Json& request, const TimingCon
         throw std::runtime_error("rerank documents cannot be empty");
     }
     std::vector<float> last;
-    const auto rerank = [&]() {
-        std::vector<float> scores;
-        scores.reserve(documents.size());
-        for (const auto& document : documents) {
-            scores.push_back(pipeline.rerank(query, document));
-        }
-        return scores;
-    };
+    const auto rerank = [&]() { return pipeline.rerank_batch(query, documents); };
     for (int index = 0; index < warmup; ++index) {
         last = rerank();
     }

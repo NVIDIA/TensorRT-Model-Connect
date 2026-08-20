@@ -90,23 +90,32 @@ def test_eagle_vlm_prefers_rope_parameters_over_legacy_alias() -> None:
     assert plugin_module._resolve_rope_scaling(Config())["factor"] == 8.0
 
 
-def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
+def test_eagle_vlm_fp16_reranker_keeps_residual_and_norms_in_fp32(
     monkeypatch,
 ) -> None:
     plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.eagle_vlm.plugin")
     graph_blocks = importlib.import_module(
         "tensorrt_model_connect.families.eagle_vlm.graph_blocks")
+    graph_ops = importlib.import_module(
+        "tensorrt_model_connect.families.eagle_vlm.graph_ops")
     trt_compat = importlib.import_module("tensorrt_model_connect.trt_compat")
     trt = trt_compat.get_trt()
     original_apply_norm = graph_blocks.apply_norm
-    assert plugin_module._RERANKER_FP32_TAIL_LAYERS == 16
-    num_layers = plugin_module._RERANKER_FP32_TAIL_LAYERS + 2
+    original_add_matmul = graph_ops.add_matmul_rhs_constant
+    original_add_attention = graph_ops.add_attention_from_rows
+    original_add_mlp = graph_blocks.add_swiglu_mlp
+    num_layers = 3
 
     class FinalNormCaptured(RuntimeError):
         pass
 
-    calls = []
+    norm_calls = []
+    matmul_dtypes = []
+    matmul_input_dtypes = []
+    matmul_fp32_compute = []
+    attention_fp32 = []
+    mlp_dtypes = []
 
     def capture_tail_norms(
         network,
@@ -120,12 +129,12 @@ def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
         dtype,
         eps=None,
     ):
-        calls.append({
+        norm_calls.append({
             "input_dtype": inp.dtype,
             "eps_dtype": eps_tensor.dtype,
             "dtype": dtype,
         })
-        if len(calls) == 2 * num_layers + 1:
+        if len(norm_calls) == 2 * num_layers + 1:
             raise FinalNormCaptured
         return original_apply_norm(
             network,
@@ -139,7 +148,24 @@ def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
             eps=eps,
         )
 
+    def capture_matmul(*args, **kwargs):
+        matmul_dtypes.append(kwargs["dtype"])
+        matmul_input_dtypes.append(args[1].dtype)
+        matmul_fp32_compute.append(kwargs.get("fp32_compute", False))
+        return original_add_matmul(*args, **kwargs)
+
+    def capture_attention(*args, **kwargs):
+        attention_fp32.append(kwargs["fp32_accumulation"])
+        return original_add_attention(*args, **kwargs)
+
+    def capture_mlp(*args, **kwargs):
+        mlp_dtypes.append(kwargs["dtype"])
+        return original_add_mlp(*args, **kwargs)
+
     monkeypatch.setattr(graph_blocks, "apply_norm", capture_tail_norms)
+    monkeypatch.setattr(graph_ops, "add_matmul_rhs_constant", capture_matmul)
+    monkeypatch.setattr(graph_ops, "add_attention_from_rows", capture_attention)
+    monkeypatch.setattr(graph_blocks, "add_swiglu_mlp", capture_mlp)
 
     class RerankerConfig(_Config):
         raw = {"is_reranker": True}
@@ -173,17 +199,17 @@ def test_eagle_vlm_fp16_reranker_keeps_bounded_tail_in_fp32(
             precision="fp16",
         )
 
-    fp16_call = {
-        "input_dtype": trt.float16,
-        "eps_dtype": trt.float16,
-        "dtype": np.float16,
-    }
     fp32_call = {
         "input_dtype": trt.float32,
         "eps_dtype": trt.float32,
         "dtype": np.float32,
     }
-    assert calls == [fp16_call] * 4 + [fp32_call] * 33
+    assert norm_calls == [fp32_call] * (2 * num_layers + 1)
+    assert matmul_dtypes == [np.float16] * (7 * num_layers)
+    assert matmul_input_dtypes == [trt.float16] * (7 * num_layers)
+    assert matmul_fp32_compute == ([True] * 3 + [False] * 4) * num_layers
+    assert attention_fp32 == [True] * num_layers
+    assert mlp_dtypes == [np.float16] * num_layers
 
 
 def test_eagle_vlm_reranker_executes_actual_sequence_length() -> None:
@@ -207,14 +233,14 @@ def test_eagle_vlm_reranker_executes_actual_sequence_length() -> None:
     engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
 
     assert engine is not None
-    assert tuple(engine.get_tensor_shape("input_ids")) == (-1,)
-    assert tuple(engine.get_tensor_shape("attention_mask")) == (-1,)
+    assert tuple(engine.get_tensor_shape("input_ids")) == (-1, -1)
+    assert tuple(engine.get_tensor_shape("attention_mask")) == (-1, -1)
     assert tuple(
         tuple(shape) for shape in engine.get_tensor_profile_shape("input_ids", 0)
-    ) == ((1,), (32,), (32,))
+    ) == ((1, 1), (2, 32), (2, 32))
     assert tuple(
         tuple(shape) for shape in engine.get_tensor_profile_shape("attention_mask", 0)
-    ) == ((1,), (32,), (32,))
+    ) == ((1, 1), (2, 32), (2, 32))
     io_names = {engine.get_tensor_name(index) for index in range(engine.num_io_tensors)}
     assert "input_embed" not in io_names
     assert "use_input_embed" not in io_names

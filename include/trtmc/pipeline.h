@@ -551,6 +551,14 @@ class IPipeline {
         (void)document;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support rerank()");
     }
+    virtual std::vector<float> rerank_batch(const std::string& query,
+                                            const std::vector<std::string>& documents) {
+        std::vector<float> scores;
+        scores.reserve(documents.size());
+        for (const auto& document : documents)
+            scores.push_back(rerank(query, document));
+        return scores;
+    }
 
     // -- Segmentation --
     // Image pixels are RGB HWC float values in [0, 1]. The owning model family

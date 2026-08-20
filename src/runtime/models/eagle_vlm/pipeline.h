@@ -27,6 +27,8 @@ class EncoderPipeline final : public IPipeline {
     EmbeddingResult embed(const std::string& text) override;
     EmbeddingResult encode(const std::string& text) override;
     float rerank(const std::string& query, const std::string& document) override;
+    std::vector<float> rerank_batch(const std::string& query,
+                                    const std::vector<std::string>& documents) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "EncoderPipeline"; }
@@ -41,6 +43,14 @@ class EncoderPipeline final : public IPipeline {
     };
 
     EncodedOutput encode_ids_with_shape(const std::vector<int32_t>& input_ids);
+    EncodedOutput encode_batch_with_shape(const std::vector<int32_t>& input_ids,
+                                          const std::vector<int32_t>& attention_mask,
+                                          std::size_t batch_size, std::size_t sequence_length);
+    EncodedOutput forward_ids(const std::vector<int32_t>& input_ids,
+                              const std::vector<int32_t>& attention_mask,
+                              const std::vector<int64_t>& shape);
+    bool supports_batched_reranking() const;
+    std::vector<int64_t> reranking_profile_max_shape() const;
 
     std::unique_ptr<TrtModule> encoder_;
     std::string mode_; // "encoder_only", "embedding", "reranking"

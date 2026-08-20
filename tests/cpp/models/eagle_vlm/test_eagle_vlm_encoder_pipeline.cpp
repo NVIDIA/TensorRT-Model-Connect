@@ -83,18 +83,41 @@ class SeparatorTokenizer : public trtmc::ITokenizer {
     std::string token_for_id(int32_t) const override { return ""; }
 };
 
+class VariableLengthTokenizer : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string& text) const override {
+        return text.find("short") == std::string::npos ? std::vector<int32_t>{1, 2, 3, 4}
+                                                       : std::vector<int32_t>{1, 2};
+    }
+    std::string decode(const std::vector<int32_t>&) const override { return "test"; }
+    int32_t id_for_token(std::string_view) const override { return -1; }
+    std::string token_for_id(int32_t) const override { return ""; }
+};
+
 class FakeScoreModule final : public trtmc::ITrtModule {
   public:
-    FakeScoreModule(std::vector<float> scores, std::vector<int64_t> shape)
-        : scores_(std::move(scores)), shape_(std::move(shape)) {}
+    FakeScoreModule(std::vector<float> scores, std::vector<int64_t> shape,
+                    std::vector<int64_t> input_shape = {4},
+                    std::vector<int64_t> profile_max_shape = {4})
+        : scores_(std::move(scores)), shape_(std::move(shape)),
+          input_shape_(std::move(input_shape)), profile_max_shape_(std::move(profile_max_shape)) {}
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         const auto input = inputs.find("input_ids");
-        if (input != inputs.end() && input->second.data && input->second.shape.size() == 1) {
-            const auto size = static_cast<std::size_t>(input->second.shape.front());
+        if (input != inputs.end() && input->second.data) {
+            input_shape_seen_ = input->second.shape;
+            std::size_t size = 1;
+            for (const auto dim : input->second.shape)
+                size *= static_cast<std::size_t>(dim);
             const auto* ids = static_cast<const int32_t*>(input->second.data);
             input_ids_.assign(ids, ids + size);
         }
+        const auto mask = inputs.find("attention_mask");
+        if (mask != inputs.end() && mask->second.data) {
+            const auto* values = static_cast<const int32_t*>(mask->second.data);
+            attention_mask_.assign(values, values + input_ids_.size());
+        }
+        ++forward_calls_;
         return {{"score", trtmc::Tensor{scores_.data(), shape_, trtmc::DType::kFloat32}}};
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -107,8 +130,8 @@ class FakeScoreModule final : public trtmc::ITrtModule {
     int32_t profile_idx() const override { return 0; }
     std::vector<trtmc::TensorInfo> input_info() const override {
         return {
-            {"input_ids", {4}, trtmc::DType::kInt32, true},
-            {"attention_mask", {4}, trtmc::DType::kInt32, true},
+            {"input_ids", input_shape_, trtmc::DType::kInt32, true},
+            {"attention_mask", input_shape_, trtmc::DType::kInt32, true},
         };
     }
     std::vector<trtmc::TensorInfo> output_info() const override {
@@ -122,7 +145,7 @@ class FakeScoreModule final : public trtmc::ITrtModule {
     std::vector<int64_t> tensor_shape(const std::string&) const override { return shape_; }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
-        return {4};
+        return profile_max_shape_;
     }
     int32_t optimization_profile_count() const override { return 1; }
     void* device_ptr(const std::string&) const override { return nullptr; }
@@ -130,11 +153,19 @@ class FakeScoreModule final : public trtmc::ITrtModule {
     bool ok() const override { return true; }
     void keep_alive(std::shared_ptr<void>) override {}
     const std::vector<int32_t>& input_ids() const { return input_ids_; }
+    const std::vector<int32_t>& attention_mask() const { return attention_mask_; }
+    const std::vector<int64_t>& input_shape_seen() const { return input_shape_seen_; }
+    int forward_calls() const { return forward_calls_; }
 
   private:
     std::vector<float> scores_;
     std::vector<int64_t> shape_;
+    std::vector<int64_t> input_shape_;
+    std::vector<int64_t> profile_max_shape_;
     std::vector<int32_t> input_ids_;
+    std::vector<int32_t> attention_mask_;
+    std::vector<int64_t> input_shape_seen_;
+    int forward_calls_{0};
 };
 
 // ---------------------------------------------------------------------------
@@ -353,6 +384,28 @@ static void test_encoder_rerank_canonicalizes_checkpoint_separator_tokens() {
           "rerank separator: merges the native separator pieces like HF");
 }
 
+static void test_encoder_rerank_batches_and_masks_documents() {
+    auto tokenizer = std::make_shared<VariableLengthTokenizer>();
+    auto module = std::make_unique<FakeScoreModule>(
+        std::vector<float>{1.0f, 3.0f, 99.0f, 99.0f, 2.0f, 4.0f, 6.0f, 8.0f},
+        std::vector<int64_t>{2, 4, 1}, std::vector<int64_t>{-1, -1}, std::vector<int64_t>{2, 4});
+    auto* module_ptr = module.get();
+    trtmc::EncoderPipeline pipeline(std::move(module), "reranking", tokenizer, "", "avg");
+
+    const auto scores = pipeline.rerank_batch("query", {"short", "long document"});
+    check(scores.size() == 2, "rerank batch: returns one score per document");
+    check(std::abs(scores[0] - 2.0f) < 1e-6f,
+          "rerank batch: excludes right padding from short-document pooling");
+    check(std::abs(scores[1] - 5.0f) < 1e-6f, "rerank batch: pools the complete long document");
+    check(module_ptr->forward_calls() == 1, "rerank batch: executes one engine enqueue");
+    check(module_ptr->input_shape_seen() == std::vector<int64_t>({2, 4}),
+          "rerank batch: binds batch and sequence dimensions");
+    check(module_ptr->input_ids() == std::vector<int32_t>({1, 2, 0, 0, 1, 2, 3, 4}),
+          "rerank batch: right pads shorter token rows");
+    check(module_ptr->attention_mask() == std::vector<int32_t>({1, 1, 0, 0, 1, 1, 1, 1}),
+          "rerank batch: masks padded tokens");
+}
+
 static void test_encoder_rerank_preserves_last_and_scalar_outputs() {
     auto tokenizer = std::make_shared<FixedTokenizer>();
     auto last_module = std::make_unique<FakeScoreModule>(std::vector<float>{0.1f, 0.2f, 0.3f, 0.9f},
@@ -549,6 +602,7 @@ int main() {
     test_encoder_encode_mode();
     test_encoder_rerank();
     test_encoder_rerank_canonicalizes_checkpoint_separator_tokens();
+    test_encoder_rerank_batches_and_masks_documents();
     test_encoder_rerank_preserves_last_and_scalar_outputs();
     test_encoder_rerank_rejects_invalid_score_shape();
     test_encoder_int32_mask();

@@ -247,10 +247,12 @@ entries:
     baseline:
       runner: task-reference
       adapter: hf-transformers-reranking
+      precision: fp16
       mode: hf-eager
       reference_backend: hf_transformers
       timing_scope: task-model-call-wall
       input_preparation_included: false
+      output_contract: reranking-order
   - id: electra.encode
     family: electra
     operation: encode

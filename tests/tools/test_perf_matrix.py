@@ -312,6 +312,8 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     }
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
+    assert by_id["eagle_vlm.rerank"]["baseline"]["precision"] == "fp16"
+    assert by_id["eagle_vlm.rerank"]["baseline"]["output_contract"] == "reranking-order"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
     assert by_id["sana_wm.generate_image"]["baseline"]["adapter_options"] == {
@@ -775,6 +777,31 @@ def test_generated_token_count_contract_allows_stochastic_token_content() -> Non
     assert perf_matrix._output_contract(case, candidate, reference) == (
         False,
         "generated token count differs",
+    )
+
+
+def test_reranking_order_contract_checks_all_document_scores() -> None:
+    case = {
+        "operation": "rerank",
+        "baseline": {"output_contract": "reranking-order"},
+    }
+    candidate = {"output_summary": {"documents": 3, "scores": [0.8, 0.1, 0.4]}}
+    reference = {
+        "output_summary": {"document_count": 3, "scores": [12.0, -4.0, 2.0]}
+    }
+
+    assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
+
+    candidate["output_summary"]["scores"] = [0.1, 0.8, 0.4]
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "reranking order differs",
+    )
+
+    candidate["output_summary"]["scores"] = [0.8, float("nan"), 0.4]
+    assert perf_matrix._output_contract(case, candidate, reference) == (
+        False,
+        "reranking scores are missing or invalid",
     )
 
 

@@ -6,7 +6,7 @@
   "runtime_strategy": "eagle_vlm_reranking",
   "task_strategy": "reranking",
   "precision": "fp16",
-  "max_cache_length": 256,
+  "max_cache_length": 685,
   "trust_remote_code": true,
   "testcases": [
     {

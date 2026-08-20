@@ -1659,6 +1659,30 @@ def _output_contract(
         matched = all(isinstance(value, list) and value for value in left_shape + right_shape)
         matched = matched and left_shape == right_shape
         return matched, "image feature output shape differs" if not matched else ""
+    if contract == "reranking-order":
+        left_scores = left.get("scores")
+        right_scores = right.get("scores")
+        if (
+            not isinstance(left_scores, list)
+            or not isinstance(right_scores, list)
+            or not left_scores
+            or len(left_scores) != len(right_scores)
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in (*left_scores, *right_scores)
+            )
+        ):
+            return False, "reranking scores are missing or invalid"
+        left_order = sorted(
+            range(len(left_scores)), key=lambda index: (-float(left_scores[index]), index)
+        )
+        right_order = sorted(
+            range(len(right_scores)), key=lambda index: (-float(right_scores[index]), index)
+        )
+        matched = left_order == right_order
+        return matched, "reranking order differs" if not matched else ""
     if operation == "generate":
         if contract == "generated-token-count":
             left_tokens = left.get("token_ids")
