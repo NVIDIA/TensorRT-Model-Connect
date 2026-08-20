@@ -59,10 +59,15 @@ def _review(
     variants: Sequence[Mapping[str, Any]],
     has_models: bool,
     sample_count: int | None,
+    selection: str,
 ) -> list[dict[str, Any]]:
     review: list[dict[str, Any]] = []
-    if not has_models:
+    if selection not in {"model_inventory", "explicit_only"}:
+        review.append({"code": "unsupported_selection", "value": selection})
+    elif selection == "model_inventory" and not has_models:
         review.append({"code": "no_selected_models"})
+    elif selection == "explicit_only" and has_models:
+        review.append({"code": "explicit_only_has_selected_models"})
     if sample_count is None:
         review.append({"code": "sample_limit_unconfigured"})
     if not any(
@@ -107,6 +112,7 @@ def build_gate_census(
     binding_count = 0
     for suite_id, suite in suites.items():
         sample_count, sample_limit_source = _sample_count(catalog, suite_id)
+        selection = str(suite.get("selection", "model_inventory") or "model_inventory")
         grouped: dict[str, dict[str, Any]] = {}
         for model_name, model_spec in catalog.get("models", {}).items():
             if suite_id not in model_spec.get("workloads", []):
@@ -131,6 +137,7 @@ def build_gate_census(
             variants=variants,
             has_models=any(variant["models"] for variant in variants),
             sample_count=sample_count,
+            selection=selection,
         )
         suite_rows.append(
             {
@@ -139,6 +146,7 @@ def build_gate_census(
                 "rationale": str(suite.get("description", "") or "").strip(),
                 "configured_sample_count": sample_count,
                 "sample_limit_source": sample_limit_source,
+                "selection": selection,
                 "variants": variants,
                 "review": review,
             }

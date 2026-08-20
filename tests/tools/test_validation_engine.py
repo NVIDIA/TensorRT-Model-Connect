@@ -861,6 +861,10 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
     assert prompted["default_model_names"] == ["sam-vit-base", "sam3"]
     assert prompted["model_overrides"]["by_family"]["sam"]["prompt_mode"] == "point"
     assert prompted["model_overrides"]["by_family"]["sam3"]["prompt_mode"] == "text"
+    assert prompted["sample_acceptance"] == {
+        "min_pass_rate": 0.95,
+        "min_allowed_failures": 1,
+    }
 
     selected = validation_engine.selected_models_for_suite(
         features,
@@ -3447,6 +3451,37 @@ def test_codegen_humaneval_gate_accepts_exact_replay() -> None:
 
     assert result["exact_match_rate"] == 1.0
     assert result["status"] == "passed"
+
+
+def test_prompted_segmentation_rejects_a_bad_tail_hidden_by_the_mean() -> None:
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "coco2017_prompted_segmentation"
+    )
+    result = {
+        "status": "passed",
+        "sample_count": 20,
+        "valid_count": 20,
+        "passed_count": 14,
+        "mean_backend_mask_iou": 0.75,
+        "worst_backend_mask_iou": 0.002,
+    }
+
+    validation_engine._apply_sample_acceptance(
+        result,
+        suite["sample_acceptance"],
+    )
+
+    assert result["status"] == "failed"
+    assert result["sample_acceptance"]["allowed_failures"] == 1
+    assert result["sample_acceptance"]["failed_count"] == 6
+    assert result["gate_failures"] == [
+        {
+            "gate": "sample_acceptance",
+            "metric": "failed_samples",
+            "actual": 6,
+            "required": 1,
+        }
+    ]
 
 
 def test_validation_suites_keep_continuation_and_drop_trace_cloze() -> None:

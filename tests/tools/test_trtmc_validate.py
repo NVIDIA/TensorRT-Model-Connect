@@ -203,6 +203,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
     assert declared <= configured
     assert configured - declared == {
         "full_duplex_bench_speech_parity",
+        "refcoco_grounding",
         "vlm_mmmu_pro_vision_mcq",
     }
     assert min(catalog["sample_limits"].values()) >= 1
@@ -366,7 +367,7 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
             "strict-model": {"workloads": ["quality"]},
             "observer": {"workloads": ["diagnostic"]},
         },
-        "sample_limits": {"quality": 20, "diagnostic": 5},
+        "sample_limits": {"quality": 20, "diagnostic": 5, "explicit": 5},
     }
     suites = {
         "quality": {
@@ -386,6 +387,12 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
         "unbound": {
             "id": "unbound",
             "description": "Not selected by the current model inventory.",
+            "gates": {"min_sample_pass_rate": 1.0},
+        },
+        "explicit": {
+            "id": "explicit",
+            "description": "Selected only by an explicit command.",
+            "selection": "explicit_only",
             "gates": {"min_sample_pass_rate": 1.0},
         },
     }
@@ -409,10 +416,10 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
 
     assert census["schema_version"] == "trtmc.validation-gate-census/v1"
     assert census["summary"] == {
-        "suites": 3,
+        "suites": 4,
         "bindings": 3,
-        "variants": 4,
-        "blocking_variants": 3,
+        "variants": 5,
+        "blocking_variants": 4,
         "observation_only_variants": 1,
         "invalid_variants": 1,
         "review_required_suites": 1,
@@ -433,6 +440,9 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
         {"code": "no_selected_models"},
         {"code": "sample_limit_unconfigured"},
     ]
+    explicit = next(row for row in census["suites"] if row["id"] == "explicit")
+    assert explicit["selection"] == "explicit_only"
+    assert explicit["review"] == []
 
 
 def test_gate_census_expands_sample_acceptance_at_configured_count() -> None:
@@ -554,9 +564,22 @@ def test_default_gate_census_covers_every_suite_and_binding() -> None:
     invalid = [
         row["id"]
         for row in census["suites"]
-        if any(variant["policy"]["issues"] for variant in row["variants"])
+        if any(
+            variant["policy"]["issues"]
+            or variant.get("sample_acceptance", {}).get("issues")
+            for variant in row["variants"]
+        )
     ]
-    assert invalid == ["refcoco_grounding"]
+    assert invalid == []
+    assert census["summary"]["review_required_suites"] == 0
+    explicit_only = {
+        row["id"] for row in census["suites"] if row["selection"] == "explicit_only"
+    }
+    assert explicit_only == {
+        "full_duplex_bench_speech_parity",
+        "refcoco_grounding",
+        "vlm_mmmu_pro_vision_mcq",
+    }
     mmlu = next(row for row in census["suites"] if row["id"] == "mmlu_five_shot_mcq")
     assert len(mmlu["variants"]) == 2
     assert [

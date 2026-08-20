@@ -62,6 +62,11 @@ default, additional, or diagnostic workload category. A suite that exists in
 from model and all-model runs; it can still be selected explicitly for a
 one-off experiment when its selectors match that model.
 
+Such an intentionally unmapped workload declares `selection: explicit_only`.
+The gate census then treats the missing model binding as deliberate while still
+requiring a configured sample limit and a valid gate policy. This annotation
+does not add the workload to a model or change execution behavior.
+
 The complete selection schema is intentionally just:
 
 ```yaml

@@ -463,6 +463,7 @@ suites:
         Run with --limit 10 on GB300. BLEU on ten samples is diagnostic only.
 
   - id: vlm_mmmu_pro_vision_mcq
+    selection: explicit_only
     description: >
       Local VLM multiple-choice accuracy evaluation on MMMU-Pro-Vision. This
       validates image-conditioned question answering for vision-language bundles
@@ -585,6 +586,7 @@ suites:
         runtime. This does not replace the native HF-target suite above.
 
   - id: refcoco_grounding
+    selection: explicit_only
     description: >
       RefCOCO referring-expression grounding accuracy for LocateAnything. HF
       slow/AR and TRTMC consume the same image and official single-instance
@@ -1287,6 +1289,11 @@ suites:
       # numerically close but worse task result from passing.
       min_backend_mask_iou: 0.70
       max_ground_truth_iou_drop_from_hf: 0.05
+    sample_acceptance:
+      # Each prompt first passes or fails at backend mask IoU 0.70. At the
+      # configured 20-sample slice, at most one prompt may miss that threshold.
+      min_pass_rate: 0.95
+      min_allowed_failures: 1
     model_overrides:
       by_family:
         sam:
@@ -1932,6 +1939,7 @@ suites:
       notes: GB300-only aggregate behavioral reference consistency.
 
   - id: full_duplex_bench_speech_parity
+    selection: explicit_only
     description: >
       Speech-response token and waveform consistency on five public
       Full-Duplex-Bench synthetic interruption and pause-handling inputs.
