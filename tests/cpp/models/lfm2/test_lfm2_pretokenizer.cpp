@@ -84,6 +84,21 @@ PieceMap pinned_piece_ids() {
         {"'T", {32640}},
         {"SHE", {560, 6347}},
         {"'S", {24406}},
+        {"a", {574}},
+        {" b", {794}},
+        {"5", {530}},
+        {" \t", {46482}},
+        {"trailing", {19310, 8206}},
+        {"  ", {767}},
+        {"def", {3663}},
+        {" f", {792}},
+        {"():\n", {32711}},
+        {"   ", {861}},
+        {" return", {1789}},
+        {" x", {3053}},
+        {"|", {601}},
+        {" a", {768}},
+        {" |", {2171}},
     };
 }
 
@@ -180,6 +195,27 @@ std::vector<Fixture> supported_language_fixtures() {
     };
 }
 
+std::vector<Fixture> whitespace_run_fixtures() {
+    // Pins the \s+(?!\S) alternative of the pinned Split regex: a
+    // newline-free whitespace run followed by non-whitespace yields its final
+    // whitespace unit to the next piece. Every id below is the byte-level BPE
+    // encoding the reference Hugging Face tokenizer assigns the same text.
+    return {
+        {"double-space", "a  b", {"a", " ", " b"}, {574, 730, 794}},
+        {"space-before-digit", "a  5", {"a", " ", " ", "5"}, {574, 730, 730, 530}},
+        {"space-tab", "a \t b", {"a", " \t", " b"}, {574, 46482, 794}},
+        {"trailing-run", "trailing  ", {"trailing", "  "}, {19310, 8206, 767}},
+        {"indented-code",
+         "def f():\n    return  x",
+         {"def", " f", "():\n", "   ", " return", " ", " x"},
+         {3663, 792, 32711, 861, 1789, 730, 3053}},
+        {"markdown-row",
+         "| a |  b |",
+         {"|", " a", " |", " ", " b", " |"},
+         {601, 768, 2171, 730, 794, 2171}},
+    };
+}
+
 void test_pinned_metadata_detection() {
     const std::string pinned = R"({"pre_tokenizer":{"type":"Sequence","pretokenizers":[
       {"type":"Split","pattern":{"Regex":"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"},"behavior":"Isolated","invert":false},
@@ -198,6 +234,19 @@ void test_supported_language_piece_and_id_parity() {
     const std::vector<std::string> added{"<|startoftext|>", "<|im_start|>", "<|im_end|>",
                                          "<|tool_call_start|>"};
     for (const auto& fixture : supported_language_fixtures()) {
+        check(trtmc::lfm2_split_pretokens(fixture.text) == fixture.pieces,
+              std::string(fixture.name) + " pinned Split pieces");
+        auto tokenizer =
+            trtmc::lfm2_wrap_pinned_pretokenizer(std::make_unique<PinnedPieceTokenizer>(), added);
+        check(tokenizer->encode(fixture.text) == fixture.ids,
+              std::string(fixture.name) + " pinned token ids");
+    }
+}
+
+void test_whitespace_run_piece_and_id_parity() {
+    const std::vector<std::string> added{"<|startoftext|>", "<|im_start|>", "<|im_end|>",
+                                         "<|tool_call_start|>"};
+    for (const auto& fixture : whitespace_run_fixtures()) {
         check(trtmc::lfm2_split_pretokens(fixture.text) == fixture.pieces,
               std::string(fixture.name) + " pinned Split pieces");
         auto tokenizer =
@@ -282,6 +331,7 @@ void test_real_pinned_tokenizer_when_provided() {
 int main() {
     test_pinned_metadata_detection();
     test_supported_language_piece_and_id_parity();
+    test_whitespace_run_piece_and_id_parity();
     test_case_insensitive_contractions();
     test_chat_and_tool_added_tokens_are_not_split();
     test_real_pinned_tokenizer_when_provided();

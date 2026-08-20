@@ -229,15 +229,25 @@ std::size_t whitespace_piece_end(std::string_view text, std::size_t offset, cons
 
     std::size_t scan = offset;
     std::size_t last_newline_end = offset;
+    std::size_t last_unit_begin = offset;
     while (scan < text.size()) {
         const auto unit = decode_utf8_unit(text, scan);
         if (!is_whitespace(unit.codepoint))
             break;
+        last_unit_begin = scan;
         scan += unit.size;
         if (is_newline(unit.codepoint))
             last_newline_end = scan;
     }
-    return last_newline_end > offset ? last_newline_end : scan;
+    if (last_newline_end > offset)
+        return last_newline_end;
+    // \s+(?!\S): a newline-free run followed by non-whitespace yields its
+    // final whitespace unit to the next piece (it becomes that piece's
+    // prefix). A single-unit run has nothing left to yield and falls through
+    // to the plain \s+ alternative, consuming the unit whole.
+    if (scan < text.size() && last_unit_begin > offset)
+        return last_unit_begin;
+    return scan;
 }
 
 std::size_t next_pretoken_end(std::string_view text, std::size_t offset) {
