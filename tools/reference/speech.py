@@ -527,6 +527,25 @@ def _load_nemotron35_model(
     return torch, model
 
 
+def load_nemotron35_asr_model(
+    *,
+    model: str,
+    device: str,
+    revision: str = "",
+    local_files_only: bool = False,
+) -> Any:
+    """Load Nemotron 3.5 through its archive-compatible NeMo model class."""
+    arguments = argparse.Namespace(
+        model=model,
+        model_revision=revision,
+        local_files_only=local_files_only,
+        device=device,
+    )
+    archive = _resolve_nemotron35_archive(arguments)
+    _torch, loaded = _load_nemotron35_model(arguments, archive)
+    return loaded
+
+
 def _load_nemo_asr_model(arguments: argparse.Namespace, nemo_asr: Any) -> Any:
     if arguments.local_files_only:
         archive = _resolve_nemo_archive(
@@ -732,14 +751,16 @@ def _transcribe_tts(
         pipeline,
     )
 
-    device = (
-        0
-        if arguments.device.startswith("cuda") and torch.cuda.is_available()
-        else -1
-    )
+    use_cuda = arguments.device.startswith("cuda") and torch.cuda.is_available()
+    device = 0 if use_cuda else -1
+    model_kwargs: dict[str, Any] = {
+        "local_files_only": arguments.local_files_only,
+    }
+    if use_cuda:
+        model_kwargs["torch_dtype"] = torch.float16
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         model_id,
-        local_files_only=arguments.local_files_only,
+        **model_kwargs,
     )
     processor = AutoProcessor.from_pretrained(
         model_id,
@@ -757,7 +778,7 @@ def _transcribe_tts(
     for path in wav_paths:
         audio, sample_rate = _read_wav_float32(str(path))
         waveforms.append(_resample_audio(audio, sample_rate, target_rate))
-    outputs = transcriber(waveforms, batch_size=min(8, len(waveforms)))
+    outputs = transcriber(waveforms, batch_size=1 if use_cuda else min(8, len(waveforms)))
     if isinstance(outputs, Mapping):
         outputs = [outputs]
     return [_transcription_text(output).strip() for output in outputs]

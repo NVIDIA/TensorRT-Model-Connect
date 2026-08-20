@@ -164,7 +164,11 @@ class DockerImageManager:
         for spec in profiles.values():
             if not isinstance(spec, dict):
                 continue
-            for field in ("requirements", "verification_script_file"):
+            for field in (
+                "requirements",
+                "bootstrap_requirements",
+                "verification_script_file",
+            ):
                 value = str(spec.get(field, "") or "").strip()
                 if value:
                     assets.add(package_root / value)
@@ -298,7 +302,7 @@ import json
 from pathlib import Path
 
 import tensorrt
-from nemo.collections.asr.models.rnnt_bpe_models_prompt import EncDecRNNTBPEModelWithPrompt
+from nemo.collections.asr.models import EncDecHybridRNNTCTCBPEModelWithPrompt
 
 print(f"TENSORRT_VERSION={tensorrt.__version__}")
 print("MODELOPT_VERSION=" + metadata.version("nvidia-modelopt"))

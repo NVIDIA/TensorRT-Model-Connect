@@ -492,21 +492,21 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
     """Return Python profile specs declared by family-owned MODEL.toml files.
 
     Entries use
-    ``name|requirements|verification_script|system_site_packages|prebuild``.
+    ``name|requirements|verification_script|system_site_packages|prebuild|bootstrap_requirements``.
     Paths are package-relative so profile assets stay under the owning family.
     """
     profiles: dict[str, dict[str, object]] = {}
     for meta in _load_family_metadata():
         for spec in meta.python_profile_specs:
             parts = [part.strip() for part in spec.split("|")]
-            if len(parts) not in {3, 4, 5} or any(
+            if len(parts) not in {3, 4, 5, 6} or any(
                 not part for part in parts[:3]
             ):
                 raise ValueError(
                     f"Invalid python_profile_specs entry {spec!r} for family "
                     f"{meta.id}; expected "
                     "'name|requirements|verification_script|"
-                    "system_site_packages|prebuild'"
+                    "system_site_packages|prebuild|bootstrap_requirements'"
                 )
             name, requirements, verification_script_file = parts[:3]
             system_site_packages = (
@@ -515,7 +515,7 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
             )
             prebuild = (
                 _metadata_bool(parts[4], "python_profile_specs")
-                if len(parts) == 5 else True
+                if len(parts) >= 5 else True
             )
             if name in profiles:
                 raise ValueError(
@@ -528,6 +528,13 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
                 "system_site_packages": system_site_packages,
                 "prebuild": prebuild,
             }
+            if len(parts) == 6:
+                if not parts[5]:
+                    raise ValueError(
+                        f"Invalid python_profile_specs entry {spec!r} for family "
+                        f"{meta.id}; bootstrap requirements must be non-empty"
+                    )
+                profiles[name]["bootstrap_requirements"] = parts[5]
     return profiles
 
 

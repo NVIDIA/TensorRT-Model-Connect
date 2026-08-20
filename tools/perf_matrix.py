@@ -1217,6 +1217,36 @@ def _candidate_build_python_profile(resolved: Mapping[str, Any]) -> tuple[str, s
     return profile, python
 
 
+def _candidate_build_dependency_preflight(
+    resolved: Mapping[str, Any],
+    *,
+    profile: str,
+    python: str,
+    timeout_seconds: int,
+) -> None:
+    model = resolved.get("model", {})
+    build = model.get("build", {}) if isinstance(model, Mapping) else {}
+    quantization = build.get("quantization", {}) if isinstance(build, Mapping) else {}
+    if not isinstance(quantization, Mapping) or (
+        str(quantization.get("format", "")).strip().lower(),
+        str(quantization.get("scale_source", "")).strip().lower(),
+    ) != ("fp8", "modelopt"):
+        return
+
+    command = _run_command(
+        [python, "-c", "import modelopt.torch.quantization"],
+        _command_environment(),
+        timeout_seconds,
+    )
+    if command["exit_code"] != 0:
+        detail = str(command.get("stderr_tail", "")).strip()
+        suffix = f": {detail}" if detail else ""
+        raise PerfMatrixError(
+            f"candidate build Python profile {profile!r} is missing "
+            f"nvidia-modelopt required for automatic FP8 calibration{suffix}"
+        )
+
+
 def _command_environment() -> dict[str, str]:
     environment = dict(os.environ)
     existing = environment.get("PYTHONPATH", "")
@@ -1276,7 +1306,13 @@ def _resolve_candidate(
         raise PerfMatrixError(
             f"case {case['id']} includes asset loading but resolves no timed asset path"
         )
-    profile, _ = _candidate_build_python_profile(value)
+    profile, python = _candidate_build_python_profile(value)
+    _candidate_build_dependency_preflight(
+        value,
+        profile=profile,
+        python=python,
+        timeout_seconds=options.timeout_seconds,
+    )
     value["_candidate_build_python_profile"] = profile
     command.pop("stdout", None)
     return value, argv, command

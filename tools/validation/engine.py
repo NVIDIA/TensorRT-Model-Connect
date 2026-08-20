@@ -9284,6 +9284,7 @@ def ensure_bundle(
     log_path: Path | None = None,
     cuda_visible_devices: str = "",
     expected_source_revision: str = "",
+    build_python: str = "",
 ) -> tuple[Path, bool]:
     expected_source_revision = str(expected_source_revision or "").strip().lower()
     if (
@@ -9322,12 +9323,18 @@ def ensure_bundle(
     log_path = log_path or bundle_path.with_suffix(".build.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     build_env = None
-    if cuda_visible_devices or expected_source_revision:
+    if cuda_visible_devices or expected_source_revision or build_python:
         build_env = os.environ.copy()
         if cuda_visible_devices:
             build_env["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         if expected_source_revision:
             build_env["TRTMC_ENGINE_BUILD_REVISION"] = expected_source_revision
+        if build_python:
+            python_bin = str(Path(build_python).expanduser().absolute().parent)
+            existing_path = build_env.get("PATH", "")
+            build_env["PATH"] = os.pathsep.join(
+                value for value in (python_bin, existing_path) if value
+            )
     with log_path.open("w", encoding="utf-8") as log_f:
         log_f.write(f"$ {shlex.join(cmd)}\n")
         log_f.flush()
@@ -9689,14 +9696,26 @@ def _namespace_for_run_bundle(
     )
 
 
-def model_reference_python(model: dict[str, Any], base_python: str) -> str:
+def model_phase_python(
+    model: dict[str, Any],
+    base_python: str,
+    phase: str,
+) -> str:
     profiles = normalize_execution_profiles(
         model.get("execution_profiles"),
         family=str(model.get("family", "") or ""),
         runtime_strategy=str(model.get("runtime_strategy", "") or ""),
         reference_backend=str(model.get("reference_backend", "") or ""),
     )
-    return resolve_profile_python(profiles["reference"], base_python)
+    return resolve_profile_python(profiles[phase], base_python)
+
+
+def model_build_python(model: dict[str, Any], base_python: str) -> str:
+    return model_phase_python(model, base_python, "build")
+
+
+def model_reference_python(model: dict[str, Any], base_python: str) -> str:
+    return model_phase_python(model, base_python, "reference")
 
 
 def _read_bundle_section(bundle_path: Path, section_name: str) -> bytes:
@@ -11429,6 +11448,10 @@ def eval_one_model(
         cuda_visible_devices=args.cuda_visible_devices,
         expected_source_revision=str(
             validation_config.get("reference_source_revision", "") or ""
+        ),
+        build_python=model_build_python(
+            model,
+            str(getattr(args, "hf_python", "") or sys.executable),
         ),
     )
 

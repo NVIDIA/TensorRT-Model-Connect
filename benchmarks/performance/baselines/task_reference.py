@@ -244,6 +244,49 @@ def _snapshot_revision(path: str | Path) -> str:
     return ""
 
 
+def _load_sam3_processor(
+    transformers: Any,
+    model: str,
+    processor_kwargs: Mapping[str, Any],
+) -> Any:
+    """Load SAM3's processor, including Meta's processor_config-only snapshot."""
+    try:
+        return transformers.Sam3Processor.from_pretrained(model, **processor_kwargs)
+    except (OSError, ValueError) as processor_error:
+        model_path = Path(model)
+        if model_path.is_dir():
+            processor_config_path = model_path / "processor_config.json"
+        else:
+            try:
+                from huggingface_hub import try_to_load_from_cache
+
+                cached_path = try_to_load_from_cache(
+                    model,
+                    "processor_config.json",
+                    revision=str(processor_kwargs.get("revision") or "main"),
+                )
+            except Exception:  # noqa: BLE001 - preserve the original processor error
+                raise processor_error
+            processor_config_path = Path(cached_path) if isinstance(cached_path, str) else Path()
+        if not processor_config_path.is_file():
+            raise processor_error
+
+        processor_config = json.loads(processor_config_path.read_text(encoding="utf-8"))
+        image_processor_kwargs = processor_config.get("image_processor")
+        if not isinstance(image_processor_kwargs, dict):
+            raise processor_error
+        image_processor_kwargs = dict(image_processor_kwargs)
+        image_processor_kwargs.pop("image_processor_type", None)
+        image_processor_kwargs.pop("processor_class", None)
+        image_processor = transformers.Sam3ImageProcessorFast(**image_processor_kwargs)
+        tokenizer = transformers.AutoTokenizer.from_pretrained(model, **processor_kwargs)
+        return transformers.Sam3Processor(
+            image_processor,
+            tokenizer,
+            target_size=processor_config.get("target_size"),
+        )
+
+
 def _cached_snapshot_revision(repo_id: str, requested: str | None) -> str:
     try:
         from huggingface_hub import scan_cache_dir
@@ -479,6 +522,41 @@ def _load_tts(
     return Session(invoke, revision, framework, reference_dependencies=dependencies)
 
 
+def _load_nemo_asr_reference_model(
+    arguments: argparse.Namespace,
+    *,
+    device: Any,
+) -> Any:
+    if (
+        arguments.family == "nemotron_speech_streaming"
+        and "nemotron-3.5-asr-streaming" in arguments.model.lower()
+    ):
+        from tools.reference.speech import load_nemotron35_asr_model
+
+        return load_nemotron35_asr_model(
+            model=arguments.model,
+            revision=arguments.revision or "",
+            local_files_only=arguments.local_files_only,
+            device=str(device),
+        )
+
+    import nemo.collections.asr as nemo_asr
+
+    return nemo_asr.models.ASRModel.from_pretrained(
+        arguments.model,
+        map_location="cpu",
+    )
+
+
+def _disable_nemo_asr_cuda_graphs(model: Any) -> bool:
+    """Disable NeMo's optional RNNT CUDA Graph decoder when available."""
+    decoding = getattr(getattr(model, "decoding", None), "decoding", None)
+    disable_cuda_graphs = getattr(decoding, "disable_cuda_graphs", None)
+    if not callable(disable_cuda_graphs):
+        return False
+    return bool(disable_cuda_graphs())
+
+
 def _load_asr(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
@@ -494,14 +572,10 @@ def _load_asr(
     device = torch.device("cuda")
 
     if arguments.family in {"canary", "nemotron_speech_streaming"}:
-        import nemo.collections.asr as nemo_asr
         from tools.validation.engine import _transcription_text
 
-        model = (
-            nemo_asr.models.ASRModel.from_pretrained(arguments.model, map_location="cpu")
-            .eval()
-            .to(device)
-        )
+        model = _load_nemo_asr_reference_model(arguments, device=device).eval().to(device)
+        _disable_nemo_asr_cuda_graphs(model)
         reference_dtype = _torch_dtype(torch, arguments.precision)
         autocast_dtype = reference_dtype if arguments.precision != "fp32" else torch.float16
         temporary = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -1830,7 +1904,7 @@ def _load_vision(
             return {"mask_count": int(masks.shape[0]), **_tensor_summary(masks)}
 
     elif arguments.family == "sam3":
-        processor = transformers.Sam3Processor.from_pretrained(arguments.model, **processor_kwargs)
+        processor = _load_sam3_processor(transformers, arguments.model, processor_kwargs)
         model = transformers.Sam3Model.from_pretrained(arguments.model, **kwargs).eval().to(device)
         inputs = _to_device(
             processor(

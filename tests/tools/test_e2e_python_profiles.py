@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -62,6 +63,37 @@ def test_python_profile_key_preserves_non_virtualenv_interpreter_path(tmp_path):
     interpreter = tmp_path / "python3"
 
     assert shared_profiles._absolute_python(str(interpreter)) == str(interpreter)
+
+
+def test_python_site_packages_preserves_transitive_profile_overlays(tmp_path):
+    base_environment = tmp_path / "base-environment"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(base_environment)],
+        check=True,
+    )
+    base_python = base_environment / "bin" / "python"
+    base_site_packages = Path(
+        subprocess.run(
+            [
+                str(base_python),
+                "-c",
+                "import site; print(site.getsitepackages()[0])",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    inherited_site_packages = tmp_path / "inherited" / "site-packages"
+    inherited_site_packages.mkdir(parents=True)
+    (base_site_packages / "inherited-profile.pth").write_text(
+        f"{inherited_site_packages}\n",
+        encoding="utf-8",
+    )
+
+    assert str(inherited_site_packages) in shared_profiles._python_site_packages(
+        str(base_python)
+    )
 
 
 def test_resolve_case_profile_names_apply_manifest_profiles():
@@ -189,10 +221,96 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
     assert install[2] == 7200
 
 
+def test_profile_installs_bootstrap_requirements_before_runtime_requirements(
+    monkeypatch, tmp_path
+):
+    bootstrap = tmp_path / "bootstrap.lock.txt"
+    bootstrap.write_text("build-helper==1.0\n", encoding="utf-8")
+    requirements = tmp_path / "requirements.lock.txt"
+    requirements.write_text("source-package==2.0\n", encoding="utf-8")
+    monkeypatch.delenv(shared_profiles.PREBUILT_ONLY_ENV, raising=False)
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+    monkeypatch.setattr(
+        shared_profiles,
+        "_verify_exact_requirements",
+        lambda *_args, **_kwargs: None,
+    )
+
+    commands = []
+
+    def run_command(cmd, *, description, timeout=1800, **kwargs):
+        commands.append((cmd, description, timeout, kwargs))
+        if description.startswith("create Python profile"):
+            python = Path(cmd[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(shared_profiles, "_run_profile_command", run_command)
+
+    shared_profiles._materialize_venv_profile(
+        "custom",
+        {
+            "bootstrap_requirements": str(bootstrap),
+            "requirements": str(requirements),
+            "system_site_packages": False,
+        },
+        sys.executable,
+    )
+
+    installs = [call for call in commands if call[1].startswith("install ")]
+    assert [call[1] for call in installs] == [
+        "install bootstrap requirements for Python profile 'custom'",
+        "install Python profile 'custom'",
+    ]
+
+
 def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
     monkeypatch.setenv("MAX_JOBS", "2")
 
     assert shared_profiles._profile_install_environment()["MAX_JOBS"] == "2"
+
+
+def test_profile_source_builds_filter_hard_coded_cuda_architectures(
+    monkeypatch, tmp_path
+):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    (cuda_home / "include").mkdir()
+    (cuda_home / "lib64").mkdir()
+    nvcc.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    nvcc.chmod(0o755)
+    monkeypatch.setenv("CUDA_HOME", str(cuda_home))
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "10.0;11.0+PTX")
+
+    environment = shared_profiles._profile_install_environment()
+    result = subprocess.run(
+        [
+            str(Path(environment["CUDA_HOME"]) / "bin" / "nvcc"),
+            "-O3",
+            "-gencode",
+            "arch=compute_90,code=sm_90",
+            "-gencode",
+            "arch=compute_100,code=sm_100",
+            "-gencode=arch=compute_90,code=sm_90",
+            "-gencode=arch=compute_110,code=sm_110",
+            "input.cu",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "arch=compute_90,code=sm_90" not in result.stdout
+    assert "arch=compute_100,code=sm_100" in result.stdout
+    assert "arch=compute_110,code=sm_110" in result.stdout
+    assert Path(environment["CUDA_HOME"], "include").resolve() == cuda_home / "include"
+
+
+def test_cuda_arch_codes_reject_named_architectures() -> None:
+    assert shared_profiles._cuda_arch_codes("8.7;10.0+PTX;11.0") == ("87", "100", "110")
+    assert shared_profiles._cuda_arch_codes("Ampere") == ()
 
 
 def test_profile_command_timeout_terminates_descendants(tmp_path):
@@ -241,17 +359,27 @@ def test_process_session_members_ignores_vanished_proc_entry(monkeypatch):
 
 def test_family_profile_registry_is_fully_exact_pinned():
     expected = {
+        "canary_reference",
         "chronos",
         "deepseek_ocr",
+        "deepseek_v2",
         "elf_flow",
         "elf_flow_reference",
         "internlm",
         "lance_reference",
         "magpie_tts_reference",
+        "minimax_h3_reference",
+        "nemotron_labs_diffusion_reference",
+        "nemotron_speech_streaming_reference",
         "nemotron_h_reference",
+        "olmo_tokenizer",
         "personaplex_full_duplex_evaluator",
         "phi4_multimodal",
+        "qwen_image_reference",
         "sana_wm_reference",
+        "timm_reference",
+        "wan2_2_ti2v_reference",
+        "xglm_tokenizer",
         "reference_common",
     }
     profiles = shared_profiles.load_python_profile_registry()["profiles"]
@@ -265,11 +393,70 @@ def test_family_profile_registry_is_fully_exact_pinned():
         assert pins, name
 
 
-def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
+def test_reference_common_pins_the_transformers_hub_pair():
+    profile = shared_profiles.load_python_profile_registry()["profiles"]["reference_common"]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert shared_profiles._exact_pinned_requirements(requirements).items() >= {
+        "transformers": "5.2.0",
+        "huggingface-hub": "1.22.0",
+        "tokenizers": "0.22.2",
+    }.items()
+
+
+def test_reference_common_pins_sacrebleu_runtime_dependencies() -> None:
+    profile = shared_profiles.load_python_profile_registry()["profiles"][
+        "reference_common"
+    ]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert "sacrebleu==2.5.1" in requirements
+    assert "colorama==0.4.6" in requirements
+    assert "portalocker==3.2.0" in requirements
+    assert "tabulate==0.10.0" in requirements
+    assert "lxml==6.1.1" in requirements
+    assert 'version("colorama") == "0.4.6"' in profile["verification_script"]
+    assert 'version("portalocker") == "3.2.0"' in profile["verification_script"]
+    assert 'version("tabulate") == "0.10.0"' in profile["verification_script"]
+    assert 'version("lxml") == "6.1.1"' in profile["verification_script"]
+    assert "import sacrebleu" in profile["verification_script"]
+
+
+def test_reference_common_pins_clip_scoring_dependencies() -> None:
+    profile = shared_profiles.load_python_profile_registry()["profiles"][
+        "reference_common"
+    ]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert "open-clip-torch==3.3.0" in requirements
+    assert "ftfy==6.3.1" in requirements
+    assert 'version("open-clip-torch") == "3.3.0"' in profile["verification_script"]
+    assert 'version("ftfy") == "6.3.1"' in profile["verification_script"]
+    assert "import open_clip" in profile["verification_script"]
+    assert "import ftfy" in profile["verification_script"]
+
+
+def test_reference_common_pins_chat_template_dependencies() -> None:
+    profile = shared_profiles.load_python_profile_registry()["profiles"][
+        "reference_common"
+    ]
+    requirements = shared_profiles._read_requirements_text(profile["requirements"])
+
+    assert "Jinja2==3.1.6" in requirements
+    assert "MarkupSafe==3.0.3" in requirements
+    assert 'version("Jinja2") == "3.1.6"' in profile["verification_script"]
+    assert 'version("MarkupSafe") == "3.0.3"' in profile["verification_script"]
+
+
+def test_profile_prebuild_policy_controls_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
 
+    assert "canary_reference" not in prebuilt
+    assert "magpie_tts_reference" not in prebuilt
+    assert "nemotron_speech_streaming_reference" in prebuilt
     assert "personaplex_full_duplex_evaluator" not in prebuilt
+    assert "minimax_h3_reference" not in prebuilt
     assert "reference_common" in prebuilt
 
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
@@ -279,6 +466,32 @@ def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
     with pytest.raises(ValueError, match="more than once"):
         shared_profiles._exact_pinned_requirements(
             "huggingface-hub==0.28.1\nhuggingface_hub==0.28.1\n"
+        )
+
+
+def test_profile_lock_filters_exact_platform_machine_markers(monkeypatch):
+    requirements = (
+        'flash-attn==2.8.3; platform_machine != "aarch64"\n'
+        "numpy==1.26.4\n"
+    )
+    monkeypatch.setattr(shared_profiles.platform, "machine", lambda: "aarch64")
+
+    assert shared_profiles._exact_pinned_requirements(requirements) == {
+        "numpy": "1.26.4"
+    }
+
+    monkeypatch.setattr(shared_profiles.platform, "machine", lambda: "x86_64")
+
+    assert shared_profiles._exact_pinned_requirements(requirements) == {
+        "flash-attn": "2.8.3",
+        "numpy": "1.26.4",
+    }
+
+
+def test_profile_lock_rejects_unrestricted_environment_markers():
+    with pytest.raises(ValueError, match="platform_machine"):
+        shared_profiles._exact_pinned_requirements(
+            'transformers==4.49.0; python_version >= "3.11"\n'
         )
 
 

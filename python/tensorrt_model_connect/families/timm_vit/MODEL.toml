@@ -4,6 +4,12 @@
 id = "timm_vit"
 plugin = "timm_vit"
 module = "plugin"
+python_profile_specs = [
+  "timm_reference|families/timm_vit/python_profile_requirements/timm_reference.lock.txt|families/timm_vit/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|timm_reference",
+]
 aliases = [
   "timm_vit",
   "timmvit",

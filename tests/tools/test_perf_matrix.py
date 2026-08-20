@@ -311,6 +311,10 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
+    assert (
+        by_id["timm_vit.classify"]["baseline"]["python_profile"]
+        == "timm_reference"
+    )
     assert by_id["sana_wm.generate_image"]["baseline"]["adapter_options"] == {
         "reference_commit": "59629fdf790850797cb657bad014fce432bd713d",
         "intrinsics": "assets/demo_0_intrinsics.npy",
@@ -2571,6 +2575,78 @@ def test_candidate_preflight_rejects_an_unavailable_build_python_profile(
         perf_matrix._candidate_build_python_profile({"model": {"family": "example"}})
 
 
+def test_candidate_preflight_requires_modelopt_for_auto_fp8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_command",
+        lambda argv, _environment, timeout: calls.append((argv, timeout))
+        or {
+            "exit_code": 1,
+            "stderr_tail": "ModuleNotFoundError: No module named 'modelopt'",
+        },
+    )
+
+    with pytest.raises(
+        perf_matrix.PerfMatrixError,
+        match="candidate build Python profile 'base' is missing nvidia-modelopt",
+    ):
+        perf_matrix._candidate_build_dependency_preflight(
+            {
+                "model": {
+                    "build": {
+                        "quantization": {
+                            "format": "fp8",
+                            "scale_source": "modelopt",
+                        }
+                    }
+                }
+            },
+            profile="base",
+            python="/profile/python",
+            timeout_seconds=30,
+        )
+
+    assert calls == [
+        (
+            [
+                "/profile/python",
+                "-c",
+                "import modelopt.torch.quantization",
+            ],
+            30,
+        )
+    ]
+
+
+def test_candidate_preflight_skips_modelopt_for_non_calibrated_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        perf_matrix,
+        "_run_command",
+        lambda *_args, **_kwargs: pytest.fail("dependency probe must not run"),
+    )
+
+    perf_matrix._candidate_build_dependency_preflight(
+        {
+            "model": {
+                "build": {
+                    "quantization": {
+                        "format": "fp8",
+                        "scale_source": "precomputed",
+                    }
+                }
+            }
+        },
+        profile="base",
+        python="/profile/python",
+        timeout_seconds=30,
+    )
+
+
 def test_seq2seq_token_framing_is_explicit_and_exact() -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py"))
     normalize = runner["_normalize_seq2seq_tokens"]
@@ -2753,6 +2829,60 @@ def test_task_reference_runner_measures_loaded_public_operation(
     }
 
 
+def test_nemotron35_perf_reference_uses_archive_compatible_loader(monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    from tools.reference import speech
+
+    expected = object()
+    captured: dict[str, object] = {}
+
+    def load_compatible(**kwargs):
+        captured.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(
+        speech,
+        "load_nemotron35_asr_model",
+        load_compatible,
+        raising=False,
+    )
+    arguments = Namespace(
+        family="nemotron_speech_streaming",
+        model="nvidia/nemotron-3.5-asr-streaming-0.6b",
+        revision="model-revision",
+        local_files_only=True,
+    )
+
+    model = runner["_load_nemo_asr_reference_model"](
+        arguments,
+        device="cuda",
+    )
+
+    assert model is expected
+    assert captured == {
+        "model": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+        "revision": "model-revision",
+        "local_files_only": True,
+        "device": "cuda",
+    }
+
+
+def test_nemo_asr_perf_reference_disables_rnnt_cuda_graphs() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    calls = 0
+
+    class GreedyDecoder:
+        def disable_cuda_graphs(self) -> bool:
+            nonlocal calls
+            calls += 1
+            return True
+
+    model = Namespace(decoding=Namespace(decoding=GreedyDecoder()))
+
+    assert runner["_disable_nemo_asr_cuda_graphs"](model) is True
+    assert calls == 1
+
+
 def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     deepseek = object()
@@ -2852,6 +2982,67 @@ def test_sam3_reference_reports_source_image_dimensions(
     )
 
     assert session.invoke() == {"num_masks": 2, "height": 4, "width": 6}
+
+
+def test_sam3_reference_falls_back_to_processor_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    processor_config = snapshot / "processor_config.json"
+    processor_config.write_text(
+        json.dumps(
+            {
+                "target_size": 1008,
+                "image_processor": {
+                    "image_processor_type": "Sam3ImageProcessorFast",
+                    "size": {"height": 1008, "width": 1008},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeProcessor:
+        def __init__(self, image_processor, tokenizer, *, target_size):
+            self.image_processor = image_processor
+            self.tokenizer = tokenizer
+            self.target_size = target_size
+
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            raise OSError("preprocessor_config.json is absent")
+
+    class FakeImageProcessor:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, *_args, **_kwargs):
+            return "tokenizer"
+
+    fake_transformers = Namespace(
+        AutoTokenizer=FakeTokenizer,
+        Sam3ImageProcessorFast=FakeImageProcessor,
+        Sam3Processor=FakeProcessor,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        Namespace(try_to_load_from_cache=lambda *_args, **_kwargs: str(processor_config)),
+    )
+
+    processor = runner["_load_sam3_processor"](
+        fake_transformers,
+        "facebook/sam3",
+        {"local_files_only": True, "revision": "pinned"},
+    )
+
+    assert processor.target_size == 1008
+    assert processor.tokenizer == "tokenizer"
+    assert processor.image_processor.kwargs == {"size": {"height": 1008, "width": 1008}}
 
 
 def test_locateanything_fallback_tokenizer_supports_batch_decode(
