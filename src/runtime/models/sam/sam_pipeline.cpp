@@ -212,10 +212,13 @@ PromptedSegmentationResult SamPipeline::segment_prompted(const float* image_pixe
 
     auto enc_out = image_encoder_->forward({{"pixel_values", img_t}});
 
+    const float reference_point_x = quantize_sam_fractional_point(point_x, plan.original_width);
+    const float reference_point_y = quantize_sam_fractional_point(point_y, plan.original_height);
     auto sparse_prompt = build_sam_point_sparse_prompt(
-        point_x, point_y, is_foreground, plan.rescaled_width, plan.rescaled_height,
-        config_.image_size, config_.decoder_hidden_size, config_.shared_image_pe,
-        config_.point_embed_fg, config_.point_embed_bg, config_.not_a_point_embed);
+        reference_point_x, reference_point_y, is_foreground, plan.rescaled_width,
+        plan.rescaled_height, config_.image_size, config_.decoder_hidden_size,
+        config_.shared_image_pe, config_.point_embed_fg, config_.point_embed_bg,
+        config_.not_a_point_embed);
     Tensor sparse_t;
     sparse_t.data = sparse_prompt.data();
     sparse_t.shape = {2, config_.decoder_hidden_size};

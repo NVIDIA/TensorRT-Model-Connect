@@ -68,6 +68,15 @@ void test_build_sam_point_sparse_prompt_happy_path() {
     check_close(sparse[7], 6.0F, "happy path: pad value[3]");
 }
 
+void test_fractional_prompt_matches_reference_pixel_quantization() {
+    check_close(trtmc::quantize_sam_fractional_point(0.50390625F, 640), 322.0F / 640.0F,
+                "prompt quantization: x uses the reference integer pixel");
+    check_close(trtmc::quantize_sam_fractional_point(0.6461318F, 349), 225.0F / 349.0F,
+                "prompt quantization: y uses the reference integer pixel");
+    check_close(trtmc::quantize_sam_fractional_point(0.25F, 0), 0.25F,
+                "prompt quantization: invalid image size preserves the fraction");
+}
+
 void test_encode_sam_point_embedding_missing_data_returns_zeroes() {
     const std::vector<float> shared_image_pe = {1.0F, 2.0F, 3.0F};
     const std::vector<float> point_embed_fg = {0.1F, 0.2F, 0.3F, 0.4F};
@@ -227,6 +236,7 @@ void test_postprocess_sam_result_preserves_invalid_requests_and_incomplete_paylo
 
 int main() {
     test_build_sam_point_sparse_prompt_happy_path();
+    test_fractional_prompt_matches_reference_pixel_quantization();
     test_encode_sam_point_embedding_missing_data_returns_zeroes();
     test_build_sam_point_sparse_prompt_short_padding_embedding();
     test_select_sam_multimask_outputs_keeps_trailing_masks();

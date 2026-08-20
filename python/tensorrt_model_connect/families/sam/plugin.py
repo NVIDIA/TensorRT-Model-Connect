@@ -1157,20 +1157,102 @@ class SamPlugin:
         grid_size, hidden, num_heads, head_dim, window_size,
         dtype=np.float32,
     ):
-        """Build windowed attention for SAM ViT layers.
+        """Partition SAM features into local windows and restore their layout."""
+        padded_size = ((grid_size + window_size - 1) // window_size) * window_size
+        window_count = padded_size // window_size
+        pad_size = padded_size - grid_size
 
-        For simplicity, we treat windowed attention as global attention
-        over the full sequence. This is mathematically correct (windowed
-        attention is a subset of global attention) but less efficient.
-        A proper windowed implementation would partition into windows,
-        but TRT's static shape requirements make this complex.
-        """
-        seq_len = grid_size * grid_size
+        padded = inp_4d
+        if pad_size:
+            pad_right = graph_ops.add_constant(
+                network,
+                (1, grid_size, pad_size, hidden),
+                np.zeros((1, grid_size, pad_size, hidden), dtype=dtype),
+                dtype=dtype,
+            )
+            concat_width = network.add_concatenation([padded, pad_right])
+            concat_width.axis = 2
+
+            pad_bottom = graph_ops.add_constant(
+                network,
+                (1, pad_size, padded_size, hidden),
+                np.zeros((1, pad_size, padded_size, hidden), dtype=dtype),
+                dtype=dtype,
+            )
+            concat_height = network.add_concatenation(
+                [concat_width.get_output(0), pad_bottom]
+            )
+            concat_height.axis = 1
+            padded = concat_height.get_output(0)
+
+        partition = network.add_shuffle(padded)
+        partition.reshape_dims = (
+            1,
+            window_count,
+            window_size,
+            window_count,
+            window_size,
+            hidden,
+        )
+        partition.second_transpose = trt.Permutation([0, 1, 3, 2, 4, 5])
+
+        windows = network.add_shuffle(partition.get_output(0))
+        windows.reshape_dims = (
+            window_count * window_count,
+            window_size,
+            window_size,
+            hidden,
+        )
+        attended = SamPlugin._build_spatial_attention(
+            network,
+            windows.get_output(0),
+            weights,
+            w_prefix,
+            batch_size=window_count * window_count,
+            spatial_size=window_size,
+            hidden=hidden,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            dtype=dtype,
+        )
+
+        grouped = network.add_shuffle(attended)
+        grouped.reshape_dims = (
+            1,
+            window_count,
+            window_count,
+            window_size,
+            window_size,
+            hidden,
+        )
+        grouped.second_transpose = trt.Permutation([0, 1, 3, 2, 4, 5])
+
+        unpartitioned = network.add_shuffle(grouped.get_output(0))
+        unpartitioned.reshape_dims = (1, padded_size, padded_size, hidden)
+        if not pad_size:
+            return unpartitioned.get_output(0)
+
+        cropped = network.add_slice(
+            unpartitioned.get_output(0),
+            start=(0, 0, 0, 0),
+            shape=(1, grid_size, grid_size, hidden),
+            stride=(1, 1, 1, 1),
+        )
+        return cropped.get_output(0)
+
+    @staticmethod
+    def _build_spatial_attention(
+        network, inp_4d, weights, w_prefix, *,
+        batch_size, spatial_size, hidden, num_heads, head_dim,
+        dtype=np.float32,
+    ):
+        """Build SAM attention over one or more equally sized spatial grids."""
+        seq_len = spatial_size * spatial_size
         attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
-        # Flatten to 2D: [1, H, W, C] -> [H*W, C]
+        # Flatten to rows for the projection layers.
         flat = network.add_shuffle(inp_4d)
-        flat.reshape_dims = (seq_len, hidden)
+        flat.reshape_dims = (batch_size * seq_len, hidden)
 
         q = graph_ops.add_matmul_rhs_constant(
             network, flat.get_output(0), hidden, hidden,
@@ -1191,149 +1273,129 @@ class SamPlugin:
             network, v, hidden, weights[f"{w_prefix}.attn.v.bias"])
 
         q_h = network.add_shuffle(q)
-        q_h.reshape_dims = (seq_len, num_heads, head_dim)
-        q_h.second_transpose = trt.Permutation([1, 0, 2])
+        q_h.reshape_dims = (batch_size, seq_len, num_heads, head_dim)
+        q_h.second_transpose = trt.Permutation([0, 2, 1, 3])
 
         k_h = network.add_shuffle(k)
-        k_h.reshape_dims = (seq_len, num_heads, head_dim)
-        k_h.second_transpose = trt.Permutation([1, 0, 2])
+        k_h.reshape_dims = (batch_size, seq_len, num_heads, head_dim)
+        k_h.second_transpose = trt.Permutation([0, 2, 1, 3])
 
         v_h = network.add_shuffle(v)
-        v_h.reshape_dims = (seq_len, num_heads, head_dim)
-        v_h.second_transpose = trt.Permutation([1, 0, 2])
+        v_h.reshape_dims = (batch_size, seq_len, num_heads, head_dim)
+        v_h.second_transpose = trt.Permutation([0, 2, 1, 3])
 
         score = network.add_matrix_multiply(
             q_h.get_output(0), trt.MatrixOperation.NONE,
             k_h.get_output(0), trt.MatrixOperation.TRANSPOSE)
         scale_c = graph_ops.add_constant(
-            network, (1, 1, 1), np.array([attn_scale], dtype=dtype),
+            network, (1, 1, 1, 1), np.array([attn_scale], dtype=dtype),
             dtype=dtype)
         scaled = network.add_elementwise(
             score.get_output(0), scale_c, trt.ElementWiseOperation.PROD)
 
-        # Add decomposed relative position bias if available
-        # HF: rel_h = einsum("bhwc,hkc->bhwk", q_reshaped, rel_pos_h)
-        #     rel_w = einsum("bhwc,wkc->bhwk", q_reshaped, rel_pos_w)
-        #     bias = rel_h[:,:,:,:,None] + rel_w[:,:,:,None,:]
-        #     bias = bias.reshape_as(attn_weights)
+        # HF SAM's decomposed relative-position bias depends on each query.
         if f"{w_prefix}.attn.rel_pos_h" in weights:
             rel_pos_h = weights[f"{w_prefix}.attn.rel_pos_h"]
             rel_pos_w = weights[f"{w_prefix}.attn.rel_pos_w"]
-            # Precompute the indexed rel_pos tables as constants
-            rp_h = SamPlugin._get_rel_pos(grid_size, grid_size, rel_pos_h)  # [H, H, head_dim]
-            rp_w = SamPlugin._get_rel_pos(grid_size, grid_size, rel_pos_w)  # [W, W, head_dim]
+            rp_h = SamPlugin._get_rel_pos(
+                spatial_size, spatial_size, rel_pos_h)
+            rp_w = SamPlugin._get_rel_pos(
+                spatial_size, spatial_size, rel_pos_w)
 
-            # q_h is [num_heads, H*W, head_dim]
-            # Reshape Q to [num_heads, H, W, head_dim]
             q_4d = network.add_shuffle(q_h.get_output(0))
-            q_4d.reshape_dims = (num_heads, grid_size, grid_size, head_dim)
+            q_4d.reshape_dims = (
+                batch_size, num_heads, spatial_size, spatial_size, head_dim)
 
-            # rel_h = einsum("nhwc,hkc->nhwk", q_4d, rp_h)
-            # = for each n,h,w: sum_c q[n,h,w,c] * rp_h[h,k,c]
-            # This is q_4d[:, :, :, :] @ rp_h.transpose(0,2,1)[h] for each h
-            # Simpler: reshape q to [N*W, H, head_dim] and rp_h to [H, head_dim, H]
-            # then bmm. But rp_h is [H, H, hd] so rp_h.T is [H, hd, H].
-            # Actually, we need per-row-of-h matmul which is tricky.
-            #
-            # Alternative approach: compute the full bias as a constant by averaging
-            # over typical query magnitudes. But that's not mathematically correct.
-            #
-            # The cleanest TRT approach:
-            # q_for_h: [num_heads * grid_size, grid_size, head_dim]  (merge N,W dims)
-            #         but that doesn't work either.
-            #
-            # Let's use a different decomposition:
-            # rel_h[n,h,w,k] = sum_c q[n,h,w,c] * rp_h[h,k,c]
-            # Reshape q: [N, H, W, D] -> [N*W, H, D]
-            # rp_h: [H, K, D] -> [H, D, K].T = [K, D, H]... no
-            #
-            # Actually: for each (n,w), rel_h[n,:,w,:] = q[n,:,w,:] @ rp_h.T
-            # where rp_h.T is [H, head_dim].T reshaped... Let me think again.
-            #
-            # rp_h shape is [H, H, D]. For the einsum "nhwc,hkc->nhwk":
-            # For fixed h: rel_h[n,h,w,k] = sum_c q[n,h,w,c] * rp_h[h,k,c]
-            # This is a matmul: q[n,h,w,:] @ rp_h[h,:,:].T for each h
-            # = [N, H, W, D] @ [H, D, K] (batched over H dimension)
-            #
-            # In TRT we can do this with a MatMul where one input has batch dim H:
-            # q_perm: [H, N*W, D]  rp_h_perm: [H, D, K]
-            # result: [H, N*W, K] -> reshape [N, H, W, K]
-
-            # For H-axis relative position:
-            # q_perm: permute q_4d [N,H,W,D] -> [H,N,W,D] -> reshape [H, N*W, D]
             q_perm_h = network.add_shuffle(q_4d.get_output(0))
-            q_perm_h.first_transpose = trt.Permutation([1, 0, 2, 3])
-            q_perm_h.reshape_dims = (grid_size, num_heads * grid_size, head_dim)
+            q_perm_h.first_transpose = trt.Permutation([2, 0, 1, 3, 4])
+            q_perm_h.reshape_dims = (
+                spatial_size,
+                batch_size * num_heads * spatial_size,
+                head_dim,
+            )
 
-            # rp_h: [H, K, D] -> transpose to [H, D, K]
-            rp_h_t = rp_h.transpose(0, 2, 1).astype(np.float32)  # [H, D, K]
+            rp_h_t = rp_h.transpose(0, 2, 1).astype(np.float32)
             rp_h_c = graph_ops.add_constant(
                 network, rp_h_t.shape, rp_h_t, dtype=dtype)
 
-            # Batched matmul: [H, N*W, D] @ [H, D, K] -> [H, N*W, K]
             rel_h_mm = network.add_matrix_multiply(
                 q_perm_h.get_output(0), trt.MatrixOperation.NONE,
                 rp_h_c, trt.MatrixOperation.NONE)
-            # Reshape: [H, N*W, K] -> [H, N, W, K] -> permute [N, H, W, K]
             rel_h_4d = network.add_shuffle(rel_h_mm.get_output(0))
-            rel_h_4d.reshape_dims = (grid_size, num_heads, grid_size, grid_size)
-            rel_h_4d.second_transpose = trt.Permutation([1, 0, 2, 3])
-            # rel_h: [N, H, W, K]
+            rel_h_4d.reshape_dims = (
+                spatial_size,
+                batch_size,
+                num_heads,
+                spatial_size,
+                spatial_size,
+            )
+            rel_h_4d.second_transpose = trt.Permutation([1, 2, 0, 3, 4])
 
-            # For W-axis relative position:
-            # rel_w[n,h,w,k] = sum_c q[n,h,w,c] * rp_w[w,k,c]
-            # q_perm: [W, N*H, D]  rp_w: [W, D, K]
             q_perm_w = network.add_shuffle(q_4d.get_output(0))
-            q_perm_w.first_transpose = trt.Permutation([2, 0, 1, 3])
-            q_perm_w.reshape_dims = (grid_size, num_heads * grid_size, head_dim)
+            q_perm_w.first_transpose = trt.Permutation([3, 0, 1, 2, 4])
+            q_perm_w.reshape_dims = (
+                spatial_size,
+                batch_size * num_heads * spatial_size,
+                head_dim,
+            )
 
-            rp_w_t = rp_w.transpose(0, 2, 1).astype(np.float32)  # [W, D, K]
+            rp_w_t = rp_w.transpose(0, 2, 1).astype(np.float32)
             rp_w_c = graph_ops.add_constant(
                 network, rp_w_t.shape, rp_w_t, dtype=dtype)
 
             rel_w_mm = network.add_matrix_multiply(
                 q_perm_w.get_output(0), trt.MatrixOperation.NONE,
                 rp_w_c, trt.MatrixOperation.NONE)
-            # [W, N*H, K] -> [W, N, H, K] -> [N, H, W, K]
             rel_w_4d = network.add_shuffle(rel_w_mm.get_output(0))
-            rel_w_4d.reshape_dims = (grid_size, num_heads, grid_size, grid_size)
-            rel_w_4d.second_transpose = trt.Permutation([1, 2, 0, 3])
-            # rel_w: [N, H, W, K]
-
-            # Combine: bias[n,h,w,kh,kw] = rel_h[n,h,w,kh] + rel_w[n,h,w,kw]
-            # rel_h: [N,H,W,K] -> [N,H,W,K,1]
-            # rel_w: [N,H,W,K] -> [N,H,W,1,K]
-            # broadcast sum -> [N,H,W,K,K]
-            # reshape -> [N, H*W, K*K] = [num_heads, seq, seq]
+            rel_w_4d.reshape_dims = (
+                spatial_size,
+                batch_size,
+                num_heads,
+                spatial_size,
+                spatial_size,
+            )
+            rel_w_4d.second_transpose = trt.Permutation([1, 2, 3, 0, 4])
 
             rel_h_5d = network.add_shuffle(rel_h_4d.get_output(0))
-            rel_h_5d.reshape_dims = (num_heads, grid_size, grid_size, grid_size, 1)
+            rel_h_5d.reshape_dims = (
+                batch_size,
+                num_heads,
+                spatial_size,
+                spatial_size,
+                spatial_size,
+                1,
+            )
             rel_w_5d = network.add_shuffle(rel_w_4d.get_output(0))
-            rel_w_5d.reshape_dims = (num_heads, grid_size, grid_size, 1, grid_size)
+            rel_w_5d.reshape_dims = (
+                batch_size,
+                num_heads,
+                spatial_size,
+                spatial_size,
+                1,
+                spatial_size,
+            )
 
             rel_bias = network.add_elementwise(
                 rel_h_5d.get_output(0), rel_w_5d.get_output(0),
                 trt.ElementWiseOperation.SUM)
-            # [N, H, W, K_h, K_w] -> [N, H*W, K_h*K_w]
             rel_bias_flat = network.add_shuffle(rel_bias.get_output(0))
-            rel_bias_flat.reshape_dims = (num_heads, seq_len, seq_len)
+            rel_bias_flat.reshape_dims = (
+                batch_size, num_heads, seq_len, seq_len)
 
             scaled = network.add_elementwise(
                 scaled.get_output(0), rel_bias_flat.get_output(0),
                 trt.ElementWiseOperation.SUM)
 
-        # Relative 2D positional bias is generated from Q before softmax, so
-        # this is not representable as a static/native IAttention mask.
         softmax = network.add_softmax(scaled.get_output(0))
-        softmax.axes = 1 << 2
+        softmax.axes = 1 << 3
 
         ctx = network.add_matrix_multiply(
             softmax.get_output(0), trt.MatrixOperation.NONE,
             v_h.get_output(0), trt.MatrixOperation.NONE)
 
         ctx_flat = network.add_shuffle(ctx.get_output(0))
-        ctx_flat.first_transpose = trt.Permutation([1, 0, 2])
-        ctx_flat.reshape_dims = (seq_len, hidden)
+        ctx_flat.first_transpose = trt.Permutation([0, 2, 1, 3])
+        ctx_flat.reshape_dims = (batch_size * seq_len, hidden)
 
         out = graph_ops.add_matmul_rhs_constant(
             network, ctx_flat.get_output(0), hidden, hidden,
@@ -1341,9 +1403,9 @@ class SamPlugin:
         out = graph_ops.add_bias_sum(
             network, out, hidden, weights[f"{w_prefix}.attn.o.bias"])
 
-        # Reshape back to 4D: [H*W, C] -> [1, H, W, C]
         out_4d = network.add_shuffle(out)
-        out_4d.reshape_dims = (1, grid_size, grid_size, hidden)
+        out_4d.reshape_dims = (
+            batch_size, spatial_size, spatial_size, hidden)
         return out_4d.get_output(0)
 
     @staticmethod
@@ -1352,10 +1414,20 @@ class SamPlugin:
         grid_size, hidden, num_heads, head_dim, seq_len,
         dtype=np.float32,
     ):
-        """Build global attention (same as windowed but explicitly global)."""
-        return SamPlugin._build_windowed_attention(
-            network, inp_4d, weights, w_prefix,
-            grid_size, hidden, num_heads, head_dim, 0, dtype=dtype)
+        """Build SAM's four full-image attention layers."""
+        del seq_len
+        return SamPlugin._build_spatial_attention(
+            network,
+            inp_4d,
+            weights,
+            w_prefix,
+            batch_size=1,
+            spatial_size=grid_size,
+            hidden=hidden,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            dtype=dtype,
+        )
 
     @staticmethod
     def _get_rel_pos(q_size, k_size, rel_pos):

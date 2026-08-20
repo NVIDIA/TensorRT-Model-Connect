@@ -12,6 +12,13 @@
 
 namespace trtmc {
 
+inline float quantize_sam_fractional_point(float fraction, int32_t original_size) {
+    if (original_size <= 0)
+        return fraction;
+    return std::floor(fraction * static_cast<float>(original_size)) /
+           static_cast<float>(original_size);
+}
+
 inline std::vector<float> encode_sam_point_embedding(float x, float y, bool is_foreground,
                                                      int32_t image_size,
                                                      int32_t decoder_hidden_size,
