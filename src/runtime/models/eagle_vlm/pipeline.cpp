@@ -131,6 +131,98 @@ float select_reranking_score(const EmbeddingResult& result, const std::vector<in
     throw std::runtime_error("EncoderPipeline: unsupported reranking pooling mode: " + pooling);
 }
 
+struct RerankingBatchInputs {
+    std::vector<int32_t> input_ids;
+    std::vector<int32_t> attention_mask;
+    std::vector<std::size_t> valid_lengths;
+    std::size_t sequence_length{};
+};
+
+std::vector<int32_t> tokenize_reranking_pair(const ITokenizer& tokenizer, const std::string& query,
+                                             const std::string& document,
+                                             std::size_t max_sequence) {
+    const std::string combined = "question:" + query + " \n \n passage:" + document;
+    auto ids = tokenizer.encode(combined);
+    canonicalize_reranking_separator_tokens(tokenizer, ids);
+    if (ids.empty())
+        throw std::runtime_error("EncoderPipeline: reranking input produced no tokens");
+    if (ids.size() > max_sequence)
+        throw std::runtime_error(
+            "EncoderPipeline: reranking input exceeds the engine sequence profile");
+    return ids;
+}
+
+RerankingBatchInputs prepare_reranking_batch(const ITokenizer& tokenizer, const std::string& query,
+                                             const std::vector<std::string>& documents,
+                                             std::size_t first, std::size_t batch_size,
+                                             std::size_t max_sequence) {
+    std::vector<std::vector<int32_t>> token_rows;
+    token_rows.reserve(batch_size);
+    RerankingBatchInputs inputs;
+    inputs.valid_lengths.reserve(batch_size);
+    for (std::size_t index = 0; index < batch_size; ++index) {
+        auto ids =
+            tokenize_reranking_pair(tokenizer, query, documents[first + index], max_sequence);
+        inputs.sequence_length = std::max(inputs.sequence_length, ids.size());
+        inputs.valid_lengths.push_back(ids.size());
+        token_rows.push_back(std::move(ids));
+    }
+
+    // Masked token ID zero is never attended to and therefore does not affect
+    // valid positions. Right padding matches the reference batch.
+    inputs.input_ids.assign(batch_size * inputs.sequence_length, 0);
+    inputs.attention_mask.assign(inputs.input_ids.size(), 0);
+    for (std::size_t row = 0; row < batch_size; ++row) {
+        const auto offset = row * inputs.sequence_length;
+        std::copy(token_rows[row].begin(), token_rows[row].end(),
+                  inputs.input_ids.begin() + offset);
+        std::fill_n(inputs.attention_mask.begin() + offset, token_rows[row].size(), 1);
+    }
+    return inputs;
+}
+
+std::size_t validate_batched_reranking_output(const EmbeddingResult& result,
+                                              const std::vector<int64_t>& shape,
+                                              std::size_t batch_size) {
+    const auto element_count = checked_element_count(shape);
+    if (result.data.size() != element_count || shape.size() < 2 ||
+        shape.front() != static_cast<int64_t>(batch_size) || element_count % batch_size != 0)
+        throw std::runtime_error(
+            "EncoderPipeline: batched reranking score shape does not match its inputs");
+    const auto elements_per_row = element_count / batch_size;
+    if (elements_per_row > 1 && shape.back() != 1)
+        throw std::runtime_error(
+            "EncoderPipeline: batched reranking output must have one score per position");
+    return elements_per_row;
+}
+
+float select_batched_reranking_score(const EmbeddingResult& result, std::size_t row,
+                                     std::size_t elements_per_row, std::size_t valid_tokens,
+                                     const std::string& pooling) {
+    if (elements_per_row == 1)
+        return result.data[row];
+    if (valid_tokens > elements_per_row)
+        throw std::runtime_error(
+            "EncoderPipeline: batched reranking output is shorter than an input");
+
+    const auto offset = row * elements_per_row;
+    if (pooling == "last")
+        return result.data[offset + valid_tokens - 1];
+    if (pooling == "avg") {
+        double sum = 0.0;
+        for (std::size_t index = 0; index < valid_tokens; ++index)
+            sum += result.data[offset + index];
+        return static_cast<float>(sum / static_cast<double>(valid_tokens));
+    }
+    throw std::runtime_error("EncoderPipeline: unsupported reranking pooling mode: " + pooling);
+}
+
+bool is_encoder_output_name(const std::string& name) {
+    return name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
+           name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
+           name.find("score") != std::string::npos;
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
@@ -226,68 +318,17 @@ std::vector<float> EncoderPipeline::rerank_batch(const std::string& query,
 
     for (std::size_t first = 0; first < documents.size(); first += max_batch) {
         const auto batch_size = std::min(max_batch, documents.size() - first);
-        std::vector<std::vector<int32_t>> token_rows;
-        token_rows.reserve(batch_size);
-        std::size_t sequence_length = 0;
-        for (std::size_t index = 0; index < batch_size; ++index) {
-            std::string combined =
-                "question:" + query + " \n \n passage:" + documents[first + index];
-            auto ids = tokenizer_->encode(combined);
-            canonicalize_reranking_separator_tokens(*tokenizer_, ids);
-            if (ids.empty())
-                throw std::runtime_error("EncoderPipeline: reranking input produced no tokens");
-            if (ids.size() > max_sequence)
-                throw std::runtime_error(
-                    "EncoderPipeline: reranking input exceeds the engine sequence profile");
-            sequence_length = std::max(sequence_length, ids.size());
-            token_rows.push_back(std::move(ids));
-        }
+        const auto inputs =
+            prepare_reranking_batch(*tokenizer_, query, documents, first, batch_size, max_sequence);
+        auto output = encode_batch_with_shape(inputs.input_ids, inputs.attention_mask, batch_size,
+                                              inputs.sequence_length);
+        const auto elements_per_row =
+            validate_batched_reranking_output(output.result, output.shape, batch_size);
 
-        // Masked token ID zero is never attended to and therefore does not
-        // affect valid positions. Right padding matches the reference batch.
-        std::vector<int32_t> padded(batch_size * sequence_length, 0);
-        std::vector<int32_t> attention_mask(batch_size * sequence_length, 0);
-        for (std::size_t row = 0; row < batch_size; ++row) {
-            const auto offset = row * sequence_length;
-            std::copy(token_rows[row].begin(), token_rows[row].end(), padded.begin() + offset);
-            std::fill_n(attention_mask.begin() + offset, token_rows[row].size(), 1);
-        }
-
-        auto output = encode_batch_with_shape(padded, attention_mask, batch_size, sequence_length);
-        const auto element_count = checked_element_count(output.shape);
-        if (output.result.data.size() != element_count || output.shape.size() < 2 ||
-            output.shape.front() != static_cast<int64_t>(batch_size) ||
-            element_count % batch_size != 0)
-            throw std::runtime_error(
-                "EncoderPipeline: batched reranking score shape does not match its inputs");
-        const auto elements_per_row = element_count / batch_size;
-        if (elements_per_row > 1 && output.shape.back() != 1)
-            throw std::runtime_error(
-                "EncoderPipeline: batched reranking output must have one score per position");
-
-        for (std::size_t row = 0; row < batch_size; ++row) {
-            const auto valid_tokens = token_rows[row].size();
-            if (elements_per_row == 1) {
-                scores.push_back(output.result.data[row]);
-            } else {
-                if (valid_tokens > elements_per_row)
-                    throw std::runtime_error(
-                        "EncoderPipeline: batched reranking output is shorter than an input");
-                const auto offset = row * elements_per_row;
-                if (reranking_pooling_ == "last") {
-                    scores.push_back(output.result.data[offset + valid_tokens - 1]);
-                } else if (reranking_pooling_ == "avg") {
-                    double sum = 0.0;
-                    for (std::size_t index = 0; index < valid_tokens; ++index)
-                        sum += output.result.data[offset + index];
-                    scores.push_back(static_cast<float>(sum / static_cast<double>(valid_tokens)));
-                } else {
-                    throw std::runtime_error(
-                        "EncoderPipeline: unsupported reranking pooling mode: " +
-                        reranking_pooling_);
-                }
-            }
-        }
+        for (std::size_t row = 0; row < batch_size; ++row)
+            scores.push_back(select_batched_reranking_score(output.result, row, elements_per_row,
+                                                            inputs.valid_lengths[row],
+                                                            reranking_pooling_));
     }
     return scores;
 }
@@ -351,9 +392,7 @@ EncoderPipeline::forward_ids(const std::vector<int32_t>& input_ids,
 
     EncodedOutput output;
     for (auto& [name, tensor] : outputs) {
-        if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
-            name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
-            name.find("score") != std::string::npos) {
+        if (is_encoder_output_name(name)) {
             const auto element_count = checked_element_count(tensor.shape);
             if (!tensor.data)
                 throw std::runtime_error("EncoderPipeline: output tensor has no data");
