@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Community CPU Request
+
+run-name: >-
+  PR #${{ github.event.pull_request.number }} · public CPU request
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types: [labeled]
+
+permissions: {}
+
+concurrency:
+  group: community-cpu-request-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    name: Authorize public CPU request
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.label.name == 'run-ci'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: write
+
+    steps:
+      # This default-branch workflow reads public PR metadata only. It never
+      # checks out or executes the pull-request head.
+      - name: Authorize and dispatch the current PR merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+          actor_role="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+              --jq '.role_name'
+          )"
+          case "$actor_role" in
+            maintain|admin) ;;
+            *)
+              echo "::error::Only actors with maintain or admin access may request public CPU CI."
+              exit 1
+              ;;
+          esac
+
+          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          state="$(jq -er '.state' <<<"$pull")"
+          base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
+          base_ref="$(jq -er '.base.ref' <<<"$pull")"
+          base_sha="$(jq -er '.base.sha' <<<"$pull")"
+          head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          merge_sha="$(jq -er '.merge_commit_sha' <<<"$pull")"
+
+          test "$state" = "open"
+          test "$base_repo" = "$GITHUB_REPOSITORY"
+          test "$base_ref" = "main"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
+          if [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
+            echo "::error::The run-ci label was superseded by a newer PR head."
+            exit 1
+          fi
+
+          umask 077
+          payload="$RUNNER_TEMP/community-cpu-dispatch.json"
+          trap 'rm -f "$payload"' EXIT
+          jq -n \
+            --arg pr_number "$PR_NUMBER" \
+            --arg base_sha "$base_sha" \
+            --arg head_sha "$head_sha" \
+            --arg merge_sha "$merge_sha" \
+            '{
+              ref: "main",
+              inputs: {
+                pr_number: $pr_number,
+                base_sha: $base_sha,
+                head_sha: $head_sha,
+                merge_sha: $merge_sha
+              }
+            }' > "$payload"
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/dispatches" \
+            --input "$payload"
+
+      - name: Consume the public CPU trigger label
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method DELETE \
+            "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-ci"

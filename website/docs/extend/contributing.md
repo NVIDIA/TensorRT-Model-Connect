@@ -128,11 +128,17 @@ performance, and release qualification are different evidence tiers.
 
 ## 6. Read public CPU validation
 
-Every pull request automatically receives contributor-visible, GitHub-hosted
-`Community CPU` checks for source quality, ownership and impact, and source-only
-C++ and Python units. These checks have read-only repository permission and no
-access to private runners, secrets, or GPUs. Fix their detailed failures and
-wait for `Community CPU / Required` on the current PR merge revision.
+A maintainer starts contributor-visible, GitHub-hosted `Community CPU`
+validation by applying the one-shot `run-ci` label after reviewing the proposed
+workflow and tooling changes. The trusted request workflow consumes the label,
+captures the exact PR merge revision, and dispatches source quality, ownership
+and impact, and source-only C++ and Python units from the workflow on `main`.
+
+The test jobs have read-only repository permission and no access to private
+runners, secrets, or GPUs. Their sanitized checks and detailed public logs are
+published on the exact merge revision. Fix any failures and wait for
+`Community CPU / Required` to pass. If you push another commit, ask the
+maintainer to apply `run-ci` again.
 
 ## 7. Coordinate protected repository CI
 
@@ -144,11 +150,12 @@ pass and the pull request is ready, add this comment:
 @yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
 ```
 
-The maintainer verifies the PR's `headRefOid` and applies `run-internal-ci`.
-The trusted bridge consumes that label, verifies the current public CPU result,
-captures the immutable PR head SHA, and dispatches private premerge validation
-for that exact revision. The public result is contributor feedback, not an
-authorization token; the maintainer-owned label remains the security boundary.
+After public CPU validation passes, the maintainer verifies the PR's
+`headRefOid` and applies `run-internal-ci`. The trusted bridge consumes that
+label, verifies the current exact-merge public CPU result, captures the
+immutable PR head SHA, and dispatches private premerge validation for that exact
+revision. The public result is contributor feedback, not an authorization
+token; each maintainer-owned label remains a separate security boundary.
 
 Wait for the `trtmc/premerge/required` status on the same head SHA to complete
 successfully. If the head changes intentionally, finish the update and local

@@ -212,6 +212,7 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         *workflows.glob("*.yaml"),
     }
     assert sorted(path.name for path in workflow_files) == [
+        "community-cpu-request.yml",
         "community-cpu.yml",
         "internal-ci-bridge.yml",
         "pages.yml",
@@ -304,6 +305,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert '[[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
     assert "Community CPU / Required" in authorize
     assert ".app.slug == \"github-actions\"" in authorize
+    assert '(.external_id // "") | startswith("community-cpu:")' in authorize
     assert 'if [ "$community_cpu" != "success" ]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize

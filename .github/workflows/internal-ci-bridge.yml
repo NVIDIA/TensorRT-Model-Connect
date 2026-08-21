@@ -106,7 +106,7 @@ jobs:
           community_cpu="$(
             gh api --method GET \
               "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=latest&per_page=100" \
-              --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions")) | sort_by(.started_at) | last | .conclusion // empty'
+              --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions" and ((.external_id // "") | startswith("community-cpu:")))) | sort_by(.started_at) | last | .conclusion // empty'
           )"
           if [ "$community_cpu" != "success" ]; then
             echo "::error::Community CPU / Required must pass on the current PR merge before internal CI can run."

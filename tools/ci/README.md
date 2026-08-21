@@ -7,26 +7,29 @@ graph, and these classes define **what** each test stage does.
 
 The shortest useful reading order is:
 
-1. `.github/workflows/internal-ci-bridge.yml` — the exact-head dispatch boundary.
-2. `tools/ci/__main__.py` — the public command-line interface.
-3. `tools/ci/pipeline.py` — the named non-model stages and their ordered steps.
-4. `tools/ci/model_proof.py` and `model_proof_inner.py` — one isolated model proof.
+1. `.github/workflows/community-cpu-request.yml` — the trusted `run-ci` label broker.
+2. `.github/workflows/community-cpu.yml` — exact-merge public CPU validation.
+3. `.github/workflows/internal-ci-bridge.yml` — the exact-head protected dispatch boundary.
+4. `tools/ci/__main__.py` — the public command-line interface.
+5. `tools/ci/pipeline.py` — the named non-model stages and their ordered steps.
+6. `tools/ci/model_proof.py` and `model_proof_inner.py` — one isolated model proof.
 
 ## The system at a glance
 
 ```mermaid
 flowchart LR
-    A[Trusted actor adds run-internal-ci] --> B[Source bridge captures exact PR head]
-    B --> C[Private Internal premerge]
-    C --> D[Legal, ownership, and impact]
-    D --> E[Source quality and units]
-    E --> F1[Model A proof]
-    E --> F2[Model B proof]
-    E --> FN[Model N proof]
-    F1 --> G[Private report and artifacts]
-    F2 --> G
-    FN --> G
-    G --> H[Sanitized exact-head status]
+    A[Trusted actor adds run-ci] --> B[Public CPU checks exact PR merge]
+    B --> C[Public exact-merge verdict]
+    C --> D[Trusted actor adds run-internal-ci]
+    D --> E[Private Internal premerge exact PR head]
+    E --> F[Legal, ownership, source quality, and units]
+    F --> G1[Model A proof]
+    F --> G2[Model B proof]
+    F --> GN[Model N proof]
+    G1 --> H[Private report and artifacts]
+    G2 --> H
+    GN --> H
+    H --> I[Sanitized exact-head status]
 ```
 
 Each model box is a separate isolated job. Source contains the test
@@ -49,6 +52,22 @@ python3 -m tools.ci model-proof --model patchtsmixer --suite premerge
 
 `pipeline` runs in the current environment. `stage` is the host-side bridge
 that enters the run-owned container and invokes `pipeline` there.
+
+## Community CPU, step by step
+
+An actor with `maintain` or `admin` permission applies the one-shot `run-ci`
+label after reviewing the public pull request. The default-branch request
+workflow verifies the actor, open PR, `main` base, and label-event head SHA. It
+never checks out or executes PR code. It then dispatches the default-branch
+Community CPU workflow with the exact base, head, and merge SHAs and consumes
+the label.
+
+The dispatched test jobs check out only the authorized merge SHA with
+read-only repository permission and no secrets. Separate publisher jobs create
+and complete contributor-visible checks on that merge SHA. If the PR head or
+base changes before publication, every pending public check becomes neutral
+instead of validating the stale snapshot. Apply `run-ci` again only after the
+new head is ready.
 
 ## Pre-merge, step by step
 
@@ -116,8 +135,10 @@ gh api --method PATCH \
 
 This is an explicit operator recovery, not an automatic trusted-workflow
 mutation. Wait for the PR API and source branch SHA to match, confirm the PR is
-still open and targets `main`, then add `run-internal-ci` again. Never use
-`run-ci`, and never dispatch while the two heads differ.
+still open and targets `main`, then add `run-internal-ci` again. Use `run-ci`
+only to refresh public CPU validation for the current merge revision, and never
+dispatch protected CI while the two heads differ or the current public required
+check is absent.
 
 ### 2. Select the work
 
