@@ -10,10 +10,6 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def str(value: object) -> str:
-    return shlex.quote(str(value))
-
-
 class QwenVlReproCommandProvider:
     """Build Qwen VL TRT repro commands without shared harness branches."""
 

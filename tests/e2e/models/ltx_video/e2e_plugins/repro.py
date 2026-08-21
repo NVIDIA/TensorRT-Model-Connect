@@ -12,10 +12,6 @@ from . import _case_artifact_dir
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def str(value: object) -> str:
-    return shlex.quote(str(value))
-
-
 class LtxVideoReproCommandProvider:
     """Build LTX Video TRT repro commands without shared harness branches."""
 
