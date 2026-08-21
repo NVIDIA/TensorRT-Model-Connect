@@ -63,10 +63,13 @@ execute PR code.
 
 The test jobs check out only the authorized merge SHA with read-only repository
 permission and no secrets. Separate publisher jobs create
-and complete contributor-visible checks on that merge SHA. If the PR head or
-base changes before publication, every pending public check becomes neutral
-instead of validating the stale snapshot. Comment `/run-ci` again only after
-the new head is ready.
+and complete contributor-visible checks on that merge SHA. They also maintain
+one PR status comment containing the exact merge SHA, per-stage verdicts, and a
+direct link to the public Actions logs so contributors can always find the
+error output even though the checks are not attached to the PR head. If the PR
+head or base changes before publication, every pending public check becomes
+neutral instead of validating the stale snapshot. Comment `/run-ci` again
+only after the new head is ready.
 
 ## Pre-merge, step by step
 

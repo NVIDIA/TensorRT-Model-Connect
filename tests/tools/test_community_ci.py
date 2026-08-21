@@ -90,15 +90,25 @@ if null_input:
         raise SystemExit(f"unsupported null-input jq expression: {expression}")
 else:
     result = json.load(sys.stdin)
-    optional_empty = expression.endswith(" // empty")
-    path = expression.removesuffix(" // empty").removeprefix(".").split(".")
-    for part in path:
-        if not isinstance(result, dict) or part not in result:
-            result = None
-            break
-        result = result[part]
-    if optional_empty and result is None:
-        result = ""
+    if isinstance(result, list) and "github-actions[bot]" in expression:
+        marker = variables["marker"]
+        matches = [
+            item
+            for item in result
+            if item.get("user", {}).get("login") == "github-actions[bot]"
+            and marker in (item.get("body") or "")
+        ]
+        result = matches[-1]["id"] if matches else ""
+    else:
+        optional_empty = expression.endswith(" // empty")
+        path = expression.removesuffix(" // empty").removeprefix(".").split(".")
+        for part in path:
+            if not isinstance(result, dict) or part not in result:
+                result = None
+                break
+            result = result[part]
+        if optional_empty and result is None:
+            result = ""
 
 if exit_status and result is None:
     raise SystemExit(1)
@@ -133,6 +143,15 @@ elif "/pulls/" in endpoint:
     print(os.environ["FAKE_PULL_JSON"])
 elif "/commits/" in endpoint and "/check-runs" in endpoint:
     print(os.environ.get("FAKE_EXISTING_REQUIRED", ""))
+elif "/issues/" in endpoint and endpoint.endswith("comments?per_page=100"):
+    print(os.environ["FAKE_COMMENTS_JSON"])
+elif "/issues/" in endpoint and endpoint.endswith("/comments") and "POST" in arguments:
+    body_argument = arguments[arguments.index("-f") + 1]
+    Path(os.environ["FAKE_COMMENT_CAPTURE"]).write_text(
+        body_argument.removeprefix("body="),
+        encoding="utf-8",
+    )
+    print("99")
 elif endpoint.endswith("/check-runs") and "POST" in arguments:
     input_path = arguments[arguments.index("--input") + 1]
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
@@ -150,6 +169,14 @@ elif "/check-runs/" in endpoint and "PATCH" in arguments:
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
     with Path(os.environ["FAKE_CHECK_CAPTURE"]).open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(payload) + "\\n")
+elif "/issues/comments/" in endpoint and "PATCH" in arguments:
+    body_argument = arguments[arguments.index("-f") + 1]
+    Path(os.environ["FAKE_COMMENT_CAPTURE"]).write_text(
+        body_argument.removeprefix("body="),
+        encoding="utf-8",
+    )
+    if "--jq" in arguments:
+        print(endpoint.rsplit("/", maxsplit=1)[-1])
 else:
     print(f"unexpected gh invocation: {arguments}", file=sys.stderr)
     raise SystemExit(2)
@@ -182,8 +209,11 @@ def _public_ci_environment(tmp_path: Path) -> dict[str, str]:
         {
             "ACTOR": "pr-author",
             "BASE_SHA": base_sha,
+            "COMMENT_ID": "99",
             "FAKE_ACTOR_ROLE": "maintain",
             "FAKE_CHECK_CAPTURE": str(tmp_path / "checks.jsonl"),
+            "FAKE_COMMENT_CAPTURE": str(tmp_path / "comment.md"),
+            "FAKE_COMMENTS_JSON": "[]",
             "FAKE_PENDING_CHECK_CAPTURE": str(tmp_path / "pending-checks.jsonl"),
             "FAKE_PULL_JSON": json.dumps(pull),
             "GH_TOKEN": "test-token",
@@ -254,6 +284,8 @@ def test_contributor_guides_match_the_live_ci_flow(path: Path) -> None:
             "no access to private",
             "runners, secrets, or",
             "GPUs",
+            "status comment",
+            "public Actions logs",
             "py -3 -m pip",
     ):
         assert marker in source
@@ -499,6 +531,39 @@ def test_public_cpu_initialization_creates_pending_exact_merge_checks(
     )
 
 
+def test_public_cpu_initialization_publishes_a_visible_pr_run_link(
+    tmp_path: Path,
+) -> None:
+    environment = _public_ci_environment(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu.yml",
+                "initialize",
+                "Publish public run link",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
+        "comment_id=99\n"
+    )
+    comment = (tmp_path / "comment.md").read_text(encoding="utf-8")
+    assert "<!-- trtmc-community-cpu -->" in comment
+    assert "**Status:** RUNNING" in comment
+    assert f"- Exact merge: <code>{'c' * 40}</code>" in comment
+    assert "[View live public logs]" in comment
+    assert "/actions/runs/12345" in comment
+
+
 def test_public_cpu_verdict_neutralizes_a_stale_snapshot(tmp_path: Path) -> None:
     environment = _public_ci_environment(tmp_path)
     pull = json.loads(environment["FAKE_PULL_JSON"])
@@ -540,6 +605,10 @@ def test_public_cpu_verdict_neutralizes_a_stale_snapshot(tmp_path: Path) -> None
     assert len(checks) == 4
     assert {check["conclusion"] for check in checks} == {"neutral"}
     assert all("PR changed" in check["output"]["summary"] for check in checks)
+    comment = (tmp_path / "comment.md").read_text(encoding="utf-8")
+    assert "**Status:** STALE" in comment
+    assert "Comment /run-ci again" in comment
+    assert "[View public logs]" in comment
 
 
 def test_public_cpu_verdict_publishes_success_for_the_exact_snapshot(
@@ -582,6 +651,64 @@ def test_public_cpu_verdict_publishes_success_for_the_exact_snapshot(
     assert len(checks) == 4
     assert {check["conclusion"] for check in checks} == {"success"}
     assert checks[-1]["output"]["title"] == "Community CPU: success"
+    comment = (tmp_path / "comment.md").read_text(encoding="utf-8")
+    assert "**Status:** PASSED" in comment
+    assert "- Source quality: <code>success</code>" in comment
+    assert "- Ownership and impact: <code>success</code>" in comment
+    assert "- Unit / C++ and Python: <code>success</code>" in comment
+    assert "[View public logs]" in comment
+
+
+def test_public_cpu_verdict_publishes_failure_comment_before_exiting(
+    tmp_path: Path,
+) -> None:
+    environment = _public_ci_environment(tmp_path)
+    environment.update(
+        {
+            "SOURCE_QUALITY_RESULT": "failure",
+            "OWNERSHIP_IMPACT_RESULT": "success",
+            "UNIT_RESULT": "failure",
+            "SOURCE_QUALITY_CHECK_ID": "1",
+            "OWNERSHIP_IMPACT_CHECK_ID": "2",
+            "UNIT_CHECK_ID": "3",
+            "REQUIRED_CHECK_ID": "4",
+        }
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu.yml",
+                "required",
+                "Publish exact-merge CPU checks",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    checks = [
+        json.loads(line)
+        for line in (tmp_path / "checks.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [check["conclusion"] for check in checks] == [
+        "failure",
+        "success",
+        "failure",
+        "failure",
+    ]
+    comment = (tmp_path / "comment.md").read_text(encoding="utf-8")
+    assert "**Status:** FAILED" in comment
+    assert "- Source quality: <code>failure</code>" in comment
+    assert "- Ownership and impact: <code>success</code>" in comment
+    assert "- Unit / C++ and Python: <code>failure</code>" in comment
+    assert "Open the public logs for the exact error output." in comment
+    assert "[View public logs]" in comment
 
 
 def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
@@ -611,6 +738,11 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     assert 'external_id="community-cpu:' in source
     assert '"/repos/$GITHUB_REPOSITORY/check-runs"' in source
     assert '"/repos/$GITHUB_REPOSITORY/check-runs/$check_id"' in source
+    assert "<!-- trtmc-community-cpu -->" in source
+    assert "Publish public run link" in source
+    assert "[View live public logs]" in source
+    assert "[View public logs]" in source
+    assert '"/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID"' in source
     assert "The PR changed after public CPU validation was requested" in source
 
     jobs = workflow["jobs"]
@@ -630,6 +762,7 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     assert jobs["initialize"]["permissions"] == {
         "checks": "write",
         "contents": "read",
+        "issues": "write",
     }
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     for job_name in ("source-quality", "ownership-impact", "unit"):
@@ -649,6 +782,7 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     assert jobs["required"]["permissions"] == {
         "checks": "write",
         "contents": "read",
+        "issues": "write",
         "pull-requests": "read",
     }
 

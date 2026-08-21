@@ -152,11 +152,17 @@ admin may submit the same comment on the author's behalf.
 
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs, and every public job uses a GitHub-hosted
-`ubuntu-24.04` runner. Sanitized checks and detailed public logs are published
-on the exact merge revision. Fix any failures and wait for
-`Community CPU / Required` to pass. Repeating `/run-ci` for the same queued,
-running, or successful merge is safely deduplicated. If the PR head or base
-changes, comment `/run-ci` again after the new revision is ready.
+`ubuntu-24.04` runner. Before testing starts, the workflow creates or updates
+a `Community CPU` status comment on the pull request with the exact merge SHA
+and a direct link to live public Actions logs. At completion, the same comment
+reports each stage verdict and links to the complete error output. This comment
+is the stable log entrypoint because the sanitized checks are attached to the
+merge SHA rather than the pull-request head SHA.
+
+Fix any failures and wait for `Community CPU / Required` to pass. Repeating
+`/run-ci` for the same queued, running, or successful merge is safely
+deduplicated. If the PR head or base changes, comment `/run-ci` again after
+the new revision is ready.
 
 ## 7. Coordinate protected repository CI
 

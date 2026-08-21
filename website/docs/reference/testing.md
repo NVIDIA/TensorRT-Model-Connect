@@ -77,7 +77,7 @@ Source contains exactly these three workflow files:
 
 | Workflow | Trigger and evidence boundary |
 | --- | --- |
-| `.github/workflows/community-cpu.yml` | Exact `/run-ci` PR comment from the PR author or a maintainer/admin; authorizes the exact public PR snapshot, runs read-only CPU validation, and publishes checks on the merge SHA with separate least-privilege jobs. |
+| `.github/workflows/community-cpu.yml` | Exact `/run-ci` PR comment from the PR author or a maintainer/admin; authorizes the exact public PR snapshot, runs read-only CPU validation, publishes checks on the merge SHA, and maintains a PR comment linking the public logs. |
 | `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, verifies current public CPU success, captures the exact PR head, and dispatches private premerge. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
 

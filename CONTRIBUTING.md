@@ -164,9 +164,16 @@ exact merge revision.
 
 All public jobs run on GitHub-hosted `ubuntu-24.04` runners. Test jobs have
 read-only repository permission and no access to private runners, secrets, or
-GPUs. Wait for `Community CPU / Required` to pass on the current merge
-revision. Repeating `/run-ci` for an already queued, running, or successful
-merge is safely deduplicated.
+GPUs. Before testing starts, the workflow creates or updates a `Community CPU`
+status comment on the pull request with the exact merge SHA and a direct link
+to live public Actions logs. At completion, the same comment reports each stage
+verdict and links to the complete error output. This comment is the stable log
+entrypoint because the checks themselves are attached to the merge SHA rather
+than the pull-request head SHA.
+
+Wait for `Community CPU / Required` to pass on the current merge revision.
+Repeating `/run-ci` for an already queued, running, or successful merge is
+safely deduplicated.
 
 If the pull-request head or base changes, the previous merge result is stale.
 Finish the update, rerun local checks, and comment `/run-ci` again for the new

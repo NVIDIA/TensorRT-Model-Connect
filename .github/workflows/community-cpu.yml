@@ -111,12 +111,62 @@ jobs:
     permissions:
       checks: write
       contents: read
+      issues: write
     outputs:
+      comment_id: ${{ steps.comment.outputs.comment_id }}
       source_quality_check_id: ${{ steps.checks.outputs.source_quality_check_id }}
       ownership_impact_check_id: ${{ steps.checks.outputs.ownership_impact_check_id }}
       unit_check_id: ${{ steps.checks.outputs.unit_check_id }}
       required_check_id: ${{ steps.checks.outputs.required_check_id }}
     steps:
+      - name: Publish public run link
+        id: comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          marker="<!-- trtmc-community-cpu -->"
+          comments="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100"
+          )"
+          comment_id="$(
+            jq -r --arg marker "$marker" \
+              '[.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | contains($marker)))] | last | .id // empty' \
+              <<<"$comments"
+          )"
+          body="$(
+            printf '%s\n' \
+              "$marker" \
+              "## Community CPU" \
+              "" \
+              "**Status:** RUNNING" \
+              "- Exact merge: <code>$MERGE_SHA</code>" \
+              "" \
+              "[View live public logs]($details_url)"
+          )"
+
+          if [[ "$comment_id" =~ ^[1-9][0-9]*$ ]]; then
+            comment_id="$(
+              gh api --method PATCH \
+                "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
+                -f body="$body" \
+                --jq '.id'
+            )"
+          else
+            comment_id="$(
+              gh api --method POST \
+                "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                -f body="$body" \
+                --jq '.id'
+            )"
+          fi
+          [[ "$comment_id" =~ ^[1-9][0-9]*$ ]]
+          echo "comment_id=$comment_id" >> "$GITHUB_OUTPUT"
+
       - name: Publish pending exact-merge checks
         id: checks
         env:
@@ -307,6 +357,7 @@ jobs:
     permissions:
       checks: write
       contents: read
+      issues: write
       pull-requests: read
     steps:
       - name: Publish exact-merge CPU checks
@@ -314,6 +365,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          COMMENT_ID: ${{ needs.initialize.outputs.comment_id }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
           MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
@@ -363,6 +415,31 @@ jobs:
               --input "$payload"
           }
 
+          publish_comment() {
+            local status="$1"
+            local message="$2"
+            local body
+            [[ "$COMMENT_ID" =~ ^[1-9][0-9]*$ ]]
+            body="$(
+              printf '%s\n' \
+                "<!-- trtmc-community-cpu -->" \
+                "## Community CPU" \
+                "" \
+                "**Status:** $status" \
+                "- Exact merge: <code>$MERGE_SHA</code>" \
+                "- Source quality: <code>$SOURCE_QUALITY_RESULT</code>" \
+                "- Ownership and impact: <code>$OWNERSHIP_IMPACT_RESULT</code>" \
+                "- Unit / C++ and Python: <code>$UNIT_RESULT</code>" \
+                "" \
+                "$message" \
+                "" \
+                "[View public logs]($details_url)"
+            )"
+            gh api --silent --method PATCH \
+              "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
+              -f body="$body"
+          }
+
           trap 'rm -f "$payload"' EXIT
           snapshot_current=false
           if pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
@@ -384,6 +461,7 @@ jobs:
             update_check "$OWNERSHIP_IMPACT_CHECK_ID" neutral "Stale PR snapshot" "$summary"
             update_check "$UNIT_CHECK_ID" neutral "Stale PR snapshot" "$summary"
             update_check "$REQUIRED_CHECK_ID" neutral "Stale PR snapshot" "$summary"
+            publish_comment "STALE" "$summary"
             echo "::warning::$summary"
             exit 0
           fi
@@ -405,6 +483,11 @@ jobs:
             && [ "$OWNERSHIP_IMPACT_RESULT" = success ] \
             && [ "$UNIT_RESULT" = success ]; then
             required_conclusion=success
+          fi
+          if [ "$required_conclusion" = success ]; then
+            publish_comment "PASSED" "All required public CPU stages passed."
+          else
+            publish_comment "FAILED" "One or more stages failed. Open the public logs for the exact error output."
           fi
           update_check "$REQUIRED_CHECK_ID" "$required_conclusion" \
             "Community CPU: $required_conclusion" "$summary"
