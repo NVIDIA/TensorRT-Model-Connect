@@ -45,6 +45,8 @@ class BarkPipeline final : public IPipeline {
     void set_codec_module(std::unique_ptr<TrtModule> codec);
     void set_fine_module(std::unique_ptr<TrtModule> fine);
     void set_fine_embeddings(std::vector<float> embed, std::vector<float> pos_embed);
+    void set_prefill_modules(std::unique_ptr<TrtModule> semantic_prefill,
+                             std::unique_ptr<TrtModule> coarse_prefill);
 
   private:
     std::vector<int32_t> run_semantic(const std::vector<int32_t>& text_ids, int32_t max_tokens);
@@ -57,12 +59,17 @@ class BarkPipeline final : public IPipeline {
                              int32_t embed_dim, std::vector<float>& logits);
     void run_step_with_token(TrtModule& module, BarkInferenceState& state, int32_t token_id,
                              std::vector<float>& logits);
+    bool run_batched_prefill(TrtModule* module, BarkInferenceState& state,
+                             const std::vector<float>& embeddings, int32_t hidden_size,
+                             std::vector<float>& logits, const char* stage);
     int32_t sample_top_k(const float* logits, int32_t vocab_size, float temperature, int32_t top_k);
 
     std::unique_ptr<TrtModule> semantic_;
     std::unique_ptr<TrtModule> coarse_;
     std::unique_ptr<TrtModule> codec_;
     std::unique_ptr<TrtModule> fine_;
+    std::unique_ptr<TrtModule> semantic_prefill_;
+    std::unique_ptr<TrtModule> coarse_prefill_;
     std::unique_ptr<BarkInferenceState> semantic_state_;
     std::unique_ptr<BarkInferenceState> coarse_state_;
     std::vector<float> semantic_embed_;

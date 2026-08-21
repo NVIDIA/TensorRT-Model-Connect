@@ -130,6 +130,7 @@ def build_dual_profile_decoder_engine(
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     profile_mode: str = "dual_profile",
+    embed_input: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -155,6 +156,8 @@ def build_dual_profile_decoder_engine(
     Dynamic-KV cache bucket profiles are only meaningful in ``dual_profile``
     mode. In either mode, cache_k/cache_v inputs are declared dynamic when
     bucket profiles are requested so each profile can constrain their row count.
+    ``embed_input`` replaces token IDs with caller-provided embeddings; Bark
+    uses this for its host-composed semantic and coarse prefill sequences.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill"):
@@ -198,7 +201,12 @@ def build_dual_profile_decoder_engine(
         work_np_dtype, work_trt_dtype = (np.float16, trt.bfloat16)
     else:
         work_np_dtype, work_trt_dtype = (np.float32, trt.float32)
-    token_id = network.add_input("token_id", trt.int32, (-1,))
+    token_id = None
+    input_embed = None
+    if embed_input:
+        input_embed = network.add_input("input_embed", trt.float32, (-1, hidden))
+    else:
+        token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
     attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
     cache_shape: tuple[int, int]
@@ -233,7 +241,15 @@ def build_dual_profile_decoder_engine(
     ):
         prof = builder.create_optimization_profile()
         min_sq = opt_sq if fixed else 1
-        prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
+        if embed_input:
+            prof.set_shape(
+                "input_embed",
+                (min_sq, hidden),
+                (opt_sq, hidden),
+                (max_sq, hidden),
+            )
+        else:
+            prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape(
             "attention_mask",
@@ -315,9 +331,6 @@ def build_dual_profile_decoder_engine(
                     )
             else:
                 _add_profile(1, 1, fixed=True)
-    embedding_table = _const_in_work_dtype(
-        network, (vocab, hidden), weights["embedding"], work_np_dtype, work_trt_dtype
-    )
     position_embed_table: trt.ITensor | None = None
     pos_embed_np = weights["position_embedding"]
     position_embed_table = _const_in_work_dtype(
@@ -331,8 +344,16 @@ def build_dual_profile_decoder_engine(
     )
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1)) if scale_attn_weights else 1.0
     matmul = _make_matmul_fn(network, work_np_dtype, quant_ctx)
-    emb = network.add_gather(embedding_table, token_id, 0)
-    hidden_state = emb.get_output(0)
+    if embed_input:
+        hidden_state = input_embed
+        if hidden_state.dtype != work_trt_dtype:
+            hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
+    else:
+        embedding_table = _const_in_work_dtype(
+            network, (vocab, hidden), weights["embedding"], work_np_dtype, work_trt_dtype
+        )
+        emb = network.add_gather(embedding_table, token_id, 0)
+        hidden_state = emb.get_output(0)
     if position_embed_table is not None:
         pos_gather = network.add_gather(position_embed_table, position_id, 0)
         pos_add = network.add_elementwise(
