@@ -52,6 +52,12 @@ std::any json_to_any(const nlohmann::json& j) {
     throw std::invalid_argument("unsupported json type");
 }
 
+std::string c_string_or_empty(const char* value) {
+    if (value == nullptr)
+        return {};
+    return value;
+}
+
 nlohmann::json any_to_json(const std::any& v) {
     if (!v.has_value()) return nullptr;
     if (v.type() == typeid(bool)) return std::any_cast<bool>(v);
@@ -60,11 +66,10 @@ nlohmann::json any_to_json(const std::any& v) {
     if (v.type() == typeid(int)) return std::any_cast<int>(v);
     if (v.type() == typeid(double)) return std::any_cast<double>(v);
     if (v.type() == typeid(float)) return std::any_cast<float>(v);
-    if (v.type() == typeid(std::string)) return std::any_cast<const std::string&>(v);
-    if (v.type() == typeid(const char*)) {
-        const char* s = std::any_cast<const char*>(v);
-        return s ? std::string(s) : std::string();
-    }
+    if (v.type() == typeid(std::string))
+        return std::any_cast<const std::string&>(v);
+    if (v.type() == typeid(const char*))
+        return c_string_or_empty(std::any_cast<const char*>(v));
     return "<unrepresentable>";
 }
 
