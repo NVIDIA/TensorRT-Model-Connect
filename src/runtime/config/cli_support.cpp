@@ -201,10 +201,21 @@ std::any coerce_scalar(const std::string& raw, const std::string& type_tag,
 
 LayeredFileValues parse_layered_json(std::string_view text) {
     if (text.empty()) return {};
-    auto j = nlohmann::json::parse(text);
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(text);
+    } catch (const nlohmann::json::parse_error& e) {
+        throw std::invalid_argument(std::string("expected ':' ") + e.what());
+    }
     if (j.is_null()) return {};
+    if (!j.is_object()) {
+        throw std::invalid_argument("expected '{'");
+    }
     LayeredFileValues out;
     for (auto& [ns, fields] : j.items()) {
+        if (!fields.is_object()) {
+            throw std::invalid_argument("expected '{'");
+        }
         for (auto& [field, value] : fields.items()) {
             out[ns][field] = json_to_any(value);
         }
