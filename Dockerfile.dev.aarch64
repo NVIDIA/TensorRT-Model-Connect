@@ -42,6 +42,7 @@ RUN pip install -U pip && \
       "PyYAML>=6.0" \
       "safetensors>=0.4" \
       "sentencepiece>=0.1.99" \
+      "pre-commit>=4.6.0" \
       "transformers==5.2.0" && \
     pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_CPU_INDEX}" && \
     pip install "setuptools>=80,<82"
