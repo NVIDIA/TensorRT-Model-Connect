@@ -195,6 +195,8 @@ def test_pre_commit_config_installs_fast_commit_and_complete_push_hooks() -> Non
     assert config["default_install_hook_types"] == ["pre-commit", "pre-push"]
 
     hooks = {hook["id"]: hook for repository in config["repos"] for hook in repository["hooks"]}
+    for hook_id in ("trailing-whitespace", "end-of-file-fixer", "check-yaml"):
+        assert hooks[hook_id]["stages"] == ["pre-commit"]
     assert hooks["trtmc-python-quality"]["stages"] == ["pre-commit"]
     assert hooks["trtmc-cpp-format"]["stages"] == ["pre-commit"]
     assert hooks["trtmc-community-pre-push"]["stages"] == ["pre-push"]

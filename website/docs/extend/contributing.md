@@ -41,11 +41,13 @@ python3 -m pip install --requirement requirements/community-ci.txt
 pre-commit install --install-hooks --hook-type pre-commit --hook-type pre-push
 ```
 
-Commit-time hooks check Ruff and clang-format. Push-time hooks run the complete
-source-quality and ownership analysis, followed by the selected source-only C++
-and Python unit scope in a hardened, GPU-free container. The protected suite
-retains the filesystem-specific cache-reflink contract that public runners
-cannot portably execute.
+Commit-time hooks trim trailing whitespace, ensure one final newline, validate
+YAML, check Ruff, and verify clang-format. Some commit-time hooks modify files;
+review and stage those fixes before committing again. Push-time hooks are
+check-only: they run the complete source-quality and ownership analysis,
+followed by the selected source-only C++ and Python unit scope in a hardened,
+GPU-free container. The protected suite retains the filesystem-specific
+cache-reflink contract that public runners cannot portably execute.
 
 ## 2. Find the owner before editing
 
