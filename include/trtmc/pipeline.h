@@ -251,6 +251,118 @@ class ITranscriptionStream {
     virtual TranscriptionStreamConfig config() const = 0;
 };
 
+// --- Persistent full-duplex speech sessions ---
+
+enum class SpeechSessionEventKind {
+    kAgentAudio,
+    kAgentText,
+    kUserTranscript,
+    kTurnStarted,
+    kTurnFinished,
+    kYielded,
+    kCancelled,
+    kReset,
+    kError,
+    // Emitted after finish_input() has been fully consumed by the native
+    // worker, including its configured bounded response tail. This is input
+    // lifecycle completion, not necessarily an agent-turn completion.
+    kInputFinished,
+};
+
+struct SpeechSessionEvent {
+    SpeechSessionEventKind kind{SpeechSessionEventKind::kError};
+
+    // reset(), cancel(), and a barge-in/yield invalidate work from older
+    // epochs. sequence is monotonic within an epoch and orders mixed media,
+    // text, and control events returned by take_events().
+    std::uint64_t epoch{0};
+    std::uint64_t sequence{0};
+
+    // Populated for agent audio. Samples are mono float32 [-1, 1].
+    std::vector<float> audio_samples;
+    int32_t sample_rate{0};
+
+    // Source-media coordinates. -1 means the event has no media position.
+    // For audio, [media_start_sample, media_end_sample) uses sample_rate.
+    // frame_index is the model's frame-locked timeline index when available.
+    std::int64_t media_start_sample{-1};
+    std::int64_t media_end_sample{-1};
+    std::int64_t frame_index{-1};
+
+    // Populated for agent text, user transcripts, and errors. Partial text
+    // uses is_final=false; a final hypothesis/chunk sets it to true.
+    std::string text;
+    bool is_final{false};
+};
+
+struct SpeechSessionConfig {
+    // Input chunks may use any positive sample rate. The session resamples to
+    // the model's native input rate while preserving one continuous timeline.
+    int32_t input_sample_rate{16000};
+    // 0 selects the model-native output rate.
+    int32_t output_sample_rate{0};
+    std::string system_prompt;
+
+    bool emit_agent_audio{true};
+    bool emit_agent_text{true};
+    bool emit_user_transcript{true};
+
+    // Live sessions detect non-silent user audio while the agent is speaking
+    // and invalidate queued agent output. Offline convenience paths can
+    // disable this when a complete recording is pushed in one append rather
+    // than arriving in real time.
+    bool enable_barge_in{true};
+
+    // Native stochastic TTS refinement is deterministic for a given seed.
+    // This does not promise bitwise parity with a framework-specific RNG
+    // implementation.
+    int32_t seed{0};
+
+    // Number of zero-input 80 ms frames the worker may pump after flushing a
+    // partial input frame while an agent turn is still active. -1 selects the
+    // model-owned max_response_frames bound; 0 only flushes input. Offline
+    // callers that append their own tail frames should set this to 0.
+    int32_t finish_tail_frames{-1};
+};
+
+class ISpeechSession {
+  public:
+    virtual ~ISpeechSession() = default;
+
+    // Append an arbitrary-size mono float32 chunk at config().input_sample_rate.
+    // The session retains model and conversation state across calls. End of
+    // input is explicit through finish_input(); zero-length chunks are not an
+    // implicit finish signal.
+    virtual void append_audio(const float* audio_samples, int32_t num_samples) = 0;
+
+    // Flush a partial input frame and permanently close this input stream.
+    // Generated output can continue to arrive through take_events().
+    virtual void finish_input() = 0;
+
+    // Drain all currently available agent audio/text, user transcripts, and
+    // lifecycle events. This call is non-blocking.
+    virtual std::vector<SpeechSessionEvent> take_events() = 0;
+
+    // Abort outstanding work and invalidate its epoch. No more input is
+    // accepted until reset() starts a fresh conversation.
+    virtual void cancel() = 0;
+
+    // Clear conversation/model state while retaining reusable allocations.
+    virtual void reset() = 0;
+
+    virtual SpeechSessionConfig config() const = 0;
+
+    // Wait up to timeout_ms for at least one event, then drain everything
+    // currently available. A timeout of zero is non-blocking; -1 waits until
+    // an event or terminal state is observable. The default lets synchronous
+    // implementations preserve their non-blocking behavior.
+    virtual std::vector<SpeechSessionEvent> wait_events(int32_t timeout_ms) {
+        if (timeout_ms < -1)
+            throw std::invalid_argument("speech event timeout must be -1 or non-negative");
+        return take_events();
+    }
+};
+
 // --- Pipeline interface ---
 
 class IPipeline {

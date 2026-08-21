@@ -1966,6 +1966,33 @@ suites:
       lane: local_only
       notes: GB300-only gated-model native-reference consistency.
 
+  - id: nemotron_voicechat_model_card_general_conversation
+    description: >
+      Native VoiceChat consistency on the exact pinned public model-card audio.
+      The model-owned reference, C++/TensorRT runner, and comparator retain the
+      immutable source, text, waveform-health, frame-count, and transcript gates.
+    user_contract: speech_response
+    default_model_names: [nemotron-voicechat-11b]
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/nemotron_voicechat/validation/nemotron-voicechat-11b-model-card.json
+    selectors:
+      model_names: [nemotron-voicechat-11b]
+      task_strategies: [speech_to_speech]
+      runtime_strategies: [nemotron_voicechat_full_duplex]
+      user_contracts: [speech_response]
+      families: [nemotron_voicechat]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Large-memory-GPU native reference consistency; numerical and semantic
+        gates remain owned by the VoiceChat comparator and threshold sidecar.
+
   - id: seedtts_en_omni_audio_parity
     description: >
       Qwen3-Omni text-to-audio consistency on a public Seed-TTS-Eval English

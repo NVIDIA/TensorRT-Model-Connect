@@ -81,7 +81,7 @@ markers = [
     "slow: Slow tests (>30s)",
     "text: Text generation models",
     "vision: Vision/VL models",
-    "audio: Audio models (Whisper, Bark, PersonaPlex)",
+    "audio: Audio models (Whisper, Bark, PersonaPlex, Nemotron VoiceChat)",
     "diffusion: Diffusion models (Wan, FLUX, Z-Image)",
 ]
 

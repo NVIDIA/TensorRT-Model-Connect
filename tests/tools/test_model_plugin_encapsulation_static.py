@@ -1630,11 +1630,17 @@ def test_model_cache_state_is_model_owned() -> None:
     violations = []
 
     for family in sorted(_runtime_model_ids()):
-        prefix = _model_prefix(family)
         model_dir = RUNTIME_MODELS / family
-        state_header = model_dir / "inference_state.h"
-        cache_header = model_dir / "kv_cache.h"
-        cache_source = model_dir / "kv_cache.cpp"
+        if family == "nemotron_voicechat":
+            prefix = "VoiceChatThinker"
+            state_header = model_dir / "thinker_inference_state.h"
+            cache_header = model_dir / "thinker_kv_cache.h"
+            cache_source = model_dir / "thinker_kv_cache.cpp"
+        else:
+            prefix = _model_prefix(family)
+            state_header = model_dir / "inference_state.h"
+            cache_header = model_dir / "kv_cache.h"
+            cache_source = model_dir / "kv_cache.cpp"
         helper_files = {state_header, cache_header, cache_source}
         production_sources = [
             path for path in _cpp_files_under(model_dir) if path not in helper_files
@@ -1669,7 +1675,8 @@ def test_model_cache_state_is_model_owned() -> None:
 
         if cache_header.is_file():
             text = cache_header.read_text(encoding="utf-8", errors="ignore")
-            expected_include = f"runtime/models/{family}/inference_state.h"
+            state_filename = state_header.relative_to(model_dir).as_posix()
+            expected_include = f"runtime/models/{family}/{state_filename}"
             for needle in (
                 f"struct {prefix}KvCacheNames",
                 f"class {prefix}KvCache : public {prefix}InferenceState",
@@ -1680,8 +1687,9 @@ def test_model_cache_state_is_model_owned() -> None:
 
         if cache_source.is_file():
             text = cache_source.read_text(encoding="utf-8", errors="ignore")
+            cache_filename = cache_header.relative_to(model_dir).as_posix()
             for needle in (
-                f"runtime/models/{family}/kv_cache.h",
+                f"runtime/models/{family}/{cache_filename}",
                 f"{prefix}KvCache::",
                 f"{prefix}KvCacheNames",
             ):

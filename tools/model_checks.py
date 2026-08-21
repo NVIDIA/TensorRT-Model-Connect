@@ -764,7 +764,12 @@ def _resolve_request(
     except performance_catalog.PerformanceSuiteError as error:
         raise ModelCheckError(str(error)) from error
     perf_cases = perf_suite.cases
-    perf_exclusions = perf_suite.excluded_profiles
+    e2e_only_profiles = {
+        entry.name: entry.reason
+        for entry in performance_catalog.ManifestCatalog(arguments.models_dir).entries()
+        if entry.status == "e2e_only"
+    }
+    perf_exclusions = {**perf_suite.excluded_profiles, **e2e_only_profiles}
     audit_platform_exclusions(
         platform,
         accuracy_catalog=accuracy_catalog,

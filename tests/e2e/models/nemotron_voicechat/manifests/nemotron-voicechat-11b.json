@@ -1,0 +1,57 @@
+{
+  "name": "nemotron-voicechat-11b",
+  "hf_id": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+  "hf_revision": "359ada7b1c60851e40ff08065f9b0340244f27e0",
+  "bundle": "nemotron-voicechat-11b.bundle",
+  "family": "nemotron_voicechat",
+  "runtime_strategy": "nemotron_voicechat_full_duplex",
+  "task_strategy": "speech_to_speech",
+  "benchmark_exclusion_reason": "The model-card audio is provided by a pinned public Speech checkout rather than the packaged benchmark catalog.",
+  "execution_profiles": {
+    "build": "base",
+    "runtime": "base",
+    "reference": "base"
+  },
+  "precision": "fp32",
+  "max_cache_length": 8192,
+  "trust_remote_code": false,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "e2e_min_free_gpu_memory_mib": 90000,
+  "build_timeout_s": 14400,
+  "testcases": [
+    {
+      "name": "nemotron-voicechat-11b",
+      "trace_id": "IT-E2E-NVC-01",
+      "reference_backend": "voicechat_pinned_model_card",
+      "oracle_level": "L3_snapshot_regression",
+      "reference_family": "s2s_nemotron_voicechat",
+      "user_contract": "speech_response",
+      "test_type": "audio",
+      "inputs": {
+        "speech_source_relative_path": "examples/speechlm2/sample_audio/sample_general.wav",
+        "runtime_timeout_s": 1800,
+        "transcribe_timeout_s": 1800,
+        "tail_frames": 0
+      },
+      "max_new_tokens": 256,
+      "seed": 0,
+      "speech_source_revision": "097dfe9e2f55baf653b83035868bdc89849f1b47",
+      "speech_source_sha256": "481f422a961fb160ddeba9824d55cb7c190c57acb7dc1730a2d595fd078dcb04",
+      "speech_source_sample_rate": 16000,
+      "speech_source_num_samples": 249734,
+      "voicechat_model_sha256": "d553750c29434a6bb524377e17634c6cafdbf621892e643a77f406e51570354b",
+      "text_model_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+      "text_model_revision": "6533e8de2c68e4536bf7c411d7a3ce5734111476",
+      "expected_output_sample_rate": 22050,
+      "expected_output_num_samples": 345744,
+      "expected_output_samples_per_frame": 1764,
+      "expected_output_codec_frames": 196,
+      "expected_response_text": "Hi there! How can you? How can I help you today? The sky is blue. That blue color is because of something called Rayleigh scattering.",
+      "required_response_terms": [
+        "rayleigh",
+        "scattering"
+      ],
+      "notes": "Runs the pure native TensorRT/C++ trtmc speak path on the exact public Speech model-card sample. The sample-count and alignment gates establish 196 frame-sized units at 1764 samples each; the C++ lifecycle checks cover session event ordering. Direct session agent text must preserve the Rayleigh-scattering model-card semantics; a separate native trtmc transcribe pass checks self-transcription consistency without requiring preservation of the proper noun."
+    }
+  ]
+}

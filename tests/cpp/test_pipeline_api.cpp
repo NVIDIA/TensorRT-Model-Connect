@@ -31,6 +31,7 @@
 
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/pipeline_pool.h"
+#include "trtmc/speech_session.h"
 
 #include <chrono>
 #include <cstdint>
@@ -40,6 +41,8 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 static int failures = 0;
 
@@ -70,6 +73,97 @@ class RecordingTranscriptionPipeline final : public trtmc::IPipeline {
     }
 
     std::vector<trtmc::TranscriptionConfig> observed;
+};
+
+class RecordingSpeechSession final : public trtmc::ISpeechSession {
+  public:
+    explicit RecordingSpeechSession(trtmc::SpeechSessionConfig cfg) : cfg_(std::move(cfg)) {}
+
+    void append_audio(const float* audio_samples, int32_t num_samples) override {
+        ++append_calls;
+        if (audio_samples != nullptr && num_samples > 0)
+            accepted_audio.insert(accepted_audio.end(), audio_samples, audio_samples + num_samples);
+        trtmc::SpeechSessionEvent event;
+        event.kind = trtmc::SpeechSessionEventKind::kAgentAudio;
+        event.epoch = epoch;
+        event.sequence = next_sequence++;
+        event.audio_samples = {0.25F, -0.25F};
+        event.sample_rate = cfg_.output_sample_rate == 0 ? 22050 : cfg_.output_sample_rate;
+        event.media_start_sample = 0;
+        event.media_end_sample = 2;
+        event.frame_index = 0;
+        events.push_back(std::move(event));
+    }
+
+    void finish_input() override {
+        finished = true;
+        trtmc::SpeechSessionEvent event;
+        event.kind = trtmc::SpeechSessionEventKind::kTurnFinished;
+        event.epoch = epoch;
+        event.sequence = next_sequence++;
+        event.is_final = true;
+        events.push_back(std::move(event));
+    }
+
+    std::vector<trtmc::SpeechSessionEvent> take_events() override {
+        auto result = std::move(events);
+        events.clear();
+        return result;
+    }
+
+    void cancel() override {
+        cancelled = true;
+        ++epoch;
+        trtmc::SpeechSessionEvent event;
+        event.kind = trtmc::SpeechSessionEventKind::kCancelled;
+        event.epoch = epoch;
+        event.sequence = 0;
+        event.is_final = true;
+        events.push_back(std::move(event));
+        next_sequence = 1;
+    }
+
+    void reset() override {
+        cancelled = false;
+        finished = false;
+        accepted_audio.clear();
+        ++epoch;
+        trtmc::SpeechSessionEvent event;
+        event.kind = trtmc::SpeechSessionEventKind::kReset;
+        event.epoch = epoch;
+        event.sequence = 0;
+        event.is_final = true;
+        events.push_back(std::move(event));
+        next_sequence = 1;
+    }
+
+    trtmc::SpeechSessionConfig config() const override { return cfg_; }
+
+    trtmc::SpeechSessionConfig cfg_;
+    std::vector<float> accepted_audio;
+    std::vector<trtmc::SpeechSessionEvent> events;
+    std::uint64_t epoch{1};
+    std::uint64_t next_sequence{0};
+    int append_calls{0};
+    bool finished{false};
+    bool cancelled{false};
+};
+
+class RecordingSpeechPipeline final : public trtmc::IPipeline,
+                                      public trtmc::ISpeechSessionProvider {
+  public:
+    const char* model_id() const override { return "recording-speech"; }
+    const char* pipeline_type() const override { return "RecordingSpeechPipeline"; }
+    std::unique_ptr<trtmc::ISpeechSession>
+    create_speech_session(const trtmc::SpeechSessionConfig& cfg) override {
+        observed_config = cfg;
+        auto result = std::make_unique<RecordingSpeechSession>(cfg);
+        last_session = result.get();
+        return result;
+    }
+
+    trtmc::SpeechSessionConfig observed_config;
+    RecordingSpeechSession* last_session{nullptr};
 };
 
 class PoolTestPipeline final : public trtmc::IPipeline {
@@ -140,6 +234,9 @@ static void test_ipipeline_default_virtuals() {
 
     check(std::string(pipeline.model_id()) == "dummy-model", "model_id");
     check(std::string(pipeline.pipeline_type()) == "DummyPipeline", "pipeline_type");
+    trtmc::IPipeline* base = &pipeline;
+    check(dynamic_cast<trtmc::ISpeechSessionProvider*>(base) == nullptr,
+          "speech session capability is absent by default");
 
     // Default generate(string) should throw
     bool threw = false;
@@ -278,6 +375,93 @@ static void test_ipipeline_default_virtuals() {
     check(threw, "default detect throws");
 }
 
+static void test_speech_session_value_contract() {
+    const trtmc::SpeechSessionConfig defaults;
+    check(defaults.input_sample_rate == 16000, "speech session default input sample rate");
+    check(defaults.output_sample_rate == 0, "speech session default output uses model rate");
+    check(defaults.emit_agent_audio && defaults.emit_agent_text && defaults.emit_user_transcript,
+          "speech session optional event streams default enabled");
+    check(defaults.enable_barge_in, "live speech sessions enable barge-in by default");
+    check(defaults.seed == 0, "native speech sessions default to deterministic seed zero");
+    check(defaults.finish_tail_frames == -1,
+          "live speech sessions use the model-owned bounded response tail by default");
+
+    trtmc::SpeechSessionEvent event;
+    event.kind = trtmc::SpeechSessionEventKind::kAgentText;
+    event.epoch = 7;
+    event.sequence = 12;
+    event.sample_rate = 22050;
+    event.media_start_sample = 1764;
+    event.media_end_sample = 3528;
+    event.frame_index = 1;
+    event.text = "one moment";
+    event.audio_samples = {0.5F};
+    event.is_final = true;
+
+    check(event.is_final && event.epoch == 7 && event.sequence == 12,
+          "speech session event carries final and ordering state");
+    check(event.audio_samples == std::vector<float>{0.5F} && event.sample_rate == 22050,
+          "speech session event carries audio");
+    check(event.text == "one moment" && event.media_start_sample == 1764 &&
+              event.media_end_sample == 3528 && event.frame_index == 1,
+          "speech session event carries text and media position");
+}
+
+static void test_speech_session_virtual_interface() {
+    RecordingSpeechPipeline pipeline;
+    auto* provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(&pipeline);
+    check(provider != nullptr, "speech session capability is explicit");
+    trtmc::SpeechSessionConfig cfg;
+    cfg.input_sample_rate = 44100;
+    cfg.output_sample_rate = 48000;
+    cfg.system_prompt = "Speak briefly";
+    cfg.enable_barge_in = false;
+    cfg.seed = 17;
+
+    auto session = provider->create_speech_session(cfg);
+    check(session != nullptr && pipeline.last_session != nullptr,
+          "speech session factory returns a session");
+    check(pipeline.observed_config.input_sample_rate == 44100 &&
+              session->config().output_sample_rate == 48000 && !session->config().enable_barge_in &&
+              session->config().seed == 17,
+          "speech session factory preserves arbitrary sample-rate config");
+
+    const float audio[] = {1.0F, 0.5F, -0.5F};
+    session->append_audio(audio, 3);
+    check(pipeline.last_session->append_calls == 1 &&
+              pipeline.last_session->accepted_audio == std::vector<float>({1.0F, 0.5F, -0.5F}),
+          "speech session append preserves a persistent input stream");
+    auto events = session->take_events();
+    check(events.size() == 1 && events[0].kind == trtmc::SpeechSessionEventKind::kAgentAudio &&
+              events[0].sample_rate == 48000,
+          "speech session drains currently available agent output");
+    check(session->take_events().empty(),
+          "speech session event drain is non-blocking and consuming");
+    check(session->wait_events(0).empty(),
+          "appended speech wait API preserves synchronous session behavior");
+
+    session->finish_input();
+    events = session->take_events();
+    check(pipeline.last_session->finished && events.size() == 1 && events[0].is_final &&
+              events[0].kind == trtmc::SpeechSessionEventKind::kTurnFinished,
+          "speech session finish is explicit and observable");
+
+    const auto epoch_before_cancel = pipeline.last_session->epoch;
+    session->cancel();
+    events = session->take_events();
+    check(pipeline.last_session->cancelled && pipeline.last_session->epoch > epoch_before_cancel &&
+              events.size() == 1 && events[0].kind == trtmc::SpeechSessionEventKind::kCancelled,
+          "speech session cancel invalidates outstanding output");
+
+    const auto epoch_before_reset = pipeline.last_session->epoch;
+    session->reset();
+    events = session->take_events();
+    check(!pipeline.last_session->cancelled && !pipeline.last_session->finished &&
+              pipeline.last_session->epoch > epoch_before_reset && events.size() == 1 &&
+              events[0].kind == trtmc::SpeechSessionEventKind::kReset,
+          "speech session reset starts a fresh conversation epoch");
+}
+
 static void test_transcription_batch_preserves_per_request_config() {
     RecordingTranscriptionPipeline pipeline;
     trtmc::TranscriptionRequest first;
@@ -347,6 +531,8 @@ int main() {
     test_sizeof_ipipeline_is_vtable();
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
+    test_speech_session_value_contract();
+    test_speech_session_virtual_interface();
     test_transcription_batch_preserves_per_request_config();
     test_pipeline_pool_leases_and_adapter_maintenance();
 

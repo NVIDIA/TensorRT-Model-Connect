@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "nemotron_voicechat"
+plugin = "nemotron_voicechat"
+test_manifests = [
+  "manifests/nemotron-voicechat-11b.json",
+]
+
+[model_reference_cache]
+repository = "https://github.com/NVIDIA%2DNeMo/Speech.git"
+revision = "097dfe9e2f55baf653b83035868bdc89849f1b47"
+relative_path = "nemotron_voicechat/reference/Speech-097dfe9e2f55"
+entrypoint = "examples/speechlm2/sample_audio/sample_general.wav"
+environment_variable = "NEMOTRON_VOICECHAT_SPEECH_REPO"
+
+[e2e_defaults.speech_to_speech]
+reference_backend = "voicechat_pinned_model_card"
+oracle_level = "L3_snapshot_regression"
+stages = [
+  { name = "model_card_general_conversation", required = true },
+]

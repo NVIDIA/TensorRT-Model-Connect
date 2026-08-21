@@ -543,7 +543,8 @@ def test_hf_auth_preflight_accepts_a_warmed_offline_snapshot(
         assert hf_id == case.hf_id
         assert "config.json" in allow_patterns
         assert "model.safetensors" in allow_patterns
-        assert "LICENSE" not in allow_patterns
+        assert "LICENSE" in allow_patterns
+        assert "rnnt_tokenizer/**" in allow_patterns
         assert "sam3.pt" not in allow_patterns
         assert local_files_only is True
         return str(snapshot)

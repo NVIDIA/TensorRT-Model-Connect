@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "nemotron_voicechat"
+runtime_library = "libtrtmc_model_nemotron_voicechat.so"
+runtime_plugins = ["plugin.cpp|register_nemotron_voicechat_plugin"]
+runtime_strategies = ["nemotron_voicechat_full_duplex"]
+runtime_tests = [
+  "test_nemotron_voicechat_session_state|test_nemotron_voicechat_session_state.cpp|trtmc_model_nemotron_voicechat|_|_",
+  "test_nemotron_voicechat_codec_reconstruction|test_codec_reconstruction.cpp|_|codec_reconstruction.cpp|_",
+  "test_nemotron_voicechat_streaming_mel_policy|test_streaming_mel_policy.cpp|trtmc_model_nemotron_voicechat|_|_",
+]

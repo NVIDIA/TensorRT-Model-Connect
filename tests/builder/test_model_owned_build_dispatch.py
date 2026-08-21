@@ -175,6 +175,30 @@ def test_marked_owner_exception_propagates_without_legacy_fallback(
         engine_builder.build_bundle("/models/marked", "/tmp/marked.bundle")
 
 
+def test_structurally_selected_owner_uses_plugin_id_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def build(_model_dir: str, _output_path: str, **_options: object) -> None:
+        nonlocal called
+        called = True
+
+    plugin = SimpleNamespace(name="marked_owner")
+    plugin.build = build
+    _select(monkeypatch, plugin)
+    _forbid_legacy(monkeypatch)
+    monkeypatch.setattr(
+        engine_builder,
+        "family_has_capability",
+        lambda owner, capability: capability == MODEL_OWNED_BUILD and owner == "marked_owner",
+    )
+
+    engine_builder.build_bundle("/models/structural", "/tmp/structural.bundle")
+
+    assert called
+
+
 def test_unmarked_plugin_keeps_the_legacy_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

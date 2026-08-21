@@ -60,6 +60,7 @@
     "whisper_speech_to_text",
     "canary_speech_to_text",
     "nemotron_speech_streaming_speech_to_text_rnnt",
+    "nemotron_voicechat_full_duplex",
     "personaplex_speech_to_speech",
     "qwen3_omni_multimodal",
     "patchtst_trt",
@@ -999,6 +1000,18 @@
       "comparator_class": "speech_to_speech.SpeechToSpeechComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['personaplex_speech_to_speech'].",
+      "performance_mode": "multi_stage"
+    },
+    "nemotron_voicechat_full_duplex": {
+      "task_strategy": "speech_to_speech",
+      "cli_commands": [
+        "speak",
+        "transcribe"
+      ],
+      "runner_class": "runner.VoiceChatModelCardRunner",
+      "comparator_class": "comparator.VoiceChatModelCardComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "The pinned public general-conversation sample is gated by the model-owned runner and comparator; model-owned C++ tests cover the asynchronous session lifecycle.",
       "performance_mode": "multi_stage"
     },
     "whisper_speech_to_text": {

@@ -29,6 +29,7 @@ sample_limits:
   mmlu_continuation_parity: 10
   mmlu_five_shot_mcq: 20
   mmlu_generation_mode_parity: 8
+  nemotron_voicechat_model_card_general_conversation: 1
   mmmu_pro_vision_plugin_parity: 5
   mmmu_pro_vision_square_plugin_parity: 5
   minimax_h3_official_profile_parity: 1
@@ -189,6 +190,8 @@ models:
     workloads: [beir_scifact_reranking]
   nemotron-speech-streaming-en-0.6b:
     workloads: [librispeech_clean_asr_streaming]
+  nemotron-voicechat-11b:
+    workloads: [nemotron_voicechat_model_card_general_conversation]
   nllb-200-distilled-600m:
     workloads: [flores200_en_fr_seq2seq_parity]
   olmo-1b:

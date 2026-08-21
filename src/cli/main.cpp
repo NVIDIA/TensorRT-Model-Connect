@@ -30,6 +30,7 @@
 //   trtmc version
 
 #include "cli/args.h"
+#include "cli/speech_session_helpers.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -37,6 +38,7 @@
 #include "trtmc/image_features.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/pipeline_plugin_loader.h"
+#include "trtmc/speech_session.h"
 #include "trtmc/trtmc_io.hpp"
 
 #include <algorithm>
@@ -1593,13 +1595,60 @@ int cmd_speak(const CliArgs& args) {
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : -1;
     cfg.tail_frames = args.tail_frames;
+    cfg.seed = args.seed;
 
-    auto result = pipeline->speak(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
-                                  cfg, audio.sample_rate);
+    trtmc::AudioResult result;
+    std::string agent_text;
+    if (auto* session_provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(pipeline.get())) {
+        trtmc::SpeechSessionConfig session_config;
+        session_config.input_sample_rate = audio.sample_rate;
+        session_config.output_sample_rate = 0;
+        session_config.emit_agent_audio = true;
+        session_config.emit_agent_text = true;
+        session_config.emit_user_transcript = false;
+        session_config.enable_barge_in = false;
+        session_config.seed = cfg.seed >= 0 ? cfg.seed : 0;
+        // The CLI appends --tail-frames explicitly. Do not let finish_input()
+        // add the live-session response tail a second time.
+        session_config.finish_tail_frames = 0;
+        auto session = session_provider->create_speech_session(session_config);
+        session->append_audio(audio.samples.data(), static_cast<int32_t>(audio.samples.size()));
+        const int32_t tail_samples =
+            trtmc::cli::speech_tail_frame_samples(session_config.input_sample_rate);
+        std::vector<float> silence(static_cast<std::size_t>(tail_samples), 0.0F);
+        for (int32_t frame = 0; frame < std::max(cfg.tail_frames, 0); ++frame)
+            session->append_audio(silence.data(), tail_samples);
+        session->finish_input();
+        std::vector<trtmc::SpeechSessionEvent> completed_events;
+        bool input_completed = false;
+        while (!input_completed) {
+            auto events = session->wait_events(-1);
+            for (const auto& event : events) {
+                if (event.kind == trtmc::SpeechSessionEventKind::kInputFinished)
+                    input_completed = true;
+                if (event.kind == trtmc::SpeechSessionEventKind::kError)
+                    throw std::runtime_error(event.text.empty() ? "speech session failed"
+                                                                : event.text);
+                if (event.kind == trtmc::SpeechSessionEventKind::kCancelled)
+                    throw std::runtime_error("speech session was cancelled");
+            }
+            completed_events.insert(completed_events.end(), std::make_move_iterator(events.begin()),
+                                    std::make_move_iterator(events.end()));
+        }
+        auto aggregate = trtmc::cli::aggregate_speech_session_events(std::move(completed_events),
+                                                                     audio.sample_rate);
+        result = std::move(aggregate.audio);
+        agent_text = std::move(aggregate.agent_text);
+    } else {
+        result = pipeline->speak(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
+                                 cfg, audio.sample_rate);
+    }
 
     const std::string out_path = args.audio_out.empty() ? "/tmp/speech_output.wav" : args.audio_out;
     trtmc::io::write_wav(result, out_path);
 
+    if (!agent_text.empty())
+        std::cout << "Agent text: " << agent_text << '\n';
     std::cout << "Generated " << result.num_samples << " audio samples -> " << out_path << '\n';
     return EXIT_SUCCESS;
 }

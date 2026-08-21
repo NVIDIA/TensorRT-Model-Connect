@@ -1018,7 +1018,9 @@ def build_bundle(
             f"No family plugin for model_type={config.model_type!r}. "
             f"Supported: {supported}")
 
-    if family_has_capability(config, "model_owned_build"):
+    if family_has_capability(config, "model_owned_build") or family_has_capability(
+        plugin.name, "model_owned_build"
+    ):
         missing = object()
         declared_build = inspect.getattr_static(plugin, "build", missing)
         if declared_build is missing:

@@ -222,6 +222,7 @@ add_library(trtmc_core SHARED
   src/runtime/core/distributed_runtime.cpp
   src/runtime/core/device_tensor.cpp
   src/runtime/core/image_features.cpp
+  src/runtime/core/speech_session.cpp
   src/runtime/core/measurement.cpp
   src/runtime/core/pipeline_pool.cpp
   src/runtime/core/stb_impl.cpp
@@ -933,6 +934,7 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+trtmc_add_test(test_speech_session_cli_helpers)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)
