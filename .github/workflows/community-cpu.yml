@@ -3,9 +3,15 @@
 
 name: Community CPU
 
-run-name: "PR #${{ inputs.pr_number }} · public CPU validation"
+run-name: >-
+  PR #${{ github.event.pull_request.number || inputs.pr_number }} · public CPU validation
 
 on:
+  # Transitional trigger: keep this until the run-ci broker is available on
+  # main. Remove pull_request after the run-ci broker is available on main.
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       pr_number:
@@ -28,11 +34,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: community-cpu-${{ inputs.pr_number }}-${{ inputs.merge_sha }}
+  group: >-
+    community-cpu-${{ github.event.pull_request.number || inputs.pr_number }}-${{ github.event.pull_request.merge_commit_sha || inputs.merge_sha }}
   cancel-in-progress: false
 
 env:
-  CI_BASE_REF: ${{ inputs.base_sha }}
+  CI_BASE_REF: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
 
 jobs:
   initialize:
@@ -50,6 +57,7 @@ jobs:
       required_check_id: ${{ steps.checks.outputs.required_check_id }}
     steps:
       - name: Validate the dispatched PR snapshot
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
@@ -72,6 +80,7 @@ jobs:
           test "$(jq -er '.merge_commit_sha' <<<"$pull")" = "$MERGE_SHA"
 
       - name: Publish pending exact-merge checks
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         id: checks
         env:
           GH_TOKEN: ${{ github.token }}
@@ -130,7 +139,7 @@ jobs:
       - name: Check out the authorized PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ inputs.merge_sha }}
+          ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -159,7 +168,7 @@ jobs:
       - name: Check out the authorized PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ inputs.merge_sha }}
+          ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -211,7 +220,7 @@ jobs:
           needs.ownership-impact.outputs.run_unit_tests == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ inputs.merge_sha }}
+          ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -234,7 +243,7 @@ jobs:
         run: python3 -m tools.community_ci unit --scope "$TRTMC_UNIT_SCOPE"
 
   required:
-    name: Publish exact-merge public checks
+    name: Community CPU / Required
     if: ${{ always() && needs.initialize.result == 'success' }}
     needs:
       - initialize
@@ -248,7 +257,21 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      - name: Publish the transitional automatic CPU verdict
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
+          OWNERSHIP_IMPACT_RESULT: ${{ needs.ownership-impact.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+        run: |
+          printf 'Source quality: %s\nOwnership and impact: %s\nUnit: %s\n' \
+            "$SOURCE_QUALITY_RESULT" "$OWNERSHIP_IMPACT_RESULT" "$UNIT_RESULT"
+          test "$SOURCE_QUALITY_RESULT" = success
+          test "$OWNERSHIP_IMPACT_RESULT" = success
+          test "$UNIT_RESULT" = success
+
       - name: Publish exact-merge CPU checks
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}

@@ -450,25 +450,25 @@ def test_public_cpu_verdict_publishes_success_for_the_exact_snapshot(
     assert checks[-1]["output"]["title"] == "Community CPU: success"
 
 
-def test_public_workflow_is_dispatched_read_only_cpu_and_publishes_exact_merge_checks() -> None:
+def test_public_workflow_supports_safe_transition_and_exact_merge_checks() -> None:
     path = REPO_ROOT / ".github" / "workflows" / "community-cpu.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     source = path.read_text(encoding="utf-8")
 
     assert workflow["run-name"] == (
-        "PR #${{ inputs.pr_number }} · public CPU validation"
+        "PR #${{ github.event.pull_request.number || inputs.pr_number }} · public CPU validation"
     )
     assert workflow["permissions"] == {}
     assert "workflow_dispatch:" in source
-    assert "\n  pull_request:" not in source
+    assert "\n  pull_request:" in source
+    assert "Remove pull_request after the run-ci broker is available on main" in source
     assert "pull_request_target" not in source
-    assert "github.event.pull_request" not in source
     assert "self-hosted" not in source
     assert "secrets." not in source
     assert "persist-credentials: false" in source
     assert "--gpus" not in source
     assert "upload-pages" not in source
-    assert "ref: ${{ inputs.merge_sha }}" in source
+    assert "ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}" in source
     assert 'external_id="community-cpu:' in source
     assert '"/repos/$GITHUB_REPOSITORY/check-runs"' in source
     assert '"/repos/$GITHUB_REPOSITORY/check-runs/$check_id"' in source
@@ -480,7 +480,7 @@ def test_public_workflow_is_dispatched_read_only_cpu_and_publishes_exact_merge_c
         "Community CPU / Source quality",
         "Community CPU / Ownership and impact",
         "Community CPU / Unit / C++ and Python",
-        "Publish exact-merge public checks",
+        "Community CPU / Required",
     ]
     assert jobs["initialize"]["permissions"] == {
         "checks": "write",
