@@ -285,7 +285,7 @@ def test_public_cpu_request_is_a_pr_author_comment_dispatcher() -> None:
     assert authorize["runs-on"] == "ubuntu-24.04"
     assert authorize["permissions"] == {
         "actions": "write",
-        "checks": "read",
+        "checks": "write",
         "contents": "read",
         "pull-requests": "read",
     }
