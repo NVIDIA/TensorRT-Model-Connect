@@ -17,7 +17,7 @@
 ## 💻 Example Code
 
 ```bash
-trtmc build Qwen/Qwen3-0.6B -o qwen3-0.6b.bundle
+trtmc build Qwen/Qwen3-0.6B --max-cache-length 16384 --output qwen3-0.6b.bundle
 trtmc run ./qwen3-0.6b.bundle --prompt "What is the capital of France? Answer in one word." --chat-template --no-thinking
 # Generated text: Paris
 ```
