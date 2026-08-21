@@ -17,6 +17,8 @@
 #include <string>
 #include <typeinfo>
 
+#include <nlohmann/json.hpp>
+
 namespace trtmc::config {
 
 namespace {
@@ -38,318 +40,32 @@ std::string strip(std::string_view sv) {
     return std::string(sv.substr(a, b - a));
 }
 
-// ---- Tiny JSON parser (scoped to config profile shape) -------------------
+// ---- JSON conversion helpers --------------------------------------------
 
-struct Parser {
-    std::string_view text;
-    std::size_t i = 0;
-
-    [[noreturn]] void fail(const std::string& msg) const {
-        // Crude line/col for diagnostics. Counting the prefix is O(n) but
-        // this runs once at session start — not hot.
-        std::size_t line = 1;
-        std::size_t col = 1;
-        for (std::size_t j = 0; j < i && j < text.size(); ++j) {
-            if (text[j] == '\n') {
-                ++line;
-                col = 1;
-            } else
-                ++col;
-        }
-        throw std::invalid_argument("parse_layered_json: " + msg + " at line " +
-                                    std::to_string(line) + " col " + std::to_string(col));
-    }
-
-    bool is_space(char c) const { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
-    bool is_line_comment_start(std::size_t at) const {
-        return at + 1 < text.size() && text[at] == '/' && text[at + 1] == '/';
-    }
-    void skip_line_comment() {
-        while (i < text.size() && text[i] != '\n')
-            ++i;
-    }
-
-    void skip_ws() {
-        while (i < text.size()) {
-            if (is_space(text[i])) {
-                ++i;
-                continue;
-            }
-            if (is_line_comment_start(i)) {
-                skip_line_comment();
-                continue;
-            }
-            break;
-        }
-    }
-
-    char peek() {
-        skip_ws();
-        if (i >= text.size())
-            fail("unexpected end of input");
-        return text[i];
-    }
-
-    void expect(char c) {
-        if (peek() != c) {
-            std::string msg = "expected '";
-            msg.push_back(c);
-            msg += "' got '";
-            msg.push_back(text[i]);
-            msg += "'";
-            fail(msg);
-        }
-        ++i;
-    }
-
-    char decode_string_escape(char esc) {
-        // JSON string-escape vocabulary. Unknown escapes fail the parse.
-        static constexpr std::pair<char, char> table[] = {
-            {'"', '"'},  {'\\', '\\'}, {'/', '/'},  {'n', '\n'},
-            {'t', '\t'}, {'r', '\r'},  {'b', '\b'}, {'f', '\f'},
-        };
-        for (const auto& entry : table)
-            if (entry.first == esc)
-                return entry.second;
-        fail("unsupported escape in string");
-    }
-
-    std::string parse_string() {
-        skip_ws();
-        if (i >= text.size() || text[i] != '"')
-            fail("expected string");
-        ++i;
-        std::string out;
-        while (i < text.size()) {
-            char c = text[i++];
-            if (c == '"')
-                return out;
-            if (c == '\\' && i < text.size()) {
-                out.push_back(decode_string_escape(text[i++]));
-                continue;
-            }
-            out.push_back(c);
-        }
-        fail("unterminated string");
-    }
-
-    std::any parse_bool_literal() {
-        if (text.compare(i, 4, "true") == 0) {
-            i += 4;
-            return std::any{true};
-        }
-        if (text.compare(i, 5, "false") == 0) {
-            i += 5;
-            return std::any{false};
-        }
-        fail("expected bool literal");
-    }
-
-    std::any parse_null_literal() {
-        // JSON null → empty std::any. has_value() is the canonical "null
-        // was present in the profile" check downstream.
-        if (text.compare(i, 4, "null") == 0) {
-            i += 4;
-            return std::any{};
-        }
-        fail("expected null literal");
-    }
-
-    static bool is_digit(char c) { return c >= '0' && c <= '9'; }
-    static bool is_dot_or_exp(char c) { return c == '.' || c == 'e' || c == 'E'; }
-    static bool is_sign_char(char c) { return c == '-' || c == '+'; }
-    bool prev_was_exp(std::size_t at) const {
-        if (at == 0)
-            return false;
-        char p = text[at - 1];
-        return p == 'e' || p == 'E';
-    }
-
-    bool is_number_continuation(std::size_t at, bool& out_has_dot_or_exp) const {
-        char ch = text[at];
-        if (is_digit(ch))
-            return true;
-        if (is_dot_or_exp(ch)) {
-            out_has_dot_or_exp = true;
-            return true;
-        }
-        if (is_sign_char(ch))
-            return prev_was_exp(at);
-        return false;
-    }
-
-    std::any parse_number_literal() {
-        std::size_t start = i;
-        if (text[i] == '-' || text[i] == '+')
-            ++i;
-        bool has_dot_or_exp = false;
-        while (i < text.size() && is_number_continuation(i, has_dot_or_exp))
-            ++i;
-        if (start == i)
-            fail("expected value");
-        std::string num_text(text.substr(start, i - start));
-        try {
-            if (has_dot_or_exp)
-                return std::any{std::stod(num_text)};
-            return std::any{static_cast<std::int64_t>(std::stoll(num_text))};
-        } catch (const std::exception&) {
-            fail("invalid number: " + num_text);
-        }
-    }
-
-    std::any parse_scalar() {
-        skip_ws();
-        if (i >= text.size())
-            fail("expected scalar");
-        char c = text[i];
-        if (c == '"')
-            return std::any{parse_string()};
-        if (c == 't' || c == 'f')
-            return parse_bool_literal();
-        if (c == 'n')
-            return parse_null_literal();
-        return parse_number_literal();
-    }
-
-    // One inner object: {field: scalar, ...}
-    std::unordered_map<std::string, std::any> parse_inner_object() {
-        expect('{');
-        std::unordered_map<std::string, std::any> out;
-        skip_ws();
-        if (i < text.size() && text[i] == '}') {
-            ++i;
-            return out;
-        }
-        while (true) {
-            std::string key = parse_string();
-            skip_ws();
-            expect(':');
-            if (out.count(key) != 0)
-                fail("duplicate field key: " + key);
-            out[key] = parse_scalar();
-            skip_ws();
-            if (i < text.size() && text[i] == ',') {
-                ++i;
-                continue;
-            }
-            if (i < text.size() && text[i] == '}') {
-                ++i;
-                break;
-            }
-            fail("expected ',' or '}' in object");
-        }
-        return out;
-    }
-
-    LayeredFileValues parse_outer_object() {
-        expect('{');
-        LayeredFileValues out;
-        skip_ws();
-        if (i < text.size() && text[i] == '}') {
-            ++i;
-            return out;
-        }
-        while (true) {
-            std::string ns = parse_string();
-            skip_ws();
-            expect(':');
-            if (out.count(ns) != 0)
-                fail("duplicate namespace key: " + ns);
-            out[ns] = parse_inner_object();
-            skip_ws();
-            if (i < text.size() && text[i] == ',') {
-                ++i;
-                continue;
-            }
-            if (i < text.size() && text[i] == '}') {
-                ++i;
-                break;
-            }
-            fail("expected ',' or '}' at outer level");
-        }
-        return out;
-    }
-};
-
-// ---- std::any serialization for effective_config.json -------------------
-
-void append_json_escaped_string(std::ostringstream& os, const std::string& s) {
-    os << '"';
-    for (char c : s) {
-        switch (c) {
-        case '"':
-            os << "\\\"";
-            break;
-        case '\\':
-            os << "\\\\";
-            break;
-        case '\n':
-            os << "\\n";
-            break;
-        case '\t':
-            os << "\\t";
-            break;
-        case '\r':
-            os << "\\r";
-            break;
-        case '\b':
-            os << "\\b";
-            break;
-        case '\f':
-            os << "\\f";
-            break;
-        default:
-            os << c;
-        }
-    }
-    os << '"';
+std::any json_to_any(const nlohmann::json& j) {
+    if (j.is_null()) return std::any{};
+    if (j.is_boolean()) return std::any{j.get<bool>()};
+    if (j.is_number_integer()) return std::any{j.get<std::int64_t>()};
+    if (j.is_number_unsigned()) return std::any{static_cast<std::int64_t>(j.get<std::uint64_t>())};
+    if (j.is_number_float()) return std::any{j.get<double>()};
+    if (j.is_string()) return std::any{j.get<std::string>()};
+    throw std::invalid_argument("unsupported json type");
 }
 
-bool try_append_numeric(std::ostringstream& os, const std::any& v) {
-    if (v.type() == typeid(std::int32_t)) {
-        os << std::any_cast<std::int32_t>(v);
-        return true;
-    }
-    if (v.type() == typeid(std::int64_t)) {
-        os << std::any_cast<std::int64_t>(v);
-        return true;
-    }
-    if (v.type() == typeid(int)) {
-        os << std::any_cast<int>(v);
-        return true;
-    }
-    if (v.type() == typeid(double)) {
-        os << std::any_cast<double>(v);
-        return true;
-    }
-    if (v.type() == typeid(float)) {
-        os << std::any_cast<float>(v);
-        return true;
-    }
-    return false;
-}
-
-void append_json_scalar(std::ostringstream& os, const std::any& v) {
-    if (!v.has_value()) {
-        os << "null";
-        return;
-    }
-    if (v.type() == typeid(bool)) {
-        os << (std::any_cast<bool>(v) ? "true" : "false");
-        return;
-    }
-    if (try_append_numeric(os, v))
-        return;
-    if (v.type() == typeid(std::string)) {
-        append_json_escaped_string(os, std::any_cast<const std::string&>(v));
-        return;
-    }
+nlohmann::json any_to_json(const std::any& v) {
+    if (!v.has_value()) return nullptr;
+    if (v.type() == typeid(bool)) return std::any_cast<bool>(v);
+    if (v.type() == typeid(std::int32_t)) return std::any_cast<std::int32_t>(v);
+    if (v.type() == typeid(std::int64_t)) return std::any_cast<std::int64_t>(v);
+    if (v.type() == typeid(int)) return std::any_cast<int>(v);
+    if (v.type() == typeid(double)) return std::any_cast<double>(v);
+    if (v.type() == typeid(float)) return std::any_cast<float>(v);
+    if (v.type() == typeid(std::string)) return std::any_cast<const std::string&>(v);
     if (v.type() == typeid(const char*)) {
         const char* s = std::any_cast<const char*>(v);
-        append_json_escaped_string(os, s ? std::string(s) : std::string());
-        return;
+        return s ? std::string(s) : std::string();
     }
-    os << "\"<unrepresentable>\"";
+    return "<unrepresentable>";
 }
 
 // ---- Field lookup shared by --set and --config paths --------------------
@@ -484,14 +200,15 @@ std::any coerce_scalar(const std::string& raw, const std::string& type_tag,
 }
 
 LayeredFileValues parse_layered_json(std::string_view text) {
-    Parser p{text, 0};
-    p.skip_ws();
-    if (p.i >= text.size())
-        return {};
-    LayeredFileValues out = p.parse_outer_object();
-    p.skip_ws();
-    if (p.i != text.size())
-        p.fail("unexpected trailing content");
+    if (text.empty()) return {};
+    auto j = nlohmann::json::parse(text);
+    if (j.is_null()) return {};
+    LayeredFileValues out;
+    for (auto& [ns, fields] : j.items()) {
+        for (auto& [field, value] : fields.items()) {
+            out[ns][field] = json_to_any(value);
+        }
+    }
     return out;
 }
 
@@ -562,130 +279,33 @@ ConfigBundle resolve_cli_config(const std::string& config_path,
 }
 
 std::string bundle_to_effective_json(const ConfigBundle& bundle) {
-    std::ostringstream os;
-    os << "{\n";
-    // Sort namespaces for stable output.
-    std::vector<std::string> ns_names;
-    for (const auto& entry : bundle.all())
-        ns_names.push_back(entry.first);
-    std::sort(ns_names.begin(), ns_names.end());
-
-    for (std::size_t ni = 0; ni < ns_names.size(); ++ni) {
-        const auto& ns = ns_names[ni];
-        os << "  \"" << ns << "\": {\n";
-        std::vector<std::string> field_names;
-        for (const auto& f : bundle.all().at(ns))
-            field_names.push_back(f.first);
-        std::sort(field_names.begin(), field_names.end());
-
-        for (std::size_t fi = 0; fi < field_names.size(); ++fi) {
-            const auto& fname = field_names[fi];
-            const ResolvedValue& rv = bundle.all().at(ns).at(fname);
-            os << "    \"" << fname << "\": {\n";
-            os << "      \"value\": ";
-            append_json_scalar(os, rv.value);
-            os << ",\n";
-            os << "      \"source\": \"" << layer_name(rv.source) << "\"\n";
-            os << "    }";
-            if (fi + 1 < field_names.size())
-                os << ",";
-            os << "\n";
+    nlohmann::json out = nlohmann::json::object();
+    for (const auto& [ns, fields] : bundle.all()) {
+        nlohmann::json ns_json = nlohmann::json::object();
+        for (const auto& [fname, rv] : fields) {
+            nlohmann::json field_json;
+            field_json["value"] = any_to_json(rv.value);
+            field_json["source"] = layer_name(rv.source);
+            ns_json[fname] = field_json;
         }
-        os << "  }";
-        if (ni + 1 < ns_names.size())
-            os << ",";
-        os << "\n";
+        out[ns] = ns_json;
     }
-    os << "}\n";
-    return os.str();
+    return out.dump(2) + "\n";
 }
-
-namespace {
-
-bool is_json_space(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
-std::size_t skip_json_ws(const std::string& text, std::size_t p) {
-    while (p < text.size() && is_json_space(text[p]))
-        ++p;
-    return p;
-}
-
-// Starting at a '{' at index `start`, scan forward honoring string literals
-// and return the index just past the matching close '}'. Returns
-// std::string::npos on unbalanced or missing close.
-std::size_t match_object_end(const std::string& text, std::size_t start) {
-    int depth = 0;
-    bool in_string = false;
-    for (std::size_t p = start; p < text.size(); ++p) {
-        char c = text[p];
-        if (in_string) {
-            if (c == '\\' && p + 1 < text.size()) {
-                ++p;
-                continue;
-            }
-            if (c == '"')
-                in_string = false;
-            continue;
-        }
-        if (c == '"') {
-            in_string = true;
-            continue;
-        }
-        if (c == '{')
-            ++depth;
-        else if (c == '}' && --depth == 0)
-            return p + 1;
-    }
-    return std::string::npos;
-}
-
-// Confirm that a "<key>" match at `pattern_end` is actually followed by
-// a colon and then an object open-brace. Returns the index of the '{' on
-// success, std::string::npos otherwise.
-std::size_t find_object_open_after_key(const std::string& text, std::size_t pattern_end) {
-    std::size_t p = skip_json_ws(text, pattern_end);
-    if (p >= text.size() || text[p] != ':')
-        return std::string::npos;
-    p = skip_json_ws(text, p + 1);
-    if (p >= text.size() || text[p] != '{')
-        return std::string::npos;
-    return p;
-}
-
-// Locate the object value for ``"<key>":`` in a JSON text and return the
-// substring from the opening '{' to its matching close '}' (inclusive).
-// Returns empty string if the key is absent or the value isn't an object.
-// Honors string-literal escaping so that '{' or '}' inside quoted values
-// don't confuse brace matching.
-std::string find_object_value_for_key(const std::string& text, const std::string& key) {
-    const std::string pattern = "\"" + key + "\"";
-    std::size_t pos = 0;
-    while ((pos = text.find(pattern, pos)) != std::string::npos) {
-        std::size_t open = find_object_open_after_key(text, pos + pattern.size());
-        if (open == std::string::npos) {
-            // Not a key (or value isn't an object). Skip past and keep
-            // looking — handles the case where the literal appears inside
-            // another string value.
-            pos += pattern.size();
-            continue;
-        }
-        std::size_t end = match_object_end(text, open);
-        if (end == std::string::npos)
-            return {};
-        return text.substr(open, end - open);
-    }
-    return {};
-}
-
-} // namespace
 
 LayeredFileValues extract_bundle_defaults(const std::string& header_json) {
-    std::string sub = find_object_value_for_key(header_json, "defaults");
-    if (sub.empty())
+    if (header_json.empty()) return {};
+    auto j = nlohmann::json::parse(header_json);
+    if (!j.contains("defaults") || j["defaults"].is_null()) {
         return {};
-    return parse_layered_json(sub);
+    }
+    LayeredFileValues out;
+    for (auto& [ns, fields] : j["defaults"].items()) {
+        for (auto& [field, value] : fields.items()) {
+            out[ns][field] = json_to_any(value);
+        }
+    }
+    return out;
 }
 
 LayerContribution bundle_defaults_contribution(const std::string& header_json) {
