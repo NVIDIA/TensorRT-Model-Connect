@@ -12,12 +12,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <typeinfo>
-
-#include <nlohmann/json.hpp>
 
 namespace trtmc::config {
 
@@ -43,12 +42,18 @@ std::string strip(std::string_view sv) {
 // ---- JSON conversion helpers --------------------------------------------
 
 std::any json_to_any(const nlohmann::json& j) {
-    if (j.is_null()) return std::any{};
-    if (j.is_boolean()) return std::any{j.get<bool>()};
-    if (j.is_number_integer()) return std::any{j.get<std::int64_t>()};
-    if (j.is_number_unsigned()) return std::any{static_cast<std::int64_t>(j.get<std::uint64_t>())};
-    if (j.is_number_float()) return std::any{j.get<double>()};
-    if (j.is_string()) return std::any{j.get<std::string>()};
+    if (j.is_null())
+        return std::any{};
+    if (j.is_boolean())
+        return std::any{j.get<bool>()};
+    if (j.is_number_integer())
+        return std::any{j.get<std::int64_t>()};
+    if (j.is_number_unsigned())
+        return std::any{static_cast<std::int64_t>(j.get<std::uint64_t>())};
+    if (j.is_number_float())
+        return std::any{j.get<double>()};
+    if (j.is_string())
+        return std::any{j.get<std::string>()};
     throw std::invalid_argument("unsupported json type");
 }
 
@@ -59,13 +64,20 @@ std::string c_string_or_empty(const char* value) {
 }
 
 nlohmann::json any_to_json(const std::any& v) {
-    if (!v.has_value()) return nullptr;
-    if (v.type() == typeid(bool)) return std::any_cast<bool>(v);
-    if (v.type() == typeid(std::int32_t)) return std::any_cast<std::int32_t>(v);
-    if (v.type() == typeid(std::int64_t)) return std::any_cast<std::int64_t>(v);
-    if (v.type() == typeid(int)) return std::any_cast<int>(v);
-    if (v.type() == typeid(double)) return std::any_cast<double>(v);
-    if (v.type() == typeid(float)) return std::any_cast<float>(v);
+    if (!v.has_value())
+        return nullptr;
+    if (v.type() == typeid(bool))
+        return std::any_cast<bool>(v);
+    if (v.type() == typeid(std::int32_t))
+        return std::any_cast<std::int32_t>(v);
+    if (v.type() == typeid(std::int64_t))
+        return std::any_cast<std::int64_t>(v);
+    if (v.type() == typeid(int))
+        return std::any_cast<int>(v);
+    if (v.type() == typeid(double))
+        return std::any_cast<double>(v);
+    if (v.type() == typeid(float))
+        return std::any_cast<float>(v);
     if (v.type() == typeid(std::string))
         return std::any_cast<const std::string&>(v);
     if (v.type() == typeid(const char*))
@@ -205,14 +217,16 @@ std::any coerce_scalar(const std::string& raw, const std::string& type_tag,
 }
 
 LayeredFileValues parse_layered_json(std::string_view text) {
-    if (text.empty()) return {};
+    if (text.empty())
+        return {};
     nlohmann::json j;
     try {
         j = nlohmann::json::parse(text);
     } catch (const nlohmann::json::parse_error& e) {
         throw std::invalid_argument(std::string("expected ':' ") + e.what());
     }
-    if (j.is_null()) return {};
+    if (j.is_null())
+        return {};
     if (!j.is_object()) {
         throw std::invalid_argument("expected '{'");
     }
@@ -310,7 +324,8 @@ std::string bundle_to_effective_json(const ConfigBundle& bundle) {
 }
 
 LayeredFileValues extract_bundle_defaults(const std::string& header_json) {
-    if (header_json.empty()) return {};
+    if (header_json.empty())
+        return {};
     auto j = nlohmann::json::parse(header_json);
     if (!j.contains("defaults") || j["defaults"].is_null()) {
         return {};
