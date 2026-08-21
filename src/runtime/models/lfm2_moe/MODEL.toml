@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "lfm2_moe"
+runtime_library = "libtrtmc_model_lfm2_moe.so"
+runtime_plugins = ["plugin.cpp|register_lfm2_moe_plugin"]
+runtime_strategies = ["lfm2_moe_hybrid_conv_attention"]
+runtime_tests = [
+  "test_lfm2_moe_byte_level_decoder|test_lfm2_moe_byte_level_decoder.cpp|trtmc_model_lfm2_moe|_|_",
+  "test_lfm2_moe_chat_template|test_lfm2_moe_chat_template.cpp|trtmc_model_lfm2_moe|_|_",
+  "test_lfm2_moe_pretokenizer|test_lfm2_moe_pretokenizer.cpp|trtmc_model_lfm2_moe|_|_",
+  "test_lfm2_moe_sampler|test_lfm2_moe_sampler.cpp|trtmc_model_lfm2_moe|_|_",
+  "test_lfm2_moe_runtime|test_lfm2_moe_runtime.cpp|trtmc_model_lfm2_moe|_|REQUIRES_GPU",
+]
+
+[validation_profiles]
+decoder_debug = ["lfm2_moe_hybrid_conv_attention"]

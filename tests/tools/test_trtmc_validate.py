@@ -72,6 +72,7 @@ def test_model_workload_catalog_covers_every_ready_model():
         "lfm2-2.6b",
         "lfm2-350m-fp16",
         "lfm2-700m",
+        "lfm2-8b-a1b",
     }
     assert trtmc_validate.resolve_binding(
         catalog,

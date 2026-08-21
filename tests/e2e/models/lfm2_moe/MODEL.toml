@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "lfm2_moe"
+plugin = "lfm2_moe"
+test_manifests = [
+  "manifests/lfm2-8b-a1b.json",
+]
+
+[e2e_defaults.text_generation_causal]
+reference_backend = "hf_transformers"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "full_generation", required = true },
+]

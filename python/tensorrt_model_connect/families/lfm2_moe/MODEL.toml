@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "lfm2_moe"
+plugin = "lfm2_moe"
+module = "plugin"
+aliases = [
+  "lfm2_moe",
+]
+prefixes = [
+  "lfm2_moe",
+]
+capabilities = ["debug_layer_outputs"]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "lfm2_moe_hybrid_conv_attention",
+]

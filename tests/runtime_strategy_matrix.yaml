@@ -31,6 +31,7 @@
     "nemotron_h_hybrid_mamba_attention",
     "qwen3_5_hybrid_mamba_attention",
     "lfm2_hybrid_conv_attention",
+    "lfm2_moe_hybrid_conv_attention",
     "albert_encoder_only",
     "bert_encoder_only",
     "convbert_encoder_only",
@@ -770,6 +771,17 @@
       "comparator_class": "text.TextComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['lfm2_hybrid_conv_attention'].",
+      "performance_mode": "decode"
+    },
+    "lfm2_moe_hybrid_conv_attention": {
+      "task_strategy": "text_generation_causal",
+      "cli_commands": [
+        "run"
+      ],
+      "runner_class": "text_generation.TextGenerationCausalRunner",
+      "comparator_class": "text.TextComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['lfm2_moe_hybrid_conv_attention'].",
       "performance_mode": "decode"
     },
     "patchtst_trt": {

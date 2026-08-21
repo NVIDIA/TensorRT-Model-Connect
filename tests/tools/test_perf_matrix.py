@@ -46,6 +46,10 @@ LFM2_EXCLUSION_REASON = (
     "Dense LFM2 functional and reference-parity qualification is present, but "
     "this change does not add a matching release-performance workload or receipt."
 )
+LFM2_MOE_EXCLUSION_REASON = (
+    "LFM2-MoE functional and reference-parity qualification is present, but "
+    "this change does not add a matching release-performance workload or receipt."
+)
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
     "bert.embed": "hf-transformers-embedding",
@@ -279,6 +283,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "lfm2-350m-bf16-model-card": LFM2_EXCLUSION_REASON,
         "lfm2-350m-fp16": LFM2_EXCLUSION_REASON,
         "lfm2-700m": LFM2_EXCLUSION_REASON,
+        "lfm2-8b-a1b": LFM2_MOE_EXCLUSION_REASON,
         "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
     }
     assert all(
@@ -2204,8 +2209,8 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 6,
-        "explicitly_excluded_profiles": 6,
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 7,
+        "explicitly_excluded_profiles": 7,
         "explicit_exclusions": [
             {
                 "model": "lfm2-1.2b",
@@ -2226,6 +2231,10 @@ def test_run_consolidates_results_and_records_replayable_commands(
             {
                 "model": "lfm2-700m",
                 "reason": LFM2_EXCLUSION_REASON,
+            },
+            {
+                "model": "lfm2-8b-a1b",
+                "reason": LFM2_MOE_EXCLUSION_REASON,
             },
             {
                 "model": "minimax-h3-768p",
