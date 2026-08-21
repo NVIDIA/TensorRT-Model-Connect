@@ -1856,6 +1856,23 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "examples/cosmos3_story_scene/Dockerfile",
+            "examples/cosmos3_story_scene/app/story_scene/server.py",
+            "examples/cosmos3_story_scene/app/static/app.js",
+        ],
+    )
+    def test_cosmos3_story_scene_example_triggers_tools_tier(self, imap, path):
+        """The one-click Cosmos sample runs its tools-tier contract tests."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "cosmos3_story_scene_example"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
             "python/tensorrt_model_connect/benchmark/cli.py",
             "python/tensorrt_model_connect/benchmark/operations.py",
         ],

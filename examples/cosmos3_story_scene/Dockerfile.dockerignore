@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# This Dockerfile-specific allowlist overrides the repository's root
+# .dockerignore when Compose uses the repository root as its build context.
+*
+!CMakeLists.txt
+!pyproject.toml
+!_pyproject_backend.py
+!README.md
+!LICENSE
+!NOTICE
+!ASSET_LICENSES.md
+!cmake/
+!cmake/**
+!include/
+!include/**
+!python/
+!python/**
+!src/
+!src/**
+!tests/
+!tests/cpp/
+!tests/cpp/models/
+!tests/cpp/models/**
+!third_party/
+!third_party/stb/
+!third_party/stb/**
+!examples/
+!examples/byok/
+!examples/byok/identity_copy_kernel.cpp
+!examples/cosmos3_story_scene/
+!examples/cosmos3_story_scene/app/
+!examples/cosmos3_story_scene/app/**
+!examples/cosmos3_story_scene/scripts/
+!examples/cosmos3_story_scene/scripts/entrypoint.sh
+
+# Defense in depth: generated artifacts and credentials must never be sent to
+# the daemon even if a future allowlist entry becomes broader.
+**/__pycache__/
+**/*.py[cod]
+**/*.bundle
+**/*.engine
+**/*.plan
+**/*.trtfb
+**/build/
+**/build-*/
+**/hf-cache/
+/models/
+/examples/cosmos3_story_scene/models/
+/outputs/
+/examples/cosmos3_story_scene/outputs/
+/secrets/
+/examples/cosmos3_story_scene/secrets/

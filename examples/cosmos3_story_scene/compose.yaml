@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: cosmos3-story-scene
+
+services:
+  story-scene:
+    build:
+      context: ../..
+      dockerfile: examples/cosmos3_story_scene/Dockerfile
+    image: cosmos3-story-scene:local
+    init: true
+    ipc: host
+    gpus: all
+    stop_grace_period: 2m
+    ports:
+      - "${STORY_SCENE_PORT:-8080}:8080"
+    environment:
+      TRTMC_BIN: /opt/trtmc/bin/trtmc
+      COSMOS3_BUNDLE: /models/cosmos3.trtfb
+      COSMOS3_CP_SIZE: "${COSMOS3_CP_SIZE:-1}"
+      OUTPUT_ROOT: /outputs
+      HOST: 0.0.0.0
+      PORT: "8080"
+    secrets:
+      - hf_token
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - cosmos3-models:/models
+      - generated-clips:/outputs
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import json, urllib.request;
+          data=json.load(urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)); assert data.get('status') == 'ok' and data.get('worker_ready') is True
+      interval: 30s
+      timeout: 5s
+      start_period: 12h
+      retries: 3
+
+secrets:
+  hf_token:
+    file: "${HF_TOKEN_FILE:-/dev/null}"
+
+volumes:
+  hf-cache:
+  cosmos3-models:
+  generated-clips:

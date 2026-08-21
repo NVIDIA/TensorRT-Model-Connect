@@ -95,6 +95,9 @@ models/hf/hf-internal-testing__*/
 models/hf/trl-internal-testing__*/
 models/hf/*/.cache/
 
+# Local credentials for the Cosmos3 Story Scene example
+/examples/cosmos3_story_scene/secrets/
+
 .*
 !.github/
 !.github/**
