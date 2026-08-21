@@ -212,6 +212,7 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         *workflows.glob("*.yaml"),
     }
     assert sorted(path.name for path in workflow_files) == [
+        "community-cpu-request.yml",
         "community-cpu.yml",
         "internal-ci-bridge.yml",
         "pages.yml",
@@ -304,6 +305,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert '[[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
     assert "Community CPU / Required" in authorize
     assert ".app.slug == \"github-actions\"" in authorize
+    assert '(.external_id // "") | startswith("community-cpu:")' in authorize
     assert 'if [ "$community_cpu" != "success" ]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
@@ -680,6 +682,15 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     )
     for architecture, source_dockerfile in source_dockerfiles.items():
         assert "FROM ${TENSORRT_IMAGE}" in source_dockerfile
+        assert (
+            "COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt"
+            in source_dockerfile
+        )
+        assert (
+            "pip install --requirement /tmp/trtmc-community-ci.txt"
+            in source_dockerfile
+        )
+        assert "pre-commit>=" not in source_dockerfile
         assert "https://download.pytorch.org/whl/cpu" in source_dockerfile
         assert "torch.version.cuda is None" in source_dockerfile
         assert "TRTMC_TORCH_CUDA_ARCH_LIST" not in source_dockerfile

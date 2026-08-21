@@ -27,7 +27,6 @@ from tools.model_ci import ModelCIError, calculate_impact, discover_catalog
 
 
 UNIT_SCOPES = ("none", "builder", "cli", "all")
-ZERO_REVISION = "0" * 40
 
 
 class CommunityCI:
@@ -42,20 +41,6 @@ class CommunityCI:
         self.env = dict(env or os.environ)
         self.commands = CommandRunner(cwd=self.repository, env=self.env)
         self.github = GitHubFiles(self.env)
-
-    def format_python(self, files: Sequence[str]) -> None:
-        selected = self._existing_files(files, {".py"})
-        if not selected:
-            print("No Python files require quality checks.")
-            return
-        self.commands.run(["ruff", "check", "--config", "ruff.toml", *selected])
-
-    def format_cpp(self, files: Sequence[str]) -> None:
-        selected = self._existing_files(files, {".cpp", ".h"})
-        if not selected:
-            print("No C++ files require formatting checks.")
-            return
-        self.commands.run(["clang-format", "--dry-run", "--Werror", *selected])
 
     def source_quality(self, base: str | None) -> None:
         resolved_base = self.resolve_base(base)
@@ -157,35 +142,10 @@ class CommunityCI:
                     capture_output=True,
                 )
 
-    def pre_push(self, base: str | None) -> None:
-        resolved_base = self.resolve_base(base)
-        failures: list[str] = []
-        try:
-            self.source_quality(resolved_base)
-        except (CiError, ModelCIError) as error:
-            failures.append(str(error))
-
-        impact: dict[str, object] | None = None
-        try:
-            impact = self.impact(resolved_base)
-        except (CiError, ModelCIError) as error:
-            failures.append(f"Ownership and impact: {error}")
-
-        if impact is not None:
-            try:
-                self.unit(str(impact["unit_scope"]))
-            except CiError as error:
-                failures.append(f"C++ and Python unit tests: {error}")
-
-        self._raise_failures("Community CPU pre-push gate", failures)
-
     def resolve_base(self, explicit: str | None) -> str:
         configured = explicit or self.env.get("TRTMC_COMMUNITY_BASE_REF", "")
         candidates = [configured] if configured else []
         candidates.extend(("upstream/main", "github/main", "origin/main"))
-        pre_push_from = self.env.get("PRE_COMMIT_FROM_REF", "")
-        if pre_push_from and pre_push_from != ZERO_REVISION:
-            candidates.append(pre_push_from)
 
         seen: set[str] = set()
         for candidate in candidates:
@@ -241,14 +201,6 @@ class CommunityCI:
             print(f"Reusing Community CPU image: {image}")
         return image
 
-    def _existing_files(self, files: Sequence[str], suffixes: set[str]) -> list[str]:
-        selected = []
-        for value in files:
-            path = self.repository / value
-            if path.is_file() and path.suffix in suffixes:
-                selected.append(value)
-        return selected
-
     @staticmethod
     def _collect(checks: Sequence[tuple[str, Callable[[], None]]]) -> list[str]:
         failures = []
@@ -274,12 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    python_format = commands.add_parser("format-python", help="Check changed Python files")
-    python_format.add_argument("files", nargs="*")
-    cpp_format = commands.add_parser("format-cpp", help="Check changed C++ files")
-    cpp_format.add_argument("files", nargs="*")
-
-    for name in ("source-quality", "impact", "pre-push"):
+    for name in ("source-quality", "impact"):
         command = commands.add_parser(name)
         command.add_argument("--base")
 
@@ -292,18 +239,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_parser().parse_args(argv)
     runner = CommunityCI()
     try:
-        if arguments.command == "format-python":
-            runner.format_python(arguments.files)
-        elif arguments.command == "format-cpp":
-            runner.format_cpp(arguments.files)
-        elif arguments.command == "source-quality":
+        if arguments.command == "source-quality":
             runner.source_quality(arguments.base)
         elif arguments.command == "impact":
             runner.impact(arguments.base)
         elif arguments.command == "unit":
             runner.unit(arguments.scope)
-        else:
-            runner.pre_push(arguments.base)
     except (CiError, ModelCIError) as error:
         print(f"ERROR: {error}")
         return 1

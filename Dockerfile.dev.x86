@@ -30,6 +30,8 @@ RUN python3.12 -m venv --system-site-packages ${VIRTUAL_ENV} && \
     ln -s /usr/bin/cmake ${VIRTUAL_ENV}/bin/cmake
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt
+
 RUN pip install -U pip && \
     pip install \
       "apache-tvm-ffi==0.1.12" \
@@ -45,7 +47,9 @@ RUN pip install -U pip && \
       "pre-commit>=4.6.0" \
       "transformers==5.2.0" && \
     pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_CPU_INDEX}" && \
-    pip install "setuptools>=80,<82"
+    pip install "setuptools>=80,<82" && \
+    pip install --requirement /tmp/trtmc-community-ci.txt && \
+    rm -f /tmp/trtmc-community-ci.txt
 
 ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
 ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu

@@ -38,14 +38,21 @@ Install the local quality hooks once in the clone:
 
 ```bash
 python3 -m pip install --requirement requirements/community-ci.txt
-pre-commit install --install-hooks --hook-type pre-commit --hook-type pre-push
+pre-commit install --install-hooks
 ```
 
-Commit-time hooks check Ruff and clang-format. Push-time hooks run the complete
-source-quality and ownership analysis, followed by the selected source-only C++
-and Python unit scope in a hardened, GPU-free container. The protected suite
-retains the filesystem-specific cache-reflink contract that public runners
-cannot portably execute.
+Commit-time hooks trim trailing whitespace, ensure one final newline, validate
+YAML, check Ruff, and verify clang-format. Some commit-time hooks modify files;
+review and stage those fixes before committing again. Pre-commit manages the
+Ruff and clang-format environments on Linux, macOS, and Windows instead of
+depending on host-installed binaries.
+
+The local hook intentionally stays lightweight and does not build the CLI or
+run the complete CPU suite. After pushing, comment `/run-ci` on the pull request
+to run source quality, ownership analysis, and the selected source-only C++ and
+Python units on GitHub-hosted public CPU runners. The protected suite retains
+the filesystem-specific cache-reflink contract that public runners cannot
+portably execute.
 
 ## 2. Find the owner before editing
 
@@ -128,11 +135,23 @@ performance, and release qualification are different evidence tiers.
 
 ## 6. Read public CPU validation
 
-Every pull request automatically receives contributor-visible, GitHub-hosted
-`Community CPU` checks for source quality, ownership and impact, and source-only
-C++ and Python units. These checks have read-only repository permission and no
-access to private runners, secrets, or GPUs. Fix their detailed failures and
-wait for `Community CPU / Required` on the current PR merge revision.
+The pull-request author starts contributor-visible, GitHub-hosted `Community
+CPU` validation by adding this exact comment to the pull request:
+
+```text
+/run-ci
+```
+
+The trusted request workflow runs from `main`, captures the exact PR merge
+revision, and dispatches source quality, ownership and impact, and source-only
+C++ and Python units. A maintainer or admin may submit the same comment on the
+author's behalf.
+
+The test jobs have read-only repository permission and no access to private
+runners, secrets, or GPUs. Their sanitized checks and detailed public logs are
+published on the exact merge revision. Fix any failures and wait for
+`Community CPU / Required` to pass. If you push another commit, comment
+`/run-ci` again after the new head is ready.
 
 ## 7. Coordinate protected repository CI
 
@@ -144,11 +163,12 @@ pass and the pull request is ready, add this comment:
 @yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
 ```
 
-The maintainer verifies the PR's `headRefOid` and applies `run-internal-ci`.
-The trusted bridge consumes that label, verifies the current public CPU result,
-captures the immutable PR head SHA, and dispatches private premerge validation
-for that exact revision. The public result is contributor feedback, not an
-authorization token; the maintainer-owned label remains the security boundary.
+After public CPU validation passes, the maintainer verifies the PR's
+`headRefOid` and applies `run-internal-ci`. The trusted bridge consumes that
+label, verifies the current exact-merge public CPU result, captures the
+immutable PR head SHA, and dispatches private premerge validation for that exact
+revision. The public result is contributor feedback, not an authorization
+token; `run-internal-ci` remains the protected-resource security boundary.
 
 Wait for the `trtmc/premerge/required` status on the same head SHA to complete
 successfully. If the head changes intentionally, finish the update and local

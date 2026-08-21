@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 minimum_pre_commit_version: "3.2.0"
-default_install_hook_types: [pre-commit, pre-push]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -15,24 +14,27 @@ repos:
 
   - repo: local
     hooks:
-      - id: trtmc-python-quality
-        name: TRTMC Python quality
-        entry: python3 -m tools.community_ci format-python
-        language: system
-        files: \.py$
+      - id: trailing-whitespace
+        stages: [pre-commit]
+      - id: end-of-file-fixer
+        stages: [pre-commit]
+      - id: check-yaml
         stages: [pre-commit]
 
-      - id: trtmc-cpp-format
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4
+    hooks:
+      - id: ruff-check
+        name: TRTMC Python quality
+        args: [--config, ruff.toml]
+        stages: [pre-commit]
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.8
+    hooks:
+      - id: clang-format
         name: TRTMC C++ formatting
-        entry: python3 -m tools.community_ci format-cpp
-        language: system
+        entry: clang-format --dry-run --Werror
+        args: [-style=file]
         files: \.(cpp|h)$
         stages: [pre-commit]
-
-      - id: trtmc-community-pre-push
-        name: TRTMC Community CPU pre-push gate
-        entry: python3 -m tools.community_ci pre-push
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [pre-push]

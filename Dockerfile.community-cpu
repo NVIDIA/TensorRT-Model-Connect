@@ -67,8 +67,14 @@ COPY community-ci.txt /tmp/trtmc-community-ci.txt
 RUN pip install --requirement /tmp/trtmc-community-ci.txt && \
     rm -f /tmp/trtmc-community-ci.txt
 
-ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
-ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu
+RUN multiarch="$(gcc -dumpmachine)" && \
+    test -d "/usr/lib/${multiarch}" && \
+    test -d "/usr/include/${multiarch}" && \
+    ln -s "/usr/lib/${multiarch}" /opt/trtmc-tensorrt-lib && \
+    ln -s "/usr/include/${multiarch}" /opt/trtmc-tensorrt-include
+
+ENV TRT_LIB_DIR=/opt/trtmc-tensorrt-lib
+ENV TRT_INC_DIR=/opt/trtmc-tensorrt-include
 ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:/usr/local/cuda/lib64"
 
 RUN python3.12 -c \
