@@ -629,6 +629,10 @@ void TrtModuleImpl::execute_enqueue() {
     record_timed_enqueue();
 }
 
+bool TrtModuleImpl::cuda_graph_captured() const {
+    return use_cuda_graph_ && cuda_graph_ && cuda_graph_->ready();
+}
+
 bool TrtModuleImpl::begin_timing_event(TimingEvent& event) {
     if (cudaEventCreate(&event.start) != cudaSuccess)
         return false;

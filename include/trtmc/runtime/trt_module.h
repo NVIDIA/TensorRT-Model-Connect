@@ -42,6 +42,9 @@ class ITrtModule {
     virtual cudaStream_t stream() const = 0;
     virtual void enable_cuda_graph() = 0;
     virtual bool cuda_graph_active() const = 0;
+    // True only after the enabled graph has been captured and instantiated.
+    // Backends without graph-state introspection conservatively report false.
+    virtual bool cuda_graph_captured() const { return false; }
     virtual int32_t profile_idx() const = 0;
     virtual std::vector<TensorInfo> input_info() const = 0;
     virtual std::vector<TensorInfo> output_info() const = 0;

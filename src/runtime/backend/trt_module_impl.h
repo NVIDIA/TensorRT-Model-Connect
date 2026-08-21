@@ -46,6 +46,7 @@ class TrtModuleImpl final : public ITrtModule {
     cudaStream_t stream() const override { return stream_; }
     void enable_cuda_graph() override;
     bool cuda_graph_active() const override { return use_cuda_graph_; }
+    bool cuda_graph_captured() const override;
     int32_t profile_idx() const override { return profile_idx_; }
     std::vector<TensorInfo> input_info() const override;
     std::vector<TensorInfo> output_info() const override;
