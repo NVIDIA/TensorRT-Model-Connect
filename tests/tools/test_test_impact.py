@@ -1137,6 +1137,75 @@ class TestFamilyOwnedBuilder:
         assert set(match.models) == {"encoder-core"}
 
 
+class TestScanFamilyImports:
+    def test_parent_package_import_is_tracked(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text(
+            "from ..standard_decoder_builder import build\n"
+        )
+        result = test_impact._scan_family_imports(tmp_path)
+        assert result == {"standard_decoder_builder": ["some_family"]}
+
+    def test_single_dot_import_is_family_owned_not_tracked(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text(
+            "from .local_helper_builder import helper\n"
+        )
+        assert test_impact._scan_family_imports(tmp_path) == {}
+
+    def test_aliased_import_tracked_by_real_module_name(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text(
+            "from ..standard_decoder_builder import build as sd\n"
+        )
+        result = test_impact._scan_family_imports(tmp_path)
+        assert result == {"standard_decoder_builder": ["some_family"]}
+
+    def test_multiline_parenthesized_import_resolved(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text(
+            "from .. import (\n    encoder_builder,\n    other_builder as oe,\n)\n"
+        )
+        result = test_impact._scan_family_imports(tmp_path)
+        assert result == {
+            "encoder_builder": ["some_family"],
+            "other_builder": ["some_family"],
+        }
+
+    def test_triple_dot_import_tracked(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text("from ...pkg_builder import helper\n")
+        result = test_impact._scan_family_imports(tmp_path)
+        assert result == {"pkg_builder": ["some_family"]}
+
+    def test_import_like_text_in_comments_and_strings_is_ignored(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text(
+            '"""\nfrom ..fake_builder import y\n"""\n'
+            "# from ..comment_builder import z\n"
+        )
+        assert test_impact._scan_family_imports(tmp_path) == {}
+
+    def test_syntax_error_raises_instead_of_silently_skipping(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text("from ..standard_decoder_builder import (\n")
+        with pytest.raises(SyntaxError):
+            test_impact._scan_family_imports(tmp_path)
+
+    def test_non_builder_import_is_filtered_out(self, tmp_path):
+        family_dir = tmp_path / "some_family"
+        family_dir.mkdir()
+        (family_dir / "model.py").write_text("from ..some_utility import helper\n")
+        assert test_impact._scan_family_imports(tmp_path) == {}
+
+
 # ---------------------------------------------------------------------------
 # C++ scope tests
 # ---------------------------------------------------------------------------

@@ -251,21 +251,18 @@ def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
             content = py_file.read_text(encoding="utf-8")
         except OSError:
             continue
-        # from ..module_name import ... / from ...module_name import ...
-        for m in re.finditer(r"from\s+(\.+)(\w+)\s+import", content):
-            dots, module = m.group(1), m.group(2)
-            if len(dots) <= 1:
+        tree = ast.parse(content, filename=str(py_file))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.level <= 1:
                 continue
-            reverse.setdefault(module, set()).add(name)
-        # from .. import module_name / from ... import module_name
-        for m in re.finditer(r"from\s+(\.+)\s+import\s+([\w,\s]+)", content):
-            dots = m.group(1)
-            if len(dots) <= 1:
+            # from ..module_name import ... / from ...module_name import ...
+            if node.module:
+                module = node.module.split(".", 1)[0]
+                reverse.setdefault(module, set()).add(name)
                 continue
-            for mod in m.group(2).split(","):
-                mod = mod.strip()
-                if mod:
-                    reverse.setdefault(mod, set()).add(name)
+            # from .. import module_name / from ... import module_name
+            for alias in node.names:
+                reverse.setdefault(alias.name, set()).add(name)
     # Filter to *_builder modules only (excluding orchestrators)
     filtered: Dict[str, List[str]] = {}
     for module, families in reverse.items():
