@@ -73,12 +73,11 @@ change must not claim that this checker passes.
 
 ## Active workflow inventory
 
-Source contains exactly these four workflow files:
+Source contains exactly these three workflow files:
 
 | Workflow | Trigger and evidence boundary |
 | --- | --- |
-| `.github/workflows/community-cpu-request.yml` | Exact `/run-ci` PR comment from the PR author or a maintainer/admin; dispatches only an exact public PR snapshot without executing PR code. |
-| `.github/workflows/community-cpu.yml` | Manual dispatch from the trusted request broker; runs read-only public CPU validation and publishes checks on the exact PR merge SHA. |
+| `.github/workflows/community-cpu.yml` | Exact `/run-ci` PR comment from the PR author or a maintainer/admin; authorizes the exact public PR snapshot, runs read-only CPU validation, and publishes checks on the merge SHA with separate least-privilege jobs. |
 | `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, verifies current public CPU success, captures the exact PR head, and dispatches private premerge. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
 

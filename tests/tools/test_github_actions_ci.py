@@ -212,7 +212,6 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         *workflows.glob("*.yaml"),
     }
     assert sorted(path.name for path in workflow_files) == [
-        "community-cpu-request.yml",
         "community-cpu.yml",
         "internal-ci-bridge.yml",
         "pages.yml",

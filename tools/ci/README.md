@@ -7,12 +7,12 @@ graph, and these classes define **what** each test stage does.
 
 The shortest useful reading order is:
 
-1. `.github/workflows/community-cpu-request.yml` — the trusted `/run-ci` comment broker.
-2. `.github/workflows/community-cpu.yml` — exact-merge public CPU validation.
-3. `.github/workflows/internal-ci-bridge.yml` — the exact-head protected dispatch boundary.
-4. `tools/ci/__main__.py` — the public command-line interface.
-5. `tools/ci/pipeline.py` — the named non-model stages and their ordered steps.
-6. `tools/ci/model_proof.py` and `model_proof_inner.py` — one isolated model proof.
+1. `.github/workflows/community-cpu.yml` — trusted `/run-ci` authorization and
+   exact-merge public CPU validation.
+2. `.github/workflows/internal-ci-bridge.yml` — the exact-head protected dispatch boundary.
+3. `tools/ci/__main__.py` — the public command-line interface.
+4. `tools/ci/pipeline.py` — the named non-model stages and their ordered steps.
+5. `tools/ci/model_proof.py` and `model_proof_inner.py` — one isolated model proof.
 
 ## The system at a glance
 
@@ -56,13 +56,13 @@ that enters the run-owned container and invokes `pipeline` there.
 ## Community CPU, step by step
 
 The pull-request author comments `/run-ci`; a maintainer or admin may submit the
-same command on the author's behalf. The default-branch request workflow
-verifies the actor, open PR, and `main` base. It never checks out or executes PR
-code. It dispatches the default-branch Community CPU workflow with the exact
-base, head, and merge SHAs.
+same command on the author's behalf. The default-branch Community CPU workflow
+verifies the actor, open PR, and `main` base, then captures the exact base,
+head, and merge SHAs. Its authorization and publisher jobs never check out or
+execute PR code.
 
-The dispatched test jobs check out only the authorized merge SHA with
-read-only repository permission and no secrets. Separate publisher jobs create
+The test jobs check out only the authorized merge SHA with read-only repository
+permission and no secrets. Separate publisher jobs create
 and complete contributor-visible checks on that merge SHA. If the PR head or
 base changes before publication, every pending public check becomes neutral
 instead of validating the stale snapshot. Comment `/run-ci` again only after

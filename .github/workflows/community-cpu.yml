@@ -4,87 +4,124 @@
 name: Community CPU
 
 run-name: >-
-  PR #${{ github.event.pull_request.number || inputs.pr_number }} · public CPU validation
+  PR #${{ github.event.issue.number }} · public CPU validation
 
 on:
-  # Transitional trigger: keep this until the /run-ci broker is available on
-  # main. Remove pull_request after the /run-ci broker is available on main.
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: Open pull request number to test
-        required: true
-        type: string
-      base_sha:
-        description: Exact main revision in the requested merge
-        required: true
-        type: string
-      head_sha:
-        description: Exact pull-request head revision
-        required: true
-        type: string
-      merge_sha:
-        description: Exact pull-request merge revision to test
-        required: true
-        type: string
+  issue_comment:
+    types: [created]
 
 permissions: {}
 
 concurrency:
-  group: >-
-    community-cpu-${{ github.event.pull_request.number || inputs.pr_number }}-${{ github.event.pull_request.merge_commit_sha || inputs.merge_sha }}
+  group: community-cpu-${{ github.event.issue.number }}
   cancel-in-progress: false
 
-env:
-  CI_BASE_REF: ${{ inputs.base_sha || github.event.pull_request.base.sha }}
-
 jobs:
+  authorize:
+    name: Authorize public CPU request
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.ref == 'refs/heads/main' &&
+      github.event.issue.pull_request != null &&
+      github.event.comment.body == '/run-ci'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      run_tests: ${{ steps.snapshot.outputs.run_tests }}
+      pr_number: ${{ steps.snapshot.outputs.pr_number }}
+      base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      head_sha: ${{ steps.snapshot.outputs.head_sha }}
+      merge_sha: ${{ steps.snapshot.outputs.merge_sha }}
+
+    steps:
+      # This trusted job reads PR metadata only. It never checks out or
+      # executes pull-request code.
+      - name: Authorize the current PR merge
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+
+          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          state="$(jq -er '.state' <<<"$pull")"
+          pr_author="$(jq -er '.user.login' <<<"$pull")"
+          base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
+          base_ref="$(jq -er '.base.ref' <<<"$pull")"
+          base_sha="$(jq -er '.base.sha' <<<"$pull")"
+          head_sha="$(jq -er '.head.sha' <<<"$pull")"
+          merge_sha="$(jq -er '.merge_commit_sha' <<<"$pull")"
+
+          test "$state" = "open"
+          test "$base_repo" = "$GITHUB_REPOSITORY"
+          test "$base_ref" = "main"
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
+
+          if [ "$ACTOR" != "$pr_author" ]; then
+            actor_role="$(
+              gh api --method GET \
+                "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+                --jq '.role_name' 2>/dev/null || true
+            )"
+            case "$actor_role" in
+              maintain|admin) ;;
+              *)
+                echo "::error::Only the PR author or a maintainer/admin may request public CPU CI."
+                exit 1
+                ;;
+            esac
+          fi
+
+          existing_required="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=latest&per_page=100" \
+              --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions" and ((.external_id // "") | startswith("community-cpu:")))) | sort_by(.started_at) | last // {} | if (.status // "") != "completed" then (.status // "") else (.conclusion // "") end'
+          )"
+          case "$existing_required" in
+            queued|in_progress|success)
+              echo "run_tests=false" >> "$GITHUB_OUTPUT"
+              echo "Community CPU is already $existing_required for merge $merge_sha."
+              exit 0
+              ;;
+          esac
+
+          {
+            echo "run_tests=true"
+            echo "pr_number=$PR_NUMBER"
+            echo "base_sha=$base_sha"
+            echo "head_sha=$head_sha"
+            echo "merge_sha=$merge_sha"
+          } >> "$GITHUB_OUTPUT"
+
   initialize:
     name: Initialize exact-merge public checks
+    needs: authorize
+    if: ${{ needs.authorize.outputs.run_tests == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       checks: write
       contents: read
-      pull-requests: read
     outputs:
       source_quality_check_id: ${{ steps.checks.outputs.source_quality_check_id }}
       ownership_impact_check_id: ${{ steps.checks.outputs.ownership_impact_check_id }}
       unit_check_id: ${{ steps.checks.outputs.unit_check_id }}
       required_check_id: ${{ steps.checks.outputs.required_check_id }}
     steps:
-      - name: Validate the dispatched PR snapshot
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          MERGE_SHA: ${{ inputs.merge_sha }}
-        run: |
-          set -euo pipefail
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
-          for revision in "$BASE_SHA" "$HEAD_SHA" "$MERGE_SHA"; do
-            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
-          done
-
-          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
-          test "$(jq -er '.state' <<<"$pull")" = "open"
-          test "$(jq -er '.base.repo.full_name' <<<"$pull")" = "$GITHUB_REPOSITORY"
-          test "$(jq -er '.base.ref' <<<"$pull")" = "main"
-          test "$(jq -er '.base.sha' <<<"$pull")" = "$BASE_SHA"
-          test "$(jq -er '.head.sha' <<<"$pull")" = "$HEAD_SHA"
-          test "$(jq -er '.merge_commit_sha' <<<"$pull")" = "$MERGE_SHA"
-
       - name: Publish pending exact-merge checks
-        if: ${{ github.event_name == 'workflow_dispatch' }}
         id: checks
         env:
           GH_TOKEN: ${{ github.token }}
-          MERGE_SHA: ${{ inputs.merge_sha }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
         run: |
           set -euo pipefail
           details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -130,16 +167,21 @@ jobs:
 
   source-quality:
     name: Community CPU / Source quality
-    needs: initialize
+    needs:
+      - authorize
+      - initialize
+    if: ${{ needs.authorize.outputs.run_tests == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
+    env:
+      CI_BASE_REF: ${{ needs.authorize.outputs.base_sha }}
     steps:
       - name: Check out the authorized PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}
+          ref: ${{ needs.authorize.outputs.merge_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -156,11 +198,16 @@ jobs:
 
   ownership-impact:
     name: Community CPU / Ownership and impact
-    needs: initialize
+    needs:
+      - authorize
+      - initialize
+    if: ${{ needs.authorize.outputs.run_tests == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
+    env:
+      CI_BASE_REF: ${{ needs.authorize.outputs.base_sha }}
     outputs:
       run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
       unit_scope: ${{ steps.impact.outputs.unit_scope }}
@@ -168,7 +215,7 @@ jobs:
       - name: Check out the authorized PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}
+          ref: ${{ needs.authorize.outputs.merge_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -183,8 +230,9 @@ jobs:
 
   unit:
     name: Community CPU / Unit / C++ and Python
-    if: ${{ always() }}
+    if: ${{ always() && needs.authorize.outputs.run_tests == 'true' }}
     needs:
+      - authorize
       - initialize
       - ownership-impact
     runs-on: ubuntu-24.04
@@ -220,7 +268,7 @@ jobs:
           needs.ownership-impact.outputs.run_unit_tests == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}
+          ref: ${{ needs.authorize.outputs.merge_sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -244,8 +292,12 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ always() && needs.initialize.result == 'success' }}
+    if: >-
+      always() &&
+      needs.authorize.outputs.run_tests == 'true' &&
+      needs.initialize.result == 'success'
     needs:
+      - authorize
       - initialize
       - source-quality
       - ownership-impact
@@ -257,27 +309,13 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - name: Publish the transitional automatic CPU verdict
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
-          OWNERSHIP_IMPACT_RESULT: ${{ needs.ownership-impact.result }}
-          UNIT_RESULT: ${{ needs.unit.result }}
-        run: |
-          printf 'Source quality: %s\nOwnership and impact: %s\nUnit: %s\n' \
-            "$SOURCE_QUALITY_RESULT" "$OWNERSHIP_IMPACT_RESULT" "$UNIT_RESULT"
-          test "$SOURCE_QUALITY_RESULT" = success
-          test "$OWNERSHIP_IMPACT_RESULT" = success
-          test "$UNIT_RESULT" = success
-
       - name: Publish exact-merge CPU checks
-        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ inputs.pr_number }}
-          BASE_SHA: ${{ inputs.base_sha }}
-          HEAD_SHA: ${{ inputs.head_sha }}
-          MERGE_SHA: ${{ inputs.merge_sha }}
+          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           OWNERSHIP_IMPACT_RESULT: ${{ needs.ownership-impact.result }}
           UNIT_RESULT: ${{ needs.unit.result }}

@@ -61,12 +61,18 @@ while index < len(arguments):
     index += 1
 
 if null_input:
-    if 'ref: "main"' in expression:
+    if 'status: "in_progress"' in expression:
         result = {
-            "ref": "main",
-            "inputs": {
-                key: variables[key]
-                for key in ("pr_number", "base_sha", "head_sha", "merge_sha")
+            "name": variables["name"],
+            "head_sha": variables["head_sha"],
+            "status": "in_progress",
+            "details_url": variables["details_url"],
+            "external_id": variables["external_id"],
+            "output": {
+                "title": "Contributor-requested public CPU validation",
+                "summary": (
+                    "Public CPU validation is running for this exact PR merge revision."
+                ),
             },
         }
     elif 'status: "completed"' in expression:
@@ -127,12 +133,18 @@ elif "/pulls/" in endpoint:
     print(os.environ["FAKE_PULL_JSON"])
 elif "/commits/" in endpoint and "/check-runs" in endpoint:
     print(os.environ.get("FAKE_EXISTING_REQUIRED", ""))
-elif "/actions/workflows/community-cpu.yml/dispatches" in endpoint:
+elif endpoint.endswith("/check-runs") and "POST" in arguments:
     input_path = arguments[arguments.index("--input") + 1]
-    Path(os.environ["FAKE_DISPATCH_CAPTURE"]).write_text(
-        Path(input_path).read_text(encoding="utf-8"),
-        encoding="utf-8",
+    payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
+    capture = Path(os.environ["FAKE_PENDING_CHECK_CAPTURE"])
+    existing = (
+        capture.read_text(encoding="utf-8").splitlines()
+        if capture.exists()
+        else []
     )
+    with capture.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload) + "\\n")
+    print(len(existing) + 1)
 elif "/check-runs/" in endpoint and "PATCH" in arguments:
     input_path = arguments[arguments.index("--input") + 1]
     payload = json.loads(Path(input_path).read_text(encoding="utf-8"))
@@ -172,9 +184,10 @@ def _public_ci_environment(tmp_path: Path) -> dict[str, str]:
             "BASE_SHA": base_sha,
             "FAKE_ACTOR_ROLE": "maintain",
             "FAKE_CHECK_CAPTURE": str(tmp_path / "checks.jsonl"),
-            "FAKE_DISPATCH_CAPTURE": str(tmp_path / "dispatch.json"),
+            "FAKE_PENDING_CHECK_CAPTURE": str(tmp_path / "pending-checks.jsonl"),
             "FAKE_PULL_JSON": json.dumps(pull),
             "GH_TOKEN": "test-token",
+            "GITHUB_OUTPUT": str(tmp_path / "github-output"),
             "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
             "GITHUB_RUN_ATTEMPT": "1",
             "GITHUB_RUN_ID": "12345",
@@ -257,10 +270,13 @@ def test_impact_publishes_only_the_public_cpu_scope(
     assert "src/runtime/config/cli_support.cpp" in summary
 
 
-def test_public_cpu_request_is_a_pr_author_comment_dispatcher() -> None:
-    path = REPO_ROOT / ".github" / "workflows" / "community-cpu-request.yml"
+def test_public_cpu_workflow_authorizes_pr_author_comments() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-cpu.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     source = path.read_text(encoding="utf-8")
+    authorize_source = source.split("\n  authorize:", maxsplit=1)[1].split(
+        "\n  initialize:", maxsplit=1
+    )[0]
 
     assert workflow["permissions"] == {}
     assert "issue_comment:" in source
@@ -271,27 +287,23 @@ def test_public_cpu_request_is_a_pr_author_comment_dispatcher() -> None:
     assert 'if [ "$ACTOR" != "$pr_author" ]; then' in source
     assert "maintain|admin)" in source
     assert "Only the PR author or a maintainer/admin" in source
-    assert "actions/workflows/community-cpu.yml/dispatches" in source
-    assert 'ref: "main"' in source
-    for input_name in ("pr_number", "base_sha", "head_sha", "merge_sha"):
-        assert f"{input_name}: ${input_name}" in source
+    assert "actions/workflows/community-cpu.yml/dispatches" not in source
     assert "/labels/run-ci" not in source
     assert "pull_request_target" not in source
-    assert "actions/checkout@" not in source
+    assert "actions/checkout@" not in authorize_source
     assert "secrets." not in source
     assert "self-hosted" not in source
 
     authorize = workflow["jobs"]["authorize"]
     assert authorize["runs-on"] == "ubuntu-24.04"
     assert authorize["permissions"] == {
-        "actions": "write",
-        "checks": "write",
+        "checks": "read",
         "contents": "read",
         "pull-requests": "read",
     }
 
 
-def test_public_cpu_request_dispatches_the_exact_commented_snapshot(
+def test_public_cpu_request_captures_the_exact_commented_snapshot(
     tmp_path: Path,
 ) -> None:
     environment = _public_ci_environment(tmp_path)
@@ -300,9 +312,9 @@ def test_public_cpu_request_dispatches_the_exact_commented_snapshot(
             "bash",
             "-c",
             _workflow_step_script(
-                "community-cpu-request.yml",
+                "community-cpu.yml",
                 "authorize",
-                "Authorize and dispatch the current PR merge",
+                "Authorize the current PR merge",
             ),
         ],
         cwd=REPO_ROOT,
@@ -313,16 +325,13 @@ def test_public_cpu_request_dispatches_the_exact_commented_snapshot(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    dispatch = json.loads((tmp_path / "dispatch.json").read_text(encoding="utf-8"))
-    assert dispatch == {
-        "ref": "main",
-        "inputs": {
-            "pr_number": "980",
-            "base_sha": "a" * 40,
-            "head_sha": "b" * 40,
-            "merge_sha": "c" * 40,
-        },
-    }
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
+        "run_tests=true\n"
+        "pr_number=980\n"
+        f"base_sha={'a' * 40}\n"
+        f"head_sha={'b' * 40}\n"
+        f"merge_sha={'c' * 40}\n"
+    )
 
 
 def test_public_cpu_request_rejects_an_unrelated_commenter(
@@ -336,9 +345,9 @@ def test_public_cpu_request_rejects_an_unrelated_commenter(
             "bash",
             "-c",
             _workflow_step_script(
-                "community-cpu-request.yml",
+                "community-cpu.yml",
                 "authorize",
-                "Authorize and dispatch the current PR merge",
+                "Authorize the current PR merge",
             ),
         ],
         cwd=REPO_ROOT,
@@ -350,7 +359,7 @@ def test_public_cpu_request_rejects_an_unrelated_commenter(
 
     assert result.returncode != 0
     assert "Only the PR author or a maintainer/admin" in result.stdout + result.stderr
-    assert not (tmp_path / "dispatch.json").exists()
+    assert not (tmp_path / "github-output").exists()
 
 
 def test_public_cpu_request_allows_a_maintainer_to_help(
@@ -363,9 +372,9 @@ def test_public_cpu_request_allows_a_maintainer_to_help(
             "bash",
             "-c",
             _workflow_step_script(
-                "community-cpu-request.yml",
+                "community-cpu.yml",
                 "authorize",
-                "Authorize and dispatch the current PR merge",
+                "Authorize the current PR merge",
             ),
         ],
         cwd=REPO_ROOT,
@@ -376,7 +385,9 @@ def test_public_cpu_request_allows_a_maintainer_to_help(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert (tmp_path / "dispatch.json").is_file()
+    assert (tmp_path / "github-output").read_text(encoding="utf-8").startswith(
+        "run_tests=true\n"
+    )
 
 
 @pytest.mark.parametrize("existing", ["queued", "in_progress", "success"])
@@ -391,9 +402,9 @@ def test_public_cpu_request_deduplicates_the_current_merge(
             "bash",
             "-c",
             _workflow_step_script(
-                "community-cpu-request.yml",
+                "community-cpu.yml",
                 "authorize",
-                "Authorize and dispatch the current PR merge",
+                "Authorize the current PR merge",
             ),
         ],
         cwd=REPO_ROOT,
@@ -405,7 +416,52 @@ def test_public_cpu_request_deduplicates_the_current_merge(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"already {existing}" in result.stdout
-    assert not (tmp_path / "dispatch.json").exists()
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
+        "run_tests=false\n"
+    )
+
+
+def test_public_cpu_initialization_creates_pending_exact_merge_checks(
+    tmp_path: Path,
+) -> None:
+    environment = _public_ci_environment(tmp_path)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu.yml",
+                "initialize",
+                "Publish pending exact-merge checks",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    checks = [
+        json.loads(line)
+        for line in (tmp_path / "pending-checks.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(checks) == 4
+    assert {check["head_sha"] for check in checks} == {"c" * 40}
+    assert {check["status"] for check in checks} == {"in_progress"}
+    assert all(
+        check["external_id"].startswith("community-cpu:12345:1:")
+        for check in checks
+    )
+    assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
+        "source_quality_check_id=1\n"
+        "ownership_impact_check_id=2\n"
+        "unit_check_id=3\n"
+        "required_check_id=4\n"
+    )
 
 
 def test_public_cpu_verdict_neutralizes_a_stale_snapshot(tmp_path: Path) -> None:
@@ -493,25 +549,30 @@ def test_public_cpu_verdict_publishes_success_for_the_exact_snapshot(
     assert checks[-1]["output"]["title"] == "Community CPU: success"
 
 
-def test_public_workflow_supports_safe_transition_and_exact_merge_checks() -> None:
+def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     path = REPO_ROOT / ".github" / "workflows" / "community-cpu.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     source = path.read_text(encoding="utf-8")
 
     assert workflow["run-name"] == (
-        "PR #${{ github.event.pull_request.number || inputs.pr_number }} · public CPU validation"
+        "PR #${{ github.event.issue.number }} · public CPU validation"
     )
     assert workflow["permissions"] == {}
-    assert "workflow_dispatch:" in source
-    assert "\n  pull_request:" in source
-    assert "Remove pull_request after the /run-ci broker is available on main" in source
+    assert "issue_comment:" in source
+    assert "workflow_dispatch:" not in source
+    assert "\n  pull_request:" not in source
+    assert not (
+        REPO_ROOT / ".github" / "workflows" / "community-cpu-request.yml"
+    ).exists()
     assert "pull_request_target" not in source
     assert "self-hosted" not in source
     assert "secrets." not in source
     assert "persist-credentials: false" in source
     assert "--gpus" not in source
     assert "upload-pages" not in source
-    assert "ref: ${{ inputs.merge_sha || github.event.pull_request.merge_commit_sha }}" in source
+    assert "ref: ${{ needs.authorize.outputs.merge_sha }}" in source
+    assert "github.event.pull_request" not in source
+    assert "inputs." not in source
     assert 'external_id="community-cpu:' in source
     assert '"/repos/$GITHUB_REPOSITORY/check-runs"' in source
     assert '"/repos/$GITHUB_REPOSITORY/check-runs/$check_id"' in source
@@ -519,22 +580,32 @@ def test_public_workflow_supports_safe_transition_and_exact_merge_checks() -> No
 
     jobs = workflow["jobs"]
     assert [job["name"] for job in jobs.values()] == [
+        "Authorize public CPU request",
         "Initialize exact-merge public checks",
         "Community CPU / Source quality",
         "Community CPU / Ownership and impact",
         "Community CPU / Unit / C++ and Python",
         "Community CPU / Required",
     ]
+    assert jobs["authorize"]["permissions"] == {
+        "checks": "read",
+        "contents": "read",
+        "pull-requests": "read",
+    }
     assert jobs["initialize"]["permissions"] == {
         "checks": "write",
         "contents": "read",
-        "pull-requests": "read",
     }
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     for job_name in ("source-quality", "ownership-impact", "unit"):
         assert jobs[job_name]["permissions"] == {"contents": "read"}
-    assert jobs["unit"]["needs"] == ["initialize", "ownership-impact"]
+    assert jobs["unit"]["needs"] == [
+        "authorize",
+        "initialize",
+        "ownership-impact",
+    ]
     assert jobs["required"]["needs"] == [
+        "authorize",
         "initialize",
         "source-quality",
         "ownership-impact",
