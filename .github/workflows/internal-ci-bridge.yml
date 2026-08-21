@@ -87,13 +87,11 @@ jobs:
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
           head_sha="$(jq -er '.head.sha' <<<"$pull")"
-          merge_sha="$(jq -er '.merge_commit_sha' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
           if [ "$EVENT_NAME" = "pull_request_target" ] \
             && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
             echo "::error::The CI trigger was superseded by a newer PR head."
@@ -103,13 +101,15 @@ jobs:
           # This contributor-visible result is a readiness prerequisite. The
           # maintainer-owned label and this default-branch workflow remain the
           # authorization boundary for protected resources.
+          # GitHub attaches pull_request workflow checks to the PR head even
+          # when their jobs check out the synthetic merge commit.
           community_cpu="$(
             gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=latest&per_page=100" \
+              "/repos/$GITHUB_REPOSITORY/commits/$head_sha/check-runs?filter=latest&per_page=100" \
               --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions")) | sort_by(.started_at) | last | .conclusion // empty'
           )"
           if [ "$community_cpu" != "success" ]; then
-            echo "::error::Community CPU / Required must pass on the current PR merge before internal CI can run."
+            echo "::error::Community CPU / Required must pass on the current PR head before internal CI can run."
             exit 1
           fi
           {

@@ -158,7 +158,6 @@ else:
             "repo": {"full_name": "NVIDIA/TensorRT-Model-Connect"},
         },
         "head": {"sha": pr_head_sha},
-        "merge_commit_sha": "a" * 40,
     }
     environment = os.environ.copy()
     environment.update(
@@ -301,7 +300,9 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "head_repo" not in authorize
     assert "head_ref" not in authorize
     assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
-    assert '[[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
+    assert "merge_sha" not in authorize
+    assert 'commits/$head_sha/check-runs' in authorize
+    assert 'commits/$merge_sha/check-runs' not in authorize
     assert "Community CPU / Required" in authorize
     assert ".app.slug == \"github-actions\"" in authorize
     assert 'if [ "$community_cpu" != "success" ]; then' in authorize
