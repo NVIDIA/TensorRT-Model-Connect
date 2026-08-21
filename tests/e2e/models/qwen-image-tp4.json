@@ -1,0 +1,50 @@
+{
+  "name": "qwen-image-tp4",
+  "trace_id": "IT-E2E-QIMG-TP4-01",
+  "hf_id": "Qwen/Qwen-Image",
+  "bundle": "qwen-image-tp4.trtfb",
+  "model_type": "qwen_image",
+  "family": "qwen_image",
+  "runtime_strategy": "diffusion_qwen_image",
+  "task_strategy": "diffusion_media_generation",
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "description": "Qwen-Image base text-to-image TP=4 lane (text encoder + DiT + VAE sharded across 4 GPUs)",
+  "build_args": {
+    "max_cache_length": 256,
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 4
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 4,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "command_available", "args": { "command": "mpirun" }, "gating": true },
+    { "kind": "gpu_count_min", "args": { "count": 4 }, "gating": true }
+  ],
+  "prompt": "A cat holding a sign that says hello world",
+  "negative_prompt": " ",
+  "test_type": "diffusion",
+  "image_height": 1024,
+  "image_width": 1024,
+  "height": 1024,
+  "width": 1024,
+  "video_num_frames": 1,
+  "num_inference_steps": 20,
+  "cfg_scale": 4.0,
+  "seed": 42,
+  "skip_text_comparison": true,
+  "notes": "Qwen-Image TP=4 scaffold. qwen_image family currently lacks TP infra (DiT TP, VAE TP, text-encoder TP). Lane parked as XFAIL until qwen_image family TP is implemented (similar shape to wan_t2v / flux diffusion TP work)."
+}

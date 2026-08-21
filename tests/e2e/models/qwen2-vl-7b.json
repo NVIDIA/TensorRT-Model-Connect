@@ -1,0 +1,16 @@
+{
+  "name": "qwen2-vl-7b",
+  "trace_id": "IT-E2E-Q2VL-7B-01",
+  "hf_id": "Qwen/Qwen2-VL-7B-Instruct",
+  "bundle": "qwen2-vl-7b.trtfb",
+  "family": "qwen_vl",
+  "runtime_strategy": "vision_language",
+  "max_cache_length": 384,
+  "prompt": "What color is the vehicle in this image? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.001,
+  "layer_atol": 0.05,
+  "test_image": "tests/e2e/data/test_img.jpeg",
+  "trust_remote_code": false,
+  "notes": "Qwen2-VL-7B-Instruct dense (single-device) lane. model_type=qwen2_vl, routes to qwen_vl family (matcher accepts qwen+vl)."
+}
