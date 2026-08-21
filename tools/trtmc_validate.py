@@ -77,9 +77,7 @@ HF_WARM_SCRIPT = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 COMMON_REFERENCE_PROFILE = "reference_common"
 NOT_COMPARED_DIRECTORY = "not-compared"
 DEFAULT_REUSED_BUNDLE_REVALIDATION_LIMIT = 1
-LEGACY_E2E_REASON = (
-    "E2E execution does not compare aligned reference and TRTMC outputs."
-)
+LEGACY_E2E_REASON = "E2E execution does not compare aligned reference and TRTMC outputs."
 HF_CACHE_ENVIRONMENT_NAMES = (
     "HF_HOME",
     "HF_HUB_CACHE",
@@ -537,12 +535,6 @@ def resolve_sample_limit(
     return 0 if configured == -1 else configured
 
 
-def _validation_models(models_root: Path) -> dict[str, dict[str, Any]]:
-    return {
-        str(model["name"]): model for model in validation_catalog.load_manifest_records(models_root)
-    }
-
-
 def _declared_profile(
     *,
     family: str,
@@ -807,9 +799,7 @@ def _run_supervised_subprocess(
                 else:
                     process.kill()
                 process.wait()
-            raise WorkerTimeoutError(
-                f"model worker exceeded {timeout_seconds:g} seconds"
-            ) from exc
+            raise WorkerTimeoutError(f"model worker exceeded {timeout_seconds:g} seconds") from exc
 
 
 def _source_environment() -> dict[str, str]:
@@ -1712,39 +1702,26 @@ def _reused_bundle_failure_receipt(
     raw_result = result.get("raw_result", {})
     return {
         "execution_status": (
-            str(execution.get("status", ""))
-            if isinstance(execution, Mapping)
-            else ""
+            str(execution.get("status", "")) if isinstance(execution, Mapping) else ""
         ),
         "validation_status": (
-            str(validation.get("status", ""))
-            if isinstance(validation, Mapping)
-            else ""
+            str(validation.get("status", "")) if isinstance(validation, Mapping) else ""
         ),
         "comparison_status": (
-            str(comparison.get("status", ""))
-            if isinstance(comparison, Mapping)
-            else ""
+            str(comparison.get("status", "")) if isinstance(comparison, Mapping) else ""
         ),
         "bundle_built": (
-            raw_result.get("bundle_built")
-            if isinstance(raw_result, Mapping)
-            else None
+            raw_result.get("bundle_built") if isinstance(raw_result, Mapping) else None
         ),
         "error_type": (
-            str(raw_result.get("error_type", "") or "")
-            if isinstance(raw_result, Mapping)
-            else ""
+            str(raw_result.get("error_type", "") or "") if isinstance(raw_result, Mapping) else ""
         ),
         "error": (
-            str(raw_result.get("error", "") or "")
-            if isinstance(raw_result, Mapping)
-            else ""
+            str(raw_result.get("error", "") or "") if isinstance(raw_result, Mapping) else ""
         ),
         "metrics": (
             dict(comparison.get("metrics", {}))
-            if isinstance(comparison, Mapping)
-            and isinstance(comparison.get("metrics"), Mapping)
+            if isinstance(comparison, Mapping) and isinstance(comparison.get("metrics"), Mapping)
             else {}
         ),
         "artifacts": dict(archived),
@@ -1753,11 +1730,7 @@ def _reused_bundle_failure_receipt(
 
 def _bundle_revalidation_outcome(result: Mapping[str, Any]) -> str:
     raw_result = result.get("raw_result", {})
-    rebuilt = (
-        raw_result.get("bundle_built")
-        if isinstance(raw_result, Mapping)
-        else None
-    )
+    rebuilt = raw_result.get("bundle_built") if isinstance(raw_result, Mapping) else None
     execution = result.get("execution", {})
     validation = result.get("validation", {})
     if not isinstance(execution, Mapping) or execution.get("status") != "completed":
@@ -1987,9 +1960,7 @@ def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
     build_root = benchmark_binary.parent
     trtmc_binary = arguments.trtmc_binary.expanduser().resolve()
     backend_dir = (
-        arguments.backend_dir.expanduser().resolve()
-        if arguments.backend_dir
-        else build_root
+        arguments.backend_dir.expanduser().resolve() if arguments.backend_dir else build_root
     )
     model_plugin_dir = (
         arguments.model_plugin_dir.expanduser().resolve()
@@ -2026,37 +1997,28 @@ def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
     }
     for label, path in required_files.items():
         if not path.is_file():
-            raise ValidationError(
-                f"{label} is missing for build identity preflight: {path}"
-            )
+            raise ValidationError(f"{label} is missing for build identity preflight: {path}")
     if not model_plugin_dir.is_dir():
         raise ValidationError(
-            "model plugin directory is missing for build identity preflight: "
-            f"{model_plugin_dir}"
+            f"model plugin directory is missing for build identity preflight: {model_plugin_dir}"
         )
 
     try:
         metadata = worker_metadata(worker)
     except BenchmarkError as exc:
-        raise ValidationError(
-            f"cannot verify benchmark worker build identity: {exc}"
-        ) from exc
+        raise ValidationError(f"cannot verify benchmark worker build identity: {exc}") from exc
     build = metadata.get("build", {})
     embedded_revision = str(build.get("source_revision", "") or "").strip()
     configuration = str(build.get("configuration", "") or "").strip()
     if not embedded_revision or embedded_revision == "unknown":
-        raise ValidationError(
-            "benchmark worker metadata is missing an embedded source revision"
-        )
+        raise ValidationError("benchmark worker metadata is missing an embedded source revision")
     if embedded_revision != expected_revision:
         raise ValidationError(
             "benchmark worker source revision mismatch: "
             f"embedded {embedded_revision}, expected {expected_revision}"
         )
     if not configuration or configuration == "unknown":
-        raise ValidationError(
-            "benchmark worker metadata is missing its build configuration"
-        )
+        raise ValidationError("benchmark worker metadata is missing its build configuration")
 
     artifacts = {
         label: {
@@ -2171,9 +2133,7 @@ def _query_cuda_runtime_gpus() -> list[dict[str, Any]]:
                 )
             status, pci_bus_id = cudart.cudaDeviceGetPCIBusId(32, index)
             if int(status) != 0:
-                raise ValidationError(
-                    f"cudaDeviceGetPCIBusId({index}) failed with status {status}"
-                )
+                raise ValidationError(f"cudaDeviceGetPCIBusId({index}) failed with status {status}")
             name = properties.name
             if isinstance(name, bytes):
                 name = name.decode("utf-8", errors="replace").rstrip("\x00")
@@ -2263,9 +2223,7 @@ def _resolve_cuda_runtime_devices(
     for logical_index, selector in enumerate(selectors):
         if selector.isdigit():
             matches = [
-                device
-                for device in inventory
-                if int(device["cuda_runtime_index"]) == int(selector)
+                device for device in inventory if int(device["cuda_runtime_index"]) == int(selector)
             ]
         else:
             matches = [
@@ -2817,7 +2775,13 @@ def _format_metric_value(name: str, value: Any) -> str:
         return str(value)
     is_ratio = any(
         token in name
-        for token in ("accuracy", "agreement", "pass_rate", "exact_match", "divergence_rate")
+        for token in (
+            "accuracy",
+            "agreement",
+            "pass_rate",
+            "exact_match",
+            "divergence_rate",
+        )
     )
     if is_ratio:
         return f"{value * 100:.2f}%"
@@ -2983,13 +2947,11 @@ def _accuracy_issue(result: Mapping[str, Any]) -> dict[str, str] | None:
         raw_result = raw_result if isinstance(raw_result, Mapping) else {}
         if raw_result.get("error_type") == "SampleEvidenceError":
             acceptance = raw_result.get("sample_acceptance", {})
-            issues = (
-                acceptance.get("issues", [])
-                if isinstance(acceptance, Mapping)
-                else []
-            )
-            code = str(issues[0].get("code", "invalid_sample_evidence")) if issues else (
-                "invalid_sample_evidence"
+            issues = acceptance.get("issues", []) if isinstance(acceptance, Mapping) else []
+            code = (
+                str(issues[0].get("code", "invalid_sample_evidence"))
+                if issues
+                else ("invalid_sample_evidence")
             )
             return {
                 "priority": "P1",
@@ -3075,14 +3037,7 @@ def _materialize_accuracy_report_artifact(
 ) -> str:
     relative_case = case_dir.relative_to(output)
     relative_artifact = path.relative_to(case_dir)
-    destination = (
-        output
-        / "artifacts"
-        / "cases"
-        / relative_case
-        / category
-        / relative_artifact
-    )
+    destination = output / "artifacts" / "cases" / relative_case / category / relative_artifact
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(path, destination)
     return destination.relative_to(output).as_posix()
@@ -3223,9 +3178,7 @@ def _compact_sample_difference(value: Any) -> Any:
         }
         artifacts = value.get("artifacts")
         if isinstance(artifacts, Mapping) and artifacts.get("media"):
-            compact["artifacts"] = {
-                "media": _compact_sample_difference(artifacts["media"])
-            }
+            compact["artifacts"] = {"media": _compact_sample_difference(artifacts["media"])}
         return compact
     if isinstance(value, list):
         return [_compact_sample_difference(item) for item in value]
@@ -3300,9 +3253,7 @@ def _public_accuracy_result(
     if configured_gates or (policy_mode == "observation_only" and not sample_acceptance):
         comparison["gate_evaluation"] = evaluate_shadow_gates(
             metrics=_shadow_gate_metrics(comparison, raw_result),
-            configured_gates=(
-                configured_gates if isinstance(configured_gates, Mapping) else {}
-            ),
+            configured_gates=(configured_gates if isinstance(configured_gates, Mapping) else {}),
             sample_count=_accuracy_gate_sample_count(comparison, samples),
             policy_mode=policy_mode or "blocking",
             metric_kinds=(
@@ -3551,8 +3502,7 @@ def _accuracy_ledger_report_rows(
                     "result": None,
                     "progress": {
                         "stage": receipt["stage"],
-                        "attempt": receipt["active_attempt"]
-                        or len(receipt["attempts"]),
+                        "attempt": receipt["active_attempt"] or len(receipt["attempts"]),
                     },
                     "precision": {
                         "reference": "Not recorded",
@@ -3693,9 +3643,7 @@ def _print_result(
     execution = result.get("execution", {})
     validation = result.get("validation", {})
     raw_result = result.get("raw_result", {})
-    validation_status = (
-        str(validation.get("status", "")) if isinstance(validation, Mapping) else ""
-    )
+    validation_status = str(validation.get("status", "")) if isinstance(validation, Mapping) else ""
     status = {
         "passed": "PASSED",
         "failed": "FAILED",
@@ -3704,11 +3652,7 @@ def _print_result(
     print()
     print(f"Status: {status}")
     if isinstance(execution, Mapping) and execution.get("status") == "error":
-        error = (
-            str(raw_result.get("error", ""))
-            if isinstance(raw_result, Mapping)
-            else ""
-        )
+        error = str(raw_result.get("error", "")) if isinstance(raw_result, Mapping) else ""
         if error:
             print(f"Error: {error}")
         worker_log = str(result.get("worker_log", "") or "")
@@ -3992,7 +3936,7 @@ def _load_validation_inputs(
     suites_list = validation_catalog.load_suites(arguments.suites)
     suites = {suite["id"]: suite for suite in suites_list}
     ready = ready_model_names(arguments.models_dir)
-    task_models = _validation_models(arguments.models_dir)
+    task_models = validation_catalog.load_manifest_records_by_name(arguments.models_dir)
     audit_catalog(catalog, ready_models=ready, suite_names=suites)
     audit_workload_compatibility(
         catalog,
@@ -4200,9 +4144,7 @@ def _binding_resource_arguments(
     if arguments.hf_cache_mode == "per_model":
         selected.hf_cache_dir = model_work / "hf-cache"
         selected.hf_cache_dir.mkdir(parents=True, exist_ok=True)
-        if arguments.hf_cache_seed_dir is not None and not any(
-            selected.hf_cache_dir.iterdir()
-        ):
+        if arguments.hf_cache_seed_dir is not None and not any(selected.hf_cache_dir.iterdir()):
             seed_source = arguments.hf_cache_seed_dir
             seed_destination = selected.hf_cache_dir
             if any(
@@ -4213,10 +4155,7 @@ def _binding_resource_arguments(
                 # to a complete HF_HOME tree. HF_HOME expects these entries
                 # below its hub/ directory.
                 seed_destination = selected.hf_cache_dir / "hub"
-            if (
-                seed_source.stat().st_dev
-                != selected.hf_cache_dir.stat().st_dev
-            ):
+            if seed_source.stat().st_dev != selected.hf_cache_dir.stat().st_dev:
                 raise ValidationError(
                     "Hugging Face cache seed and per-model cache must use the same filesystem"
                 )
@@ -4231,8 +4170,7 @@ def _binding_resource_arguments(
             except OSError as exc:
                 shutil.rmtree(selected.hf_cache_dir, ignore_errors=True)
                 raise ValidationError(
-                    f"could not hard-link Hugging Face cache seed "
-                    f"{seed_source}: {exc}"
+                    f"could not hard-link Hugging Face cache seed {seed_source}: {exc}"
                 ) from exc
     return selected, binding_work, model_work
 
@@ -4698,9 +4636,7 @@ def _run_supervised_binding_with_retries(
         revalidation_budget.record_worker_result(result)
         execution = result.get("execution", {})
         execution_error = isinstance(execution, Mapping) and execution.get("status") == "error"
-        retryable = not (
-            isinstance(execution, Mapping) and execution.get("retryable") is False
-        )
+        retryable = not (isinstance(execution, Mapping) and execution.get("retryable") is False)
         archived = (
             _archive_failed_attempt(case_dir, attempt)
             if execution_error and retryable and attempt < arguments.model_attempts
@@ -4726,8 +4662,7 @@ def _run_supervised_binding_with_retries(
         if attempt_result["worker_log"]:
             print(f"  Worker log: {attempt_result['worker_log']}", flush=True)
         print(
-            f"  Retrying {binding.model} "
-            f"(attempt {attempt + 1}/{arguments.model_attempts})",
+            f"  Retrying {binding.model} (attempt {attempt + 1}/{arguments.model_attempts})",
             flush=True,
         )
         if arguments.model_retry_delay_seconds:
@@ -4832,9 +4767,7 @@ def _open_accuracy_ledger(
     for binding in bindings:
         result_path = _case_directory(arguments.output, binding) / "comparison.json"
         sample_limit = (
-            resolve_sample_limit(catalog, binding, arguments.limit)
-            if binding.runnable
-            else None
+            resolve_sample_limit(catalog, binding, arguments.limit) if binding.runnable else None
         )
         cases.append(
             {
@@ -5038,8 +4971,7 @@ def _run_all_bindings(
         light = _traffic_light_status(normalized)
         raw_result = normalized.get("raw_result", {})
         timed_out = (
-            isinstance(raw_result, Mapping)
-            and raw_result.get("error_type") == "WorkerTimeoutError"
+            isinstance(raw_result, Mapping) and raw_result.get("error_type") == "WorkerTimeoutError"
         )
         ledger.finish(
             case_id,
@@ -5107,9 +5039,7 @@ def _run_bindings(
                 _print_result(result, comparison, report_path, arguments.verbose)
             continue
         binding_arguments = copy.copy(arguments)
-        binding_arguments._reused_bundle_revalidation_budget = (
-            revalidation_budget
-        )
+        binding_arguments._reused_bundle_revalidation_budget = revalidation_budget
         binding_arguments.limit = resolve_sample_limit(
             catalog,
             binding,

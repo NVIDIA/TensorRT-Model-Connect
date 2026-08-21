@@ -185,6 +185,13 @@ def load_manifest_records(
     return [manifest_record(path) for path in iter_manifest_paths(models_dir)]
 
 
+def load_manifest_records_by_name(
+    models_dir: Path = DEFAULT_MODELS_DIR,
+) -> dict[str, dict[str, Any]]:
+    """Index validation manifest records by canonical model name."""
+    return {str(record["name"]): record for record in load_manifest_records(models_dir)}
+
+
 def _selector_values(selectors: dict[str, Any], key: str) -> set[str]:
     values = selectors.get(key, [])
     if values is None:
@@ -288,8 +295,7 @@ def resolve_suite_for_model(suite: dict[str, Any], model: dict[str, Any]) -> dic
         profile_acceptance = source.get("sample_acceptance", {})
         if not isinstance(profile_acceptance, dict):
             raise ValueError(
-                f"Suite {suite['id']} sample_acceptance profile for {owner} "
-                "must be a mapping"
+                f"Suite {suite['id']} sample_acceptance profile for {owner} must be a mapping"
             )
         sample_acceptance.update(profile_acceptance)
     if sample_acceptance:

@@ -31,7 +31,7 @@ def test_validation_entrypoints_use_narrow_engine_boundaries():
 def test_model_workload_catalog_covers_every_ready_model():
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()
-    task_models = trtmc_validate._validation_models(trtmc_validate.DEFAULT_MODELS)
+    task_models = validation_catalog.load_manifest_records_by_name(trtmc_validate.DEFAULT_MODELS)
     ready_models = trtmc_validate.ready_model_names()
 
     trtmc_validate.audit_catalog(
@@ -66,9 +66,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
     assert len(bindings) == 114
     assert {
-        binding.model
-        for binding in bindings
-        if binding.workload == "mmlu_continuation_parity"
+        binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
         "lfm2-1.2b",
         "lfm2-2.6b",
@@ -82,9 +80,9 @@ def test_model_workload_catalog_covers_every_ready_model():
         "lfm2-350m-bf16-model-card",
         "lfm2_model_card_sampling_parity",
     )
-    assert [
-        binding.workload for binding in bindings if binding.model == "personaplex-7b"
-    ] == ["full_duplex_bench_behavior_parity"]
+    assert [binding.workload for binding in bindings if binding.model == "personaplex-7b"] == [
+        "full_duplex_bench_behavior_parity"
+    ]
     assert trtmc_validate.resolve_binding(
         catalog,
         "personaplex-7b",
@@ -93,9 +91,9 @@ def test_model_workload_catalog_covers_every_ready_model():
         "personaplex-7b",
         "full_duplex_bench_speech_parity",
     )
-    assert [
-        binding.workload for binding in bindings if binding.model == "qwen25vl-3b"
-    ] == ["vlm_mmmu_pro_vision_fixed_mcq"]
+    assert [binding.workload for binding in bindings if binding.model == "qwen25vl-3b"] == [
+        "vlm_mmmu_pro_vision_fixed_mcq"
+    ]
 
 
 def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
@@ -142,21 +140,22 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     }
 
 
-def test_dataset_path_keeps_repository_owned_default_with_dataset_root(tmp_path: Path) -> None:
+def test_dataset_path_keeps_repository_owned_default_with_dataset_root(
+    tmp_path: Path,
+) -> None:
     suite = {
         "id": "repo-owned",
-        "dataset": {
-            "default_path": "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
-        },
+        "dataset": {"default_path": "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"},
     }
 
     assert trtmc_validate._dataset_path(suite, tmp_path / "datasets") == (
-        trtmc_validate.REPO_ROOT
-        / "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
+        trtmc_validate.REPO_ROOT / "tests/e2e/models/minimax_h3/validation/minimax-h3-768p.json"
     )
 
 
-def test_dataset_path_rebases_mounted_defaults_under_dataset_root(tmp_path: Path) -> None:
+def test_dataset_path_rebases_mounted_defaults_under_dataset_root(
+    tmp_path: Path,
+) -> None:
     suite = {
         "id": "mounted",
         "dataset": {"default_path": "/mnt/data/example/dataset.json"},
@@ -176,9 +175,7 @@ def test_validation_ready_models_exclude_l0_and_regression_profiles():
     }
     l0_only = {str(record["name"]) for record in records if record.get("ci_tier") == "l0_only"}
     regressions = {
-        str(record["name"])
-        for record in records
-        if record.get("test_category") == "regression"
+        str(record["name"]) for record in records if record.get("test_category") == "regression"
     }
     selected = set(trtmc_validate.ready_model_names())
 
@@ -374,9 +371,7 @@ def test_gate_census_groups_resolved_variants_and_exposes_review_gaps() -> None:
             "id": "quality",
             "description": "Sampled quality parity.",
             "gates": {"min_prediction_agreement": 0.98},
-            "model_profiles": {
-                "strict-model": {"gates": {"min_prediction_agreement": 1.0}}
-            },
+            "model_profiles": {"strict-model": {"gates": {"min_prediction_agreement": 1.0}}},
         },
         "diagnostic": {
             "id": "diagnostic",
@@ -533,9 +528,7 @@ def test_gate_census_cli_rejects_model_selection(monkeypatch) -> None:
             {},
         ),
     )
-    arguments = trtmc_validate.build_parser().parse_args(
-        ["gpt2-125m", "--gate-census"]
-    )
+    arguments = trtmc_validate.build_parser().parse_args(["gpt2-125m", "--gate-census"])
 
     with pytest.raises(
         trtmc_validate.ValidationError,
@@ -546,10 +539,8 @@ def test_gate_census_cli_rejects_model_selection(monkeypatch) -> None:
 
 def test_default_gate_census_covers_every_suite_and_binding() -> None:
     catalog = trtmc_validate.load_catalog()
-    suites = {
-        suite["id"]: suite for suite in validation_catalog.load_suites()
-    }
-    task_models = trtmc_validate._validation_models(trtmc_validate.DEFAULT_MODELS)
+    suites = {suite["id"]: suite for suite in validation_catalog.load_suites()}
+    task_models = validation_catalog.load_manifest_records_by_name(trtmc_validate.DEFAULT_MODELS)
 
     census = trtmc_validate.build_gate_census(
         catalog=catalog,
@@ -565,16 +556,13 @@ def test_default_gate_census_covers_every_suite_and_binding() -> None:
         row["id"]
         for row in census["suites"]
         if any(
-            variant["policy"]["issues"]
-            or variant.get("sample_acceptance", {}).get("issues")
+            variant["policy"]["issues"] or variant.get("sample_acceptance", {}).get("issues")
             for variant in row["variants"]
         )
     ]
     assert invalid == []
     assert census["summary"]["review_required_suites"] == 0
-    explicit_only = {
-        row["id"] for row in census["suites"] if row["selection"] == "explicit_only"
-    }
+    explicit_only = {row["id"] for row in census["suites"] if row["selection"] == "explicit_only"}
     assert explicit_only == {
         "full_duplex_bench_speech_parity",
         "refcoco_grounding",
@@ -582,18 +570,16 @@ def test_default_gate_census_covers_every_suite_and_binding() -> None:
     }
     mmlu = next(row for row in census["suites"] if row["id"] == "mmlu_five_shot_mcq")
     assert len(mmlu["variants"]) == 2
-    assert [
-        variant["sample_acceptance"]["min_pass_rate"]
-        for variant in mmlu["variants"]
-    ] == [0.98, 0.95]
-    assert [
-        variant["sample_acceptance"]["allowed_failures"]
-        for variant in mmlu["variants"]
-    ] == [1, 1]
+    assert [variant["sample_acceptance"]["min_pass_rate"] for variant in mmlu["variants"]] == [
+        0.98,
+        0.95,
+    ]
+    assert [variant["sample_acceptance"]["allowed_failures"] for variant in mmlu["variants"]] == [
+        1,
+        1,
+    ]
     asr = next(row for row in census["suites"] if row["id"] == "librispeech_clean_asr")
-    assert asr["variants"][0]["policy"]["gates"][1]["effective"]["kind"] == (
-        "continuous"
-    )
+    assert asr["variants"][0]["policy"]["gates"][1]["effective"]["kind"] == ("continuous")
     marian = next(
         row
         for row in census["suites"]
@@ -923,9 +909,7 @@ def test_per_model_hf_cache_hardlinks_seed_and_deletes_only_working_copy(tmp_pat
     )
 
     linked_blob = selected.hf_cache_dir / "hub/models--org--model/blobs/content"
-    linked_snapshot = (
-        selected.hf_cache_dir / "hub/models--org--model/snapshots/revision/model.bin"
-    )
+    linked_snapshot = selected.hf_cache_dir / "hub/models--org--model/snapshots/revision/model.bin"
     assert linked_blob.stat().st_ino == blob.stat().st_ino
     assert linked_snapshot.is_symlink()
     assert linked_snapshot.resolve() == linked_blob
@@ -978,9 +962,7 @@ def test_per_model_hf_cache_accepts_hub_cache_as_seed(tmp_path):
     )
 
     linked_blob = selected.hf_cache_dir / "hub/models--org--model/blobs/content"
-    linked_snapshot = (
-        selected.hf_cache_dir / "hub/models--org--model/snapshots/revision/model.bin"
-    )
+    linked_snapshot = selected.hf_cache_dir / "hub/models--org--model/snapshots/revision/model.bin"
     assert linked_blob.stat().st_ino == blob.stat().st_ino
     assert linked_snapshot.resolve() == linked_blob
 
@@ -1022,9 +1004,9 @@ def test_prepare_hf_on_demand_uses_binding_cache_and_selected_model(
     assert "--strict" in command
     assert "--fail-fast" in command
     assert kwargs["env"]["HF_HOME"] == str(arguments.hf_cache_dir)
-    assert (
-        tmp_path / "results/model-a/suite-a/hf_prepare.models.txt"
-    ).read_text(encoding="utf-8") == "model-a\n"
+    assert (tmp_path / "results/model-a/suite-a/hf_prepare.models.txt").read_text(
+        encoding="utf-8"
+    ) == "model-a\n"
 
 
 def test_worker_command_propagates_on_demand_hf_preparation(tmp_path):
@@ -1187,17 +1169,20 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     assert returncode == 0
     result = json.loads((case_dir / "comparison.json").read_text(encoding="utf-8"))
     assert result["resource_cleanup"]["engine"]["status"] == "deleted"
-    receipt = trtmc_validate.ExecutionLedger.load(
-        output, task_kind="accuracy"
-    ).receipt("model-a::suite-a")
+    receipt = trtmc_validate.ExecutionLedger.load(output, task_kind="accuracy").receipt(
+        "model-a::suite-a"
+    )
     assert receipt["state"] == "terminal"
     comparison_mtime = (case_dir / "comparison.json").stat().st_mtime_ns
 
-    assert trtmc_validate._run_all_bindings(
-        [binding],
-        arguments=arguments,
-        catalog={"sample_limits": {"suite-a": 1}},
-    ) == 0
+    assert (
+        trtmc_validate._run_all_bindings(
+            [binding],
+            arguments=arguments,
+            catalog={"sample_limits": {"suite-a": 1}},
+        )
+        == 0
+    )
     assert (case_dir / "comparison.json").stat().st_mtime_ns == comparison_mtime
 
 
@@ -1253,9 +1238,10 @@ def test_accuracy_report_is_rebuilt_from_ordered_live_receipts(tmp_path):
         {"stage": "candidate", "attempt": 1},
         {"stage": None, "attempt": 0},
     ]
-    assert json.loads(
-        (tmp_path / "model-a/suite-a/comparison.json").read_text(encoding="utf-8")
-    ) == result
+    assert (
+        json.loads((tmp_path / "model-a/suite-a/comparison.json").read_text(encoding="utf-8"))
+        == result
+    )
     assert report["accounting"]["progress"] == {
         "pending": 1,
         "running": 0,
@@ -1395,15 +1381,11 @@ def test_accuracy_shadow_gate_preserves_worst_nested_metric(tmp_path):
             "raw_result": {
                 "status": "failed",
                 "valid_count": 5,
-                "metrics": {
-                    "pixel_mean": {"mean": 0.5, "min": 0.1, "max": 0.9}
-                },
+                "metrics": {"pixel_mean": {"mean": 0.5, "min": 0.1, "max": 0.9}},
                 "configured_gates": {"max_pixel_mean": 0.85},
                 "gate_policy": "blocking",
             },
-            "reproduce": {
-                "dataset": {"sample_limit": 5, "prepared_input_count": 5}
-            },
+            "reproduce": {"dataset": {"sample_limit": 5, "prepared_input_count": 5}},
         }
     )
 
@@ -1415,9 +1397,7 @@ def test_accuracy_shadow_gate_preserves_worst_nested_metric(tmp_path):
     assert evaluation["checks"][0]["actual"] == 0.9
 
 
-def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(
-    tmp_path, monkeypatch
-):
+def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(tmp_path, monkeypatch):
     output = tmp_path / "results"
     arguments = trtmc_validate.build_parser().parse_args(
         [
@@ -1448,9 +1428,7 @@ def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(
     )
 
     with pytest.raises(KeyboardInterrupt):
-        trtmc_validate._run_all_bindings(
-            [binding], arguments=arguments, catalog=catalog
-        )
+        trtmc_validate._run_all_bindings([binding], arguments=arguments, catalog=catalog)
     ledger = trtmc_validate.ExecutionLedger.load(output, task_kind="accuracy")
     running = ledger.receipt("model-a::suite-a")
     assert running["state"] == "running"
@@ -1487,9 +1465,7 @@ def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(
         ),
     )
 
-    assert trtmc_validate._run_all_bindings(
-        [binding], arguments=arguments, catalog=catalog
-    ) == 0
+    assert trtmc_validate._run_all_bindings([binding], arguments=arguments, catalog=catalog) == 0
     receipt = ledger.receipt("model-a::suite-a")
     assert receipt["result"] == "green"
     assert [(attempt["attempt"], attempt["state"]) for attempt in receipt["attempts"]] == [
@@ -1568,11 +1544,14 @@ def test_accuracy_adapter_records_each_worker_retry_and_reference_stage(
 
     monkeypatch.setattr(trtmc_validate, "_run_supervised_binding", fail_reference)
 
-    assert trtmc_validate._run_all_bindings(
-        [binding],
-        arguments=arguments,
-        catalog={"sample_limits": {"suite-a": 1}},
-    ) == 1
+    assert (
+        trtmc_validate._run_all_bindings(
+            [binding],
+            arguments=arguments,
+            catalog={"sample_limits": {"suite-a": 1}},
+        )
+        == 1
+    )
 
     receipt = trtmc_validate.ExecutionLedger.load(
         output,
@@ -1581,8 +1560,7 @@ def test_accuracy_adapter_records_each_worker_retry_and_reference_stage(
     assert receipt["result"] == "white"
     assert receipt["stage"] == "reference"
     assert [
-        (attempt["attempt"], attempt["state"], attempt["stage"])
-        for attempt in receipt["attempts"]
+        (attempt["attempt"], attempt["state"], attempt["stage"]) for attempt in receipt["attempts"]
     ] == [
         (1, "failed", "reference"),
         (2, "failed", "reference"),
@@ -1924,9 +1902,7 @@ def test_reused_bundle_revalidation_limit_rejects_negative_values():
     parser = trtmc_validate.build_parser()
 
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            ["--all", "--reused-bundle-revalidation-limit", "-1"]
-        )
+        parser.parse_args(["--all", "--reused-bundle-revalidation-limit", "-1"])
 
 
 @pytest.mark.parametrize(
@@ -2042,7 +2018,10 @@ def test_supervisor_retries_execution_error_but_not_disagreement(
         result = {
             "model": binding.model,
             "workload": binding.workload,
-            "execution": {"status": execution_status, "exit_code": 1 if attempt == 1 else 0},
+            "execution": {
+                "status": execution_status,
+                "exit_code": 1 if attempt == 1 else 0,
+            },
             "validation": {"status": validation_status},
             "raw_result": {
                 "status": validation_status,
@@ -2204,9 +2183,7 @@ def test_supervisor_retry_cannot_reset_revalidation_budget(
             "validation": {"status": "failed"},
             "raw_result": {
                 "status": "failed",
-                "error_type": (
-                    "RebuildExecutionError" if rebuild_failed else ""
-                ),
+                "error_type": ("RebuildExecutionError" if rebuild_failed else ""),
             },
             "bundle_revalidation": {
                 "attempted": rebuild_failed,
@@ -2372,9 +2349,7 @@ def test_supervised_binding_records_worker_timeout(tmp_path, monkeypatch):
     def timeout(command, log_path, env, timeout_seconds):
         assert timeout_seconds == 42
         log_path.write_text("worker timed out\n", encoding="utf-8")
-        raise trtmc_validate.WorkerTimeoutError(
-            "model worker exceeded 42 seconds"
-        )
+        raise trtmc_validate.WorkerTimeoutError("model worker exceeded 42 seconds")
 
     monkeypatch.setattr(trtmc_validate, "_run_supervised_subprocess", timeout)
 
@@ -2800,9 +2775,7 @@ def test_reference_sources_select_model_specific_inputs(
     assert common.environment == {"TRTMC_STORAGE_ROOT": str(tmp_path)}
     assert wan22.environment == {
         "TRTMC_STORAGE_ROOT": str(tmp_path),
-        "TRTMC_WAN_REFERENCE_REPO": str(
-            tmp_path / "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"
-        ),
+        "TRTMC_WAN_REFERENCE_REPO": str(tmp_path / "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"),
     }
     assert lance.environment == {
         "TRTMC_STORAGE_ROOT": str(tmp_path),
@@ -2869,7 +2842,7 @@ def test_print_result_verbose_exposes_raw_commands_and_result_locations(tmp_path
                 },
                 "hf": ["python hf_reference.py --model model-a"],
                 "trtmc": ["trtmc run --model model-a"],
-            }
+            },
         },
         comparison,
         report,
@@ -3127,9 +3100,9 @@ def test_report_infers_task_type_for_legacy_standard_result(tmp_path):
     assert result["user_contract"] == "tts_audio"
     assert result["samples"] == {"planned": 3, "evaluated": 3}
     assert "bark-large" not in html_path.read_text(encoding="utf-8")
-    assert "Samples" in (
-        tmp_path / "assets" / "qualification-report.js"
-    ).read_text(encoding="utf-8")
+    assert "Samples" in (tmp_path / "assets" / "qualification-report.js").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_accuracy_traffic_light_statuses_are_mutually_exclusive():
@@ -3193,9 +3166,7 @@ def test_accuracy_result_with_incomplete_samples_is_white() -> None:
                     "min_allowed_failures": 1,
                     "allowed_failures": 1,
                     "verdict": "invalid",
-                    "issues": [
-                        {"code": "incomplete_samples", "expected": 20, "actual": 19}
-                    ],
+                    "issues": [{"code": "incomplete_samples", "expected": 20, "actual": 19}],
                 },
                 "precision_contract": {
                     "reference_precision": "fp16",
@@ -3901,18 +3872,14 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
     assert public_differences["preview"][0]["reference_result"]["output_text"] == (
         "reference answer"
     )
-    assert public_differences["preview"][0]["trtmc_result"]["output_text"] == (
-        "TRTMC answer"
-    )
+    assert public_differences["preview"][0]["trtmc_result"]["output_text"] == ("TRTMC answer")
     assert public_differences["preview"][0]["reproduce"]["reference"].startswith(
         "/profiles/reference/bin/python"
     )
     assert (tmp_path / public_differences["href"]).is_file()
     rendered = html_path.read_text(encoding="utf-8")
     assert "reference answer" not in rendered
-    frontend = (tmp_path / "assets" / "qualification-report.js").read_text(
-        encoding="utf-8"
-    )
+    frontend = (tmp_path / "assets" / "qualification-report.js").read_text(encoding="utf-8")
     assert "sampleDifferences" in frontend
     assert "results and vanilla commands" in frontend
     assert "sameMetricValue" in frontend
@@ -4464,9 +4431,7 @@ def test_runtime_gpu_identity_falls_back_to_cuda_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(
         trtmc_validate,
         "_query_nvidia_smi_gpus",
-        lambda: (_ for _ in ()).throw(
-            trtmc_validate.ValidationError("nvidia-smi was not found")
-        ),
+        lambda: (_ for _ in ()).throw(trtmc_validate.ValidationError("nvidia-smi was not found")),
     )
     monkeypatch.setattr(
         trtmc_validate,
@@ -4659,10 +4624,7 @@ def test_build_identity_preflight_accepts_exact_native_build(
         "benchmark worker",
         "TensorRT backend",
     }
-    assert all(
-        len(artifact["sha256"]) == 64
-        for artifact in identity["artifacts"].values()
-    )
+    assert all(len(artifact["sha256"]) == 64 for artifact in identity["artifacts"].values())
 
 
 def test_build_identity_preflight_rejects_stale_native_build(
@@ -4945,12 +4907,7 @@ def _run_binding_with_comparison_results(
     def run(command, log_path, _environment):
         commands.append(command)
         log_path.write_text(f"run {len(commands)}\n", encoding="utf-8")
-        summary = (
-            log_path.parent
-            / "validation"
-            / "workload-a"
-            / "eval_summary.json"
-        )
+        summary = log_path.parent / "validation" / "workload-a" / "eval_summary.json"
         summary.parent.mkdir(parents=True, exist_ok=True)
         summary.write_text(
             json.dumps({"run": len(commands)}),
@@ -5035,12 +4992,7 @@ def _run_multiple_bindings_with_comparison_results(
         commands.append(command)
         log_path.write_text(f"run {len(commands)}\n", encoding="utf-8")
         workload = log_path.parent.name
-        summary = (
-            log_path.parent
-            / "validation"
-            / workload
-            / "eval_summary.json"
-        )
+        summary = log_path.parent / "validation" / workload / "eval_summary.json"
         summary.parent.mkdir(parents=True, exist_ok=True)
         summary.write_text(
             json.dumps({"run": len(commands)}),
@@ -5064,10 +5016,7 @@ def _run_multiple_bindings_with_comparison_results(
 
     monkeypatch.setattr(trtmc_validate, "_run_subprocess", run)
     monkeypatch.setattr(trtmc_validate, "_comparison_result", comparison_result)
-    bindings = [
-        trtmc_validate.Binding(model, "workload-a")
-        for model in models
-    ]
+    bindings = [trtmc_validate.Binding(model, "workload-a") for model in models]
     task_models = {
         model: {
             "family": "family-a",
@@ -5095,12 +5044,9 @@ def _run_multiple_bindings_with_comparison_results(
     )
     results = {
         model: json.loads(
-            (
-                arguments.output
-                / model
-                / "workload-a"
-                / "comparison.json"
-            ).read_text(encoding="utf-8")
+            (arguments.output / model / "workload-a" / "comparison.json").read_text(
+                encoding="utf-8"
+            )
         )
         for model in models
     }
@@ -5127,9 +5073,7 @@ def test_reused_bundle_accuracy_failure_rebuilds_once_and_recovers(
                     }
                 ],
                 "error_type": "BenchmarkGateError",
-                "error": (
-                    "min_prediction_agreement_rate actual=0.25 required=1.0"
-                ),
+                "error": ("min_prediction_agreement_rate actual=0.25 required=1.0"),
             },
             {
                 "status": "passed",
@@ -5152,16 +5096,9 @@ def test_reused_bundle_accuracy_failure_rebuilds_once_and_recovers(
     assert initial_receipt["metrics"]["prediction_agreement_rate"] == 0.25
     initial = Path(initial_receipt["artifacts"]["comparison_result"])
     assert initial.is_file()
-    initial_summary = Path(
-        initial_receipt["artifacts"]["eval_summary.json"]
-    )
+    initial_summary = Path(initial_receipt["artifacts"]["eval_summary.json"])
     assert json.loads(initial_summary.read_text(encoding="utf-8")) == {"run": 1}
-    assert (
-        arguments.output
-        / "model-a"
-        / "workload-a"
-        / "execution.reused-bundle.log"
-    ).is_file()
+    assert (arguments.output / "model-a" / "workload-a" / "execution.reused-bundle.log").is_file()
 
 
 def test_reused_bundle_accuracy_failure_rebuilds_once_and_confirms_failure(
@@ -5195,29 +5132,27 @@ def test_reused_bundle_revalidation_limit_caps_multi_binding_run(
     tmp_path,
     monkeypatch,
 ):
-    results, commands, returncode, arguments = (
-        _run_multiple_bindings_with_comparison_results(
-            tmp_path=tmp_path,
-            monkeypatch=monkeypatch,
-            models=("model-a", "model-b"),
-            raw_results=[
-                {
-                    "status": "failed",
-                    "bundle_built": False,
-                    "prediction_agreement_rate": 0.25,
-                },
-                {
-                    "status": "passed",
-                    "bundle_built": True,
-                    "prediction_agreement_rate": 1.0,
-                },
-                {
-                    "status": "failed",
-                    "bundle_built": False,
-                    "prediction_agreement_rate": 0.50,
-                },
-            ],
-        )
+    results, commands, returncode, arguments = _run_multiple_bindings_with_comparison_results(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        models=("model-a", "model-b"),
+        raw_results=[
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 0.25,
+            },
+            {
+                "status": "passed",
+                "bundle_built": True,
+                "prediction_agreement_rate": 1.0,
+            },
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 0.50,
+            },
+        ],
     )
 
     assert arguments.reused_bundle_revalidation_limit == 1
@@ -5225,10 +5160,7 @@ def test_reused_bundle_revalidation_limit_caps_multi_binding_run(
     assert sum("--force-build" in command for command in commands) == 1
     assert results["model-a"]["validation"]["status"] == "passed"
     assert results["model-a"]["bundle_revalidation"]["attempted"] is True
-    assert (
-        results["model-a"]["bundle_revalidation"]["outcome"]
-        == "recovered_after_rebuild"
-    )
+    assert results["model-a"]["bundle_revalidation"]["outcome"] == "recovered_after_rebuild"
     capped = results["model-b"]
     assert capped["validation"]["status"] == "failed"
     assert capped["comparison"]["status"] == "disagreement"
@@ -5237,14 +5169,8 @@ def test_reused_bundle_revalidation_limit_caps_multi_binding_run(
     assert capped["bundle_revalidation"]["attempt_count"] == 0
     assert capped["bundle_revalidation"]["run_attempt_limit"] == 1
     assert capped["bundle_revalidation"]["run_attempts_used"] == 1
-    assert (
-        capped["bundle_revalidation"]["outcome"]
-        == "not_attempted_run_limit_reached"
-    )
-    assert (
-        capped["bundle_revalidation"]["initial"]["validation_status"]
-        == "failed"
-    )
+    assert capped["bundle_revalidation"]["outcome"] == "not_attempted_run_limit_reached"
+    assert capped["bundle_revalidation"]["initial"]["validation_status"] == "failed"
     assert returncode == 1
 
 
@@ -5273,40 +5199,35 @@ def test_zero_revalidation_limit_preserves_original_disagreement(
     assert result["bundle_revalidation"]["attempted"] is False
     assert result["bundle_revalidation"]["run_attempt_limit"] == 0
     assert result["bundle_revalidation"]["run_attempts_used"] == 0
-    assert (
-        result["bundle_revalidation"]["outcome"]
-        == "not_attempted_run_limit_reached"
-    )
+    assert result["bundle_revalidation"]["outcome"] == "not_attempted_run_limit_reached"
 
 
 def test_nonaccuracy_failure_does_not_consume_revalidation_budget(
     tmp_path,
     monkeypatch,
 ):
-    results, commands, returncode, _arguments = (
-        _run_multiple_bindings_with_comparison_results(
-            tmp_path=tmp_path,
-            monkeypatch=monkeypatch,
-            models=("model-error", "model-accuracy"),
-            raw_results=[
-                {
-                    "status": "failed",
-                    "bundle_built": False,
-                    "error_type": "ReferenceSetupError",
-                    "error": "reference environment is unavailable",
-                },
-                {
-                    "status": "failed",
-                    "bundle_built": False,
-                    "prediction_agreement_rate": 0.25,
-                },
-                {
-                    "status": "passed",
-                    "bundle_built": True,
-                    "prediction_agreement_rate": 1.0,
-                },
-            ],
-        )
+    results, commands, returncode, _arguments = _run_multiple_bindings_with_comparison_results(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        models=("model-error", "model-accuracy"),
+        raw_results=[
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "error_type": "ReferenceSetupError",
+                "error": "reference environment is unavailable",
+            },
+            {
+                "status": "failed",
+                "bundle_built": False,
+                "prediction_agreement_rate": 0.25,
+            },
+            {
+                "status": "passed",
+                "bundle_built": True,
+                "prediction_agreement_rate": 1.0,
+            },
+        ],
     )
 
     assert len(commands) == 3
@@ -5314,10 +5235,7 @@ def test_nonaccuracy_failure_does_not_consume_revalidation_budget(
     assert results["model-error"]["execution"]["status"] == "error"
     assert "bundle_revalidation" not in results["model-error"]
     assert results["model-accuracy"]["validation"]["status"] == "passed"
-    assert (
-        results["model-accuracy"]["bundle_revalidation"]["outcome"]
-        == "recovered_after_rebuild"
-    )
+    assert results["model-accuracy"]["bundle_revalidation"]["outcome"] == "recovered_after_rebuild"
     assert returncode == 1
 
 

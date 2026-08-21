@@ -6,8 +6,8 @@ the comparison command, and nightly model-proof CI.
 
 ## Modules
 
-- `catalog.py` loads workload definitions, projects E2E manifests, and resolves
-  model/workload compatibility.
+- `catalog.py` loads workload definitions, projects and indexes E2E manifests,
+  and resolves model/workload compatibility.
 - `artifacts.py` validates the durable prediction artifact contract.
 - `model_plugin_contract.py` selects fixed model-manifest testcase/stage
   contracts and serializes model-owned stage outputs across the independent
