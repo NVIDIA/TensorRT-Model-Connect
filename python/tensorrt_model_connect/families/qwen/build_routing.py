@@ -99,14 +99,14 @@ def native_kv_cache_geometry(
     *,
     element_bytes: int = 2,
 ) -> tuple[int, int]:
-    """Return runtime byte geometry for the required full-context cache."""
+    """Return runtime byte geometry for one fixed native cache capacity."""
 
     capacity = _integer(capacity, "max_cache_length")
     context = _positive(config, "max_position_embeddings")
-    if capacity != context:
+    if capacity <= 0 or capacity > context:
         raise ValueError(
-            "native Qwen KV requires max_cache_length == "
-            f"max_position_embeddings ({context}), got {capacity}"
+            "native Qwen KV requires max_cache_length in "
+            f"[1, max_position_embeddings ({context})], got {capacity}"
         )
     row_bytes = _checked_product(
         "row size",

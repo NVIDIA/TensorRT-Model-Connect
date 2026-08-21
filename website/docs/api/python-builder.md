@@ -85,7 +85,7 @@ API or CLI directly for other task-specific operations.
 | --- | --- |
 | `model_id_or_path` | Hugging Face repository ID or resolved local model directory. |
 | `output_path` | Destination `.bundle` bundle path. |
-| `max_cache_length` | Explicit KV cache length. Omitted/`None` lets the family choose: eligible dense Qwen3/Llama use `max_position_embeddings`, while other native or legacy paths normally use 256. Qwen3 rejects a non-full-context value instead of falling back; other families apply their own capability policy. |
+| `max_cache_length` | Explicit KV cache length. Omitted/`None` lets the family choose: eligible dense Qwen3/Llama use `max_position_embeddings`, while other native or legacy paths normally use 256. Dense Qwen3 accepts a positive fixed capacity up to its model context and rejects larger values instead of falling back; other families apply their own capability policy. |
 | `model_revision` | Hugging Face commit, tag, or branch to resolve. |
 | `decoder_engine_layout` | `split` or `dual_profile` for supported decoders. |
 | `dynamic_kv_cache` | Build compatible decoder bundles with runtime-resizable KV cache support. Dense Qwen3 rejects this option and requires fixed-capacity native KV. |

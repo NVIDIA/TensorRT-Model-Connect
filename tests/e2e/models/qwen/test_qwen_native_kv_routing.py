@@ -106,6 +106,18 @@ def test_route_uses_architecture_not_checkpoint_identity():
     assert prefer_native_default(config)
 
 
+def test_fixed_native_cache_can_be_smaller_than_model_context():
+    config = _config()
+    capability = native_kv_build_capability(
+        config,
+        max_cache_length=16384,
+    )
+    row_bytes, cache_bytes = native_kv_cache_geometry(config, 16384)
+
+    assert capability.eligible, capability.reason
+    assert cache_bytes == 16384 * row_bytes
+
+
 @pytest.mark.parametrize(
     "builder_name",
     [
@@ -178,7 +190,7 @@ def test_architecture_variants_fail_closed(overrides, raw_updates, reason):
     ("kwargs", "raw_updates", "reason"),
     [
         ({"precision": "fp32"}, {}, "FP16 or BF16"),
-        ({"max_cache_length": 40959}, {}, "max_cache_length"),
+        ({"max_cache_length": 40961}, {}, "max_cache_length"),
         ({"parallel_enabled": True}, {}, "tensor parallel"),
         ({"dynamic_kv_cache": True}, {}, "fixed physical"),
         ({"quantized": True}, {}, "quantized"),

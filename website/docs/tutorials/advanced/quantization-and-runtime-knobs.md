@@ -143,7 +143,7 @@ budget into admitted decoder contexts and inference-state capacity. During a
 request, the pipeline reads the state's preferred row count and chooses a
 matching decoder context.
 
-Dense Qwen3 supports only its native full-context fixed-KV route and rejects
+Dense Qwen3 supports only its native fixed-capacity KV route and rejects
 `--dynamic-kv-cache`; remove that option to build Qwen3. Eligible dense Llama
 checkpoints still opt out of native KV and use their compatible legacy builder
 when dynamic KV is requested. A native full-context bundle rejects runtime

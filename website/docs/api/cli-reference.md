@@ -69,13 +69,14 @@ The compatibility option `--max-cache-length N` remains accepted but is hidden
 from `build --help`. Omitting it lets the selected family choose the capacity:
 eligible dense Qwen3 and Llama builds use the checkpoint's full
 `max_position_embeddings`; other native or legacy paths normally use 256.
-For those Qwen3/Llama models, an explicit value preserves native KV only when it
-equals the full model context and the other native-KV constraints are also met.
-Qwen3 fails closed instead of falling back when those constraints are not met.
+For dense Qwen3, an explicit positive value up to the model context preserves
+the fixed-capacity native KV path; larger values and other unsupported build
+modes fail closed instead of falling back. Llama applies its own native-KV
+capacity policy.
 
 Eligible dense Qwen3 and Llama checkpoints declare a model-owned native default
 route. A model-only build skips the optimized-provider probe and selects BF16,
-full-context fixed KV, and split prefill/decode engines. Qwen3 has no legacy
+model-context fixed KV, and split prefill/decode engines. Qwen3 has no legacy
 fallback; unsupported Qwen3 build modes fail with the native-KV capability
 reason. Other families probe their exact qualified optimized profiles before
 falling back to their native builder.
