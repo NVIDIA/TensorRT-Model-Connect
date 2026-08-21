@@ -38,7 +38,7 @@ Install the local quality hooks once in the clone:
 
 ```bash
 python3 -m pip install --requirement requirements/community-ci.txt
-pre-commit install --install-hooks --hook-type pre-commit --hook-type pre-push
+pre-commit install --install-hooks
 ```
 
 Commit-time hooks trim trailing whitespace, ensure one final newline, validate
@@ -47,12 +47,10 @@ review and stage those fixes before committing again. Pre-commit manages the
 Ruff and clang-format environments on Linux, macOS, and Windows instead of
 depending on host-installed binaries.
 
-Push-time hooks are check-only: they run the complete source-quality and
-ownership analysis, followed by the selected source-only C++ and Python unit
-scope in a hardened, GPU-free Linux container. This requires Docker with Linux
-containers; use WSL2 on Windows. The public image supports Linux x86_64 and
-ARM64, including Docker Desktop on macOS. Native Windows without WSL2/Linux
-containers cannot run the TensorRT CLI build gate. The protected suite retains
+The local hook intentionally stays lightweight and does not build the CLI or
+run the complete CPU suite. After pushing, comment `/run-ci` on the pull request
+to run source quality, ownership analysis, and the selected source-only C++ and
+Python units on GitHub-hosted public CPU runners. The protected suite retains
 the filesystem-specific cache-reflink contract that public runners cannot
 portably execute.
 

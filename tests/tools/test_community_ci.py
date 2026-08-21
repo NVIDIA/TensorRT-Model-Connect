@@ -14,7 +14,6 @@ import pytest
 import yaml
 
 from tools import community_ci
-from tools.ci.process import CiError
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -190,9 +189,9 @@ def _public_ci_environment(tmp_path: Path) -> dict[str, str]:
     return environment
 
 
-def test_pre_commit_config_installs_fast_commit_and_complete_push_hooks() -> None:
+def test_pre_commit_config_installs_only_lightweight_commit_hooks() -> None:
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
-    assert config["default_install_hook_types"] == ["pre-commit", "pre-push"]
+    assert "default_install_hook_types" not in config
 
     repositories = {repository["repo"]: repository for repository in config["repos"]}
     assert repositories["https://github.com/astral-sh/ruff-pre-commit"]["rev"] == "v0.16.4"
@@ -207,15 +206,11 @@ def test_pre_commit_config_installs_fast_commit_and_complete_push_hooks() -> Non
     assert hooks["ruff-check"]["stages"] == ["pre-commit"]
     assert hooks["clang-format"]["stages"] == ["pre-commit"]
     assert hooks["clang-format"]["entry"] == "clang-format --dry-run --Werror"
-    assert hooks["trtmc-community-pre-push"]["stages"] == ["pre-push"]
-    assert hooks["trtmc-community-pre-push"]["entry"] == (
-        "python -m tools.community_ci pre-push"
-    )
-    assert hooks["trtmc-community-pre-push"]["always_run"] is True
-    assert hooks["trtmc-community-pre-push"]["pass_filenames"] is False
+    assert all(hook["stages"] == ["pre-commit"] for hook in hooks.values())
 
     source = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     assert "python3 -m tools.community_ci format-" not in source
+    assert "pre-push" not in source
 
 
 def test_impact_publishes_only_the_public_cpu_scope(
@@ -260,36 +255,6 @@ def test_impact_publishes_only_the_public_cpu_scope(
     summary = github_summary.read_text(encoding="utf-8")
     assert "Unit scope: `cli`" in summary
     assert "src/runtime/config/cli_support.cpp" in summary
-
-
-def test_pre_push_collects_source_and_unit_failures(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runner = community_ci.CommunityCI(REPO_ROOT, dict(os.environ))
-    calls = []
-    monkeypatch.setattr(runner, "resolve_base", lambda _base: "base-sha")
-
-    def fail_source(_base: str) -> None:
-        calls.append("source")
-        raise CiError("format failed")
-
-    def run_impact(_base: str) -> dict[str, object]:
-        calls.append("impact")
-        return {"unit_scope": "cli"}
-
-    def fail_unit(scope: str) -> None:
-        calls.append(f"unit:{scope}")
-        raise CiError("test_config_cli_support failed")
-
-    monkeypatch.setattr(runner, "source_quality", fail_source)
-    monkeypatch.setattr(runner, "impact", run_impact)
-    monkeypatch.setattr(runner, "unit", fail_unit)
-
-    with pytest.raises(CiError, match="format failed") as error:
-        runner.pre_push(None)
-
-    assert calls == ["source", "impact", "unit:cli"]
-    assert "test_config_cli_support failed" in str(error.value)
 
 
 def test_public_cpu_request_is_a_pr_author_comment_dispatcher() -> None:
