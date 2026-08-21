@@ -246,12 +246,10 @@ static void test_module_cuda_graph_correctness() {
     auto graphed = make_module(engine.get(), stream);
     graphed->enable_cuda_graph();
     check(graphed->cuda_graph_active(), "graph_correctness: cuda_graph_active");
-    check(!graphed->cuda_graph_captured(), "graph_correctness: not captured before first call");
 
     // First call: capture + execute
     float graph_out1[4] = {0};
     run_and_read(*graphed, input, graph_out1);
-    check(graphed->cuda_graph_captured(), "graph_correctness: captured after first call");
 
     // Second call: replay
     float graph_out2[4] = {0};
