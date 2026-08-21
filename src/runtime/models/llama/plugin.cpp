@@ -49,17 +49,6 @@ struct TensorParallelRuntime {
     DistributedRuntimeGroup group;
 };
 
-struct DecoderProfileInfo {
-    int32_t profile_idx{0};
-    int32_t kv_rows{0};
-};
-
-struct DecoderProfileRoles {
-    int32_t prefill_profile_idx{-1};
-    int32_t prefill_max_length{0};
-    std::vector<DecoderProfileInfo> decode_profiles;
-};
-
 int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
     if (dim < 0 || static_cast<std::size_t>(dim) >= shape.size())
         return -1;
@@ -98,28 +87,6 @@ int32_t cache_row_dim_from_module(const TrtModule& module, const std::string& te
                              "'");
 }
 
-bool cache_input_is_dynamic(const TrtModule& module, const std::string& tensor_name) {
-    const auto shape = module.tensor_shape(tensor_name);
-    return !shape.empty() && shape[0] == -1;
-}
-
-bool cache_input_supports_runtime_rows(const TrtModule& module, const std::string& tensor_name) {
-    if (!cache_input_is_dynamic(module, tensor_name))
-        return false;
-    const int32_t num_profiles = module.optimization_profile_count();
-    if (num_profiles <= 0)
-        return false;
-    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t min_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin), 0);
-        const int32_t max_rows = dim_at(
-            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax), 0);
-        if (min_rows > 0 && max_rows > min_rows)
-            return true;
-    }
-    return false;
-}
-
 TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::string& config_json) {
     TensorParallelRuntimeConfig cfg;
     cfg.tp_size = extract_json_int(config_json, "tensor_parallel_size", 1);
@@ -130,66 +97,6 @@ TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::stri
 
 std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
-}
-
-int32_t profile_token_max_length(const TrtModule& module, const std::string& token_id_name,
-                                 int32_t profile_idx) {
-    return dim_at(
-        module.input_profile_shape(token_id_name, profile_idx, ProfileShapeSelector::kMax), 0);
-}
-
-int32_t profile_cache_rows(const TrtModule& module, const std::string& cache_name,
-                           int32_t profile_idx, int32_t fallback_rows) {
-    const auto cache_rows = [](const std::vector<int64_t>& shape) {
-        return dim_at(shape, shape.size() == 4 ? 2 : 0);
-    };
-    const int32_t static_rows = cache_rows(module.tensor_shape(cache_name));
-    if (static_rows > 0)
-        return static_rows;
-
-    if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
-        const int32_t max_rows = cache_rows(
-            module.input_profile_shape(cache_name, profile_idx, ProfileShapeSelector::kMax));
-        if (max_rows > 0)
-            return max_rows;
-    }
-    return fallback_rows;
-}
-
-DecoderProfileRoles detect_decoder_profile_roles(const TrtModule& module,
-                                                 const std::string& token_id_name,
-                                                 const std::string& cache_k_name,
-                                                 int32_t fallback_rows) {
-    DecoderProfileRoles roles;
-    const int32_t num_profiles = module.optimization_profile_count();
-    if (num_profiles <= 0) {
-        roles.decode_profiles.push_back(DecoderProfileInfo{0, fallback_rows});
-        return roles;
-    }
-
-    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
-        const int32_t token_max = profile_token_max_length(module, token_id_name, profile_idx);
-        if (token_max > 1) {
-            if (token_max > roles.prefill_max_length) {
-                roles.prefill_profile_idx = profile_idx;
-                roles.prefill_max_length = token_max;
-            }
-            continue;
-        }
-
-        roles.decode_profiles.push_back(DecoderProfileInfo{
-            profile_idx, profile_cache_rows(module, cache_k_name, profile_idx, fallback_rows)});
-    }
-
-    if (roles.decode_profiles.empty()) {
-        const int32_t fallback_profile =
-            roles.prefill_profile_idx >= 0 ? roles.prefill_profile_idx : 0;
-        roles.decode_profiles.push_back(DecoderProfileInfo{
-            fallback_profile,
-            profile_cache_rows(module, cache_k_name, fallback_profile, fallback_rows)});
-    }
-
-    return roles;
 }
 
 std::string format_bytes(std::uint64_t bytes) {
@@ -577,9 +484,13 @@ class DecoderPlugin final : public IPipelinePlugin {
                            std::unique_ptr<TrtModule>& prefill_module) {
         std::vector<LlamaTextGenerationPipeline::DecoderContext> decoders;
         decoders.reserve(profile_modules.modules.size());
-        for (const auto& profile : profile_roles.decode_profiles) {
-            if (profile.kv_rows > runtime_rows && !decoders.empty())
-                break;
+        std::vector<int32_t> available_rows;
+        available_rows.reserve(profile_roles.decode_profiles.size());
+        for (const auto& profile : profile_roles.decode_profiles)
+            available_rows.push_back(profile.kv_rows);
+        const auto selected_rows = select_decoder_profile_rows(available_rows, runtime_rows);
+        for (std::size_t index = 0; index < selected_rows.size(); ++index) {
+            const auto& profile = profile_roles.decode_profiles[index];
             auto* found = find_profile_module(profile_modules, profile.profile_idx);
             if (found == nullptr || !found->module)
                 continue;
@@ -592,6 +503,10 @@ class DecoderPlugin final : public IPipelinePlugin {
 
         if (decoders.empty())
             throw std::runtime_error("No decoder profile available for engine_plan");
+        if (decoders.back().kv_rows < runtime_rows) {
+            throw std::runtime_error(
+                "Loaded decoder profiles do not cover the selected runtime KV capacity");
+        }
         return decoders;
     }
 

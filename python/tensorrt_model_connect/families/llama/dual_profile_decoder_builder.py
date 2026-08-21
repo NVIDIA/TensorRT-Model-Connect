@@ -402,18 +402,21 @@ def build_dual_profile_decoder_engine(
                      cache_rows_max: int | None = None):
         prof = builder.create_optimization_profile()
         min_sq = opt_sq if fixed else 1
+        if multi_bucket_decode:
+            cmn = cache_rows_min if cache_rows_min is not None else max_cache_length
+            cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
+            cmx = cache_rows_max if cache_rows_max is not None else max_cache_length
+        else:
+            cmn = cop = cmx = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
         if not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
-                (min_sq, max_cache_length + min_sq),
-                (opt_sq, max_cache_length + opt_sq),
-                (max_sq, max_cache_length + max_sq))
+                (min_sq, cmn + min_sq),
+                (opt_sq, cop + opt_sq),
+                (max_sq, cmx + max_sq))
         if multi_bucket_decode:
-            cmn = cache_rows_min if cache_rows_min is not None else 1
-            cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
-            cmx = cache_rows_max if cache_rows_max is not None else max_cache_length
             for i in range(num_layers):
                 for name in (graph_ops.layer_tensor_name("cache_k", i),
                              graph_ops.layer_tensor_name("cache_v", i)):

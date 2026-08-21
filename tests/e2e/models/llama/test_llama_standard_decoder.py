@@ -136,6 +136,18 @@ class TestTensorNamingContract:
         assert "present_v_0" in outputs
         assert "present_v_1" in outputs
 
+        engine = _deserialize_engine(plan)
+        assert engine.get_tensor_profile_shape("attention_mask", 0) == [
+            (1, 5),
+            (4, 8),
+            (4, 8),
+        ]
+        assert engine.get_tensor_profile_shape("attention_mask", 1) == [
+            (1, 5),
+            (1, 5),
+            (1, 5),
+        ]
+
     def test_layernorm_gelu_fc(self):
         """LayerNorm + gelu_fc MLP, same I/O names."""
         plan = self._build_engine(
@@ -247,17 +259,26 @@ class TestTensorNamingContract:
             rope_theta=10000.0,
         )
         config.raw["dynamic_kv_cache"] = True
-        config.raw["_dynamic_kv_opt_length"] = 2
         weights = _make_weights(hidden, vocab, num_layers, attention_size, mlp_size)
 
         plan = build_standard_decoder_engine(config, weights, max_cache)
         engine = _deserialize_engine(plan)
 
         assert engine is not None
-        assert engine.num_optimization_profiles == 1
-        assert tuple(engine.get_tensor_shape("attention_mask")) == (1, -1)
+        assert engine.num_optimization_profiles == 2
+        assert tuple(engine.get_tensor_shape("attention_mask")) == (-1, -1)
         assert tuple(engine.get_tensor_shape("cache_k_0")) == (-1, attention_size)
         assert tuple(engine.get_tensor_shape("cache_v_0")) == (-1, attention_size)
+        assert engine.get_tensor_profile_shape("attention_mask", 0) == [
+            (1, 2),
+            (4, 8),
+            (4, 8),
+        ]
+        assert engine.get_tensor_profile_shape("attention_mask", 1) == [
+            (1, 2),
+            (1, 5),
+            (1, 5),
+        ]
 
     def test_dynamic_kv_cache_multiple_profiles(self):
         from tensorrt_model_connect.config import ModelConfig
@@ -286,19 +307,30 @@ class TestTensorNamingContract:
         engine = _deserialize_engine(plan)
 
         assert engine is not None
-        assert engine.num_optimization_profiles == 3
-        assert engine.get_tensor_profile_shape("attention_mask", 0) == [(1, 2), (1, 3), (1, 3)]
-        assert engine.get_tensor_profile_shape("attention_mask", 1) == [(1, 2), (1, 4), (1, 4)]
-        assert engine.get_tensor_profile_shape("attention_mask", 2) == [(1, 2), (1, 5), (1, 5)]
-        assert engine.get_tensor_profile_shape("cache_k_0", 0) == [(1, attention_size),
-                                                                    (2, attention_size),
-                                                                    (2, attention_size)]
-        assert engine.get_tensor_profile_shape("cache_k_0", 1) == [(1, attention_size),
-                                                                    (3, attention_size),
-                                                                    (3, attention_size)]
-        assert engine.get_tensor_profile_shape("cache_k_0", 2) == [(1, attention_size),
-                                                                    (4, attention_size),
-                                                                    (4, attention_size)]
+        assert engine.num_optimization_profiles == 4
+        assert engine.get_tensor_profile_shape("attention_mask", 0) == [
+            (1, 2),
+            (4, 8),
+            (4, 8),
+        ]
+        assert engine.get_tensor_profile_shape("cache_k_0", 0) == [
+            (1, attention_size),
+            (4, attention_size),
+            (4, attention_size),
+        ]
+        for profile, cache_rows in enumerate((2, 3, 4), start=1):
+            assert engine.get_tensor_profile_shape(
+                "attention_mask", profile
+            ) == [
+                (1, 2),
+                (1, cache_rows + 1),
+                (1, cache_rows + 1),
+            ]
+            assert engine.get_tensor_profile_shape("cache_k_0", profile) == [
+                (1, attention_size),
+                (cache_rows, attention_size),
+                (cache_rows, attention_size),
+            ]
 
     def test_dynamic_kv_cache_rejects_alibi(self):
         from tensorrt_model_connect.config import ModelConfig

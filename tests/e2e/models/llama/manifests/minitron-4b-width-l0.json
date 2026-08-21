@@ -1,12 +1,23 @@
 {
   "name": "minitron-4b-width-l0",
   "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
+  "hf_revision": "5205ef7d36204947e3b973cb8b147a816ccd7e6a",
   "bundle": "minitron-4b-width-l0.bundle",
   "family": "llama",
   "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
   "max_cache_length": 256,
+  "build_cli_args": [
+    {
+      "flag": "--dynamic-kv-cache",
+      "value": true
+    },
+    {
+      "flag": "--dynamic-kv-profile-rows",
+      "value": "256,131072"
+    }
+  ],
   "build_args": {
     "decoder_engine_layout": "dual_profile"
   },

@@ -36,14 +36,21 @@ class NativeKvModuleStub final : public ITrtModule {
     NativeKvModuleStub(cudaStream_t stream, int32_t layers, int32_t capacity, int32_t kv_heads,
                        int32_t head_dim, DType dtype, bool native = true,
                        std::shared_ptr<NativeKvTrace> trace = nullptr, int32_t profile_limit = 4,
-                       int32_t vocab_size = 16)
-        : stream_(stream), native_(native), trace_(std::move(trace)), vocab_size_(vocab_size) {
+                       int32_t vocab_size = 16, bool dynamic_legacy_cache = false,
+                       std::vector<int32_t> dynamic_profile_rows = {},
+                       std::vector<int32_t> token_profile_max_lengths = {})
+        : stream_(stream), native_(native), trace_(std::move(trace)), vocab_size_(vocab_size),
+          dynamic_legacy_cache_(dynamic_legacy_cache), dynamic_cache_width_(kv_heads * head_dim),
+          dynamic_profile_rows_(std::move(dynamic_profile_rows)),
+          token_profile_max_lengths_(std::move(token_profile_max_lengths)) {
+        if (dynamic_legacy_cache_ && dynamic_profile_rows_.empty())
+            dynamic_profile_rows_.push_back(capacity);
         if (native_) {
             add("cache_write_indices", {1}, DType::kInt32, true);
             add("key_value_lengths", {1}, DType::kInt32, true);
         }
         add("position_id", {1}, DType::kInt32, true);
-        if (trace_) {
+        if (trace_ || !token_profile_max_lengths_.empty()) {
             add("token_id", {profile_limit}, DType::kInt32, true);
             add("logits", {profile_limit, vocab_size}, DType::kFloat32, false);
         }
@@ -99,11 +106,29 @@ class NativeKvModuleStub final : public ITrtModule {
         const auto it = tensors_.find(name);
         return it == tensors_.end() ? std::vector<int64_t>{} : it->second.shape;
     }
-    std::vector<int64_t> input_profile_shape(const std::string& name, int32_t,
-                                             ProfileShapeSelector) const override {
+    std::vector<int64_t> input_profile_shape(const std::string& name, int32_t profile_idx,
+                                             ProfileShapeSelector selector) const override {
+        if (name == "token_id" && !token_profile_max_lengths_.empty()) {
+            const int32_t tokens =
+                selector == ProfileShapeSelector::kMin
+                    ? 1
+                    : token_profile_max_lengths_.at(static_cast<std::size_t>(profile_idx));
+            return {tokens};
+        }
+        if (dynamic_legacy_cache_ && name.rfind("cache_", 0) == 0) {
+            const int32_t rows =
+                selector == ProfileShapeSelector::kMin
+                    ? 1
+                    : dynamic_profile_rows_.at(static_cast<std::size_t>(profile_idx));
+            return {rows, dynamic_cache_width_};
+        }
         return tensor_shape(name);
     }
-    int32_t optimization_profile_count() const override { return 1; }
+    int32_t optimization_profile_count() const override {
+        if (!token_profile_max_lengths_.empty())
+            return static_cast<int32_t>(token_profile_max_lengths_.size());
+        return dynamic_legacy_cache_ ? static_cast<int32_t>(dynamic_profile_rows_.size()) : 1;
+    }
     void* device_ptr(const std::string& name) const override {
         const auto it = bindings_.find(name);
         return it == bindings_.end() ? nullptr : it->second;
@@ -115,10 +140,21 @@ class NativeKvModuleStub final : public ITrtModule {
         if (native_ && name.rfind("cache_", 0) == 0)
             bindings_["present_" + name.substr(6)] = ptr;
     }
+    void bind_external(const std::string& name, void* ptr,
+                       const std::vector<int64_t>& shape) override {
+        bind_external(name, ptr);
+        binding_shapes_[name] = shape;
+    }
+    std::vector<int64_t> bound_shape(const std::string& name) const {
+        const auto it = binding_shapes_.find(name);
+        return it == binding_shapes_.end() ? std::vector<int64_t>{} : it->second;
+    }
     int32_t input_rank(const std::string& name) const override {
         return has_input(name) ? static_cast<int32_t>(tensor_shape(name).size()) : 0;
     }
-    bool input_is_dynamic(const std::string&) const override { return false; }
+    bool input_is_dynamic(const std::string& name) const override {
+        return dynamic_legacy_cache_ && name.rfind("cache_", 0) == 0;
+    }
     bool ok() const override { return stream_ != nullptr; }
     void keep_alive(std::shared_ptr<void> value) override {
         keep_alive_.push_back(std::move(value));
@@ -150,9 +186,14 @@ class NativeKvModuleStub final : public ITrtModule {
     bool native_;
     std::shared_ptr<NativeKvTrace> trace_;
     int32_t vocab_size_;
+    bool dynamic_legacy_cache_;
+    int32_t dynamic_cache_width_;
+    std::vector<int32_t> dynamic_profile_rows_;
+    std::vector<int32_t> token_profile_max_lengths_;
     std::vector<float> logits_;
     std::unordered_map<std::string, Entry> tensors_;
     std::unordered_map<std::string, void*> bindings_;
+    std::unordered_map<std::string, std::vector<int64_t>> binding_shapes_;
     std::vector<std::shared_ptr<void>> keep_alive_;
 };
 

@@ -122,18 +122,24 @@ def build_standard_decoder_engine(
     #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
-    #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
     #
     # ``TRTMC_NO_DUAL_PROFILE=1`` is an internal escape hatch (perf A/B,
     # bisects against the legacy graph). It is *not* intended as a
     # supported user-facing flag.
     requested_fp32_layers = tuple(config.raw.get("_fp32_layers", ()))
+    dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
+    if dynamic_kv_cache and position_type == "alibi":
+        raise ValueError("dynamic_kv_cache is not supported for ALiBi decoder builds")
+    dynamic_kv_profile_rows = (
+        config.raw.get("_dynamic_kv_profile_rows") if dynamic_kv_cache else None
+    )
+    if dynamic_kv_cache and not dynamic_kv_profile_rows:
+        dynamic_kv_profile_rows = [max_cache_length]
     _dual_profile_disabled_for = (
         embed_input
         or debug_layer_outputs
         or hidden_state_output
         or bool(requested_fp32_layers)
-        or bool(config.raw.get("dynamic_kv_cache", False))
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
     if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
@@ -155,6 +161,7 @@ def build_standard_decoder_engine(
             scale_attn_weights=scale_attn_weights,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
+            dynamic_kv_profile_rows=dynamic_kv_profile_rows,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
 
@@ -179,7 +186,6 @@ def build_standard_decoder_engine(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
-    dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
     dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
     dynamic_kv_opt_rows = max(1, min(dynamic_kv_opt_rows, max_cache_length))
     raw_profile_rows = config.raw.get("_dynamic_kv_profile_rows")

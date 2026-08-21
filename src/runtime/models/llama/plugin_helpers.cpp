@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -72,6 +73,16 @@ struct TokenizerSpecialFrame {
 
 using TokenizerFactory = std::unique_ptr<ITokenizer> (*)(const char*, std::size_t, bool);
 
+int32_t cache_rows_from_shape(const std::vector<int64_t>& shape) {
+    const std::size_t row_index = shape.size() == 4 ? 2 : 0;
+    if (shape.empty() || row_index >= shape.size())
+        return -1;
+    const int64_t rows = shape[row_index];
+    if (rows <= 0 || rows > std::numeric_limits<int32_t>::max())
+        return -1;
+    return static_cast<int32_t>(rows);
+}
+
 } // namespace
 
 void log_trt_load_timing(const char* label, double load_deserialize_ms, std::size_t plan_bytes) {
@@ -80,6 +91,111 @@ void log_trt_load_timing(const char* label, double load_deserialize_ms, std::siz
          << (label ? label : "engine") << "\" load_deserialize_ms=" << load_deserialize_ms
          << " plan_bytes=" << plan_bytes;
     std::cerr << line.str() << '\n';
+}
+
+std::vector<int32_t> select_decoder_profile_rows(const std::vector<int32_t>& ordered_profile_rows,
+                                                 int32_t runtime_rows) {
+    if (runtime_rows <= 0 || ordered_profile_rows.empty()) {
+        throw std::invalid_argument(
+            "Decoder profile selection requires positive runtime rows and profiles");
+    }
+    int32_t previous_rows = 0;
+    for (const int32_t profile_rows : ordered_profile_rows) {
+        if (profile_rows <= 0 || profile_rows < previous_rows) {
+            throw std::invalid_argument("Decoder KV profile rows must be positive and ordered");
+        }
+        previous_rows = profile_rows;
+    }
+
+    std::vector<int32_t> selected;
+    selected.reserve(ordered_profile_rows.size());
+    for (const int32_t profile_rows : ordered_profile_rows) {
+        selected.push_back(profile_rows);
+        if (profile_rows >= runtime_rows)
+            break;
+    }
+    if (selected.back() < runtime_rows) {
+        throw std::runtime_error("No decoder KV profile can cover the selected runtime capacity");
+    }
+    return selected;
+}
+
+bool cache_input_supports_runtime_rows(const TrtModule& module, const std::string& tensor_name) {
+    if (!module.input_is_dynamic(tensor_name))
+        return false;
+    const int32_t num_profiles = module.optimization_profile_count();
+    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
+        const auto min_shape =
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMin);
+        const auto max_shape =
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax);
+        if (!min_shape.empty() && !max_shape.empty() && min_shape.front() > 0 &&
+            max_shape.front() > min_shape.front()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int32_t decoder_profile_cache_rows(const TrtModule& module, const std::string& tensor_name,
+                                   int32_t profile_idx, int32_t fallback_rows) {
+    if (!module.input_is_dynamic(tensor_name)) {
+        const int32_t static_rows = cache_rows_from_shape(module.tensor_shape(tensor_name));
+        if (static_rows > 0)
+            return static_rows;
+    }
+    if (profile_idx >= 0 && profile_idx < module.optimization_profile_count()) {
+        const int32_t max_rows = cache_rows_from_shape(
+            module.input_profile_shape(tensor_name, profile_idx, ProfileShapeSelector::kMax));
+        if (max_rows > 0)
+            return max_rows;
+    }
+    return fallback_rows;
+}
+
+DecoderProfileRoles detect_decoder_profile_roles(const TrtModule& module,
+                                                 const std::string& token_id_name,
+                                                 const std::string& cache_k_name,
+                                                 int32_t fallback_rows) {
+    const auto token_max_length = [&](int32_t profile_idx) -> int32_t {
+        const auto shape =
+            module.input_profile_shape(token_id_name, profile_idx, ProfileShapeSelector::kMax);
+        if (shape.empty() || shape.front() <= 0 ||
+            shape.front() > std::numeric_limits<int32_t>::max()) {
+            return -1;
+        }
+        return static_cast<int32_t>(shape.front());
+    };
+
+    DecoderProfileRoles roles;
+    const int32_t num_profiles = module.optimization_profile_count();
+    if (num_profiles <= 0) {
+        roles.decode_profiles.push_back(DecoderProfileInfo{0, fallback_rows});
+        return roles;
+    }
+
+    for (int32_t profile_idx = 0; profile_idx < num_profiles; ++profile_idx) {
+        const int32_t token_max = token_max_length(profile_idx);
+        if (token_max > 1) {
+            if (token_max > roles.prefill_max_length) {
+                roles.prefill_profile_idx = profile_idx;
+                roles.prefill_max_length = token_max;
+            }
+            continue;
+        }
+        roles.decode_profiles.push_back(DecoderProfileInfo{
+            profile_idx,
+            decoder_profile_cache_rows(module, cache_k_name, profile_idx, fallback_rows)});
+    }
+
+    if (roles.decode_profiles.empty()) {
+        const int32_t fallback_profile =
+            roles.prefill_profile_idx >= 0 ? roles.prefill_profile_idx : 0;
+        roles.decode_profiles.push_back(DecoderProfileInfo{
+            fallback_profile,
+            decoder_profile_cache_rows(module, cache_k_name, fallback_profile, fallback_rows)});
+    }
+    return roles;
 }
 
 // Tokenizer helpers.

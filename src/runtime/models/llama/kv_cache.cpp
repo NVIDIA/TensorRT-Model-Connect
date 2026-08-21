@@ -402,10 +402,24 @@ void LlamaKvCache::bind_cache_inputs(TrtModule& module) {
         bind_native_cache(module);
         return;
     }
+    // A dual-profile prefill engine exposes dynamic cache rows even though it
+    // consumes the complete runtime allocation. Bind the runtime-sized view,
+    // which can be smaller than the engine profile's opt/max shape after a
+    // --kv-cache-size override.
+    dynamic_binding_enabled_ =
+        !names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front());
+    bound_cache_rows_ = 0;
+    const std::vector<int64_t> cache_shape{max_length_, kv_dim_};
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        module.bind_external(names_.cache_k[li], cache_k_[li].data());
-        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        if (dynamic_binding_enabled_) {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
+            module.bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
+            bound_cache_rows_ = max_length_;
+        } else {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data());
+            module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        }
     }
 }
 

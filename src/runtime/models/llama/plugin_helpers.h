@@ -61,6 +61,17 @@ struct DualProfileModules {
     std::unique_ptr<ITrtModule> decode;  // Sq=1 profile, or the only profile if single-profile
 };
 
+struct DecoderProfileInfo {
+    int32_t profile_idx{0};
+    int32_t kv_rows{0};
+};
+
+struct DecoderProfileRoles {
+    int32_t prefill_profile_idx{-1};
+    int32_t prefill_max_length{0};
+    std::vector<DecoderProfileInfo> decode_profiles;
+};
+
 // Load an engine from a serialized plan via the backend and create two
 // execution contexts — one per optimization profile — sharing the engine.
 // When the engine has fewer than 2 profiles, `prefill` is left null and
@@ -96,6 +107,27 @@ int32_t compute_kv_dim(const BaseConfig& cfg);
 // Convert the BaseConfig precision string ("fp16", "bf16", "fp32") to a DType
 // for use as KV cache element type.
 DType cache_dtype_from_precision(const std::string& precision);
+
+// Return whether the engine input can be rebound to a runtime-selected row
+// count. Tensor shape reports may already contain the active/opt shape, so
+// dynamicity must come from the module's declared input metadata.
+bool cache_input_supports_runtime_rows(const TrtModule& module, const std::string& tensor_name);
+
+// Read a decode profile's KV row ceiling. Dynamic inputs must use that
+// profile's kMAX metadata rather than tensor_shape(), which may report the
+// currently active positive shape.
+int32_t decoder_profile_cache_rows(const TrtModule& module, const std::string& tensor_name,
+                                   int32_t profile_idx, int32_t fallback_rows);
+
+DecoderProfileRoles detect_decoder_profile_roles(const TrtModule& module,
+                                                 const std::string& token_id_name,
+                                                 const std::string& cache_k_name,
+                                                 int32_t fallback_rows);
+
+// Keep every decode bucket below the requested runtime capacity plus the
+// first ceiling bucket that can execute that capacity.
+std::vector<int32_t> select_decoder_profile_rows(const std::vector<int32_t>& ordered_profile_rows,
+                                                 int32_t runtime_rows);
 
 // Reinterpret a raw char section as a vector of floats.
 std::vector<float> section_to_floats(const std::vector<char>* sec);

@@ -324,6 +324,52 @@ def test_plugin_falls_back_for_explicit_legacy_build_options(monkeypatch):
     assert plugin_module.plugin.get_bundle_config_overrides(config) is None
 
 
+def test_dynamic_kv_dual_profile_dispatches_bucket_rows(monkeypatch):
+    pytest.importorskip("tensorrt")
+    builder_module = importlib.import_module(
+        "tensorrt_model_connect.families.llama.standard_decoder_builder"
+    )
+    config = _small_config(role="dual_profile")
+    config.raw["dynamic_kv_cache"] = True
+    config.raw["_dynamic_kv_profile_rows"] = [256, 131072]
+    captured: dict[str, object] = {}
+
+    def _build(*args, **kwargs):
+        captured.update(args=args, kwargs=kwargs)
+        return b"dynamic-dual-profile-plan"
+
+    monkeypatch.setattr(
+        builder_module,
+        "build_dual_profile_decoder_engine",
+        _build,
+    )
+
+    plan = builder_module.build_standard_decoder_engine(
+        config,
+        _weights(config),
+        131072,
+        precision="fp16",
+    )
+
+    assert plan == b"dynamic-dual-profile-plan"
+    assert captured["args"][2] == 131072
+    assert captured["kwargs"]["precision"] == "fp16"
+    assert captured["kwargs"]["dynamic_kv_profile_rows"] == [256, 131072]
+    assert captured["kwargs"]["profile_mode"] == "dual_profile"
+
+    config.raw.pop("_dynamic_kv_profile_rows")
+    captured.clear()
+    plan = builder_module.build_standard_decoder_engine(
+        config,
+        _weights(config),
+        131072,
+        precision="fp16",
+    )
+
+    assert plan == b"dynamic-dual-profile-plan"
+    assert captured["kwargs"]["dynamic_kv_profile_rows"] == [131072]
+
+
 def test_plugin_falls_back_outside_the_native_architecture_contract(
     monkeypatch,
 ):

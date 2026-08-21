@@ -6,6 +6,7 @@
 // Unit tests for runtime plugin helper parsing.
 // Focus: tokenizer_add_special_tokens detection from bundle config.
 
+#include "../../native_kv_cache_contract_test.h"
 #include "runtime/models/llama/plugin_helpers.h"
 
 #include <iostream>
@@ -76,6 +77,45 @@ static void test_bool_true_parsed() {
     auto bundle = make_bundle_with_config(R"({"tokenizer_add_special_tokens":true})");
     check(trtmc::detect_add_special_tokens(bundle) == true,
           "detect_add_special_tokens: bool true parsed as true");
+}
+
+static void test_decoder_profile_selection_keeps_runtime_ceiling() {
+    check_ids(trtmc::select_decoder_profile_rows({256, 131072}, 1000), {256, 131072},
+              "decoder profile selection keeps first runtime ceiling");
+    check_ids(trtmc::select_decoder_profile_rows({256, 131072}, 256), {256},
+              "decoder profile selection stops at exact runtime capacity");
+    bool rejected = false;
+    try {
+        (void)trtmc::select_decoder_profile_rows({256}, 131072);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "decoder profile selection rejects an undersized largest bucket");
+}
+
+static void test_dynamic_profile_rows_use_profile_metadata() {
+    trtmc::test::NativeKvModuleStub module(nullptr, 1, 131072, 1, 2, trtmc::DType::kFloat16,
+                                           /*native=*/false, nullptr, 4, 16,
+                                           /*dynamic_legacy_cache=*/true, {131072, 256, 131072},
+                                           {131072, 1, 1});
+
+    check(module.tensor_shape("cache_k_0") == std::vector<int64_t>{131072, 2},
+          "dynamic module reports a positive active cache shape");
+    check(trtmc::cache_input_supports_runtime_rows(module, "cache_k_0"),
+          "dynamic input metadata enables runtime rows despite positive active shape");
+    check(trtmc::decoder_profile_cache_rows(module, "cache_k_0", 1, 131072) == 256,
+          "first dynamic decode profile uses its own row ceiling");
+    check(trtmc::decoder_profile_cache_rows(module, "cache_k_0", 2, 131072) == 131072,
+          "second dynamic decode profile uses its own row ceiling");
+
+    const auto roles = trtmc::detect_decoder_profile_roles(module, "token_id", "cache_k_0", 131072);
+    check(roles.prefill_profile_idx == 0 && roles.prefill_max_length == 131072,
+          "role detection keeps the dynamic prefill profile");
+    check(roles.decode_profiles.size() == 2 && roles.decode_profiles[0].profile_idx == 1 &&
+              roles.decode_profiles[0].kv_rows == 256 &&
+              roles.decode_profiles[1].profile_idx == 2 &&
+              roles.decode_profiles[1].kv_rows == 131072,
+          "role detection preserves per-profile dynamic KV ceilings");
 }
 
 static void test_exact_special_frame_overrides_native_unigram_fallback() {
@@ -152,6 +192,8 @@ int main() {
     test_integer_true_parsed();
     test_bool_false_parsed();
     test_bool_true_parsed();
+    test_decoder_profile_selection_keeps_runtime_ceiling();
+    test_dynamic_profile_rows_use_profile_metadata();
     test_exact_special_frame_overrides_native_unigram_fallback();
     test_exact_special_frame_respects_add_special_false();
 

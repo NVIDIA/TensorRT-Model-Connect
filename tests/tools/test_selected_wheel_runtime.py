@@ -13,10 +13,13 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tools.ci.context import CiContext
 from tools.ci import model_proof_inner as model_proof_inner_module
 from tools.ci.model_proof import ModelProofRequest, ModelProofRunner
 from tools.ci.model_proof_inner import ModelProofInnerPipeline
+from tools.ci.process import CiError
 from tools.ci.quality import UnitTestRunner
 from tools.ci.selected_wheel import SelectedWheelRuntime
 
@@ -366,6 +369,8 @@ def test_model_proof_stages_wheel_model_dso_but_keeps_source_cpp_tests(
     packaged = target / "tensorrt_model_connect/bin" / runtime_library
     packaged.parent.mkdir(parents=True)
     packaged.write_bytes(b"\x7fELFwheel")
+    packaged_core = packaged.parent / "libtrtmc_core.so"
+    packaged_core.write_bytes(b"\x7fELFwheel-core")
     runtime = SelectedWheelRuntime(
         wheel=tmp_path / "wheel.whl",
         site_packages=target,
@@ -404,6 +409,22 @@ def test_model_proof_stages_wheel_model_dso_but_keeps_source_cpp_tests(
     assert facts["runtime_library_sha256"] == hashlib.sha256(
         packaged.read_bytes()
     ).hexdigest()
+    staged_core = staged.parent / packaged_core.name
+    core_digest = hashlib.sha256(packaged_core.read_bytes()).hexdigest()
+    assert staged_core.is_file() and not staged_core.is_symlink()
+    assert staged_core.read_bytes() == packaged_core.read_bytes()
+    assert staged_core.resolve().is_relative_to(staged.parent.resolve())
+    assert facts["runtime_core_library"] == packaged_core.name
+    assert facts["runtime_core_library_source"] == "selected-wheel"
+    assert facts["runtime_core_library_sha256"] == core_digest
+    assert facts["staged_runtime_core_library_sha256"] == core_digest
+
+    outside_core = tmp_path / "outside-libtrtmc_core.so"
+    outside_core.write_bytes(b"\x7fELFoutside")
+    packaged_core.unlink()
+    packaged_core.symlink_to(outside_core)
+    with pytest.raises(CiError, match="selected wheel core DSO is missing or unsafe"):
+        pipeline._validate_dso("fixture", runtime_library)
 
     calls: list[tuple[list[object], dict[str, str]]] = []
     monkeypatch.setattr(

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from tests.e2e_harness.manifest_loader import load_manifest
+from tests.e2e_harness.orchestrator import _append_declared_build_cli_args
 
 
 def test_falcon3_split_decoder_build_reserves_an_exclusive_gpu() -> None:
@@ -43,9 +44,26 @@ def test_minitron_width_release_profiles_use_qualified_runtime_contract() -> Non
         case = load_manifest(manifest_path)
 
         assert manifest["precision"] == "fp16", manifest_name
+        assert (
+            case.hf_revision == "5205ef7d36204947e3b973cb8b147a816ccd7e6a"
+        ), manifest_name
         assert manifest["build_args"] == {
             "decoder_engine_layout": "dual_profile"
         }, manifest_name
+        assert case.metadata["build_cli_args"] == [
+            {"flag": "--dynamic-kv-cache", "value": True},
+            {
+                "flag": "--dynamic-kv-profile-rows",
+                "value": "256,131072",
+            },
+        ], manifest_name
+        build_cli_args: list[str] = []
+        _append_declared_build_cli_args(build_cli_args, case)
+        assert build_cli_args == [
+            "--dynamic-kv-cache",
+            "--dynamic-kv-profile-rows",
+            "256,131072",
+        ], manifest_name
         if expected_cache_length is None:
             assert "max_cache_length" not in manifest, manifest_name
             assert "max_cache_length" not in case.inputs, manifest_name

@@ -619,6 +619,7 @@ class ModelProofInnerPipeline:
             raise CiError(f"model DSO links a sibling model DSO: {sorted(dependencies)}")
         scratch = dsos[0]
         runtime_dso = scratch
+        runtime_core: Path | None = None
         runtime_library_source = "scratch-build"
         if self.selected_wheel:
             native_dir = (
@@ -634,6 +635,13 @@ class ModelProofInnerPipeline:
                 raise CiError(
                     f"selected wheel model DSO is missing or unsafe: {runtime_library}"
                 )
+            runtime_core = native_dir / "libtrtmc_core.so"
+            if (
+                runtime_core.is_symlink()
+                or not runtime_core.is_file()
+                or not runtime_core.resolve().is_relative_to(native_dir)
+            ):
+                raise CiError("selected wheel core DSO is missing or unsafe: libtrtmc_core.so")
             runtime_library_source = "selected-wheel"
 
         plugin_dir = self.work / "model-plugins" / runtime_model
@@ -642,6 +650,24 @@ class ModelProofInnerPipeline:
         shutil.copy2(runtime_dso, staged)
         if staged.read_bytes() != runtime_dso.read_bytes():
             raise CiError("staged plugin DSO does not byte-match its runtime source")
+        core_facts: dict[str, str] = {}
+        if runtime_core is not None:
+            staged_core = plugin_dir / runtime_core.name
+            shutil.copy2(runtime_core, staged_core)
+            if (
+                staged_core.is_symlink()
+                or not staged_core.is_file()
+                or not staged_core.resolve().is_relative_to(plugin_dir.resolve())
+                or staged_core.read_bytes() != runtime_core.read_bytes()
+            ):
+                raise CiError("staged core DSO does not byte-match its selected wheel source")
+            core_digest = hashlib.sha256(staged_core.read_bytes()).hexdigest()
+            core_facts = {
+                "runtime_core_library": runtime_core.name,
+                "runtime_core_library_sha256": core_digest,
+                "staged_runtime_core_library_sha256": core_digest,
+                "runtime_core_library_source": "selected-wheel",
+            }
         scratch_digest = hashlib.sha256(scratch.read_bytes()).hexdigest()
         digest = hashlib.sha256(staged.read_bytes()).hexdigest()
         for key, value in {
@@ -655,9 +681,12 @@ class ModelProofInnerPipeline:
             "model_dso_count": "1",
             "network": "disabled",
             "plugin_search": "strict",
+            **core_facts,
         }.items():
             self.status.fact(key, value)
-        self.status.step("dso_isolation", "passed", "exactly one DSO; no sibling model DT_NEEDED")
+        self.status.step(
+            "dso_isolation", "passed", "exactly one model DSO; no sibling model DT_NEEDED"
+        )
         return staged, scratch_digest, runtime_library_source
 
     def _run_cpp_tests(self, tests: list[str]) -> None:

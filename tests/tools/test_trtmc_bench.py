@@ -178,10 +178,29 @@ def test_benchmark_uses_qualified_minitron_width_precision(tmp_path: Path) -> No
     options = benchmark_builder._build_options(model, (case,))
 
     assert model.precision == "fp16"
+    assert model.hf_revision == "5205ef7d36204947e3b973cb8b147a816ccd7e6a"
     assert model.identity()["precision"] == "fp16"
     assert options["precision"] == "fp16"
     assert options["max_cache_length"] == 256
     assert options["decoder_engine_layout"] == "dual_profile"
+    assert options["extra_cli_args"] == [
+        "--dynamic-kv-cache",
+        "--dynamic-kv-profile-rows",
+        "256,131072",
+    ]
+    command = benchmark_builder._build_command(
+        model,
+        case.bundle_path,
+        options,
+        benchmark_builder._BuilderRuntime("11.2", "11.2", "11.2"),
+    )
+    assert command[-3:] == (
+        "--dynamic-kv-cache",
+        "--dynamic-kv-profile-rows",
+        "256,131072",
+    )
+    revision_index = command.index("--model-revision")
+    assert command[revision_index + 1] == model.hf_revision
 
 
 def test_operation_registry_declares_supported_task_semantics() -> None:
