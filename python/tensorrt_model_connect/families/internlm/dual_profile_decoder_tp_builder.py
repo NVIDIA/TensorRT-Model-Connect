@@ -300,7 +300,6 @@ def build_dual_profile_tp_decoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16

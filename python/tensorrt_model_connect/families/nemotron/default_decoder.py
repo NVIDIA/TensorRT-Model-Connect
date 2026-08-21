@@ -150,7 +150,7 @@ def build_standard_decoder_engine(
         dynamic_kv_profile_rows.sort()
     else:
         dynamic_kv_profile_rows = []
-    builder_context = create_builder_context(verbose=verbose, workspace_bytes=1 << 30)
+    builder_context = create_builder_context(verbose=verbose)
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config

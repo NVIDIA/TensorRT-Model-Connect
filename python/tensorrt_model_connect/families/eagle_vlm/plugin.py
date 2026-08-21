@@ -358,7 +358,6 @@ def _build_eagle_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     # --- Inputs ---
     # input_ids: [seq_length] token IDs (padded to max length)
@@ -677,7 +676,6 @@ def _build_siglip_vision_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     # Input: pixel_values [3, image_size, image_size]
     pixel_values = network.add_input(

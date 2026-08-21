@@ -68,7 +68,6 @@ def build_olmo2_prefill_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     token_id = network.add_input("token_id", trt.int32, (-1,))

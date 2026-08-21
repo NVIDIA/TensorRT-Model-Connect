@@ -183,7 +183,6 @@ def build_standard_decoder_engine(
 
     builder_context = create_builder_context(
         verbose=verbose,
-        workspace_bytes=1 << 30,
     )
     builder = builder_context.builder
     network = builder_context.network

@@ -15,6 +15,9 @@ from tests.tools.test_perf_matrix import (
 from tests.tools.test_trtmc_validate import (
     test_model_workload_catalog_covers_every_ready_model as _check_validation_coverage,
 )
+from tests.tools.test_workspace_policy import (
+    test_model_builders_do_not_impose_one_gib_workspace_limits as _check_workspace_policy,
+)
 
 
 def test_ready_models_have_validation_workloads() -> None:
@@ -31,3 +34,7 @@ def test_family_sources_remain_isolated() -> None:
 
 def test_repository_family_inventory_is_current() -> None:
     _check_family_inventory()
+
+
+def test_model_builders_use_tensorrt_default_workspace() -> None:
+    _check_workspace_policy()

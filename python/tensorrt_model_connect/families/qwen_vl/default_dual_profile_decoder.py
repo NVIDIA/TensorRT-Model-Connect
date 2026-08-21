@@ -154,7 +154,7 @@ def build_dual_profile_decoder_engine(
     precision: str = "fp16",
     opt_prefill_length: int = 64,
     max_prefill_length: int | None = None,
-    builder_workspace_bytes: int = 1 << 30,
+    builder_workspace_bytes: int | None = None,
     quant_ctx: "QuantContext | None" = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
@@ -186,7 +186,8 @@ def build_dual_profile_decoder_engine(
 
     ``opt_prefill_length`` and ``max_prefill_length`` bound the prefill
     optimization profile independently from the KV cache capacity.
-    ``builder_workspace_bytes`` controls TensorRT tactic workspace.
+    ``builder_workspace_bytes`` optionally caps TensorRT tactic workspace;
+    ``None`` preserves TensorRT's device default.
 
     ``profile_mode`` controls which optimization profiles are emitted:
 

@@ -212,7 +212,7 @@ def test_onnx_builder_success_and_plan_none_branches() -> None:
         plan = mod.build_vision_engine_from_onnx(b"good-onnx", verbose=True)
         assert plan == b"engine-plan"
         assert _FakeBuilder.last_instance.flags == 3
-        assert _FakeBuilder.last_instance.config.calls == [("workspace", 1 << 30)]
+        assert _FakeBuilder.last_instance.config.calls == []
 
         _FakeBuilder.plan_to_return = None
         with pytest.raises(RuntimeError, match="TensorRT vision engine build failed"):

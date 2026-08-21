@@ -58,21 +58,23 @@ def _decode_attention_backend(config: ModelConfig) -> str:
     return backend
 
 
-def _decoder_profile_options(config: ModelConfig) -> tuple[int, int | None, int]:
+def _decoder_profile_options(
+    config: ModelConfig,
+) -> tuple[int, int | None, int | None]:
     decoder_options = _decoder_build_options(config)
     max_prefill_length = int(decoder_options.get("max_prefill_length", 0))
     opt_prefill_length = int(decoder_options.get("opt_prefill_length", 64))
-    builder_workspace_gib = int(decoder_options.get("builder_workspace_gib", 1))
+    builder_workspace_gib = int(decoder_options.get("builder_workspace_gib", 0))
     if max_prefill_length < 0:
         raise ValueError("qwen_vl_decoder.max_prefill_length must be >= 0")
     if opt_prefill_length <= 0:
         raise ValueError("qwen_vl_decoder.opt_prefill_length must be > 0")
-    if builder_workspace_gib <= 0:
-        raise ValueError("qwen_vl_decoder.builder_workspace_gib must be > 0")
+    if builder_workspace_gib < 0:
+        raise ValueError("qwen_vl_decoder.builder_workspace_gib must be >= 0")
     return (
         opt_prefill_length,
         max_prefill_length or None,
-        builder_workspace_gib << 30,
+        builder_workspace_gib << 30 if builder_workspace_gib else None,
     )
 
 

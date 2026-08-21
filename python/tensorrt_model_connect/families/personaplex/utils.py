@@ -63,7 +63,7 @@ BuilderContextFactory = Callable[[], BuilderContext]
 def create_builder_context(
     *,
     verbose: bool,
-    workspace_bytes: int,
+    workspace_bytes: int | None = None,
     strongly_typed: bool = True,
     explicit_batch: bool = False,
     disable_tf32: bool = False,
@@ -85,8 +85,9 @@ def create_builder_context(
         )
         context.network = context.builder.create_network(flags)
         context.config = context.builder.create_builder_config()
-        context.config.set_memory_pool_limit(
-            trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+        if workspace_bytes is not None:
+            context.config.set_memory_pool_limit(
+                trt.MemoryPoolType.WORKSPACE, workspace_bytes)
         if disable_tf32:
             context.config.clear_flag(trt.BuilderFlag.TF32)
         if builder_optimization_level is not None:
@@ -101,7 +102,7 @@ def create_builder_context(
 
 def with_builder_context(
     *,
-    workspace_bytes: int,
+    workspace_bytes: int | None = None,
     strongly_typed: bool = True,
     explicit_batch: bool = False,
     disable_tf32: bool = False,
