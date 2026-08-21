@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -126,6 +126,8 @@ if "/collaborators/" in endpoint:
     print(os.environ["FAKE_ACTOR_ROLE"])
 elif "/pulls/" in endpoint:
     print(os.environ["FAKE_PULL_JSON"])
+elif "/commits/" in endpoint and "/check-runs" in endpoint:
+    print(os.environ.get("FAKE_EXISTING_REQUIRED", ""))
 elif "/actions/workflows/community-cpu.yml/dispatches" in endpoint:
     input_path = arguments[arguments.index("--input") + 1]
     Path(os.environ["FAKE_DISPATCH_CAPTURE"]).write_text(
@@ -161,14 +163,14 @@ def _public_ci_environment(tmp_path: Path) -> dict[str, str]:
             "repo": {"full_name": "NVIDIA/TensorRT-Model-Connect"},
         },
         "head": {"sha": head_sha},
+        "user": {"login": "pr-author"},
         "merge_commit_sha": merge_sha,
     }
     environment = os.environ.copy()
     environment.update(
         {
-            "ACTOR": "trusted-maintainer",
+            "ACTOR": "pr-author",
             "BASE_SHA": base_sha,
-            "EVENT_HEAD_SHA": head_sha,
             "FAKE_ACTOR_ROLE": "maintain",
             "FAKE_CHECK_CAPTURE": str(tmp_path / "checks.jsonl"),
             "FAKE_DISPATCH_CAPTURE": str(tmp_path / "dispatch.json"),
@@ -274,37 +276,41 @@ def test_pre_push_collects_source_and_unit_failures(
     assert "test_config_cli_support failed" in str(error.value)
 
 
-def test_public_cpu_request_is_a_trusted_label_only_dispatcher() -> None:
+def test_public_cpu_request_is_a_pr_author_comment_dispatcher() -> None:
     path = REPO_ROOT / ".github" / "workflows" / "community-cpu-request.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     source = path.read_text(encoding="utf-8")
 
     assert workflow["permissions"] == {}
-    assert "pull_request_target:" in source
-    assert "types: [labeled]" in source
-    assert "github.event.label.name == 'run-ci'" in source
+    assert "issue_comment:" in source
+    assert "types: [created]" in source
+    assert "github.event.issue.pull_request != null" in source
+    assert "github.event.comment.body == '/run-ci'" in source
     assert "github.ref == 'refs/heads/main'" in source
+    assert 'if [ "$ACTOR" != "$pr_author" ]; then' in source
     assert "maintain|admin)" in source
-    assert "Only actors with maintain or admin access" in source
+    assert "Only the PR author or a maintainer/admin" in source
     assert "actions/workflows/community-cpu.yml/dispatches" in source
     assert 'ref: "main"' in source
     for input_name in ("pr_number", "base_sha", "head_sha", "merge_sha"):
         assert f"{input_name}: ${input_name}" in source
-    assert "/labels/run-ci" in source
-    assert "always()" in source
+    assert "/labels/run-ci" not in source
+    assert "pull_request_target" not in source
     assert "actions/checkout@" not in source
     assert "secrets." not in source
     assert "self-hosted" not in source
 
     authorize = workflow["jobs"]["authorize"]
+    assert authorize["runs-on"] == "ubuntu-24.04"
     assert authorize["permissions"] == {
         "actions": "write",
+        "checks": "read",
         "contents": "read",
-        "pull-requests": "write",
+        "pull-requests": "read",
     }
 
 
-def test_public_cpu_request_dispatches_the_exact_labeled_snapshot(
+def test_public_cpu_request_dispatches_the_exact_commented_snapshot(
     tmp_path: Path,
 ) -> None:
     environment = _public_ci_environment(tmp_path)
@@ -338,11 +344,12 @@ def test_public_cpu_request_dispatches_the_exact_labeled_snapshot(
     }
 
 
-def test_public_cpu_request_rejects_a_new_push_after_the_label(
+def test_public_cpu_request_rejects_an_unrelated_commenter(
     tmp_path: Path,
 ) -> None:
     environment = _public_ci_environment(tmp_path)
-    environment["EVENT_HEAD_SHA"] = "d" * 40
+    environment["ACTOR"] = "unrelated-user"
+    environment["FAKE_ACTOR_ROLE"] = "read"
     result = subprocess.run(
         [
             "bash",
@@ -361,7 +368,62 @@ def test_public_cpu_request_rejects_a_new_push_after_the_label(
     )
 
     assert result.returncode != 0
-    assert "superseded by a newer PR head" in result.stdout + result.stderr
+    assert "Only the PR author or a maintainer/admin" in result.stdout + result.stderr
+    assert not (tmp_path / "dispatch.json").exists()
+
+
+def test_public_cpu_request_allows_a_maintainer_to_help(
+    tmp_path: Path,
+) -> None:
+    environment = _public_ci_environment(tmp_path)
+    environment["ACTOR"] = "trusted-maintainer"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu-request.yml",
+                "authorize",
+                "Authorize and dispatch the current PR merge",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "dispatch.json").is_file()
+
+
+@pytest.mark.parametrize("existing", ["queued", "in_progress", "success"])
+def test_public_cpu_request_deduplicates_the_current_merge(
+    tmp_path: Path,
+    existing: str,
+) -> None:
+    environment = _public_ci_environment(tmp_path)
+    environment["FAKE_EXISTING_REQUIRED"] = existing
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu-request.yml",
+                "authorize",
+                "Authorize and dispatch the current PR merge",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"already {existing}" in result.stdout
     assert not (tmp_path / "dispatch.json").exists()
 
 
@@ -461,7 +523,7 @@ def test_public_workflow_supports_safe_transition_and_exact_merge_checks() -> No
     assert workflow["permissions"] == {}
     assert "workflow_dispatch:" in source
     assert "\n  pull_request:" in source
-    assert "Remove pull_request after the run-ci broker is available on main" in source
+    assert "Remove pull_request after the /run-ci broker is available on main" in source
     assert "pull_request_target" not in source
     assert "self-hosted" not in source
     assert "secrets." not in source
@@ -487,6 +549,7 @@ def test_public_workflow_supports_safe_transition_and_exact_merge_checks() -> No
         "contents": "read",
         "pull-requests": "read",
     }
+    assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     for job_name in ("source-quality", "ownership-impact", "unit"):
         assert jobs[job_name]["permissions"] == {"contents": "read"}
     assert jobs["unit"]["needs"] == ["initialize", "ownership-impact"]

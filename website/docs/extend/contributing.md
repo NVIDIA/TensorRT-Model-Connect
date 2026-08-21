@@ -128,17 +128,23 @@ performance, and release qualification are different evidence tiers.
 
 ## 6. Read public CPU validation
 
-A maintainer starts contributor-visible, GitHub-hosted `Community CPU`
-validation by applying the one-shot `run-ci` label after reviewing the proposed
-workflow and tooling changes. The trusted request workflow consumes the label,
-captures the exact PR merge revision, and dispatches source quality, ownership
-and impact, and source-only C++ and Python units from the workflow on `main`.
+The pull-request author starts contributor-visible, GitHub-hosted `Community
+CPU` validation by adding this exact comment to the pull request:
+
+```text
+/run-ci
+```
+
+The trusted request workflow runs from `main`, captures the exact PR merge
+revision, and dispatches source quality, ownership and impact, and source-only
+C++ and Python units. A maintainer or admin may submit the same comment on the
+author's behalf.
 
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs. Their sanitized checks and detailed public logs are
 published on the exact merge revision. Fix any failures and wait for
-`Community CPU / Required` to pass. If you push another commit, ask the
-maintainer to apply `run-ci` again.
+`Community CPU / Required` to pass. If you push another commit, comment
+`/run-ci` again after the new head is ready.
 
 ## 7. Coordinate protected repository CI
 
@@ -155,7 +161,7 @@ After public CPU validation passes, the maintainer verifies the PR's
 label, verifies the current exact-merge public CPU result, captures the
 immutable PR head SHA, and dispatches private premerge validation for that exact
 revision. The public result is contributor feedback, not an authorization
-token; each maintainer-owned label remains a separate security boundary.
+token; `run-internal-ci` remains the protected-resource security boundary.
 
 Wait for the `trtmc/premerge/required` status on the same head SHA to complete
 successfully. If the head changes intentionally, finish the update and local

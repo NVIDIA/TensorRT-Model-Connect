@@ -4,18 +4,16 @@
 name: Community CPU Request
 
 run-name: >-
-  PR #${{ github.event.pull_request.number }} · public CPU request
+  PR #${{ github.event.issue.number }} · public CPU request
 
 on:
-  pull_request_target:
-    branches:
-      - main
-    types: [labeled]
+  issue_comment:
+    types: [created]
 
 permissions: {}
 
 concurrency:
-  group: community-cpu-request-${{ github.event.pull_request.number }}
+  group: community-cpu-request-${{ github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
@@ -24,13 +22,15 @@ jobs:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
       github.ref == 'refs/heads/main' &&
-      github.event.label.name == 'run-ci'
+      github.event.issue.pull_request != null &&
+      github.event.comment.body == '/run-ci'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: write
+      checks: read
       contents: read
-      pull-requests: write
+      pull-requests: read
 
     steps:
       # This default-branch workflow reads public PR metadata only. It never
@@ -39,28 +39,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
-          [[ "$EVENT_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
-
-          actor_role="$(
-            gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
-              --jq '.role_name'
-          )"
-          case "$actor_role" in
-            maintain|admin) ;;
-            *)
-              echo "::error::Only actors with maintain or admin access may request public CPU CI."
-              exit 1
-              ;;
-          esac
 
           pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
           state="$(jq -er '.state' <<<"$pull")"
+          pr_author="$(jq -er '.user.login' <<<"$pull")"
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
           base_sha="$(jq -er '.base.sha' <<<"$pull")"
@@ -73,10 +59,33 @@ jobs:
           [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
           [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
-          if [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
-            echo "::error::The run-ci label was superseded by a newer PR head."
-            exit 1
+
+          if [ "$ACTOR" != "$pr_author" ]; then
+            actor_role="$(
+              gh api --method GET \
+                "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+                --jq '.role_name' 2>/dev/null || true
+            )"
+            case "$actor_role" in
+              maintain|admin) ;;
+              *)
+                echo "::error::Only the PR author or a maintainer/admin may request public CPU CI."
+                exit 1
+                ;;
+            esac
           fi
+
+          existing_required="$(
+            gh api --method GET \
+              "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=latest&per_page=100" \
+              --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions" and ((.external_id // "") | startswith("community-cpu:")))) | sort_by(.started_at) | last // {} | if (.status // "") != "completed" then (.status // "") else (.conclusion // "") end'
+          )"
+          case "$existing_required" in
+            queued|in_progress|success)
+              echo "Community CPU is already $existing_required for merge $merge_sha."
+              exit 0
+              ;;
+          esac
 
           umask 077
           payload="$RUNNER_TEMP/community-cpu-dispatch.json"
@@ -98,13 +107,3 @@ jobs:
           gh api --silent --method POST \
             "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/dispatches" \
             --input "$payload"
-
-      - name: Consume the public CPU trigger label
-        if: ${{ always() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh api --silent --method DELETE \
-            "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-ci"

@@ -9,14 +9,15 @@ CPU request broker and executor, the Internal CI Bridge, and the path-scoped
 Pages deployment. Protected premerge, including legal compliance, and nightly
 orchestration run in private Internal CI.
 
-An authorized collaborator with maintain or admin access first applies
-`run-ci` to run public CPU validation on the exact current PR merge, then
-applies `run-internal-ci` to dispatch the exact current PR head after the public
-required check passes. Source receives contributor-visible public CPU checks
-and only the sanitized `trtmc/premerge/required` status from protected CI. Raw
-protected logs, artifacts, runner details, internal packages, and the complete
-report remain private. Neither label path triggers on a push to `main`, so
-merging a passing PR does not rerun the same premerge suite.
+The pull-request author first comments `/run-ci` to run public CPU validation
+on the exact current PR merge. After the public required check passes, an
+authorized collaborator with maintain or admin access applies
+`run-internal-ci` to dispatch the exact current PR head. Source receives
+contributor-visible public CPU checks and only the sanitized
+`trtmc/premerge/required` status from protected CI. Raw protected logs,
+artifacts, runner details, internal packages, and the complete report remain
+private. Neither path triggers on a push to `main`, so merging a passing PR
+does not rerun the same premerge suite.
 
 Source has no separate pull-request documentation-validation workflow. The
 Pages workflow builds the site before deployment from `main`, but it is not a
@@ -76,7 +77,7 @@ Source contains exactly these four workflow files:
 
 | Workflow | Trigger and evidence boundary |
 | --- | --- |
-| `.github/workflows/community-cpu-request.yml` | One-shot `run-ci` label; authorizes the actor and dispatches only an exact public PR snapshot without executing PR code. |
+| `.github/workflows/community-cpu-request.yml` | Exact `/run-ci` PR comment from the PR author or a maintainer/admin; dispatches only an exact public PR snapshot without executing PR code. |
 | `.github/workflows/community-cpu.yml` | Manual dispatch from the trusted request broker; runs read-only public CPU validation and publishes checks on the exact PR merge SHA. |
 | `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, verifies current public CPU success, captures the exact PR head, and dispatches private premerge. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |

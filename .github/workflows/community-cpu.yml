@@ -7,8 +7,8 @@ run-name: >-
   PR #${{ github.event.pull_request.number || inputs.pr_number }} · public CPU validation
 
 on:
-  # Transitional trigger: keep this until the run-ci broker is available on
-  # main. Remove pull_request after the run-ci broker is available on main.
+  # Transitional trigger: keep this until the /run-ci broker is available on
+  # main. Remove pull_request after the /run-ci broker is available on main.
   pull_request:
     branches:
       - main
@@ -108,7 +108,7 @@ jobs:
                 details_url: $details_url,
                 external_id: $external_id,
                 output: {
-                  title: "Maintainer-authorized public CPU validation",
+                  title: "Contributor-requested public CPU validation",
                   summary: "Public CPU validation is running for this exact PR merge revision."
                 }
               }' > "$payload"
@@ -341,7 +341,7 @@ jobs:
           fi
 
           if [ "$snapshot_current" != true ]; then
-            summary="The PR changed after public CPU validation was requested. Ask a maintainer to apply run-ci again."
+            summary="The PR changed after public CPU validation was requested. Comment /run-ci again."
             update_check "$SOURCE_QUALITY_CHECK_ID" neutral "Stale PR snapshot" "$summary"
             update_check "$OWNERSHIP_IMPACT_CHECK_ID" neutral "Stale PR snapshot" "$summary"
             update_check "$UNIT_CHECK_ID" neutral "Stale PR snapshot" "$summary"
