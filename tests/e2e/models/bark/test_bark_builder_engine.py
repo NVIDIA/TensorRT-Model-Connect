@@ -34,6 +34,8 @@ Postconditions: All weight keys are present with correct shapes, fused QKV is sp
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -74,6 +76,10 @@ _FINE_MAX_POS = 32
 _FINE_N_EMBED_TABLES = 8
 _FINE_N_LM_HEADS = 7
 _FINE_CODEBOOK_SIZE = 16
+
+bark_plugin_module = importlib.import_module(
+    "tensorrt_model_connect.families.bark.plugin"
+)
 
 
 def _make_bark_tp_weights(
@@ -364,6 +370,57 @@ class TestBarkEngine(FamilyPluginTestMixin):
         pass
 
     # --- Bark-specific Tier 1 tests ---
+
+    def test_dual_profile_builds_one_semantic_and_one_coarse_plan(
+        self, tester, tmp_path, monkeypatch
+    ):
+        config, weights, _ = tester.prepare_config_and_weights(tmp_path)
+        config.raw["_decoder_engine_layout"] = "dual_profile"
+        weights["_state_dict"] = None
+        plugin = bark_plugin_module.BarkPlugin()
+
+        calls: list[tuple[str, str]] = []
+
+        def fake_decoder_builder(
+            weights,
+            sub_model,
+            sub_cfg,
+            max_cache_length,
+            precision="fp32",
+            verbose=False,
+            *,
+            engine_role="decode",
+        ):
+            del weights, sub_cfg, max_cache_length, precision, verbose
+            calls.append((sub_model, engine_role))
+            return f"{sub_model}-{engine_role}".encode()
+
+        monkeypatch.setattr(
+            bark_plugin_module, "_build_bark_standard_engine", fake_decoder_builder
+        )
+        monkeypatch.setattr(
+            bark_plugin_module,
+            "_build_bark_fine_engine",
+            lambda *args, **kwargs: b"fine",
+        )
+
+        config.raw["_decoder_engine_role"] = "dual_profile"
+        assert plugin.build_engine(config, weights, 32) == b"semantic-dual_profile"
+        config.raw.pop("_decoder_engine_role")
+
+        extras = plugin.build_extra_engines(config, weights, 32)
+
+        assert extras["coarse_engine_plan"] == b"coarse-dual_profile"
+        assert "coarse_prefill_engine_plan" not in extras
+        assert calls == [
+            ("semantic", "dual_profile"),
+            ("coarse", "dual_profile"),
+        ]
+
+    def test_bark_does_not_duplicate_weights_for_split_decoder_roles(self):
+        plugin = bark_plugin_module.BarkPlugin()
+
+        assert not getattr(plugin, "supports_split_decoder_roles", False)
 
     def test_fused_qkv_correctly_split(self, tester, tmp_path):
         """Validate that Bark's fused att_proj [3H, H] is correctly split into Q/K/V.
