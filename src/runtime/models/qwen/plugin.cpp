@@ -242,9 +242,10 @@ bool validate_native_kv_runtime(const PipelineContext& ctx, const TrtModule& mod
     if (!native_kv)
         return false;
 
-    if (cache_dtype != DType::kBFloat16 || tri_cfg.enabled || tp_cfg.enabled) {
+    if ((cache_dtype != DType::kFloat16 && cache_dtype != DType::kBFloat16) || tri_cfg.enabled ||
+        tp_cfg.enabled) {
         throw std::runtime_error(
-            "Qwen native KV requires BF16, single-GPU, non-TriAttention runtime");
+            "Qwen native KV requires FP16 or BF16, single-GPU, non-TriAttention runtime");
     }
     const std::vector<int64_t> expected_shape{1, ctx.config.num_kv_heads,
                                               ctx.config.max_cache_length, 128};

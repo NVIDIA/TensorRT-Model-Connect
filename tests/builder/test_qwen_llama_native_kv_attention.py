@@ -154,9 +154,45 @@ def test_bf16_uses_exact_fp32_scale_before_fused_attention(
     assert result["context"] is attention[6].get_output(0)
 
 
-@pytest.mark.parametrize("module_name", _FAMILIES)
-def test_unqualified_fp16_graph_fails_closed(monkeypatch, module_name):
-    graph_ops = importlib.import_module(module_name)
+def test_qwen_fp16_uses_exact_fp32_scale_before_fused_attention(monkeypatch):
+    graph_ops = importlib.import_module("tensorrt_model_connect.families.qwen.graph_ops")
+    constants: list[tuple[tuple[int, ...], np.ndarray, np.dtype]] = []
+
+    def _record(network, shape, values, dtype=np.float32):
+        constants.append((shape, np.asarray(values).copy(), np.dtype(dtype)))
+        tensor = _FakeTensor("scale", trt.float32)
+        network.calls.append(("constant", tensor))
+        return tensor
+
+    monkeypatch.setattr(graph_ops, "add_constant", _record)
+    network, tensors, result = _add_native_attention(monkeypatch, graph_ops, trt.float16)
+    relevant = [
+        call
+        for call in network.calls
+        if call[0] in {"cast", "constant", "elementwise", "attention"}
+    ]
+
+    assert len(constants) == 1
+    assert [call[0] for call in relevant] == [
+        "cast",
+        "constant",
+        "elementwise",
+        "cast",
+        "attention",
+    ]
+    upcast, constant, product, downcast, attention = relevant
+    assert upcast[1] is tensors["q"]
+    assert upcast[2] == trt.float32
+    assert constant[1].dtype == trt.float32
+    assert product[3] == trt.ElementWiseOperation.PROD
+    assert downcast[2] == trt.float16
+    assert attention[1] is downcast[3].get_output(0)
+    assert attention[2] is result["present_k"]
+    assert attention[3] is result["present_v"]
+
+
+def test_llama_unqualified_fp16_graph_fails_closed(monkeypatch):
+    graph_ops = importlib.import_module("tensorrt_model_connect.families.llama.graph_ops")
 
     with pytest.raises(ValueError, match="requires BF16"):
         _add_native_attention(monkeypatch, graph_ops, trt.float16)

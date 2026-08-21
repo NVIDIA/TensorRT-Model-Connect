@@ -129,7 +129,7 @@ class QwenPlugin:
                 config,
                 weights,
                 max_cache_length,
-                precision="bf16",
+                precision=precision,
                 quant_ctx=None,
                 verbose=verbose,
                 profile_mode=role,

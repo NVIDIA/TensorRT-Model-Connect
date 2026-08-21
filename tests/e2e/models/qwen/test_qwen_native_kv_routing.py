@@ -150,7 +150,7 @@ def test_architecture_variants_fail_closed(overrides, raw_updates, reason):
 @pytest.mark.parametrize(
     ("kwargs", "raw_updates", "reason"),
     [
-        ({"precision": "fp16"}, {}, "BF16"),
+        ({"precision": "fp32"}, {}, "FP16 or BF16"),
         ({"max_cache_length": 40959}, {}, "max_cache_length"),
         ({"parallel_enabled": True}, {}, "tensor parallel"),
         ({"dynamic_kv_cache": True}, {}, "fixed physical"),
@@ -240,7 +240,8 @@ def test_weight_contract_rejects_missing_shape_and_bias():
         validate_native_kv_weights(config, biased)
 
 
-def test_plugin_builds_the_requested_split_role_directly(monkeypatch):
+@pytest.mark.parametrize("precision", ["fp16", "bf16"])
+def test_plugin_builds_the_requested_split_role_directly(monkeypatch, precision):
     pytest.importorskip("tensorrt")
     plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.qwen.plugin"
@@ -263,16 +264,55 @@ def test_plugin_builds_the_requested_split_role_directly(monkeypatch):
         config,
         _weights(config),
         256,
-        precision="bf16",
+        precision=precision,
     )
 
     assert result == b"plan"
     assert captured["kwargs"]["profile_mode"] == "decode"
     assert captured["kwargs"]["native_kv_cache"] is True
+    assert captured["kwargs"]["precision"] == precision
     assert plugin_module.plugin.get_bundle_config_overrides(config) == {
         "native_kv_contract_version": 1,
         "native_kv_cache": True,
     }
+
+
+def test_fp16_native_build_failure_does_not_fall_back(monkeypatch):
+    pytest.importorskip("tensorrt")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.plugin"
+    )
+    config = _small_config(role="decode")
+    legacy_called = False
+
+    def _fail_native(*_args, **_kwargs):
+        raise RuntimeError("native FP16 build failed")
+
+    def _unexpected_legacy(*_args, **_kwargs):
+        nonlocal legacy_called
+        legacy_called = True
+        return b"legacy-plan"
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_dual_profile_decoder_engine",
+        _fail_native,
+    )
+    monkeypatch.setattr(
+        plugin_module,
+        "build_standard_decoder_engine",
+        _unexpected_legacy,
+    )
+
+    with pytest.raises(RuntimeError, match="native FP16 build failed"):
+        plugin_module.plugin.build_engine(
+            config,
+            _weights(config),
+            256,
+            precision="fp16",
+        )
+
+    assert not legacy_called
 
 
 def test_plugin_falls_back_for_explicit_legacy_build_options(monkeypatch):

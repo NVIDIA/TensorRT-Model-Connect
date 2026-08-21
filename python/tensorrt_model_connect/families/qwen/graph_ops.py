@@ -1217,11 +1217,11 @@ def add_native_kv_cache_attention_from_rows(
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
 
-    if q_4d.dtype != trt.bfloat16:
-        raise ValueError("Qwen native KV attention requires BF16 queries")
+    if q_4d.dtype not in {trt.float16, trt.bfloat16}:
+        raise ValueError("Qwen native KV attention requires FP16 or BF16 queries")
 
-    # Match the native fused-attention contract exactly: TensorRT consumes a
-    # BF16 query after the FP32 scale has already been applied and rounded.
+    # Match the native fused-attention contract exactly: TensorRT consumes an
+    # FP16/BF16 query after the FP32 scale has already been applied and rounded.
     q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
     scale_t = add_constant(
         network,
@@ -1232,7 +1232,7 @@ def add_native_kv_cache_attention_from_rows(
     q_scaled = network.add_elementwise(
         q_scale_input, scale_t, trt.ElementWiseOperation.PROD
     ).get_output(0)
-    q_scaled = network.add_cast(q_scaled, trt.bfloat16).get_output(0)
+    q_scaled = network.add_cast(q_scaled, q_4d.dtype).get_output(0)
 
     recipe = nullcontext()
     if recipe_instance is not None:

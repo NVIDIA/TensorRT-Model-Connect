@@ -257,8 +257,8 @@ def native_kv_build_capability(
 
     raw = _raw(config)
     reasons: list[str] = []
-    if str(precision).lower() != "bf16":
-        reasons.append("native Qwen3 requires BF16")
+    if str(precision).lower() not in {"fp16", "bf16"}:
+        reasons.append("native Qwen3 requires FP16 or BF16")
     if str(raw.get("_decoder_engine_layout", "split")) != "split":
         reasons.append("native Qwen3 requires split prefill/decode engines")
     if raw.get("_rtx_build_requested"):
