@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -102,6 +104,31 @@ def test_route_uses_architecture_not_checkpoint_identity():
 
     assert native_kv_architecture_capability(config).eligible
     assert prefer_native_default(config)
+
+
+@pytest.mark.parametrize(
+    "builder_name",
+    [
+        "standard_decoder_builder.py",
+        "dual_profile_decoder_builder.py",
+        "dual_profile_decoder_tp_builder.py",
+    ],
+)
+def test_qwen_builders_keep_tensorrt_default_workspace_limit(builder_name):
+    family_dir = Path(__file__).parents[4] / "python/tensorrt_model_connect/families/qwen"
+    tree = ast.parse((family_dir / builder_name).read_text(encoding="utf-8"))
+    workspace_limit_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "set_memory_pool_limit"
+        and node.args
+        and isinstance(node.args[0], ast.Attribute)
+        and node.args[0].attr == "WORKSPACE"
+    ]
+
+    assert workspace_limit_calls == []
 
 
 def test_explicit_hf_head_dim_overrides_hidden_divided_by_heads():
