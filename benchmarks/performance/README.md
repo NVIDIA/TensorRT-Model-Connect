@@ -10,6 +10,12 @@ entry in `release.yaml`. TRTMC measurements always use `trtmc-bench`; reference
 frameworks run in separate Python processes and do not add dependencies to
 `trtmc-bench`.
 
+`tools/performance/catalog.py` owns suite loading, profile expansion, release
+coverage, exclusions, and entry/model/family selection. `perf_matrix.py` owns
+execution, evidence, classification, resume, and reporting. Other orchestration
+tools consume the catalog and the public `perf_matrix.write_report()` interface
+instead of importing runner internals.
+
 The suite contains one row for every release-relevant single-process model
 profile marked `ready` in the benchmark catalog. Profiles whose names contain an
 `l0` segment are shorter PR-smoke duplicates and are deliberately excluded.

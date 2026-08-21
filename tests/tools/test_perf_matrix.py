@@ -18,17 +18,25 @@ import pytest
 import yaml
 
 from tools import perf_matrix
+from tools.performance import catalog as performance_catalog
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SUITE = REPOSITORY / "benchmarks/performance/release.yaml"
 GB300_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/gb300.yaml"
-L4T_THOR_ENVIRONMENT = (
-    REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
-)
-AUTO_THOR_ENVIRONMENT = (
-    REPOSITORY / "benchmarks/performance/environments/auto-thor.yaml"
-)
+L4T_THOR_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/l4t-thor.yaml"
+AUTO_THOR_ENVIRONMENT = REPOSITORY / "benchmarks/performance/environments/auto-thor.yaml"
+
+
+def _suite_for_cases(cases, *, exclusions=None):
+    return performance_catalog.PerformanceSuite(
+        source=SUITE,
+        definition={},
+        cases=tuple(cases),
+        excluded_profiles=dict(exclusions or {}),
+    )
+
+
 MINIMAX_H3_EXCLUSION_REASON = (
     "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
     "into the release performance runner."
@@ -222,8 +230,7 @@ def _write_environment(
                     "trtmc_worker": str(trtmc_worker),
                     "hf_transformers_runner": str(hf_transformers_runner),
                     "task_reference_runner": str(
-                        REPOSITORY
-                        / "benchmarks/performance/baselines/task_reference.py"
+                        REPOSITORY / "benchmarks/performance/baselines/task_reference.py"
                     ),
                 },
                 "storage": {
@@ -251,19 +258,19 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         OFFICIAL_NEGATIVE_PROMPT,
     )
 
-    suite = perf_matrix._read_yaml(SUITE)
-    cases = perf_matrix._cases(suite)
+    suite = performance_catalog.load_suite(SUITE)
+    cases = list(suite.cases)
     raw_suite = yaml.safe_load(SUITE.read_text(encoding="utf-8"))
     raw_entries = raw_suite["entries"]
     raw_additional = raw_suite["additional_profiles"]
-    excluded_profiles = perf_matrix._excluded_profiles(suite)
+    excluded_profiles = suite.excluded_profiles
     ready_profiles = {
         entry.name
         for entry in perf_matrix.ManifestCatalog().entries()
-        if entry.status == "ready" and not perf_matrix._is_l0_profile(entry.name)
+        if entry.status == "ready" and not performance_catalog.is_l0_profile(entry.name)
     }
 
-    perf_matrix._validate_coverage(cases, excluded_profiles)
+    performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
     assert len(cases) == 107
     assert len(raw_entries) == 78
@@ -278,14 +285,13 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "minimax-h3-768p": MINIMAX_H3_EXCLUSION_REASON,
     }
     assert all(
-        set(entry["workload"]) <= {"testcase", "request", "runtime"}
-        for entry in raw_entries
+        set(entry["workload"]) <= {"testcase", "request", "runtime"} for entry in raw_entries
     )
     assert all(entry["workload"].get("testcase") for entry in raw_entries)
     assert all(entry.get("model") and entry.get("inherit") for entry in raw_additional)
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
-    assert not any(perf_matrix._is_l0_profile(case["model"]) for case in cases)
+    assert not any(performance_catalog.is_l0_profile(case["model"]) for case in cases)
     assert len({(case["family"], case["operation"]) for case in cases}) == 78
     assert len({case["family"] for case in cases}) == 77
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
@@ -296,11 +302,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "model_call_wall": 24,
         "public_pipeline_call_wall": 83,
     }
-    assert {
-        case["id"]
-        for case in cases
-        if case["baseline"]["asset_loading_included"]
-    } == {
+    assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
         "canary.transcribe",
         "deepseek_ocr.generate",
         "lance.generate",
@@ -315,10 +317,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "reference_commit": "59629fdf790850797cb657bad014fce432bd713d",
         "intrinsics": "assets/demo_0_intrinsics.npy",
     }
-    assert (
-        by_id["sana_wm.generate_image"]["baseline"]["python_profile"]
-        == "sana_wm_reference"
-    )
+    assert by_id["sana_wm.generate_image"]["baseline"]["python_profile"] == "sana_wm_reference"
     locateanything_baseline = by_id["locateanything.generate"]["baseline"]
     assert locateanything_baseline["output_contract"] == "localization"
     assert locateanything_baseline["min_localization_box_iou"] == 0.9
@@ -332,14 +331,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert by_id["opt.generate"]["workload"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
-    assert (
-        by_id["llama.generate@minitron-4b-width"]["baseline"]["precision"]
-        == "fp16"
-    )
+    assert by_id["llama.generate@minitron-4b-width"]["baseline"]["precision"] == "fp16"
     assert by_id["nemotron_h.generate"]["baseline"]["mode"] == "hf-eager"
-    assert by_id["nemotron_h.generate"]["workload"]["runtime"] == {
-        "cuda_graphs": True
-    }
+    assert by_id["nemotron_h.generate"]["workload"]["runtime"] == {"cuda_graphs": True}
     nemotron_baseline = by_id["nemotron_speech_streaming.transcribe"]["baseline"]
     assert {
         key: nemotron_baseline[key] for key in ("runner", "adapter", "mode", "reference_backend")
@@ -352,14 +346,8 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["magpie_tts.generate_audio"]["baseline"]["adapter_options"] == {
         "speaker_encoder_revision": "e9124b5364a2c3e9b4f78da429a33cbca8f8c22b"
     }
-    assert (
-        by_id["bark.generate_audio"]["workload"]["request"]["max_new_tokens"]
-        == 128
-    )
-    assert (
-        by_id["magpie_tts.generate_audio"]["workload"]["request"]["max_new_tokens"]
-        == 256
-    )
+    assert by_id["bark.generate_audio"]["workload"]["request"]["max_new_tokens"] == 128
+    assert by_id["magpie_tts.generate_audio"]["workload"]["request"]["max_new_tokens"] == 256
     for case_id in (
         "bark.generate_audio",
         "magpie_tts.generate_audio",
@@ -385,29 +373,29 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
 
 def test_release_suite_rejects_unknown_explicit_exclusion() -> None:
-    suite = perf_matrix._read_yaml(SUITE)
-    cases = perf_matrix._cases(suite)
+    suite = performance_catalog.load_suite(SUITE)
+    cases = list(suite.cases)
     exclusions = {
-        **perf_matrix._excluded_profiles(suite),
+        **suite.excluded_profiles,
         "unknown-profile": "Invalid test exclusion.",
     }
 
     with pytest.raises(
-        perf_matrix.PerfMatrixError,
+        performance_catalog.PerformanceSuiteError,
         match="invalid-exclusion=unknown-profile",
     ):
-        perf_matrix._validate_coverage(cases, exclusions)
+        performance_catalog.validate_release_coverage(cases, exclusions)
 
 
 def test_release_suite_rejects_a_configured_explicit_exclusion() -> None:
-    suite = perf_matrix._read_yaml(SUITE)
-    cases = perf_matrix._cases(suite)
+    suite = performance_catalog.load_suite(SUITE)
+    cases = list(suite.cases)
 
     with pytest.raises(
-        perf_matrix.PerfMatrixError,
+        performance_catalog.PerformanceSuiteError,
         match="excluded-and-configured=qwen3-moe-30b-a3b",
     ):
-        perf_matrix._validate_coverage(
+        performance_catalog.validate_release_coverage(
             cases,
             {"qwen3-moe-30b-a3b": "Temporary test exclusion."},
         )
@@ -612,8 +600,6 @@ def test_perf_shared_hf_cache_retains_failed_entry_work(tmp_path: Path) -> None:
     assert not case_work.exists()
 
 
-
-
 def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
     case = {
         "operation": "generate",
@@ -649,9 +635,7 @@ def test_timing_stability_accepts_a_settled_measurement() -> None:
 
 
 def test_timing_stability_flags_a_measurement_that_is_still_falling() -> None:
-    stability = perf_matrix._timing_stability(
-        [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
-    )
+    stability = perf_matrix._timing_stability([3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0])
 
     assert stability["status"] == "unstable"
     assert stability["half_median_change_percent"] > 5.0
@@ -689,7 +673,7 @@ def test_timing_stability_does_not_judge_a_nonstandard_sample_count() -> None:
 def test_suite_timing_contract_drift_is_rejected_before_execution() -> None:
     case = next(
         value
-        for value in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+        for value in performance_catalog.load_suite(SUITE).cases
         if value["id"] == "bark.generate_audio"
     )
     drifted = {
@@ -701,16 +685,16 @@ def test_suite_timing_contract_drift_is_rejected_before_execution() -> None:
     }
 
     with pytest.raises(
-        perf_matrix.PerfMatrixError,
+        performance_catalog.PerformanceSuiteError,
         match=r"baseline\.timing_scope must be 'task-model-call-wall'",
     ):
-        perf_matrix._validate_baseline(drifted)
+        performance_catalog.validate_case(drifted)
 
 
 def test_suite_rejects_non_boolean_baseline_local_files_only() -> None:
     case = next(
         value
-        for value in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+        for value in performance_catalog.load_suite(SUITE).cases
         if value["id"] == "sam3.segment_prompted"
     )
     drifted = {
@@ -722,10 +706,10 @@ def test_suite_rejects_non_boolean_baseline_local_files_only() -> None:
     }
 
     with pytest.raises(
-        perf_matrix.PerfMatrixError,
+        performance_catalog.PerformanceSuiteError,
         match="baseline local_files_only must be boolean",
     ):
-        perf_matrix._validate_baseline(drifted)
+        performance_catalog.validate_case(drifted)
 
 
 def test_exact_text_contract_is_explicit_and_still_strict() -> None:
@@ -837,15 +821,14 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     monkeypatch.setattr(
         perf_matrix,
         "_wait_for_gpu_memory_headroom",
-        lambda **kwargs: events.append(
-            ("wait", kwargs["minimum_free_fraction"])
-        ),
+        lambda **kwargs: events.append(("wait", kwargs["minimum_free_fraction"])),
     )
     monkeypatch.setattr(
         perf_matrix,
         "_run_command",
-        lambda argv, _environment, _timeout: events.append(("run", argv[0]))
-        or {"exit_code": 0, "stdout": ""},
+        lambda argv, _environment, _timeout: (
+            events.append(("run", argv[0])) or {"exit_code": 0, "stdout": ""}
+        ),
     )
     monkeypatch.setattr(
         perf_matrix,
@@ -902,9 +885,7 @@ def test_backend_waits_for_gpu_headroom_before_each_command(
     assert "[example] baseline: baseline --precision fp16" in output
 
 
-def test_unsettled_measurement_is_retried_once_in_fresh_processes(
-    tmp_path, monkeypatch
-) -> None:
+def test_unsettled_measurement_is_retried_once_in_fresh_processes(tmp_path, monkeypatch) -> None:
     falling = [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
     settled = [10.0] * 10
     commands_run = []
@@ -927,8 +908,9 @@ def test_unsettled_measurement_is_retried_once_in_fresh_processes(
     monkeypatch.setattr(
         perf_matrix,
         "_run_command",
-        lambda argv, _environment, _timeout: commands_run.append(argv[0])
-        or {"exit_code": 0, "stdout": "ok", "stderr": ""},
+        lambda argv, _environment, _timeout: (
+            commands_run.append(argv[0]) or {"exit_code": 0, "stdout": "ok", "stderr": ""}
+        ),
     )
     monkeypatch.setattr(
         perf_matrix,
@@ -972,9 +954,7 @@ def test_unsettled_measurement_is_retried_once_in_fresh_processes(
     assert any("measurement-2" in record["href"] for record in row["logs"])
 
 
-def test_measurement_that_remains_unsettled_has_no_performance_light(
-    tmp_path, monkeypatch
-) -> None:
+def test_measurement_that_remains_unsettled_has_no_performance_light(tmp_path, monkeypatch) -> None:
     falling = [3.7, 3.4, 3.0, 2.7, 2.3, 1.9, 1.6, 1.4, 1.2, 1.0]
     monkeypatch.setattr(perf_matrix, "_command_environment", lambda: {})
     monkeypatch.setattr(perf_matrix, "_workload_digest", lambda _resolved: "digest")
@@ -1054,10 +1034,7 @@ def test_performance_projection_is_rebuilt_from_ordered_live_receipts(tmp_path) 
         campaign_id="run-1",
         task_kind="performance",
         fingerprint="revision-1",
-        cases=[
-            {"id": row["id"], "report": row}
-            for row in base_rows
-        ],
+        cases=[{"id": row["id"], "report": row} for row in base_rows],
     )
     terminal = {
         **base_rows[0],
@@ -1068,7 +1045,10 @@ def test_performance_projection_is_rebuilt_from_ordered_live_receipts(tmp_path) 
     ledger.finish("model-a.generate", result="white", payload=terminal)
     results = {
         "selected_entry_ids": ["model-a.generate", "model-b.generate"],
-        "cases": [{**base_rows[0], "status": "green"}, {**base_rows[1], "status": "red"}],
+        "cases": [
+            {**base_rows[0], "status": "green"},
+            {**base_rows[1], "status": "red"},
+        ],
     }
 
     perf_matrix._sync_perf_results_from_ledger(results, ledger)
@@ -1113,9 +1093,7 @@ def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
     tmp_path, monkeypatch
 ) -> None:
     case = next(
-        row
-        for row in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
-        if row["id"] == "gpt2.generate"
+        row for row in performance_catalog.load_suite(SUITE).cases if row["id"] == "gpt2.generate"
     )
     results = {
         "run_id": "run-1",
@@ -1140,9 +1118,7 @@ def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
         minimum_gpu_free_fraction=0,
         timeout_seconds=1,
     )
-    contract = perf_matrix.timing_contract(
-        runner=case["baseline"]["runner"], family=case["family"]
-    )
+    contract = perf_matrix.timing_contract(runner=case["baseline"]["runner"], family=case["family"])
     preflight = {
         case["id"]: (
             {
@@ -1163,6 +1139,7 @@ def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
         "worker": {},
         "storage_preflight": {},
     }
+
     def interrupt_with_leaf_commands(*_args, **kwargs):
         kwargs["progress"](
             "reference",
@@ -1252,9 +1229,7 @@ def test_ocr_text_contract_preserves_required_content_and_allows_format_variatio
             "text": "OCR title\nArchitecture:\nAttention: Standard Q/K/V/O (no biases)"
         }
     }
-    reference = {
-        "output_summary": {"text": "Architecture:\nAttention:Standard Q/K/V/O"}
-    }
+    reference = {"output_summary": {"text": "Architecture:\nAttention:Standard Q/K/V/O"}}
 
     assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
@@ -1300,18 +1275,12 @@ def test_localization_contract_checks_point_type_and_distance() -> None:
             "max_normalized_edit_distance": 0.5,
         },
     }
-    candidate = {
-        "output_summary": {"text": "<ref>button</ref><box><504><252></box>"}
-    }
-    reference = {
-        "output_summary": {"text": "<ref>button</ref><box><500><250></box>"}
-    }
+    candidate = {"output_summary": {"text": "<ref>button</ref><box><504><252></box>"}}
+    reference = {"output_summary": {"text": "<ref>button</ref><box><500><250></box>"}}
 
     assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
-    candidate["output_summary"]["text"] = (
-        "<ref>button</ref><box><450><200><550><300></box>"
-    )
+    candidate["output_summary"]["text"] = "<ref>button</ref><box><450><200><550><300></box>"
     assert perf_matrix._output_contract(case, candidate, reference) == (
         False,
         "localization output type differs",
@@ -1327,7 +1296,7 @@ def test_localization_contract_checks_point_type_and_distance() -> None:
 def test_localization_contract_rejects_invalid_thresholds() -> None:
     case = next(
         value
-        for value in perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+        for value in performance_catalog.load_suite(SUITE).cases
         if value["id"] == "locateanything.generate"
     )
     drifted = {
@@ -1339,10 +1308,10 @@ def test_localization_contract_rejects_invalid_thresholds() -> None:
     }
 
     with pytest.raises(
-        perf_matrix.PerfMatrixError,
+        performance_catalog.PerformanceSuiteError,
         match="localization contract has invalid max_localization_point_distance",
     ):
-        perf_matrix._validate_baseline(drifted)
+        performance_catalog.validate_case(drifted)
 
 
 def test_normalized_text_contract_allows_only_case_and_whitespace_variation() -> None:
@@ -1430,7 +1399,10 @@ def test_segmentation_contract_rejects_raw_masks_against_postprocessed_masks() -
             "width": 640,
         }
     }
-    assert perf_matrix._output_contract(case, candidate, aligned_reference) == (True, "")
+    assert perf_matrix._output_contract(case, candidate, aligned_reference) == (
+        True,
+        "",
+    )
 
 
 def test_audio_contract_rejects_different_generated_sample_counts() -> None:
@@ -1609,6 +1581,30 @@ def test_report_displays_campaign_and_model_profile_wall_times() -> None:
     assert "not used for traffic-light classification" in report
 
 
+def test_write_report_rebuilds_an_existing_run(tmp_path: Path) -> None:
+    output = tmp_path / "performance-run"
+    output.mkdir()
+    results = {
+        "schema_version": perf_matrix.RESULT_SCHEMA,
+        "status": "completed",
+        "suite_name": "example",
+        "selected_entry_ids": [],
+        "cases": [],
+    }
+    (output / "results.json").write_text(
+        json.dumps(results),
+        encoding="utf-8",
+    )
+
+    report_json, report_html, report = perf_matrix.write_report(output)
+
+    assert report_json == output / "report.json"
+    assert report_html == output / "report.html"
+    assert report["report_kind"] == "performance"
+    assert report_json.is_file()
+    assert report_html.is_file()
+
+
 def test_report_prefers_test_task_bundle_preparation_receipt() -> None:
     bundle = "/shared/engines/example/cache-key/example.bundle"
     results = {
@@ -1723,10 +1719,7 @@ def test_report_includes_client_side_row_filters() -> None:
     assert 'id="report-filter-preparation"' in report
     assert 'id="report-filter-reset"' in report
     assert 'id="report-filter-count">Showing 2 of 2 rows<' in report
-    assert (
-        "data-filter-search='example generate example-model example.generate'"
-        not in report
-    )
+    assert "data-filter-search='example generate example-model example.generate'" not in report
     assert "example generate example-model text → text" in report
     assert "data-filter-model-type='example'" in report
     assert "data-filter-operation='generate'" in report
@@ -1947,9 +1940,7 @@ def test_command_diagnostic_materializes_nested_build_logs(tmp_path: Path) -> No
         "stage": "build",
         "domain": "harness/unknown",
         "code": "bundle_build_failed",
-        "artifacts": [
-            {"label": "Bundle build stderr", "path": str(build_stderr)}
-        ],
+        "artifacts": [{"label": "Bundle build stderr", "path": str(build_stderr)}],
     }
     command = {
         "stdout": "",
@@ -2061,9 +2052,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
         live = json.loads((options.output / "report.json").read_text(encoding="utf-8"))
         selected = [row for row in live["results"] if row["id"] == "gpt2.generate"]
         if preflight_calls == 1:
-            assert [(row["state"], row["result"]) for row in selected] == [
-                ("pending", None)
-            ]
+            assert [(row["state"], row["result"]) for row in selected] == [("pending", None)]
         return original_preflight(cases, options)
 
     monkeypatch.setattr(
@@ -2100,15 +2089,12 @@ def test_run_consolidates_results_and_records_replayable_commands(
     rows = {row["id"]: row for row in results["cases"]}
     assert len(rows) == 107
     assert results["environment_config"]["name"] == "test-gb300"
-    assert (
-        results["environment_config"]["execution"]["minimum_gpu_free_fraction"]
-        == 0.0
-    )
+    assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())
     catalog_entries = perf_matrix.ManifestCatalog().entries()
     catalog_counts = Counter(entry.status for entry in catalog_entries)
     excluded_l0_profiles = sum(
-        entry.status == "ready" and perf_matrix._is_l0_profile(entry.name)
+        entry.status == "ready" and performance_catalog.is_l0_profile(entry.name)
         for entry in catalog_entries
     )
     expected_catalog_coverage = {
@@ -2254,9 +2240,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert 'data-report="report.json"' in report
     assert "gpt2.generate" not in report
     assert "minimax-h3-768p" not in report
-    frontend = (output / "assets/qualification-report.js").read_text(
-        encoding="utf-8"
-    )
+    frontend = (output / "assets/qualification-report.js").read_text(encoding="utf-8")
     assert "Comparable results" in frontend
     assert "Operational coverage" in frontend
     assert "Failures" in frontend
@@ -2276,9 +2260,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert rows["gpt2.generate"]["commands"]["baseline"]["cwd"] == str(REPOSITORY)
 
     rows["gpt2.generate"]["status"] = "failed"
-    (output / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n", encoding="utf-8"
-    )
+    (output / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
     receipt_path = next((output / "ledger" / "cases").glob("*/receipt.json"))
     receipt_mtime = receipt_path.stat().st_mtime_ns
 
@@ -2286,9 +2268,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     rebuilt = json.loads((output / "report.json").read_text(encoding="utf-8"))
     assert rebuilt["results"][0]["result"] == "green"
     rows["gpt2.generate"]["status"] = "failed"
-    (output / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n", encoding="utf-8"
-    )
+    (output / "results.json").write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
 
     assert perf_matrix.main(["resume", str(output)]) == 0
     assert receipt_path.stat().st_mtime_ns == receipt_mtime
@@ -2523,7 +2503,7 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
 def test_resolution_failure_is_recorded_without_stopping_other_entries(
     tmp_path: Path, monkeypatch
 ) -> None:
-    case = perf_matrix._cases(perf_matrix._read_yaml(SUITE))[0]
+    case = performance_catalog.load_suite(SUITE).cases[0]
     options = perf_matrix.RunOptions(
         output=tmp_path,
         scratch_root=tmp_path / "scratch",
@@ -2576,7 +2556,6 @@ def test_candidate_command_forwards_workload_runtime_overrides(tmp_path: Path) -
         runtime_dirs=(),
     )
 
-    perf_matrix._validate_workload(case)
     argv = perf_matrix._candidate_base_argv(case, options)
 
     assert "runtime.cuda_graphs=true" in argv
@@ -2676,12 +2655,9 @@ def test_task_reference_uses_manifest_reference_precision(tmp_path: Path) -> Non
 
 
 def test_entry_is_the_only_run_selection() -> None:
-    cases = perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+    suite = performance_catalog.load_suite(SUITE)
 
-    selected = perf_matrix._selected_cases(
-        cases,
-        requested=["flux.generate_image"],
-    )
+    selected = suite.select(entries=["flux.generate_image"])
 
     assert [case["id"] for case in selected] == ["flux.generate_image"]
 
@@ -2693,11 +2669,7 @@ def test_model_selection_expands_every_matching_perf_entry_in_model_order() -> N
         {"id": "model-a.short", "family": "family-a", "model": "model-a"},
     ]
 
-    selected = perf_matrix._selected_cases(
-        cases,
-        requested=[],
-        requested_models=["model-b", "model-a"],
-    )
+    selected = _suite_for_cases(cases).select(models=["model-b", "model-a"])
 
     assert [case["id"] for case in selected] == [
         "model-b.default",
@@ -2713,46 +2685,32 @@ def test_model_ci_family_selection_expands_owned_perf_profiles():
         {"id": "a.two", "family": "family-a", "model": "model-a2"},
     ]
 
-    selected = perf_matrix._selected_cases(
-        cases,
-        requested=[],
-        requested_families=["family-a"],
-    )
+    selected = _suite_for_cases(cases).select(families=["family-a"])
 
     assert [case["id"] for case in selected] == ["a.one", "a.two"]
 
 
 def test_model_selection_rejects_models_without_perf_entries() -> None:
-    cases = [
-        {"id": "model-a.default", "family": "family-a", "model": "model-a"}
-    ]
+    cases = [{"id": "model-a.default", "family": "family-a", "model": "model-a"}]
 
     with pytest.raises(
-        perf_matrix.PerfMatrixError,
+        performance_catalog.PerformanceSuiteError,
         match="models have no performance entries: model-b",
     ):
-        perf_matrix._selected_cases(
-            cases,
-            requested=[],
-            requested_models=["model-b"],
-        )
+        _suite_for_cases(cases).select(models=["model-b"])
 
 
 def test_model_selection_reports_explicit_perf_exclusion() -> None:
-    cases = [
-        {"id": "model-a.default", "family": "family-a", "model": "model-a"}
-    ]
+    cases = [{"id": "model-a.default", "family": "family-a", "model": "model-a"}]
 
     with pytest.raises(
-        perf_matrix.PerfMatrixError,
+        performance_catalog.PerformanceSuiteError,
         match="excluded performance models: model-b: baseline unavailable",
     ):
-        perf_matrix._selected_cases(
+        _suite_for_cases(
             cases,
-            requested=[],
-            requested_models=["model-b"],
-            excluded_profiles={"model-b": "baseline unavailable"},
-        )
+            exclusions={"model-b": "baseline unavailable"},
+        ).select(models=["model-b"])
 
 
 def test_perf_selection_modes_are_mutually_exclusive() -> None:
@@ -2871,9 +2829,7 @@ def test_hf_runner_closes_ignored_disabled_thinking_prompt() -> None:
             captured.update(text=text, tokenizer_kwargs=kwargs)
             return {"input_ids": "encoded"}
 
-    encoded = runner["_chat_prompt_inputs"](
-        FakeTokenizer(), "hello", enable_thinking=False
-    )
+    encoded = runner["_chat_prompt_inputs"](FakeTokenizer(), "hello", enable_thinking=False)
 
     assert encoded == {"input_ids": "encoded"}
     assert captured["text"] == "<SPECIAL_11>Assistant\n<think></think>"
@@ -3114,9 +3070,7 @@ def test_locateanything_fallback_tokenizer_supports_batch_decode(
 
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "tokenizer_config.json").write_text(
-        '{"model_max_length": 2048}', encoding="utf-8"
-    )
+    (tmp_path / "tokenizer_config.json").write_text('{"model_max_length": 2048}', encoding="utf-8")
 
     def fail_auto_tokenizer(*_args, **_kwargs):
         raise OSError("unsupported tokenizer class")
@@ -3199,19 +3153,13 @@ def test_locateanything_tokenizer_builds_qwen_bpe_when_tokenizer_json_is_absent(
         json.dumps({"F": 0, "i": 1, "n": 2, "d": 3}), encoding="utf-8"
     )
     (tmp_path / "merges.txt").write_text("#version: 0.2\n", encoding="utf-8")
-    (tmp_path / "added_tokens.json").write_text(
-        json.dumps({"<special>": 4}), encoding="utf-8"
-    )
-    (tmp_path / "tokenizer_config.json").write_text(
-        '{"model_max_length": 512}', encoding="utf-8"
-    )
+    (tmp_path / "added_tokens.json").write_text(json.dumps({"<special>": 4}), encoding="utf-8")
+    (tmp_path / "tokenizer_config.json").write_text('{"model_max_length": 512}', encoding="utf-8")
 
     def fail_auto_tokenizer(*_args, **_kwargs):
         raise OSError("tokenizer.json is not available")
 
-    monkeypatch.setattr(
-        transformers.AutoTokenizer, "from_pretrained", fail_auto_tokenizer
-    )
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", fail_auto_tokenizer)
     arguments = Namespace(
         local_files_only=True,
         model=str(tmp_path),
@@ -3240,9 +3188,7 @@ def test_task_reference_resolves_revision_from_hugging_face_cache(monkeypatch) -
 
 
 def test_snapshot_revision_keeps_revision_from_symlink_path(tmp_path: Path) -> None:
-    runner = runpy.run_path(
-        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
-    )
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     blob = tmp_path / "blobs" / "weights"
     blob.parent.mkdir()
     blob.write_bytes(b"weights")
@@ -3254,9 +3200,7 @@ def test_snapshot_revision_keeps_revision_from_symlink_path(tmp_path: Path) -> N
     assert runner["_snapshot_revision"](checkpoint) == "abc123"
 
 
-def test_task_reference_pinned_checkout_scopes_safe_directory(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_task_reference_pinned_checkout_scopes_safe_directory(tmp_path: Path, monkeypatch) -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     captured: list[str] = []
 
@@ -3702,9 +3646,7 @@ def test_diffusers_adapter_preserves_batched_prompts_and_seeds(
 
 
 def test_diffusers_media_count_accepts_array_like_video_frames() -> None:
-    runner = runpy.run_path(
-        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
-    )
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
 
     class Frames:
         def __len__(self):
@@ -3724,9 +3666,7 @@ def test_diffusers_media_count_accepts_array_like_video_frames() -> None:
 def test_diffusers_adapter_requests_numeric_output_before_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runner = runpy.run_path(
-        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
-    )
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     captured: dict[str, object] = {}
 
     class FakePipeline:
@@ -3758,9 +3698,7 @@ def test_diffusers_adapter_requests_numeric_output_before_summary(
 
 
 def test_diffusers_media_summary_rejects_non_finite_pixels() -> None:
-    runner = runpy.run_path(
-        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
-    )
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     finite = np.zeros((1, 4, 6, 3), dtype=np.float32)
 
     assert runner["_media_summary"](finite, "image") == {
@@ -3937,18 +3875,16 @@ def test_qwen3_omni_supplies_text_chat_template_when_snapshot_omits_it() -> None
 
 
 def test_qwen3_omni_uses_installed_generation_speaker_argument() -> None:
-    source = (
-        REPOSITORY / "benchmarks/performance/baselines/task_reference.py"
-    ).read_text(encoding="utf-8")
+    source = (REPOSITORY / "benchmarks/performance/baselines/task_reference.py").read_text(
+        encoding="utf-8"
+    )
 
     assert 'speaker=str(options.get("speaker", "Ethan"))' in source
     assert 'spk=str(options.get("speaker", "Ethan"))' not in source
 
 
 def test_qwen3_omni_uses_visible_single_gpu_placement(monkeypatch) -> None:
-    runner = runpy.run_path(
-        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
-    )
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     captured: dict[str, object] = {}
 
     class FakeInputs:
@@ -3989,7 +3925,7 @@ def test_qwen3_omni_uses_visible_single_gpu_placement(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
-    cases = perf_matrix._cases(perf_matrix._read_yaml(SUITE))
+    cases = performance_catalog.load_suite(SUITE).cases
     case = next(case for case in cases if case["id"] == "qwen3_omni.generate_audio")
     options = case["baseline"]["adapter_options"]
     runner["_load_qwen3_omni"](
@@ -4042,9 +3978,7 @@ def test_lance_image_only_decord_stub_rejects_video_use() -> None:
         modules["decord"].VideoReader("video.mp4")
 
 
-def test_lance_reference_loads_sdpa_attention_compat(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_lance_reference_loads_sdpa_attention_compat(tmp_path: Path, monkeypatch) -> None:
     runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
     reference_repo = tmp_path / "Lance"
     reference_repo.mkdir()
@@ -4284,7 +4218,10 @@ def test_sana_wm_adapter_runs_pinned_official_pipeline_with_resolved_inputs(
             json.dumps(
                 {
                     "samples_ms": [101.0, 102.0],
-                    "output_summary": {"frame_count": 321, "shape": [321, 704, 1280, 3]},
+                    "output_summary": {
+                        "frame_count": 321,
+                        "shape": [321, 704, 1280, 3],
+                    },
                 }
             ),
             encoding="utf-8",
