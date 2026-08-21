@@ -90,7 +90,7 @@ def test_eagle_vlm_prefers_rope_parameters_over_legacy_alias() -> None:
     assert plugin_module._resolve_rope_scaling(Config())["factor"] == 8.0
 
 
-def test_eagle_vlm_fp16_reranker_keeps_transformer_compute_in_fp32(
+def test_eagle_vlm_fp16_reranker_keeps_residual_and_norms_in_fp32(
     monkeypatch,
 ) -> None:
     plugin_module = importlib.import_module(
@@ -105,7 +105,7 @@ def test_eagle_vlm_fp16_reranker_keeps_transformer_compute_in_fp32(
     original_add_matmul = graph_ops.add_matmul_rhs_constant
     original_add_attention = graph_ops.add_attention_from_rows
     original_add_mlp = graph_blocks.add_swiglu_mlp
-    num_layers = 3
+    num_layers = 6
 
     class FinalNormCaptured(RuntimeError):
         pass
@@ -116,6 +116,7 @@ def test_eagle_vlm_fp16_reranker_keeps_transformer_compute_in_fp32(
     matmul_fp32_compute = []
     attention_fp32 = []
     mlp_dtypes = []
+    mlp_fp32_down_projection = []
 
     def capture_tail_norms(
         network,
@@ -160,6 +161,7 @@ def test_eagle_vlm_fp16_reranker_keeps_transformer_compute_in_fp32(
 
     def capture_mlp(*args, **kwargs):
         mlp_dtypes.append(kwargs["dtype"])
+        mlp_fp32_down_projection.append(kwargs["fp32_down_projection"])
         return original_add_mlp(*args, **kwargs)
 
     monkeypatch.setattr(graph_blocks, "apply_norm", capture_tail_norms)
@@ -205,11 +207,20 @@ def test_eagle_vlm_fp16_reranker_keeps_transformer_compute_in_fp32(
         "dtype": np.float32,
     }
     assert norm_calls == [fp32_call] * (2 * num_layers + 1)
-    assert matmul_dtypes == [np.float32] * (7 * num_layers)
-    assert matmul_input_dtypes == [trt.float32] * (7 * num_layers)
-    assert matmul_fp32_compute == [False] * (7 * num_layers)
+    expected_fp32_down = [False] * (num_layers - 4) + [True] * 4
+    expected_matmul_dtypes = []
+    expected_matmul_input_dtypes = []
+    for fp32_down in expected_fp32_down:
+        expected_matmul_dtypes.extend(
+            [np.float16] * 6 + [np.float32 if fp32_down else np.float16])
+        expected_matmul_input_dtypes.extend(
+            [trt.float16] * 6 + [trt.float32 if fp32_down else trt.float16])
+    assert matmul_dtypes == expected_matmul_dtypes
+    assert matmul_input_dtypes == expected_matmul_input_dtypes
+    assert matmul_fp32_compute == ([True] * 3 + [False] * 4) * num_layers
     assert attention_fp32 == [True] * num_layers
-    assert mlp_dtypes == [np.float32] * num_layers
+    assert mlp_dtypes == [np.float16] * num_layers
+    assert mlp_fp32_down_projection == expected_fp32_down
 
 
 def test_eagle_vlm_reranker_executes_actual_sequence_length() -> None:

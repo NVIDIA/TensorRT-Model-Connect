@@ -129,6 +129,7 @@ def add_swiglu_mlp(
     hidden_size: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    fp32_down_projection: bool = False,
     quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
 ) -> trt.ITensor:
@@ -143,7 +144,14 @@ def add_swiglu_mlp(
     swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
-    mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down"
+    down_input = gated.get_output(0)
+    down_matmul = matmul
+    if fp32_down_projection:
+        if down_input.dtype != trt.float32:
+            down_input = network.add_cast(down_input, trt.float32).get_output(0)
+        down_matmul = _make_matmul_fn(network, np.float32, quant_ctx)
+
+    mlp_out = down_matmul(
+        down_input, mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down"
     )
     return mlp_out
