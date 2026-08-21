@@ -30,6 +30,25 @@ auto pipeline = trtmc::load("./qwen3-0.6b.bundle");
 std::cout << pipeline->generate("What is the capital of France? Answer in one word.").text << '\n';
 ```
 
+<a id="get-started-and-stay-tuned"></a>
+
+## 🌟 Get Started & Stay Tuned
+
+<div align="center">
+
+<img width="960" height="540" alt="Animated TensorRT-Model-Connect project hero" src="TRTMCHERO-small.gif" />
+
+</div>
+
+Ready to try TensorRT-Model-Connect? Follow the
+[Quick Start](https://nvidia.github.io/TensorRT-Model-Connect/getting-started/quick-start)
+to build and run your first supported model.
+
+We're glad you're here. [Star the repository](https://github.com/NVIDIA/TensorRT-Model-Connect)
+to keep TensorRT-Model-Connect on your radar as we share new model integrations,
+releases, examples, and community updates. Ideas and feedback are always
+welcome through the [issue chooser](https://github.com/NVIDIA/TensorRT-Model-Connect/issues/new/choose).
+
 <a id="what-is-tensorrt-model-connect"></a>
 
 ## 🔎 What is TensorRT-Model-Connect?

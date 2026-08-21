@@ -19,6 +19,7 @@ catch_all docker-compose.yml # tracked path has no precise impact rule yet; catc
 catch_all examples/byok/export_cutedsl_residual_add.py # standalone GPU tutorial exporter has no precise impact rule yet; catch-all stays conservative
 catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all NOTICE # top-level legal attribution metadata; conservative full-suite fallback is intentionally retained
+catch_all TRTMCHERO-small.gif # root README media asset has no precise impact rule; conservative full-suite fallback is intentionally retained
 catch_all pyproject.toml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all ruff.toml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative

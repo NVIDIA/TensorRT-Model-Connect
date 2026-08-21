@@ -37,15 +37,18 @@ distributed under the Apache License 2.0 with the rest of the project:
   project source text created for OCR regression testing; SHA-256
   `d27d4e33afb8e820916b19bffc4c94f1f626536cc3375b5fafeee684b0a3b9b3`
 
-## Project overview diagrams
+## Project overview media
 
-The following project overview diagrams were supplied by the project maintainer
-for inclusion and redistribution under the Apache License 2.0:
+The following project overview images and animation were supplied by the
+project maintainer for inclusion and redistribution under the Apache License
+2.0:
 
 - `website/static/img/readme/model-connect-overview.png`; SHA-256
   `15e97bc498406629d32eb043e474f835ee88ea6ba4d78cd5ea0cd91c0954b2f4`
 - `website/static/img/readme/tensorrt-stack.png`; SHA-256
   `de08eb9b63d6d7808bf11c8893005514d26282b4377f1988b2bdc30366ccad16`
+- `TRTMCHERO-small.gif`; SHA-256
+  `2dc2b3ac0526d469748a15543f17ca0fd94e2a4caf3729690fa70e6fe35ec43a`
 
 ## Maintainer voice recording and derived ASR probes
 
