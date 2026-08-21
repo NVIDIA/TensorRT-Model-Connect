@@ -1057,6 +1057,10 @@ def build_bundle(
     if max_cache_length < 1:
         raise ValueError("max_cache_length must be >= 1")
 
+    validate_build_request = getattr(plugin, "validate_build_request", None)
+    if callable(validate_build_request):
+        validate_build_request(config)
+
     # 3. Load weights
     t1 = time.monotonic()
     print("[trtmc build] Loading weights ...", file=sys.stderr)

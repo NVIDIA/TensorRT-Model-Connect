@@ -123,8 +123,8 @@ Use `--save-fp8-scales` when you want to reuse calibrated scales across builds.
 ## Dynamic KV cache
 
 ```bash
-$TRTMC build Qwen/Qwen3-0.6B \
-  -o /tmp/qwen3-dynamic.bundle \
+$TRTMC build Qwen/Qwen2.5-0.5B-Instruct \
+  -o /tmp/qwen25-dynamic.bundle \
   --dynamic-kv-cache \
   --dynamic-kv-profile-rows 256,512,1024
 ```
@@ -132,7 +132,7 @@ $TRTMC build Qwen/Qwen3-0.6B \
 At runtime, override the cache memory budget with:
 
 ```bash
-$TRTMC run /tmp/qwen3-dynamic.bundle \
+$TRTMC run /tmp/qwen25-dynamic.bundle \
   --prompt "Summarize dynamic KV cache." \
   --kv-cache-size 512MB
 ```
@@ -143,11 +143,12 @@ budget into admitted decoder contexts and inference-state capacity. During a
 request, the pipeline reads the state's preferred row count and chooses a
 matching decoder context.
 
-For eligible dense Qwen3 and Llama, `--dynamic-kv-cache` deliberately opts out
-of the native full-context fixed-KV route and uses the compatible legacy
-builder. A native full-context bundle rejects runtime `--kv-cache-size`; its
-physical capacity is fixed to the model context and shared by prefill and
-decode.
+Dense Qwen3 supports only its native full-context fixed-KV route and rejects
+`--dynamic-kv-cache`; remove that option to build Qwen3. Eligible dense Llama
+checkpoints still opt out of native KV and use their compatible legacy builder
+when dynamic KV is requested. A native full-context bundle rejects runtime
+`--kv-cache-size`; its physical capacity is fixed to the model context and
+shared by prefill and decode.
 
 <Diagram
   src="/img/diagrams/tutorials/advanced/dynamic-kv-cache.svg"

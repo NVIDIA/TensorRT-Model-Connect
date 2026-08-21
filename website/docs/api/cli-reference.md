@@ -41,7 +41,7 @@ replaces unsafe filename characters with `-`.
 | `--model-revision REV` | Build a Hugging Face commit, tag, or branch instead of its default revision. |
 | `--trust-remote-code` | Accepted for E2E-command compatibility. The current build dispatcher does not forward this flag as a universal remote-code gate; family/model loaders own their loading behavior. Review the checkpoint and family implementation, and do not assume omitting this flag prevents every remote-code path. |
 | `--decoder-engine-layout split|dual_profile` | Request separate prefill/decode engines or one multi-profile decoder engine. Unsupported split requests log a fallback; inspect `config.json.decoder_engine_layout` and bundle sections for the actual result. |
-| `--dynamic-kv-cache` | Enable runtime-resizable KV cache support. |
+| `--dynamic-kv-cache` | Enable runtime-resizable KV cache support for compatible families. Dense Qwen3 rejects this option and requires fixed-capacity native KV. |
 | `--tensor-parallel-size N`, `--tp-size N` | Build a supported decoder for TP size `1`, `2`, `4`, or `8`. |
 | `--context-parallel-size N`, `--cp-size N` | Build a supported context-parallel bundle for CP size `1`, `2`, `4`, or `8`. TP and CP requests are mutually exclusive. |
 | `--dynamic-kv-profile-rows A,B,C` | Override dynamic-KV optimization profiles. |
@@ -71,12 +71,14 @@ eligible dense Qwen3 and Llama builds use the checkpoint's full
 `max_position_embeddings`; other native or legacy paths normally use 256.
 For those Qwen3/Llama models, an explicit value preserves native KV only when it
 equals the full model context and the other native-KV constraints are also met.
+Qwen3 fails closed instead of falling back when those constraints are not met.
 
 Eligible dense Qwen3 and Llama checkpoints declare a model-owned native default
 route. A model-only build skips the optimized-provider probe and selects BF16,
-full-context fixed KV, and split prefill/decode engines. Other families probe
-their exact qualified optimized profiles before falling back to their native
-builder.
+full-context fixed KV, and split prefill/decode engines. Qwen3 has no legacy
+fallback; unsupported Qwen3 build modes fail with the native-KV capability
+reason. Other families probe their exact qualified optimized profiles before
+falling back to their native builder.
 
 TensorRT is the build backend; there is no public build-method selector. Older
 `--method trt` and `--method auto` spellings remain accepted for compatibility.

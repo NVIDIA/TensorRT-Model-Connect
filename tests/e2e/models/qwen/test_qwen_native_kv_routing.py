@@ -315,15 +315,114 @@ def test_fp16_native_build_failure_does_not_fall_back(monkeypatch):
     assert not legacy_called
 
 
-def test_plugin_falls_back_for_explicit_legacy_build_options(monkeypatch):
+def test_qwen3_dynamic_kv_fails_before_legacy_builder(monkeypatch):
     pytest.importorskip("tensorrt")
     plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.qwen.plugin"
     )
+    config = _small_config(role="decode")
+    config.raw["dynamic_kv_cache"] = True
+    legacy_called = False
 
+    def _unexpected_legacy(*_args, **_kwargs):
+        nonlocal legacy_called
+        legacy_called = True
+        return b"legacy-plan"
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_standard_decoder_engine",
+        _unexpected_legacy,
+    )
+
+    with pytest.raises(ValueError, match="does not support dynamic KV cache"):
+        plugin_module.plugin.build_engine(
+            config,
+            _weights(config),
+            256,
+            precision="fp16",
+        )
+
+    assert not legacy_called
+    assert plugin_module.plugin.get_bundle_config_overrides(config) is None
+
+
+def test_qwen3_explicit_legacy_build_options_fail_closed(monkeypatch):
+    pytest.importorskip("tensorrt")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.plugin"
+    )
     config = _small_config(role="decode")
     config.raw["_native_kv_cache_metadata"] = {"stale": True}
-    quant_ctx = object()
+    legacy_called = False
+
+    def _unexpected_legacy(*_args, **_kwargs):
+        nonlocal legacy_called
+        legacy_called = True
+        return b"legacy-plan"
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_standard_decoder_engine",
+        _unexpected_legacy,
+    )
+
+    with pytest.raises(ValueError, match="requires the fixed-capacity native KV path"):
+        plugin_module.plugin.build_engine(
+            config,
+            _weights(config),
+            128,
+            precision="fp16",
+            quant_ctx=object(),
+        )
+
+    assert not legacy_called
+    assert plugin_module.plugin.get_bundle_config_overrides(config) is None
+
+
+def test_qwen3_outside_native_architecture_contract_fails_closed(
+    monkeypatch,
+):
+    pytest.importorskip("tensorrt")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.plugin"
+    )
+    config = _small_config()
+    config._head_dim = 64
+    legacy_called = False
+
+    def _unexpected_legacy(*_args, **_kwargs):
+        nonlocal legacy_called
+        legacy_called = True
+        return b"legacy-plan"
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_standard_decoder_engine",
+        _unexpected_legacy,
+    )
+
+    assert not prefer_native_default(config)
+    assert plugin_module.plugin.default_build_precision(config) == "fp32"
+    assert plugin_module.plugin.default_max_cache_length(config) == 256
+    with pytest.raises(ValueError, match="requires the fixed-capacity native KV path"):
+        plugin_module.plugin.build_engine(
+            config,
+            _weights(config),
+            128,
+            precision="fp16",
+        )
+    assert not legacy_called
+
+
+def test_non_qwen3_variants_retain_the_legacy_builder(monkeypatch):
+    pytest.importorskip("tensorrt")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.plugin"
+    )
+    config = _small_config()
+    config.model_type = "qwen2"
+    config.architectures = ["Qwen2ForCausalLM"]
     captured: dict[str, object] = {}
 
     def _build(*args, **kwargs):
@@ -341,45 +440,8 @@ def test_plugin_falls_back_for_explicit_legacy_build_options(monkeypatch):
         _weights(config),
         128,
         precision="fp16",
-        quant_ctx=quant_ctx,
     )
 
     assert result == b"legacy-plan"
-    assert captured["args"][2] == 128
-    assert captured["kwargs"]["precision"] == "fp16"
-    assert captured["kwargs"]["quant_ctx"] is quant_ctx
-    assert plugin_module.plugin.get_bundle_config_overrides(config) is None
-
-
-def test_plugin_falls_back_outside_the_native_architecture_contract(
-    monkeypatch,
-):
-    pytest.importorskip("tensorrt")
-    plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.qwen.plugin"
-    )
-    config = _small_config()
-    config._head_dim = 64
-    captured: dict[str, object] = {}
-
-    def _build(*args, **kwargs):
-        captured.update(args=args, kwargs=kwargs)
-        return b"legacy-plan"
-
-    monkeypatch.setattr(
-        plugin_module,
-        "build_standard_decoder_engine",
-        _build,
-    )
-
-    assert not prefer_native_default(config)
-    assert plugin_module.plugin.default_build_precision(config) == "fp32"
-    assert plugin_module.plugin.default_max_cache_length(config) == 256
-    assert plugin_module.plugin.build_engine(
-        config,
-        _weights(config),
-        128,
-        precision="fp16",
-    ) == b"legacy-plan"
     assert captured["args"][2] == 128
     assert captured["kwargs"]["precision"] == "fp16"

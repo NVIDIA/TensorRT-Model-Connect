@@ -3,8 +3,8 @@
 
 """Qwen family plugin — Qwen, Qwen2, Qwen3, QwQ (text-only, not VL).
 
-Dense Qwen3 uses the family-owned TensorRT native KV path. Other Qwen
-variants retain their existing legacy graph routes.
+Qwen3 uses only the family-owned TensorRT native KV path and fails closed for
+unsupported build modes. Other Qwen variants retain their legacy graph routes.
 """
 
 from __future__ import annotations
@@ -86,8 +86,22 @@ class QwenPlugin:
         return int(config.max_position_embeddings) if capability.eligible else 256
 
     def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
-        """Keep quantized Qwen on the single-engine correctness path."""
+        """Keep quantized legacy Qwen variants on the single-engine path."""
         return not bool(config.raw.get("_quantized_build_requested"))
+
+    def validate_build_request(self, config: ModelConfig) -> None:
+        """Reject Qwen3 runtime-sized KV before loading checkpoint weights."""
+        if str(config.model_type).lower() != "qwen3":
+            return
+        if (
+            config.raw.get("dynamic_kv_cache")
+            or config.raw.get("_runtime_dynamic_kv_requested")
+        ):
+            raise ValueError(
+                "Qwen3 does not support dynamic KV cache; remove "
+                "--dynamic-kv-cache or set dynamic_kv_cache=False to use "
+                "the fixed-capacity native KV path"
+            )
 
     def load_weights(
         self, model_dir: str, config: ModelConfig,
@@ -102,6 +116,8 @@ class QwenPlugin:
         debug_layer_outputs: bool = False,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
+        config.raw.pop("_native_kv_cache_metadata", None)
+        self.validate_build_request(config)
         capability = native_kv_build_capability(
             config,
             precision=precision,
@@ -136,7 +152,12 @@ class QwenPlugin:
                 native_kv_cache=True,
             )
 
-        config.raw.pop("_native_kv_cache_metadata", None)
+        if capability.applicable:
+            raise ValueError(
+                "Qwen3 requires the fixed-capacity native KV path: "
+                f"{capability.reason}"
+            )
+
         if parallel.enabled:
             if debug_layer_outputs:
                 raise NotImplementedError(
