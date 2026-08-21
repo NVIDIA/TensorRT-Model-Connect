@@ -34,6 +34,8 @@ WHEEL_INSTALL_STATE = "wheel-installed.json"
 RELEASE_LEGAL_FILES = ("LICENSE", "NOTICE", "ASSET_LICENSES.md")
 PACKAGE_TENSORRT_VERSION_ENV = "TRTMC_PACKAGE_TENSORRT_VERSION"
 EXACT_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
+PACKAGE_SMOKE_TORCH_VERSION = "2.12.0+cpu"
+PACKAGE_SMOKE_TORCH_INDEX = "https://download.pytorch.org/whl/cpu"
 
 
 def _target_tensorrt_version(
@@ -764,6 +766,7 @@ class WheelPackageManager:
         self._create_venv(venv, wheel)
         python = venv / "bin/python"
         trtmc = venv / "bin/trtmc"
+        self._install_model_smoke_dependencies(python)
         self.context.run([python, "-m", "pip", "check"])
         InstalledWheelValidator.require_elf(trtmc)
         clean = ("VIRTUAL_ENV", "CONDA_PREFIX", "TRTMC_TRT_LIBRARY_DIR", "LD_LIBRARY_PATH")
@@ -840,6 +843,34 @@ class WheelPackageManager:
             [python, "-m", "pip", "install", "--disable-pip-version-check", "--upgrade", "pip"]
         )
         self.context.run([python, "-m", "pip", "install", "--disable-pip-version-check", wheel])
+
+    def _install_model_smoke_dependencies(self, python: Path) -> None:
+        self.context.run(
+            [
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--only-binary=:all:",
+                "--index-url",
+                PACKAGE_SMOKE_TORCH_INDEX,
+                f"torch=={PACKAGE_SMOKE_TORCH_VERSION}",
+            ]
+        )
+        self.context.run(
+            [
+                python,
+                "-I",
+                "-c",
+                (
+                    "import torch; "
+                    f"assert torch.__version__ == {PACKAGE_SMOKE_TORCH_VERSION!r}, "
+                    "torch.__version__; "
+                    "assert torch.version.cuda is None, torch.version.cuda"
+                ),
+            ]
+        )
 
     def _validate_build_platform(self, platform: str) -> None:
         match = re.fullmatch(r"manylinux_2_([0-9]+)_aarch64", platform)

@@ -1623,6 +1623,55 @@ def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
     assert '"PATH"' not in smoke_block
     assert 'trtmc,\n                "build"' in smoke_block
     assert "InstalledWheelValidator.require_elf(trtmc)" in smoke_block
+    assert smoke_block.index("self._create_venv(venv, wheel)") < smoke_block.index(
+        "self._install_model_smoke_dependencies(python)"
+    ) < smoke_block.index('self.context.run([python, "-m", "pip", "check"])')
+
+
+def test_wheel_model_smoke_installs_pinned_cpu_torch() -> None:
+    from tools.ci.package import (
+        PACKAGE_SMOKE_TORCH_INDEX,
+        PACKAGE_SMOKE_TORCH_VERSION,
+        WheelPackageManager,
+    )
+
+    class RecordingContext:
+        def __init__(self) -> None:
+            self.commands: list[list[object]] = []
+
+        def run(self, command: list[object], **_kwargs: object) -> subprocess.CompletedProcess:
+            self.commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    context = RecordingContext()
+    python = Path("venv/bin/python")
+    WheelPackageManager(context)._install_model_smoke_dependencies(python)
+
+    assert context.commands[0] == [
+        python,
+        "-m",
+        "pip",
+        "install",
+        "--disable-pip-version-check",
+        "--only-binary=:all:",
+        "--index-url",
+        PACKAGE_SMOKE_TORCH_INDEX,
+        f"torch=={PACKAGE_SMOKE_TORCH_VERSION}",
+    ]
+    assert context.commands[1][:3] == [python, "-I", "-c"]
+    assert PACKAGE_SMOKE_TORCH_VERSION in str(context.commands[1][3])
+    assert "torch.version.cuda is None" in str(context.commands[1][3])
+
+    package_text = _ci_source("package.py")
+    clean_smoke_block = package_text.split("def _clean_venv_smoke", maxsplit=1)[1].split(
+        "def _create_venv", maxsplit=1
+    )[0]
+    assert "_install_model_smoke_dependencies" not in clean_smoke_block
+
+    for dockerfile_name in ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86"):
+        dockerfile = (REPO_ROOT / dockerfile_name).read_text()
+        assert f"ARG TORCH_VERSION={PACKAGE_SMOKE_TORCH_VERSION}" in dockerfile
+        assert f"ARG PYTORCH_CPU_INDEX={PACKAGE_SMOKE_TORCH_INDEX}" in dockerfile
 
 
 def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:
