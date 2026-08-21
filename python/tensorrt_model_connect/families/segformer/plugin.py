@@ -268,7 +268,6 @@ class SegformerPlugin:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
         def _mark_debug(tensor, name):
             """Mark a tensor as debug output (identity to avoid aliasing)."""

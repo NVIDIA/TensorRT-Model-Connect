@@ -313,7 +313,6 @@ def _add_mimi_streaming_transformer_layer(
 
 
 @with_builder_context(
-    workspace_bytes=1 << 30,
     explicit_batch=True,
     disable_tf32=True,
     builder_optimization_level=0,

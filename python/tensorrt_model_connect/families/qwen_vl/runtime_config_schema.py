@@ -40,9 +40,9 @@ DECODER_SCHEMA = Schema(
         ConfigField(
             name="builder_workspace_gib",
             type_tag="int32",
-            default=1,
+            default=0,
             allowed_layers=_BUILD,
-            validator=lambda value: isinstance(value, int) and value > 0,
+            validator=lambda value: isinstance(value, int) and value >= 0,
         ),
     ),
 )

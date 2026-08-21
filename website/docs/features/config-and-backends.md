@@ -63,7 +63,7 @@ The Qwen-VL build schemas have these exact defaults and validation rules:
 | `qwen_vl_decoder.decode_attention` | `string`, `native` | Accepts `native` or `decomposed`; decomposed decode is valid only for an active split-decoder build. |
 | `qwen_vl_decoder.max_prefill_length` | `int32`, `0` | Nonnegative; zero lets the builder use the cache-length bound for the prefill maximum. |
 | `qwen_vl_decoder.opt_prefill_length` | `int32`, `64` | Must be positive and is clamped to the effective prefill maximum. |
-| `qwen_vl_decoder.builder_workspace_gib` | `int32`, `1` | Must be positive and controls the decoder builder workspace independently of the cache bound. |
+| `qwen_vl_decoder.builder_workspace_gib` | `int32`, `0` | Nonnegative; zero preserves TensorRT's device default, while a positive value caps decoder builder workspace independently of the cache bound. |
 | `qwen_vl_lora.enabled` | `bool`, `false` | Dynamic binding currently supports Qwen2.5-VL only and rejects tensor-parallel builds. |
 | `qwen_vl_lora.max_rank` | `int32`, `0` | Schema range is 0 through 256; enabling LoRA requires 1 through 256. |
 | `qwen_vl_lora.target_modules` | `string`, `q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj` | Comma-separated non-empty subset of exactly those seven projection names. |

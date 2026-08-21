@@ -64,7 +64,7 @@ def _apply_norm(
         dtype=dtype, eps=eps)
 
 
-@with_builder_context(workspace_bytes=1 << 30)
+@with_builder_context()
 def build_personaplex_tp_decoder_engine(
     config: "ModelConfig",
     weights: "WeightDict",

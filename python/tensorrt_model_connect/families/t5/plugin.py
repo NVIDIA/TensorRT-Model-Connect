@@ -148,7 +148,6 @@ class T5Plugin:
         network = builder.create_network(
             1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         tc = builder.create_builder_config()
-        tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
         tc.clear_flag(trt.BuilderFlag.TF32)
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
@@ -277,7 +276,6 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
-    tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     tc.clear_flag(trt.BuilderFlag.TF32)
     et = graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=work_np_dtype),

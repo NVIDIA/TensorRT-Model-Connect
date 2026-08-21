@@ -337,13 +337,14 @@ def build_dual_profile_decoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    # Full-context Llama prefill can require a large fused-attention tactic
-    # workspace while TensorRT is building the plan. This is build-time
+    # Native full-context Llama prefill can require a large fused-attention
+    # tactic workspace while TensorRT is building the plan. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
-    # does not allocate the bytes eagerly.
-    workspace_bytes = 16 << 30 if native_kv_cache else 1 << 30
-    trt_config.set_memory_pool_limit(
-        trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+    # does not allocate the bytes eagerly. Other paths keep TensorRT's device
+    # default instead of imposing the former 1 GiB cap.
+    if native_kv_cache:
+        trt_config.set_memory_pool_limit(
+            trt.MemoryPoolType.WORKSPACE, 16 << 30)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16

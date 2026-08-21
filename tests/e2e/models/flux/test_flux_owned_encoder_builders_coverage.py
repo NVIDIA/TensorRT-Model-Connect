@@ -466,7 +466,7 @@ def test_build_t5_encoder_engine_success_exercises_relative_bias_fallback(monkey
 
     assert plan == b"engine-plan"
     builder = fake_trt.Builder.last_instance
-    assert builder.config.pool_limits == [("workspace", 1 << 30)]
+    assert builder.config.pool_limits == []
     assert [t.name for t in builder.network.outputs] == ["text_embeddings"]
     assert [t.dtype for t in builder.network.outputs] == ["float32"]
 

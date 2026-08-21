@@ -188,7 +188,7 @@ def build_dual_profile_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim
     )
     int(head_dim * partial_rotary_factor)
-    builder_context = create_builder_context(verbose=verbose, workspace_bytes=1 << 30)
+    builder_context = create_builder_context(verbose=verbose)
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config

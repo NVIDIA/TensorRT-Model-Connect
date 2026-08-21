@@ -295,7 +295,7 @@ def test_build_encoder_engine_success_passes_activation(monkeypatch: pytest.Monk
     assert all(isinstance(call, dict) for call in layer_calls)
 
     builder = fake_trt.Builder.last_instance
-    assert builder.config.pool_limits == [("workspace", 1 << 30)]
+    assert builder.config.pool_limits == []
     assert builder.config.cleared_flags == ["tf32"]
     assert [t.name for t in builder.network.outputs] == ["hidden_states"]
     assert builder.network.outputs[0].dtype == "float32"

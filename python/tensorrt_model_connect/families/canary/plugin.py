@@ -1233,7 +1233,6 @@ class CanaryPlugin:
         b = trt.Builder(log)
         net = b.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         tc = b.create_builder_config()
-        tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
         tid = net.add_input("token_id", trt.int32, (-1,))
         pid = net.add_input("position_id", trt.int32, (-1,))

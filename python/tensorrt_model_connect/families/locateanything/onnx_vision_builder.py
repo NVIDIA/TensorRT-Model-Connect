@@ -55,7 +55,6 @@ def build_engine_from_onnx(
             "ONNX parsing failed:\n" + "\n".join(errors))
 
     config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     if verbose:
         print(f"[trtmc build] Building vision TRT engine from ONNX "

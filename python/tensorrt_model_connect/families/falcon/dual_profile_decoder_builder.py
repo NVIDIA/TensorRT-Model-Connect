@@ -296,7 +296,6 @@ def build_dual_profile_decoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     import os as _os_pv
     if _os_pv.environ.get("TRTMC_TRT_DETAILED_VERBOSITY") == "1":
         trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
