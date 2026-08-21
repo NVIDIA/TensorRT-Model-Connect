@@ -34,6 +34,19 @@ unrelated local work.
 For source changes, use the development environment described in
 [System Requirements](../getting-started/environment-and-repro.md).
 
+Install the local quality hooks once in the clone:
+
+```bash
+python3 -m pip install --requirement requirements/community-ci.txt
+pre-commit install --install-hooks --hook-type pre-commit --hook-type pre-push
+```
+
+Commit-time hooks check Ruff and clang-format. Push-time hooks run the complete
+source-quality and ownership analysis, followed by the selected source-only C++
+and Python unit scope in a hardened, GPU-free container. The protected suite
+retains the filesystem-specific cache-reflink contract that public runners
+cannot portably execute.
+
 ## 2. Find the owner before editing
 
 Choose the narrowest current owner:
@@ -113,7 +126,15 @@ The pull request should record:
 Compilation, source tests, model parity, target-hardware execution,
 performance, and release qualification are different evidence tiers.
 
-## 6. Coordinate repository CI
+## 6. Read public CPU validation
+
+Every pull request automatically receives contributor-visible, GitHub-hosted
+`Community CPU` checks for source quality, ownership and impact, and source-only
+C++ and Python units. These checks have read-only repository permission and no
+access to private runners, secrets, or GPUs. Fix their detailed failures and
+wait for `Community CPU / Required` on the current PR merge revision.
+
+## 7. Coordinate protected repository CI
 
 The repository premerge workflow is one-shot and label-driven. Pushing a branch
 or creating a pull request alone does not start the gate. After local checks
@@ -124,8 +145,10 @@ pass and the pull request is ready, add this comment:
 ```
 
 The maintainer verifies the PR's `headRefOid` and applies `run-internal-ci`.
-The trusted bridge consumes that label, captures the immutable PR head SHA, and
-dispatches private premerge validation for that exact revision.
+The trusted bridge consumes that label, verifies the current public CPU result,
+captures the immutable PR head SHA, and dispatches private premerge validation
+for that exact revision. The public result is contributor feedback, not an
+authorization token; the maintainer-owned label remains the security boundary.
 
 Wait for the `trtmc/premerge/required` status on the same head SHA to complete
 successfully. If the head changes intentionally, finish the update and local

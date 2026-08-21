@@ -1999,13 +1999,31 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=492,
+            name="community_cpu_contract",
+            matcher=_path_in(
+                {
+                    ".pre-commit-config.yaml",
+                    "Dockerfile.community-cpu",
+                    "requirements/community-ci.txt",
+                    "tools/community_ci.py",
+                }
+            ),
+            resolver=_match_result(
+                "community_cpu_contract", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestNoImpact.test_community_cpu_contract_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
+            priority=493,
             name="github_ci_config",
             matcher=_path_startswith(".github/"),
             resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=493,
+            priority=494,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,

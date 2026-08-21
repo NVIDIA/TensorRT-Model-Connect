@@ -61,6 +61,24 @@ Keep each pull request focused on one problem. Add or update focused tests when
 behavior changes, and update documentation when users or developers will observe
 the change.
 
+Install the repository's Python `pre-commit` hooks once in each clone:
+
+```bash
+python3 -m pip install --requirement requirements/community-ci.txt
+pre-commit install --install-hooks --hook-type pre-commit --hook-type pre-push
+```
+
+The pre-commit hook checks changed Python files with Ruff and changed C++ files
+with clang-format. The pre-push hook reruns the complete source-quality and
+ownership analysis, then builds and runs the selected source-only C++ and Python
+unit scope in a hardened, GPU-free Docker container. The first pre-push builds
+the pinned `Dockerfile.community-cpu` image; later pushes reuse it until an image
+input changes. A filesystem-specific cache-reflink contract remains in the
+protected suite because GitHub-hosted runners do not guarantee reflink storage.
+Fetch `upstream/main` before pushing so impact is calculated
+against a current base. Set `TRTMC_COMMUNITY_BASE_REF` only when the pull request
+targets a different fetched revision.
+
 Start with repository consistency checks:
 
 ```bash
@@ -130,7 +148,21 @@ Compilation, unit tests, inference, model parity, target-hardware execution,
 performance, and release qualification are separate evidence levels. Claim only
 what the recorded validation proves.
 
-### 8. Ask a maintainer to trigger CI
+### 8. Read the public CPU checks
+
+Every pull request automatically runs these GitHub-hosted checks without access
+to repository secrets, private runners, or GPUs:
+
+- `Community CPU / Source quality`
+- `Community CPU / Ownership and impact`
+- `Community CPU / Unit / C++ and Python`
+- `Community CPU / Required`
+
+Their logs are the public source of formatting, complexity, build, and unit-test
+feedback. Fix failures and wait for `Community CPU / Required` on the current PR
+merge revision before requesting protected CI.
+
+### 9. Ask a maintainer to trigger CI
 
 Opening a pull request or pushing to your fork does **not** start the protected
 premerge suite. After your local checks pass and the pull request is ready for
@@ -140,9 +172,13 @@ CI, mention the repository maintainer in a pull-request comment:
 @yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
 ```
 
-The maintainer verifies the pull-request head and applies the one-shot
-`run-internal-ci` label. Only collaborators with repository `maintain` or
-`admin` permission can authorize that trigger.
+The maintainer verifies the pull-request head and public CPU result, then applies
+the one-shot `run-internal-ci` label. The trusted bridge refuses dispatch unless
+`Community CPU / Required` passed on the current PR merge revision. Only
+collaborators with repository `maintain` or `admin` permission can authorize
+that trigger. Because pull-request code controls its public validation, the
+public result is contributor feedback rather than an authorization token; the
+maintainer-owned label remains the protected-resource security boundary.
 
 Wait for `trtmc/premerge/required` to pass on the exact pull-request head SHA.
 If you push another commit, the previous result no longer validates the current
@@ -150,7 +186,7 @@ head; finish the update, rerun local checks, and mention `@yifeif-nv` once to
 request a new CI run. Private runner details, logs, artifacts, and URLs are not
 part of the public contribution interface.
 
-### 9. Respond to review and keep evidence current
+### 10. Respond to review and keep evidence current
 
 Address review feedback on the same topic branch and sign off every new commit.
 Keep the pull request current with upstream when requested. Any head change

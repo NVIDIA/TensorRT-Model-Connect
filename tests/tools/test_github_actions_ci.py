@@ -119,6 +119,7 @@ def _run_internal_ci_snapshot(
     pr_head_sha: str,
     event_name: str = "pull_request_target",
     actor_role: str = "maintain",
+    community_conclusion: str = "success",
     system_path: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     fake_bin = tmp_path / "bin"
@@ -140,6 +141,8 @@ if "/collaborators/" in endpoint:
     print(os.environ["FAKE_ACTOR_ROLE"])
 elif "/pulls/" in endpoint:
     print(os.environ["FAKE_PULL_JSON"])
+elif "/check-runs" in endpoint:
+    print(os.environ["FAKE_COMMUNITY_CONCLUSION"])
 else:
     print(f"unexpected gh invocation: {arguments}", file=sys.stderr)
     raise SystemExit(2)
@@ -155,6 +158,7 @@ else:
             "repo": {"full_name": "NVIDIA/TensorRT-Model-Connect"},
         },
         "head": {"sha": pr_head_sha},
+        "merge_commit_sha": "a" * 40,
     }
     environment = os.environ.copy()
     environment.update(
@@ -163,6 +167,7 @@ else:
             "EVENT_HEAD_SHA": event_head_sha,
             "EVENT_NAME": event_name,
             "FAKE_ACTOR_ROLE": actor_role,
+            "FAKE_COMMUNITY_CONCLUSION": community_conclusion,
             "FAKE_PULL_JSON": json.dumps(pull),
             "GH_TOKEN": "test-token",
             "GITHUB_OUTPUT": str(output),
@@ -207,6 +212,7 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         *workflows.glob("*.yaml"),
     }
     assert sorted(path.name for path in workflow_files) == [
+        "community-cpu.yml",
         "internal-ci-bridge.yml",
         "pages.yml",
     ]
@@ -272,7 +278,9 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "github.event_name == 'pull_request_target'" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "permissions: {}" in workflow
-    assert authorize_permissions.strip() == "contents: read\n      pull-requests: write"
+    assert authorize_permissions.strip() == (
+        "checks: read\n      contents: read\n      pull-requests: write"
+    )
     assert dispatch_permissions.strip() == "{}"
 
     assert "collaborators/$ACTOR/permission" in authorize
@@ -293,11 +301,14 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "head_repo" not in authorize
     assert "head_ref" not in authorize
     assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
+    assert '[[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
+    assert "Community CPU / Required" in authorize
+    assert ".app.slug == \"github-actions\"" in authorize
+    assert 'if [ "$community_cpu" != "success" ]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
     for legacy in (
         "base_sha",
-        "merge_sha",
         "BASE_SHA",
         "MERGE_SHA",
         "EVENT_BASE_SHA",
@@ -382,6 +393,22 @@ def test_internal_ci_bridge_uses_upstream_pr_metadata_without_fork_access(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_internal_ci_bridge_requires_current_community_cpu_success(
+    tmp_path: Path,
+) -> None:
+    head_sha = "c8844445a1c630aef586b45daf7dfb31d4168c5a"
+
+    result = _run_internal_ci_snapshot(
+        tmp_path,
+        event_head_sha=head_sha,
+        pr_head_sha=head_sha,
+        community_conclusion="failure",
+    )
+
+    assert result.returncode != 0
+    assert "Community CPU / Required must pass" in result.stdout + result.stderr
 
 
 def test_internal_ci_bridge_only_allows_maintainers_and_admins(
@@ -1111,6 +1138,8 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert 'glob("test_*.py")' in script
     assert '"-q"' in stage and '"-x"' in stage
     assert '"--dist=worksteal"' in stage
+    assert 'if scope == "community-all"' in stage
+    assert "test_distinct_explicit_hf_cache_paths_reach_both_containers" in stage
     assert 'not model_proof_allocator"' in stage
     assert '"-m"' in stage and '"model_proof_allocator"' in stage
     assert '["trtmc", "test_cli_args", "test_config_cli_support"]' in script

@@ -150,9 +150,13 @@ BUILDER_UNIT_TEST_INPUT_EXACT = frozenset(
 # ready-model coverage, exclusions, and report accounting.
 FULL_UNIT_TEST_INPUT_EXACT = frozenset(
     {
+        ".pre-commit-config.yaml",
         "benchmarks/performance/release.yaml",
+        "Dockerfile.community-cpu",
         "Dockerfile.dev.aarch64",
         "Dockerfile.dev.x86",
+        "requirements/community-ci.txt",
+        "tools/community_ci.py",
         "tools/ci/README.md",
     }
 )

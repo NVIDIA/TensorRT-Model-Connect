@@ -228,6 +228,13 @@ class UnitTestRunner:
             "--ignore=tests/builder/test_flashinfer_benchmark.py",
             "--ignore=tests/builder/test_tvm_ffi_plugin.py",
         ]
+        if scope == "community-all":
+            # GitHub-hosted runners do not promise a reflink-capable scratch
+            # filesystem. The protected suite retains this storage contract.
+            pytest.append(
+                "--deselect=tests/tools/test_model_proof_runner.py::"
+                "test_distinct_explicit_hf_cache_paths_reach_both_containers"
+            )
         if selected_wheel:
             pytest.append("--import-mode=importlib")
         self.context.run(
@@ -235,7 +242,7 @@ class UnitTestRunner:
             limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
             updates=python_environment,
         )
-        if scope == "all":
+        if scope in {"all", "community-all"}:
             allocator = [
                 python,
                 "-m",
@@ -324,7 +331,7 @@ class UnitTestRunner:
                 ["trtmc", "test_cli_args", "test_config_cli_support"],
                 ["-R", "^(test_cli_args|test_config_cli_support)$"],
             )
-        if scope == "all":
+        if scope in {"all", "community-all"}:
             harness_tests = [
                 str(path.relative_to(self.context.repository))
                 for path in sorted(
@@ -336,7 +343,9 @@ class UnitTestRunner:
                 ["trtmc", "trtmc_platform_cpp_tests"],
                 ["-L", "platform"],
             )
-        raise CiError("TRTMC_PREMERGE_UNIT_SCOPE must be builder, cli, or all")
+        raise CiError(
+            "TRTMC_PREMERGE_UNIT_SCOPE must be builder, cli, all, or community-all"
+        )
 
     def cpp_targets(self) -> list[str]:
         if self.context.env.get("FULL_E2E", "false") == "true":

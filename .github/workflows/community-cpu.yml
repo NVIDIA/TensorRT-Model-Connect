@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Community CPU
+
+run-name: "PR #${{ github.event.pull_request.number }} · public CPU validation"
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: community-cpu-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CI_BASE_REF: ${{ github.event.pull_request.base.sha }}
+
+jobs:
+  source-quality:
+    name: Community CPU / Source quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the current PR merge
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Install public CPU quality tools
+        run: python3 -m pip install --disable-pip-version-check --requirement requirements/community-ci.txt
+
+      - name: Run source quality
+        run: python3 -m tools.community_ci source-quality --base "$CI_BASE_REF"
+
+  ownership-impact:
+    name: Community CPU / Ownership and impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
+      unit_scope: ${{ steps.impact.outputs.unit_scope }}
+    steps:
+      - name: Check out the current PR merge
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Resolve source ownership and CPU scope
+        id: impact
+        run: python3 -m tools.community_ci impact --base "$CI_BASE_REF"
+
+  unit:
+    name: Community CPU / Unit / C++ and Python
+    if: ${{ always() }}
+    needs: ownership-impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Require successful impact analysis
+        if: ${{ needs.ownership-impact.result != 'success' }}
+        env:
+          IMPACT_RESULT: ${{ needs.ownership-impact.result }}
+        run: |
+          echo "::error::Ownership and impact did not succeed: $IMPACT_RESULT"
+          exit 1
+
+      - name: Explain an empty unit scope
+        if: >-
+          needs.ownership-impact.result == 'success' &&
+          needs.ownership-impact.outputs.run_unit_tests != 'true'
+        run: echo "No source-only C++ or Python unit tests are required for this change."
+
+      - name: Check out the current PR merge
+        if: >-
+          needs.ownership-impact.result == 'success' &&
+          needs.ownership-impact.outputs.run_unit_tests == 'true'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        if: >-
+          needs.ownership-impact.result == 'success' &&
+          needs.ownership-impact.outputs.run_unit_tests == 'true'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Run hardened source-only units
+        if: >-
+          needs.ownership-impact.result == 'success' &&
+          needs.ownership-impact.outputs.run_unit_tests == 'true'
+        env:
+          TRTMC_UNIT_SCOPE: ${{ needs.ownership-impact.outputs.unit_scope }}
+        run: python3 -m tools.community_ci unit --scope "$TRTMC_UNIT_SCOPE"
+
+  required:
+    name: Community CPU / Required
+    if: ${{ always() }}
+    needs:
+      - source-quality
+      - ownership-impact
+      - unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Publish the public CPU verdict
+        env:
+          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
+          IMPACT_RESULT: ${{ needs.ownership-impact.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+        run: |
+          printf 'Source quality: %s\nOwnership and impact: %s\nUnit: %s\n' \
+            "$SOURCE_QUALITY_RESULT" "$IMPACT_RESULT" "$UNIT_RESULT"
+          test "$SOURCE_QUALITY_RESULT" = success
+          test "$IMPACT_RESULT" = success
+          test "$UNIT_RESULT" = success

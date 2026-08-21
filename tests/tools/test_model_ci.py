@@ -688,6 +688,31 @@ def test_source_container_runs_units_without_model_fallback(
 @pytest.mark.parametrize(
     "path",
     (
+        ".pre-commit-config.yaml",
+        "Dockerfile.community-cpu",
+        "requirements/community-ci.txt",
+        "tools/community_ci.py",
+    ),
+)
+def test_community_cpu_contract_runs_all_units_without_model_fallback(
+    tmp_path: Path, path: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "# community CPU contract\n")
+    head = _commit(repo, "update community CPU contract")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
         "benchmarks/performance/baselines/task_reference.py",
         "tools/perf_matrix.py",
     ),

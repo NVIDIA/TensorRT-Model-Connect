@@ -1481,6 +1481,23 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
+            ".pre-commit-config.yaml",
+            "Dockerfile.community-cpu",
+            "requirements/community-ci.txt",
+            "tools/community_ci.py",
+        ],
+    )
+    def test_community_cpu_contract_triggers_tools_tier(self, imap, path):
+        """Community CPU contract changes run tools tests without model proofs."""
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "community_cpu_contract"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
             "CODEOWNERS",
             "ruff.toml",
             "tests/__init__.py",

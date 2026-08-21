@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Public, GPU-free source validation image. It contains the CUDA/TensorRT SDK
+# needed to compile the CLI, but runtime containers receive no GPU devices.
+ARG CUDA_IMAGE=nvidia/cuda:13.3.0-base-ubuntu24.04@sha256:bcf7d05f0b13b9bbb86d9a4cd039d331894b8f1145ad009d1af75023bcd1dc5c
+ARG TENSORRT_VERSION=11.1.0.106
+ARG TENSORRT_APT_VERSION=11.1.0.106-1+cuda13.3
+FROM ${CUDA_IMAGE}
+
+ARG TENSORRT_VERSION
+ARG TENSORRT_APT_VERSION
+ARG PYTORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
+ARG TORCH_VERSION=2.12.0+cpu
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      cuda-cudart-dev-13-3 \
+      cuda-nvcc-13-3 \
+      git \
+      ninja-build \
+      nlohmann-json3-dev \
+      pkg-config \
+      python3.12 \
+      python3.12-dev \
+      python3.12-venv \
+      libcublas-dev-13-3 \
+      "libnvinfer-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-headers-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-headers-plugin-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-plugin11=${TENSORRT_APT_VERSION}" \
+      "libnvinfer-safe-headers-dev=${TENSORRT_APT_VERSION}" \
+      "libnvinfer11=${TENSORRT_APT_VERSION}" \
+      "libnvonnxparsers-dev=${TENSORRT_APT_VERSION}" \
+      "libnvonnxparsers11=${TENSORRT_APT_VERSION}" && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV VIRTUAL_ENV=/opt/venv
+RUN python3.12 -m venv ${VIRTUAL_ENV}
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+RUN pip install --upgrade pip && \
+    pip install \
+      "apache-tvm-ffi==0.1.12" \
+      "cuda-python>=13.0.3,<14" \
+      "huggingface_hub>=0.23" \
+      "ml_dtypes>=0.4" \
+      "numpy>=1.24,<2.5" \
+      "onnx>=1.16" \
+      "onnxscript>=0.2" \
+      "PyYAML>=6.0" \
+      "safetensors>=0.4" \
+      "sentencepiece>=0.1.99" \
+      "transformers==5.2.0" && \
+    pip install --no-deps \
+      "tensorrt_cu13==${TENSORRT_VERSION}" \
+      "tensorrt_cu13_bindings==${TENSORRT_VERSION}" && \
+    pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_CPU_INDEX}" && \
+    pip install "setuptools>=80,<82"
+
+COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt
+RUN pip install --requirement /tmp/trtmc-community-ci.txt && \
+    rm -f /tmp/trtmc-community-ci.txt
+
+ENV TRT_LIB_DIR=/usr/lib/x86_64-linux-gnu
+ENV TRT_INC_DIR=/usr/include/x86_64-linux-gnu
+ENV LD_LIBRARY_PATH="${TRT_LIB_DIR}:/usr/local/cuda/lib64"
+
+RUN python3.12 -c \
+      "import tensorrt, torch, transformers; assert tensorrt.__version__ == '${TENSORRT_VERSION}'; assert torch.__version__ == '${TORCH_VERSION}'; assert torch.version.cuda is None; assert transformers.__version__ == '5.2.0'" && \
+    test -f "${TRT_INC_DIR}/NvInferVersion.h" && \
+    test -f "${TRT_LIB_DIR}/libnvinfer.so.11"
+
+WORKDIR /workspace/tensorrt-model-connect
+CMD ["bash"]

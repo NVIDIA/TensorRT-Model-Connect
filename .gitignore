@@ -100,6 +100,7 @@ models/hf/*/.cache/
 !.github/**
 !.gitignore
 !.dockerignore
+!.pre-commit-config.yaml
 !website/docs/context/.last_scan_sha
 !.agents/
 !.agents/plugins/

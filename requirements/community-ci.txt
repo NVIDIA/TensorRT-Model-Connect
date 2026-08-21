@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Keep local hooks and the public Community CPU workflow on the same formatter
+# versions. The development image consumes this file as well.
+pre-commit==4.6.2
+ruff==0.16.4
+clang-format==22.1.8
+lizard==1.24.0
+pytest==8.4.2
+pytest-xdist==3.8.0
+Pillow==12.2.0
