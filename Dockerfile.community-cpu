@@ -63,7 +63,7 @@ RUN pip install --upgrade pip && \
     pip install "torch==${TORCH_VERSION}" --index-url "${PYTORCH_CPU_INDEX}" && \
     pip install "setuptools>=80,<82"
 
-COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt
+COPY community-ci.txt /tmp/trtmc-community-ci.txt
 RUN pip install --requirement /tmp/trtmc-community-ci.txt && \
     rm -f /tmp/trtmc-community-ci.txt
 

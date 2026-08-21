@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -136,11 +137,33 @@ def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
 
     assert "-base-ubuntu24.04@sha256:" in dockerfile
-    assert "COPY requirements/community-ci.txt" in dockerfile
+    assert "COPY community-ci.txt" in dockerfile
     assert "pip install --requirement /tmp/trtmc-community-ci.txt" in dockerfile
     assert '"libnvinfer11=${TENSORRT_APT_VERSION}"' in dockerfile
     assert "pip install --no-deps" in dockerfile
     assert '"tensorrt_cu13_bindings==${TENSORRT_VERSION}"' in dockerfile
     assert '"tensorrt==${TENSORRT_VERSION}"' not in dockerfile
     assert "NVIDIA_VISIBLE_DEVICES" not in dockerfile
-    assert "!requirements/community-ci.txt" in dockerignore
+    assert "!requirements/" not in dockerignore
+    assert "!requirements/community-ci.txt" not in dockerignore
+
+
+def test_cpu_image_builds_from_the_minimal_requirements_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = community_ci.CommunityCI(REPO_ROOT, dict(os.environ))
+    calls: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            1 if command[:3] == ["docker", "image", "inspect"] else 0,
+        )
+
+    monkeypatch.setattr(runner.commands, "run", run)
+
+    runner._ensure_cpu_image()
+
+    assert calls[1][:3] == ["docker", "build", "--file"]
+    assert calls[1][-1] == "requirements"

@@ -20,8 +20,6 @@
 !.github/
 !.github/scripts/
 !.github/scripts/build-python-profiles.py
-!requirements/
-!requirements/community-ci.txt
 
 **/__pycache__/
 **/*.py[cod]

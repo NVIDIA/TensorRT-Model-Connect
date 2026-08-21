@@ -234,7 +234,7 @@ class CommunityCI:
                     "Dockerfile.community-cpu",
                     "--tag",
                     image,
-                    ".",
+                    "requirements",
                 ]
             )
         else:
