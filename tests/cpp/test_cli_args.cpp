@@ -345,6 +345,40 @@ void test_bad_kv_cache_size_fails() {
     check(args.error_message.find("--kv-cache-size expects") == 0, "bad kv cache message");
 }
 
+void test_parse_byte_size_si_vs_iec() {
+    using trtmc::cli::parse_byte_size;
+    check(parse_byte_size("1GB") == 1000ull * 1000 * 1000, "1GB is decimal");
+    check(parse_byte_size("1GiB") == 1024ull * 1024 * 1024, "1GiB is binary");
+    check(parse_byte_size("1GB") != parse_byte_size("1GiB"), "GB and GiB differ");
+    check(parse_byte_size("1KB") == 1000ull, "1KB is decimal");
+    check(parse_byte_size("1KiB") == 1024ull, "1KiB is binary");
+    check(parse_byte_size("1MB") == 1000ull * 1000, "1MB is decimal");
+    check(parse_byte_size("1MiB") == 1024ull * 1024, "1MiB is binary");
+    check(parse_byte_size("1TB") == 1000ull * 1000 * 1000 * 1000, "1TB is decimal");
+    check(parse_byte_size("1TiB") == 1024ull * 1024 * 1024 * 1024, "1TiB is binary");
+}
+
+void test_parse_byte_size_case_and_fractional() {
+    using trtmc::cli::parse_byte_size;
+    check(parse_byte_size("1gb") == parse_byte_size("1GB"), "lowercase suffix matches uppercase");
+    check(parse_byte_size("1Gb") == parse_byte_size("1GB"), "mixed-case suffix matches");
+    check(parse_byte_size("1gib") == parse_byte_size("1GiB"), "lowercase iec suffix matches");
+    check(parse_byte_size("1.5GB") == 1500000000ull, "fractional value scales correctly");
+    check(parse_byte_size("100") == 100ull, "no suffix means bytes");
+    check(parse_byte_size("100B") == 100ull, "explicit B suffix means bytes");
+}
+
+void test_parse_byte_size_rejects_invalid() {
+    using trtmc::cli::parse_byte_size;
+    check(!parse_byte_size("").has_value(), "empty string rejected");
+    check(!parse_byte_size("0GB").has_value(), "zero rejected");
+    check(!parse_byte_size("-1GB").has_value(), "negative rejected");
+    check(!parse_byte_size("10GBx").has_value(), "trailing garbage rejected");
+    check(!parse_byte_size("10XB").has_value(), "unsupported suffix rejected");
+    check(!parse_byte_size("abc").has_value(), "non-numeric rejected");
+    check(!parse_byte_size("99999999999999999999999TB").has_value(), "overflow rejected");
+}
+
 void test_invalid_generation_sampling_values_fail() {
     auto negative_tokens =
         parse({"trtmc", "run", "bundle.bundle", "--prompt", "hello", "--max-new-tokens", "-5"});
@@ -512,6 +546,9 @@ int main() {
     test_missing_value_fails();
     test_missing_prompt_is_distinct_from_empty_prompt();
     test_bad_kv_cache_size_fails();
+    test_parse_byte_size_si_vs_iec();
+    test_parse_byte_size_case_and_fractional();
+    test_parse_byte_size_rejects_invalid();
     test_invalid_generation_sampling_values_fail();
     test_generation_sampling_boundaries_parse();
     test_unexpected_positional_fails();

@@ -691,7 +691,10 @@ set_target_properties(trtmc PROPERTIES
 )
 
 if(TRTMC_BUILD_BENCHMARKS)
-  add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
+  add_executable(trtmc_dataset_benchmark
+    examples/trtmc_dataset_benchmark.cpp
+    src/cli/args.cpp
+  )
   target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
   target_include_directories(trtmc_dataset_benchmark PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_include_directories(trtmc_dataset_benchmark SYSTEM PRIVATE
