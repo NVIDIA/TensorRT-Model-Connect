@@ -194,14 +194,28 @@ def test_pre_commit_config_installs_fast_commit_and_complete_push_hooks() -> Non
     config = yaml.safe_load((REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
     assert config["default_install_hook_types"] == ["pre-commit", "pre-push"]
 
+    repositories = {repository["repo"]: repository for repository in config["repos"]}
+    assert repositories["https://github.com/astral-sh/ruff-pre-commit"]["rev"] == "v0.16.4"
+    assert (
+        repositories["https://github.com/pre-commit/mirrors-clang-format"]["rev"]
+        == "v22.1.8"
+    )
+
     hooks = {hook["id"]: hook for repository in config["repos"] for hook in repository["hooks"]}
     for hook_id in ("trailing-whitespace", "end-of-file-fixer", "check-yaml"):
         assert hooks[hook_id]["stages"] == ["pre-commit"]
-    assert hooks["trtmc-python-quality"]["stages"] == ["pre-commit"]
-    assert hooks["trtmc-cpp-format"]["stages"] == ["pre-commit"]
+    assert hooks["ruff-check"]["stages"] == ["pre-commit"]
+    assert hooks["clang-format"]["stages"] == ["pre-commit"]
+    assert hooks["clang-format"]["entry"] == "clang-format --dry-run --Werror"
     assert hooks["trtmc-community-pre-push"]["stages"] == ["pre-push"]
+    assert hooks["trtmc-community-pre-push"]["entry"] == (
+        "python -m tools.community_ci pre-push"
+    )
     assert hooks["trtmc-community-pre-push"]["always_run"] is True
     assert hooks["trtmc-community-pre-push"]["pass_filenames"] is False
+
+    source = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    assert "python3 -m tools.community_ci format-" not in source
 
 
 def test_impact_publishes_only_the_public_cpu_scope(
@@ -579,6 +593,11 @@ def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:
     assert "pip install --no-deps" in dockerfile
     assert '"tensorrt_cu13_bindings==${TENSORRT_VERSION}"' in dockerfile
     assert '"tensorrt==${TENSORRT_VERSION}"' not in dockerfile
+    assert 'multiarch="$(gcc -dumpmachine)"' in dockerfile
+    assert "ENV TRT_LIB_DIR=/opt/trtmc-tensorrt-lib" in dockerfile
+    assert "ENV TRT_INC_DIR=/opt/trtmc-tensorrt-include" in dockerfile
+    assert "/usr/lib/x86_64-linux-gnu" not in dockerfile
+    assert "/usr/include/x86_64-linux-gnu" not in dockerfile
     assert "NVIDIA_VISIBLE_DEVICES" not in dockerfile
     assert "!requirements/" not in dockerignore
     assert "!requirements/community-ci.txt" not in dockerignore

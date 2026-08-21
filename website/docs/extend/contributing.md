@@ -43,11 +43,18 @@ pre-commit install --install-hooks --hook-type pre-commit --hook-type pre-push
 
 Commit-time hooks trim trailing whitespace, ensure one final newline, validate
 YAML, check Ruff, and verify clang-format. Some commit-time hooks modify files;
-review and stage those fixes before committing again. Push-time hooks are
-check-only: they run the complete source-quality and ownership analysis,
-followed by the selected source-only C++ and Python unit scope in a hardened,
-GPU-free container. The protected suite retains the filesystem-specific
-cache-reflink contract that public runners cannot portably execute.
+review and stage those fixes before committing again. Pre-commit manages the
+Ruff and clang-format environments on Linux, macOS, and Windows instead of
+depending on host-installed binaries.
+
+Push-time hooks are check-only: they run the complete source-quality and
+ownership analysis, followed by the selected source-only C++ and Python unit
+scope in a hardened, GPU-free Linux container. This requires Docker with Linux
+containers; use WSL2 on Windows. The public image supports Linux x86_64 and
+ARM64, including Docker Desktop on macOS. Native Windows without WSL2/Linux
+containers cannot run the TensorRT CLI build gate. The protected suite retains
+the filesystem-specific cache-reflink contract that public runners cannot
+portably execute.
 
 ## 2. Find the owner before editing
 

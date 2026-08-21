@@ -15,25 +15,29 @@ repos:
       - id: check-yaml
         stages: [pre-commit]
 
-  - repo: local
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.4
     hooks:
-      - id: trtmc-python-quality
+      - id: ruff-check
         name: TRTMC Python quality
-        entry: python3 -m tools.community_ci format-python
-        language: system
-        files: \.py$
+        args: [--config, ruff.toml]
         stages: [pre-commit]
 
-      - id: trtmc-cpp-format
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.8
+    hooks:
+      - id: clang-format
         name: TRTMC C++ formatting
-        entry: python3 -m tools.community_ci format-cpp
-        language: system
+        entry: clang-format --dry-run --Werror
+        args: [-style=file]
         files: \.(cpp|h)$
         stages: [pre-commit]
 
+  - repo: local
+    hooks:
       - id: trtmc-community-pre-push
         name: TRTMC Community CPU pre-push gate
-        entry: python3 -m tools.community_ci pre-push
+        entry: python -m tools.community_ci pre-push
         language: system
         pass_filenames: false
         always_run: true
