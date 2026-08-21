@@ -41,7 +41,7 @@ from tools.ci.model_reference_cache import (  # noqa: E402
     parse_model_reference_contract,
 )
 from tools.ci.process import CiError  # noqa: E402
-from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
+from tools.performance import catalog as performance_catalog  # noqa: E402
 from tools.validation import catalog as validation_catalog  # noqa: E402
 from tensorrt_model_connect.python_profiles import (  # noqa: E402
     PREBUILT_ONLY_ENV,
@@ -58,6 +58,7 @@ TASKS = ("accuracy", "perf")
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 EXACT_GIT_REVISION_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
 ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"TRTMC_[A-Z0-9_]+")
+ENVIRONMENT_REFERENCE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 MANAGED_TASK_ENVIRONMENT_VARIABLES = frozenset(
     {
         PROFILE_ROOT_ENV,
@@ -237,12 +238,26 @@ def _environment_path(value: str) -> Path:
     return (DEFAULT_ENVIRONMENT_ROOT / f"{value}.yaml").resolve()
 
 
+def _expand_environment_value(value: str, field: str) -> str:
+    missing: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        configured = os.environ.get(name)
+        if configured is None or not configured.strip():
+            missing.append(name)
+            return ""
+        return configured
+
+    expanded = ENVIRONMENT_REFERENCE_PATTERN.sub(replace, value)
+    if missing:
+        raise ModelCheckError(f"environment {field} requires: {', '.join(sorted(set(missing)))}")
+    return expanded
+
+
 def _expand_environment(value: Any, field: str) -> Any:
     if isinstance(value, str):
-        try:
-            return perf_matrix._expand_environment_value(value, field)
-        except perf_matrix.PerfMatrixError as exc:
-            raise ModelCheckError(str(exc)) from exc
+        return _expand_environment_value(value, field)
     if isinstance(value, list):
         return [_expand_environment(item, f"{field}[{index}]") for index, item in enumerate(value)]
     if isinstance(value, Mapping):
@@ -258,10 +273,7 @@ def _repo_path(value: str) -> Path:
 
 
 def _runner_executable(value: str, field: str) -> str:
-    try:
-        expanded = perf_matrix._expand_environment_value(value, field)
-    except perf_matrix.PerfMatrixError as exc:
-        raise ModelCheckError(str(exc)) from exc
+    expanded = _expand_environment_value(value, field)
     path = Path(expanded).expanduser()
     if path.is_absolute():
         return str(path.absolute())
@@ -291,16 +303,12 @@ def load_execution_environment(value: str, *, platform_id: str) -> dict[str, Any
     if not isinstance(executable_dirs, list) or any(
         not isinstance(path, str) or not path for path in executable_dirs
     ):
-        raise ModelCheckError(
-            "model-check environment executable_dirs must be a list of paths"
-        )
+        raise ModelCheckError("model-check environment executable_dirs must be a list of paths")
     python_dirs = environment.get("python_dirs", [])
     if not isinstance(python_dirs, list) or any(
         not isinstance(path, str) or not path for path in python_dirs
     ):
-        raise ModelCheckError(
-            "model-check environment python_dirs must be a list of paths"
-        )
+        raise ModelCheckError("model-check environment python_dirs must be a list of paths")
     environment_variables = environment.get("environment_variables", {})
     if not isinstance(environment_variables, Mapping) or any(
         not isinstance(name, str)
@@ -428,13 +436,10 @@ def _task_environment(
     if library_dirs:
         child["LD_LIBRARY_PATH"] = os.pathsep.join(library_dirs)
     executable_dirs = [str(path) for path in environment.get("executable_dirs", [])]
-    missing_executable_dirs = [
-        path for path in executable_dirs if not Path(path).is_dir()
-    ]
+    missing_executable_dirs = [path for path in executable_dirs if not Path(path).is_dir()]
     if missing_executable_dirs:
         raise ModelCheckError(
-            "model-check executable directory does not exist: "
-            + ", ".join(missing_executable_dirs)
+            "model-check executable directory does not exist: " + ", ".join(missing_executable_dirs)
         )
     inherited_path = child.get("PATH", "")
     if inherited_path:
@@ -445,8 +450,7 @@ def _task_environment(
     missing_python_dirs = [path for path in python_dirs if not Path(path).is_dir()]
     if missing_python_dirs:
         raise ModelCheckError(
-            "model-check Python runtime directory does not exist: "
-            + ", ".join(missing_python_dirs)
+            "model-check Python runtime directory does not exist: " + ", ".join(missing_python_dirs)
         )
     inherited_python_path = child.get("PYTHONPATH", "")
     if inherited_python_path:
@@ -583,7 +587,7 @@ def _perf_projection(
                 "reason": exclusions[model],
                 "bindings": [],
             }
-        if perf_matrix._is_l0_profile(model):
+        if performance_catalog.is_l0_profile(model):
             return {
                 "status": "not_applicable",
                 "reason": "L0 profiles are excluded from the release performance matrix",
@@ -668,9 +672,7 @@ def resolve_plan(
             "configured_binding_count": sum(
                 binding["status"] == "configured" for binding in bindings
             ),
-            "excluded_binding_count": sum(
-                binding["status"] == "excluded" for binding in bindings
-            ),
+            "excluded_binding_count": sum(binding["status"] == "excluded" for binding in bindings),
             "blocker_count": blocker_count,
         },
     }
@@ -745,7 +747,7 @@ def _resolve_request(
     accuracy_catalog = trtmc_validate.load_catalog(arguments.catalog)
     accuracy_suites = validation_catalog.load_suites(arguments.suites)
     accuracy_suite_map = {suite["id"]: suite for suite in accuracy_suites}
-    accuracy_models = trtmc_validate._validation_models(arguments.models_dir)
+    accuracy_models = validation_catalog.load_manifest_records_by_name(arguments.models_dir)
     trtmc_validate.audit_catalog(
         accuracy_catalog,
         ready_models=trtmc_validate.ready_model_names(arguments.models_dir),
@@ -757,10 +759,12 @@ def _resolve_request(
         task_models=accuracy_models,
     )
 
-    perf_suite = perf_matrix._read_yaml(arguments.perf_suite)
-    perf_cases = perf_matrix._cases(perf_suite)
-    perf_exclusions = perf_matrix._excluded_profiles(perf_suite)
-    perf_matrix._validate_coverage(perf_cases, perf_exclusions)
+    try:
+        perf_suite = performance_catalog.load_suite(arguments.perf_suite)
+    except performance_catalog.PerformanceSuiteError as error:
+        raise ModelCheckError(str(error)) from error
+    perf_cases = perf_suite.cases
+    perf_exclusions = perf_suite.excluded_profiles
     audit_platform_exclusions(
         platform,
         accuracy_catalog=accuracy_catalog,
@@ -949,9 +953,7 @@ def _campaign_cases(
                     "model": binding["model"],
                     "workload": binding["workload"],
                     "samples": {
-                        "planned": (accuracy_sample_limits or {}).get(
-                            binding["workload"]
-                        ),
+                        "planned": (accuracy_sample_limits or {}).get(binding["workload"]),
                         "evaluated": None,
                     },
                 }
@@ -1008,9 +1010,7 @@ def _selected_perf_reference_contracts(
 ) -> tuple[ModelReferenceContract, ...]:
     selected_models = {
         str(binding["model"])
-        for binding in (
-            bindings if bindings is not None else _task_bindings(plan, "perf")
-        )
+        for binding in (bindings if bindings is not None else _task_bindings(plan, "perf"))
     }
     if not selected_models:
         return ()
@@ -1048,11 +1048,7 @@ def _selected_perf_reference_contracts(
             )
         except CiError as exc:
             raise ModelCheckError(str(exc)) from exc
-        if (
-            contract is None
-            or not contract.environment_variable
-            or contract.relative_path in seen
-        ):
+        if contract is None or not contract.environment_variable or contract.relative_path in seen:
             continue
         seen.add(contract.relative_path)
         contracts.append(contract)
@@ -1105,9 +1101,7 @@ def _accuracy_command(
     *,
     bindings: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[str] | None:
-    bindings = (
-        list(bindings) if bindings is not None else _task_bindings(plan, "accuracy")
-    )
+    bindings = list(bindings) if bindings is not None else _task_bindings(plan, "accuracy")
     if not bindings:
         return None
     config = environment["tasks"]["accuracy"]
@@ -1255,9 +1249,7 @@ def _perf_shard_output(shard_root: Path) -> Path | None:
     results_root = shard_root / "perf" / "results"
     if not results_root.is_dir():
         return None
-    candidates = sorted(
-        path.parent.parent for path in results_root.glob("*/ledger/campaign.json")
-    )
+    candidates = sorted(path.parent.parent for path in results_root.glob("*/ledger/campaign.json"))
     if len(candidates) > 1:
         raise ModelCheckError(f"shard has multiple Performance runs: {shard_root}")
     return candidates[0] if candidates else None
@@ -1266,20 +1258,18 @@ def _perf_shard_output(shard_root: Path) -> Path | None:
 def _refresh_shard_report(task: str, output: Path) -> None:
     report = output / "report.json"
     receipts = list((output / "ledger" / "cases").glob("*/receipt.json"))
-    if report.is_file() and receipts and report.stat().st_mtime_ns >= max(
-        receipt.stat().st_mtime_ns for receipt in receipts
+    if (
+        report.is_file()
+        and receipts
+        and report.stat().st_mtime_ns >= max(receipt.stat().st_mtime_ns for receipt in receipts)
     ):
         return
     if task == "accuracy":
         trtmc_validate.write_report(output)
         return
     try:
-        results = perf_matrix._read_json_object(
-            output / "results.json", "performance results"
-        )
-        ledger = ExecutionLedger.load(output, task_kind="performance")
-        perf_matrix._write_artifacts(output, results, ledger)
-    except ExecutionLedgerError as error:
+        perf_matrix.write_report(output)
+    except perf_matrix.PerfMatrixError as error:
         raise ModelCheckError(str(error)) from error
 
 
@@ -1296,9 +1286,7 @@ def _validate_shard_member(
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ModelCheckError(
-            f"cannot read shard request {request_path}: {error}"
-        ) from error
+        raise ModelCheckError(f"cannot read shard request {request_path}: {error}") from error
     selection = request.get("selection", {}) if isinstance(request, Mapping) else {}
     stable_selection = (
         {key: value for key, value in selection.items() if key != "platform_source"}
@@ -1329,11 +1317,7 @@ def _consolidate_once(run_root: Path) -> bool:
         raise ModelCheckError(str(error)) from error
     cases = campaign.get("cases")
     shard_count = campaign.get("shard_count")
-    if (
-        not isinstance(cases, list)
-        or not isinstance(shard_count, int)
-        or shard_count < 1
-    ):
+    if not isinstance(cases, list) or not isinstance(shard_count, int) or shard_count < 1:
         raise ModelCheckError("sharded campaign inventory is invalid")
     shards = []
     for index in range(shard_count):
@@ -1355,9 +1339,7 @@ def _consolidate_once(run_root: Path) -> bool:
         ("perf", "performance"),
     ):
         expected = [
-            case
-            for case in cases
-            if isinstance(case, Mapping) and case.get("task") == task
+            case for case in cases if isinstance(case, Mapping) and case.get("task") == task
         ]
         if not expected:
             continue
@@ -1385,9 +1367,7 @@ def _consolidate_once(run_root: Path) -> bool:
         except campaign_shards.CampaignShardError as error:
             raise ModelCheckError(str(error)) from error
         progress = report["accounting"]["progress"]
-        all_terminal = (
-            all_terminal and not progress["pending"] and not progress["running"]
-        )
+        all_terminal = all_terminal and not progress["pending"] and not progress["running"]
         print(
             f"{_task_label(task)}: {progress['terminal']}/{report['accounting']['selected']} "
             f"terminal · {run_root / task / 'report.json'}",
@@ -1499,9 +1479,7 @@ def _run(arguments: argparse.Namespace) -> int:
             environment["tasks"]["accuracy"]["options"].get("hf-cache-mode", "shared")
             != "per_model"
         ):
-            raise ModelCheckError(
-                "--hf-cache-seed-dir requires Accuracy hf-cache-mode per_model"
-            )
+            raise ModelCheckError("--hf-cache-seed-dir requires Accuracy hf-cache-mode per_model")
         arguments.hf_cache_seed_dir = _require_managed_path(
             arguments.hf_cache_seed_dir,
             storage_root,
@@ -1509,13 +1487,10 @@ def _run(arguments: argparse.Namespace) -> int:
         )
         if not arguments.hf_cache_seed_dir.is_dir():
             raise ModelCheckError(
-                "Hugging Face cache seed directory does not exist: "
-                f"{arguments.hf_cache_seed_dir}"
+                f"Hugging Face cache seed directory does not exist: {arguments.hf_cache_seed_dir}"
             )
     if shard is not None:
-        stable_selection = {
-            key: value for key, value in plan.items() if key != "platform_source"
-        }
+        stable_selection = {key: value for key, value in plan.items() if key != "platform_source"}
         try:
             campaign_shards.open_campaign(
                 run_root,
@@ -1609,9 +1584,7 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.resume:
         _verify_resume_request(request_path, request)
     else:
-        temporary_request = request_path.with_name(
-            f".{request_path.name}.{os.getpid()}.tmp"
-        )
+        temporary_request = request_path.with_name(f".{request_path.name}.{os.getpid()}.tmp")
         temporary_request.write_text(
             json.dumps(request, indent=2) + "\n",
             encoding="utf-8",

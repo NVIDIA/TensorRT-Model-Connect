@@ -3,6 +3,11 @@
 `tools/model_checks.py` maps selected models to exact Accuracy suites and Perf
 entries.
 
+Model Checks composes the public qualification interfaces: Validation model
+records come from `tools.validation.catalog`, Performance entries come from
+`tools.performance.catalog`, and each runner owns its `write_report()` logic.
+The controller does not parse runner-private suites, ledgers, or report data.
+
 ## Setup
 
 GB300 example:

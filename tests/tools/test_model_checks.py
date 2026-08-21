@@ -16,6 +16,13 @@ from tools import campaign_shards, model_checks, qualification_report
 from tools.execution_ledger import ExecutionLedger
 
 
+def test_model_checks_uses_public_qualification_interfaces() -> None:
+    source = (model_checks.REPOSITORY / "tools" / "model_checks.py").read_text(encoding="utf-8")
+
+    assert "perf_matrix._" not in source
+    assert "trtmc_validate._validation_models" not in source
+
+
 def _platform(*, serial: bool = True, excluded_models=()):
     return {
         "id": "test-platform",
@@ -329,15 +336,11 @@ def test_execution_environment_preserves_command_name_and_resolves_paths(
 
     assert environment["storage"]["root"] == str(storage)
     assert environment["storage"]["results_root"] == str(storage / "results")
-    assert environment["storage"]["python_profiles_root"] == str(
-        storage / "python-profiles"
-    )
+    assert environment["storage"]["python_profiles_root"] == str(storage / "python-profiles")
     assert environment["tasks"]["accuracy"]["runner_python"] == "python3"
     assert Path(environment["tasks"]["perf"]["suite"]).is_absolute()
     assert environment["python_dirs"] == [str(storage / "runtime/python")]
-    assert environment["environment_variables"] == {
-        "TRTMC_MODEL_FEATURE": "enabled"
-    }
+    assert environment["environment_variables"] == {"TRTMC_MODEL_FEATURE": "enabled"}
 
 
 @pytest.mark.parametrize(
@@ -372,9 +375,7 @@ def test_execution_environment_rejects_unsafe_environment_variables(
                     "perf": {
                         "runner_python": "python3",
                         "suite": "benchmarks/performance/release.yaml",
-                        "environment": (
-                            "benchmarks/performance/environments/gb300.yaml"
-                        ),
+                        "environment": ("benchmarks/performance/environments/gb300.yaml"),
                     },
                 },
             },
@@ -434,9 +435,7 @@ def test_task_environment_prepends_configured_runtime_libraries(
         }
     )
 
-    assert environment["LD_LIBRARY_PATH"] == (
-        f"{runtime_library}{os.pathsep}/system/lib"
-    )
+    assert environment["LD_LIBRARY_PATH"] == (f"{runtime_library}{os.pathsep}/system/lib")
 
 
 def test_task_environment_prepends_configured_executable_directories(
@@ -472,9 +471,7 @@ def test_task_environment_prepends_configured_python_directories(
         }
     )
 
-    assert environment["PYTHONPATH"] == (
-        f"{runtime_python}{os.pathsep}/system/python"
-    )
+    assert environment["PYTHONPATH"] == (f"{runtime_python}{os.pathsep}/system/python")
 
 
 def test_task_environment_exports_checked_in_environment_variables(
@@ -486,9 +483,7 @@ def test_task_environment_exports_checked_in_environment_variables(
     environment = model_checks._task_environment(
         {
             "storage": {"python_profiles_root": str(tmp_path / "profiles")},
-            "environment_variables": {
-                "TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF": "disable"
-            },
+            "environment_variables": {"TRTMC_REFERENCE_PYTORCH_CUDA_ALLOC_CONF": "disable"},
         }
     )
 
@@ -714,9 +709,7 @@ def test_l4t_environment_selects_qualified_tensorrt_libraries() -> None:
         "model-check environment",
     )
 
-    assert raw["library_dirs"] == [
-        "${TRTMC_CHECK_STORAGE_ROOT}/runtime/TensorRT-11.0.2.2/lib"
-    ]
+    assert raw["library_dirs"] == ["${TRTMC_CHECK_STORAGE_ROOT}/runtime/TensorRT-11.0.2.2/lib"]
     assert raw["executable_dirs"] == ["/usr/local/cuda/bin"]
 
 
@@ -837,9 +830,7 @@ def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
     assert "perf" not in request["commands"]
 
 
-def test_sharded_dry_runs_partition_one_campaign_without_enabling_ci(
-    tmp_path, monkeypatch
-):
+def test_sharded_dry_runs_partition_one_campaign_without_enabling_ci(tmp_path, monkeypatch):
     storage = tmp_path / "storage"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
     monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
@@ -899,9 +890,7 @@ def test_shard_requires_an_explicit_shared_run_id(capsys):
     assert "--shard requires an explicit shared --run-id" in capsys.readouterr().err
 
 
-def test_consolidator_preserves_campaign_order_and_receipt_results(
-    tmp_path, monkeypatch
-):
+def test_consolidator_preserves_campaign_order_and_receipt_results(tmp_path, monkeypatch):
     run_root = tmp_path / "campaign"
     cases = [
         {
@@ -973,9 +962,7 @@ def test_consolidator_preserves_campaign_order_and_receipt_results(
 
     assert model_checks._consolidate_once(run_root) is True
 
-    report = json.loads(
-        (run_root / "accuracy" / "report.json").read_text(encoding="utf-8")
-    )
+    report = json.loads((run_root / "accuracy" / "report.json").read_text(encoding="utf-8"))
     assert [row["id"] for row in report["results"]] == [case["id"] for case in cases]
     assert report["accounting"]["outcomes"] == {
         "green": 1,
@@ -1018,10 +1005,7 @@ def test_shard_resume_reuses_the_same_member_directory(tmp_path, monkeypatch):
 
     assert model_checks.main([*selection, "--resume"]) == 0
     assert commands[-1][-1] == "--resume-existing"
-    assert (
-        storage
-        / "results/shard-resume-unit/shards/000-of-001/result.json"
-    ).is_file()
+    assert (storage / "results/shard-resume-unit/shards/000-of-001/result.json").is_file()
 
 
 def test_l4t_dry_run_passes_managed_hf_cache_seed_to_accuracy(tmp_path, monkeypatch):
@@ -1052,9 +1036,7 @@ def test_l4t_dry_run_passes_managed_hf_cache_seed_to_accuracy(tmp_path, monkeypa
     )
 
     assert result == 0
-    request = json.loads(
-        (storage / "results/seeded-unit/request.json").read_text(encoding="utf-8")
-    )
+    request = json.loads((storage / "results/seeded-unit/request.json").read_text(encoding="utf-8"))
     command = request["commands"]["accuracy"]
     seed_index = command.index("--hf-cache-seed-dir")
     assert command[seed_index + 1] == str(seed)
@@ -1100,8 +1082,7 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     assert len(commands) == 2
     assert all("warm_hf_cache.py" not in command for command in commands)
     assert all(
-        environment["TRTMC_PYTHON_PROFILE_ROOT"]
-        == str(storage / "python-profiles")
+        environment["TRTMC_PYTHON_PROFILE_ROOT"] == str(storage / "python-profiles")
         for environment in child_environments
     )
     assert all(
@@ -1157,9 +1138,7 @@ def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch
     assert commands[-1][-1] == "--verbose"
 
 
-def test_run_forwards_exact_source_revision_to_accuracy_and_perf(
-    tmp_path, monkeypatch
-):
+def test_run_forwards_exact_source_revision_to_accuracy_and_perf(tmp_path, monkeypatch):
     storage = tmp_path / "storage"
     revision = "A" * 40
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
@@ -1314,11 +1293,7 @@ def test_auto_thor_environment_builds_both_task_commands(tmp_path, monkeypatch):
     assert set(request["commands"]) == {"accuracy", "perf"}
     assert request["selection"]["execution"]["serial_tasks"] is True
     perf_environment = request["perf_environment_config"]
-    assert perf_environment["tools"]["trtmc_worker"] == str(
-        runtime / "trtmc_benchmark_worker"
-    )
-    assert perf_environment["storage"]["bundle_cache"] == str(
-        storage / "engines/perf"
-    )
+    assert perf_environment["tools"]["trtmc_worker"] == str(runtime / "trtmc_benchmark_worker")
+    assert perf_environment["storage"]["bundle_cache"] == str(storage / "engines/perf")
     assert perf_environment["storage"]["bundle_roots"] == []
     assert perf_environment["storage"]["runtime_dirs"] == [str(runtime)]
