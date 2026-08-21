@@ -79,6 +79,39 @@ void mask_coarse_logits_for_codebook(std::vector<float>& logits, int32_t codeboo
     }
 }
 
+int32_t bark_batched_prefill_length(TrtModule* module, BarkKvCache* cache,
+                                    const std::vector<float>& embeddings, int32_t hidden_size,
+                                    int32_t max_length) {
+    if (module == nullptr || cache == nullptr || hidden_size <= 0 || embeddings.empty() ||
+        embeddings.size() % static_cast<std::size_t>(hidden_size) != 0 ||
+        !module->has_input("input_embed")) {
+        return 0;
+    }
+
+    const int32_t seq_len =
+        static_cast<int32_t>(embeddings.size() / static_cast<std::size_t>(hidden_size));
+    return seq_len > 1 && seq_len <= max_length ? seq_len : 0;
+}
+
+void collect_bark_prefill_kv(TrtModule& module, int32_t num_layers,
+                             std::vector<const void*>& present_k,
+                             std::vector<const void*>& present_v) {
+    present_k.reserve(static_cast<std::size_t>(num_layers));
+    present_v.reserve(static_cast<std::size_t>(num_layers));
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const std::string suffix = "_" + std::to_string(layer);
+        const void* key = module.device_ptr("present_k" + suffix);
+        const void* value = module.device_ptr("present_v" + suffix);
+        if (key == nullptr || value == nullptr) {
+            throw std::runtime_error(
+                "BarkPipeline: batched prefill is missing KV output for layer " +
+                std::to_string(layer));
+        }
+        present_k.push_back(key);
+        present_v.push_back(value);
+    }
+}
+
 // Dump tokens to ``<dump_path><suffix>`` when dump_path is non-empty.
 // Replaces the TRTMC_BARK_DUMP env var. Value flows in through the
 // ``audio_bark.dump_path`` schema field.
@@ -316,15 +349,9 @@ bool BarkPipeline::run_batched_prefill(TrtModule* module, BarkInferenceState& st
                                        const std::vector<float>& embeddings, int32_t hidden_size,
                                        std::vector<float>& logits, const char* stage) {
     auto* cache = dynamic_cast<BarkKvCache*>(&state);
-    if (module == nullptr || cache == nullptr || hidden_size <= 0 || embeddings.empty() ||
-        embeddings.size() % static_cast<std::size_t>(hidden_size) != 0 ||
-        !module->has_input("input_embed")) {
-        return false;
-    }
-
     const int32_t seq_len =
-        static_cast<int32_t>(embeddings.size() / static_cast<std::size_t>(hidden_size));
-    if (seq_len <= 1 || seq_len > state.max_length())
+        bark_batched_prefill_length(module, cache, embeddings, hidden_size, state.max_length());
+    if (seq_len == 0)
         return false;
 
     TensorMap inputs;
@@ -343,22 +370,7 @@ bool BarkPipeline::run_batched_prefill(TrtModule* module, BarkInferenceState& st
 
     std::vector<const void*> present_k;
     std::vector<const void*> present_v;
-    present_k.reserve(static_cast<std::size_t>(state.num_layers()));
-    present_v.reserve(static_cast<std::size_t>(state.num_layers()));
-    for (int32_t layer = 0; layer < state.num_layers(); ++layer) {
-        const std::string suffix = "_" + std::to_string(layer);
-        const std::string key_name = "present_k" + suffix;
-        const std::string value_name = "present_v" + suffix;
-        const void* key = module->device_ptr(key_name);
-        const void* value = module->device_ptr(value_name);
-        if (key == nullptr || value == nullptr) {
-            throw std::runtime_error(
-                "BarkPipeline: batched prefill is missing KV output for layer " +
-                std::to_string(layer));
-        }
-        present_k.push_back(key);
-        present_v.push_back(value);
-    }
+    collect_bark_prefill_kv(*module, state.num_layers(), present_k, present_v);
     cache->write_prefill_kv(present_k, present_v, seq_len);
     std::cerr << "[trtmc] Bark " << stage << " prefill: " << seq_len << " tokens in one call"
               << std::endl;
