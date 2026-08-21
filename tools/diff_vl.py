@@ -106,12 +106,8 @@ def _find_family_diff_vl_handler(model_type: str) -> ModuleType | None:
 
 
 def _read_bundle_header(bundle_path: str) -> dict:
-    with open(bundle_path, "rb") as f:
-        magic = f.read(8)
-        if magic != b"BUNDLE\x01\x00":
-            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        return json.loads(f.read(header_len).decode("utf-8"))
+    from tensorrt_model_connect import BundleReader
+    return BundleReader(bundle_path).header
 
 
 def _bundle_family(bundle_path: str) -> str:

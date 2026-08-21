@@ -320,3 +320,74 @@ def write_bundle(
         f.write(header_json)
         for s in sections:
             f.write(s.data)
+
+
+class BundleReader:
+    """Read a .bundle artifact file."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        with open(self.path, "rb") as f:
+            magic = f.read(8)
+            if magic != BUNDLE_MAGIC:
+                raise ValueError(f"Invalid bundle magic: {magic!r}")
+            header_len_bytes = f.read(8)
+            if len(header_len_bytes) != 8:
+                raise ValueError("Bundle is truncated before header length")
+            
+            header_len = struct.unpack("<Q", header_len_bytes)[0]
+            if header_len > _MAX_BUNDLE_HEADER_SIZE:
+                raise ValueError(
+                    f"Bundle header size {header_len} exceeds maximum allowed {_MAX_BUNDLE_HEADER_SIZE}"
+                )
+            
+            header_bytes = f.read(header_len)
+            if len(header_bytes) != header_len:
+                raise ValueError("Bundle is truncated in JSON header")
+            
+            try:
+                self.header = json.loads(header_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"Invalid JSON in bundle header: {exc}") from exc
+                
+            self._payload_start = 16 + header_len
+            self._file_size = self.path.stat().st_size
+            
+            sections = self.header.get("sections", {})
+            if not isinstance(sections, dict):
+                raise ValueError("Bundle sections field is not a dictionary")
+                
+            self._sections = {}
+            for name, meta in sections.items():
+                if not isinstance(meta, dict) or "offset" not in meta or "size" not in meta:
+                    raise ValueError(f"Invalid section metadata for {name!r}")
+                self._sections[name] = {"offset": meta["offset"], "size": meta["size"]}
+
+            sorted_sections = sorted(self._sections.items(), key=lambda item: item[1]["offset"])
+            last_end = 0
+            for name, meta in sorted_sections:
+                offset = meta["offset"]
+                size = meta["size"]
+                if offset < last_end:
+                    raise ValueError(f"Bundle section {name!r} overlaps with preceding section")
+                last_end = offset + size
+
+            if self._payload_start + last_end > self._file_size:
+                raise ValueError("Bundle sections exceed file size")
+
+    def get_section_info(self, name: str) -> tuple[int, int]:
+        """Return (absolute_file_offset, size) for the named section."""
+        if name not in self._sections:
+            raise KeyError(f"Bundle does not contain section {name!r}")
+        meta = self._sections[name]
+        return self._payload_start + meta["offset"], meta["size"]
+
+    def read_section(self, name: str) -> bytes:
+        """Read the full content of the named section."""
+        offset, size = self.get_section_info(name)
+        with open(self.path, "rb") as f:
+            f.seek(offset)
+            data = f.read(size)
+            if len(data) != size:
+                raise ValueError(f"Bundle section {name!r} is truncated")
+            return data

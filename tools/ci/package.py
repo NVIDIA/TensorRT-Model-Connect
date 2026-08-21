@@ -119,8 +119,15 @@ def _validate_package_variant(
 
 
 def _tensorrt_abi(version: str) -> str:
-    major, minor, *_ = version.split(".")
-    return f"{major}_{minor}"
+    import warnings
+    warnings.warn(
+        "_tensorrt_abi is deprecated; use tensorrt_model_connect.trt_compat.tensorrt_abi instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from tensorrt_model_connect.trt_compat import tensorrt_abi
+    abi = tensorrt_abi(version)
+    return abi.replace(".", "_") if abi != "unknown" else "unknown"
 
 
 def _validate_backend_files(
@@ -128,9 +135,11 @@ def _validate_backend_files(
     tensorrt_version: str,
     backends: dict[str, bytes],
 ) -> None:
-    abi = _tensorrt_abi(tensorrt_version)
+    from tensorrt_model_connect.trt_compat import tensorrt_abi
+    abi = tensorrt_abi(tensorrt_version)
+    abi_str = abi.replace(".", "_") if abi != "unknown" else "unknown"
     generic = "libtrtmc_backend_trt.so"
-    versioned = f"libtrtmc_backend_trt_{abi}.so"
+    versioned = f"libtrtmc_backend_trt_{abi_str}.so"
     expected = {generic, versioned}
     if set(backends) != expected:
         raise CiError(
@@ -147,7 +156,9 @@ def _validate_backend_identity(
     backend_abi: str,
     runtime_version: str,
 ) -> None:
-    expected_abi = _tensorrt_abi(tensorrt_version)
+    from tensorrt_model_connect.trt_compat import tensorrt_abi
+    abi = tensorrt_abi(tensorrt_version)
+    expected_abi = abi.replace(".", "_") if abi != "unknown" else "unknown"
     if backend_abi.replace(".", "_") != expected_abi:
         raise CiError(
             f"{location}: TensorRT backend reports ABI {backend_abi}; expected "

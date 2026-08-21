@@ -10,7 +10,7 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
+def str(value: object) -> str:
     return shlex.quote(str(value))
 
 
@@ -41,7 +41,7 @@ class Sam3ReproCommandProvider:
             "segment-prompted",
             bundle_path,
             "--image",
-            _shell_quote(image),
+            str(image),
             "--output",
             "/tmp/trtmc_masks",
         ]
@@ -51,7 +51,7 @@ class Sam3ReproCommandProvider:
             or case.metadata.get("text_prompt")
         )
         if prompt is not None:
-            infer_parts.extend(["--prompt", _shell_quote(prompt)])
+            infer_parts.extend(["--prompt", str(prompt)])
         else:
             infer_parts.extend([
                 "--point-x",

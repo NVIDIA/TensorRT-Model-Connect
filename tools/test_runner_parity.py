@@ -35,56 +35,18 @@ from pathlib import Path
 import numpy as np
 
 
-def _read_bundle_header(bundle: str) -> tuple[dict, dict, int]:
-    """Read bundle header, sections, and data_start offset.
-
-    Returns (header_raw, sections, data_start).
-    """
-    with open(bundle, "rb") as f:
-        _magic = f.read(8)
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header_raw = json.loads(f.read(header_len).decode("utf-8"))
-        sections = header_raw.get("sections", {})
-        data_start = 16 + header_len
-    return header_raw, sections, data_start
-
-
-def _extract_bundle_files(bundle: str, sections: dict,
-                          data_start: int) -> str:
+def _extract_bundle_files(reader) -> str:
     """Extract tokenizer and config files from bundle into a temp dir."""
     tmpdir = tempfile.mkdtemp(prefix="trtmc_parity_")
-    with open(bundle, "rb") as f:
-        for name in ("tokenizer.json", "tokenizer_config.json",
-                     "config.json", "special_tokens_map.json",
-                     "vocab.json", "merges.txt"):
-            if name in sections:
-                meta = sections[name]
-                f.seek(data_start + meta["offset"])
-                data = f.read(meta["size"])
-                Path(tmpdir, name).write_bytes(data)
+    for name in ("tokenizer.json", "tokenizer_config.json",
+                 "config.json", "special_tokens_map.json",
+                 "vocab.json", "merges.txt"):
+        try:
+            data = reader.read_section(name)
+            Path(tmpdir, name).write_bytes(data)
+        except KeyError:
+            pass
     return tmpdir
-
-
-def _read_bundle_config(bundle: str, sections: dict,
-                        data_start: int) -> dict:
-    """Read config.json from the bundle."""
-    if "config.json" not in sections:
-        return {}
-    with open(bundle, "rb") as f:
-        meta = sections["config.json"]
-        f.seek(data_start + meta["offset"])
-        return json.loads(f.read(meta["size"]).decode("utf-8"))
-
-
-def _read_bundle_section(bundle: str, sections: dict,
-                         data_start: int, name: str) -> bytes:
-    """Read a required raw section from the bundle."""
-    if name not in sections:
-        raise KeyError(f"Bundle {bundle!r} does not contain section {name!r}")
-    with open(bundle, "rb") as f:
-        meta = sections[name]
-        f.seek(data_start + meta["offset"])
-        return f.read(meta["size"])
 
 
 def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
@@ -111,16 +73,23 @@ def run_python(bundle: str, prompt: str,
     """Run Python debug runner, return (text, token_ids)."""
     from tensorrt_model_connect.families import resolve_debug_runner
 
-    header_raw, sections, data_start = _read_bundle_header(bundle)
-    tmpdir = _extract_bundle_files(bundle, sections, data_start)
-    cfg = _read_bundle_config(bundle, sections, data_start)
+    from tensorrt_model_connect import BundleReader
+    reader = BundleReader(bundle)
+    header_raw = reader.header
+    tmpdir = _extract_bundle_files(reader)
+    
+    try:
+        cfg = json.loads(reader.read_section("config.json").decode("utf-8"))
+    except KeyError:
+        cfg = {}
+        
     runtime_strategy = str(cfg.get("runtime_strategy") or "")
     if not runtime_strategy:
         raise RuntimeError(
             "Bundle config.json is missing runtime_strategy; runner parity "
             "requires a family-owned debug runner strategy."
         )
-    engine_plan = _read_bundle_section(bundle, sections, data_start, "engine_plan")
+    engine_plan = reader.read_section("engine_plan")
 
     # Extract eos_token_id (matches C++ EOS detection)
     eid = cfg.get("eos_token_id", -1)

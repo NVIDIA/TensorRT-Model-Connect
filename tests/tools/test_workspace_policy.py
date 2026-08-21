@@ -119,3 +119,48 @@ def test_model_builders_do_not_impose_one_gib_workspace_limits() -> None:
     }
 
     assert not violations, f"fixed 1 GiB TensorRT workspace limits found: {violations}"
+
+
+def _raw_bundle_unpack_lines(path: Path) -> list[int]:
+    source = path.read_text(encoding="utf-8")
+    if "struct.unpack(" not in source and "BUNDLE\\x01\\x00" not in source:
+        return []
+        
+    tree = ast.parse(source, filename=str(path))
+    violations: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "unpack"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "struct"
+            ):
+                if len(node.args) >= 1 and isinstance(node.args[0], ast.Constant):
+                    if node.args[0].value == "<Q":
+                        violations.add(node.lineno)
+                        
+        if isinstance(node, ast.Compare):
+            if isinstance(node.ops[0], (ast.Eq, ast.NotEq)):
+                if isinstance(node.comparators[0], ast.Constant) and node.comparators[0].value == b"BUNDLE\x01\x00":
+                    violations.add(node.lineno)
+                if isinstance(node.left, ast.Constant) and node.left.value == b"BUNDLE\x01\x00":
+                    violations.add(node.lineno)
+                    
+    return sorted(violations)
+
+
+def test_shared_tools_use_bundle_reader() -> None:
+    """Ensure shared tools use BundleReader instead of manually unpacking bundles.
+    
+    Model-local exceptions in tests/e2e/models/ are permitted per the isolation policy.
+    """
+    violations = {}
+    
+    for scan_dir in [REPO_ROOT / "tools", REPO_ROOT / "tests" / "tools", REPO_ROOT / "tests" / "builder"]:
+        for path in scan_dir.rglob("*.py"):
+            lines = _raw_bundle_unpack_lines(path)
+            if lines:
+                violations[path.relative_to(REPO_ROOT)] = lines
+                
+    assert not violations, f"manual bundle unpack detected in shared tools: {violations}"

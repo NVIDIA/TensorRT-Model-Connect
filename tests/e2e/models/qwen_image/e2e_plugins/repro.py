@@ -12,7 +12,7 @@ from . import _case_artifact_dir
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
+def str(value: object) -> str:
     return shlex.quote(str(value))
 
 
@@ -37,7 +37,7 @@ class QwenImageReproCommandProvider:
             "run",
             bundle_path,
             "--prompt",
-            _shell_quote(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
+            str(case.inputs.get("prompt", case.inputs.get("test_prompt", ""))),
             "--output",
             "/tmp/trtmc_qwen_image/output.png",
             "--num-inference-steps",
@@ -46,7 +46,7 @@ class QwenImageReproCommandProvider:
 
         negative_prompt = case.inputs.get("negative_prompt")
         if negative_prompt is not None:
-            infer_parts.extend(["--negative-prompt", _shell_quote(negative_prompt)])
+            infer_parts.extend(["--negative-prompt", str(negative_prompt)])
 
         cfg_scale = case.inputs.get("cfg_scale")
         if cfg_scale is None:
@@ -67,7 +67,7 @@ class QwenImageReproCommandProvider:
 
         image_path = case.inputs.get("image") or case.inputs.get("image_path")
         if image_path:
-            infer_parts.extend(["--image", _shell_quote(image_path)])
+            infer_parts.extend(["--image", str(image_path)])
 
         if ctx.artifacts_dir:
             latent_path = Path(

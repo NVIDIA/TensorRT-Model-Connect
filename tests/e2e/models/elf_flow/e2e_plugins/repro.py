@@ -10,7 +10,7 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
+def str(value: object) -> str:
     return shlex.quote(str(value))
 
 

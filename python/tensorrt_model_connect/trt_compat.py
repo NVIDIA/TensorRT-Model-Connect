@@ -109,10 +109,11 @@ def tensorrt_version() -> str:
 
 
 def tensorrt_abi(version: str | None = None) -> str:
-    match = re.search(r"(\d+)\.(\d+)", version or tensorrt_version() or "")
-    if not match:
-        return ""
-    return f"{match.group(1)}.{match.group(2)}"
+    v = str(version or tensorrt_version() or "").strip()
+    parts = v.split(".")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        return f"{parts[0]}.{parts[1]}"
+    return "unknown"
 
 
 def module_file(module_name: str | None = None) -> str:

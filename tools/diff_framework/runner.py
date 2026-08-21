@@ -139,41 +139,34 @@ def detect_runtime_strategy_from_bundle(
     import struct
 
     try:
-        with open(bundle_path, "rb") as f:
-            _magic = f.read(8)
-            header_len = struct.unpack("<Q", f.read(8))[0]
-            header = json.loads(f.read(header_len).decode("utf-8"))
-            sections = header.get("sections", {})
-            data_start = 16 + header_len
-
-            if "config.json" not in sections:
+        from tensorrt_model_connect import BundleReader
+        reader = BundleReader(bundle_path)
+        try:
+            cfg = json.loads(reader.read_section("config.json").decode("utf-8"))
+            strategy = cfg.get("runtime_strategy")
+            if not strategy:
                 detection = StrategyDetection(
                     runtime_strategy=None,
                     status="warning",
                     message=(
-                        f"Bundle {bundle_path!r} has no config.json; "
-                        "no default runtime strategy is assumed."
+                        f"Bundle {bundle_path!r} config.json has no "
+                        "runtime_strategy; no default runtime strategy is assumed."
                     ),
                 )
             else:
-                meta = sections["config.json"]
-                f.seek(data_start + meta["offset"])
-                cfg = json.loads(f.read(meta["size"]).decode("utf-8"))
-                strategy = cfg.get("runtime_strategy")
-                if not strategy:
-                    detection = StrategyDetection(
-                        runtime_strategy=None,
-                        status="warning",
-                        message=(
-                            f"Bundle {bundle_path!r} config.json has no "
-                            "runtime_strategy; no default runtime strategy is assumed."
-                        ),
-                    )
-                else:
-                    detection = _classify_detected_strategy(
-                        strategy=strategy,
-                        source=f"bundle {bundle_path!r}",
-                    )
+                detection = _classify_detected_strategy(
+                    strategy=strategy,
+                    source=f"bundle {bundle_path!r}",
+                )
+        except KeyError:
+            detection = StrategyDetection(
+                runtime_strategy=None,
+                status="warning",
+                message=(
+                    f"Bundle {bundle_path!r} has no config.json; "
+                    "no default runtime strategy is assumed."
+                ),
+            )
     except Exception as exc:
         detection = StrategyDetection(
             runtime_strategy=None,

@@ -10,7 +10,7 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
+def str(value: object) -> str:
     return shlex.quote(str(value))
 
 
@@ -41,7 +41,7 @@ class SamReproCommandProvider:
             "segment-prompted",
             bundle_path,
             "--image",
-            _shell_quote(image),
+            str(image),
             "--output",
             "/tmp/trtmc_masks",
             "--point-x",
