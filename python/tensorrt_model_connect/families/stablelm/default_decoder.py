@@ -50,6 +50,63 @@ def _mark_debug_output(
     network.mark_output(out)
 
 
+def _use_fp32_lm_head_accumulation(
+    precision: str, num_layers: int, fp32_layers: frozenset[int]
+) -> bool:
+    """Return whether an FP16 decode tail needs a stable FP32 head reduction."""
+    return (
+        precision == "fp16"
+        and num_layers > 0
+        and num_layers - 1 in fp32_layers
+    )
+
+
+def _add_lm_head(
+    network: trt.INetworkDefinition,
+    hidden_state: trt.ITensor,
+    weights: WeightDict,
+    *,
+    hidden_size: int,
+    out_vocab: int,
+    work_np_dtype: np.dtype,
+    work_trt_dtype,
+    fp32_accumulation: bool,
+) -> trt.ITensor:
+    """Build the LM head while preserving the model's output precision.
+
+    A decode-only FP32 boundary can also stabilize the large vocabulary
+    projection's accumulation order. First round the input weights to the
+    requested model dtype, expand those rounded operands for FP32 accumulation,
+    then explicitly round the result back before exposing FP32 logits.
+    """
+    head_np_dtype = np.float32 if fp32_accumulation else work_np_dtype
+    head_trt_dtype = trt.float32 if fp32_accumulation else work_trt_dtype
+    head_input = hidden_state
+    if head_input.dtype != head_trt_dtype:
+        head_input = network.add_cast(head_input, head_trt_dtype).get_output(0)
+
+    head_weights = weights["w_out"]
+    if fp32_accumulation:
+        head_weights = np.asarray(head_weights, dtype=work_np_dtype).astype(
+            np.float32)
+    logits = graph_ops.add_matmul_rhs_constant(
+        network, head_input, hidden_size, out_vocab, head_weights,
+        dtype=head_np_dtype)
+    lm_bias = weights.get("lm_head_bias")
+    if lm_bias is None:
+        lm_bias = np.zeros(out_vocab, dtype=work_np_dtype)
+    if fp32_accumulation:
+        lm_bias = np.asarray(lm_bias, dtype=work_np_dtype).astype(np.float32)
+    logits = graph_ops.add_bias_sum(
+        network, logits, out_vocab, lm_bias, dtype=head_np_dtype)
+
+    if logits.dtype != work_trt_dtype:
+        logits = network.add_cast(logits, work_trt_dtype).get_output(0)
+    if logits.dtype != trt.float32:
+        logits = network.add_cast(logits, trt.float32).get_output(0)
+    return logits
+
+
 def build_standard_decoder_engine(
     config: ModelConfig,
     weights: WeightDict,
@@ -517,23 +574,13 @@ def build_standard_decoder_engine(
     # Output vocab may differ from input vocab (e.g. Bark semantic: 129600 in, 10048 out).
     # Derive from w_out shape if available.
     out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
-    logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
-    # LM head bias (if present, e.g. CodeGen) or zero bias for C++ parity
-    lm_bias = weights.get("lm_head_bias")
-    if lm_bias is not None:
-        logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias,
-                                        dtype=work_np_dtype)
-    else:
-        b_out = np.zeros(out_vocab, dtype=work_np_dtype)
-        logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out,
-                                        dtype=work_np_dtype)
-
-    # Logits output: always FP32 for accurate argmax/sampling
-    if work_trt_dtype != trt.float32:
-        logits_cast = network.add_cast(logits, trt.float32)
-        logits = logits_cast.get_output(0)
+    logits = _add_lm_head(
+        network, hidden_state, weights,
+        hidden_size=hidden, out_vocab=out_vocab,
+        work_np_dtype=work_np_dtype, work_trt_dtype=work_trt_dtype,
+        fp32_accumulation=_use_fp32_lm_head_accumulation(
+            precision, num_layers, fp32_layers),
+    )
     logits.name = "logits"
     network.mark_output(logits)
 
