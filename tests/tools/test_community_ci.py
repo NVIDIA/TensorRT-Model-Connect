@@ -226,6 +226,41 @@ def test_pre_commit_config_installs_only_lightweight_commit_hooks() -> None:
     assert "pre-push" not in source
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        REPO_ROOT / "CONTRIBUTING.md",
+        REPO_ROOT / "website" / "docs" / "extend" / "contributing.md",
+    ],
+)
+def test_contributor_guides_match_the_live_ci_flow(path: Path) -> None:
+    source = path.read_text(encoding="utf-8")
+    ordered_markers = [
+        "pre-commit install --install-hooks",
+        "git commit --signoff",
+        "git push --set-upstream origin",
+        "```text\n/run-ci\n```",
+        "Community CPU / Required",
+        "run-internal-ci",
+        "trtmc/premerge/required",
+    ]
+
+    positions = [source.index(marker) for marker in ordered_markers]
+    assert positions == sorted(positions)
+    for marker in (
+            "GitHub-hosted",
+            "ubuntu-24.04",
+            "read-only repository permission",
+            "no access to private",
+            "runners, secrets, or",
+            "GPUs",
+            "py -3 -m pip",
+    ):
+        assert marker in source
+    assert "trusted request workflow" not in source
+    assert "Community CPU Request" not in source
+
+
 def test_impact_publishes_only_the_public_cpu_scope(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

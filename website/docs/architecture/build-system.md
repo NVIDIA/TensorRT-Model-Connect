@@ -141,7 +141,7 @@ instead.
 | `dist/tensorrt_model_connect-*.whl` | Built Python/native wheel |
 | Native `.bundle` | Plans/assets dispatched through an installed model/backend DSO |
 | Optimized `.bundle` | Descriptor plus embedded implementation DSO/artifact tree |
-| `website/build/` | Docusaurus production output |
+| Generated build directory under `website/` | Docusaurus production output |
 
 ## Build-time versus run-time availability
 

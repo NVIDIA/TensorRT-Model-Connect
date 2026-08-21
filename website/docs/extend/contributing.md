@@ -41,6 +41,8 @@ python3 -m pip install --requirement requirements/community-ci.txt
 pre-commit install --install-hooks
 ```
 
+On Windows, use `py -3 -m pip` in place of `python3 -m pip`.
+
 Commit-time hooks trim trailing whitespace, ensure one final newline, validate
 YAML, check Ruff, and verify clang-format. Some commit-time hooks modify files;
 review and stage those fixes before committing again. Pre-commit manages the
@@ -133,7 +135,7 @@ The pull request should record:
 Compilation, source tests, model parity, target-hardware execution,
 performance, and release qualification are different evidence tiers.
 
-## 6. Read public CPU validation
+## 6. Run public CPU validation
 
 The pull-request author starts contributor-visible, GitHub-hosted `Community
 CPU` validation by adding this exact comment to the pull request:
@@ -142,16 +144,19 @@ CPU` validation by adding this exact comment to the pull request:
 /run-ci
 ```
 
-The trusted request workflow runs from `main`, captures the exact PR merge
-revision, and dispatches source quality, ownership and impact, and source-only
-C++ and Python units. A maintainer or admin may submit the same comment on the
-author's behalf.
+The trusted default-branch `Community CPU` workflow authorizes the actor and
+captures the exact base, head, and merge SHAs without checking out
+pull-request code. Separate jobs in that same workflow run source quality,
+ownership and impact, and source-only C++ and Python units. A maintainer or
+admin may submit the same comment on the author's behalf.
 
 The test jobs have read-only repository permission and no access to private
-runners, secrets, or GPUs. Their sanitized checks and detailed public logs are
-published on the exact merge revision. Fix any failures and wait for
-`Community CPU / Required` to pass. If you push another commit, comment
-`/run-ci` again after the new head is ready.
+runners, secrets, or GPUs, and every public job uses a GitHub-hosted
+`ubuntu-24.04` runner. Sanitized checks and detailed public logs are published
+on the exact merge revision. Fix any failures and wait for
+`Community CPU / Required` to pass. Repeating `/run-ci` for the same queued,
+running, or successful merge is safely deduplicated. If the PR head or base
+changes, comment `/run-ci` again after the new revision is ready.
 
 ## 7. Coordinate protected repository CI
 

@@ -61,6 +61,21 @@ Keep each pull request focused on one problem. Add or update focused tests when
 behavior changes, and update documentation when users or developers will observe
 the change.
 
+Install the lightweight commit-time quality hooks once in each clone:
+
+```bash
+python3 -m pip install --requirement requirements/community-ci.txt
+pre-commit install --install-hooks
+```
+
+On Windows, use `py -3 -m pip` in place of `python3 -m pip`.
+
+The hooks trim trailing whitespace, ensure one final newline, validate YAML,
+check Ruff, and verify clang-format. Pre-commit manages the Ruff and
+clang-format environments on Linux, macOS, and Windows. There is no pre-push
+hook: builds and the broader source-only CPU suite run through the public
+`/run-ci` workflow after the branch is pushed.
+
 Start with repository consistency checks:
 
 ```bash
@@ -130,33 +145,63 @@ Compilation, unit tests, inference, model parity, target-hardware execution,
 performance, and release qualification are separate evidence levels. Claim only
 what the recorded validation proves.
 
-### 8. Ask a maintainer to trigger CI
+### 8. Run contributor-visible public CPU validation
+
+Creating a pull request or pushing to a fork does not automatically start
+Community CPU. After local checks pass, the pull-request author adds this exact
+comment:
+
+```text
+/run-ci
+```
+
+A maintainer or admin may submit the same command on the author's behalf. The
+trusted default-branch `Community CPU` workflow authorizes the actor and
+captures the current base, head, and merge SHAs without checking out
+pull-request code. Separate test jobs then run source quality, ownership and
+impact analysis, and the selected source-only C++ and Python units against that
+exact merge revision.
+
+All public jobs run on GitHub-hosted `ubuntu-24.04` runners. Test jobs have
+read-only repository permission and no access to private runners, secrets, or
+GPUs. Wait for `Community CPU / Required` to pass on the current merge
+revision. Repeating `/run-ci` for an already queued, running, or successful
+merge is safely deduplicated.
+
+If the pull-request head or base changes, the previous merge result is stale.
+Finish the update, rerun local checks, and comment `/run-ci` again for the new
+merge revision.
+
+### 9. Ask a maintainer to trigger protected CI
 
 Opening a pull request or pushing to your fork does **not** start the protected
-premerge suite. After your local checks pass and the pull request is ready for
-CI, mention the repository maintainer in a pull-request comment:
+premerge suite. After public CPU validation passes and the pull request is
+ready for protected CI, mention the repository maintainer in a pull-request
+comment:
 
 ```text
 @yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
 ```
 
-The maintainer verifies the pull-request head and applies the one-shot
-`run-internal-ci` label. Only collaborators with repository `maintain` or
-`admin` permission can authorize that trigger.
+The maintainer verifies the pull-request head and the current exact-merge public
+result, then applies the one-shot `run-internal-ci` label. Only collaborators
+with repository `maintain` or `admin` permission can authorize that trigger.
+The trusted bridge consumes the label, rechecks `Community CPU / Required`,
+captures the current PR head SHA, and dispatches protected premerge validation.
 
 Wait for `trtmc/premerge/required` to pass on the exact pull-request head SHA.
 If you push another commit, the previous result no longer validates the current
-head; finish the update, rerun local checks, and mention `@yifeif-nv` once to
-request a new CI run. Private runner details, logs, artifacts, and URLs are not
-part of the public contribution interface.
+head; finish the update, rerun local checks and `/run-ci`, and mention
+`@yifeif-nv` once to request a new protected run. Private runner details,
+logs, artifacts, and URLs are not part of the public contribution interface.
 
-### 9. Respond to review and keep evidence current
+### 10. Respond to review and keep evidence current
 
 Address review feedback on the same topic branch and sign off every new commit.
-Keep the pull request current with upstream when requested. Any head change
-requires fresh validation and a fresh maintainer-triggered CI result before the
-pull request can merge. Maintainers merge accepted changes according to the
-repository ruleset.
+Keep the pull request current with upstream when requested. Any head or base
+change requires a fresh public merge result; any head change also requires a
+fresh maintainer-triggered protected result before the pull request can merge.
+Maintainers merge accepted changes according to the repository ruleset.
 
 ## Established development practices
 
