@@ -1,0 +1,41 @@
+{
+  "name": "nemotron-3-super-120b-tp8",
+  "trace_id": "IT-E2E-NM3S-120B-TP8-01",
+  "hf_id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+  "bundle": "nemotron-3-super-120b-tp8.trtfb",
+  "family": "nemotron_h",
+  "runtime_strategy": "hybrid_mamba_attention",
+  "precision": "bf16",
+  "max_cache_length": 256,
+  "prompt": "What is the capital of France? Answer in one word.",
+  "max_new_tokens": 10,
+  "logit_atol": 0.01,
+  "layer_atol": 0.1,
+  "trust_remote_code": true,
+  "ci_tier": "multi_device",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "parallel": {
+      "mode": "tensor_parallel",
+      "tp_size": 8
+    }
+  },
+  "distributed_runtime": {
+    "enabled": true,
+    "launcher": "mpirun",
+    "world_size": 8,
+    "capture_gpu_memory": true,
+    "gpu_memory_sample_interval_ms": 200,
+    "export_env": [
+      "LD_LIBRARY_PATH",
+      "CUDA_VISIBLE_DEVICES",
+      "TRTMC_NCCL_RENDEZVOUS"
+    ]
+  },
+  "preflight_requirements": [
+    { "kind": "binary_exists", "args": {}, "gating": true },
+    { "kind": "command_available", "args": { "command": "mpirun" }, "gating": true },
+    { "kind": "gpu_count_min", "args": { "count": 8 }, "gating": true }
+  ],
+  "notes": "NVIDIA-Nemotron-3-Super-120B-A12B-BF16: 88-layer hybrid Mamba+attention+MoE (22 experts/token, 4096 hidden, 32/2 GQA, 131K vocab). The model_type='nemotron_h' matches our existing family but Nano-9B-v2 was Mamba+attention+MLP only. Super-120B adds MoE on the dense-MLP slots (hybrid_override_pattern uses 'E' chars). nemotron_h family's _parse_layer_types only recognizes 'M'/-'/'*' and filters E out, so build fails with 'Pattern length 48 != num_hidden_layers 88'. Onboarding needs MoE support in nemotron_h family — similar in shape to qwen_moe's expert sharding but on the hybrid Mamba+attention runtime path. Verified 2026-06-01 on umb-b200-138: 247 GB weights download in ~3min via HF mirror; build fails at weight-load step."
+}
