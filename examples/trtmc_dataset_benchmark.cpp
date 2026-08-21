@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "cli/args.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
 #include "trtmc/pipeline.h"
@@ -248,31 +249,6 @@ void usage() {
                  "[--stop-check-interval N]\n";
 }
 
-std::uint64_t parse_size_bytes(const std::string& text) {
-    if (text.empty())
-        throw std::runtime_error("Empty kv-cache-size");
-    std::size_t idx = 0;
-    const double value = std::stod(text, &idx);
-    std::string suffix = text.substr(idx);
-    for (char& ch : suffix)
-        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-    double multiplier = 1.0;
-    if (suffix.empty() || suffix == "B") {
-        multiplier = 1.0;
-    } else if (suffix == "K" || suffix == "KB" || suffix == "KIB") {
-        multiplier = 1024.0;
-    } else if (suffix == "M" || suffix == "MB" || suffix == "MIB") {
-        multiplier = 1024.0 * 1024.0;
-    } else if (suffix == "G" || suffix == "GB" || suffix == "GIB") {
-        multiplier = 1024.0 * 1024.0 * 1024.0;
-    } else if (suffix == "T" || suffix == "TB" || suffix == "TIB") {
-        multiplier = 1024.0 * 1024.0 * 1024.0 * 1024.0;
-    } else {
-        throw std::runtime_error("Unsupported kv-cache-size suffix: " + suffix);
-    }
-    return static_cast<std::uint64_t>(value * multiplier);
-}
-
 } // namespace
 
 int main(int argc, char** argv) {
@@ -314,7 +290,13 @@ int main(int argc, char** argv) {
         } else if (arg == "--hf-python") {
             load_options.hf_python = need_value(arg);
         } else if (arg == "--kv-cache-size") {
-            load_options.kv_cache_size_bytes = parse_size_bytes(need_value(arg));
+            try {
+                load_options.kv_cache_size_bytes =
+                    trtmc::cli::parse_byte_size_or_throw(need_value(arg));
+            } catch (const std::exception& e) {
+                std::cerr << "Error: " << e.what() << '\n';
+                return 1;
+            }
         } else if (arg == "--backend-dir") {
             load_options.backend_search_paths.emplace_back(need_value(arg));
         } else if (arg == "--model-plugin-dir") {

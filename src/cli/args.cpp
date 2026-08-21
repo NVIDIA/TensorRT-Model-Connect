@@ -14,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 namespace trtmc::cli {
 
@@ -76,6 +77,14 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
     } catch (...) {
         return std::nullopt;
     }
+    // std::stod accepts "nan"/"inf"/"infinity" (optionally signed) as valid
+    // conversions. NaN compares false against every relation below, so
+    // neither the value <= 0.0 check nor the later overflow check catches
+    // it, and casting a non-finite double to uint64_t is undefined
+    // behavior. Reject explicitly rather than relying on comparisons that
+    // silently do nothing for NaN.
+    if (!std::isfinite(value))
+        return std::nullopt;
     if (value <= 0.0)
         return std::nullopt;
 
@@ -112,6 +121,13 @@ std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
         return std::nullopt;
     }
     return static_cast<std::uint64_t>(bytes + 0.5L);
+}
+
+std::uint64_t parse_byte_size_or_throw(const std::string& text) {
+    auto parsed = parse_byte_size(text);
+    if (!parsed.has_value())
+        throw std::runtime_error(kInvalidByteSizeMessage);
+    return *parsed;
 }
 
 std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text) {
@@ -481,7 +497,7 @@ CliArgs parse_args(int argc, char** argv) {
             auto parsed = parse_byte_size(argv[++i]);
             if (!parsed.has_value()) {
                 args.parse_error = true;
-                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                args.error_message = kInvalidByteSizeMessage;
                 return args;
             }
             args.kv_cache_size_bytes = *parsed;
@@ -492,7 +508,7 @@ CliArgs parse_args(int argc, char** argv) {
             auto parsed = parse_byte_size(arg.substr(eq + 1));
             if (!parsed.has_value()) {
                 args.parse_error = true;
-                args.error_message = "--kv-cache-size expects a positive size like 90GB or 90GiB";
+                args.error_message = kInvalidByteSizeMessage;
                 return args;
             }
             args.kv_cache_size_bytes = *parsed;
