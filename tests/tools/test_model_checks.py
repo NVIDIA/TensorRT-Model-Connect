@@ -794,6 +794,20 @@ def test_checked_in_platform_resolves_complete_task_matrices(platform):
     assert model_checks.main(["check", "--platform", platform, "--all", "--json"]) == 0
 
 
+def test_e2e_only_profile_keeps_accuracy_and_excludes_perf() -> None:
+    arguments = model_checks.build_parser().parse_args(
+        ["check", "--platform", "gb300", "--model", "nemotron-voicechat-11b"]
+    )
+
+    plan, _ = model_checks._resolve_request(arguments)
+
+    tasks = plan["models"][0]["tasks"]
+    assert tasks["accuracy"]["status"] == "configured"
+    assert tasks["perf"]["status"] == "excluded"
+    assert tasks["perf"]["reason"]
+    assert plan["summary"]["blocker_count"] == 0
+
+
 def test_run_dry_run_writes_exact_accuracy_bindings(tmp_path, monkeypatch):
     storage = tmp_path / "storage"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
