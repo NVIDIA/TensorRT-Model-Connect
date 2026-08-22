@@ -14,6 +14,8 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import pytest
+
 
 def _import_checker():
     return importlib.import_module("check_runtime_strategy_matrix")
@@ -114,6 +116,39 @@ def test_extract_runtime_strategies_from_model_manifests(tmp_path: Path):
         "qwen_decoder_kv_cache",
         "diffusion_primary",
     }
+
+
+def test_extract_runtime_strategies_parses_toml_edge_cases(tmp_path: Path):
+    """A standards-compliant parser handles quoted #, comments, escapes, and
+    multiline lists that the previous regex reader would mangle."""
+    mod = _import_checker()
+
+    manifest = tmp_path / "MODEL.toml"
+    manifest.write_text(
+        "# leading comment\n"
+        'name = "value with a # hash"          # trailing comment\n'
+        "runtime_strategies = [\n"
+        '    "torch_trt",                      # inline comment\n'
+        '    "trt_llm",\n'
+        "]\n",
+        encoding="utf-8",
+    )
+
+    assert mod.extract_runtime_strategies_from_model_manifest(manifest) == {
+        "torch_trt",
+        "trt_llm",
+    }
+
+
+def test_extract_runtime_strategies_malformed_toml_fails_closed(tmp_path: Path):
+    """A malformed manifest raises instead of silently yielding an empty set."""
+    mod = _import_checker()
+
+    manifest = tmp_path / "MODEL.toml"
+    manifest.write_text('runtime_strategies = ["unterminated\n', encoding="utf-8")
+
+    with pytest.raises(mod.tomllib.TOMLDecodeError):
+        mod.extract_runtime_strategies_from_model_manifest(manifest)
 
 
 def test_model_local_e2e_plugin_discovery(tmp_path: Path):

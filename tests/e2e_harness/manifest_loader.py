@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import warnings
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -123,31 +122,13 @@ def _resolve_preflight_asset_paths(manifest: dict[str, Any], model_test_dir: Pat
 
 
 def _read_model_index(index_path: Path) -> dict[str, Any]:
-    text = index_path.read_text(encoding="utf-8")
-    if tomllib is not None:
-        return tomllib.loads(text)
+    """Load a model-index ``MODEL.toml`` with a standards-compliant TOML parser.
 
-    entries: list[str] = []
-    in_array = False
-    for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if not in_array:
-            if not line.startswith("test_manifests"):
-                continue
-            _, value = line.split("=", 1)
-            line = value.strip()
-            if not line.startswith("["):
-                raise ValueError(f"{index_path}: test_manifests must be an array")
-            line = line[1:]
-            in_array = True
-        if in_array:
-            if "]" in line:
-                line = line.split("]", 1)[0]
-                in_array = False
-            entries.extend(re.findall(r'"([^"]+)"', line))
-    return {"test_manifests": entries}
+    A malformed index raises ``tomllib.TOMLDecodeError`` rather than being
+    silently misread by a hand-rolled ``test_manifests`` extractor.
+    """
+    with index_path.open("rb") as handle:
+        return tomllib.load(handle)
 
 
 def _manifest_paths_from_model_index(index_path: Path) -> list[Path]:
@@ -771,19 +752,13 @@ def _runtime_model_manifests_dir() -> Path:
 
 
 def _read_runtime_model_manifest(path: Path) -> dict[str, Any]:
-    if tomllib is not None:
-        with path.open("rb") as f:
-            return tomllib.load(f)
+    """Load a runtime ``MODEL.toml`` with a standards-compliant TOML parser.
 
-    parsed: dict[str, Any] = {}
-    text = path.read_text(encoding="utf-8")
-    single = re.search(r'(?m)^\s*runtime_strategy\s*=\s*"([^"]+)"', text)
-    if single:
-        parsed["runtime_strategy"] = single.group(1)
-    multi = re.search(r"(?ms)^\s*runtime_strategies\s*=\s*\[([^\]]*)\]", text)
-    if multi:
-        parsed["runtime_strategies"] = re.findall(r'"([^"]+)"', multi.group(1))
-    return parsed
+    A malformed manifest raises ``tomllib.TOMLDecodeError`` rather than being
+    silently misread by the previous regex extractor.
+    """
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
 
 
 def _known_runtime_strategies() -> frozenset[str]:
@@ -795,9 +770,8 @@ def _known_runtime_strategies() -> frozenset[str]:
     for manifest in sorted(_runtime_model_manifests_dir().glob("*/MODEL.toml")):
         try:
             raw = _read_runtime_model_manifest(manifest)
-        except Exception as exc:
-            logger.warning("Failed to read runtime model manifest %s: %s", manifest, exc)
-            continue
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"Malformed runtime MODEL.toml at {manifest}: {exc}") from exc
         values = raw.get("runtime_strategies")
         if values is None:
             values = [raw.get("runtime_strategy")]

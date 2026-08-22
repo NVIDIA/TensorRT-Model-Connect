@@ -15,6 +15,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 uses the declared tomli dependency
+    import tomli as tomllib
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX_PATH = PROJECT_ROOT / "tests" / "runtime_strategy_matrix.yaml"
 DEFAULT_CPP_PATH = PROJECT_ROOT / "src" / "cabi" / "api" / "trtmc_c.cpp"
@@ -161,13 +166,19 @@ def discover_runtime_strategy_source_files(
 
 
 def extract_runtime_strategies_from_model_manifest(path: Path) -> set[str]:
-    """Extract runtime strategies from a src/runtime/models/<id>/MODEL.toml."""
-    text = path.read_text(encoding="utf-8")
-    match = re.search(r"runtime_strategies\s*=\s*\[([^\]]*)\]", text)
-    if match:
-        return set(re.findall(r'"([^"]+)"', match.group(1)))
-    match = re.search(r'runtime_strategy\s*=\s*"([^"]+)"', text)
-    return {match.group(1)} if match else set()
+    """Extract runtime strategies from a src/runtime/models/<id>/MODEL.toml.
+
+    Uses a standards-compliant TOML parser; a malformed manifest raises
+    ``tomllib.TOMLDecodeError`` (fail-closed) rather than silently yielding an
+    empty set and masking a real strategy-matrix mismatch.
+    """
+    with path.open("rb") as handle:
+        data = tomllib.load(handle)
+    strategies = data.get("runtime_strategies")
+    if isinstance(strategies, list):
+        return {value for value in strategies if isinstance(value, str)}
+    single = data.get("runtime_strategy")
+    return {single} if isinstance(single, str) else set()
 
 
 def extract_runtime_strategies_from_model_manifests(models_dir: Path) -> set[str]:

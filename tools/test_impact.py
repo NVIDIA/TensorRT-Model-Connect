@@ -26,6 +26,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 uses the declared tomli dependency
+    import tomli as tomllib
+
 # ---------------------------------------------------------------------------
 # Constants -- strategy mappings
 # ---------------------------------------------------------------------------
@@ -272,16 +277,22 @@ def _scan_family_imports(families_dir: Path) -> Dict[str, List[str]]:
 
 
 def _parse_runtime_model_manifest(manifest_path: Path) -> List[str]:
-    """Parse the tiny MODEL.toml runtime strategy list without extra deps."""
+    """Parse the MODEL.toml runtime strategy list with a standards-compliant parser.
+
+    A missing manifest yields an empty list. A malformed manifest raises
+    ``tomllib.TOMLDecodeError`` (fail-closed): a broken descriptor must surface
+    loudly in CI selection rather than silently selecting no strategies.
+    """
     try:
-        text = manifest_path.read_text(encoding="utf-8")
+        with manifest_path.open("rb") as handle:
+            data = tomllib.load(handle)
     except OSError:
         return []
-    match = re.search(r"runtime_strategies\s*=\s*\[([^\]]*)\]", text)
-    if match:
-        return re.findall(r'"([^"]+)"', match.group(1))
-    match = re.search(r'runtime_strategy\s*=\s*"([^"]+)"', text)
-    return [match.group(1)] if match else []
+    strategies = data.get("runtime_strategies")
+    if isinstance(strategies, list):
+        return [value for value in strategies if isinstance(value, str)]
+    single = data.get("runtime_strategy")
+    return [single] if isinstance(single, str) else []
 
 
 def _scan_cpp_runtime_model_manifests(models_dir: Path) -> Dict[str, List[str]]:

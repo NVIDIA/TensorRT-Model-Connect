@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 try:
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    tomllib = None
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 uses the declared tomli dependency
+    import tomli as tomllib
 
 if TYPE_CHECKING:
     from .base import FamilyPlugin
@@ -114,50 +114,14 @@ def _compact_key(value: str) -> str:
 
 
 def _read_model_toml(path: Path) -> dict:
-    text = path.read_text(encoding="utf-8")
-    if tomllib is not None:
-        return tomllib.loads(text)
+    """Load a family ``MODEL.toml`` with a standards-compliant TOML parser.
 
-    # Python 3.10 fallback for this repo's flat string/list metadata shape.
-    data: dict[str, str | list[str]] = {}
-    current_key: str | None = None
-    current_values: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if current_key is not None:
-            if "]" in line:
-                before_close = line.split("]", 1)[0]
-                current_values.extend(_parse_toml_string_values(before_close))
-                data[current_key] = current_values
-                current_key = None
-                current_values = []
-            else:
-                current_values.extend(_parse_toml_string_values(line))
-            continue
-        if "=" not in line:
-            continue
-        key, value = [part.strip() for part in line.split("=", 1)]
-        if value.startswith("["):
-            value = value[1:]
-            if "]" in value:
-                data[key] = _parse_toml_string_values(value.split("]", 1)[0])
-            else:
-                current_key = key
-                current_values = _parse_toml_string_values(value)
-        elif value.startswith('"') and value.endswith('"'):
-            data[key] = value[1:-1]
-    return data
-
-
-def _parse_toml_string_values(value: str) -> list[str]:
-    values: list[str] = []
-    for item in value.split(","):
-        item = item.strip()
-        if item.startswith('"') and item.endswith('"'):
-            values.append(item[1:-1])
-    return values
+    Uses ``tomllib`` on Python 3.11+ and the declared ``tomli`` dependency on
+    3.10. A malformed manifest raises ``tomllib.TOMLDecodeError`` rather than
+    being silently misread by a hand-rolled parser.
+    """
+    with path.open("rb") as handle:
+        return tomllib.load(handle)
 
 
 def _metadata_strings(raw: object) -> frozenset[str]:
