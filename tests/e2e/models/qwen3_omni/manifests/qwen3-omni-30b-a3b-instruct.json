@@ -6,6 +6,7 @@
   "family": "qwen3_omni",
   "runtime_strategy": "qwen3_omni_multimodal",
   "task_strategy": "omni_multimodal",
+  "benchmark_exclusion_reason": "Native Thinker text generation is covered functionally, but audio remains unavailable until a native Talker exists and no text-only release performance receipt is available.",
   "precision": "bf16",
   "max_cache_length": 256,
   "trust_remote_code": true,
@@ -16,26 +17,23 @@
     {
       "name": "qwen3-omni-30b-a3b-instruct",
       "trace_id": "IT-E2E-QWEN3-OMNI-01",
-      "reference_backend": "torch_reference",
-      "oracle_level": "L1_external_reference",
-      "user_contract": "tts_audio",
-      "prompt": "Please say hello from Qwen3 Omni in one short sentence.",
+      "ci_tier": "default",
+      "reference_backend": "invariant_only",
+      "oracle_level": "L4_invariants",
+      "reference_family": "qwen3_omni_native_thinker",
+      "user_contract": "runtime_invariants",
+      "notes": "Native premerge exercises Thinker text generation; audio generation remains disabled until a native Talker exists.",
+      "prompt": "Reply with a short greeting.",
       "inputs": {
         "runtime_timeout_s": 900
       },
       "max_new_tokens": 16,
-      "seed": 42,
-      "reference_speaker": "Ethan",
-      "reference_talker_max_new_tokens": 32,
-      "metadata": {
-        "runtime_cli_requires_hf_python": true
-      },
       "stages": [
         {
-          "name": "talker_decode",
+          "name": "thinker_decode",
           "required": true,
-          "artifact_type": "waveform",
-          "comparison_mode": "waveform_cosine_and_invariants"
+          "artifact_type": "text",
+          "comparison_mode": "runtime_invariants"
         }
       ]
     }

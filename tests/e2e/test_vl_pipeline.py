@@ -40,7 +40,7 @@ def test_vl_vision_only(model_entry, engine_dir):
 
 
 @pytest.mark.e2e
-def test_vl_generation(model_entry, trtmc_binary, hf_python, ld_library_path):
+def test_vl_generation(model_entry, trtmc_binary, ld_library_path):
     """Run VL inference through the C++ binary (requires image + VL model)."""
     if not _is_vl_model(model_entry):
         pytest.skip(f"{model_entry['name']} is not a VL model")
@@ -54,8 +54,7 @@ def test_vl_generation(model_entry, trtmc_binary, hf_python, ld_library_path):
         [str(trtmc_binary), "run", model_entry["bundle_path"],
          "--prompt", "Describe this image.",
          "--image", image_path,
-         "--max-new-tokens", "10",
-         "--hf-python", str(hf_python)],
+         "--max-new-tokens", "10"],
         capture_output=True, text=True, timeout=120, env=env)
 
     assert result.returncode == 0, f"VL inference failed: {result.stderr}"

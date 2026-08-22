@@ -193,7 +193,7 @@ void print_usage() {
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--repetition-penalty F] "
            "[--source-language-token-id N] [--forced-bos-token-id N] "
-           "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
+           "[--top-k N] [--seed N] [--benchmark N] [--warmup N] "
            "[--lora-adapter DIR] [--lora-adapter-id ID] "
            "[--kv-cache-size SIZE] [--chat-template] [--no-thinking] "
            "[--generation-mode MODE] [--block-length N] [--threshold F] "
@@ -204,28 +204,26 @@ void print_usage() {
            "                        Image-generation extras: [--negative-prompt \"text\"] "
            "[--num-inference-steps N] [--height N] [--width N] "
            "[--num-images N] [--prompts-file PATH] [--seed s0,s1,...]\n"
-           "  trtmc encode          <bundle.bundle> --prompt \"text\" [--hf-python PATH]\n"
-           "  trtmc segment         <bundle.bundle> --image PATH --output PATH [--hf-python PATH]\n"
+           "  trtmc encode          <bundle.bundle> --prompt \"text\"\n"
+           "  trtmc segment         <bundle.bundle> --image PATH --output PATH\n"
            "  trtmc disparity       <bundle.bundle> --image LEFT --right-image RIGHT "
            "--output PATH\n"
            "  trtmc segment-prompted <bundle.bundle> --image PATH --output DIR "
-           "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
+           "[--point-x F] [--point-y F] [--background] [--prompt TEXT]\n"
            "  trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]\n"
            "  trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]\n"
            "  trtmc detect          <bundle.bundle> --image PATH [--output-json PATH] "
            "[--score-threshold F]\n"
            "  trtmc generate-audio  <bundle.bundle> --prompt \"text\" --output PATH "
-           "[--max-new-tokens N] [--hf-python PATH]\n"
-           "  trtmc serve-audio     <bundle.bundle> [--chunk-frames N] [--max-new-tokens N] "
-           "[--hf-python PATH]\n"
+           "[--max-new-tokens N]\n"
+           "  trtmc serve-audio     <bundle.bundle> [--chunk-frames N] [--max-new-tokens N]\n"
            "                       Loads bundle once, reads prompts from stdin, streams PCM to "
            "stdout.\n"
            "  trtmc generate-video  <bundle.bundle> --prompt \"text\" --output DIR [--num-steps N] "
            "[--guidance-scale S] [--initial-latents-raw PATH]\n"
            "                        [--negative-prompt \"text\"] [--height N] [--width N]\n"
-           "  trtmc embed           <bundle.bundle> --prompt \"text\" [--hf-python PATH]\n"
-           "  trtmc rerank          <bundle.bundle> --prompt \"query\" --document \"text\" "
-           "[--hf-python PATH]\n"
+           "  trtmc embed           <bundle.bundle> --prompt \"text\"\n"
+           "  trtmc rerank          <bundle.bundle> --prompt \"query\" --document \"text\"\n"
            "  trtmc solve           <bundle.bundle> --field-input CSV\n"
            "  trtmc solve           <bundle.bundle> --branch-input CSV [--trunk-input CSV]\n"
            "  trtmc transcribe      <bundle.bundle> --audio FILE.wav [--max-new-tokens N] "
@@ -235,7 +233,7 @@ void print_usage() {
            "[--max-input-seconds F] [--segment-length-seconds F] [--segment-min-seconds F] "
            "[--segment-overlap-seconds F] [--lcs-merge] "
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
-           "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
+           "[--pad-and-drop-preencoded]\n"
            "  trtmc speak           <bundle.bundle> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
            "  trtmc inspect         <bundle.bundle> [--list-engines]\n"
            "  trtmc version\n"
@@ -469,10 +467,6 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--tail-frames" && need_value(arg)) {
             args.tail_frames = std::max(0, std::atoi(argv[++i]));
-            continue;
-        }
-        if (arg == "--hf-python" && need_value(arg)) {
-            args.hf_python = argv[++i];
             continue;
         }
         if (arg == "--kv-cache-size" || arg == "--kv_cache_size") {

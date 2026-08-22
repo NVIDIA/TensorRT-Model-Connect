@@ -179,8 +179,8 @@ capsule-owned names such as `optimized_runtime_artifacts/.../llm.engine`, so
 `--list-engines` can legitimately report `No engine sections found.` and exit
 nonzero for an otherwise valid optimized bundle.
 
-Depending on the command, shared load/run options include `--hf-python`,
-`--backend-dir`, repeatable `--model-plugin-dir`, `--runtime-cache`,
+Depending on the command, shared load/run options include `--backend-dir`,
+repeatable `--model-plugin-dir`, `--runtime-cache`,
 `--kernel-bindings`, `--cuda-graphs`, `--benchmark`, `--warmup`, `--config`,
 and repeatable `--set`. `trtmc --help` prints one combined synopsis for all
 commands; it is not separate per-command help. Read the relevant command
@@ -218,7 +218,7 @@ an inventory, not a claim that every option is accepted by every command.
 | Help and version | `--help`, `--version` |
 | Primary inputs | `--prompt`, `--prompts-file`, `--image`, `--audio`, `--audio-in`, `--document`, `--field-input`, `--branch-input`, `--trunk-input` |
 | Output selection | `--output`, `--output-json`, `--audio-out`, `--list-engines` |
-| Runtime loading and config | `--hf-python`, `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kernel-bindings`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
+| Runtime loading and config | `--backend-dir`, `--model-plugin-dir`, `--runtime-cache`, `--kernel-bindings`, `--kv-cache-size`, `--cuda-graphs`, `--config`, `--set` |
 | Text generation | `--prompt` or `--prompts-file`, `--max-new-tokens`, `--source-language-token-id`, `--forced-bos-token-id`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--repetition-penalty`, `--seed`, `--chat-template`, `--no-thinking`, `--generation-mode`, `--block-length`, `--threshold`, `--num-samples`, `--tail-frames` |
 | Diffusion and raw-state generation | `--num-steps`, `--num-inference-steps`, `--guidance-scale`, `--cfg-scale`, `--sde-gamma`, `--initial-latents-raw`, `--condition-latents-raw`, `--condition-mask-raw`, `--sampling-steps-raw`, `--sde-noise-raw`, `--negative-prompt`, `--height`, `--width`, `--num-images` |
 | Dynamic adapters | `--lora-adapter`, `--lora-adapter-id` |

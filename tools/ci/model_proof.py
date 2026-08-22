@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -796,20 +797,40 @@ class ModelProofRunner:
             print(f"Removing orphaned model-proof container {container}")
             removed = self.context.run(["docker", "rm", "-f", container], check=False)
             if removed.returncode:
-                remaining = self.context.output(
-                    [
-                        "docker",
-                        "ps",
-                        "-a",
-                        "--no-trunc",
-                        "--filter",
-                        f"id={container}",
-                        "--format",
-                        "{{.ID}}",
-                    ]
-                ).splitlines()
-                if container in remaining:
-                    raise CiError(f"could not remove orphaned model-proof container {container}")
+                timeout_ms = self.context.positive_integer(
+                    self.context.env.get(
+                        "TRTMC_MODEL_PROOF_ORPHAN_REMOVAL_TIMEOUT_MS", "30000"
+                    ),
+                    "TRTMC_MODEL_PROOF_ORPHAN_REMOVAL_TIMEOUT_MS",
+                )
+                poll_ms = self.context.positive_integer(
+                    self.context.env.get(
+                        "TRTMC_MODEL_PROOF_ORPHAN_REMOVAL_POLL_MS", "250"
+                    ),
+                    "TRTMC_MODEL_PROOF_ORPHAN_REMOVAL_POLL_MS",
+                )
+                deadline = time.monotonic() + timeout_ms / 1000.0
+                while True:
+                    remaining = self.context.output(
+                        [
+                            "docker",
+                            "ps",
+                            "-a",
+                            "--no-trunc",
+                            "--filter",
+                            f"id={container}",
+                            "--format",
+                            "{{.ID}}",
+                        ]
+                    ).splitlines()
+                    if container not in remaining:
+                        break
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise CiError(
+                            f"could not remove orphaned model-proof container {container}"
+                        )
+                    time.sleep(min(poll_ms / 1000.0, deadline - now))
 
     def _run_logged(self, command: list[object], path: Path) -> int:
         with path.open("w", encoding="utf-8") as output:

@@ -16,7 +16,6 @@ Usage (inside container):
     python3 tools/test_runner_parity.py \
       --bundle /tmp/model.bundle \
       --binary ./build/trtmc \
-      --hf-python .venv/bin/python \
       --prompt "The capital of France is" \
       --max-new-tokens 20
 """
@@ -87,14 +86,10 @@ def _read_bundle_section(bundle: str, sections: dict,
         return f.read(meta["size"])
 
 
-def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int,
-            hf_python: str) -> str:
+def run_cpp(binary: str, bundle: str, prompt: str, max_new_tokens: int) -> str:
     """Run C++ trtmc binary, return generated text."""
     cmd = [binary, "run", bundle, "--prompt", prompt,
            "--max-new-tokens", str(max_new_tokens)]
-    if hf_python:
-        cmd.extend(["--hf-python", hf_python])
-
     env = os.environ.copy()
     result = subprocess.run(cmd, capture_output=True, text=True, env=env,
                             timeout=120)
@@ -144,8 +139,7 @@ def run_python(bundle: str, prompt: str,
             f"No family-owned debug_runner adapter handles {runtime_strategy!r}"
         )
 
-    # Encode prompt — use add_special_tokens=False to match the C++ runtime,
-    # which calls hf_tokenizer.py with add_special_tokens=False.
+    # Encode prompt without special tokens to match the native C++ tokenizer.
     input_ids = tokenizer.encode(prompt, add_special_tokens=False)
 
     # Prefill
@@ -177,8 +171,6 @@ def main():
     parser.add_argument("--bundle", required=True, help=".bundle artifact path")
     parser.add_argument("--binary", default="./build/trtmc",
                         help="Path to trtmc C++ binary")
-    parser.add_argument("--hf-python", default="",
-                        help="Python path for HF tokenizer bridge")
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--max-new-tokens", type=int, default=20)
     args = parser.parse_args()
@@ -190,8 +182,7 @@ def main():
 
     # Run C++ binary
     print("Running C++ binary ...", file=sys.stderr)
-    cpp_text = run_cpp(args.binary, args.bundle, args.prompt,
-                       args.max_new_tokens, args.hf_python)
+    cpp_text = run_cpp(args.binary, args.bundle, args.prompt, args.max_new_tokens)
     print(f"C++:    {cpp_text!r}")
 
     # Run Python runner
@@ -243,11 +234,9 @@ def run_as_diff_test(ctx):
     try:
         bundle = ctx.bundle_path
         binary = ctx.binary_path or "./build/trtmc"
-        hf_python = ctx.hf_python or ""
         prompt = "The capital of France is"
 
-        cpp_text = run_cpp(
-            binary, bundle, prompt, ctx.max_new_tokens, hf_python)
+        cpp_text = run_cpp(binary, bundle, prompt, ctx.max_new_tokens)
         py_text, _ = run_python(
             bundle, prompt, ctx.max_new_tokens)
 

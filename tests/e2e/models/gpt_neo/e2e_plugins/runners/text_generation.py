@@ -531,9 +531,6 @@ class TextGenerationCausalRunner:
             output_root.mkdir(parents=True, exist_ok=True)
             output_jsonl_path = output_root / "trt_text_generation.jsonl"
             cmd.extend(["-o", str(output_jsonl_path)])
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            cmd.extend(["--hf-python", runtime_cli_python])
         if inputs:
             if inputs.get("temperature", 1.0) != 1.0:
                 cmd.extend(["--temperature", str(inputs["temperature"])])

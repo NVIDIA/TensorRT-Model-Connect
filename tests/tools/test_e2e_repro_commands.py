@@ -277,6 +277,8 @@ def test_qwen_native_kv_repro_preserves_model_only_build(tmp_path) -> None:
     assert f"--prompts-file {resolved_prompt}" in repro["trt_inference"]
     assert "--max-new-tokens 2" in repro["trt_inference"]
     assert "--temperature 0.0" in repro["trt_inference"]
+    assert "--hf-python" not in repro["trt_inference"]
+    assert "--hf-python /usr/bin/python3" in repro["rerun_test"]
     assert "--e2e-category regression" in repro["rerun_test_rebuild"]
 
 

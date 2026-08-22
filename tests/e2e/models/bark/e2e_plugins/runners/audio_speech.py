@@ -193,9 +193,6 @@ class TextToAudioRunner:
             ]
             if not distributed_runtime:
                 cmd.extend(["--output", wav_path])
-            runtime_cli_python = ctx.runtime_cli_hf_python()
-            if runtime_cli_python:
-                cmd.extend(["--hf-python", runtime_cli_python])
 
             max_tokens = case.inputs.get("max_new_tokens", 0)
             if max_tokens > 0:

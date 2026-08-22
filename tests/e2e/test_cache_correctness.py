@@ -63,13 +63,12 @@ def _build_bundle(trtmc_binary, hf_id, output_path, max_cache_length, timeout=60
 
 
 def _run_inference(trtmc_binary, bundle_path, prompt, max_new_tokens,
-                   hf_python, ld_library_path, timeout=120):
+                   ld_library_path, timeout=120):
     """Run C++ inference and return (returncode, stdout, stderr)."""
     cmd = [
         str(trtmc_binary), "run", str(bundle_path),
         "--prompt", prompt,
         "--max-new-tokens", str(max_new_tokens),
-        "--hf-python", str(hf_python),
     ]
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(
@@ -100,7 +99,7 @@ pytestmark = [
 class TestCacheOverflow:
     """Verify inference doesn't crash when the prompt exceeds max_cache_length."""
 
-    def test_cache_overflow_produces_output(self, trtmc_binary, hf_python,
+    def test_cache_overflow_produces_output(self, trtmc_binary,
                                             ld_library_path, engine_dir):
         """Generate with prompt exceeding max_cache_length=32 -> non-empty output."""
         bundle_path = engine_dir / "cache_test_32.bundle"
@@ -110,14 +109,14 @@ class TestCacheOverflow:
 
         rc, stdout, stderr = _run_inference(
             trtmc_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
-            hf_python=hf_python, ld_library_path=ld_library_path)
+            ld_library_path=ld_library_path)
 
         assert rc == 0, (
             f"Inference crashed with cache overflow (rc={rc}):\n{stderr}")
         assert len(stdout) > 0, (
             "Inference produced no output with cache overflow")
 
-    def test_cache_overflow_no_segfault(self, trtmc_binary, hf_python,
+    def test_cache_overflow_no_segfault(self, trtmc_binary,
                                         ld_library_path, engine_dir):
         """Specifically verify no segfault (signal -11) on cache overflow."""
         bundle_path = engine_dir / "cache_test_32.bundle"
@@ -128,7 +127,7 @@ class TestCacheOverflow:
 
         rc, stdout, stderr = _run_inference(
             trtmc_binary, bundle_path, LONG_PROMPT, max_new_tokens=10,
-            hf_python=hf_python, ld_library_path=ld_library_path)
+            ld_library_path=ld_library_path)
 
         assert rc != -11, f"Segfault on cache overflow: {stderr}"
 
@@ -138,7 +137,7 @@ class TestCacheConsistency:
     for short prompts that fit in all cache sizes."""
 
     def test_first_tokens_match_across_cache_sizes(
-            self, trtmc_binary, hf_python, ld_library_path, engine_dir):
+            self, trtmc_binary, ld_library_path, engine_dir):
         """Same short prompt with cache=64 vs cache=256 -> first N tokens match.
 
         When the prompt fits in both caches, the first generated tokens
@@ -155,10 +154,10 @@ class TestCacheConsistency:
 
         rc_64, out_64, stderr_64 = _run_inference(
             trtmc_binary, bundle_64, SHORT_PROMPT, max_new,
-            hf_python=hf_python, ld_library_path=ld_library_path)
+            ld_library_path=ld_library_path)
         rc_256, out_256, stderr_256 = _run_inference(
             trtmc_binary, bundle_256, SHORT_PROMPT, max_new,
-            hf_python=hf_python, ld_library_path=ld_library_path)
+            ld_library_path=ld_library_path)
 
         assert rc_64 == 0, f"cache=64 inference failed:\n{stderr_64}"
         assert rc_256 == 0, f"cache=256 inference failed:\n{stderr_256}"
@@ -178,7 +177,7 @@ class TestCacheConsistency:
 class TestCacheBoundary:
     """Edge case: prompt length exactly equals max_cache_length."""
 
-    def test_prompt_at_cache_boundary(self, trtmc_binary, hf_python,
+    def test_prompt_at_cache_boundary(self, trtmc_binary,
                                       ld_library_path, engine_dir):
         """Prompt tokenising to ~64 tokens with cache=64 -> should succeed.
 
@@ -201,7 +200,7 @@ class TestCacheBoundary:
 
         rc, stdout, stderr = _run_inference(
             trtmc_binary, bundle_path, boundary_prompt, max_new_tokens=5,
-            hf_python=hf_python, ld_library_path=ld_library_path)
+            ld_library_path=ld_library_path)
 
         # Must not crash
         assert rc != -11, f"Segfault at cache boundary: {stderr}"

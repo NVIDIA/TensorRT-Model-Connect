@@ -293,11 +293,24 @@ def test_omni_invariant_talker_compares_pinned_reference_waveform(tmp_path) -> N
 
 def test_omni_invariant_text_stage_requires_non_empty_output() -> None:
     result = OmniComparator().compare(
-        StageOutput(stage_name="end_to_end", text="hello"),
-        _invariant_ref("end_to_end"),
+        StageOutput(stage_name="thinker_decode", text="hello"),
+        _invariant_ref("thinker_decode"),
         ThresholdProfile(task_strategy="omni_multimodal"),
-        StageSpec(name="end_to_end"),
+        StageSpec(name="thinker_decode"),
     )
 
     assert result.status == StageStatus.PASSED.value
     assert result.metrics["non_empty_text"].passed is True
+
+
+def test_omni_invariant_text_stage_rejects_empty_or_whitespace_output() -> None:
+    for text in ("", "   "):
+        result = OmniComparator().compare(
+            StageOutput(stage_name="thinker_decode", text=text),
+            _invariant_ref("thinker_decode"),
+            ThresholdProfile(task_strategy="omni_multimodal"),
+            StageSpec(name="thinker_decode"),
+        )
+
+        assert result.status == StageStatus.FAILED.value
+        assert result.metrics["non_empty_text"].passed is False

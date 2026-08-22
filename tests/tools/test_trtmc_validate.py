@@ -83,6 +83,11 @@ def test_model_workload_catalog_covers_every_ready_model():
     assert [binding.workload for binding in bindings if binding.model == "personaplex-7b"] == [
         "full_duplex_bench_behavior_parity"
     ]
+    assert [
+        binding.workload
+        for binding in bindings
+        if binding.model == "qwen3-omni-30b-a3b-instruct"
+    ] == ["qwen3_omni_native_thinker_invariants"]
     assert trtmc_validate.resolve_binding(
         catalog,
         "personaplex-7b",
@@ -210,7 +215,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "lfm2_model_card_sampling_parity",
         "minimax_h3_official_profile_parity",
         "nemotron_voicechat_model_card_general_conversation",
-        "seedtts_en_omni_audio_parity",
+        "qwen3_omni_native_thinker_invariants",
         "vbench_ti2v_official_profile_parity",
     }
     assert max(catalog["sample_limits"].values()) == 150

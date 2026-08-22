@@ -74,7 +74,6 @@ PYTHONPATH=python:. python3 tools/trtmc_profile.py \
   --iterations 10 \
   --dtype float16 \
   --trtmc-binary ./build/trtmc \
-  --hf-python <python> \
   --json \
   --output-dir <profile-dir>
 ```

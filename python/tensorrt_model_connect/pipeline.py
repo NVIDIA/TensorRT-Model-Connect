@@ -50,14 +50,12 @@ class Pipeline:
     Args:
         bundle_path: Path to a .bundle artifact file.
         binary: Path to the trtmc binary. Auto-detected if not specified.
-        hf_python: Path to Python interpreter for tokenizer. Auto-detected.
     """
 
     def __init__(
         self,
         bundle_path: str,
         binary: str | None = None,
-        hf_python: str | None = None,
     ):
         self.bundle_path = str(bundle_path)
 
@@ -65,8 +63,6 @@ class Pipeline:
             self.binary = binary
         else:
             self.binary = self._find_binary()
-
-        self.hf_python = hf_python
 
     def __call__(
         self,
@@ -107,9 +103,6 @@ class Pipeline:
                 "--lora-adapter", str(lora_adapter),
                 "--lora-adapter-id", lora_adapter_id,
             ])
-
-        if self.hf_python is not None:
-            cmd.extend(["--hf-python", self.hf_python])
 
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout)

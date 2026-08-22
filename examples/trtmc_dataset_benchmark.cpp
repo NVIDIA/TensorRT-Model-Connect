@@ -101,7 +101,7 @@ std::optional<std::string> extract_answer_from_text(const std::string& text) {
 
 void usage() {
     std::cerr << "Usage: trtmc_dataset_benchmark <bundle.bundle> <dataset.jsonl> <output.jsonl> "
-                 "[--max-new-tokens N] [--hf-python PATH] [--kv-cache-size SIZE] "
+                 "[--max-new-tokens N] [--kv-cache-size SIZE] "
                  "[--backend-dir PATH] [--model-plugin-dir PATH] "
                  "[--temperature F] [--top-k N] [--top-p F] [--min-p F] [--seed N] "
                  "[--chat-template] [--no-thinking] [--stop-on-answer] "
@@ -153,8 +153,6 @@ int main(int argc, char** argv) {
             set_tokens.emplace_back(need_value(arg));
         } else if (arg == "--max-new-tokens") {
             max_new_tokens = std::stoi(need_value(arg));
-        } else if (arg == "--hf-python") {
-            load_options.hf_python = need_value(arg);
         } else if (arg == "--kv-cache-size") {
             load_options.kv_cache_size_bytes = parse_size_bytes(need_value(arg));
         } else if (arg == "--backend-dir") {

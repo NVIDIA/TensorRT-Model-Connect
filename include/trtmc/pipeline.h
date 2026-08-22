@@ -691,9 +691,8 @@ class IPipeline {
 
 // --- Factory ---
 // LoadOptions bundles every knob the factory understands. Users who only want
-// the defaults can still call the positional overload below.
+// the defaults can call the single-argument overload below.
 struct LoadOptions {
-    std::string hf_python;
     std::string runtime_cache_path;
     bool cuda_graphs{false};
     std::uint64_t kv_cache_size_bytes{0};               // 0 = use bundle's max_cache_length
@@ -703,9 +702,7 @@ struct LoadOptions {
     std::vector<std::string> model_plugin_search_paths; // Extra dirs for libtrtmc_model_*.so
 };
 
-std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python = "",
-                                const std::string& runtime_cache_path = "",
-                                bool cuda_graphs = false);
+std::unique_ptr<IPipeline> load(const std::string& bundle_path);
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options);
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options,
                                 const std::string& kernel_bindings_path);
@@ -718,7 +715,6 @@ extern "C" {
 
 struct TrtmcPipelineOptions {
     int max_new_tokens;        // 0 = use model default
-    const char* hf_python;     // nullptr = auto-detect
     const char* image_path;    // nullptr = text-only
     const char* runtime_cache; // nullptr = no RTX cache
     int cuda_graphs;           // 0 = disabled

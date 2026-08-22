@@ -29,6 +29,43 @@ _SUPPORTED_E2E_PROOF_KINDS = {
     "reference",
     "snapshot_regression",
 }
+_READELF_NEEDED_ENTRY = re.compile(
+    r"\(NEEDED\)\s+Shared library:\s*\[([^\]\r\n]+)\]\s*$"
+)
+_LIBPYTHON_SONAME = re.compile(r"libpython[^/]*\.so(?:\.[^/]+)*$")
+_SCRATCH_DSO_EVIDENCE = (
+    "model-dsos.txt, model-dso.dynamic.txt, core-dso.dynamic.txt, "
+    "trt-backend-dso.dynamic.txt, trtmc.dynamic.txt"
+)
+_SELECTED_WHEEL_DSO_EVIDENCE = (
+    "selected-wheel-native-elfs.txt, selected-wheel-*.dynamic.txt"
+)
+
+
+def _readelf_dt_needed(dynamic: str, elf: Path) -> set[str]:
+    """Parse GNU readelf dynamic dependencies, rejecting unknown NEEDED syntax."""
+
+    dependencies = set()
+    for line in dynamic.splitlines():
+        if "(NEEDED)" not in line:
+            continue
+        match = _READELF_NEEDED_ENTRY.search(line)
+        if match is None:
+            raise CiError(f"could not parse DT_NEEDED entry for {elf}: {line.strip()!r}")
+        dependencies.add(match.group(1))
+    return dependencies
+
+
+def _reject_python_runtime_dependency(elf: Path, dependencies: set[str]) -> None:
+    python_dependencies = sorted(
+        dependency
+        for dependency in dependencies
+        if _LIBPYTHON_SONAME.fullmatch(dependency.rsplit("/", maxsplit=1)[-1])
+    )
+    if python_dependencies:
+        raise CiError(
+            f"{elf} links a forbidden Python runtime via DT_NEEDED: {python_dependencies}"
+        )
 
 
 def _classify_e2e_proof_kinds(
@@ -62,7 +99,7 @@ class ProofStatus:
         "projection_validation": "source-projection.json, selection.json",
         "configure": "configure.log",
         "scratch_build": "build.log",
-        "dso_isolation": "model-dsos.txt, model-dso.dynamic.txt",
+        "dso_isolation": _SCRATCH_DSO_EVIDENCE,
         "cpp_tests": "cpp-tests.log",
         "python_tests": "python-model-tests.xml",
         "e2e_reference": "e2e/junit.xml, e2e/*/result.json",
@@ -612,19 +649,41 @@ class ModelProofInnerPipeline:
             raise CiError(
                 f"scratch build produced {[path.name for path in dsos]}, expected only {runtime_library}"
             )
-        dynamic = self.context.output(["readelf", "-d", dsos[0]])
-        (self.artifacts / "model-dso.dynamic.txt").write_text(dynamic + "\n", encoding="utf-8")
+        scratch = dsos[0]
+        build = self.work / "build"
+        scratch_elfs = (
+            (scratch, "model-dso.dynamic.txt"),
+            (build / "libtrtmc_core.so", "core-dso.dynamic.txt"),
+            (build / "libtrtmc_backend_trt.so", "trt-backend-dso.dynamic.txt"),
+            (build / "trtmc", "trtmc.dynamic.txt"),
+        )
+        dynamic_by_elf: dict[Path, str] = {}
+        build_root = build.resolve()
+        for elf, evidence_name in scratch_elfs:
+            if not elf.is_file() or not elf.resolve().is_relative_to(build_root):
+                raise CiError(f"scratch build did not produce a safe native ELF: {elf}")
+            dynamic = self.context.output(["readelf", "-d", elf])
+            (self.artifacts / evidence_name).write_text(dynamic + "\n", encoding="utf-8")
+            dependencies = _readelf_dt_needed(dynamic, elf)
+            _reject_python_runtime_dependency(elf, dependencies)
+            dynamic_by_elf[elf] = dynamic
+
+        dynamic = dynamic_by_elf[scratch]
         dependencies = set(re.findall(r"libtrtmc_model_[^\] ]*\.so", dynamic)) - {runtime_library}
         if dependencies:
             raise CiError(f"model DSO links a sibling model DSO: {sorted(dependencies)}")
-        scratch = dsos[0]
         runtime_dso = scratch
         runtime_core: Path | None = None
+        selected_wheel_native_dir: Path | None = None
+        selected_wheel_trtmc: Path | None = None
+        selected_wheel_benchmark_worker: Path | None = None
+        selected_wheel_backends: list[Path] = []
         runtime_library_source = "scratch-build"
         if self.selected_wheel:
             native_dir = (
                 self.selected_wheel.site_packages / "tensorrt_model_connect" / "bin"
             ).resolve()
+            selected_wheel_native_dir = native_dir
             runtime_dso = native_dir / runtime_library
             if (
                 Path(runtime_library).name != runtime_library
@@ -642,6 +701,29 @@ class ModelProofInnerPipeline:
                 or not runtime_core.resolve().is_relative_to(native_dir)
             ):
                 raise CiError("selected wheel core DSO is missing or unsafe: libtrtmc_core.so")
+            expected_trtmc = native_dir / "trtmc"
+            if self.selected_wheel.trtmc != expected_trtmc:
+                raise CiError("selected wheel trtmc CLI does not match its native directory")
+            selected_wheel_trtmc = expected_trtmc
+            selected_wheel_benchmark_worker = native_dir / "trtmc_benchmark_worker"
+            version = self.selected_wheel.tensorrt_version.split(".")
+            if len(version) != 4 or any(not part.isdigit() for part in version):
+                raise CiError("selected wheel TensorRT version cannot identify its backend ABI")
+            expected_backends = {
+                "libtrtmc_backend_trt.so",
+                f"libtrtmc_backend_trt_{version[0]}_{version[1]}.so",
+            }
+            selected_wheel_backends = sorted(
+                native_dir.glob("libtrtmc_backend_trt*.so*")
+            )
+            missing_backends = expected_backends - {
+                backend.name for backend in selected_wheel_backends
+            }
+            if missing_backends:
+                raise CiError(
+                    "selected wheel is missing required TensorRT backend ELF files: "
+                    f"{sorted(missing_backends)}"
+                )
             runtime_library_source = "selected-wheel"
 
         plugin_dir = self.work / "model-plugins" / runtime_model
@@ -651,6 +733,7 @@ class ModelProofInnerPipeline:
         if staged.read_bytes() != runtime_dso.read_bytes():
             raise CiError("staged plugin DSO does not byte-match its runtime source")
         core_facts: dict[str, str] = {}
+        staged_core: Path | None = None
         if runtime_core is not None:
             staged_core = plugin_dir / runtime_core.name
             shutil.copy2(runtime_core, staged_core)
@@ -668,6 +751,71 @@ class ModelProofInnerPipeline:
                 "staged_runtime_core_library_sha256": core_digest,
                 "runtime_core_library_source": "selected-wheel",
             }
+        selected_wheel_dependency_facts: dict[str, object] = {}
+        dso_evidence = _SCRATCH_DSO_EVIDENCE
+        if self.selected_wheel:
+            if (
+                selected_wheel_native_dir is None
+                or selected_wheel_trtmc is None
+                or selected_wheel_benchmark_worker is None
+                or staged_core is None
+            ):
+                raise CiError("selected wheel native ELF audit setup is incomplete")
+            selected_wheel_elfs = [
+                (
+                    "staged-model-dso",
+                    staged,
+                    plugin_dir,
+                    "selected-wheel-model-dso.dynamic.txt",
+                ),
+                (
+                    "staged-core-dso",
+                    staged_core,
+                    plugin_dir,
+                    "selected-wheel-core-dso.dynamic.txt",
+                ),
+                (
+                    "wheel-trtmc-cli",
+                    selected_wheel_trtmc,
+                    selected_wheel_native_dir,
+                    "selected-wheel-trtmc.dynamic.txt",
+                ),
+                (
+                    "wheel-benchmark-worker",
+                    selected_wheel_benchmark_worker,
+                    selected_wheel_native_dir,
+                    "selected-wheel-benchmark-worker.dynamic.txt",
+                ),
+                *[
+                    (
+                        "wheel-trt-backend",
+                        backend,
+                        selected_wheel_native_dir,
+                        f"selected-wheel-{backend.name}.dynamic.txt",
+                    )
+                    for backend in selected_wheel_backends
+                ],
+            ]
+            (self.artifacts / "selected-wheel-native-elfs.txt").write_text(
+                "".join(f"{role}\t{elf}\n" for role, elf, _root, _evidence in selected_wheel_elfs),
+                encoding="utf-8",
+            )
+            for _role, elf, root, evidence_name in selected_wheel_elfs:
+                if not elf.is_file() or not elf.resolve().is_relative_to(root.resolve()):
+                    raise CiError(f"selected wheel native ELF is missing or unsafe: {elf}")
+                dynamic = self.context.output(["readelf", "-d", elf])
+                (self.artifacts / evidence_name).write_text(dynamic + "\n", encoding="utf-8")
+                dependencies = _readelf_dt_needed(dynamic, elf)
+                _reject_python_runtime_dependency(elf, dependencies)
+            selected_wheel_dependency_facts = {
+                "selected_wheel_native_elf_dependency_audit": "direct-dt-needed",
+                "selected_wheel_native_elf_dependency_scan_count": len(selected_wheel_elfs),
+                "selected_wheel_backend_elf_dependency_scan_count": len(
+                    selected_wheel_backends
+                ),
+                "selected_wheel_python_runtime_dt_needed_count": 0,
+            }
+            dso_evidence += ", " + _SELECTED_WHEEL_DSO_EVIDENCE
         scratch_digest = hashlib.sha256(scratch.read_bytes()).hexdigest()
         digest = hashlib.sha256(staged.read_bytes()).hexdigest()
         for key, value in {
@@ -679,13 +827,19 @@ class ModelProofInnerPipeline:
             "runtime_library_source": runtime_library_source,
             "sibling_model_count": "0",
             "model_dso_count": "1",
+            "scratch_native_elf_dependency_audit": "direct-dt-needed",
+            "scratch_native_elf_dependency_scan_count": len(scratch_elfs),
+            "scratch_python_runtime_dt_needed_count": 0,
             "network": "disabled",
             "plugin_search": "strict",
             **core_facts,
+            **selected_wheel_dependency_facts,
         }.items():
             self.status.fact(key, value)
         self.status.step(
-            "dso_isolation", "passed", "exactly one model DSO; no sibling model DT_NEEDED"
+            "dso_isolation",
+            "passed",
+            dso_evidence,
         )
         return staged, scratch_digest, runtime_library_source
 

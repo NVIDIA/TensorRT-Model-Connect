@@ -26,16 +26,13 @@ import sys
 import time
 
 
-def _run_trtmc_binary(binary, bundle, prompt, max_new_tokens, hf_python):
+def _run_trtmc_binary(binary, bundle, prompt, max_new_tokens):
     """Run the C++ trtmc binary and measure wall-clock time."""
     cmd = [
         binary, "run", bundle,
         "--prompt", prompt,
         "--max-new-tokens", str(max_new_tokens),
     ]
-    if hf_python:
-        cmd += ["--hf-python", hf_python]
-
     start = time.perf_counter()
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     elapsed = time.perf_counter() - start
@@ -130,7 +127,6 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
     parser.add_argument("--bundle", default=None, help="Pre-built .bundle artifact path")
     parser.add_argument("--binary", default="./build/trtmc")
-    parser.add_argument("--hf-python", default="/opt/venv/bin/python")
     parser.add_argument("--prompt", default="The capital of France is")
     parser.add_argument("--max-new-tokens", type=int, default=20)
     parser.add_argument(
@@ -174,7 +170,7 @@ def main():
         for i in range(args.runs):
             t, text = _run_trtmc_binary(
                 args.binary, bundle, args.prompt,
-                args.max_new_tokens, args.hf_python,
+                args.max_new_tokens,
             )
             times.append(t)
             output = text

@@ -75,7 +75,6 @@ def cmd_run(args):
         runtime_strategy=strategy,
         bundle_path=args.bundle,
         binary_path=args.binary,
-        hf_python=args.hf_python,
         image_path=args.image,
         max_cache_length=args.max_cache_length,
         max_new_tokens=args.max_new_tokens,
@@ -130,7 +129,6 @@ def main():
     p_run.add_argument("--bundle", help="Pre-built .bundle artifact")
     p_run.add_argument("--binary", default="./build/trtmc",
                        help="C++ trtmc binary path")
-    p_run.add_argument("--hf-python", help="Python for HF tokenizer bridge")
     p_run.add_argument("--image", help="Test image (VL models)")
     p_run.add_argument("--max-cache-length", type=int, default=256)
     p_run.add_argument("--max-new-tokens", type=int, default=20)

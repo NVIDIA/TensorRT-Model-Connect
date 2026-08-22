@@ -80,7 +80,7 @@ def _get_paths(request):
 def _run_cpp(binary: Path, bundle: Path, hf_python: Path) -> tuple[str, float]:
     """Run C++ binary and return (output_text, wall_clock_seconds)."""
     env = os.environ.copy()
-    # Resolve TRT libs using the same interpreter passed to --hf-python.
+    # Resolve TRT libs using the selected E2E Python environment.
     trt_probe = (
         "import importlib.util; "
         "s=importlib.util.find_spec('tensorrt_libs'); "
@@ -107,8 +107,6 @@ def _run_cpp(binary: Path, bundle: Path, hf_python: Path) -> tuple[str, float]:
         PROMPT,
         "--max-new-tokens",
         str(MAX_NEW_TOKENS),
-        "--hf-python",
-        str(hf_python),
     ]
 
     t0 = time.perf_counter()

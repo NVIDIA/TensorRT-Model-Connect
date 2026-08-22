@@ -344,9 +344,6 @@ class DiffusionMediaRunner:
                 cmd.extend(["--guidance-scale", str(guidance_scale)])
             if "seed" in case.inputs:
                 cmd.extend(["--seed", str(case.inputs["seed"])])
-            runtime_cli_python = ctx.runtime_cli_hf_python()
-            if runtime_cli_python:
-                cmd.extend(["--hf-python", runtime_cli_python])
 
             env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
             distributed_runtime = _distributed_runtime_config(case)

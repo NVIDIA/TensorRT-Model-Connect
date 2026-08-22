@@ -5,11 +5,16 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace trtmc {
+
+// Exact-match epoch: pre-1.0 runtimes accept only model DSOs built for this version.
+inline constexpr std::uint32_t kModelPluginAbiVersion = 2;
+inline constexpr const char* kModelPluginAbiEntrypoint = "trtmc_model_plugin_abi_version";
 
 struct ModelPluginInfo {
     const char* model_id;

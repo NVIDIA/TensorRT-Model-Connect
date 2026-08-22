@@ -99,9 +99,6 @@ class ObjectDetectionRunner:
             "--output-json", str(json_output_path),
             "--score-threshold", str(score_threshold),
         ]
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            cmd.extend(["--hf-python", str(runtime_cli_python)])
 
         env = dict(os.environ)
         if ctx.ld_library_path:

@@ -587,7 +587,6 @@ class PersonaPlexPlugin:
         # ropefix2 default (validated during bring-up):
         # - deterministic depth decoding (greedy)
         # - no injected text/system prompt
-        prompt = ""
         return {
             "num_codebooks": 16,
             "codebook_size": 2048,
@@ -613,7 +612,6 @@ class PersonaPlexPlugin:
             "speech_depth_temperature": 0.0,
             "speech_depth_top_k": 0,
             # ropefix2 prompt policy: no prompt injection by default.
-            "speech_system_prompt": prompt,
             "speech_text_prompt_ids": [],
         }
 

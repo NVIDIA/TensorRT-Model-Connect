@@ -176,6 +176,16 @@ class TestEdgeCases:
         }))
         assert cfg.tie_word_embeddings is True
 
+    def test_zero_token_ids_are_preserved(self):
+        cfg = ModelConfig.from_json(json.dumps({
+            "bos_token_id": 0,
+            "eos_token_id": [0, 2],
+            "pad_token_id": 0,
+        }))
+        assert cfg.bos_token_id == 0
+        assert cfg.eos_token_id == [0, 2]
+        assert cfg.pad_token_id == 0
+
     def test_max_position_embeddings_n_positions(self):
         """Some models use n_positions instead of max_position_embeddings."""
         cfg = ModelConfig.from_json(json.dumps({

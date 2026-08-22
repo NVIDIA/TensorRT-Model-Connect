@@ -75,7 +75,7 @@ inline EncoderShapeInfo resolve_encoder_shape_with_fallback_codebooks(
 }
 
 inline bool should_run_text_prompt_injection(const SpeechConfig& cfg) {
-    return !cfg.text_prompt_ids.empty() || (!cfg.system_prompt.empty() && !cfg.hf_python.empty());
+    return !cfg.text_prompt_ids.empty();
 }
 
 inline SpeechGenerationSettings

@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Qwen3-Omni family plugin -- multimodal Thinker-Talker-Code2Wav pipeline.
+"""Qwen3-Omni family plugin with a text-only native Thinker product path.
+
+The active bundle contract contains the Thinker engine plus tokenizer assets.
+Vision, audio, Talker, and Code2Wav helpers remain private below so future
+native multimodal work can reuse them without exposing dormant build hooks.
 
 Qwen3-Omni is a 3-stage multimodal model:
   1. Thinker: Multimodal MoE decoder (text + image + audio input -> text output)
@@ -14,9 +18,8 @@ Qwen3-Omni is a 3-stage multimodal model:
   3. Code2Wav: Codec tokens -> audio waveform
      - Exports the complete official pre-transformer, upsampler, and decoder
 
-The Thinker MoE decoder follows Qwen3 MoE (sibling model) with the same
-top-k softmax routing. Vision/audio features inject via embed_input mode
-during prefill.
+The active Thinker MoE decoder follows Qwen3 MoE (sibling model) with the same
+top-k softmax routing and accepts token IDs only.
 
 Weight key mapping:
   Thinker MoE decoder:
@@ -63,29 +66,16 @@ from .standard_decoder_builder import _mark_debug_output
 trt = trt_compat.get_trt()
 
 
-def _talker_model_locator(model_dir: Path) -> tuple[str, str]:
-    """Return a portable HF repo/revision pair, or the resolved local path."""
-    resolved = model_dir.resolve()
-    cache_repo = resolved.parent.parent.name
-    if resolved.parent.name == "snapshots" and cache_repo.startswith("models--"):
-        namespace, separator, repository = cache_repo.removeprefix("models--").partition("--")
-        if separator and namespace and repository:
-            return f"{namespace}/{repository}", resolved.name
-    return str(resolved), ""
-
-
 class Qwen3OmniPlugin:
     name = "qwen3_omni"
     runtime_strategy = "qwen3_omni_multimodal"
-    embed_input = True
+    embed_input = False
 
     def __init__(self):
         self._thinker_cfg: dict = {}
         self._talker_cfg: dict = {}
         self._audio_encoder_cfg: dict = {}
         self._code2wav_cfg: dict = {}
-        self._talker_model_id = ""
-        self._talker_model_revision = ""
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -96,15 +86,11 @@ class Qwen3OmniPlugin:
     ) -> WeightDict:
         """Load Qwen3-Omni weights from safetensors.
 
-        Loads:
-          - Thinker MoE decoder weights (model.thinker.layers.*)
-          - Thinker audio encoder weights (model.thinker.audio_tower.*)
-          - Talker decoder weights (model.talker.*)
-          - Code2Wav weights (model.code2wav.*)
+        Loads only the Thinker MoE text-decoder weights consumed by the
+        current native runtime. Private multimodal builders remain available
+        for a future product path but are not part of today's bundle contract.
         """
-        model_dir_path = Path(model_dir)
-        self._talker_model_id, self._talker_model_revision = _talker_model_locator(model_dir_path)
-        readers = _open_safetensors(model_dir_path)
+        readers = _open_safetensors(Path(model_dir))
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -321,49 +307,6 @@ class Qwen3OmniPlugin:
             "num_experts_per_tok": num_experts_per_tok,
             "intermediate_size": intermediate_size,
         }
-
-        # Detect audio encoder config
-        audio_cfg = self._detect_audio_encoder(readers)
-        self._audio_encoder_cfg = audio_cfg
-        weights["_audio_encoder_cfg"] = audio_cfg
-
-        # Detect Talker config
-        talker_cfg = self._detect_talker(readers, config)
-        self._talker_cfg = talker_cfg
-        weights["_talker_cfg"] = talker_cfg
-
-        # Detect Code2Wav config
-        code2wav_cfg = self._detect_code2wav(readers, config)
-        self._code2wav_cfg = code2wav_cfg
-        weights["_code2wav_cfg"] = code2wav_cfg
-
-        # Load only weights consumed by native extra-engine builders. The
-        # official Talker bridge loads its own checkpoint tensors at runtime;
-        # duplicating them here adds several GB to build memory for no output.
-        # Handle both common checkpoint prefixes.
-        for reader in readers:
-            for key in reader.keys():
-                # Audio tower weights
-                if key.startswith("thinker.audio_tower."):
-                    canon = key[len("thinker."):]
-                    weights[f"audio.{canon}"] = _load_tensor([reader], key)
-                elif key.startswith("model.thinker.audio_tower."):
-                    canon = key[len("model.thinker."):]
-                    weights[f"audio.{canon}"] = _load_tensor([reader], key)
-                # Code2Wav weights
-                elif key.startswith("code2wav."):
-                    weights[f"code2wav.{key[len('code2wav.'):]}"] = (
-                        _load_tensor([reader], key))
-                elif key.startswith("model.code2wav."):
-                    weights[f"code2wav.{key[len('model.code2wav.'):]}"] = (
-                        _load_tensor([reader], key))
-                # Vision encoder weights
-                elif key.startswith("thinker.visual."):
-                    canon = key[len("thinker."):]
-                    weights[f"vision.{canon}"] = _load_tensor([reader], key)
-                elif key.startswith("model.thinker.visual."):
-                    canon = key[len("model.thinker."):]
-                    weights[f"vision.{canon}"] = _load_tensor([reader], key)
 
         return weights
 
@@ -586,12 +529,6 @@ class Qwen3OmniPlugin:
         attention_mask = network.add_input(
             "attention_mask", trt.float32, (-1, -1))
 
-        # VL embed_input (for vision/audio feature injection)
-        input_embed_tensor = network.add_input(
-            "input_embed", trt.float32, (-1, hidden))
-        use_input_embed_tensor = network.add_input(
-            "use_input_embed", trt.float32, (-1, 1))
-
         # KV cache inputs
         cache_k_inputs = []
         cache_v_inputs = []
@@ -615,10 +552,6 @@ class Qwen3OmniPlugin:
                 (min_sq, max_cache_length + min_sq),
                 (opt_sq, max_cache_length + opt_sq),
                 (max_sq, max_cache_length + max_sq))
-            profile.set_shape(
-                "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
-            profile.set_shape(
-                "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
             trt_config.add_optimization_profile(profile)
 
         _add_profile(min(64, max_cache_length), max_cache_length)
@@ -649,39 +582,12 @@ class Qwen3OmniPlugin:
             sin_half_tensor = network.add_cast(sin_half_tensor, work_trt_dtype).get_output(0)
             eps_tensor = network.add_cast(eps_tensor, work_trt_dtype).get_output(0)
 
-        # Embedding lookup with input_embed override for VL/audio
+        # Pure text-token embedding lookup.
         gather = network.add_gather(embedding_table, token_id, 0)
         token_embed = gather.get_output(0)
         if token_embed.dtype != work_trt_dtype:
             token_embed = network.add_cast(token_embed, work_trt_dtype).get_output(0)
-        if input_embed_tensor.dtype != work_trt_dtype:
-            input_embed_tensor = network.add_cast(
-                input_embed_tensor, work_trt_dtype).get_output(0)
-        if use_input_embed_tensor.dtype != work_trt_dtype:
-            use_input_embed_tensor = network.add_cast(
-                use_input_embed_tensor, work_trt_dtype).get_output(0)
-
-        # Conditional: (1 - flag) * token_embed + flag * input_embed
-        flag_broadcast = network.add_shuffle(use_input_embed_tensor)
-        flag_broadcast.reshape_dims = (-1, 1)
-        one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-            dtype=work_np_dtype)
-        if one_const.dtype != work_trt_dtype:
-            one_const = network.add_cast(one_const, work_trt_dtype).get_output(0)
-        inv_flag = network.add_elementwise(
-            one_const, flag_broadcast.get_output(0),
-            trt.ElementWiseOperation.SUB)
-        tok_part = network.add_elementwise(
-            inv_flag.get_output(0), token_embed,
-            trt.ElementWiseOperation.PROD)
-        embed_part = network.add_elementwise(
-            flag_broadcast.get_output(0), input_embed_tensor,
-            trt.ElementWiseOperation.PROD)
-        hidden_sum = network.add_elementwise(
-            tok_part.get_output(0), embed_part.get_output(0),
-            trt.ElementWiseOperation.SUM)
-        hidden_state = hidden_sum.get_output(0)
+        hidden_state = token_embed
 
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, "debug_embed")
@@ -819,7 +725,7 @@ class Qwen3OmniPlugin:
 
         return bytes(plan)
 
-    def build_vision_engine(
+    def _build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
         *, precision: str = "fp32", verbose: bool = False,
     ) -> bytes | None:
@@ -867,7 +773,7 @@ class Qwen3OmniPlugin:
                 fixed_image_size=fixed_image_size,
                 verbose=verbose)
 
-    def build_extra_engines(
+    def _build_extra_engines(
         self,
         config: ModelConfig,
         weights: WeightDict,
@@ -902,7 +808,7 @@ class Qwen3OmniPlugin:
 
         return result
 
-    def get_vl_config(self, config: ModelConfig) -> dict | None:
+    def _get_vl_config(self, config: ModelConfig) -> dict | None:
         """Return VL config for vision-language support."""
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
@@ -969,38 +875,6 @@ class Qwen3OmniPlugin:
             "num_experts", 8)
         overrides["num_experts_per_tok"] = self._thinker_cfg.get(
             "num_experts_per_tok", 2)
-        # Audio output config (flat keys matching C++ fast_path_config parser)
-        overrides["audio_sample_rate"] = 24000
-        overrides["omni_n_codebooks"] = self._talker_cfg.get(
-            "n_codebooks", 16)
-        overrides["omni_codebook_size"] = self._talker_cfg.get(
-            "codebook_size", 2048)
-
-        # Talker config (flat keys for C++ parser)
-        overrides["omni_talker_hidden_size"] = self._talker_cfg.get(
-            "hidden_size", 0)
-        overrides["omni_talker_num_layers"] = self._talker_cfg.get(
-            "num_layers", 0)
-        overrides["omni_talker_max_cache_length"] = 1024
-        overrides["omni_talker_model_id"] = self._talker_model_id
-        overrides["omni_talker_model_revision"] = self._talker_model_revision
-
-        # The official decoder is causal and exported at a fixed 32-frame
-        # shape. Shorter generations are zero-padded and trimmed by the
-        # runtime using the model's 1920x stride and 555-sample causal delay.
-        overrides["omni_code2wav_max_frames"] = self._code2wav_cfg.get("max_frames", 32)
-        overrides["omni_code2wav_upsample_factor"] = self._code2wav_cfg.get("upsample_factor", 1920)
-        overrides["omni_code2wav_output_delay"] = self._code2wav_cfg.get("output_delay", 555)
-
-        # Audio encoder config (flat keys for C++ parser)
-        overrides["omni_audio_embed_dim"] = self._audio_encoder_cfg.get(
-            "embed_dim", 1280)
-        overrides["omni_audio_num_mel"] = self._audio_encoder_cfg.get(
-            "num_mel_bins", 128)
-        overrides["omni_audio_num_layers"] = self._audio_encoder_cfg.get(
-            "num_layers", 0)
-        overrides["omni_audio_num_frames"] = 1500
-
         return overrides
 
 

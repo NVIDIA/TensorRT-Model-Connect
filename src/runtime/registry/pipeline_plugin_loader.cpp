@@ -5,6 +5,7 @@
 
 #include "trtmc/runtime/pipeline_plugin_loader.h"
 
+#include "runtime/registry/pipeline_plugin_loader_internal.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 #include <cstdlib>
@@ -23,15 +24,105 @@ namespace trtmc {
 
 namespace {
 
-namespace fs = std::filesystem;
+void* required_model_plugin_symbol(const std::string& path, void* handle, const char* name,
+                                   std::vector<std::string>& errors) {
+    dlerror();
+    void* symbol = dlsym(handle, name);
+    const char* error = dlerror();
+    if (error != nullptr || symbol == nullptr) {
+        errors.push_back(path + ": missing " + name);
+        return nullptr;
+    }
+    return symbol;
+}
 
-using RegisterModelPluginFn = void (*)(PipelineRegistry*);
-using ModelPluginIdFn = const char* (*)();
+bool model_plugin_abi_matches(const std::string& path, void* handle,
+                              std::vector<std::string>& errors) {
+    auto* symbol = required_model_plugin_symbol(path, handle, kModelPluginAbiEntrypoint, errors);
+    if (symbol == nullptr)
+        return false;
+
+    using ModelPluginAbiVersionFn = std::uint32_t (*)();
+    const auto actual_version = reinterpret_cast<ModelPluginAbiVersionFn>(symbol)();
+    if (actual_version == kModelPluginAbiVersion)
+        return true;
+
+    errors.push_back(path + ": model plugin ABI mismatch, expected " +
+                     std::to_string(kModelPluginAbiVersion) + " but got " +
+                     std::to_string(actual_version));
+    return false;
+}
+
+bool model_plugin_id_matches(const std::string& path, void* handle,
+                             const std::string& expected_model_id,
+                             std::vector<std::string>& errors) {
+    auto* symbol = required_model_plugin_symbol(path, handle, "trtmc_model_plugin_id", errors);
+    if (symbol == nullptr)
+        return false;
+
+    using ModelPluginIdFn = const char* (*)();
+    const char* actual_model_id = reinterpret_cast<ModelPluginIdFn>(symbol)();
+    if (actual_model_id != nullptr && expected_model_id == actual_model_id)
+        return true;
+
+    errors.push_back(path + ": plugin id mismatch, expected '" + expected_model_id + "' but got '" +
+                     (actual_model_id ? actual_model_id : "<null>") + "'");
+    return false;
+}
+
+void reject_model_plugin_entrypoints(void*& handle, detail::RegisterModelPluginFn& register_fn) {
+    dlclose(handle);
+    handle = nullptr;
+    register_fn = nullptr;
+}
+
+} // namespace
+
+namespace detail {
+
+bool open_model_plugin_entrypoints(const std::string& path, const std::string& expected_model_id,
+                                   void*& handle, RegisterModelPluginFn& register_fn,
+                                   std::vector<std::string>& errors) {
+    handle = nullptr;
+    register_fn = nullptr;
+
+    dlerror();
+    handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (handle == nullptr) {
+        const char* error = dlerror();
+        errors.push_back(path + ": " + (error ? error : "unknown dlopen error"));
+        return false;
+    }
+
+    if (!model_plugin_abi_matches(path, handle, errors)) {
+        reject_model_plugin_entrypoints(handle, register_fn);
+        return false;
+    }
+    if (!model_plugin_id_matches(path, handle, expected_model_id, errors)) {
+        reject_model_plugin_entrypoints(handle, register_fn);
+        return false;
+    }
+    auto* register_symbol =
+        required_model_plugin_symbol(path, handle, "trtmc_register_model_plugin", errors);
+    if (register_symbol == nullptr) {
+        reject_model_plugin_entrypoints(handle, register_fn);
+        return false;
+    }
+
+    register_fn = reinterpret_cast<RegisterModelPluginFn>(register_symbol);
+    return true;
+}
+
+} // namespace detail
+
+namespace {
+
+namespace fs = std::filesystem;
 
 struct ModelPluginCandidate {
     fs::path path;
     void* handle{nullptr};
-    RegisterModelPluginFn register_fn{nullptr};
+    detail::RegisterModelPluginFn register_fn{nullptr};
 };
 
 std::vector<void*>& loaded_handles() {
@@ -166,52 +257,14 @@ void close_model_plugin_candidate(ModelPluginCandidate& candidate) {
     candidate.handle = nullptr;
 }
 
-bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std::string& model_id,
-                             std::vector<std::string>& errors) {
-    dlerror();
-    auto* id_sym = dlsym(handle, "trtmc_model_plugin_id");
-    const char* id_err = dlerror();
-    if (id_err != nullptr || id_sym == nullptr) {
-        errors.push_back(candidate.string() + ": missing trtmc_model_plugin_id");
-        return false;
-    }
-
-    const char* actual_model_id = reinterpret_cast<ModelPluginIdFn>(id_sym)();
-    if (actual_model_id != nullptr && model_id == actual_model_id)
-        return true;
-
-    errors.push_back(candidate.string() + ": plugin id mismatch, expected '" + model_id +
-                     "' but got '" + (actual_model_id ? actual_model_id : "<null>") + "'");
-    return false;
-}
-
 std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& path,
                                                                 const std::string& model_id,
                                                                 std::vector<std::string>& errors) {
-    dlerror();
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (handle == nullptr) {
-        const char* err = dlerror();
-        errors.push_back(path.string() + ": " + (err ? err : "unknown dlopen error"));
+    ModelPluginCandidate candidate{path, nullptr, nullptr};
+    if (!detail::open_model_plugin_entrypoints(path.string(), model_id, candidate.handle,
+                                               candidate.register_fn, errors)) {
         return std::nullopt;
     }
-
-    ModelPluginCandidate candidate{path, handle, nullptr};
-    if (!model_plugin_id_matches(path, handle, model_id, errors)) {
-        close_model_plugin_candidate(candidate);
-        return std::nullopt;
-    }
-
-    dlerror();
-    auto* sym = dlsym(handle, "trtmc_register_model_plugin");
-    const char* err = dlerror();
-    if (err != nullptr || sym == nullptr) {
-        errors.push_back(path.string() + ": missing trtmc_register_model_plugin");
-        close_model_plugin_candidate(candidate);
-        return std::nullopt;
-    }
-
-    candidate.register_fn = reinterpret_cast<RegisterModelPluginFn>(sym);
     return candidate;
 }
 

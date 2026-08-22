@@ -43,9 +43,6 @@ class TimmVitReproCommandProvider:
             "--image",
             _shell_quote(image),
         ]
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            infer_parts.extend(["--hf-python", runtime_cli_python])
         return infer_parts
 
 

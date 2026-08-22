@@ -16,7 +16,7 @@ std::unique_ptr<PersonaplexKvCache> make_coarse_kv_cache(const std::string& json
                                                          DType cache_dtype = DType::kFloat32);
 
 SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std::string& json,
-                                             const BaseConfig& base, const std::string& hf_python);
+                                             const BaseConfig& base);
 
 void infer_speech_vocab_sizes(SpeechConfig& sc, const std::string& json, const BaseConfig& base);
 

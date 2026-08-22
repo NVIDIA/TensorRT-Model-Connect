@@ -221,10 +221,10 @@ def test_num_attention_heads_falls_back_to_n_heads():
     assert cfg.num_attention_heads == 12
 
 
-def test_zero_token_ids_are_coerced_to_minus_one():
-    """Intent: document token-id coercion behavior in dataclass construction.
+def test_zero_token_ids_are_preserved():
+    """Intent: document zero-valued token IDs in dataclass construction.
     Preconditions: config explicitly sets bos/eos/pad token ids to 0.
-    Postconditions: resulting ids are -1 because of `or -1` fallback logic.
+    Postconditions: zero remains a valid token ID rather than becoming missing.
     """
     cfg = ModelConfig.from_json(json.dumps({
         "hidden_size": 256,
@@ -234,9 +234,9 @@ def test_zero_token_ids_are_coerced_to_minus_one():
         "pad_token_id": 0,
     }))
 
-    assert cfg.bos_token_id == -1
-    assert cfg.eos_token_id == -1
-    assert cfg.pad_token_id == -1
+    assert cfg.bos_token_id == 0
+    assert cfg.eos_token_id == 0
+    assert cfg.pad_token_id == 0
 
 
 def test_create_tiny_provides_expected_defaults():

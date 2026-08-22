@@ -680,6 +680,7 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
     )[0]
     assert '"pytest"' in architecture_contract
     assert "tests/tools/test_model_plugin_encapsulation_static.py" in architecture_contract
+    assert "tests/tools/test_native_runtime_python_free.py" in architecture_contract
     assert '"-q"' in architecture_contract
     assert '"no:cacheprovider"' in architecture_contract
 

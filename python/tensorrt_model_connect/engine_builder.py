@@ -730,6 +730,40 @@ def _apply_generation_config_eos(model_dir: Path, config: dict) -> None:
         config["eos_token_id"] = generation_config["eos_token_id"]
 
 
+def _canonical_runtime_model_fields(config: ModelConfig) -> dict[str, object]:
+    """Return normalized decoder fields consumed from bundle config roots."""
+    raw = config.raw
+    nested_configs = [raw.get("text_config")]
+    if not raw.get("hidden_size"):
+        nested_configs.extend((raw.get("language_config"), raw.get("llm_config")))
+        thinker_config = raw.get("thinker_config")
+        if isinstance(thinker_config, dict):
+            nested_configs.append(thinker_config.get("text_config"))
+    if not any(isinstance(value, dict) and value for value in nested_configs):
+        return {}
+
+    fields: dict[str, object] = {
+        "vocab_size": config.vocab_size,
+        "hidden_size": config.hidden_size,
+        "intermediate_size": config.intermediate_size,
+        "num_hidden_layers": config.num_hidden_layers,
+        "num_attention_heads": config.num_attention_heads,
+        "num_key_value_heads": config.num_key_value_heads,
+        "head_dim": config.head_dim,
+        "rms_norm_eps": config.rms_norm_eps,
+        "rope_theta": config.rope_theta,
+        "tie_word_embeddings": config.tie_word_embeddings,
+        "max_position_embeddings": config.max_position_embeddings,
+    }
+    if config.hidden_act:
+        fields["hidden_act"] = config.hidden_act
+    for name in ("bos_token_id", "eos_token_id", "pad_token_id"):
+        value = getattr(config, name)
+        if value != -1:
+            fields[name] = value
+    return fields
+
+
 def _detect_tokenizer_add_special_tokens(model_dir: Path) -> bool:
     """Detect whether the HF tokenizer adds special tokens (BOS/EOS) by default.
 
@@ -1588,6 +1622,7 @@ def build_bundle(
 
     def make_runtime_config_json(source: bytes | None) -> bytes:
         cfg_dict = json.loads(source) if source is not None else dict(config.raw)
+        cfg_dict.update(_canonical_runtime_model_fields(config))
         _apply_generation_config_eos(model_dir_path, cfg_dict)
         runtime_strategy = getattr(plugin, "runtime_strategy", None)
         if runtime_strategy:
@@ -1659,25 +1694,12 @@ def build_bundle(
             lora_cfg = get_lora_config(config)
             if lora_cfg is not None:
                 cfg_dict.update(lora_cfg)
-        # Inject generic config overrides from plugin.
-        # Build the final dict so overrides appear FIRST in the
-        # serialized JSON.  The C++ fast_path_config parser uses
-        # flat text search (text.find) which picks up the first
-        # occurrence of a key.  For models with nested configs, a nested
-        # copy of "hidden_size" etc. would otherwise shadow the
-        # top-level value.
+        # Inject generic model-owned config overrides last.
         get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
         if get_overrides is not None:
             overrides = get_overrides(config)
             if overrides is not None:
-                # Put overrides first, then original dict.  Dict
-                # union preserves insertion order; overrides keys
-                # appear before any nested dicts.
-                merged = dict(overrides)
-                merged.update(cfg_dict)
-                # Ensure overrides win for top-level keys.
-                merged.update(overrides)
-                cfg_dict = merged
+                cfg_dict.update(overrides)
         return json.dumps(cfg_dict, indent=2).encode("utf-8")
 
     # Embed tokenizer + config files. If the source model uses a family-owned

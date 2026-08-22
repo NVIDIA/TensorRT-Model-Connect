@@ -5,9 +5,9 @@
 
 #pragma once
 
-// OmniPipeline: omni multimodal pipeline with thinker + talker + code2wav.
-// Uses a TensorRT Thinker, the checkpoint's official model-owned Talker bridge,
-// and a TensorRT Code2Wav decoder.
+// OmniPipeline: text-only native Qwen3-Omni product path.
+// The active plugin supplies a TensorRT Thinker and native tokenizer. Dormant
+// Code2Wav helpers remain for future use; audio fails closed without a Talker.
 
 #include "runtime/models/qwen3_omni/inference_state.h"
 #include "runtime/models/qwen3_omni/kv_cache.h"
@@ -24,8 +24,6 @@
 #include <vector>
 
 namespace trtmc {
-
-class Qwen3OmniTalkerRuntime;
 
 struct OmniThinkerRunStats {
     int32_t prompt_tokens{0};
@@ -44,6 +42,10 @@ class OmniPipeline final : public IPipeline {
 
     ~OmniPipeline() override;
 
+    // Native text-only product path. Applies the official Qwen3-Omni chat
+    // prompt, runs the TensorRT Thinker, and decodes only newly generated IDs.
+    TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
+
     AudioResult generate_audio(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
     const char* model_id() const override { return model_id_.c_str(); }
@@ -57,7 +59,8 @@ class OmniPipeline final : public IPipeline {
   private:
     int32_t run_thinker_step(int32_t token_id);
     bool run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token);
-    std::vector<int32_t> run_thinker(const std::vector<int32_t>& input_ids, int32_t max_tokens);
+    std::vector<int32_t> run_thinker(const std::vector<int32_t>& input_ids, int32_t max_tokens,
+                                     int32_t eos_token_id);
     std::vector<float> run_code2wav(const std::vector<int32_t>& codec_tokens, int32_t n_codebooks,
                                     int32_t n_frames, double& code2wav_and_transfer_ms,
                                     double& output_materialization_ms);
@@ -67,7 +70,6 @@ class OmniPipeline final : public IPipeline {
     std::unique_ptr<Qwen3OmniInferenceState> thinker_state_;
     std::unique_ptr<TrtModule> code2wav_;
     std::unique_ptr<OmniConfig> config_;
-    std::unique_ptr<Qwen3OmniTalkerRuntime> talker_runtime_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;

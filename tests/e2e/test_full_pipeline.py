@@ -59,7 +59,7 @@ if str(TOOLS_DIR) not in sys.path:
 # ---------------------------------------------------------------------------
 
 def _run_cpp_inference(binary, bundle_path, prompt, max_new_tokens,
-                       hf_python, ld_library_path, image_path=None):
+                       ld_library_path, image_path=None):
     """Run C++ trtmc binary inference (subprocess — no in-process GPU usage).
 
     Returns:
@@ -69,7 +69,6 @@ def _run_cpp_inference(binary, bundle_path, prompt, max_new_tokens,
         str(binary), "run", str(bundle_path),
         "--prompt", prompt,
         "--max-new-tokens", str(max_new_tokens),
-        "--hf-python", str(hf_python),
     ]
     if image_path:
         cmd.extend(["--image", str(image_path)])
@@ -132,7 +131,7 @@ def _run_diff_logits_subprocess(hf_id, atol, max_cache_length, max_new_tokens,
     }
 
 
-def _run_diff_vl_subprocess(bundle_path, image_path, hf_id, binary, hf_python,
+def _run_diff_vl_subprocess(bundle_path, image_path, hf_id, binary,
                             ld_library_path, atol=0.1, max_new_tokens=20):
     """Run diff_vl.py as a subprocess (all GPU work isolated).
 
@@ -149,8 +148,6 @@ def _run_diff_vl_subprocess(bundle_path, image_path, hf_id, binary, hf_python,
         "--max-new-tokens", str(max_new_tokens),
         "--binary", str(binary),
     ]
-    if hf_python:
-        cmd.extend(["--hf-python", str(hf_python)])
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
 
@@ -268,7 +265,7 @@ def _save_results(bundle_path, results_dict):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.e2e
-def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
+def test_full_pipeline(built_bundle, trtmc_binary, ld_library_path):
     """Full pipeline: build -> C++ inference -> diff_logits (HF vs Python runner)."""
     entry = built_bundle["entry"]
     bundle_path = built_bundle["path"]
@@ -310,7 +307,7 @@ def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
     # Step 1: C++ binary inference (subprocess)
     cpp_result = _run_cpp_inference(
         trtmc_binary, bundle_path, prompt, max_new_tokens,
-        hf_python, ld_library_path)
+        ld_library_path)
     assert cpp_result["returncode"] == 0, (
         f"C++ inference failed (rc={cpp_result['returncode']}):\n"
         f"{cpp_result['stderr']}")
@@ -395,7 +392,7 @@ def test_full_pipeline(built_bundle, trtmc_binary, hf_python, ld_library_path):
 
 
 @pytest.mark.e2e
-def test_full_pipeline_vlm(built_bundle, trtmc_binary, hf_python, ld_library_path,
+def test_full_pipeline_vlm(built_bundle, trtmc_binary, ld_library_path,
                            engine_dir):
     """Full VL pipeline: build -> C++ inference -> diff_vl (HF vs Python runner)."""
     entry = built_bundle["entry"]
@@ -423,7 +420,7 @@ def test_full_pipeline_vlm(built_bundle, trtmc_binary, hf_python, ld_library_pat
     # Step 1: C++ binary with image (subprocess)
     cpp_result = _run_cpp_inference(
         trtmc_binary, bundle_path, prompt, max_new_tokens,
-        hf_python, ld_library_path, image_path=str(image_path))
+        ld_library_path, image_path=str(image_path))
     assert cpp_result["returncode"] == 0, (
         f"C++ VL inference failed (rc={cpp_result['returncode']}):\n"
         f"{cpp_result['stderr']}")
@@ -431,7 +428,7 @@ def test_full_pipeline_vlm(built_bundle, trtmc_binary, hf_python, ld_library_pat
 
     # Step 2: diff_vl — HF vs Python VLTrtRunner (subprocess, memory-isolated)
     diff_result = _run_diff_vl_subprocess(
-        bundle_path, str(image_path), hf_id, trtmc_binary, hf_python,
+        bundle_path, str(image_path), hf_id, trtmc_binary,
         ld_library_path, atol=atol, max_new_tokens=max_new_tokens)
 
     # Step 3: Build and save results
@@ -518,7 +515,7 @@ def _run_segmentation_hf_subprocess(hf_id, image_path, output_path):
 
 
 @pytest.mark.e2e
-def test_segmentation_pipeline(built_bundle, trtmc_binary, hf_python,
+def test_segmentation_pipeline(built_bundle, trtmc_binary,
                                ld_library_path, engine_dir):
     """Full segmentation pipeline: build -> C++ segment -> compare with HF."""
     entry = built_bundle["entry"]
@@ -548,8 +545,6 @@ def test_segmentation_pipeline(built_bundle, trtmc_binary, hf_python,
         "--image", str(image_path),
         "--output", str(output_path),
     ]
-    if hf_python:
-        cmd.extend(["--hf-python", str(hf_python)])
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
@@ -803,15 +798,13 @@ def _run_diff_audio_stage4_subprocess(hf_id, prompt, json_path,
 
 
 def _run_cpp_audio_generation(binary, bundle_path, prompt, output_wav,
-                               hf_python, ld_library_path):
+                               ld_library_path):
     """Run C++ generate-audio and return (success, file_size)."""
     cmd = [
         str(binary), "generate-audio", str(bundle_path),
         "--prompt", prompt,
         "--output", str(output_wav),
     ]
-    if hf_python:
-        cmd.extend(["--hf-python", str(hf_python)])
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(
@@ -898,7 +891,7 @@ def _make_speech_greedy_bundle(
 
 
 def _run_cpp_speech_generation(binary, bundle_path, input_wav, output_wav,
-                               max_frames, hf_python, ld_library_path):
+                               max_frames, ld_library_path):
     """Run C++ speak command and return subprocess result metadata."""
     cmd = [
         str(binary), "speak", str(bundle_path),
@@ -906,8 +899,6 @@ def _run_cpp_speech_generation(binary, bundle_path, input_wav, output_wav,
         "--audio-out", str(output_wav),
         "--max-new-tokens", str(max_frames),
     ]
-    if hf_python:
-        cmd.extend(["--hf-python", str(hf_python)])
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(
@@ -996,7 +987,7 @@ def _speech_token_match_metrics(
 
 
 @pytest.mark.e2e
-def test_bark_stage_parity(built_bundle, trtmc_binary, hf_python,
+def test_bark_stage_parity(built_bundle, trtmc_binary,
                            ld_library_path):
     """Bark stage-by-stage greedy parity: TRT engine vs HF, per stage.
 
@@ -1025,7 +1016,7 @@ def test_bark_stage_parity(built_bundle, trtmc_binary, hf_python,
     wav_path = bundle_p.with_suffix(".wav")
     cpp_ok, wav_size, cpp_stderr = _run_cpp_audio_generation(
         trtmc_binary, bundle_path, prompt, str(wav_path),
-        hf_python, ld_library_path)
+        ld_library_path)
 
     # Step 3: Build and save results.json next to the bundle
     stage_data = parity_result.get("stage_data") or {}
@@ -1082,7 +1073,7 @@ def test_bark_stage_parity(built_bundle, trtmc_binary, hf_python,
 
 
 @pytest.mark.e2e
-def test_audio_pipeline(built_bundle, trtmc_binary, hf_python,
+def test_audio_pipeline(built_bundle, trtmc_binary,
                         ld_library_path):
     """Full audio pipeline: build -> C++ generate-audio -> verify output."""
     entry = built_bundle["entry"]
@@ -1100,8 +1091,6 @@ def test_audio_pipeline(built_bundle, trtmc_binary, hf_python,
         "--prompt", prompt,
         "--output", str(output_path),
     ]
-    if hf_python:
-        cmd.extend(["--hf-python", str(hf_python)])
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=env)
@@ -1119,7 +1108,7 @@ def test_audio_pipeline(built_bundle, trtmc_binary, hf_python,
 
 
 @pytest.mark.e2e
-def test_speech_to_speech_pipeline(model_entry, trtmc_binary, hf_python,
+def test_speech_to_speech_pipeline(model_entry, trtmc_binary,
                                    ld_library_path):
     """Speech pipeline parity: run `trtmc speak` and compare tokens to reference."""
     entry = model_entry
@@ -1158,7 +1147,7 @@ def test_speech_to_speech_pipeline(model_entry, trtmc_binary, hf_python,
 
     run = _run_cpp_speech_generation(
         trtmc_binary, greedy_bundle, input_audio, output_wav,
-        max_frames, hf_python, ld_library_path)
+        max_frames, ld_library_path)
     assert run["returncode"] == 0, (
         f"Speech generation failed (rc={run['returncode']}):\n{run['stderr']}")
     assert output_wav.is_file(), "Speech output WAV not written"

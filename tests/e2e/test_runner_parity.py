@@ -21,7 +21,7 @@ _SPEECH_RUNTIME_STRATEGIES = {
 
 
 @pytest.mark.e2e
-def test_runner_parity(model_entry, trtmc_binary, hf_python, ld_library_path):
+def test_runner_parity(model_entry, trtmc_binary, ld_library_path):
     """Run test_runner_parity.py and verify C++ matches Python."""
     if model_entry.get("test_type") == "diffusion":
         pytest.skip("Diffusion model — no text runner parity")
@@ -43,7 +43,6 @@ def test_runner_parity(model_entry, trtmc_binary, hf_python, ld_library_path):
         [sys.executable, str(parity_script),
          "--bundle", model_entry["bundle_path"],
          "--binary", str(trtmc_binary),
-         "--hf-python", str(hf_python),
          "--max-new-tokens", str(max_new)],
         capture_output=True, text=True, timeout=120, env=env_patch)
 

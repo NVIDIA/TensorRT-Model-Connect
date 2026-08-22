@@ -524,7 +524,8 @@ the producing class remains the source of truth for optional evidence fields.
   `E2EParallelRunner` discovers healthy GPUs, collects tests, persists the
   plan, starts pytest workers, enforces timeout, and merges results.
 - **Inputs:** Config fields such as `engine_dir`, `result_dir`,
-  `trtmc_binary`, `hf_python`, GPU/worker counts, timeout, optional
+  `trtmc_binary`, the pytest/reference `hf_python` interpreter,
+  GPU/worker counts, timeout, optional
   newline-delimited models/tests files, and extra pytest arguments.
 - **Outputs:** Returns the number of failed workers. It writes
   `schedule.json`, `console-gpu*-w*.log`, `junit-gpu*-w*.xml`, merged
