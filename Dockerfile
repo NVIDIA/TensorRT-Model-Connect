@@ -66,7 +66,8 @@ RUN pip install \
     sentencepiece \
     huggingface_hub \
     ml_dtypes \
-    datasets
+    datasets \
+    "websockets>=13,<18"
 
 # PyTorch ecosystem. The development image is Ubuntu 24.04 to match the
 # manylinux_2_39/glibc floor used by the native wheel.

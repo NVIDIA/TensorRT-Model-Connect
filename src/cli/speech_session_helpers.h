@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "trtmc/pipeline.h"
+#include "trtmc/speech_session.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,6 +27,15 @@ inline int32_t speech_tail_frame_samples(int32_t sample_rate) {
     if (sample_rate <= 0)
         throw std::invalid_argument("speech tail sample rate must be positive");
     return static_cast<int32_t>(std::llround(static_cast<double>(sample_rate) * 0.08));
+}
+
+inline std::unique_ptr<ISpeechSession>
+create_cli_speech_session(IPipeline& pipeline, const SpeechSessionConfig& config) {
+    if (auto* batch = dynamic_cast<ISpeechBatchSessionProvider*>(&pipeline))
+        return batch->create_batch_speech_session(config);
+    if (auto* live = dynamic_cast<ISpeechSessionProvider*>(&pipeline))
+        return live->create_speech_session(config);
+    return {};
 }
 
 inline SpeechSessionCliResult

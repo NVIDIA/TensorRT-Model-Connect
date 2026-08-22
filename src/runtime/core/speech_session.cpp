@@ -8,5 +8,9 @@
 namespace trtmc {
 
 ISpeechSessionProvider::~ISpeechSessionProvider() = default;
+ISpeechBatchSessionProvider::~ISpeechBatchSessionProvider() = default;
+ISpeechRealtimeControl::~ISpeechRealtimeControl() = default;
+ISpeechToolSession::~ISpeechToolSession() = default;
+ISpeechToolSessionProvider::~ISpeechToolSessionProvider() = default;
 
 } // namespace trtmc

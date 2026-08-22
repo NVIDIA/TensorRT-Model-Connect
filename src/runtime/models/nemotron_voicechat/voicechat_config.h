@@ -29,12 +29,10 @@ struct Config {
     int32_t bos_token_id{1};
     int32_t eos_token_id{2};
     int32_t pad_token_id{12};
-    int32_t listening_silence_token_id{11};
 
     int32_t input_sample_rate{16000};
     int32_t output_sample_rate{22050};
     int32_t input_samples_per_frame{1280};
-    int32_t output_samples_per_frame{1764};
     int32_t mel_n_fft{512};
     int32_t mel_win_length{400};
     int32_t mel_hop_length{160};
@@ -52,6 +50,21 @@ struct Config {
     int32_t rnnt_vocab_size{1024};
     int32_t rnnt_blank_id{1024};
     int32_t rnnt_max_symbols_per_step{10};
+    // Model-owned live turn-taking policy. The defaults follow the public
+    // NeMo wrapper's low-latency RNNT policy: confirm the first utterance with
+    // two speech frames, subsequent utterances with three, end an utterance
+    // after ten blank frames, and confirm barge-in after three consecutive
+    // non-unknown RNNT speech frames while an agent turn is active.
+    int32_t rnnt_eou_frames{10};
+    int32_t rnnt_bou_frames{3};
+    int32_t rnnt_min_speech_frames{3};
+    int32_t rnnt_min_speech_frames_first_turn{2};
+
+    int32_t function_max_call_tokens{512};
+    int32_t function_max_response_tokens{1024};
+    int32_t function_max_async_steps{2048};
+    int32_t function_tool_timeout_ms{15000};
+    int32_t function_on_hold_min_pad_frames{17};
 
     int32_t tts_hidden_size{1152};
     int32_t tts_num_layers{28};
@@ -76,7 +89,16 @@ struct Config {
     // frames while an agent response remains active; offline speak() supplies
     // its own explicit tail and disables this implicit live-session tail.
     int32_t max_response_frames{256};
-    int32_t tts_pad_tail_ratio{3};
+    int32_t tts_text_token_ratio_cap{16};
+    int32_t tts_text_token_ratio_min_tokens{5};
+
+    // Bound queued live input and undrained public events. Offline convenience
+    // paths bypass the input bound because they intentionally enqueue a whole
+    // recording. Live sessions remain bounded even when a producer or consumer
+    // runs faster or slower than inference.
+    int32_t max_pending_input_ms{30000};
+    int32_t max_pending_events{4096};
+    int32_t stream_tick_ms{80};
 
     std::string default_system_prompt{
         "You are an AI voice assistant developed by NVIDIA. Your name is NVIDIA Voice Chat. "

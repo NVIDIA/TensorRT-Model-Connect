@@ -125,15 +125,11 @@ nemotron_voicechat::Config parse_config(const PipelineContext& context) {
     config.bos_token_id = extract_json_int(json, "bos_token_id", 1);
     config.eos_token_id = extract_json_int(json, "eos_token_id", 2);
     config.pad_token_id = extract_json_int(json, "pad_token_id", 12);
-    config.listening_silence_token_id =
-        extract_json_int(json, "voicechat_listening_silence_token_id", 11);
 
     config.input_sample_rate = extract_json_int(json, "input_sample_rate", 16000);
     config.output_sample_rate = extract_json_int(json, "output_sample_rate", 22050);
     config.input_samples_per_frame =
         extract_json_int(json, "voicechat_input_samples_per_frame", 1280);
-    config.output_samples_per_frame =
-        extract_json_int(json, "voicechat_output_samples_per_frame", 1764);
     config.mel_n_fft = extract_json_int(json, "mel_n_fft", 512);
     config.mel_win_length = extract_json_int(json, "mel_win_length", 400);
     config.mel_hop_length = extract_json_int(json, "mel_hop_length", 160);
@@ -151,6 +147,21 @@ nemotron_voicechat::Config parse_config(const PipelineContext& context) {
     config.rnnt_vocab_size = extract_json_int(json, "rnnt_vocab_size", 1024);
     config.rnnt_blank_id = extract_json_int(json, "rnnt_blank_id", 1024);
     config.rnnt_max_symbols_per_step = extract_json_int(json, "rnnt_max_symbols_per_step", 10);
+    config.rnnt_eou_frames = extract_json_int(json, "voicechat_rnnt_eou_frames", 10);
+    config.rnnt_bou_frames = extract_json_int(json, "voicechat_rnnt_bou_frames", 3);
+    config.rnnt_min_speech_frames = extract_json_int(json, "voicechat_rnnt_min_speech_frames", 3);
+    config.rnnt_min_speech_frames_first_turn =
+        extract_json_int(json, "voicechat_rnnt_min_speech_frames_first_turn", 2);
+    config.function_max_call_tokens =
+        extract_json_int(json, "voicechat_function_max_call_tokens", 512);
+    config.function_max_response_tokens =
+        extract_json_int(json, "voicechat_function_max_response_tokens", 1024);
+    config.function_max_async_steps =
+        extract_json_int(json, "voicechat_function_max_async_steps", 2048);
+    config.function_tool_timeout_ms =
+        extract_json_int(json, "voicechat_function_tool_timeout_ms", 15000);
+    config.function_on_hold_min_pad_frames =
+        extract_json_int(json, "voicechat_function_on_hold_min_pad_frames", 17);
 
     config.tts_hidden_size = extract_json_int(json, "tts_hidden_size", 1152);
     config.tts_num_layers = extract_json_int(json, "tts_num_layers", 28);
@@ -167,6 +178,14 @@ nemotron_voicechat::Config parse_config(const PipelineContext& context) {
     config.tts_num_refinement_steps = extract_json_int(json, "tts_num_refinement_steps", 8);
     config.codec_latent_size = extract_json_int(json, "codec_latent_size", 512);
     config.codec_wav_to_token_ratio = extract_json_int(json, "codec_wav_to_token_ratio", 1764);
+    config.max_response_frames = extract_json_int(json, "voicechat_max_response_frames", 256);
+    config.tts_text_token_ratio_cap =
+        extract_json_int(json, "voicechat_tts_text_token_ratio_cap", 16);
+    config.tts_text_token_ratio_min_tokens =
+        extract_json_int(json, "voicechat_tts_text_token_ratio_min_tokens", 5);
+    config.max_pending_input_ms = extract_json_int(json, "voicechat_max_pending_input_ms", 30000);
+    config.max_pending_events = extract_json_int(json, "voicechat_max_pending_events", 4096);
+    config.stream_tick_ms = extract_json_int(json, "voicechat_stream_tick_ms", 80);
     return config;
 }
 

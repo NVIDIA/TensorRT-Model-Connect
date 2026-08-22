@@ -40,7 +40,6 @@ struct StreamingMelStep {
 StreamingMelStep make_streaming_mel_step(bool first_step, int32_t next_mel_frame,
                                          int32_t available_mel_frames, bool final);
 
-bool should_barge_in(const SpeechSessionConfig& config, bool agent_turn_active, double rms);
 int32_t streaming_frontend_capacity_seconds(const Config& config);
 
 } // namespace nemotron_voicechat
@@ -70,7 +69,10 @@ struct VoiceChatAssets {
 
 class NemotronVoiceChatRuntime;
 
-class NemotronVoiceChatPipeline final : public IPipeline, public ISpeechSessionProvider {
+class NemotronVoiceChatPipeline final : public IPipeline,
+                                        public ISpeechSessionProvider,
+                                        public ISpeechBatchSessionProvider,
+                                        public ISpeechToolSessionProvider {
   public:
     NemotronVoiceChatPipeline(std::unique_ptr<TrtModule> thinker,
                               std::unique_ptr<TrtModule> perception_stream_first,
@@ -84,6 +86,13 @@ class NemotronVoiceChatPipeline final : public IPipeline, public ISpeechSessionP
 
     std::unique_ptr<ISpeechSession>
     create_speech_session(const SpeechSessionConfig& cfg = {}) override;
+
+    std::unique_ptr<ISpeechSession>
+    create_batch_speech_session(const SpeechSessionConfig& cfg = {}) override;
+
+    std::unique_ptr<ISpeechSession>
+    create_tool_speech_session(const SpeechSessionConfig& session_config,
+                               const SpeechToolSessionConfig& tool_config) override;
 
     AudioResult speak(const float* audio_in, int32_t num_samples, const GenerateConfig& cfg = {},
                       int32_t input_sample_rate = 0) override;

@@ -75,7 +75,9 @@ class RecordingTranscriptionPipeline final : public trtmc::IPipeline {
     std::vector<trtmc::TranscriptionConfig> observed;
 };
 
-class RecordingSpeechSession final : public trtmc::ISpeechSession {
+class RecordingSpeechSession final : public trtmc::ISpeechSession,
+                                     public trtmc::ISpeechRealtimeControl,
+                                     public trtmc::ISpeechToolSession {
   public:
     explicit RecordingSpeechSession(trtmc::SpeechSessionConfig cfg) : cfg_(std::move(cfg)) {}
 
@@ -139,6 +141,30 @@ class RecordingSpeechSession final : public trtmc::ISpeechSession {
 
     trtmc::SpeechSessionConfig config() const override { return cfg_; }
 
+    void commit_input_turn(bool create_response) override {
+        ++commit_input_turn_calls;
+        commit_create_response = create_response;
+    }
+
+    void create_response() override { ++create_response_calls; }
+
+    void clear_pending_input() override { ++clear_pending_input_calls; }
+
+    void cancel_response() override { ++cancel_response_calls; }
+
+    void truncate_response(std::uint64_t response_epoch,
+                           std::int64_t played_output_samples) override {
+        truncate_response_epoch = response_epoch;
+        truncate_played_output_samples = played_output_samples;
+    }
+
+    void submit_tool_response(std::uint64_t response_epoch, const std::string& call_id,
+                              const std::string& output) override {
+        tool_response_epoch = response_epoch;
+        tool_response_call_id = call_id;
+        tool_response_output = output;
+    }
+
     trtmc::SpeechSessionConfig cfg_;
     std::vector<float> accepted_audio;
     std::vector<trtmc::SpeechSessionEvent> events;
@@ -147,23 +173,55 @@ class RecordingSpeechSession final : public trtmc::ISpeechSession {
     int append_calls{0};
     bool finished{false};
     bool cancelled{false};
+    int commit_input_turn_calls{0};
+    int create_response_calls{0};
+    bool commit_create_response{false};
+    int clear_pending_input_calls{0};
+    int cancel_response_calls{0};
+    std::uint64_t truncate_response_epoch{0};
+    std::int64_t truncate_played_output_samples{0};
+    std::uint64_t tool_response_epoch{0};
+    std::string tool_response_call_id;
+    std::string tool_response_output;
 };
 
 class RecordingSpeechPipeline final : public trtmc::IPipeline,
-                                      public trtmc::ISpeechSessionProvider {
+                                      public trtmc::ISpeechSessionProvider,
+                                      public trtmc::ISpeechBatchSessionProvider,
+                                      public trtmc::ISpeechToolSessionProvider {
   public:
     const char* model_id() const override { return "recording-speech"; }
     const char* pipeline_type() const override { return "RecordingSpeechPipeline"; }
     std::unique_ptr<trtmc::ISpeechSession>
     create_speech_session(const trtmc::SpeechSessionConfig& cfg) override {
+        ++live_factory_calls;
         observed_config = cfg;
         auto result = std::make_unique<RecordingSpeechSession>(cfg);
         last_session = result.get();
         return result;
     }
 
+    std::unique_ptr<trtmc::ISpeechSession>
+    create_batch_speech_session(const trtmc::SpeechSessionConfig& cfg) override {
+        ++batch_factory_calls;
+        observed_config = cfg;
+        auto result = std::make_unique<RecordingSpeechSession>(cfg);
+        last_session = result.get();
+        return result;
+    }
+
+    std::unique_ptr<trtmc::ISpeechSession>
+    create_tool_speech_session(const trtmc::SpeechSessionConfig& cfg,
+                               const trtmc::SpeechToolSessionConfig& tool_cfg) override {
+        observed_tool_config = tool_cfg;
+        return create_speech_session(cfg);
+    }
+
     trtmc::SpeechSessionConfig observed_config;
+    trtmc::SpeechToolSessionConfig observed_tool_config;
     RecordingSpeechSession* last_session{nullptr};
+    int live_factory_calls{0};
+    int batch_factory_calls{0};
 };
 
 class PoolTestPipeline final : public trtmc::IPipeline {
@@ -237,6 +295,12 @@ static void test_ipipeline_default_virtuals() {
     trtmc::IPipeline* base = &pipeline;
     check(dynamic_cast<trtmc::ISpeechSessionProvider*>(base) == nullptr,
           "speech session capability is absent by default");
+    check(dynamic_cast<trtmc::ISpeechBatchSessionProvider*>(base) == nullptr,
+          "speech batch-session capability is absent by default");
+    check(dynamic_cast<trtmc::ISpeechRealtimeControl*>(base) == nullptr,
+          "speech realtime-control capability is absent by default");
+    check(dynamic_cast<trtmc::ISpeechToolSessionProvider*>(base) == nullptr,
+          "speech tool-session capability is absent by default");
 
     // Default generate(string) should throw
     bool threw = false;
@@ -375,6 +439,24 @@ static void test_ipipeline_default_virtuals() {
     check(threw, "default detect throws");
 }
 
+static void test_speech_batch_session_optional_interface() {
+    RecordingSpeechPipeline pipeline;
+    auto* provider = dynamic_cast<trtmc::ISpeechBatchSessionProvider*>(&pipeline);
+    check(provider != nullptr, "speech batch-session capability is explicit");
+
+    trtmc::SpeechSessionConfig cfg;
+    cfg.input_sample_rate = 24000;
+    cfg.enable_barge_in = true;
+    cfg.seed = 31;
+    auto session = provider->create_batch_speech_session(cfg);
+    check(session != nullptr && pipeline.batch_factory_calls == 1 &&
+              pipeline.live_factory_calls == 0,
+          "batch speech factory is independent from the live factory");
+    check(session->config().input_sample_rate == 24000 && session->config().enable_barge_in &&
+              session->config().seed == 31,
+          "batch speech factory preserves the public session config");
+}
+
 static void test_speech_session_value_contract() {
     const trtmc::SpeechSessionConfig defaults;
     check(defaults.input_sample_rate == 16000, "speech session default input sample rate");
@@ -460,6 +542,64 @@ static void test_speech_session_virtual_interface() {
               pipeline.last_session->epoch > epoch_before_reset && events.size() == 1 &&
               events[0].kind == trtmc::SpeechSessionEventKind::kReset,
           "speech session reset starts a fresh conversation epoch");
+
+    auto* realtime_control = dynamic_cast<trtmc::ISpeechRealtimeControl*>(session.get());
+    check(realtime_control != nullptr, "speech realtime-control capability is explicit");
+
+    realtime_control->commit_input_turn(false);
+    check(pipeline.last_session->commit_input_turn_calls == 1 &&
+              !pipeline.last_session->commit_create_response,
+          "speech realtime control preserves explicit response creation");
+    realtime_control->commit_input_turn();
+    check(pipeline.last_session->commit_input_turn_calls == 2 &&
+              pipeline.last_session->commit_create_response,
+          "speech realtime control defaults to creating a response");
+    realtime_control->create_response();
+    check(pipeline.last_session->create_response_calls == 1,
+          "speech realtime control can create a response after a commit-only turn");
+
+    realtime_control->clear_pending_input();
+    realtime_control->cancel_response();
+    realtime_control->truncate_response(23, 3528);
+    check(pipeline.last_session->clear_pending_input_calls == 1 &&
+              pipeline.last_session->cancel_response_calls == 1 &&
+              pipeline.last_session->truncate_response_epoch == 23 &&
+              pipeline.last_session->truncate_played_output_samples == 3528,
+          "speech realtime control preserves lifecycle and truncation arguments");
+}
+
+static void test_speech_tool_session_optional_interface() {
+    RecordingSpeechPipeline pipeline;
+    auto* provider = dynamic_cast<trtmc::ISpeechToolSessionProvider*>(&pipeline);
+    check(provider != nullptr, "speech tool-session capability is explicit");
+
+    trtmc::SpeechToolSessionConfig tool_config;
+    tool_config.tools_json =
+        R"([{"type":"function","name":"get_weather","parameters":{"type":"object"}}])";
+    tool_config.on_hold_messages_json = R"({"get_weather":"One moment."})";
+    auto session = provider->create_tool_speech_session({}, tool_config);
+    check(session != nullptr &&
+              pipeline.observed_tool_config.tools_json == tool_config.tools_json &&
+              pipeline.observed_tool_config.on_hold_messages_json ==
+                  tool_config.on_hold_messages_json,
+          "tool-session factory preserves tool configuration");
+
+    auto* tool_session = dynamic_cast<trtmc::ISpeechToolSession*>(session.get());
+    check(tool_session != nullptr, "tool-session response capability is explicit");
+    tool_session->submit_tool_response(9, "call-9-1", R"({"temperature":72})");
+    check(pipeline.last_session->tool_response_epoch == 9 &&
+              pipeline.last_session->tool_response_call_id == "call-9-1" &&
+              pipeline.last_session->tool_response_output == R"({"temperature":72})",
+          "tool response preserves epoch, call id, and output");
+
+    trtmc::SpeechSessionEvent event;
+    event.kind = trtmc::SpeechSessionEventKind::kFunctionCall;
+    event.epoch = 9;
+    event.sequence = 1;
+    event.text = R"({"call_id":"call-9-1","name":"get_weather","arguments":{}})";
+    check(event.kind == trtmc::SpeechSessionEventKind::kFunctionCall && event.epoch == 9 &&
+              event.sequence == 1 && event.text.find("call-9-1") != std::string::npos,
+          "function-call event reuses the ABI-stable text and ordering fields");
 }
 
 static void test_transcription_batch_preserves_per_request_config() {
@@ -532,7 +672,9 @@ int main() {
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
     test_speech_session_value_contract();
+    test_speech_batch_session_optional_interface();
     test_speech_session_virtual_interface();
+    test_speech_tool_session_optional_interface();
     test_transcription_batch_preserves_per_request_config();
     test_pipeline_pool_leases_and_adapter_maintenance();
 
