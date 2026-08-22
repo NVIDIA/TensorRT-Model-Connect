@@ -235,6 +235,7 @@ add_library(trtmc_core SHARED
   src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
+  src/cli/jsonl_io.cpp
   src/utils/wav_reader.cpp
   src/utils/image_reader.cpp
   # Config (schema registry + layered resolution + CLI surface + schemas)
@@ -679,7 +680,10 @@ add_executable(trtmc
 )
 target_link_libraries(trtmc PRIVATE trtmc_core Threads::Threads)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+target_include_directories(trtmc SYSTEM PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/stb
+  ${_trtmc_nlohmann_json_include}
+)
 set_target_properties(trtmc PROPERTIES
   BUILD_RPATH "\$ORIGIN"
   BUILD_RPATH_USE_ORIGIN TRUE
@@ -689,8 +693,10 @@ set_target_properties(trtmc PROPERTIES
 if(TRTMC_BUILD_BENCHMARKS)
   add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
   target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
+  target_include_directories(trtmc_dataset_benchmark PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_include_directories(trtmc_dataset_benchmark SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb
+    ${_trtmc_nlohmann_json_include}
   )
 
   add_executable(trtmc_benchmark_worker examples/trtmc_benchmark_worker.cpp)
@@ -934,6 +940,9 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+trtmc_add_test(test_jsonl_dataset_and_output
+  EXTRA_INCLUDES ${_trtmc_nlohmann_json_include}
+)
 trtmc_add_test(test_speech_session_cli_helpers)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)

@@ -30,6 +30,7 @@
 //   trtmc version
 
 #include "cli/args.h"
+#include "cli/jsonl_io.h"
 #include "cli/speech_session_helpers.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
@@ -353,54 +354,9 @@ std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
     return values;
 }
 
-std::string json_escape(const std::string& text) {
-    std::ostringstream out;
-    for (unsigned char ch : text) {
-        switch (ch) {
-        case '"':
-            out << "\\\"";
-            break;
-        case '\\':
-            out << "\\\\";
-            break;
-        case '\b':
-            out << "\\b";
-            break;
-        case '\f':
-            out << "\\f";
-            break;
-        case '\n':
-            out << "\\n";
-            break;
-        case '\r':
-            out << "\\r";
-            break;
-        case '\t':
-            out << "\\t";
-            break;
-        default:
-            if (ch < 0x20U) {
-                out << "\\u" << std::hex << std::setw(4) << std::setfill('0')
-                    << static_cast<int>(ch) << std::dec << std::setfill(' ');
-            } else {
-                out << static_cast<char>(ch);
-            }
-            break;
-        }
-    }
-    return out.str();
-}
-
 void write_text_sample_jsonl(std::ostream& out, int32_t id, const std::string& prompt,
                              const trtmc::TextResult& result) {
-    out << "{\"id\":" << id << ",\"prompt\":\"" << json_escape(prompt) << "\",\"generated\":\""
-        << json_escape(result.text) << "\",\"token_ids\":[";
-    for (std::size_t i = 0; i < result.token_ids.size(); ++i) {
-        if (i > 0)
-            out << ',';
-        out << result.token_ids[i];
-    }
-    out << "]}\n";
+    out << trtmc::cli::build_text_sample_record(id, prompt, result).dump() << '\n';
 }
 
 int cmd_run(const CliArgs& args) {
@@ -1002,44 +958,12 @@ int cmd_classify(const CliArgs& args) {
         result = pipeline->classify(image.pixels.data(), image.height, image.width);
     }
 
-    std::cout << "{"
-              << "\"top_class\":" << result.top_class << ","
-              << "\"top_score\":" << std::setprecision(8) << result.top_score << ","
-              << "\"num_classes\":" << result.logits.size() << "}\n";
+    std::cout << trtmc::cli::build_classify_record(result).dump() << '\n';
     return EXIT_SUCCESS;
 }
 
-void write_float_tensor_json(std::ostream& out, const std::vector<int64_t>& shape,
-                             const std::vector<float>& data) {
-    out << "{\"shape\":[";
-    for (std::size_t i = 0; i < shape.size(); ++i) {
-        if (i != 0)
-            out << ',';
-        out << shape[i];
-    }
-    out << "],\"data\":[";
-    for (std::size_t i = 0; i < data.size(); ++i) {
-        if (i != 0)
-            out << ',';
-        const float value = data[i];
-        if (!std::isfinite(value))
-            throw std::runtime_error("Image feature tensor contains a non-finite value");
-        if (value == 0.0F)
-            out << '0';
-        else
-            out << value;
-    }
-    out << "]}";
-}
-
 void write_image_features_json(std::ostream& out, const trtmc::ImageFeaturesResult& result) {
-    out.imbue(std::locale::classic());
-    out << std::defaultfloat << std::setprecision(std::numeric_limits<float>::max_digits10);
-    out << "{\"last_hidden_state\":";
-    write_float_tensor_json(out, result.last_hidden_state_shape, result.last_hidden_state);
-    out << ",\"pooler_output\":";
-    write_float_tensor_json(out, result.pooler_output_shape, result.pooler_output);
-    out << "}\n";
+    out << trtmc::cli::build_image_features_record(result).dump() << '\n';
 }
 
 int cmd_extract_features(const CliArgs& args) {
