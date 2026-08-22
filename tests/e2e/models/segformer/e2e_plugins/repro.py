@@ -10,10 +10,6 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
-    return shlex.quote(str(value))
-
-
 class SegformerReproCommandProvider:
     """Build SegFormer TRT repro commands without shared harness branches."""
 
@@ -36,7 +32,7 @@ class SegformerReproCommandProvider:
             "segment",
             bundle_path,
             "--image",
-            _shell_quote(image),
+            str(image),
             "--output",
             "/tmp/trtmc_segformer/seg_output.png",
         ]

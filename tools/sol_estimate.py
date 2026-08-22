@@ -188,23 +188,10 @@ def load_model_arch_from_hf(model_id: str) -> ModelArch:
 
 def load_model_arch_from_bundle(bundle_path: str) -> ModelArch:
     """Load model architecture from a .bundle artifact."""
-    try:
-        sys.path.insert(0, "python")
-        from tensorrt_model_connect.bundle_writer import BundleReader
-        reader = BundleReader(bundle_path)
-        config = json.loads(reader.read_section("config"))
-    except Exception:
-        # Fallback: read bundle as binary, find config JSON
-        with open(bundle_path, "rb") as f:
-            data = f.read()
-        # Find JSON config section
-        import re
-        match = re.search(rb'\{"[^"]*model_type[^}]+\}', data)
-        if not match:
-            print("ERROR: Could not extract config from bundle.",
-                  file=sys.stderr)
-            sys.exit(1)
-        config = json.loads(match.group())
+    sys.path.insert(0, "python")
+    from tensorrt_model_connect import BundleReader
+    reader = BundleReader(bundle_path)
+    config = json.loads(reader.read_section("config.json"))
 
     hidden = config.get("hidden_size", 0)
     num_heads = config.get("num_attention_heads", 0)

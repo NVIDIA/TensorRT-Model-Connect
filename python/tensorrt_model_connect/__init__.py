@@ -14,6 +14,7 @@ __all__ = [
     "build",
     "build_bundle",
     "write_bundle",
+    "BundleReader",
     "ModelConfig",
     "Pipeline",
 ]
@@ -38,6 +39,11 @@ def __getattr__(name: str) -> Any:
         from .bundle_writer import write_bundle
 
         return write_bundle
+
+    if name == "BundleReader":
+        from .bundle_writer import BundleReader
+
+        return BundleReader
 
     if name == "ModelConfig":
         from .config import ModelConfig

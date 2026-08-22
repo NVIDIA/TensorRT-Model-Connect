@@ -315,3 +315,64 @@ def test_llama_chunked_prefill_repro_preserves_model_only_build(tmp_path) -> Non
     assert "--max-new-tokens 2" in repro["trt_inference"]
     assert "--temperature 0.0" in repro["trt_inference"]
     assert "--e2e-category regression" in repro["rerun_test_rebuild"]
+
+
+class _WeirdTokensProvider:
+    @property
+    def family_name(self) -> str:
+        return "weird_family"
+
+    def build_trt_inference_command(
+        self,
+        case: E2ECase,
+        ctx: RunContext,
+        bundle_path: str,
+    ) -> list[str]:
+        return [
+            ctx.binary_path,
+            "run",
+            bundle_path,
+            "--prompt", "A 'single' quote",
+            "--newline", "line1\nline2",
+            "--empty", "",
+            "--dollar", "$HOME",
+            "--backslash", "\\path\\to\\dir",
+            "--spaces", "many spaces here",
+        ]
+
+
+def test_repro_commands_shlex_round_trip(tmp_path) -> None:
+    reset()
+    register_repro_command_provider(_WeirdTokensProvider())
+    case = E2ECase(
+        name="weird-tokens-case",
+        hf_id="test",
+        family="weird_family",
+        runtime_strategy="weird",
+        task_strategy="weird",
+        bundle="test.bundle",
+        inputs={},
+        stages=[],
+    )
+    repro = _build_repro_commands(
+        case,
+        _make_ctx(tmp_path),
+        "/tmp/engines/test.bundle",
+        {},
+    )
+
+    cmd = repro["trt_inference"]
+    import shlex
+    parts = shlex.split(cmd)
+    
+    assert parts == [
+        "./build/trtmc",
+        "run",
+        "/tmp/engines/test.bundle",
+        "--prompt", "A 'single' quote",
+        "--newline", "line1\nline2",
+        "--empty", "",
+        "--dollar", "$HOME",
+        "--backslash", "\\path\\to\\dir",
+        "--spaces", "many spaces here",
+    ]

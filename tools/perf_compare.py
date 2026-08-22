@@ -185,29 +185,22 @@ def load_trt_from_bundle(bundle_path: str):
     Returns (engine_plan_bytes, num_layers, max_cache_length, bundle_config,
              family_perf_handler).
     """
-    import struct
-
-    with open(bundle_path, "rb") as f:
-        magic = f.read(8)
-        if magic != b"BUNDLE\x01\x00":
-            raise ValueError(f"Not a valid .bundle artifact: {bundle_path}")
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len).decode("utf-8"))
-        sections = header.get("sections", {})
-        engine_meta = sections.get("engine_plan")
-        if engine_meta is None:
-            raise KeyError(
-                f"Bundle {bundle_path!r} does not contain section 'engine_plan'")
-        data_start = 16 + header_len
-        f.seek(data_start + engine_meta["offset"])
-        engine_plan = f.read(engine_meta["size"])
-
-        config_meta = sections.get("config.json")
-        if config_meta is None:
-            bundle_config = {}
-        else:
-            f.seek(data_start + config_meta["offset"])
-            bundle_config = json.loads(f.read(config_meta["size"]).decode("utf-8"))
+    from tensorrt_model_connect import BundleReader
+    
+    reader = BundleReader(bundle_path)
+    header = reader.header
+    
+    try:
+        engine_plan = reader.read_section("engine_plan")
+    except KeyError:
+        raise KeyError(
+            f"Bundle {bundle_path!r} does not contain section 'engine_plan'")
+            
+    try:
+        config_bytes = reader.read_section("config.json")
+        bundle_config = json.loads(config_bytes.decode("utf-8"))
+    except KeyError:
+        bundle_config = {}
 
     # Reject unsupported runtime strategies
     rt = str(bundle_config.get("runtime_strategy") or "")

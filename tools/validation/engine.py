@@ -9207,12 +9207,15 @@ def bundle_max_cache_length(bundle_path: Path, trtmc_binary: str) -> int | None:
 
 
 def runtime_tensorrt_abi() -> str:
-    try:
-        import tensorrt
-    except Exception:
-        return ""
-    parts = str(tensorrt.__version__).split(".")
-    return ".".join(parts[:2]) if len(parts) >= 2 else ""
+    import warnings
+    warnings.warn(
+        "runtime_tensorrt_abi is deprecated; use tensorrt_model_connect.trt_compat.tensorrt_abi instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    from tensorrt_model_connect.trt_compat import tensorrt_abi
+    abi = tensorrt_abi()
+    return abi if abi != "unknown" else ""
 
 
 def _bundle_can_be_reused(
@@ -9247,7 +9250,9 @@ def _bundle_can_be_reused(
             if bundle_precision != expected_precision:
                 return False
     bundle_abi = inspection.get("TRT ABI", "")
-    runtime_abi = runtime_tensorrt_abi()
+    from tensorrt_model_connect.trt_compat import tensorrt_abi
+    abi = tensorrt_abi()
+    runtime_abi = abi if abi != "unknown" else ""
     return not bundle_abi or not runtime_abi or bundle_abi == runtime_abi
 
 

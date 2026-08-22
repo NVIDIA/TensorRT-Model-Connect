@@ -10,10 +10,6 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
-    return shlex.quote(str(value))
-
-
 class ElfFlowReproCommandProvider:
     """Build ELF Flow TRT repro commands without shared harness branches."""
 

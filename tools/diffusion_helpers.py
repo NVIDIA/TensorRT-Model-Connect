@@ -25,15 +25,9 @@ def gelu_tanh(x):
 
 def load_pp_weights(bundle_path: str) -> dict[str, np.ndarray]:
     """Load preprocessor weights from bundle."""
-    with open(bundle_path, "rb") as f:
-        f.read(8)
-        jl = struct.unpack("<Q", f.read(8))[0]
-        hdr = json.loads(f.read(jl))
-        ds = 16 + jl
-    sec = hdr["sections"]["preprocessor_weights"]
-    with open(bundle_path, "rb") as f:
-        f.seek(ds + sec["offset"])
-        ppd = f.read(sec["size"])
+    from tensorrt_model_connect import BundleReader
+    reader = BundleReader(bundle_path)
+    ppd = reader.read_section("preprocessor_weights")
     il = struct.unpack("<I", ppd[:4])[0]
     ppx = json.loads(ppd[4 : 4 + il])
     blob = ppd[4 + il :]
@@ -46,15 +40,9 @@ def load_pp_weights(bundle_path: str) -> dict[str, np.ndarray]:
 
 def load_bundle_config(bundle_path: str) -> dict:
     """Load config.json from bundle."""
-    with open(bundle_path, "rb") as f:
-        f.read(8)
-        jl = struct.unpack("<Q", f.read(8))[0]
-        hdr = json.loads(f.read(jl))
-        ds = 16 + jl
-    sec = hdr["sections"]["config.json"]
-    with open(bundle_path, "rb") as f:
-        f.seek(ds + sec["offset"])
-        return json.loads(f.read(sec["size"]).decode("utf-8"))
+    from tensorrt_model_connect import BundleReader
+    reader = BundleReader(bundle_path)
+    return json.loads(reader.read_section("config.json").decode("utf-8"))
 
 
 def compute_timestep_embedding(timestep: float, pp: dict,

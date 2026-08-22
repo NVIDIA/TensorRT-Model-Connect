@@ -10,10 +10,6 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
-    return shlex.quote(str(value))
-
-
 class TimmVitReproCommandProvider:
     """Build timm_vit TRT repro commands without shared harness branches."""
 
@@ -41,7 +37,7 @@ class TimmVitReproCommandProvider:
             "classify",
             bundle_path,
             "--image",
-            _shell_quote(image),
+            str(image),
         ]
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:

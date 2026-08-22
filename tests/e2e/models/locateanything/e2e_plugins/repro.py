@@ -10,10 +10,6 @@ import shlex
 from .contracts import E2ECase, ReproCommandProvider, RunContext
 
 
-def _shell_quote(value: object) -> str:
-    return shlex.quote(str(value))
-
-
 class LocateAnythingReproCommandProvider:
     """Build LocateAnything TRT repro commands without shared harness branches."""
 
@@ -36,9 +32,9 @@ class LocateAnythingReproCommandProvider:
             "run",
             bundle_path,
             "--prompt",
-            _shell_quote(case.inputs.get("prompt", "Describe this image.")),
+            str(case.inputs.get("prompt", "Describe this image.")),
             "--image",
-            _shell_quote(image),
+            str(image),
             "--max-new-tokens",
             str(case.inputs.get("max_new_tokens", 30)),
         ]
