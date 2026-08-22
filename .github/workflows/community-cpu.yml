@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Owned PR #1000 smoke marker; this comment-only change must not be merged.
 name: Community CPU
 
 run-name: >-
