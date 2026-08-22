@@ -111,7 +111,7 @@ jobs:
     permissions:
       checks: write
       contents: read
-      issues: write
+      pull-requests: write
     outputs:
       comment_id: ${{ steps.comment.outputs.comment_id }}
       source_quality_check_id: ${{ steps.checks.outputs.source_quality_check_id }}
@@ -357,8 +357,7 @@ jobs:
     permissions:
       checks: write
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - name: Publish exact-merge CPU checks
         env:

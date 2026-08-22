@@ -762,7 +762,7 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     assert jobs["initialize"]["permissions"] == {
         "checks": "write",
         "contents": "read",
-        "issues": "write",
+        "pull-requests": "write",
     }
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     for job_name in ("source-quality", "ownership-impact", "unit"):
@@ -782,8 +782,7 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     assert jobs["required"]["permissions"] == {
         "checks": "write",
         "contents": "read",
-        "issues": "write",
-        "pull-requests": "read",
+        "pull-requests": "write",
     }
 
 
