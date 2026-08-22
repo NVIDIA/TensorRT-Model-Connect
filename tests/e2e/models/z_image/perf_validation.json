@@ -8,7 +8,7 @@
         "label": "generate",
         "gpu_argmax_label": "generate",
         "metric": "pipeline_ms",
-        "command": ["{binary}", "generate-video", "{bundle}", "--prompt", "{prompt}", "--output", "{generated_output_dir}", "{hf_python_args}"]
+        "command": ["{binary}", "generate-video", "{bundle}", "--prompt", "{prompt}", "--output", "{generated_output_dir}"]
       }
     }
   ]

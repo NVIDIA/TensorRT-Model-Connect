@@ -51,9 +51,6 @@ class SamReproCommandProvider:
         ]
         if not case.inputs.get("is_foreground", True):
             infer_parts.append("--background")
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            infer_parts.extend(["--hf-python", runtime_cli_python])
         return infer_parts
 
 

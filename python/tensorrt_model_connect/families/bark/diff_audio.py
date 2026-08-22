@@ -31,21 +31,21 @@ Usage:
     python3 tools/diff_audio.py \\
       --bundle bark.bundle --binary ./build/trtmc \\
       --prompt "Hello, my dog is cute" \\
-      --hf-python .venv/bin/python --stage 1
+      --stage 1
 
     # Stage 2: Token distribution comparison
     python3 tools/diff_audio.py \\
       --bundle bark.bundle --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
-      --hf-python .venv/bin/python --stage 2
+      --stage 2
 
     # Stage 3: Codec waveform comparison
     python3 tools/diff_audio.py \\
       --bundle bark.bundle --binary ./build/trtmc \\
       --model suno/bark-small \\
       --prompt "Hello, my dog is cute" \\
-      --hf-python .venv/bin/python --stage 3
+      --stage 3
 
     # Stage 4: Greedy parity (TRT engine vs HF)
     python3 tools/diff_audio.py \\
@@ -56,8 +56,7 @@ Usage:
     python3 tools/diff_audio.py \\
       --bundle bark.bundle --binary ./build/trtmc \\
       --model suno/bark-small \\
-      --prompt "Hello, my dog is cute" \\
-      --hf-python .venv/bin/python
+      --prompt "Hello, my dog is cute"
 """
 
 from __future__ import annotations
@@ -195,7 +194,7 @@ def find_trt_lib_dir() -> str:
 
 
 def run_cpp_bark(binary: str, bundle: str, prompt: str, output_wav: str,
-                 hf_python: str, dump_dir: str | None = None,
+                 dump_dir: str | None = None,
                  greedy: bool = False, max_tokens: int = 0) -> bool:
     """Run the C++ Bark pipeline and return True on success."""
     env = os.environ.copy()
@@ -212,8 +211,6 @@ def run_cpp_bark(binary: str, bundle: str, prompt: str, output_wav: str,
         "--prompt", prompt,
         "--output", output_wav,
     ]
-    if hf_python:
-        cmd += ["--hf-python", hf_python]
     if max_tokens > 0:
         cmd += ["--max-new-tokens", str(max_tokens)]
     if greedy:
@@ -259,7 +256,7 @@ def stage1_cpp_smoke_test(args) -> bool:
 
         ok = run_cpp_bark(
             args.binary, args.bundle, args.prompt, wav_path,
-            args.hf_python, greedy=False)
+            greedy=False)
 
         if not ok:
             print("  FAIL: C++ pipeline returned error", file=sys.stderr)
@@ -325,7 +322,7 @@ def stage2_token_comparison(args) -> bool:
 
         ok = run_cpp_bark(
             args.binary, args.bundle, args.prompt, wav_path,
-            args.hf_python, dump_dir=dump_prefix, greedy=False)
+            dump_dir=dump_prefix, greedy=False)
 
         if not ok:
             print("  FAIL: C++ pipeline failed", file=sys.stderr)
@@ -467,7 +464,7 @@ def stage3_codec_comparison(args) -> bool:
 
         ok = run_cpp_bark(
             args.binary, args.bundle, args.prompt, wav_path,
-            args.hf_python, dump_dir=dump_prefix, greedy=False)
+            dump_dir=dump_prefix, greedy=False)
 
         if not ok:
             print("  FAIL: C++ pipeline failed", file=sys.stderr)
@@ -1154,7 +1151,7 @@ Stages:
 Examples:
   # Quick smoke test
   python3 tools/diff_audio.py --bundle bark.bundle --binary ./build/trtmc \\
-    --prompt "Hello, my dog is cute" --hf-python .venv/bin/python --stage 1
+    --prompt "Hello, my dog is cute" --stage 1
 
   # Greedy parity (TRT engine vs HF)
   python3 tools/diff_audio.py --model suno/bark-small --stage 4 \\
@@ -1162,8 +1159,7 @@ Examples:
 
   # Stages 1-3 comparison
   python3 tools/diff_audio.py --bundle bark.bundle --binary ./build/trtmc \\
-    --model suno/bark-small --prompt "Hello, my dog is cute" \\
-    --hf-python .venv/bin/python
+    --model suno/bark-small --prompt "Hello, my dog is cute"
 """)
     parser.add_argument("--model", default=None,
                         help="HF model ID (e.g. suno/bark-small)")
@@ -1173,8 +1169,6 @@ Examples:
                         help="Path to trtmc binary (e.g. ./build/trtmc)")
     parser.add_argument("--prompt", default="Hello, my dog is cute.",
                         help="Text prompt")
-    parser.add_argument("--hf-python", default="",
-                        help="Path to Python with HF tokenizers installed")
     parser.add_argument("--min-energy", type=float, default=0.005,
                         help="Min RMS energy for speech detection (stage 1)")
     parser.add_argument("--codec-atol", type=float, default=0.15,

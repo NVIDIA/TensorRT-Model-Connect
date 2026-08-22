@@ -73,7 +73,6 @@ struct PipelineContext {
     const BundleFile& bundle;
     const BaseConfig& config;
     const std::string& config_json;        // raw JSON text from bundle
-    const std::string& hf_python;          // path to HF Python interpreter
     const std::string& bundle_path;        // filesystem path to .bundle file
     IBackend* backend;                     // Backend for creating ITrtModule instances
     const std::string& runtime_cache_path; // RTX: JIT kernel cache file path

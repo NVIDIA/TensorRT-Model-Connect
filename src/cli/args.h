@@ -18,7 +18,6 @@ struct CliArgs {
     std::string bundle_path;
     std::string prompt;
     bool prompt_provided{false};
-    std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string right_image_path;

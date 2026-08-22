@@ -169,8 +169,8 @@ static void test_last_error_cleared_on_success() {
 //   initialization) produces safe default values for every field, ensuring
 //   backward compatibility when new fields are added to the struct.
 // Setup: A brace-initialized TrtmcPipelineOptions{}.
-// Mechanism: Checks each field: max_new_tokens==0, hf_python==nullptr,
-//   image_path==nullptr. Also
+// Mechanism: Checks each field: max_new_tokens==0, image_path==nullptr,
+//   runtime_cache==nullptr, and cuda_graphs==0. Also
 //   verifies that trtmc_create_pipeline_ex with null options and a bad path
 //   returns nullptr (null options should use defaults).
 // -----------------------------------------------------------------------------
@@ -178,8 +178,9 @@ static void test_pipeline_options_zero_init() {
     // Verify that zero-initialized TrtmcPipelineOptions is safe and backward-compatible
     TrtmcPipelineOptions opts{};
     check(opts.max_new_tokens == 0, "zero-init max_new_tokens == 0");
-    check(opts.hf_python == nullptr, "zero-init hf_python == nullptr");
     check(opts.image_path == nullptr, "zero-init image_path == nullptr");
+    check(opts.runtime_cache == nullptr, "zero-init runtime_cache == nullptr");
+    check(opts.cuda_graphs == 0, "zero-init cuda_graphs == 0");
 
     // Should work with null options (uses defaults)
     auto* p = trtmc_create_pipeline_ex("/nonexistent", nullptr);
@@ -191,7 +192,8 @@ static void test_pipeline_options_zero_init() {
 //   populated TrtmcPipelineOptions struct and propagates the error when the
 //   bundle path is invalid.
 // Setup: Creates a TrtmcPipelineOptions with all fields set: max_new_tokens=5,
-//   hf_python="/nonexistent/python", image_path="/nonexistent/image.png".
+//   image_path="/nonexistent/image.png", runtime_cache="/nonexistent/cache",
+//   and cuda_graphs=1.
 // Mechanism: Calls trtmc_create_pipeline_ex with a nonexistent bundle path and
 //   the options struct. Asserts nullptr return and a non-empty error message.
 //   This ensures the extended API processes all option fields without crashing.
@@ -199,8 +201,9 @@ static void test_pipeline_options_zero_init() {
 static void test_create_ex_with_options() {
     TrtmcPipelineOptions opts{};
     opts.max_new_tokens = 5;
-    opts.hf_python = "/nonexistent/python";
     opts.image_path = "/nonexistent/image.png";
+    opts.runtime_cache = "/nonexistent/cache";
+    opts.cuda_graphs = 1;
 
     auto* p = trtmc_create_pipeline_ex("/nonexistent/bundle.bundle", &opts);
     check(p == nullptr, "bad bundle with options returns null");

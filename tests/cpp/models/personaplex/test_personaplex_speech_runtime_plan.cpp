@@ -61,13 +61,9 @@ void test_prompt_injection_and_generation_settings() {
     cfg.text_initial_token_id = 32000;
     cfg.text_padding_id = 3;
     cfg.mimi_decode_codebooks = 8;
-    cfg.system_prompt = "hello";
-    cfg.hf_python = "/usr/bin/python";
 
-    check(trtmc::should_run_text_prompt_injection(cfg),
-          "speech runtime plan enables prompt injection when system prompt and hf_python exist");
-    cfg.system_prompt.clear();
-    cfg.hf_python.clear();
+    check(!trtmc::should_run_text_prompt_injection(cfg),
+          "speech runtime plan skips prompt injection without pretokenized ids");
     cfg.text_prompt_ids = {1, 2, 3};
     check(trtmc::should_run_text_prompt_injection(cfg),
           "speech runtime plan enables prompt injection when pretokenized ids exist");

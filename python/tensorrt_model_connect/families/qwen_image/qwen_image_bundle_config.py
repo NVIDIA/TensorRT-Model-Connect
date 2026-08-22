@@ -233,7 +233,6 @@ def build_bundle_config(
             "height_alignment": 16, "width_alignment": 16,
         },
         "tokenizer": {
-            "kind": "hf_python",
             "class": "Qwen2Tokenizer",
             "prompt_template_kind": template_kind,
             "prompt_template_drop_idx": prompt_drop_idx,

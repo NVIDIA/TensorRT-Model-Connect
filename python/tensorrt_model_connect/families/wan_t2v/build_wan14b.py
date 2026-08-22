@@ -64,7 +64,7 @@ def main():
     print("\n[14b] Done! Run with:", file=sys.stderr)
     print(f"  ./build/trtmc generate-video {args.output} "
           f"--prompt 'A cat walking in the garden' "
-          f"--num-steps 30 --hf-python /opt/venv/bin/python",
+          f"--num-steps 30",
           file=sys.stderr)
 
 

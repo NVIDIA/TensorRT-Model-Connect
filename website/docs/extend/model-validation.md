@@ -130,10 +130,11 @@ PYTHONPATH=python:. python3 -m pytest \
   -v
 ```
 
-Add `--hf-python /path/to/python` only when the selected runtime requires a
-Python helper. This step needs the declared checkpoint, TensorRT/CUDA, suitable
-GPU hardware, the compiled CLI, and all runtime libraries required by the
-bundle path.
+The harness-level `--hf-python /path/to/python` option selects build,
+reference, and diagnostic helper environments; it is not a native runtime
+option. This step needs the declared checkpoint, TensorRT/CUDA, suitable GPU
+hardware, the compiled CLI, and all runtime libraries required by the bundle
+path.
 
 Confirm that:
 

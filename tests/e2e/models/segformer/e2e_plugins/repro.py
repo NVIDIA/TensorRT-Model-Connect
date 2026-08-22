@@ -40,9 +40,6 @@ class SegformerReproCommandProvider:
             "--output",
             "/tmp/trtmc_segformer/seg_output.png",
         ]
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            infer_parts.extend(["--hf-python", runtime_cli_python])
         return infer_parts
 
 

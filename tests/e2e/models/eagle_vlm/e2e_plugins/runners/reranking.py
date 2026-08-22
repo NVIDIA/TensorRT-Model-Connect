@@ -53,7 +53,6 @@ class RerankingRunner:
                 f"manifest inputs (case={case.name!r})"
             )
 
-        runtime_cli_python = ctx.runtime_cli_hf_python()
 
         env = dict(os.environ)
         if ctx.ld_library_path:
@@ -76,8 +75,6 @@ class RerankingRunner:
                 "--prompt", prompt,
                 "--document", document,
             ]
-            if runtime_cli_python:
-                cmd.extend(["--hf-python", runtime_cli_python])
             if ctx.model_plugin_dir:
                 cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
             run_env = dict(env)

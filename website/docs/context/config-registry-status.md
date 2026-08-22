@@ -299,7 +299,7 @@ deleted (hard removal with no shims), tests updated.
     `/tmp/qwen3-0.6b-smoke.effective_config.json` was written alongside
     the bundle with all seven namespaces serialized.
   - `./build/trtmc run /tmp/qwen3-0.6b-smoke.bundle --prompt "The capital
-    of France is" --max-new-tokens 20 --hf-python /opt/venv/bin/python` —
+    of France is" --max-new-tokens 20` —
     C++ runtime loaded the bundle, registry resolved, plugin read
     values from `ctx.runtime_config`, text generation produced
     coherent output: "Paris. The capital of Italy is Rome. The
@@ -473,8 +473,7 @@ deleted (hard removal with no shims), tests updated.
     /tmp/qwen3-0.6b-smoke.effective_config.json      (7 namespaces)
 - Runtime command:
     `./build/trtmc run /tmp/qwen3-0.6b-smoke.bundle
-     --prompt "The capital of France is" --max-new-tokens 20
-     --hf-python /opt/venv/bin/python`
+     --prompt "The capital of France is" --max-new-tokens 20`
   produced: "Paris. The capital of Italy is Rome. The capital of
   Spain is Madrid. The capital of China"
 - What this proves:
@@ -577,22 +576,15 @@ Commit chain:
   * Added `configure_trt_logger(verbose_stderr, min_severity)` as the
     public setter; called by pipeline_factory once the registry is
     resolved. Severity parsing mirrors the old env-var vocabulary.
-- `src/utils/data_dir.cpp`:
-  * Deleted the TRTMC_DATA_DIR env-var read.
-  * Added `set_source_dir_override(value)` as the public setter;
-    called by pipeline_factory. Empty string (default) ⇒ fall through
-    to the compile-time TRTMC_SOURCE_DIR.
 - `src/runtime/registry/pipeline_factory.cpp`:
-  * New helper `apply_platform_config(bundle)` pulls all three
-    platform.* fields and routes them to `set_source_dir_override`
-    and `configure_trt_logger`. Called from `try_resolve_runtime_config`
+  * `apply_platform_config(bundle)` routes the logging fields to
+    `configure_trt_logger`. Called from `try_resolve_runtime_config`
     after the bundle resolves, with a try/catch so schema-absent /
     type-mismatch leaves defaults intact.
 - `python/tensorrt_model_connect/runtime_config/schemas/platform.py` and
   mirrors `include/trtmc/config/schemas/platform.h` plus
   `src/runtime/config/schemas/platform.cpp`:
-  * Three fields: `source_dir` (string), `trt_log_stderr` (bool),
-    `trt_log_min_severity` (string with
+  * Two fields: `trt_log_stderr` (bool), `trt_log_min_severity` (string with
     INTERNAL_ERROR / ERROR / WARNING / INFO / VERBOSE validator). Session /
     platform layers.
   * Schema manifest entry added — eighth row in the list.

@@ -313,6 +313,12 @@ void test_unknown_flag_fails() {
     check(args.error_message == "Unknown flag: --bogus", "unknown flag message");
 }
 
+void test_runtime_python_flag_is_rejected() {
+    auto args = parse({"trtmc", "run", "bundle.bundle", "--hf-python", "/usr/bin/python3"});
+    check(args.parse_error, "runtime Python flag parse error");
+    check(args.error_message == "Unknown flag: --hf-python", "runtime Python flag message");
+}
+
 void test_missing_value_fails() {
     auto args = parse({"trtmc", "run", "bundle.bundle", "--prompt"});
     check(args.parse_error, "missing value parse error");
@@ -509,6 +515,7 @@ int main() {
     test_canary_transcription_flags_and_batch();
     test_unknown_command_fails();
     test_unknown_flag_fails();
+    test_runtime_python_flag_is_rejected();
     test_missing_value_fails();
     test_missing_prompt_is_distinct_from_empty_prompt();
     test_bad_kv_cache_size_fails();

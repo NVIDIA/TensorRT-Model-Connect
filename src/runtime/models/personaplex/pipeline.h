@@ -27,7 +27,6 @@
 
 namespace trtmc {
 
-class ISubprocessRunner;
 struct SpeechDeviceWorkspace;
 
 struct SpeechTemporalDeviceOutput {
@@ -42,9 +41,7 @@ class SpeechPipeline final : public IPipeline {
                    std::vector<std::unique_ptr<TrtModule>> depth_engines,
                    std::unique_ptr<PersonaplexInferenceState> depth_state,
                    std::unique_ptr<TrtModule> mimi_decoder, SpeechConfig config,
-                   cudaStream_t stream,
-                   std::shared_ptr<ISubprocessRunner> subprocess_runner = nullptr,
-                   std::string model_id_str = "");
+                   cudaStream_t stream, std::string model_id_str = "");
 
     ~SpeechPipeline() override;
 
@@ -93,7 +90,6 @@ class SpeechPipeline final : public IPipeline {
 
     cudaStream_t stream_;
     SpeechConfig config_;
-    std::shared_ptr<ISubprocessRunner> subprocess_runner_;
     std::string model_id_;
 
     int32_t last_encode_frames_{0};

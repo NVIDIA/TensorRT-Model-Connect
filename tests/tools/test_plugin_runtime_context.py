@@ -78,7 +78,6 @@ def _case() -> E2ECase:
         reference_backend="fake_reference",
         reference_family="fake_family",
         bundle="plugin-runtime-context.bundle",
-        metadata={"runtime_cli_requires_hf_python": True},
         stages=[StageSpec(name="generate")],
     )
 
@@ -125,7 +124,6 @@ def test_orchestrator_passes_typed_runtime_context_to_contract_plugin(
     assert plugin.runtime_context == PluginRuntimeContext(
         engine_dir=str(engine_dir),
         binary_path="/opt/trtmc/bin/trtmc",
-        hf_python="/venvs/runtime/bin/python",
         runtime_python="/venvs/runtime/bin/python",
         reference_python="/venvs/reference/bin/python",
         artifacts_dir=str(artifacts_dir),

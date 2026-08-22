@@ -7,7 +7,6 @@ runtime_plugins = ["plugin.cpp|register_personaplex_plugin"]
 runtime_strategies = ["personaplex_speech_to_speech"]
 gnu_warning_suppressed_sources = ["pipeline.cpp"]
 runtime_tests = [
-  "test_personaplex_speech_subprocess_seam|test_personaplex_speech_subprocess_seam.cpp|_|_|_",
   "test_personaplex_speech_decode_stop_policy|test_personaplex_speech_decode_stop_policy.cpp|_|_|_",
   "test_personaplex_speech_generation_helpers|test_personaplex_speech_generation_helpers.cpp|_|_|_",
   "test_personaplex_speech_depth_plan|test_personaplex_speech_depth_plan.cpp|_|_|_",

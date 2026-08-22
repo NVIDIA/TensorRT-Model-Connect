@@ -40,9 +40,6 @@
       "speech_test_max_frames": 100,
       "prompt": "",
       "max_new_tokens": 300,
-      "metadata": {
-        "runtime_cli_requires_hf_python": true
-      },
       "preflight_requirements": [
         {
           "kind": "binary_exists",

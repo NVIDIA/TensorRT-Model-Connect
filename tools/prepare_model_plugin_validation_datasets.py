@@ -22,7 +22,6 @@ MANAGED_DATASET_DIRECTORIES = (
     "mmlu-generation-modes",
     "mmmu-pro-vision",
     "mmmu-pro-vision-square-448",
-    "seedtts-en-omni-audio",
 )
 FLORES_SOURCE = "facebook/flores-200 eng_Latn/fra_Latn devtest"
 FULL_DUPLEX_SOURCE = (
@@ -33,7 +32,6 @@ FULL_DUPLEX_SOURCE = (
 )
 MMLU_SOURCE = "TIGER-Lab/MMLU-Pro"
 MMMU_SOURCE = "MMMU/MMMU_Pro vision"
-SEEDTTS_SOURCE = "BytedanceSpeech/seed-tts-eval test-en"
 
 
 def sha256(path: Path) -> str:
@@ -499,52 +497,6 @@ def prepare_full_duplex_bench(
     )
 
 
-def prepare_seedtts_omni_audio(
-    seedtts_source: Path,
-    root: Path,
-    *,
-    limit: int = 1,
-) -> Path:
-    data = json.loads(seedtts_source.read_text(encoding="utf-8"))
-    rows = data.get("requests", [])
-    if not isinstance(rows, list) or len(rows) < limit:
-        raise ValueError(f"{seedtts_source}: need at least {limit} requests")
-    requests = []
-    for index, row in enumerate(rows[:limit]):
-        prompt = str(row.get("reference", "") or "").strip()
-        if not prompt:
-            raise ValueError(
-                f"{seedtts_source}: request {index} has no reference text"
-            )
-        requests.append(
-            {
-                "sample_id": str(
-                    row.get("id", f"seedtts_omni_{index:06d}")
-                ),
-                "stage": "talker_decode",
-                "category": "text_to_audio",
-                "inputs": {
-                    "prompt": prompt,
-                    "max_new_tokens": 16,
-                    "seed": 42,
-                },
-            }
-        )
-    return write_json(
-        root / "seedtts-en-omni-audio" / "dataset.json",
-        dataset_payload(
-            name="Seed-TTS-Eval English omni-audio parity slice",
-            source=f"{SEEDTTS_SOURCE}; sha256={sha256(seedtts_source)}",
-            license_name="Common Voice source-corpus terms",
-            license_url=(
-                "https://github.com/BytedanceSpeech/seed-tts-eval"
-            ),
-            sampling=f"first {limit} deterministic test-en row",
-            requests=requests,
-        ),
-    )
-
-
 def write_dataset_manifest(root: Path) -> Path:
     files = []
     for directory_name in MANAGED_DATASET_DIRECTORIES:
@@ -576,7 +528,6 @@ def prepare_all(
     full_duplex_source: Path,
     mmlu_source: Path,
     mmmu_source: Path,
-    seedtts_source: Path,
 ) -> list[Path]:
     root = output_root
     outputs = [
@@ -590,7 +541,6 @@ def prepare_all(
         prepare_mmlu_generation_modes(mmlu_source, root),
         prepare_flores_translation(flores_source, root),
         prepare_full_duplex_bench(full_duplex_source, root),
-        prepare_seedtts_omni_audio(seedtts_source, root),
     ]
     outputs.append(write_dataset_manifest(root))
     return outputs
@@ -605,7 +555,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--full-duplex-source", type=Path, required=True)
     parser.add_argument("--mmlu-source", type=Path, required=True)
     parser.add_argument("--mmmu-source", type=Path, required=True)
-    parser.add_argument("--seedtts-source", type=Path, required=True)
     return parser
 
 
@@ -617,7 +566,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         full_duplex_source=arguments.full_duplex_source.resolve(),
         mmlu_source=arguments.mmlu_source.resolve(),
         mmmu_source=arguments.mmmu_source.resolve(),
-        seedtts_source=arguments.seedtts_source.resolve(),
     ):
         print(path)
     return 0

@@ -3264,8 +3264,6 @@ def run_vlm_bundle(args: argparse.Namespace) -> None:
             ]
             if seed >= 0:
                 cmd.extend(["--seed", str(seed + idx)])
-            if args.hf_python:
-                cmd.extend(["--hf-python", args.hf_python])
             if args.backend_dir:
                 cmd.extend(["--backend-dir", args.backend_dir])
             if args.kv_cache_size:
@@ -3358,8 +3356,6 @@ def run_asr_bundle(args: argparse.Namespace) -> None:
                 "--max-new-tokens",
                 str(max_new_tokens),
             ]
-            if args.hf_python:
-                cmd.extend(["--hf-python", args.hf_python])
             cmd.extend(_asr_runtime_flags(prompt_row, defaults))
 
             _append_native_trtmc_command(
@@ -8640,8 +8636,6 @@ def run_tts_bundle(args: argparse.Namespace) -> None:
             ]
             if max_new_tokens > 0:
                 cmd.extend(["--max-new-tokens", str(max_new_tokens)])
-            if args.hf_python:
-                cmd.extend(["--hf-python", args.hf_python])
             if args.backend_dir:
                 cmd.extend(["--backend-dir", args.backend_dir])
             if args.config:
@@ -8731,8 +8725,6 @@ def run_encoder_embedding_bundle(args: argparse.Namespace) -> None:
                 "--prompt",
                 str(prompt_row["prompt"]),
             ]
-            if args.hf_python:
-                cmd.extend(["--hf-python", args.hf_python])
             if args.backend_dir:
                 cmd.extend(["--backend-dir", args.backend_dir])
             if args.model_plugin_dir:
@@ -8939,8 +8931,6 @@ def run_bundle(args: argparse.Namespace) -> None:
     ]
     if seed >= 0:
         cmd.extend(["--seed", str(seed)])
-    if args.hf_python:
-        cmd.extend(["--hf-python", args.hf_python])
     if args.backend_dir:
         cmd.extend(["--backend-dir", args.backend_dir])
     if getattr(args, "model_plugin_dir", ""):

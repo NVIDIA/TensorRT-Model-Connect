@@ -47,7 +47,7 @@ void test_speech_pipeline_construction() {
 
     trtmc::SpeechConfig cfg;
     trtmc::SpeechPipeline pipeline(nullptr, std::move(temporal), std::move(temporal_cache), {},
-                                   nullptr, nullptr, cfg, stream, nullptr, "test-speech");
+                                   nullptr, nullptr, cfg, stream, "test-speech");
 
     check(std::string(pipeline.pipeline_type()) == "SpeechPipeline",
           "SpeechPipeline: pipeline_type");
@@ -62,8 +62,7 @@ void test_speech_validates_temporal() {
         cudaStream_t stream;
         cudaStreamCreate(&stream);
         trtmc::SpeechConfig cfg;
-        trtmc::SpeechPipeline p(nullptr, nullptr, nullptr, {}, nullptr, nullptr, cfg, stream,
-                                nullptr, "x");
+        trtmc::SpeechPipeline p(nullptr, nullptr, nullptr, {}, nullptr, nullptr, cfg, stream, "x");
         check(false, "null temporal should throw");
         cudaStreamDestroy(stream);
     } catch (const std::exception&) {

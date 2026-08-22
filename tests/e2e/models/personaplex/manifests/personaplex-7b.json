@@ -33,10 +33,7 @@
       "speech_test_max_frames": 300,
       "prompt": "",
       "max_new_tokens": 1000,
-      "notes": "The temporal and depth decoders run in full FP32 while the Mimi codec remains FP16. Selectors 0 and 1 keep temporal embeddings, all 32 temporal blocks, KV caches, final norm, heads, and all 16 autoregressive depth decoders in FP32 with TF32 disabled; this stabilizes freshly selected TensorRT tactics while preserving the unchanged checkpoint-owned token contract.",
-      "metadata": {
-        "runtime_cli_requires_hf_python": true
-      }
+      "notes": "The temporal and depth decoders run in full FP32 while the Mimi codec remains FP16. Selectors 0 and 1 keep temporal embeddings, all 32 temporal blocks, KV caches, final norm, heads, and all 16 autoregressive depth decoders in FP32 with TF32 disabled; this stabilizes freshly selected TensorRT tactics while preserving the unchanged checkpoint-owned token contract."
     }
   ]
 }

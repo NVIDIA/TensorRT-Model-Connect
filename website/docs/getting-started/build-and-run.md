@@ -68,7 +68,9 @@ trtmc generate-audio /tmp/magpie.bundle \
   --output /tmp/magpie.wav
 ```
 
-Streaming paths are exposed through `trtmc transcribe --stream` for cache-aware ASR and `trtmc serve-audio` for prompt-driven audio serving. Add `--hf-python /opt/venv/bin/python` only for runtime strategies that still need helper Python code.
+Streaming paths are exposed through `trtmc transcribe --stream` for cache-aware
+ASR and `trtmc serve-audio` for prompt-driven audio serving. Bundle inference
+uses native runtime components and does not accept a Python interpreter.
 
 ## Diffusion and video
 

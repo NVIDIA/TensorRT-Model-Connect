@@ -8,7 +8,7 @@
         "label": "segment",
         "gpu_argmax_label": "segment",
         "metric": "pipeline_ms",
-        "command": ["{binary}", "segment", "{bundle}", "--image", "{repo_root}/tests/e2e/models/sam/data/test_img.jpeg", "--output", "{generated_output_image}", "{hf_python_args}"]
+        "command": ["{binary}", "segment", "{bundle}", "--image", "{repo_root}/tests/e2e/models/sam/data/test_img.jpeg", "--output", "{generated_output_image}"]
       }
     }
   ]

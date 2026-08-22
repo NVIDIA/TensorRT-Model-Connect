@@ -143,9 +143,6 @@ class PromptedSegmentationRunner:
             cmd = ["bash", "-lc", wrapper, "trtmc_rank_sam", output_root] + cmd
         else:
             cmd.extend(["--output", str(output_dir)])
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            cmd.extend(["--hf-python", str(runtime_cli_python)])
         if ctx.model_plugin_dir:
             cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
         cmd = _wrap_distributed_command(cmd, case)

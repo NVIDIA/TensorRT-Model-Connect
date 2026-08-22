@@ -104,7 +104,7 @@ find_depth_engine_plans_in_codebook_order(const BundleFile& bundle) {
 }
 
 SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std::string& json,
-                                             const BaseConfig& base, const std::string& hf_python) {
+                                             const BaseConfig& base) {
     SpeechConfig sc;
     sc.sample_rate = extract_json_int(json, "sample_rate", 24000);
     sc.temporal_hidden_size = base.hidden_size;
@@ -127,9 +127,12 @@ SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std
     sc.depth_temperature = extract_json_float(json, "speech_depth_temperature", 0.0F);
     sc.depth_top_k = extract_json_int(json, "speech_depth_top_k", 0);
     sc.text_eos_token_id = base.id_eos;
-    sc.system_prompt = extract_json_string(json, "speech_system_prompt", "");
     sc.text_prompt_ids = parse_speech_text_prompt_ids(json);
-    sc.hf_python = hf_python;
+    if (!extract_json_string(json, "speech_system_prompt", "").empty() &&
+        sc.text_prompt_ids.empty()) {
+        throw std::runtime_error("PersonaPlex native runtime requires speech_text_prompt_ids when "
+                                 "speech_system_prompt is configured");
+    }
     sc.audio_embeddings = section_to_floats(find_section(bundle, "audio_embeddings"));
     sc.temporal_text_embedding = section_to_floats(find_section(bundle, "temporal_text_embedding"));
     sc.depth_text_embedding = section_to_floats(find_section(bundle, "depth_text_embedding"));

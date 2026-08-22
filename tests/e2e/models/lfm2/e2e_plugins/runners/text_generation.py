@@ -120,9 +120,6 @@ class TextGenerationCausalRunner:
             "-o",
             str(output_path),
         ]
-        runtime_hf_python = ctx.runtime_cli_hf_python()
-        if runtime_hf_python:
-            command.extend(["--hf-python", runtime_hf_python])
 
         if float(case.inputs.get("temperature", 1.0)) != 1.0:
             command.extend(["--temperature", str(case.inputs["temperature"])])

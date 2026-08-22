@@ -4,14 +4,13 @@
  */
 
 // Qwen3OmniPlugin: handles "qwen3_omni_multimodal" strategy.
-// Omni pipeline with TensorRT Thinker/Code2Wav and the official model-owned Talker bridge.
+// Omni pipeline with TensorRT Thinker/Code2Wav. Audio generation fails closed
+// until a native Talker implementation is available.
 
 #include "plugin_helpers.h"
 #include "runtime/models/qwen3_omni/pipeline.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
-
-#include <cstdlib>
 
 namespace trtmc {
 
@@ -69,18 +68,6 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         omni_cfg.code2wav_upsample_factor =
             extract_json_int(json, "omni_code2wav_upsample_factor", 1920);
         omni_cfg.code2wav_output_delay = extract_json_int(json, "omni_code2wav_output_delay", 555);
-        omni_cfg.hf_python = ctx.hf_python;
-        omni_cfg.talker_model_id = extract_json_string(
-            json, "omni_talker_model_id",
-            extract_json_string(json, "omni_talker_model_path", ctx.bundle.info.model_id));
-        omni_cfg.talker_model_revision =
-            extract_json_string(json, "omni_talker_model_revision", "");
-        if (const char* override_path = std::getenv("TRTMC_QWEN3_OMNI_MODEL_PATH");
-            override_path != nullptr && override_path[0] != '\0') {
-            omni_cfg.talker_model_id = override_path;
-            omni_cfg.talker_model_revision.clear();
-        }
-
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<OmniPipeline>(

@@ -373,7 +373,6 @@ def bench_trtmc_cpp(
     max_new_tokens: int,
     warmup: int,
     iterations: int,
-    hf_python: str | None,
     verbose: bool,
 ) -> dict | None:
     """Benchmark the C++ trtmc binary using --benchmark / --warmup flags.
@@ -393,9 +392,6 @@ def bench_trtmc_cpp(
         "--benchmark", str(iterations),
         "--warmup", str(warmup),
     ]
-    if hf_python:
-        cmd += ["--hf-python", hf_python]
-
     if verbose:
         print(f"  [cpp] running: {' '.join(cmd)}", file=sys.stderr)
 
@@ -911,9 +907,6 @@ def main():
     parser.add_argument("--trtmc-binary", dest="trtmc_binary", metavar="PATH",
                         help="Path to trtmc C++ binary for C++ runtime benchmark "
                              "(requires --bundle)")
-    parser.add_argument("--hf-python", dest="hf_python", metavar="PATH",
-                        help="Path to Python interpreter for HF tokenizer in C++ binary "
-                             "(passed to --trtmc-binary runs)")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -1101,12 +1094,11 @@ def main():
     cpp_res = None
     trtmc_binary = getattr(args, "trtmc_binary", None)
     if trtmc_binary and args.bundle:
-        hf_python = getattr(args, "hf_python", None)
         print(f"[perf] Benchmarking C++ binary ({args.warmup} warmup + "
               f"{args.iterations} iterations) ...", file=sys.stderr)
         cpp_res = bench_trtmc_cpp(
             trtmc_binary, args.bundle, args.prompt, args.max_new_tokens,
-            args.warmup, args.iterations, hf_python, args.verbose)
+            args.warmup, args.iterations, args.verbose)
         if cpp_res is None:
             print("[perf] WARNING: C++ benchmark failed; omitting from report.",
                   file=sys.stderr)

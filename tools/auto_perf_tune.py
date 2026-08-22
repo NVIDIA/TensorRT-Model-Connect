@@ -157,7 +157,6 @@ DEFAULT_BENCHMARK = {
         "{prompt}",
         "--max-new-tokens",
         "{max_tokens}",
-        "{hf_python_args}",
         "{config_args}",
     ],
 }
@@ -176,7 +175,6 @@ def _benchmark_context(
         "bundle": bundle,
         "prompt": prompt,
         "max_tokens": str(max_tokens),
-        "hf_python_args": ["--hf-python", "/opt/venv/bin/python"],
         "config_args": (
             ["--set", "platform.trt_log_stderr=true"]
             + (["--set", "runtime.prefer_gpu_greedy=true"] if gpu_argmax else [])
@@ -190,7 +188,7 @@ def _benchmark_context(
 def _expand_command_template(command: list[str], context: dict[str, object]) -> list[str]:
     expanded: list[str] = []
     for token in command:
-        if token in {"{hf_python_args}", "{config_args}"}:
+        if token == "{config_args}":
             expanded.extend(str(value) for value in context[token[1:-1]])
             continue
         try:

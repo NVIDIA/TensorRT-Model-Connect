@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-import sys
 from typing import Any, Callable, Mapping
 
 from .operations import operation_for_name
@@ -137,29 +136,15 @@ def _input_or_testcase_value(
     return _testcase_value(testcase, name, default)
 
 
-def _required_python_runtime(testcase: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
-    metadata = testcase.get("metadata", {})
-    if not isinstance(metadata, Mapping):
-        raise BenchmarkError("testcase metadata must be an object")
-    if not metadata.get("runtime_cli_requires_hf_python"):
-        return {}, {}
-    return {"hf_python": sys.executable}, {"hf_python": _MODEL_TESTCASE}
-
-
 def _resolution(
     request: Mapping[str, Any],
     sources: Mapping[str, str],
     *,
-    testcase: Mapping[str, Any] | None = None,
     runtime: Mapping[str, Any] | None = None,
     runtime_sources: Mapping[str, str] | None = None,
 ) -> CaseResolution:
     selected_runtime = dict(runtime or {})
     selected_runtime_sources = dict(runtime_sources or {})
-    if testcase is not None:
-        required_runtime, required_sources = _required_python_runtime(testcase)
-        selected_runtime.update(required_runtime)
-        selected_runtime_sources.update(required_sources)
     return CaseResolution(
         request=dict(request),
         request_sources=dict(sources),
@@ -220,7 +205,7 @@ def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> CaseRes
     request, sources = _generation_values(testcase)
     request["prompt"] = _prompt(testcase, "generate")
     sources["prompt"] = _MODEL_TESTCASE
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _vision_language_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
@@ -234,7 +219,7 @@ def _vision_language_request(testcase: Mapping[str, Any], model_root: Path) -> C
         }
     )
     sources.update({"prompt": _MODEL_TESTCASE, "image_path": _MODEL_TESTCASE})
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _diffusion_text_request(testcase: Mapping[str, Any], _model_root: Path) -> CaseResolution:
@@ -259,7 +244,7 @@ def _diffusion_text_request(testcase: Mapping[str, Any], _model_root: Path) -> C
         if source_name in inputs:
             request[target_name] = convert(inputs[source_name])
             sources[target_name] = _MODEL_TESTCASE
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _prompt_from_file(testcase: Mapping[str, Any], model_root: Path) -> tuple[str, str | None]:
@@ -411,7 +396,6 @@ def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> Ca
     return _resolution(
         request,
         sources,
-        testcase=testcase,
         runtime=runtime,
         runtime_sources=runtime_sources,
     )
@@ -441,7 +425,6 @@ def _generate_audio_request(testcase: Mapping[str, Any], _model_root: Path) -> C
     return _resolution(
         request,
         sources,
-        testcase=testcase,
         runtime=runtime,
         runtime_sources=runtime_sources,
     )
@@ -523,7 +506,7 @@ def _speak_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolut
         "max_new_tokens": max_frames_source,
         "tail_frames": _MODEL_TESTCASE if "tail_frames" in testcase else _TASK_DEFAULT,
     }
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _image_request(
@@ -560,24 +543,24 @@ def _prompted_segmentation_request(testcase: Mapping[str, Any], model_root: Path
     else:
         request["prompt"] = _prompt(testcase, "segment_prompted")
         sources["prompt"] = _MODEL_TESTCASE
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _segmentation_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
     request, sources = _image_request(testcase, model_root, "segment")
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _classification_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
     request, sources = _image_request(testcase, model_root, "classify")
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _image_feature_extraction_request(
     testcase: Mapping[str, Any], model_root: Path
 ) -> CaseResolution:
     request, sources = _image_request(testcase, model_root, "extract_features")
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _detection_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
@@ -603,7 +586,6 @@ def _detection_request(testcase: Mapping[str, Any], model_root: Path) -> CaseRes
             "image_path": _MODEL_TESTCASE,
             "score_threshold": threshold_source,
         },
-        testcase=testcase,
     )
 
 
@@ -624,7 +606,6 @@ def _rerank_request(testcase: Mapping[str, Any], _model_root: Path) -> CaseResol
     return _resolution(
         {"batch_size": 1, "query": query, "documents": list(documents)},
         {"batch_size": _TASK_DEFAULT, "query": _MODEL_TESTCASE, "documents": _MODEL_TESTCASE},
-        testcase=testcase,
     )
 
 
@@ -634,7 +615,6 @@ def _text_input_request(
     return _resolution(
         {"batch_size": 1, "prompt": _prompt(testcase, operation)},
         {"batch_size": _TASK_DEFAULT, "prompt": _MODEL_TESTCASE},
-        testcase=testcase,
     )
 
 
@@ -662,7 +642,7 @@ def _solve_request(testcase: Mapping[str, Any], _model_root: Path) -> CaseResolu
         sources[key] = _MODEL_TESTCASE
     if "field_input" not in request and "branch_input" not in request:
         raise BenchmarkError("solve testcase requires field_input or branch_input")
-    return _resolution(request, sources, testcase=testcase)
+    return _resolution(request, sources)
 
 
 def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
@@ -686,7 +666,6 @@ def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> CaseRe
             "language": language_source,
             "streaming": _MODEL_TESTCASE if "streaming" in testcase else _TASK_DEFAULT,
         },
-        testcase=testcase,
     )
 
 
@@ -716,7 +695,6 @@ def _stereo_disparity_request(
             "width": width_source,
             "pixel_shift": shift_source,
         },
-        testcase=testcase,
     )
 
 

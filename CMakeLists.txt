@@ -232,7 +232,6 @@ add_library(trtmc_core SHARED
   src/tokenizer/wordpiece_tokenizer.cpp
   src/tokenizer/unigram_tokenizer.cpp
   # Utilities
-  src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/utils/wav_reader.cpp
@@ -931,7 +930,6 @@ trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 # Config / parsing
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
-trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_speech_session_cli_helpers)

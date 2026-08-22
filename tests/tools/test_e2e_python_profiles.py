@@ -323,26 +323,6 @@ def test_prebuilt_only_profile_fails_before_creating_a_runtime_cache(
     assert not profile_root.exists()
 
 
-def test_runtime_cli_hf_python_is_manifest_metadata_controlled(tmp_path):
-    base_ctx = RunContext(
-        case=_make_case(runtime_strategy="speech_to_speech", task_strategy="speech_to_speech"),
-        hf_python="/usr/bin/python3",
-        runtime_python="/tmp/runtime-python",
-    )
-    assert base_ctx.runtime_cli_hf_python() == ""
-
-    opted_in_ctx = RunContext(
-        case=_make_case(
-            runtime_strategy="speech_to_speech",
-            task_strategy="speech_to_speech",
-            metadata={"runtime_cli_requires_hf_python": True},
-        ),
-        hf_python="/usr/bin/python3",
-        runtime_python="/tmp/runtime-python",
-    )
-    assert opted_in_ctx.runtime_cli_hf_python() == "/tmp/runtime-python"
-
-
 def test_repro_commands_record_profile_exports(tmp_path):
     case = _make_case(
         runtime_strategy="example_decoder_decoder_kv_cache",
@@ -369,3 +349,5 @@ def test_repro_commands_record_profile_exports(tmp_path):
         "TRTMC_PYTHON_PROFILE_SPECIALIZED_PYTHON=/tmp/specialized-python"
         in repro["profile_env"]
     )
+    assert "--hf-python" not in repro["trt_inference"]
+    assert "--hf-python /usr/bin/python3" in repro["rerun_test"]

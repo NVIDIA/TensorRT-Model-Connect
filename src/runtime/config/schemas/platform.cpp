@@ -28,7 +28,6 @@ Schema make_platform_schema() {
     return Schema{
         "platform",
         {
-            ConfigField{"source_dir", "string", std::any{std::string{}}, session, nullptr},
             ConfigField{"trt_log_stderr", "bool", std::any{false}, session, nullptr},
             ConfigField{"trt_log_min_severity", "string", std::any{std::string{"INFO"}}, session,
                         is_valid_severity},

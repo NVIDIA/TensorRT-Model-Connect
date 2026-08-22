@@ -128,21 +128,10 @@ python3 tools/trtmc_validate.py --all --dry-run
 python3 tools/trtmc_validate.py --all
 ```
 
-Qwen3-Omni now has a model-plugin validation binding, and the validation
-runner forwards `--model-plugin-dir` to each Omni runtime stage:
-
-```bash
-python3 tools/trtmc_validate.py \
-  qwen3-omni-30b-a3b-instruct \
-  seedtts_en_omni_audio_parity \
-  --model-plugin-dir ./build/models
-```
-
-That workload reads
-`/mnt/data/seedtts-en-omni-audio/dataset.json` and is declared `local_only` for
-a GB300 environment with roughly 280 GB of model/reference state. It is not a
-host-only documentation check; run it only in the prepared target environment
-and retain its model artifacts and comparison report.
+Qwen3-Omni audio generation currently fails closed because the repository does
+not yet provide a native Talker. Its manifest records that limitation, and the
+support matrix remains red. Do not interpret the skipped audio case as passing
+runtime evidence.
 
 Eligibility excludes manifests that require multiple devices, are marked
 `skip`, or use `ci_tier: l0_only`; readiness alone does not select a model. At
@@ -222,9 +211,10 @@ PYTHONPATH=python:. python3 -m pytest \
   -v
 ```
 
-Add `--hf-python /path/to/python` only when the selected runtime needs a Python
-helper. E2E requires the checkpoint, a compatible GPU/TensorRT environment,
-and the CLI binary. The remaining runtime evidence depends on the bundle path:
+The harness-level `--hf-python /path/to/python` option selects the environment
+for build, reference, and diagnostic helpers; it is never forwarded to the
+native runtime. E2E requires the checkpoint, a compatible GPU/TensorRT
+environment, and the CLI binary. The remaining runtime evidence depends on the bundle path:
 a native bundle needs its owning model and backend DSOs; an optimized-runtime
 bundle must contain its declared implementation metadata, integrity-bound
 artifact tree, and embedded implementation DSO. Target-environment parity and

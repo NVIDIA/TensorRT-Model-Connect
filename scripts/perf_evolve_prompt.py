@@ -150,7 +150,6 @@ def build_evolve_prompt(
     docker exec {container} bash -c \\
         './build/trtmc run /tmp/evolve_test.bundle \\
          --prompt "The capital of France is" --max-new-tokens 100 \\
-         --hf-python /opt/venv/bin/python \\
          --set platform.trt_log_stderr=true 2>&1 | grep "Decode:"'
     ```
     Parse the output: `Decode: N tokens, X ms, Y tok/s [CUDA Graph ON]`
@@ -390,7 +389,6 @@ def _build_search_space(focus_area: str | None = None) -> str:
         ```bash
         ./build/trtmc run /tmp/test.bundle \\
             --prompt "The capital of France is" --max-new-tokens 100 \\
-            --hf-python /opt/venv/bin/python \\
             --set platform.trt_log_stderr=true \\
             --set runtime.prefer_gpu_greedy=true 2>&1 | grep "Decode:"
         ```
