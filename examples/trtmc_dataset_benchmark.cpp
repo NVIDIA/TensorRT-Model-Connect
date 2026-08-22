@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "cli/jsonl_io.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
 #include "trtmc/pipeline.h"
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -21,13 +23,6 @@
 #include <vector>
 
 namespace {
-
-struct Sample {
-    std::string sample_id;
-    std::string answer;
-    std::string prompt;
-    std::optional<int32_t> seed_index;
-};
 
 std::string trim(std::string value) {
     std::size_t start = 0;
@@ -39,157 +34,21 @@ std::string trim(std::string value) {
     return value.substr(start, end - start);
 }
 
-std::string unescape_json_string(std::string_view raw) {
-    std::string out;
-    out.reserve(raw.size());
-    for (std::size_t i = 0; i < raw.size(); ++i) {
-        char ch = raw[i];
-        if (ch != '\\') {
-            out.push_back(ch);
-            continue;
-        }
-        if (i + 1 >= raw.size())
-            throw std::runtime_error("Invalid trailing escape in JSON string");
-        char esc = raw[++i];
-        switch (esc) {
-        case '\\':
-            out.push_back('\\');
-            break;
-        case '"':
-            out.push_back('"');
-            break;
-        case 'n':
-            out.push_back('\n');
-            break;
-        case 'r':
-            out.push_back('\r');
-            break;
-        case 't':
-            out.push_back('\t');
-            break;
-        default:
-            throw std::runtime_error(std::string("Unsupported JSON escape: \\") + esc);
-        }
-    }
-    return out;
-}
-
-bool extract_json_field(const std::string& line, const std::string& key, std::string& value) {
-    const std::string needle = "\"" + key + "\"";
-    std::size_t pos = line.find(needle);
-    if (pos == std::string::npos)
-        return false;
-    pos = line.find(':', pos + needle.size());
-    if (pos == std::string::npos)
-        throw std::runtime_error("Malformed JSON line: missing ':' for key " + key);
-    ++pos;
-    while (pos < line.size() && std::isspace(static_cast<unsigned char>(line[pos])))
-        ++pos;
-    if (pos >= line.size() || line[pos] != '"')
-        throw std::runtime_error("Malformed JSON line: expected string value for key " + key);
-    ++pos;
-    std::string raw;
-    bool escaped = false;
-    for (; pos < line.size(); ++pos) {
-        char ch = line[pos];
-        if (escaped) {
-            raw.push_back(ch);
-            escaped = false;
-            continue;
-        }
-        if (ch == '\\') {
-            raw.push_back(ch);
-            escaped = true;
-            continue;
-        }
-        if (ch == '"') {
-            value = unescape_json_string(raw);
-            return true;
-        }
-        raw.push_back(ch);
-    }
-    throw std::runtime_error("Malformed JSON line: unterminated string for key " + key);
-}
-
-bool extract_json_int_field(const std::string& line, const std::string& key, int32_t& value) {
-    const std::string needle = "\"" + key + "\"";
-    std::size_t pos = line.find(needle);
-    if (pos == std::string::npos)
-        return false;
-    pos = line.find(':', pos + needle.size());
-    if (pos == std::string::npos)
-        throw std::runtime_error("Malformed JSON line: missing ':' for key " + key);
-    ++pos;
-    while (pos < line.size() && std::isspace(static_cast<unsigned char>(line[pos])))
-        ++pos;
-    if (pos >= line.size())
-        throw std::runtime_error("Malformed JSON line: missing integer value for key " + key);
-
-    std::size_t end = pos;
-    if (line[end] == '-')
-        ++end;
-    while (end < line.size() && std::isdigit(static_cast<unsigned char>(line[end])))
-        ++end;
-    if (end == pos || (line[pos] == '-' && end == pos + 1))
-        throw std::runtime_error("Malformed JSON line: expected integer value for key " + key);
-
-    value = std::stoi(line.substr(pos, end - pos));
-    return true;
-}
-
-std::vector<Sample> load_samples(const std::string& dataset_path) {
+std::vector<trtmc::cli::DatasetSample> load_samples(const std::string& dataset_path) {
     std::ifstream input(dataset_path);
     if (!input)
         throw std::runtime_error("Failed to open dataset file: " + dataset_path);
 
-    std::vector<Sample> samples;
+    std::vector<trtmc::cli::DatasetSample> samples;
     std::string line;
     std::size_t line_no = 0;
     while (std::getline(input, line)) {
         ++line_no;
         if (trim(line).empty())
             continue;
-        Sample sample;
-        if (!extract_json_field(line, "sample_id", sample.sample_id) ||
-            !extract_json_field(line, "answer", sample.answer) ||
-            !extract_json_field(line, "prompt", sample.prompt)) {
-            throw std::runtime_error("Dataset line missing required fields at line " +
-                                     std::to_string(line_no));
-        }
-        int32_t seed_index = 0;
-        if (extract_json_int_field(line, "seed_index", seed_index))
-            sample.seed_index = seed_index;
-        samples.push_back(std::move(sample));
+        samples.push_back(trtmc::cli::parse_dataset_line(line, line_no));
     }
     return samples;
-}
-
-std::string json_escape(const std::string& text) {
-    std::string out;
-    out.reserve(text.size() + 16);
-    for (char ch : text) {
-        switch (ch) {
-        case '\\':
-            out += "\\\\";
-            break;
-        case '"':
-            out += "\\\"";
-            break;
-        case '\n':
-            out += "\\n";
-            break;
-        case '\r':
-            out += "\\r";
-            break;
-        case '\t':
-            out += "\\t";
-            break;
-        default:
-            out.push_back(ch);
-            break;
-        }
-    }
-    return out;
 }
 
 std::optional<std::string> normalize_answer_value(std::string value) {
@@ -388,22 +247,19 @@ int main(int argc, char** argv) {
                 : 0.0;
         const std::string pred_answer = extract_answer_from_text(result.text).value_or("");
 
-        output << "{\"sample_id\":\"" << json_escape(sample.sample_id) << "\""
-               << ",\"gold_answer\":\"" << json_escape(sample.answer) << "\""
-               << ",\"pred_answer\":\"" << json_escape(pred_answer) << "\""
-               << ",\"generated_tokens\":" << generated_tokens << ",\"generated_token_ids\":[";
-        for (std::size_t token_idx = 0; token_idx < result.token_ids.size(); ++token_idx) {
-            if (token_idx > 0)
-                output << ',';
-            output << result.token_ids[token_idx];
-        }
-        output << "]"
-               << ",\"setup_ms\":" << std::fixed << std::setprecision(6) << result.setup_ms
-               << ",\"prefill_ms\":" << std::fixed << std::setprecision(6) << result.prefill_ms
-               << ",\"decode_ms\":" << std::fixed << std::setprecision(6) << result.decode_ms
-               << ",\"wall_ms\":" << std::fixed << std::setprecision(6) << wall_ms
-               << ",\"tokens_per_sec\":" << std::fixed << std::setprecision(6) << tok_per_sec
-               << ",\"text\":\"" << json_escape(result.text) << "\"}\n";
+        nlohmann::json record;
+        record["sample_id"] = sample.sample_id;
+        record["gold_answer"] = sample.answer;
+        record["pred_answer"] = pred_answer;
+        record["generated_tokens"] = generated_tokens;
+        record["generated_token_ids"] = result.token_ids;
+        record["setup_ms"] = result.setup_ms;
+        record["prefill_ms"] = result.prefill_ms;
+        record["decode_ms"] = result.decode_ms;
+        record["wall_ms"] = wall_ms;
+        record["tokens_per_sec"] = tok_per_sec;
+        record["text"] = result.text;
+        output << record.dump() << '\n';
         output.flush();
 
         std::cerr << "[trtmc.dataset_benchmark] sample=" << sample.sample_id

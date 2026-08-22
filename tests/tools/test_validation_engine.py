@@ -3636,7 +3636,8 @@ def test_dataset_benchmark_serializes_generated_token_ids() -> None:
         validation_engine.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
     ).read_text(encoding="utf-8")
 
-    assert '\\"generated_token_ids\\":[' in source
+    assert '"generated_token_ids"' in source
+    assert "result.token_ids" in source
 
 
 def test_dataset_benchmark_accepts_model_plugin_directory() -> None:
@@ -3646,7 +3647,7 @@ def test_dataset_benchmark_accepts_model_plugin_directory() -> None:
 
     assert 'arg == "--model-plugin-dir"' in source
     assert "load_options.model_plugin_search_paths.emplace_back" in source
-    assert "result.token_ids[token_idx]" in source
+    assert "result.token_ids" in source
 
 
 def test_convert_bundle_uses_generated_text_field(tmp_path: Path) -> None:
