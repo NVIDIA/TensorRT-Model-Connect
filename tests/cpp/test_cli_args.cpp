@@ -79,6 +79,15 @@ void test_build_forwards_args_verbatim() {
           "graph command forwards to Python");
 }
 
+void test_serve_forwards_args() {
+    auto args = parse({"trtmc", "serve", "--chat-model", "chat=model.bundle", "--port", "0"});
+    check(!args.parse_error, "serve parses cleanly");
+    check(args.command == "serve", "serve command");
+    check(args.build_args ==
+              std::vector<std::string>({"--chat-model", "chat=model.bundle", "--port", "0"}),
+          "serve forwards Python facade args verbatim");
+}
+
 void test_run_parses_common_flags() {
     auto args = parse({"trtmc",
                        "run",
@@ -533,6 +542,7 @@ int main() {
     test_help_aliases_show_help();
     test_version_aliases();
     test_build_forwards_args_verbatim();
+    test_serve_forwards_args();
     test_run_parses_common_flags();
     test_diffusion_flags();
     test_detect_parses_contract_flags();

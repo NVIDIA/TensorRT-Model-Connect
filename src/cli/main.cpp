@@ -32,6 +32,7 @@
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
 #include "cli/speech_session_helpers.h"
+#include "cli/serve_worker.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -249,6 +250,17 @@ std::string build_pythonpath() {
     return pythonpath;
 }
 
+void configure_python_module_environment() {
+    const std::string pythonpath = build_pythonpath();
+    if (!pythonpath.empty())
+        setenv("PYTHONPATH", pythonpath.c_str(), 1);
+    const auto executable = current_executable_path();
+    if (!executable.empty()) {
+        const std::string native_bin_dir = executable.parent_path().string();
+        setenv("_TRTMC_INTERNAL_NATIVE_BIN_DIR", native_bin_dir.c_str(), 1);
+    }
+}
+
 int run_python_module(const std::vector<std::string>& argv) {
     if (argv.empty()) {
         std::cerr << "Error: empty Python command\n";
@@ -268,14 +280,7 @@ int run_python_module(const std::vector<std::string>& argv) {
     }
 
     if (pid == 0) {
-        const std::string pythonpath = build_pythonpath();
-        if (!pythonpath.empty())
-            setenv("PYTHONPATH", pythonpath.c_str(), 1);
-        const auto executable = current_executable_path();
-        if (!executable.empty()) {
-            const std::string native_bin_dir = executable.parent_path().string();
-            setenv("_TRTMC_INTERNAL_NATIVE_BIN_DIR", native_bin_dir.c_str(), 1);
-        }
+        configure_python_module_environment();
         execvp(exec_argv[0], exec_argv.data());
         std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
         _exit(127);
@@ -299,7 +304,51 @@ int run_python_module(const std::vector<std::string>& argv) {
     return EXIT_FAILURE;
 }
 
+int replace_with_python_module(const std::vector<std::string>& argv) {
+    if (argv.empty()) {
+        std::cerr << "Error: empty Python command\n";
+        return EXIT_FAILURE;
+    }
+
+    std::vector<char*> exec_argv;
+    exec_argv.reserve(argv.size() + 1);
+    for (const auto& arg : argv)
+        exec_argv.push_back(const_cast<char*>(arg.c_str()));
+    exec_argv.push_back(nullptr);
+
+    configure_python_module_environment();
+    execvp(exec_argv[0], exec_argv.data());
+    std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
+    return 127;
+}
+
 int cmd_python(const CliArgs& args) {
+    if (args.command == "serve") {
+        std::vector<std::string> command = {
+            build_python_executable(),
+            "-m",
+            "tensorrt_model_connect.serve.cli",
+        };
+        command.insert(command.end(), args.build_args.begin(), args.build_args.end());
+
+        const bool binary_provided =
+            std::any_of(args.build_args.begin(), args.build_args.end(), [](const std::string& arg) {
+                return arg == "--trtmc-binary" || arg.rfind("--trtmc-binary=", 0) == 0;
+            });
+        if (!binary_provided) {
+            const auto executable = current_executable_path();
+            if (executable.empty()) {
+                std::cerr << "Error: cannot resolve the current trtmc binary for serve\n";
+                return EXIT_FAILURE;
+            }
+            command.emplace_back("--trtmc-binary");
+            command.push_back(executable.string());
+        }
+        // Keep the caller-visible PID so lifecycle signals reach the long-lived
+        // Python facade directly. Short-lived build helpers still use fork/wait.
+        return replace_with_python_module(command);
+    }
+
     std::vector<std::string> command = {
         build_python_executable(),
         "-m",
@@ -1739,8 +1788,10 @@ int main(int argc, char** argv) {
     try {
         if (args.command == "version")
             return cmd_version();
-        if (args.command == "build" || args.command == "graph")
+        if (args.command == "build" || args.command == "graph" || args.command == "serve")
             return cmd_python(args);
+        if (args.command == "_serve-worker")
+            return trtmc::cli::run_serve_worker(args);
         if (args.command == "run")
             return cmd_run(args);
         if (args.command == "encode")

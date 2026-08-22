@@ -188,6 +188,8 @@ void print_usage() {
         << "Usage:\n"
            "  trtmc build           <hf-model-or-dir> -o <bundle.bundle> [builder args...]\n"
            "  trtmc graph           <inspect|list|recipes|select> [args...]\n"
+           "  trtmc serve           [--chat-model NAME=PATH] "
+           "[--transcription-model NAME=PATH] [server args...]\n"
            "  trtmc run             <bundle.bundle> "
            "(--prompt \"text\" [--image PATH] | --prompts-file PATH) "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
@@ -272,17 +274,31 @@ CliArgs parse_args(int argc, char** argv) {
         return args;
     }
 
-    if (args.command == "build" || args.command == "graph") {
+    if (args.command == "build" || args.command == "graph" || args.command == "serve") {
         for (int i = 2; i < argc; ++i)
             args.build_args.emplace_back(argv[i]);
         return args;
     }
 
-    static const char* known_cmds[] = {
-        "run",         "inspect",    "generate-video", "segment",          "segment-prompted",
-        "disparity",   "classify",   "detect",         "extract-features", "generate-audio",
-        "serve-audio", "encode",     "embed",          "rerank",           "solve",
-        "speak",       "transcribe", nullptr};
+    static const char* known_cmds[] = {"run",
+                                       "inspect",
+                                       "generate-video",
+                                       "segment",
+                                       "segment-prompted",
+                                       "disparity",
+                                       "classify",
+                                       "detect",
+                                       "extract-features",
+                                       "generate-audio",
+                                       "serve-audio",
+                                       "encode",
+                                       "embed",
+                                       "rerank",
+                                       "solve",
+                                       "speak",
+                                       "transcribe",
+                                       "_serve-worker",
+                                       nullptr};
     bool valid = false;
     for (const char** p = known_cmds; *p; ++p)
         if (args.command == *p) {

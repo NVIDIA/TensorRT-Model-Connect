@@ -34,7 +34,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "torch>=2.0"]
+serve = [
+    "fastapi>=0.115,<0.142",
+    "uvicorn>=0.30,<0.53",
+    "python-multipart>=0.0.9,<1",
+    "websockets>=13,<17",
+]
+test = [
+    "pytest>=7.0",
+    "torch>=2.0",
+    "fastapi>=0.115,<0.142",
+    "uvicorn>=0.30,<0.53",
+    "python-multipart>=0.0.9,<1",
+    "httpx>=0.27,<0.29",
+    "websockets>=13,<17",
+]
 # Build-only dependency for official Wan checkpoints containing T5/VAE .pth
 # files. Kept out of the base install and never required by the C++ runtime.
 wan = ["torch>=2.0"]
