@@ -152,6 +152,7 @@ class SourceQualityChecks:
                 "-m",
                 "pytest",
                 "tests/tools/test_model_plugin_encapsulation_static.py",
+                "tests/tools/test_server_dependency_direction.py",
                 "-q",
                 "-p",
                 "no:cacheprovider",

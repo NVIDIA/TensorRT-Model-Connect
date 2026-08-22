@@ -18,6 +18,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from tools.ci.container import CiContainer
 from tools.ci.environment import OPTIONAL_TUNING_ENVIRONMENT
 from tools.ci.process import CiError
@@ -669,6 +674,7 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
         "tests/tools/test_model_plugin_encapsulation_static.py"
         in architecture_contract
     )
+    assert "tests/tools/test_server_dependency_direction.py" in architecture_contract
     assert '"-q"' in architecture_contract
     assert '"no:cacheprovider"' in architecture_contract
 
@@ -824,6 +830,36 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "_validate_package_variant" in package
     assert "_validate_backend_files" in package
     assert "_validate_backend_identity" in package
+
+
+def test_ci_image_installs_declared_server_test_dependencies() -> None:
+    pyproject = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    extras = pyproject["project"]["optional-dependencies"]
+    server_dependency_names = {
+        "fastapi",
+        "uvicorn",
+        "python-multipart",
+        "httpx",
+        "websockets",
+    }
+    declared: dict[str, str] = {}
+    for extra_name in ("serve", "test"):
+        for requirement in extras[extra_name]:
+            name = re.split(r"[<>=!~;@\s\[]", requirement, maxsplit=1)[0].lower()
+            if name not in server_dependency_names:
+                continue
+            if name in declared:
+                assert declared[name] == requirement
+            declared[name] = requirement
+    assert set(declared) == server_dependency_names
+
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dependency_block = dockerfile.split(
+        "# Local serving control-plane and test dependencies.", maxsplit=1
+    )[1].split("\n\n", maxsplit=1)[0]
+    assert set(re.findall(r'"([^"]+)"', dependency_block)) == set(declared.values())
 
 
 def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
