@@ -76,31 +76,61 @@ files are not expected to have the same checksum.
 For live use, cast the loaded pipeline to the optional C++
 `ISpeechSessionProvider` declared in `trtmc/speech_session.h`, then create a
 persistent `ISpeechSession`. Append arbitrary mono chunks and drain interleaved
-agent-audio, agent-text, user-transcript, and lifecycle events. Sessions retain
-model state across calls and support barge-in, finish, cancel, and reset.
-Keeping the provider separate preserves the base
-`IPipeline` ABI for existing optimized-runtime integrations.
+agent-audio, agent-text, user-transcript, function-call, and lifecycle events.
+Sessions retain model state across calls and support model-confirmed barge-in,
+multiple user turns, bounded backpressure, finish, cancel, and reset. Separate
+optional interfaces provide function results, input commit/clear, response
+creation/cancellation, and playback-aware response truncation. Finite WAV
+inference uses `ISpeechBatchSessionProvider`, so live turn policy does not
+change the model-card `trtmc speak` result. Keeping these capabilities separate
+preserves the base `IPipeline` and existing speech-session ABI.
+
+To expose the native session over a local Realtime WebSocket, install the
+optional transport dependency and start the bundled worker through the Python
+host:
+
+```bash
+python -m pip install 'tensorrt-model-connect[realtime]'
+export TRTMC_REALTIME_TOKEN='replace-with-a-local-secret'
+
+python -m tensorrt_model_connect.realtime \
+  --bundle nemotron-voicechat-11b.bundle \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+Connect to `ws://127.0.0.1:8765/v1/realtime` with
+`Authorization: Bearer $TRTMC_REALTIME_TOKEN`. Audio input and output use mono
+24 kHz PCM16 carried as Base64 JSON deltas. The supported event subset includes
+session configuration, streaming append, commit/clear, `response.create`,
+response cancel/truncate, and function-call output. The host keeps audio,
+command, and output queues bounded; it never executes tool calls itself.
+The default native worker accepts at most five minutes of input audio per
+connection, leaving headroom in VoiceChat's fixed recurrent and TTS caches for
+agent output and function steps. Processed-input clear, cancel, and truncate
+perform a real model-state rollback; they are synchronous and their replay
+cost grows with conversation history.
 
 For an opt-in real-engine lifecycle check, build the standalone model-owned
 probe and run it against a prebuilt bundle and the pinned public sample:
 
 ```bash
-c++ -std=c++17 -O2 -pthread -Iinclude -Isrc \
-  tests/e2e/models/nemotron_voicechat/native_lifecycle_probe.cpp \
-  -Lbuild -ltrtmc_core -Wl,-rpath,"$PWD/build" \
-  -o /tmp/voicechat_native_lifecycle_probe
+cmake --build build --target test_nemotron_voicechat_native_lifecycle
 
 LD_LIBRARY_PATH="$PWD/build:${LD_LIBRARY_PATH:-}" \
-/tmp/voicechat_native_lifecycle_probe \
+build/test_nemotron_voicechat_native_lifecycle \
   nemotron-voicechat-11b.bundle \
   "$VOICECHAT_SPEECH/examples/speechlm2/sample_audio/sample_general.wav" \
   build build/models response.wav lifecycle-receipt.json
 ```
 
-The probe covers arbitrary chunk boundaries, output before input completion,
-mid-response barge-in and same-session recovery, cancel, reset, and bounded
-finish behavior. It is a large-memory-GPU local check rather than a normal
-source-only unit test.
+The probe covers batch parity, arbitrary chunk boundaries, output before input
+completion, model-confirmed mid-response barge-in and same-session recovery,
+cancel/reset, exact bounded finish behavior, normal multi-turn conversation,
+producer/consumer backpressure, and a real function-call/result continuation.
+The model-owned E2E also drives the WebSocket host through non-silent function,
+truncate, and cancel traces. These are large-memory-GPU checks rather than
+normal source-only unit tests.
 
 Use exact checkpoints from [Model Recipes](../models-recipes/model-recipes.md),
 organized by the corresponding Hugging Face multimodal or audio task.

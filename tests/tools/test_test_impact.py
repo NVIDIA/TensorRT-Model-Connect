@@ -1747,6 +1747,15 @@ class TestE2EDataFiles:
 
 
 class TestUnitTiers:
+    def test_realtime_speech_host_scope(self, imap):
+        """The generic realtime host affects speech-to-speech models and tools units."""
+        match = test_impact.classify_file("python/tensorrt_model_connect/realtime/server.py", imap)
+
+        assert match.rule == "realtime_speech_host"
+        assert match.models == sorted(imap.task_strategy_to_models.get("speech_to_speech", []))
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_unit_tier_builder(self, imap):
         """tests/builder/ -> unit tier 'builder', no E2E."""
         match = test_impact.classify_file("tests/builder/test_config.py", imap)

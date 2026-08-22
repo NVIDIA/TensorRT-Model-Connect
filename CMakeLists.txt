@@ -686,6 +686,20 @@ set_target_properties(trtmc PROPERTIES
   INSTALL_RPATH "\$ORIGIN"
 )
 
+add_executable(trtmc_realtime_worker
+  src/serve/realtime_worker.cpp
+  src/serve/realtime_worker_main.cpp
+)
+target_link_libraries(trtmc_realtime_worker
+  PRIVATE trtmc_core Threads::Threads nlohmann_json::nlohmann_json
+)
+target_include_directories(trtmc_realtime_worker PRIVATE ${PROJECT_SOURCE_DIR}/src)
+set_target_properties(trtmc_realtime_worker PROPERTIES
+  BUILD_RPATH "\$ORIGIN"
+  BUILD_RPATH_USE_ORIGIN TRUE
+  INSTALL_RPATH "\$ORIGIN"
+)
+
 if(TRTMC_BUILD_BENCHMARKS)
   add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
   target_link_libraries(trtmc_dataset_benchmark PRIVATE trtmc_core)
@@ -935,6 +949,9 @@ trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_speech_session_cli_helpers)
+trtmc_add_test(test_realtime_worker)
+target_sources(test_realtime_worker PRIVATE src/serve/realtime_worker.cpp)
+target_link_libraries(test_realtime_worker PRIVATE Threads::Threads nlohmann_json::nlohmann_json)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)
@@ -1065,8 +1082,8 @@ install(DIRECTORY include/trtmc/
   FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
 )
 
-# Install CLI executable
-install(TARGETS trtmc
+# Install command-line executables
+install(TARGETS trtmc trtmc_realtime_worker
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 

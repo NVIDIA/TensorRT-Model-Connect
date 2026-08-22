@@ -228,6 +228,13 @@ class TensorRTModelConnectConan(ConanFile):
         copy(self, "trtmc", src=self.build_folder, dst=str(wheel_data_scripts), keep_path=False)
         copy(
             self,
+            "trtmc_realtime_worker",
+            src=self.build_folder,
+            dst=str(package_bin),
+            keep_path=False,
+        )
+        copy(
+            self,
             "trtmc_benchmark_worker",
             src=self.build_folder,
             dst=str(package_bin),
@@ -306,6 +313,7 @@ class TensorRTModelConnectConan(ConanFile):
 
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"
+        realtime_worker = package_bin / "trtmc_realtime_worker"
         benchmark_worker = package_bin / "trtmc_benchmark_worker"
         benchmark_script = wheel_data_scripts / "trtmc-bench"
         package_cores = sorted(package_bin.glob("libtrtmc_core.so*"))
@@ -316,6 +324,8 @@ class TensorRTModelConnectConan(ConanFile):
             raise ConanException("TRTMC native executable was not staged into the wheel package")
         if not installed_script.is_file():
             raise ConanException("TRTMC native executable was not staged as the wheel script")
+        if not realtime_worker.is_file():
+            raise ConanException("TRTMC realtime worker was not staged into the wheel package")
         if not benchmark_worker.is_file():
             raise ConanException("TRTMC benchmark worker was not staged into the wheel package")
         if not benchmark_script.is_file():
@@ -330,7 +340,7 @@ class TensorRTModelConnectConan(ConanFile):
         if not model_plugins:
             raise ConanException("TRTMC model plugin DSOs were not staged into the wheel package")
 
-        for executable in (native, installed_script, benchmark_worker):
+        for executable in (native, installed_script, realtime_worker, benchmark_worker):
             _set_wheel_runpath(executable, "$ORIGIN")
         for core in (*package_cores, *script_cores):
             _set_wheel_runpath(core, "$ORIGIN:/usr/local/cuda/lib64")
@@ -342,6 +352,12 @@ class TensorRTModelConnectConan(ConanFile):
         for model_plugin in model_plugins:
             _set_wheel_runpath(model_plugin, "$ORIGIN:/usr/local/cuda/lib64")
 
-        for executable in (native, installed_script, benchmark_worker, benchmark_script):
+        for executable in (
+            native,
+            installed_script,
+            realtime_worker,
+            benchmark_worker,
+            benchmark_script,
+        ):
             mode = executable.stat().st_mode
             executable.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

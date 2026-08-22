@@ -1404,6 +1404,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_benchmark_python_triggers_owned_units",),
         ),
         ClassificationRule(
+            priority=96,
+            name="realtime_speech_host",
+            matcher=_path_startswith("python/tensorrt_model_connect/realtime/"),
+            resolver=_match_result(
+                "realtime_speech_host",
+                _task_strategy_models(["speech_to_speech"]),
+                ["tools"],
+                False,
+            ),
+            covered_by=("TestUnitTiers.test_realtime_speech_host_scope",),
+        ),
+        ClassificationRule(
             priority=100,
             name="shared_builder_module",
             matcher=_path_startswith("python/tensorrt_model_connect/"),

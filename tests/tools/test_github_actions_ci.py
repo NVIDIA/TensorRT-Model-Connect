@@ -589,6 +589,10 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
 
 def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    websocket_requirement = '"websockets>=13,<18"'
+    assert websocket_requirement in dockerfile
+    assert f"realtime = [{websocket_requirement}]" in pyproject
     assert (
         "ARG CUDA_IMAGE=nvidia/cuda:13.3.0-devel-ubuntu24.04"
         "@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52"
