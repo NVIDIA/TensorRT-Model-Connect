@@ -91,7 +91,6 @@ struct QwenImageImageConfig {
 };
 
 struct QwenImageTokenizerConfig {
-    std::string kind{"hf_python"};
     std::string class_name{"Qwen2Tokenizer"}; // "class" in JSON (C++ reserved word)
     std::string prompt_template_kind;
     int32_t prompt_template_drop_idx{0};

@@ -37,7 +37,6 @@ sample_limits:
   ocrbench_v2_unified: 5
   openwebtext_elf_diffusion_text: 5
   refcoco_grounding: 20
-  seedtts_en_omni_audio_parity: 1
   sana_wm_benchmark_diffusion_video: 2
   seedtts_en_tts_intelligibility: 3
   stsbenchmark_encoder_embedding_parity: 50
@@ -241,8 +240,6 @@ models:
     workloads: [mmlu_five_shot_mcq]
   qwen3-moe-30b-a3b:
     workloads: [mmlu_five_shot_mcq]
-  qwen3-omni-30b-a3b-instruct:
-    workloads: [seedtts_en_omni_audio_parity]
   qwen3-vl-2b:
     workloads: [vlm_mmmu_pro_vision_fixed_mcq]
   qwen35-9b:

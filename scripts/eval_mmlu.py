@@ -77,11 +77,6 @@ def parse_args() -> argparse.Namespace:
         help="Path to trtmc binary when --backend=trtmc.",
     )
     parser.add_argument(
-        "--hf-python",
-        default="",
-        help="Path to Python for HF tokenizer bridge (--backend=trtmc).",
-    )
-    parser.add_argument(
         "--min-accuracy",
         type=float,
         default=0.35,
@@ -206,13 +201,10 @@ def evaluate_transformers(model_name: str, examples: list[MmluExample], max_new_
 
 def evaluate_trtmc(
     model_id: str, binary_path: str, examples: list[MmluExample],
-    max_new_tokens: int, hf_python: str,
+    max_new_tokens: int,
 ) -> tuple[float, int, int]:
     cmd_prefix = [binary_path, "run", model_id, "--prompt", ""]
     cmd_prefix.extend(["--max-new-tokens", str(max_new_tokens)])
-    if hf_python:
-        cmd_prefix.extend(["--hf-python", hf_python])
-
     correct = 0
     answered = 0
     total = len(examples)
@@ -259,7 +251,6 @@ def main() -> int:
             args.trtmc_binary,
             examples,
             args.max_new_tokens,
-            args.hf_python,
         )
 
     total = len(examples)
@@ -282,4 +273,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

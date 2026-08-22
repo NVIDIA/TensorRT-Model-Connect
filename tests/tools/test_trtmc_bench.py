@@ -896,7 +896,7 @@ def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: 
     assert speech.operation == "speak"
     assert speech.request["max_new_tokens"] == 100
     assert Path(speech.worker_request()["request"]["audio_path"]).is_file()
-    assert Path(speech.runtime["hf_python"]).is_file()
+    assert "hf_python" not in speech.runtime
 
     magpie = resolve_case(
         ManifestCatalog().resolve("magpie-tts-357m"),

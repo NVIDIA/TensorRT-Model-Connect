@@ -289,9 +289,6 @@ class VisionLanguageRunner:
             "--image", str(image_path),
             "--max-new-tokens", str(max_new_tokens),
         ]
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            cmd.extend(["--hf-python", str(runtime_cli_python)])
 
         contract_config = case.metadata.get("contract_config", {})
         if contract_config.get("use_chat_template"):

@@ -64,8 +64,7 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         opts.cuda_graphs = ctx.cuda_graphs;
 
-        auto speech_cfg =
-            build_speech_config_from_bundle(ctx.bundle, ctx.config_json, ctx.config, ctx.hf_python);
+        auto speech_cfg = build_speech_config_from_bundle(ctx.bundle, ctx.config_json, ctx.config);
         infer_speech_vocab_sizes(speech_cfg, ctx.config_json, ctx.config);
 
         const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
@@ -134,9 +133,7 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
         return std::make_unique<SpeechPipeline>(
             std::move(mimi_encoder), std::move(temporal_loaded.module), std::move(temporal_state),
             std::move(depth_engines), std::move(depth_state), std::move(mimi_decoder),
-            std::move(speech_cfg), stream,
-            nullptr, // subprocess_runner: default
-            ctx.bundle.info.model_id);
+            std::move(speech_cfg), stream, ctx.bundle.info.model_id);
     }
 };
 

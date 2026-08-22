@@ -168,11 +168,6 @@ E2E_SHARED_TORCH_REFERENCE = (
     REPO_ROOT / "tests" / "e2e_harness" / "references" / "torch_reference.py"
 )
 E2E_SHARED_CONTRACT_PLUGINS = REPO_ROOT / "tests" / "e2e_harness" / "plugins"
-PERSONAPLEX_E2E_MANIFESTS = (
-    E2E_MODELS / "personaplex" / "manifests" / "personaplex-7b.json",
-    E2E_MODELS / "personaplex" / "manifests" / "personaplex-7b-l0.json",
-    E2E_MODELS / "personaplex" / "manifests" / "personaplex-7b-l0-tp4.json",
-)
 E2E_SHARED_SEGMENTATION_CONTRACT_FILES = (
     E2E_CONTRACTS,
     E2E_SHARED_CONTRACT_PLUGINS / "segmentation.py",
@@ -3407,35 +3402,28 @@ def test_shared_diff_layers_tool_uses_family_capability_dispatch() -> None:
     assert not violations, _format_violations(violations)
 
 
-def test_runtime_cli_python_requirement_is_model_owned() -> None:
+def test_runtime_cli_python_requirement_is_removed() -> None:
     """Trace: ARCH-MODPLUG-001
-    Intent: keep model-specific C++ CLI helper-python needs out of RunContext.
-    Preconditions: model manifests may opt into passing runtime Python to the CLI.
-    Postconditions: shared contracts read metadata, and PersonaPlex owns its opt-in.
+    Intent: keep Python interpreter paths out of native runtime commands.
+    Preconditions: build, reference, and validation helpers may still use Python.
+    Postconditions: the E2E harness and model metadata expose no native-runtime opt-in.
     """
-    contracts_text = E2E_CONTRACTS.read_text(encoding="utf-8")
     violations = []
-    if 'runtime_strategy or "") not in {"speech_to_speech"}' in contracts_text:
-        violations.append(
-            (
-                E2E_CONTRACTS,
-                0,
-                "RunContext hardcodes speech_to_speech for --hf-python",
-            )
-        )
-    if "runtime_cli_requires_hf_python" not in contracts_text:
-        violations.append(
-            (
-                E2E_CONTRACTS,
-                0,
-                "RunContext should read runtime_cli_requires_hf_python metadata",
-            )
-        )
-
-    for manifest in PERSONAPLEX_E2E_MANIFESTS:
-        text = manifest.read_text(encoding="utf-8")
-        if '"runtime_cli_requires_hf_python": true' not in text:
-            violations.append((manifest, 0, "missing model-owned runtime CLI Python opt-in"))
+    candidates = [
+        E2E_CONTRACTS,
+        E2E_ORCHESTRATOR,
+        *(path for path in E2E_MODELS.rglob("*.py") if not path.name.startswith("test_")),
+        *E2E_MODELS.rglob("*.json"),
+    ]
+    forbidden = (
+        "runtime_cli_" + "hf_python",
+        "runtime_cli_requires_" + "hf_python",
+    )
+    for path in candidates:
+        text = path.read_text(encoding="utf-8")
+        for marker in forbidden:
+            if marker in text:
+                violations.append((path, 0, f"native runtime Python seam remains: {marker}"))
 
     assert not violations, _format_violations(violations)
 
@@ -5697,7 +5685,6 @@ def test_personaplex_runtime_is_family_owned() -> None:
         f'runtime_library = "libtrtmc_model_{family}.so"',
         f'runtime_strategies = ["{strategy}"]',
         f"trtmc_model_{family}",
-        "test_personaplex_speech_subprocess_seam|test_personaplex_speech_subprocess_seam.cpp",
         "test_personaplex_speech_decode_stop_policy|test_personaplex_speech_decode_stop_policy.cpp",
         "test_personaplex_speech_generation_helpers|test_personaplex_speech_generation_helpers.cpp",
         "test_personaplex_speech_depth_plan|test_personaplex_speech_depth_plan.cpp",

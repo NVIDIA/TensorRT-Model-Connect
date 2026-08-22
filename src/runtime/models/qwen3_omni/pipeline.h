@@ -5,9 +5,9 @@
 
 #pragma once
 
-// OmniPipeline: omni multimodal pipeline with thinker + talker + code2wav.
-// Uses a TensorRT Thinker, the checkpoint's official model-owned Talker bridge,
-// and a TensorRT Code2Wav decoder.
+// OmniPipeline: native pieces of the omni multimodal pipeline.
+// Uses a TensorRT Thinker and TensorRT Code2Wav decoder. Audio generation
+// fails closed until the Talker is implemented as a native runtime component.
 
 #include "runtime/models/qwen3_omni/inference_state.h"
 #include "runtime/models/qwen3_omni/kv_cache.h"
@@ -24,8 +24,6 @@
 #include <vector>
 
 namespace trtmc {
-
-class Qwen3OmniTalkerRuntime;
 
 struct OmniThinkerRunStats {
     int32_t prompt_tokens{0};
@@ -67,7 +65,6 @@ class OmniPipeline final : public IPipeline {
     std::unique_ptr<Qwen3OmniInferenceState> thinker_state_;
     std::unique_ptr<TrtModule> code2wav_;
     std::unique_ptr<OmniConfig> config_;
-    std::unique_ptr<Qwen3OmniTalkerRuntime> talker_runtime_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;

@@ -30,5 +30,5 @@ def test_bundle_overrides() -> None:
     assert overrides["eos_token_id"] == 2
     assert overrides["speech_depth_temperature"] == pytest.approx(0.0)
     assert overrides["speech_depth_top_k"] == 0
-    assert overrides["speech_system_prompt"] == ""
+    assert "speech_system_prompt" not in overrides
     assert overrides["speech_text_prompt_ids"] == []

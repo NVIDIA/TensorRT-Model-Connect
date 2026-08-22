@@ -6,6 +6,7 @@
   "family": "qwen3_omni",
   "runtime_strategy": "qwen3_omni_multimodal",
   "task_strategy": "omni_multimodal",
+  "skip": "Native Qwen3-Omni Talker is not implemented; audio generation fails closed.",
   "precision": "bf16",
   "max_cache_length": 256,
   "trust_remote_code": true,
@@ -27,9 +28,6 @@
       "seed": 42,
       "reference_speaker": "Ethan",
       "reference_talker_max_new_tokens": 32,
-      "metadata": {
-        "runtime_cli_requires_hf_python": true
-      },
       "stages": [
         {
           "name": "talker_decode",

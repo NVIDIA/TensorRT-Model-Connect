@@ -25,15 +25,6 @@ _SESSION = frozenset({Layer.SESSION_REQUEST, Layer.PLATFORM_PROFILE})
 SCHEMA = Schema(
     namespace="platform",
     fields=(
-        # Runtime override for the source directory used by
-        # scripts_dir() / models_dir() resolution. Empty ⇒ use the
-        # compile-time TRTMC_SOURCE_DIR default.
-        ConfigField(
-            name="source_dir",
-            type_tag="string",
-            default="",
-            allowed_layers=_SESSION,
-        ),
         # Verbose TRT log streaming to stderr. When False, only warnings
         # and errors pass through the short "[trt] ..." path.
         ConfigField(

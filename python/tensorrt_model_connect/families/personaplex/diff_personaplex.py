@@ -17,7 +17,6 @@ Usage:
         --input-wav test_input.wav \
         --bundle /path/to/personaplex.bundle \
         --trtmc-binary ./build/trtmc \
-        --hf-python .venv/bin/python \
         --official-repo /path/to/personaplex/moshi
 
     # Quick reference-only run (no TRT needed, dumps official intermediate values)
@@ -31,7 +30,6 @@ Usage:
         --input-wav test_input.wav \
         --bundle /path/to/personaplex.bundle \
         --trtmc-binary ./build/trtmc \
-        --hf-python .venv/bin/python \
         --reference-dir /path/to/saved_reference
 """
 
@@ -259,7 +257,6 @@ def run_trt_pipeline(
     input_wav: str,
     bundle: str,
     trtmc_binary: str,
-    hf_python: str,
     output_dir: str,
 ) -> dict:
     """Run our TRT C++ pipeline and capture output.
@@ -293,9 +290,6 @@ def run_trt_pipeline(
         "--audio-in", input_wav,
         "--audio-out", output_wav,
     ]
-    if hf_python:
-        cmd += ["--hf-python", hf_python]
-
     print(f"[trt] Running: {' '.join(cmd)}")
     proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=600)
 
@@ -546,7 +540,6 @@ def main():
     parser.add_argument("--input-wav", required=True, help="Path to input WAV file")
     parser.add_argument("--bundle", help="Path to PersonaPlex .bundle artifact")
     parser.add_argument("--trtmc-binary", default="./build/trtmc", help="Path to trtmc binary")
-    parser.add_argument("--hf-python", default="", help="Path to Python with HF transformers")
     parser.add_argument("--official-repo", help="Path to cloned NVIDIA/personaplex/moshi directory")
     parser.add_argument("--hf-repo", default="nvidia/personaplex-7b-v1", help="HF repo ID")
     parser.add_argument("--device", default="cuda", help="Device for official model")
@@ -600,7 +593,6 @@ def main():
             input_wav=args.input_wav,
             bundle=args.bundle,
             trtmc_binary=args.trtmc_binary,
-            hf_python=args.hf_python,
             output_dir=trt_dir,
         )
     else:

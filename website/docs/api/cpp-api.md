@@ -20,7 +20,7 @@ complete stable pure-C ownership API.
 #include <iostream>
 
 int main() {
-    auto pipe = trtmc::load("/tmp/qwen3.bundle", "/opt/venv/bin/python");
+    auto pipe = trtmc::load("/tmp/qwen3.bundle");
     trtmc::GenerateConfig cfg;
     cfg.max_new_tokens = 20;
     auto out = pipe->generate("The capital of France is", cfg);
@@ -32,7 +32,6 @@ For full control, use `LoadOptions`:
 
 ```cpp
 trtmc::LoadOptions options;
-options.hf_python = "/opt/venv/bin/python";
 options.runtime_cache_path = "/tmp/trtmc-rtx.cache";
 options.cuda_graphs = true;
 options.config_path = "/etc/trtmc/runtime.json";
@@ -390,7 +389,6 @@ experiments:
 
 ```cpp
 TrtmcPipelineOptions opts{};
-opts.hf_python = "/opt/venv/bin/python";
 
 trtmc::IPipeline* pipe = trtmc_create_pipeline_ex("/tmp/model.bundle", &opts);
 if (pipe == nullptr) {
@@ -432,9 +430,9 @@ complete stable C ABI. Do not expose that handle as a pure-C or
 foreign-language ownership contract; wrap it in C++ or first design an opaque
 C handle with a matching destroy entry point.
 
-`TrtmcPipelineOptions::hf_python`, `runtime_cache`, and `cuda_graphs` are
-consumed during creation. The current implementation does not consume the
-legacy `max_new_tokens` or `image_path` fields; generation settings belong on
-the request API.
+`TrtmcPipelineOptions::runtime_cache` and `cuda_graphs` are consumed during
+creation. The current implementation does not consume the legacy
+`max_new_tokens` or `image_path` fields; generation settings belong on the
+request API.
 
 {/* Collaborative review anchor: batch 2. */}

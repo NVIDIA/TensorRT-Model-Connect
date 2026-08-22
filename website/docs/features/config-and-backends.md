@@ -44,7 +44,7 @@ This is the current registered namespace/field inventory.
 
 | Namespace and owner | Registered fields | Allowed layers |
 | --- | --- | --- |
-| `platform` (shared host/runtime) | `platform.source_dir`, `platform.trt_log_stderr`, `platform.trt_log_min_severity` | Session request, platform profile |
+| `platform` (shared host/runtime) | `platform.trt_log_stderr`, `platform.trt_log_min_severity` | Session request, platform profile |
 | `runtime` (shared decode runtime) | `runtime.disable_cuda_graph`, `runtime.prefer_gpu_greedy` | Session request, platform profile |
 | `text_trace` (shared text diagnostics) | `text_trace.step_trace_path`, `text_trace.step_trace_start_pos`, `text_trace.step_trace_end_pos`, `text_trace.step_trace_topk` | Session request, platform profile |
 | `triattention` (shared KV compaction) | `triattention.enabled`, `triattention.kv_budget`, `triattention.divide_length`, `triattention.recent_window`, `triattention.score_aggregation`, `triattention.per_layer_aggregation`, `triattention.count_prompt_tokens`, `triattention.protect_prefill`, `triattention.disable_mlr`, `triattention.disable_trig`, `triattention.offset_max_length`, `triattention.stats_section`, `triattention.debug`, `triattention.profile`, `triattention.runtime_bucket_rows`, `triattention.disable_gpu_selection`, `triattention.disable_gpu_compaction`, `triattention.disable_gpu_state`, `triattention.zero_tail`, `triattention.dump_keep_path`, `triattention.dump_compaction_index`, `triattention.abort_after_dump`, `triattention.dump_score_cache`, `triattention.dump_score_values` | Core fields: bundle default/session; `stats_section`: build/bundle; diagnostics: session |

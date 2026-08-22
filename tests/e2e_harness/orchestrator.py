@@ -860,9 +860,6 @@ def _build_repro_commands(
                 infer_parts.extend(["--top-k", str(case.inputs["top_k"])])
             if case.inputs.get("seed", -1) >= 0:
                 infer_parts.extend(["--seed", str(case.inputs["seed"])])
-            runtime_cli_python = ctx.runtime_cli_hf_python()
-            if runtime_cli_python:
-                infer_parts.extend(["--hf-python", runtime_cli_python])
         infer_parts = _wrap_distributed_repro_command(infer_parts, case)
         repro["trt_inference"] = " ".join(infer_parts)
 
@@ -1336,7 +1333,6 @@ def _build_plugin_runtime_context(ctx: RunContext) -> PluginRuntimeContext:
     return PluginRuntimeContext(
         engine_dir=ctx.engine_dir,
         binary_path=ctx.binary_path,
-        hf_python=ctx.runtime_cli_hf_python(),
         runtime_python=ctx.runtime_python_path(),
         reference_python=ctx.reference_python_path(),
         artifacts_dir=ctx.artifacts_dir,

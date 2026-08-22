@@ -14,6 +14,7 @@
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -131,7 +132,7 @@ void test_omni_pipeline_construction() {
     cudaStreamDestroy(stream);
 }
 
-void test_omni_generate_audio() {
+void test_omni_generate_audio_fails_without_native_talker() {
     const std::vector<float> thinker_logits = {0.1F, 0.1F, 0.1F, 1.0F};
     auto thinker_engine = trtmc::test::build_mock_step_engine(9, 4, thinker_logits);
     if (!thinker_engine) {
@@ -154,10 +155,14 @@ void test_omni_generate_audio() {
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
 
-    auto result = pipeline.generate_audio("hello", gen_cfg);
-    check(result.num_samples == 0,
-          "omni generate_audio: no audio when thinker returns empty text tokens");
-    check(result.sample_rate == 24000, "omni generate_audio: sample_rate = 24000");
+    bool threw = false;
+    try {
+        (void)pipeline.generate_audio("hello", gen_cfg);
+    } catch (const std::runtime_error& error) {
+        threw = std::string(error.what()).find("native Qwen3-Omni Talker is unavailable") !=
+                std::string::npos;
+    }
+    check(threw, "omni generate_audio fails closed without a native Talker");
 
     cudaStreamDestroy(stream);
 }
@@ -227,7 +232,7 @@ void test_omni_batched_prefill_and_device_argmax() {
 
 int main() {
     test_omni_pipeline_construction();
-    test_omni_generate_audio();
+    test_omni_generate_audio_fails_without_native_talker();
     test_omni_validates_thinker();
     test_omni_batched_prefill_and_device_argmax();
     if (failures > 0) {

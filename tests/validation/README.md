@@ -262,18 +262,17 @@ python tools/prepare_model_plugin_validation_datasets.py \
   --flores-source /mnt/data/FLORES200_en_fr/flores200_en_fr_task_eval.json \
   --full-duplex-source /mnt/data/FullDuplexBench-v1.0-public \
   --mmlu-source /mnt/data/MMLU_Pro/mmlu_pro_dataset.json \
-  --mmmu-source /mnt/data/MMMU_Pro_vision/mmmu_pro_vision_dataset.json \
-  --seedtts-source /mnt/data/SeedTTS_en_meta/seedtts_en_meta.json
+  --mmmu-source /mnt/data/MMMU_Pro_vision/mmmu_pro_vision_dataset.json
 ```
 
 This writes the `mmmu-pro-vision`, `mmmu-pro-vision-square-448`,
-`mmlu-generation-modes`, `flores200-en-fr`, `full-duplex-bench`, and
-`seedtts-en-omni-audio` directories directly under `/mnt/data`. It also writes
+`mmlu-generation-modes`, `flores200-en-fr`, and `full-duplex-bench`
+directories directly under `/mnt/data`. It also writes
 `/mnt/data/trtmc_model_plugin_validation_manifest.json`, which lists only
-those six managed directories and records each file's byte size and SHA256.
+those five managed directories and records each file's byte size and SHA256.
 There is intentionally no aggregate `TRTMCValidation` directory. Wan workloads
 read the existing root-level public `VBench` asset directly. Dev/QA machines
-and NAS mirrors should copy the six directories without changing their
+and NAS mirrors should copy the five directories without changing their
 relative layouts and verify the manifest after transfer.
 
 PersonaPlex's `full_duplex_bench_behavior_parity` workload uses a

@@ -236,7 +236,7 @@ if [[ "$IS_DECODER" == "true" ]]; then
         run_step "test_runner_parity" \
             "$HF_PYTHON" "${PROJECT_DIR}/tools/test_runner_parity.py" \
                 --bundle "$BUNDLE_PATH" --binary "$BINARY" \
-                --hf-python "$HF_PYTHON" --max-new-tokens 20
+                --max-new-tokens 20
     else
         echo ""
         echo "==== test_runner_parity ===="

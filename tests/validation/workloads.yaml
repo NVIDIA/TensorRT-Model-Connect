@@ -1993,29 +1993,6 @@ suites:
         Large-memory-GPU native reference consistency; numerical and semantic
         gates remain owned by the VoiceChat comparator and threshold sidecar.
 
-  - id: seedtts_en_omni_audio_parity
-    description: >
-      Qwen3-Omni text-to-audio consistency on a public Seed-TTS-Eval English
-      utterance. The official HF and TRTMC paths share prompt, speaker, seed,
-      token budgets, and deterministic decoding settings. This workload uses
-      the public target text as a parity input; it is not a paper-comparable
-      Seed-TTS zero-shot WER or speaker-similarity evaluation.
-    user_contract: tts_audio
-    default_model_names: [qwen3-omni-30b-a3b-instruct]
-    dataset:
-      kind: model_plugin_json
-      default_path: /mnt/data/seedtts-en-omni-audio/dataset.json
-    selectors:
-      model_names: [qwen3-omni-30b-a3b-instruct]
-    scoring:
-      scorer: model_plugin_parity
-    gates:
-      min_sample_pass_rate: 1.0
-    ci:
-      eligible: false
-      lane: local_only
-      notes: GB300-only 280 GB native-reference consistency.
-
   - id: vbench_ti2v_official_profile_parity
     description: >
       Wan2.2 TI2V-5B consistency at the pinned official 1280x704,

@@ -63,17 +63,6 @@ from .standard_decoder_builder import _mark_debug_output
 trt = trt_compat.get_trt()
 
 
-def _talker_model_locator(model_dir: Path) -> tuple[str, str]:
-    """Return a portable HF repo/revision pair, or the resolved local path."""
-    resolved = model_dir.resolve()
-    cache_repo = resolved.parent.parent.name
-    if resolved.parent.name == "snapshots" and cache_repo.startswith("models--"):
-        namespace, separator, repository = cache_repo.removeprefix("models--").partition("--")
-        if separator and namespace and repository:
-            return f"{namespace}/{repository}", resolved.name
-    return str(resolved), ""
-
-
 class Qwen3OmniPlugin:
     name = "qwen3_omni"
     runtime_strategy = "qwen3_omni_multimodal"
@@ -84,8 +73,6 @@ class Qwen3OmniPlugin:
         self._talker_cfg: dict = {}
         self._audio_encoder_cfg: dict = {}
         self._code2wav_cfg: dict = {}
-        self._talker_model_id = ""
-        self._talker_model_revision = ""
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -102,9 +89,7 @@ class Qwen3OmniPlugin:
           - Talker decoder weights (model.talker.*)
           - Code2Wav weights (model.code2wav.*)
         """
-        model_dir_path = Path(model_dir)
-        self._talker_model_id, self._talker_model_revision = _talker_model_locator(model_dir_path)
-        readers = _open_safetensors(model_dir_path)
+        readers = _open_safetensors(Path(model_dir))
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -337,9 +322,7 @@ class Qwen3OmniPlugin:
         self._code2wav_cfg = code2wav_cfg
         weights["_code2wav_cfg"] = code2wav_cfg
 
-        # Load only weights consumed by native extra-engine builders. The
-        # official Talker bridge loads its own checkpoint tensors at runtime;
-        # duplicating them here adds several GB to build memory for no output.
+        # Load only weights consumed by native extra-engine builders.
         # Handle both common checkpoint prefixes.
         for reader in readers:
             for key in reader.keys():
@@ -982,9 +965,6 @@ class Qwen3OmniPlugin:
         overrides["omni_talker_num_layers"] = self._talker_cfg.get(
             "num_layers", 0)
         overrides["omni_talker_max_cache_length"] = 1024
-        overrides["omni_talker_model_id"] = self._talker_model_id
-        overrides["omni_talker_model_revision"] = self._talker_model_revision
-
         # The official decoder is causal and exported at a fixed 32-frame
         # shape. Shorter generations are zero-padded and trimmed by the
         # runtime using the model's 1920x stride and 555-sample causal delay.

@@ -281,21 +281,21 @@ void test_model_owned_text_pipeline_and_eager_load() {
     check(materialized, "opaque artifact tree is materialized into runtime cache");
 }
 
-void test_legacy_load_overload_delegates_to_optimized_runtime() {
+void test_default_load_overload_delegates_to_optimized_runtime() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
-    const fs::path bundle = root / "legacy-load.bundle";
+    const fs::path bundle = root / "default-load.bundle";
     const fs::path events = root / "events.txt";
     write_bundle(bundle, text_spec());
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
 
-    auto pipeline = trtmc::load(bundle.string(), "", (root / "cache").string(), false);
-    const auto result = pipeline->generate("legacy");
-    check(result.text == "optimized:legacy",
-          "legacy public C++ load overload delegates execution to the model-owned DSO");
+    auto pipeline = trtmc::load(bundle.string());
+    const auto result = pipeline->generate("default");
+    check(result.text == "optimized:default",
+          "default public C++ load overload delegates execution to the model-owned DSO");
     const auto loaded_events = read_lines(events);
     check(count_line(loaded_events, "create") == 1,
-          "legacy public C++ load overload initializes the optimized runtime");
+          "default public C++ load overload initializes the optimized runtime");
 }
 
 void test_c_abi_create_loads_optimized_runtime_bundle() {
@@ -569,7 +569,7 @@ int main(int argc, char** argv) {
     test_exact_embedded_dso_identity();
     test_toolchain_abi_fails_before_create();
     test_model_owned_text_pipeline_and_eager_load();
-    test_legacy_load_overload_delegates_to_optimized_runtime();
+    test_default_load_overload_delegates_to_optimized_runtime();
     test_c_abi_create_loads_optimized_runtime_bundle();
     test_concurrent_repeated_loads_share_published_cache_and_dso();
     test_public_pipeline_pool_fails_before_loading_optimized_runtime();

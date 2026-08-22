@@ -124,7 +124,6 @@ PYTHONPATH=python:. python3 tools/diff_vl.py \
   --image /path/to/test.jpg \
   --model <model> \
   --binary ./build/trtmc \
-  --hf-python <python> \
   --debug-layers
 ```
 
@@ -135,7 +134,6 @@ PYTHONPATH=python:. python3 tools/diff_audio.py \
   --bundle /tmp/model.bundle \
   --binary ./build/trtmc \
   --model <model> \
-  --hf-python <python> \
   --stage 1
 ```
 
@@ -162,7 +160,6 @@ When Python/reference parity passes but the C++ result differs:
 PYTHONPATH=python:. python3 tools/test_runner_parity.py \
   --bundle /tmp/model.bundle \
   --binary ./build/trtmc \
-  --hf-python <python> \
   --prompt "The capital of France is" \
   --max-new-tokens 20
 ```

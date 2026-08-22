@@ -32,8 +32,7 @@ Usage (inside container):
     # Generate a cat image with TRT BF16 (via C++ binary):
     ./build/trtmc generate-video /tmp/flux2_bf16.bundle \\
         --prompt "A photo of a cat sitting on a windowsill at sunset" \\
-        --output /tmp/flux2_out --num-steps 28 \\
-        --hf-python /opt/venv/bin/python
+        --output /tmp/flux2_out --num-steps 28
 """
 from __future__ import annotations
 

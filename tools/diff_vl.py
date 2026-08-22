@@ -17,7 +17,7 @@ Usage:
 
   # Full VL generation with C++ binary
   python3 tools/diff_vl.py --bundle model.bundle --image test.jpg \
-    --binary ./build/trtmc --hf-python .venv/bin/python
+    --binary ./build/trtmc
 
   # Vision-only (no HF model needed)
   python3 tools/diff_vl.py --bundle model.bundle --image test.jpg --vision-only
@@ -571,7 +571,6 @@ def test_cpp_binary(
     bundle_path: str,
     binary_path: str,
     image_path: str,
-    hf_python: str | None = None,
     max_new_tokens: int = 10,
 ) -> bool:
     """Test C++ binary VL inference."""
@@ -581,9 +580,6 @@ def test_cpp_binary(
            "--prompt", "Describe this image",
            "--image", image_path,
            "--max-new-tokens", str(max_new_tokens)]
-    if hf_python:
-        cmd.extend(["--hf-python", hf_python])
-
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except FileNotFoundError:
@@ -632,8 +628,6 @@ def main():
                         help="HF model ID for reference comparison")
     parser.add_argument("--binary", default="./build/trtmc",
                         help="Path to trtmc binary")
-    parser.add_argument("--hf-python", default=None,
-                        help="Python interpreter path")
     parser.add_argument("--atol", type=float, default=0.1,
                         help="Absolute tolerance for feature comparison")
     parser.add_argument("--max-new-tokens", type=int, default=20)
@@ -676,7 +670,7 @@ def main():
         # Test 4: C++ binary
         if args.image:
             if not test_cpp_binary(args.bundle, args.binary, args.image,
-                                   args.hf_python, args.max_new_tokens):
+                                   args.max_new_tokens):
                 all_pass = False
 
     if all_pass:
@@ -724,7 +718,7 @@ def run_as_diff_test(ctx):
             sub_results["cpp_parity"] = (
                 "PASS" if test_cpp_binary(
                     bundle, ctx.binary_path, ctx.image_path,
-                    ctx.hf_python, ctx.max_new_tokens)
+                    ctx.max_new_tokens)
                 else "FAIL")
 
         all_passed = all(v == "PASS" for v in sub_results.values())
