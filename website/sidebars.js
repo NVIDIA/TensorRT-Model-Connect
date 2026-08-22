@@ -66,6 +66,7 @@ const sidebars = {
         'user-guides/build-a-bundle',
         'user-guides/inspect-a-bundle',
         'user-guides/run-inference',
+        'user-guides/serve-local-models',
         {
           type: 'category',
           label: 'Task Guides',
