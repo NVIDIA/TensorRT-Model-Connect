@@ -1523,19 +1523,19 @@ int cmd_speak(const CliArgs& args) {
 
     trtmc::AudioResult result;
     std::string agent_text;
-    if (auto* session_provider = dynamic_cast<trtmc::ISpeechSessionProvider*>(pipeline.get())) {
-        trtmc::SpeechSessionConfig session_config;
-        session_config.input_sample_rate = audio.sample_rate;
-        session_config.output_sample_rate = 0;
-        session_config.emit_agent_audio = true;
-        session_config.emit_agent_text = true;
-        session_config.emit_user_transcript = false;
-        session_config.enable_barge_in = false;
-        session_config.seed = cfg.seed >= 0 ? cfg.seed : 0;
-        // The CLI appends --tail-frames explicitly. Do not let finish_input()
-        // add the live-session response tail a second time.
-        session_config.finish_tail_frames = 0;
-        auto session = session_provider->create_speech_session(session_config);
+    trtmc::SpeechSessionConfig session_config;
+    session_config.input_sample_rate = audio.sample_rate;
+    session_config.output_sample_rate = 0;
+    session_config.emit_agent_audio = true;
+    session_config.emit_agent_text = true;
+    session_config.emit_user_transcript = false;
+    session_config.enable_barge_in = false;
+    session_config.seed = cfg.seed >= 0 ? cfg.seed : 0;
+    // The CLI appends --tail-frames explicitly. Do not let finish_input()
+    // add the session response tail a second time.
+    session_config.finish_tail_frames = 0;
+    auto session = trtmc::cli::create_cli_speech_session(*pipeline, session_config);
+    if (session) {
         session->append_audio(audio.samples.data(), static_cast<int32_t>(audio.samples.size()));
         const int32_t tail_samples =
             trtmc::cli::speech_tail_frame_samples(session_config.input_sample_rate);

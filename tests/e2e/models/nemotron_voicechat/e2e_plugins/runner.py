@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
@@ -19,6 +20,11 @@ from typing import Any
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 _SPEECH_REPO_ENV = "NEMOTRON_VOICECHAT_SPEECH_REPO"
+_MODEL_CARD_STAGE = "model_card_general_conversation"
+_LIFECYCLE_STAGE = "native_full_duplex_lifecycle"
+_LIFECYCLE_TARGET = "test_nemotron_voicechat_native_lifecycle"
+_LIFECYCLE_SCHEMA_VERSION = 3
+_NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _GENERATED_RE = re.compile(r"^Generated\s+(\d+)\s+audio samples\s+->\s+(.+)$")
 _AGENT_TEXT_RE = re.compile(r"^Agent text:\s*(.+)$")
 
@@ -28,17 +34,21 @@ def _bundle_path(case: E2ECase, ctx: RunContext) -> Path:
     return bundle if bundle.is_absolute() else Path(ctx.engine_dir) / bundle
 
 
-def _source_path(case: E2ECase) -> Path:
+def _source_path_from_input(case: E2ECase, key: str) -> Path:
     root = os.environ.get(_SPEECH_REPO_ENV, "")
     if not root:
         raise RuntimeError(f"{_SPEECH_REPO_ENV} must point at the pinned public Speech checkout")
-    relative = case.inputs.get("speech_source_relative_path", "")
+    relative = case.inputs.get(key, "")
     if not isinstance(relative, str) or not relative:
-        raise RuntimeError("VoiceChat manifest is missing speech_source_relative_path")
+        raise RuntimeError(f"VoiceChat manifest is missing {key}")
     source = Path(root) / relative
     if not source.is_file():
         raise RuntimeError(f"pinned VoiceChat source sample is unavailable: {source}")
     return source
+
+
+def _source_path(case: E2ECase) -> Path:
+    return _source_path_from_input(case, "speech_source_relative_path")
 
 
 def _sha256(path: Path) -> str:
@@ -135,13 +145,34 @@ def _run(command: list[str], env: dict[str, str], timeout_s: int) -> subprocess.
         ) from error
 
 
+def _load_lifecycle_receipt(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError("VoiceChat lifecycle probe did not write its receipt")
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"VoiceChat lifecycle receipt is invalid: {error}") from error
+    if not isinstance(receipt, dict):
+        raise RuntimeError("VoiceChat lifecycle receipt must be a JSON object")
+    if receipt.get("schema_version") != _LIFECYCLE_SCHEMA_VERSION:
+        raise RuntimeError(
+            "VoiceChat lifecycle receipt schema mismatch: "
+            f"expected {_LIFECYCLE_SCHEMA_VERSION}, got {receipt.get('schema_version')!r}"
+        )
+    if isinstance(receipt.get("error"), str) and receipt["error"]:
+        raise RuntimeError(f"VoiceChat lifecycle probe failed: {receipt['error']}")
+    return receipt
+
+
 class VoiceChatModelCardRunner:
     @property
     def strategy_name(self) -> str:
         return "speech_to_speech"
 
     def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
-        if stage.name != "model_card_general_conversation":
+        if stage.name == _LIFECYCLE_STAGE:
+            return self._run_lifecycle_stage(case, stage, ctx)
+        if stage.name != _MODEL_CARD_STAGE:
             return StageOutput(
                 stage_name=stage.name,
                 data={"error": f"unsupported VoiceChat stage: {stage.name}"},
@@ -265,6 +296,129 @@ class VoiceChatModelCardRunner:
                     "returncode": transcribe.returncode,
                     "stdout": transcribe.stdout or "",
                     "stderr": transcribe.stderr or "",
+                },
+            },
+        )
+
+    def _run_lifecycle_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
+        if not ctx.binary_path:
+            raise RuntimeError("VoiceChat lifecycle E2E requires the native trtmc binary")
+        binary = Path(ctx.binary_path).resolve()
+        build_dir = binary.parent
+        if not (build_dir / "CMakeCache.txt").is_file():
+            raise RuntimeError(
+                "VoiceChat lifecycle E2E requires a configured source build beside the "
+                f"selected trtmc binary: {build_dir}"
+            )
+
+        source = _source_path(case)
+        source_sha = _sha256(source)
+        expected_sha = str(case.metadata.get("speech_source_sha256", ""))
+        if source_sha != expected_sha:
+            raise RuntimeError(
+                f"VoiceChat source sample SHA256 mismatch: expected {expected_sha}, got {source_sha}"
+            )
+        function_source = _source_path_from_input(case, "function_speech_source_relative_path")
+        function_source_sha = _sha256(function_source)
+        expected_function_sha = str(case.metadata.get("function_speech_source_sha256", ""))
+        if function_source_sha != expected_function_sha:
+            raise RuntimeError(
+                "VoiceChat function-call sample SHA256 mismatch: "
+                f"expected {expected_function_sha}, got {function_source_sha}"
+            )
+        bundle = _bundle_path(case, ctx)
+        if not bundle.is_file():
+            raise RuntimeError(f"VoiceChat lifecycle bundle is unavailable: {bundle}")
+        if not ctx.model_plugin_dir:
+            raise RuntimeError(
+                "VoiceChat lifecycle E2E requires an explicit model plugin directory"
+            )
+
+        base = (
+            Path(ctx.artifacts_dir)
+            if ctx.artifacts_dir
+            else Path(tempfile.mkdtemp(prefix="trtmc_voicechat_lifecycle_"))
+        )
+        artifact_dir = base / case.name
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        output_wav = artifact_dir / "native_full_duplex_chunked.wav"
+        receipt_path = artifact_dir / "native_full_duplex_lifecycle.json"
+
+        env = dict(os.environ)
+        if ctx.ld_library_path:
+            env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+        build_command = [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--target",
+            _LIFECYCLE_TARGET,
+        ]
+        build = _run(
+            build_command,
+            env,
+            _timeout(case, "lifecycle_build_timeout_s", 600),
+        )
+        if build.returncode != 0:
+            raise RuntimeError(
+                "VoiceChat lifecycle probe target failed to build "
+                f"(rc={build.returncode}): {build.stderr[-2000:]}"
+            )
+
+        probe = build_dir / _LIFECYCLE_TARGET
+        if not probe.is_file():
+            raise RuntimeError(f"VoiceChat lifecycle target did not produce {probe}")
+        probe_command = [
+            str(probe),
+            str(bundle),
+            str(source),
+            str(build_dir),
+            str(Path(ctx.model_plugin_dir)),
+            str(output_wav),
+            str(receipt_path),
+        ]
+        started = time.monotonic()
+        completed = _run(
+            probe_command,
+            env,
+            _timeout(case, "lifecycle_runtime_timeout_s", 1800),
+        )
+        elapsed = time.monotonic() - started
+        if completed.returncode not in (0, 1):
+            raise RuntimeError(
+                "VoiceChat lifecycle probe could not complete "
+                f"(rc={completed.returncode}): {completed.stderr[-2000:]}"
+            )
+        if _NEW_RUNTIME_MARKER not in (completed.stderr or ""):
+            raise RuntimeError("VoiceChat lifecycle probe did not confirm the native runtime path")
+        receipt = _load_lifecycle_receipt(receipt_path)
+        if not output_wav.is_file():
+            raise RuntimeError("VoiceChat lifecycle probe did not write its chunked WAV artifact")
+
+        return StageOutput(
+            stage_name=stage.name,
+            timing_s=elapsed,
+            data={
+                "receipt": receipt,
+                "receipt_path": str(receipt_path),
+                "wav_path": str(output_wav),
+                "source_sha256": source_sha,
+                "function_source_sha256": function_source_sha,
+                "probe_returncode": completed.returncode,
+                "runtime_path_confirmed": True,
+            },
+            metadata={
+                "probe_build": {
+                    "command": build_command,
+                    "returncode": build.returncode,
+                    "stdout": build.stdout or "",
+                    "stderr": build.stderr or "",
+                },
+                "probe": {
+                    "command": probe_command,
+                    "returncode": completed.returncode,
+                    "stdout": completed.stdout or "",
+                    "stderr": completed.stderr or "",
                 },
             },
         )

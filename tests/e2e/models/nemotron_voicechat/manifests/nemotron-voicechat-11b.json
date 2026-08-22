@@ -56,6 +56,53 @@
         "scattering"
       ],
       "notes": "Runs the pure native TensorRT/C++ trtmc speak path on the exact public Speech model-card sample. The sample-count and alignment gates establish 196 frame-sized units at 1764 samples each; the C++ lifecycle checks cover session event ordering. Direct session agent text must preserve the Rayleigh-scattering model-card semantics; a separate native trtmc transcribe pass checks self-transcription consistency without requiring preservation of the proper noun."
+    },
+    {
+      "name": "nemotron-voicechat-11b-full-duplex-lifecycle",
+      "trace_id": "IT-E2E-NVC-02",
+      "reference_backend": "voicechat_lifecycle_invariants",
+      "oracle_level": "L4_invariants",
+      "reference_family": "s2s_nemotron_voicechat",
+      "user_contract": "speech_response",
+      "test_type": "audio",
+      "test_category": "regression",
+      "regression": {
+        "id": "voicechat-native-full-duplex-lifecycle",
+        "issue": "https://github.com/NVIDIA/TensorRT-Model-Connect/pull/965",
+        "previous_failure": "The model-card E2E exercised the offline speak convenience path while the real asynchronous speech-session lifecycle probe remained an optional manual command.",
+        "prevents": "Native VoiceChat full-duplex behavior being reported as covered without required real-engine evidence for streaming output, interruption, stale suppression, processed-input clear, response cancel and truncate recovery, reset, bounded finish, normal multi-turn operation, the function channel, and bounded concurrent producers."
+      },
+      "stages": [
+        {
+          "name": "native_full_duplex_lifecycle",
+          "required": true,
+          "artifact_type": "waveform",
+          "comparison_mode": "invariant_check"
+        }
+      ],
+      "inputs": {
+        "audio": "tests/e2e/models/nemotron_voicechat/assets/sample_general_input.flac",
+        "reference_audio": "tests/e2e/models/nemotron_voicechat/assets/sample_general_reference.flac",
+        "speech_source_relative_path": "examples/speechlm2/sample_audio/sample_general.wav",
+        "function_speech_source_relative_path": "examples/speechlm2/sample_audio/sample_fc.wav",
+        "lifecycle_build_timeout_s": 600,
+        "lifecycle_runtime_timeout_s": 1800
+      },
+      "seed": 0,
+      "speech_source_revision": "097dfe9e2f55baf653b83035868bdc89849f1b47",
+      "speech_source_sha256": "481f422a961fb160ddeba9824d55cb7c190c57acb7dc1730a2d595fd078dcb04",
+      "speech_source_sample_rate": 16000,
+      "speech_source_num_samples": 249734,
+      "function_speech_source_sha256": "265f9e5f58bff1e71f4354f7d83e2ff405a8405b29c2cfeb50eb9085042e9136",
+      "function_speech_source_sample_rate": 16000,
+      "function_speech_source_num_samples": 190278,
+      "reference_audio_sha256": "6966ddf14fe98fc2375a4caf956001b3231630fdc0e38e108c511e7a18ea6be8",
+      "expected_output_sample_rate": 22050,
+      "expected_output_num_samples": 345744,
+      "expected_output_samples_per_frame": 1764,
+      "expected_output_codec_frames": 196,
+      "expected_response_text": "Hi there! How can you? How can I help you today? The sky is blue. That blue color is because of something called Rayleigh scattering.",
+      "notes": "Runs one model-owned C++ lifecycle probe directly against ISpeechSession and the TensorRT backend. The required L4 stage drives chunk streaming, processed-input clear, explicit commit/create, response cancel and truncate recovery, interruption, multi-turn conversation, and function-result continuation; its comparator recomputes every gate from primitive receipt fields and fails closed when evidence is absent."
     }
   ]
 }

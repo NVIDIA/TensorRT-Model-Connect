@@ -23,6 +23,7 @@ from tests.e2e.models.nemotron_voicechat.e2e_plugins.runner import (
     VoiceChatModelCardRunner,
 )
 from tests.e2e.models.nemotron_voicechat.e2e_plugins.reference import (
+    VoiceChatLifecycleInvariantReference,
     VoiceChatPinnedModelCardReference,
 )
 from tests.e2e_harness.contracts import StageOutput, StageSpec, ThresholdProfile
@@ -117,6 +118,224 @@ def _actual_output() -> dict:
     }
 
 
+def _lifecycle_reference() -> dict:
+    return {
+        "schema_version": 3,
+        "speech_source_sha256": "source-sha",
+        "function_speech_source_sha256": "function-source-sha",
+        "expected_output_sample_rate": 22050,
+        "expected_output_num_samples": 345744,
+        "expected_output_samples_per_frame": 1764,
+        "expected_output_codec_frames": 196,
+        "expected_response_text": (
+            "Hi there! How can you? How can I help you today? The sky is blue. "
+            "That blue color is because of something called Rayleigh scattering."
+        ),
+        "control_latency_limit_ms": 500.0,
+        "tail_completion_limit_ms": 15000.0,
+        "audio_min_rms": 0.001,
+        "audio_min_peak": 0.01,
+        "response_truncate_min_discarded_samples": 1764,
+        "expected_sequence_sessions_checked": 13,
+        "expected_media_segments_checked": 16,
+        "required_sections": [
+            "baseline",
+            "irregular_chunking",
+            "barge_in",
+            "cancel",
+            "reset_vs_fresh",
+            "processed_input_clear",
+            "response_cancel_recovery",
+            "response_truncate_recovery",
+            "partial_finish_tail",
+            "sequence_continuity",
+            "media_continuity",
+            "normal_multiturn",
+            "function_channel",
+            "backpressure_concurrency",
+        ],
+    }
+
+
+def _response_recovery_receipt(*, truncate: bool) -> dict:
+    played_samples = 1764 if truncate else 0
+    return {
+        "implemented": True,
+        "commit_without_response": True,
+        "interrupted_epoch": 2,
+        "yielded_epoch": 3,
+        "replacement_epoch": 4,
+        "old_audio_events_before_control": 2,
+        "old_partial_text_events_before_control": 1,
+        "control_yield_events": 1,
+        "control_call_ms": 0.04,
+        "played_output_samples": played_samples,
+        "observed_output_span_samples": 3528,
+        "generated_output_samples": 3528,
+        "retained_output_samples": played_samples if truncate else 3528,
+        "discarded_output_samples": 3528 - played_samples if truncate else 0,
+        "stale_agent_payloads_after_control": 0,
+        "replacement_audio_events": 4,
+        "replacement_audio_samples": 7056,
+        "replacement_audio_rms": 0.01,
+        "replacement_audio_peak": 0.1,
+        "replacement_final_text_events": 1,
+        "replacement_final_text": "A complete local replacement response.",
+        "replacement_turn_finished_events": 1,
+        "input_finished_events": 1,
+    }
+
+
+def _lifecycle_receipt() -> dict:
+    agent_text = _lifecycle_reference()["expected_response_text"]
+    return {
+        "schema_version": 3,
+        "pass": True,
+        "runtime": "C++ ISpeechSession with TensorRT backend",
+        "baseline": {
+            "output_samples": 345744,
+            "audio_events": 196,
+            "audio_fnv1a64": "baseline-hash",
+            "agent_text": agent_text,
+            "input_finished_events": 1,
+        },
+        "irregular_chunking": {
+            "append_calls": 347,
+            "max_append_call_ms": 0.02,
+            "audio_events_before_finish": 1,
+            "output_samples": 345744,
+            "audio_fnv1a64": "baseline-hash",
+            "bitwise_audio_equal_to_one_shot": True,
+            "text_equal_to_one_shot": True,
+            "input_finished_events": 1,
+        },
+        "barge_in": {
+            "interrupted_epoch": 2,
+            "interrupted_audio_before_yield": True,
+            "interrupted_partial_text_before_yield": True,
+            "yielded_epoch": 3,
+            "barge_in_yield_events": 1,
+            "stale_agent_payloads_after_yield": 0,
+            "recovered_epoch": 4,
+            "recovery_audio_before_finish": True,
+            "recovery_partial_text_before_finish": True,
+            "input_finished_events": 1,
+        },
+        "cancel": {
+            "append_call_ms": 0.02,
+            "cancel_call_ms": 0.01,
+            "cancel_events": 1,
+            "append_after_cancel_rejected": True,
+            "late_events": 0,
+        },
+        "reset_vs_fresh": {
+            "reset_events": 1,
+            "output_samples": 5292,
+            "reset_audio_fnv1a64": "reset-hash",
+            "fresh_audio_fnv1a64": "reset-hash",
+            "bitwise_audio_equal": True,
+            "text_equal": True,
+            "reset_input_finished_events": 1,
+            "fresh_input_finished_events": 1,
+        },
+        "processed_input_clear": {
+            "implemented": True,
+            "clear_succeeded": True,
+            "processed_append_calls": 23,
+            "processed_input_samples": 29440,
+            "transcript_delta_events_before_clear": 2,
+            "clear_call_ms": 0.03,
+            "clear_completion_events": 1,
+            "cleared_output_samples": 5292,
+            "fresh_output_samples": 5292,
+            "cleared_audio_fnv1a64": "clear-hash",
+            "fresh_audio_fnv1a64": "clear-hash",
+            "cleared_audio_rms": 0.01,
+            "fresh_audio_rms": 0.01,
+            "cleared_audio_peak": 0.1,
+            "fresh_audio_peak": 0.1,
+            "bitwise_audio_equal": True,
+            "agent_text_equal": True,
+            "user_transcript_equal": True,
+            "cleared_turn_finished_events": 1,
+            "fresh_turn_finished_events": 1,
+            "cleared_input_finished_events": 1,
+            "fresh_input_finished_events": 1,
+        },
+        "response_cancel_recovery": _response_recovery_receipt(truncate=False),
+        "response_truncate_recovery": _response_recovery_receipt(truncate=True),
+        "partial_finish_tail": {
+            "partial_input_samples": 317,
+            "pre_finish_committed_audio_events": 1,
+            "configured_tail_frames": 3,
+            "minimum_audio_events_after_finish": 3,
+            "maximum_audio_events_after_finish": 4,
+            "audio_events_after_finish": 3,
+            "output_samples_after_finish": 5292,
+            "completion_ms": 200.0,
+            "input_finished_events": 1,
+        },
+        "sequence_continuity": {
+            "sessions_checked": 13,
+            "events_checked": 500,
+            "violations": 0,
+            "pass": True,
+        },
+        "media_continuity": {
+            "segments_checked": 16,
+            "audio_events_checked": 400,
+            "violations": 0,
+            "pass": True,
+        },
+        "normal_multiturn": {
+            "implemented": True,
+            "same_session": True,
+            "turn_started_events": 3,
+            "turn_finished_events": 3,
+            "distinct_turn_epochs": 3,
+            "every_turn_completed": True,
+            "final_agent_text_events": 3,
+            "final_user_transcript_events": 2,
+            "yield_events": 0,
+            "reset_events": 0,
+            "input_finished_events": 1,
+            "pass": True,
+        },
+        "function_channel": {
+            "implemented": True,
+            "sotc_events": 1,
+            "eotc_events": 1,
+            "eotr_events": 1,
+            "completed_calls": 1,
+            "tool_response_injections": 1,
+            "agent_resumed_audio_events": 2,
+            "agent_resumed_text_events": 1,
+            "expected_tool_name_match": True,
+            "tool_response_submitted": True,
+            "stale_response_rejected": True,
+            "stale_function_payloads": 0,
+            "pass": True,
+        },
+        "backpressure_concurrency": {
+            "implemented": True,
+            "producer_thread_completed": True,
+            "consumer_thread_completed": True,
+            "events_observed_while_producing": True,
+            "bounded_queue": True,
+            "overflow_error_observed": True,
+            "no_deadlock": True,
+            "producer_append_calls": 196,
+            "finish_input_calls": 1,
+            "live_capacity_samples": 480000,
+            "overflow_attempt_samples": 480001,
+            "max_append_call_ms": 0.03,
+            "overflow_call_ms": 0.04,
+            "input_finished_events": 1,
+            "pass": True,
+        },
+    }
+
+
 def _compare(actual: dict):
     comparator = VoiceChatModelCardComparator()
     return comparator.compare(
@@ -133,6 +352,24 @@ def _compare(actual: dict):
             },
         ),
         StageSpec(name="model_card_general_conversation"),
+    )
+
+
+def _compare_lifecycle(receipt: dict):
+    comparator = VoiceChatModelCardComparator()
+    return comparator.compare(
+        StageOutput(
+            stage_name="native_full_duplex_lifecycle",
+            data={
+                "receipt": receipt,
+                "source_sha256": "source-sha",
+                "function_source_sha256": "function-source-sha",
+                "runtime_path_confirmed": True,
+            },
+        ),
+        StageOutput(stage_name="native_full_duplex_lifecycle", data=_lifecycle_reference()),
+        ThresholdProfile(task_strategy="speech_to_speech"),
+        StageSpec(name="native_full_duplex_lifecycle"),
     )
 
 
@@ -182,6 +419,29 @@ def test_manifest_pins_public_model_card_identity_and_exact_receipt() -> None:
         case["expected_output_codec_frames"] * case["expected_output_samples_per_frame"]
     )
     assert "runtime_cli_requires_hf_python" not in case.get("metadata", {})
+
+    lifecycle = next(
+        testcase
+        for testcase in manifest["testcases"]
+        if testcase["name"] == "nemotron-voicechat-11b-full-duplex-lifecycle"
+    )
+    assert lifecycle["reference_backend"] == "voicechat_lifecycle_invariants"
+    assert lifecycle["oracle_level"] == "L4_invariants"
+    assert lifecycle["test_category"] == "regression"
+    assert lifecycle["stages"] == [
+        {
+            "name": "native_full_duplex_lifecycle",
+            "required": True,
+            "artifact_type": "waveform",
+            "comparison_mode": "invariant_check",
+        },
+    ]
+    assert lifecycle["inputs"]["function_speech_source_relative_path"].endswith("/sample_fc.wav")
+    assert lifecycle["function_speech_source_sha256"] == (
+        "265f9e5f58bff1e71f4354f7d83e2ff405a8405b29c2cfeb50eb9085042e9136"
+    )
+    assert lifecycle["function_speech_source_num_samples"] == 190278
+    assert lifecycle["inputs"]["lifecycle_runtime_timeout_s"] == 1800
 
 
 def test_runner_uses_native_speak_then_native_transcribe(monkeypatch, tmp_path: Path) -> None:
@@ -252,6 +512,90 @@ def test_runner_uses_native_speak_then_native_transcribe(monkeypatch, tmp_path: 
     assert "Rayleigh" not in output.text
 
 
+def test_runner_builds_and_executes_native_lifecycle_target(monkeypatch, tmp_path: Path) -> None:
+    speech = tmp_path / "Speech"
+    source = speech / "examples/speechlm2/sample_audio/sample_general.wav"
+    _write_wav(source, [0.25, -0.25, 0.125, -0.125], sample_rate=16000, float32=False)
+    source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    function_source = speech / "examples/speechlm2/sample_audio/sample_fc.wav"
+    _write_wav(function_source, [0.1, -0.1], sample_rate=16000, float32=False)
+    function_source_sha = hashlib.sha256(function_source.read_bytes()).hexdigest()
+    monkeypatch.setenv("NEMOTRON_VOICECHAT_SPEECH_REPO", str(speech))
+
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    (build_dir / "CMakeCache.txt").write_text("configured\n", encoding="utf-8")
+    binary = build_dir / "trtmc"
+    binary.touch()
+    probe = build_dir / "test_nemotron_voicechat_native_lifecycle"
+    engine_dir = tmp_path / "engines"
+    engine_dir.mkdir()
+    (engine_dir / "nemotron-voicechat-11b.bundle").touch()
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        commands.append(command)
+        if command[0] == "cmake":
+            probe.touch()
+            return subprocess.CompletedProcess(command, 0, "built\n", "")
+        assert command[0] == str(probe)
+        output_wav = Path(command[-2])
+        receipt_path = Path(command[-1])
+        _write_wav(output_wav, [0.2, -0.2], sample_rate=22050, float32=True)
+        receipt_path.write_text(json.dumps(_lifecycle_receipt()), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            f"receipt={receipt_path}\n",
+            "[trtmc] Pipeline loaded (strategy=nemotron_voicechat_full_duplex, "
+            "backend=trt_new_runtime)\n",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    case = SimpleNamespace(
+        name="nemotron-voicechat-11b-full-duplex-lifecycle",
+        bundle="nemotron-voicechat-11b.bundle",
+        inputs={
+            "speech_source_relative_path": "examples/speechlm2/sample_audio/sample_general.wav",
+            "function_speech_source_relative_path": "examples/speechlm2/sample_audio/sample_fc.wav",
+            "lifecycle_build_timeout_s": 10,
+            "lifecycle_runtime_timeout_s": 10,
+        },
+        metadata={
+            "speech_source_sha256": source_sha,
+            "function_speech_source_sha256": function_source_sha,
+        },
+    )
+    context = SimpleNamespace(
+        binary_path=str(binary),
+        engine_dir=str(engine_dir),
+        model_plugin_dir=str(plugin_dir),
+        ld_library_path="/opt/tensorrt/lib",
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+
+    output = VoiceChatModelCardRunner().run_stage(
+        case, StageSpec(name="native_full_duplex_lifecycle"), context
+    )
+
+    assert commands[0] == [
+        "cmake",
+        "--build",
+        str(build_dir),
+        "--target",
+        "test_nemotron_voicechat_native_lifecycle",
+    ]
+    assert commands[1][0] == str(probe)
+    assert output.data["receipt"]["schema_version"] == 3
+    assert output.data["runtime_path_confirmed"] is True
+    assert output.data["function_source_sha256"] == function_source_sha
+    assert Path(output.data["receipt_path"]).is_file()
+    assert Path(output.data["wav_path"]).is_file()
+
+
 def test_reference_persists_pinned_audio_for_the_standalone_report(tmp_path: Path) -> None:
     manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
     testcase = manifest["testcases"][0]
@@ -271,6 +615,32 @@ def test_reference_persists_pinned_audio_for_the_standalone_report(tmp_path: Pat
     persisted = Path(output.data["audio_output_path"])
     assert persisted.parent == tmp_path / manifest["name"]
     assert persisted.read_bytes() == _REFERENCE_AUDIO.read_bytes()
+
+
+def test_lifecycle_reference_declares_every_fail_closed_section(tmp_path: Path) -> None:
+    case = SimpleNamespace(
+        name="nemotron-voicechat-11b-full-duplex-lifecycle",
+        inputs={
+            "reference_audio": (
+                "tests/e2e/models/nemotron_voicechat/assets/sample_general_reference.flac"
+            )
+        },
+        metadata={
+            **_lifecycle_reference(),
+            "reference_audio_sha256": hashlib.sha256(_REFERENCE_AUDIO.read_bytes()).hexdigest(),
+        },
+    )
+    output = VoiceChatLifecycleInvariantReference().run_stage(
+        case,
+        StageSpec(name="native_full_duplex_lifecycle"),
+        SimpleNamespace(artifacts_dir=str(tmp_path)),
+    )
+
+    expected = _lifecycle_reference()
+    persisted = Path(output.data.pop("audio_output_path"))
+    assert output.data == expected
+    assert persisted.read_bytes() == _REFERENCE_AUDIO.read_bytes()
+    assert output.metadata["source"] == "model_owned_l4_lifecycle_invariants"
 
 
 def test_standalone_report_embeds_input_trt_and_reference_audio(tmp_path: Path) -> None:
@@ -303,6 +673,15 @@ def test_standalone_report_embeds_input_trt_and_reference_audio(tmp_path: Path) 
     rendered = generate_e2e_report.render_audio_model(result, project_dir=_ROOT)
     assert rendered.count("<audio controls") == 3
 
+    lifecycle = copy.deepcopy(result)
+    lifecycle["case_name"] = "nemotron-voicechat-11b-full-duplex-lifecycle"
+    lifecycle["oracle_level"] = "L4_invariants"
+    lifecycle["case_config"]["reference_backend"] = "voicechat_lifecycle_invariants"
+    lifecycle["stage_outputs"] = {
+        "ref_native_full_duplex_lifecycle": {"data": {"audio_output_path": str(reference_audio)}}
+    }
+    assert generate_e2e_report.validate_evidence([lifecycle], project_dir=_ROOT) == []
+
 
 def test_comparator_requires_every_audio_text_and_session_gate() -> None:
     result = _compare(_actual_output())
@@ -331,6 +710,116 @@ def test_comparator_requires_every_audio_text_and_session_gate() -> None:
     assert failed_transcript.status == "failed"
     assert failed_transcript.metrics["agent_required_response_terms"].passed
     assert not failed_transcript.metrics["transcript_word_count"].passed
+
+
+def test_lifecycle_comparator_recomputes_primitives_and_fails_closed() -> None:
+    passed = _compare_lifecycle(_lifecycle_receipt())
+    assert passed.status == "passed"
+    assert all(metric.passed for metric in passed.metrics.values())
+    assert len(passed.metrics) == 182
+    assert passed.message.endswith("182/182 gates passed")
+
+    stale = copy.deepcopy(_lifecycle_receipt())
+    stale["pass"] = True
+    stale["barge_in"]["stale_agent_payloads_after_yield"] = 1
+    stale_result = _compare_lifecycle(stale)
+    assert stale_result.status == "failed"
+    assert not stale_result.metrics["barge_stale_payloads"].passed
+
+    unsupported = copy.deepcopy(_lifecycle_receipt())
+    unsupported["pass"] = True
+    unsupported["function_channel"]["implemented"] = False
+    unsupported_result = _compare_lifecycle(unsupported)
+    assert unsupported_result.status == "failed"
+    assert not unsupported_result.metrics["function_channel_implemented"].passed
+
+    missing = copy.deepcopy(_lifecycle_receipt())
+    missing["pass"] = True
+    missing.pop("backpressure_concurrency")
+    missing_result = _compare_lifecycle(missing)
+    assert missing_result.status == "failed"
+    assert not missing_result.metrics["section_backpressure_concurrency_present"].passed
+
+    contaminated = copy.deepcopy(_lifecycle_receipt())
+    contaminated["pass"] = True
+    contaminated["processed_input_clear"]["user_transcript_equal"] = False
+    contaminated_result = _compare_lifecycle(contaminated)
+    assert contaminated_result.status == "failed"
+    assert not contaminated_result.metrics["clear_user_transcript_fresh_equivalent"].passed
+
+    unfinished_clear = copy.deepcopy(_lifecycle_receipt())
+    unfinished_clear["pass"] = True
+    unfinished_clear["processed_input_clear"]["clear_completion_events"] = 0
+    unfinished_clear_result = _compare_lifecycle(unfinished_clear)
+    assert unfinished_clear_result.status == "failed"
+    assert not unfinished_clear_result.metrics["clear_completion_event"].passed
+
+    silent_clear = copy.deepcopy(_lifecycle_receipt())
+    silent_clear["pass"] = True
+    silent_clear["processed_input_clear"]["cleared_audio_rms"] = 0.0
+    silent_clear_result = _compare_lifecycle(silent_clear)
+    assert silent_clear_result.status == "failed"
+    assert not silent_clear_result.metrics["clear_audio_rms"].passed
+
+    empty_fresh = copy.deepcopy(_lifecycle_receipt())
+    empty_fresh["pass"] = True
+    empty_fresh["processed_input_clear"]["fresh_output_samples"] = 0
+    empty_fresh_result = _compare_lifecycle(empty_fresh)
+    assert empty_fresh_result.status == "failed"
+    assert not empty_fresh_result.metrics["clear_fresh_output_samples"].passed
+
+    unterminated_clear = copy.deepcopy(_lifecycle_receipt())
+    unterminated_clear["pass"] = True
+    unterminated_clear["processed_input_clear"]["fresh_turn_finished_events"] = 0
+    unterminated_clear_result = _compare_lifecycle(unterminated_clear)
+    assert unterminated_clear_result.status == "failed"
+    assert not unterminated_clear_result.metrics["clear_fresh_turn_finished"].passed
+
+    stale_cancel = copy.deepcopy(_lifecycle_receipt())
+    stale_cancel["pass"] = True
+    stale_cancel["response_cancel_recovery"]["stale_agent_payloads_after_control"] = 1
+    stale_cancel_result = _compare_lifecycle(stale_cancel)
+    assert stale_cancel_result.status == "failed"
+    assert not stale_cancel_result.metrics["response_cancel_stale_agent_payloads"].passed
+
+    wrong_boundary = copy.deepcopy(_lifecycle_receipt())
+    wrong_boundary["pass"] = True
+    wrong_boundary["response_truncate_recovery"]["played_output_samples"] = 3528
+    wrong_boundary_result = _compare_lifecycle(wrong_boundary)
+    assert wrong_boundary_result.status == "failed"
+    assert not wrong_boundary_result.metrics["response_truncate_played_before_generated"].passed
+
+    no_discard = copy.deepcopy(_lifecycle_receipt())
+    no_discard["pass"] = True
+    no_discard["response_truncate_recovery"]["discarded_output_samples"] = 0
+    no_discard_result = _compare_lifecycle(no_discard)
+    assert no_discard_result.status == "failed"
+    assert not no_discard_result.metrics["response_truncate_discarded_output_samples"].passed
+
+    lost_cancel_boundary = copy.deepcopy(_lifecycle_receipt())
+    lost_cancel_boundary["pass"] = True
+    lost_cancel_boundary["response_cancel_recovery"]["retained_output_samples"] = 0
+    lost_cancel_boundary_result = _compare_lifecycle(lost_cancel_boundary)
+    assert lost_cancel_boundary_result.status == "failed"
+    assert not lost_cancel_boundary_result.metrics[
+        "response_cancel_retained_generated_boundary"
+    ].passed
+
+    missing_replacement_text = copy.deepcopy(_lifecycle_receipt())
+    missing_replacement_text["pass"] = True
+    missing_replacement_text["response_cancel_recovery"]["replacement_final_text"] = ""
+    missing_replacement_text_result = _compare_lifecycle(missing_replacement_text)
+    assert missing_replacement_text_result.status == "failed"
+    assert not missing_replacement_text_result.metrics[
+        "response_cancel_replacement_final_text_nonempty"
+    ].passed
+
+    silent_replacement = copy.deepcopy(_lifecycle_receipt())
+    silent_replacement["pass"] = True
+    silent_replacement["response_truncate_recovery"]["replacement_audio_rms"] = 0.0
+    silent_replacement_result = _compare_lifecycle(silent_replacement)
+    assert silent_replacement_result.status == "failed"
+    assert not silent_replacement_result.metrics["response_truncate_replacement_audio_rms"].passed
 
 
 def test_e2e_files_stay_model_owned() -> None:

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -35,7 +36,6 @@ void check(bool condition, const char* name) {
 
 void test_frame_constants_and_chunk_accumulation() {
     static_assert(voicechat::kInputFrameSamples == 1280);
-    static_assert(voicechat::kOutputFrameSamples == 1764);
     static_assert(
         std::is_base_of_v<trtmc::VoiceChatThinkerInferenceState, trtmc::VoiceChatThinkerKvCache>);
     static_assert(std::is_base_of_v<trtmc::VoiceChatThinkerInferenceState,
@@ -52,7 +52,7 @@ void test_frame_constants_and_chunk_accumulation() {
     static_assert(!std::is_constructible_v<trtmc::VoiceChatThinkerKvCache, int32_t, int32_t,
                                            int32_t, cudaStream_t, trtmc::DType>);
 
-    voicechat::FrameScheduler scheduler(9);
+    voicechat::FrameScheduler scheduler;
     std::vector<float> first(1000, 1.0F);
     std::vector<float> second(1560, 2.0F);
     scheduler.append(first.data(), static_cast<int32_t>(first.size()));
@@ -63,21 +63,13 @@ void test_frame_constants_and_chunk_accumulation() {
     const auto frame1 = scheduler.pop();
     check(frame0.has_value() && frame1.has_value() && !scheduler.pop().has_value(),
           "scheduler emits two complete frames across chunk boundaries");
-    check(frame0->epoch == 9 && frame0->frame_index == 0 && frame1->frame_index == 1,
-          "scheduler tags frames with epoch and monotonic indices");
-    check(frame0->input_start_sample == 0 && frame0->input_end_sample == 1280 &&
-              frame1->input_start_sample == 1280 && frame1->input_end_sample == 2560,
-          "scheduler exposes input media ranges");
-    check(frame0->output_start_sample == 0 && frame0->output_end_sample == 1764 &&
-              frame1->output_start_sample == 1764 && frame1->output_end_sample == 3528,
-          "scheduler maps the shared 80 ms timeline to 22.05 kHz output");
     check(frame0->samples[999] == 1.0F && frame0->samples[1000] == 2.0F &&
               frame1->samples.front() == 2.0F && frame1->samples.back() == 2.0F,
           "scheduler preserves sample order across chunk boundaries");
 }
 
 void test_frame_finish_padding_and_reset() {
-    voicechat::FrameScheduler scheduler(2);
+    voicechat::FrameScheduler scheduler;
     const std::array<float, 3> tail = {0.1F, 0.2F, 0.3F};
     scheduler.append(tail.data(), static_cast<int32_t>(tail.size()));
     scheduler.finish();
@@ -97,10 +89,95 @@ void test_frame_finish_padding_and_reset() {
     }
     check(rejected, "scheduler rejects append after finish");
 
-    scheduler.reset(3);
-    check(scheduler.epoch() == 3 && scheduler.next_frame_index() == 0 &&
-              scheduler.pending_samples() == 0 && !scheduler.finished(),
-          "scheduler reset starts a fresh epoch and timeline");
+    scheduler.reset();
+    scheduler.append(tail.data(), static_cast<int32_t>(tail.size()));
+    check(scheduler.pending_samples() == tail.size() && !scheduler.pop().has_value(),
+          "scheduler reset accepts a fresh incomplete chunk");
+}
+
+void test_frame_commit_and_clear_keep_session_open() {
+    voicechat::FrameScheduler scheduler;
+    std::vector<float> partial(320, 0.5F);
+    scheduler.append(partial.data(), static_cast<int32_t>(partial.size()));
+    scheduler.commit();
+    const auto committed = scheduler.pop();
+    check(committed.has_value() && committed->valid_input_samples == 320 && !committed->is_final,
+          "input commit exposes a padded model frame without finishing the session");
+
+    scheduler.append(partial.data(), static_cast<int32_t>(partial.size()));
+    scheduler.clear_pending();
+    check(scheduler.pending_samples() == 0 && !scheduler.pop().has_value(),
+          "input clear drops only the pending fragment");
+
+    std::vector<float> full(static_cast<std::size_t>(voicechat::kInputFrameSamples), 1.0F);
+    scheduler.append(full.data(), static_cast<int32_t>(full.size()));
+    const auto next = scheduler.pop();
+    check(next.has_value() && next->samples.front() == 1.0F && !next->is_final,
+          "audio remains appendable after commit and clear");
+}
+
+void test_response_checkpoints_use_safe_boundaries() {
+    const std::vector<std::int64_t> checkpoints = {0, 1920, 3840, 5760};
+    const auto retained = [&](std::int64_t played) {
+        return voicechat::retained_response_checkpoint(checkpoints, played,
+                                                       [](std::int64_t value) { return value; });
+    };
+
+    check(retained(0) == 0 && retained(1919) == 0,
+          "truncate before the first complete model frame retains no response audio");
+    check(retained(1920) == 1 && retained(5759) == 2,
+          "millisecond playback cutoffs round down to the latest complete model frame");
+    check(retained(5760) == 3, "the generated response boundary can be retained exactly");
+
+    bool rejected = false;
+    try {
+        voicechat::validate_response_cursor(17, 16, 1920, checkpoints.back());
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "response playback timeline rejects stale epochs");
+
+    rejected = false;
+    try {
+        voicechat::validate_response_cursor(17, 17, 5761, checkpoints.back());
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "response playback timeline rejects ungenerated playback positions");
+}
+
+void test_realtime_turn_control_separates_commit_and_response_creation() {
+    voicechat::RealtimeTurnControlState state;
+    bool rejected = false;
+    try {
+        state.commit(false);
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    check(rejected, "realtime turn control rejects an empty input commit");
+
+    state.note_input();
+    state.commit(false);
+    check(!state.input_pending() && state.response_available(),
+          "input commit preserves a response latch without starting generation");
+    state.consume_response();
+    check(!state.response_available(),
+          "response creation consumes exactly one committed-turn latch");
+
+    rejected = false;
+    try {
+        state.consume_response();
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    check(rejected, "response creation cannot reuse a consumed commit");
+
+    state.restore_response();
+    check(state.response_available(),
+          "cancelled or truncated model state can create a replacement response");
+    state.reset();
+    check(!state.input_pending() && !state.response_available(),
+          "realtime turn reset removes input and response latches");
 }
 
 void test_conversation_epoch_and_yield_contract() {
@@ -117,16 +194,15 @@ void test_conversation_epoch_and_yield_contract() {
 
     check(state.barge_in(), "barge-in yields an active agent turn");
     check(state.phase() == voicechat::ConversationPhase::kListening &&
-              state.yield_reason() == voicechat::YieldReason::kBargeIn &&
               !state.accepts_output(first_epoch),
           "barge-in rejects stale agent output by epoch");
 
     const auto second_epoch = state.begin_agent_turn();
     check(second_epoch != first_epoch && state.yield_to_user(),
           "model yield invalidates a later agent epoch");
-    check(state.yield_reason() == voicechat::YieldReason::kModelYield &&
+    check(state.phase() == voicechat::ConversationPhase::kListening &&
               !state.accepts_output(second_epoch),
-          "model-yield state is distinct from barge-in");
+          "model yield returns to listening and rejects stale output");
 
     const auto third_epoch = state.begin_agent_turn();
     state.cancel();
@@ -189,6 +265,27 @@ void test_async_epoch_gate_cancels_without_waiting_for_worker() {
           "cancel epoch advances without waiting for the worker");
 }
 
+enum class TestWork { kAudio, kCancel, kTruncate, kClear, kCreate };
+
+bool is_test_priority(TestWork work) {
+    return work != TestWork::kAudio;
+}
+
+void test_priority_controls_are_fifo_ahead_of_audio() {
+    std::deque<TestWork> queue = {TestWork::kAudio,    TestWork::kCancel, TestWork::kAudio,
+                                  TestWork::kTruncate, TestWork::kClear,  TestWork::kCreate};
+    const auto first = voicechat::take_priority_fifo(queue, is_test_priority);
+    const auto second = voicechat::take_priority_fifo(queue, is_test_priority);
+    const auto third = voicechat::take_priority_fifo(queue, is_test_priority);
+    const auto fourth = voicechat::take_priority_fifo(queue, is_test_priority);
+    check(first == TestWork::kCancel && second == TestWork::kTruncate &&
+              third == TestWork::kClear && fourth == TestWork::kCreate,
+          "priority controls preserve FIFO order while bypassing queued audio");
+    check(queue.size() == 2 && queue.front() == TestWork::kAudio &&
+              queue.back() == TestWork::kAudio,
+          "priority selection leaves audio order unchanged");
+}
+
 void test_interruption_filter_preserves_completed_epochs() {
     std::vector<trtmc::SpeechSessionEvent> events(5);
     events[0].kind = trtmc::SpeechSessionEventKind::kAgentAudio;
@@ -224,17 +321,175 @@ void test_bounded_finish_tail_policy() {
           "live callers can choose a smaller explicit tail bound");
 }
 
+void test_rnnt_turn_detector_rejects_noise_and_invalid_policy() {
+    voicechat::RnntTurnPolicy invalid;
+    invalid.end_of_utterance_blank_frames = 0;
+    bool rejected = false;
+    try {
+        voicechat::RnntTurnDetector detector(invalid);
+        (void)detector;
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "RNNT turn detector rejects non-positive thresholds");
+
+    voicechat::RnntTurnPolicy policy;
+    policy.first_utterance_min_speech_frames = 3;
+    policy.subsequent_utterance_min_speech_frames = 4;
+    policy.end_of_utterance_blank_frames = 2;
+    policy.beginning_of_utterance_speech_frames = 3;
+    voicechat::RnntTurnDetector detector(policy);
+
+    check(!detector.observe(false, false, 0).speech_started &&
+              !detector.observe(true, false, 1).speech_started &&
+              !detector.observe(false, false, 2).speech_stopped &&
+              !detector.observe(false, false, 3).speech_stopped,
+          "blank, unknown, and short noise activity do not form an utterance");
+    check(!detector.utterance_active() && detector.completed_utterances() == 0 &&
+              detector.speech_frames() == 0,
+          "EOU silence clears unconfirmed RNNT noise without consuming the first turn");
+
+    rejected = false;
+    try {
+        (void)detector.observe(false, false, 3);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "RNNT turn observations require increasing frame indices");
+}
+
+void test_rnnt_first_and_subsequent_utterances() {
+    voicechat::RnntTurnPolicy policy;
+    policy.first_utterance_min_speech_frames = 2;
+    policy.subsequent_utterance_min_speech_frames = 3;
+    policy.end_of_utterance_blank_frames = 2;
+    policy.beginning_of_utterance_speech_frames = 3;
+    voicechat::RnntTurnDetector detector(policy);
+
+    check(!detector.observe(true, false, 0).speech_started,
+          "first RNNT speech frame waits for the first-turn minimum");
+    const auto first_start = detector.observe(true, false, 1);
+    check(first_start.speech_started && first_start.speech_start_frame == 0 &&
+              !first_start.start_agent,
+          "first-turn minimum emits one speech-start decision at the original frame");
+    check(!detector.observe(false, false, 2).speech_stopped &&
+              !detector.observe(true, false, 3).speech_started,
+          "a mid-word pause shorter than EOU preserves the active utterance");
+    check(!detector.observe(false, false, 4).speech_stopped,
+          "EOU waits for the configured number of blank frames");
+    const auto first_stop = detector.observe(false, false, 5);
+    check(first_stop.speech_stopped && first_stop.start_agent &&
+              first_stop.speech_start_frame == 0 && first_stop.speech_end_frame == 3 &&
+              detector.completed_utterances() == 1,
+          "first utterance finalizes once and requests an agent response");
+
+    check(!detector.observe(true, false, 6).speech_started &&
+              !detector.observe(false, false, 7).speech_stopped &&
+              !detector.observe(true, false, 8).speech_started,
+          "subsequent speech accumulates across a short pause without premature start");
+    const auto second_start = detector.observe(true, false, 9);
+    check(second_start.speech_started && second_start.speech_start_frame == 6,
+          "subsequent utterances use their independent minimum speech threshold");
+    const auto second_stop = detector.finalize_utterance(false, 9);
+    check(second_stop.speech_stopped && second_stop.start_agent &&
+              second_stop.speech_start_frame == 6 && second_stop.speech_end_frame == 9 &&
+              detector.completed_utterances() == 2,
+          "explicit utterance finalization flushes an active RNNT turn");
+}
+
+void test_rnnt_barge_in_and_reset() {
+    voicechat::RnntTurnPolicy policy;
+    policy.first_utterance_min_speech_frames = 2;
+    policy.subsequent_utterance_min_speech_frames = 3;
+    policy.end_of_utterance_blank_frames = 2;
+    policy.beginning_of_utterance_speech_frames = 3;
+    voicechat::RnntTurnDetector detector(policy);
+
+    check(!detector.observe(true, true, 0).interrupt_agent &&
+              !detector.observe(false, true, 1).interrupt_agent,
+          "one speech token followed by silence is not enough to interrupt");
+    const auto accumulated = detector.observe(true, true, 2);
+    check(accumulated.speech_started && !accumulated.interrupt_agent &&
+              accumulated.speech_start_frame == 0,
+          "accumulated speech can confirm an utterance without bypassing consecutive BOU");
+    check(!detector.observe(false, true, 3).interrupt_agent &&
+              !detector.observe(true, true, 4).interrupt_agent &&
+              !detector.observe(true, true, 5).interrupt_agent,
+          "blank or unknown activity resets the consecutive BOU counter");
+    const auto barge = detector.observe(true, true, 6);
+    check(barge.interrupt_agent && barge.speech_start_frame == 0,
+          "barge-in requires the configured consecutive non-unknown RNNT frames");
+    check(!detector.observe(true, true, 7).interrupt_agent &&
+              !detector.observe(true, true, 8).interrupt_agent,
+          "one utterance cannot repeatedly interrupt the same agent turn");
+    check(!detector.observe(false, false, 9).speech_stopped,
+          "barge-in utterance remains live across a short blank");
+    const auto stopped = detector.observe(false, false, 10);
+    check(stopped.speech_stopped && stopped.start_agent && stopped.speech_end_frame == 8,
+          "barge-in utterance starts a replacement response after EOU");
+
+    detector.reset();
+    check(!detector.utterance_active() && detector.completed_utterances() == 0 &&
+              !detector.observe(true, false, 0).speech_started,
+          "RNNT reset restores first-turn thresholds and frame numbering");
+    const auto restarted = detector.observe(true, false, 1);
+    check(restarted.speech_started && restarted.speech_start_frame == 0,
+          "RNNT detector starts cleanly after reset");
+    const auto finalized = detector.finalize_utterance(true, 1);
+    check(finalized.speech_stopped && !finalized.start_agent,
+          "finalization does not start a second agent while one is speaking");
+}
+
+void test_rnnt_single_frame_bou_policy() {
+    voicechat::RnntTurnPolicy policy;
+    policy.first_utterance_min_speech_frames = 4;
+    policy.subsequent_utterance_min_speech_frames = 4;
+    policy.end_of_utterance_blank_frames = 2;
+    policy.beginning_of_utterance_speech_frames = 1;
+    voicechat::RnntTurnDetector detector(policy);
+
+    const auto barge = detector.observe(true, true, 0);
+    check(barge.speech_started && barge.interrupt_agent && barge.speech_start_frame == 0,
+          "one-frame BOU remains a valid low-latency model-aware barge policy");
+}
+
+void test_rnnt_bou_counts_only_agent_overlap() {
+    voicechat::RnntTurnPolicy policy;
+    policy.first_utterance_min_speech_frames = 2;
+    policy.subsequent_utterance_min_speech_frames = 2;
+    policy.end_of_utterance_blank_frames = 2;
+    policy.beginning_of_utterance_speech_frames = 3;
+    voicechat::RnntTurnDetector detector(policy);
+
+    (void)detector.observe(true, false, 0);
+    (void)detector.observe(true, false, 1);
+    check(!detector.observe(true, true, 2).interrupt_agent &&
+              !detector.observe(true, true, 3).interrupt_agent,
+          "speech before the agent turn does not prefill the BOU overlap counter");
+    check(detector.observe(true, true, 4).interrupt_agent,
+          "BOU fires after the required consecutive speech frames overlap agent output");
+}
+
 } // namespace
 
 int main() {
     test_frame_constants_and_chunk_accumulation();
     test_frame_finish_padding_and_reset();
+    test_frame_commit_and_clear_keep_session_open();
+    test_response_checkpoints_use_safe_boundaries();
+    test_realtime_turn_control_separates_commit_and_response_creation();
     test_conversation_epoch_and_yield_contract();
     test_conversation_finish();
     test_wait_events_terminal_phase_policy();
     test_async_epoch_gate_cancels_without_waiting_for_worker();
+    test_priority_controls_are_fifo_ahead_of_audio();
     test_interruption_filter_preserves_completed_epochs();
     test_bounded_finish_tail_policy();
+    test_rnnt_turn_detector_rejects_noise_and_invalid_policy();
+    test_rnnt_first_and_subsequent_utterances();
+    test_rnnt_barge_in_and_reset();
+    test_rnnt_single_frame_bou_policy();
+    test_rnnt_bou_counts_only_agent_overlap();
     if (failures > 0)
         std::cerr << failures << " VoiceChat session-state test(s) FAILED\n";
     return failures;
