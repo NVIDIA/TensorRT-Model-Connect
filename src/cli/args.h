@@ -119,7 +119,32 @@ inline bool text_stdout_requires_jsonl(const CliArgs& args, int total_samples) {
     return !args.prompts_file.empty() || total_samples > 1;
 }
 
+// Single source of truth for the "--kv-cache-size expects ..." message, so
+// every caller (the main CLI, trtmc_dataset_benchmark, and any future one)
+// reports the same text for the same bad input instead of each inventing
+// its own wording.
+inline constexpr const char* kInvalidByteSizeMessage =
+    "--kv-cache-size expects a positive size like 90GB or 90GiB";
+
+// Accepts an optional fractional value followed by an optional unit: a bare
+// SI unit (B/K/KB/M/MB/G/GB/T/TB, decimal, 1000-based) or an IEC unit
+// (KiB/MiB/GiB/TiB, binary, 1024-based), case-insensitive. Leading
+// whitespace before the number is skipped (std::stod's own behavior); any
+// whitespace after the number, including between it and the unit, is not
+// -- "5 GB" and "5GB " are both rejected, " 5GB" is not. The result is
+// rounded to the nearest byte (round-half-up) rather than truncated.
+// Rejects empty input, non-positive values, unknown suffixes, trailing
+// garbage, overflow, and non-finite values (nan/inf/-inf all return
+// nullopt rather than the undefined behavior of casting a non-finite
+// double to uint64_t).
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);
+// Same as parse_byte_size, but throws std::runtime_error with a single
+// canonical message on failure instead of returning nullopt. The one
+// function every `--kv-cache-size`-style flag should call, in every
+// executable, so the error text can't drift between them the way it did
+// before src/cli/args.cpp and examples/trtmc_dataset_benchmark.cpp each had
+// their own message for the same bad input.
+std::uint64_t parse_byte_size_or_throw(const std::string& text);
 // Parse a CSV of unsigned-64 integers (e.g. "0,1,2"). Returns nullopt when
 // any token fails to parse. Empty string returns an empty vector wrapped
 // in an optional (caller should treat empty CSV the same as no flag).

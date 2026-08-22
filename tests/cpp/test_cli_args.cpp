@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -345,6 +346,101 @@ void test_bad_kv_cache_size_fails() {
     check(args.error_message.find("--kv-cache-size expects") == 0, "bad kv cache message");
 }
 
+void test_parse_byte_size_si_vs_iec() {
+    using trtmc::cli::parse_byte_size;
+    check(parse_byte_size("1GB") == 1000ull * 1000 * 1000, "1GB is decimal");
+    check(parse_byte_size("1GiB") == 1024ull * 1024 * 1024, "1GiB is binary");
+    check(parse_byte_size("1GB") != parse_byte_size("1GiB"), "GB and GiB differ");
+    check(parse_byte_size("1KB") == 1000ull, "1KB is decimal");
+    check(parse_byte_size("1KiB") == 1024ull, "1KiB is binary");
+    check(parse_byte_size("1MB") == 1000ull * 1000, "1MB is decimal");
+    check(parse_byte_size("1MiB") == 1024ull * 1024, "1MiB is binary");
+    check(parse_byte_size("1TB") == 1000ull * 1000 * 1000 * 1000, "1TB is decimal");
+    check(parse_byte_size("1TiB") == 1024ull * 1024 * 1024 * 1024, "1TiB is binary");
+}
+
+void test_parse_byte_size_case_and_fractional() {
+    using trtmc::cli::parse_byte_size;
+    check(parse_byte_size("1gb") == parse_byte_size("1GB"), "lowercase suffix matches uppercase");
+    check(parse_byte_size("1Gb") == parse_byte_size("1GB"), "mixed-case suffix matches");
+    check(parse_byte_size("1gib") == parse_byte_size("1GiB"), "lowercase iec suffix matches");
+    check(parse_byte_size("1.5GB") == 1500000000ull, "fractional value scales correctly");
+    check(parse_byte_size("100") == 100ull, "no suffix means bytes");
+    check(parse_byte_size("100B") == 100ull, "explicit B suffix means bytes");
+}
+
+void test_parse_byte_size_rejects_invalid() {
+    using trtmc::cli::parse_byte_size;
+    check(!parse_byte_size("").has_value(), "empty string rejected");
+    check(!parse_byte_size("0GB").has_value(), "zero rejected");
+    check(!parse_byte_size("-1GB").has_value(), "negative rejected");
+    check(!parse_byte_size("10GBx").has_value(), "trailing garbage rejected");
+    check(!parse_byte_size("10XB").has_value(), "unsupported suffix rejected");
+    check(!parse_byte_size("abc").has_value(), "non-numeric rejected");
+    check(!parse_byte_size("99999999999999999999999TB").has_value(), "overflow rejected");
+}
+
+void test_parse_byte_size_rejects_non_finite() {
+    using trtmc::cli::parse_byte_size;
+    // std::stod("nan") succeeds and returns a value that compares false
+    // against every relation, so a naive `value <= 0.0` check does not
+    // catch it and casting it to uint64_t is undefined behavior. This is
+    // the specific regression these three guard against.
+    check(!parse_byte_size("nan").has_value(), "nan rejected");
+    check(!parse_byte_size("NaN").has_value(), "NaN, mixed case, rejected");
+    check(!parse_byte_size("inf").has_value(), "inf rejected");
+    check(!parse_byte_size("-inf").has_value(), "-inf rejected");
+    check(!parse_byte_size("infinity").has_value(), "infinity rejected");
+}
+
+void test_parse_byte_size_whitespace() {
+    using trtmc::cli::parse_byte_size;
+    // std::stod itself skips leading whitespace before the numeric part, so
+    // it is tolerated here too -- this is std::stod's behavior, not a
+    // deliberate design choice of this function.
+    check(parse_byte_size(" 5GB") == 5000000000ull, "leading whitespace before the number is skipped");
+    // Whitespace anywhere after the number becomes part of what must match
+    // a known unit suffix, so it is rejected.
+    check(!parse_byte_size("5GB ").has_value(), "trailing whitespace after the unit rejected");
+    check(!parse_byte_size("5 GB").has_value(), "whitespace between the number and the unit rejected");
+}
+
+void test_parse_byte_size_rounds_half_up() {
+    using trtmc::cli::parse_byte_size;
+    // 1.5 bytes has no exact representation; round-half-up means it becomes
+    // 2, not 1 (truncation) or a rejection.
+    check(parse_byte_size("1.5B") == 2ull, "1.5B rounds up to 2 bytes");
+    // 0.5KB = 500 bytes exactly, no rounding involved; included so the
+    // fractional-but-exact case isn't confused with the rounding case above.
+    check(parse_byte_size("0.5KB") == 500ull, "0.5KB is exactly 500 bytes");
+}
+
+void test_kv_cache_size_error_matches_between_callers() {
+    // The main CLI (via parse_args, flag-based errors) and every other
+    // caller of parse_byte_size_or_throw (e.g. trtmc_dataset_benchmark)
+    // both report failures through trtmc::cli::kInvalidByteSizeMessage now,
+    // so this asserts they can no longer drift apart the way they did
+    // before this file's own parser was shared: the CLI's error and the
+    // exception's what() must be byte-for-byte the same string for the
+    // same bad input.
+    auto args = parse({"trtmc", "run", "bundle.bundle", "--kv-cache-size", "nan"});
+    check(args.parse_error, "nan kv-cache-size is a parse error");
+    check(args.error_message == trtmc::cli::kInvalidByteSizeMessage,
+          "CLI error message is the shared constant");
+
+    bool threw = false;
+    std::string thrown_message;
+    try {
+        trtmc::cli::parse_byte_size_or_throw("nan");
+    } catch (const std::exception& e) {
+        threw = true;
+        thrown_message = e.what();
+    }
+    check(threw, "parse_byte_size_or_throw throws on nan");
+    check(thrown_message == args.error_message,
+          "parse_byte_size_or_throw message matches the CLI's message for the same input");
+}
+
 void test_invalid_generation_sampling_values_fail() {
     auto negative_tokens =
         parse({"trtmc", "run", "bundle.bundle", "--prompt", "hello", "--max-new-tokens", "-5"});
@@ -512,6 +608,13 @@ int main() {
     test_missing_value_fails();
     test_missing_prompt_is_distinct_from_empty_prompt();
     test_bad_kv_cache_size_fails();
+    test_parse_byte_size_si_vs_iec();
+    test_parse_byte_size_case_and_fractional();
+    test_parse_byte_size_rejects_invalid();
+    test_parse_byte_size_rejects_non_finite();
+    test_parse_byte_size_whitespace();
+    test_parse_byte_size_rounds_half_up();
+    test_kv_cache_size_error_matches_between_callers();
     test_invalid_generation_sampling_values_fail();
     test_generation_sampling_boundaries_parse();
     test_unexpected_positional_fails();
