@@ -89,6 +89,30 @@ fixture and is distributed under the Apache License 2.0:
 - `tests/e2e/models/personaplex/data/personaplex_recording_official_tokens_greedy.npy`;
   SHA-256 `1f9cbce7a20d09a65069eaa521c3bc5c492f00b27f2d32a4b5c12d1de5a9618c`
 
+## Nemotron VoiceChat report audio
+
+`tests/e2e/models/nemotron_voicechat/assets/sample_general_input.flac` is a
+lossless FLAC conversion of the public
+[`sample_general.wav`](https://github.com/NVIDIA%2DNeMo/Speech/blob/097dfe9e2f55baf653b83035868bdc89849f1b47/examples/speechlm2/sample_audio/sample_general.wav)
+fixture at Speech revision `097dfe9e2f55baf653b83035868bdc89849f1b47`,
+distributed under the Apache License 2.0. The source WAV SHA-256 is
+`481f422a961fb160ddeba9824d55cb7c190c57acb7dc1730a2d595fd078dcb04`;
+the FLAC SHA-256 is
+`60e1177b7687db259679546ab0a703db4a28157f21bce784fd0b0400559e5a20`.
+
+`tests/e2e/models/nemotron_voicechat/assets/sample_general_reference.flac` is a
+lossless FLAC conversion of project-generated, seed-0 reference audio produced
+from that input by the pinned public Speech implementation and
+`nvidia/NVIDIA-NemotronLabs-VoiceChat-11B` checkpoint at revision
+`359ada7b1c60851e40ff08065f9b0340244f27e0`. It is standalone-report evidence,
+not a waveform-equality acceptance gate. The checkpoint license imposes no
+restrictions or obligations on sharing its outputs, and this fixture is
+distributed under the Apache License 2.0 with the other project-generated
+golden data. The generated PCM16 WAV SHA-256 is
+`08605f5205999d02980518939b60442cc8b33f22787fa82fda9eacad222dceab`;
+the FLAC SHA-256 is
+`6966ddf14fe98fc2375a4caf956001b3231630fdc0e38e108c511e7a18ea6be8`.
+
 ## LibriSpeech accuracy fixture
 
 `tests/e2e/models/whisper/data/librispeech-test-clean-6930-75918-0003.wav`

@@ -28,6 +28,8 @@
       "user_contract": "speech_response",
       "test_type": "audio",
       "inputs": {
+        "audio": "tests/e2e/models/nemotron_voicechat/assets/sample_general_input.flac",
+        "reference_audio": "tests/e2e/models/nemotron_voicechat/assets/sample_general_reference.flac",
         "speech_source_relative_path": "examples/speechlm2/sample_audio/sample_general.wav",
         "runtime_timeout_s": 1800,
         "transcribe_timeout_s": 1800,
@@ -39,6 +41,8 @@
       "speech_source_sha256": "481f422a961fb160ddeba9824d55cb7c190c57acb7dc1730a2d595fd078dcb04",
       "speech_source_sample_rate": 16000,
       "speech_source_num_samples": 249734,
+      "report_input_audio_sha256": "60e1177b7687db259679546ab0a703db4a28157f21bce784fd0b0400559e5a20",
+      "reference_audio_sha256": "6966ddf14fe98fc2375a4caf956001b3231630fdc0e38e108c511e7a18ea6be8",
       "voicechat_model_sha256": "d553750c29434a6bb524377e17634c6cafdbf621892e643a77f406e51570354b",
       "text_model_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
       "text_model_revision": "6533e8de2c68e4536bf7c411d7a3ce5734111476",

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib
 import json
 import struct
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,11 +22,23 @@ from tests.e2e.models.nemotron_voicechat.e2e_plugins.comparator import (
 from tests.e2e.models.nemotron_voicechat.e2e_plugins.runner import (
     VoiceChatModelCardRunner,
 )
+from tests.e2e.models.nemotron_voicechat.e2e_plugins.reference import (
+    VoiceChatPinnedModelCardReference,
+)
 from tests.e2e_harness.contracts import StageOutput, StageSpec, ThresholdProfile
 
 _ROOT = Path(__file__).resolve().parents[4]
 _MODEL_DIR = Path(__file__).resolve().parent
 _MANIFEST_PATH = _MODEL_DIR / "manifests/nemotron-voicechat-11b.json"
+_INPUT_AUDIO = _MODEL_DIR / "assets/sample_general_input.flac"
+_REFERENCE_AUDIO = _MODEL_DIR / "assets/sample_general_reference.flac"
+
+
+def _import_report():
+    scripts_dir = str(_ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    return importlib.import_module("generate_e2e_report")
 
 
 def _write_wav(path: Path, samples: list[float], *, sample_rate: int, float32: bool) -> None:
@@ -146,6 +160,19 @@ def test_manifest_pins_public_model_card_identity_and_exact_receipt() -> None:
     assert case["speech_source_sha256"] == (
         "481f422a961fb160ddeba9824d55cb7c190c57acb7dc1730a2d595fd078dcb04"
     )
+    assert case["inputs"]["audio"] == (
+        "tests/e2e/models/nemotron_voicechat/assets/sample_general_input.flac"
+    )
+    assert case["inputs"]["reference_audio"] == (
+        "tests/e2e/models/nemotron_voicechat/assets/sample_general_reference.flac"
+    )
+    assert (
+        hashlib.sha256(_INPUT_AUDIO.read_bytes()).hexdigest() == (case["report_input_audio_sha256"])
+    )
+    assert (
+        hashlib.sha256(_REFERENCE_AUDIO.read_bytes()).hexdigest()
+        == (case["reference_audio_sha256"])
+    )
     assert case["text_model_revision"] == "6533e8de2c68e4536bf7c411d7a3ce5734111476"
     assert (case["expected_output_sample_rate"], case["expected_output_num_samples"]) == (
         22050,
@@ -223,6 +250,58 @@ def test_runner_uses_native_speak_then_native_transcribe(monkeypatch, tmp_path: 
     assert "Rayleigh scattering" in output.data["agent_text"]
     assert output.data["transcript_line_count"] == 1
     assert "Rayleigh" not in output.text
+
+
+def test_reference_persists_pinned_audio_for_the_standalone_report(tmp_path: Path) -> None:
+    manifest = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
+    testcase = manifest["testcases"][0]
+    case = SimpleNamespace(
+        name=manifest["name"],
+        inputs=testcase["inputs"],
+        metadata=testcase,
+        hf_id=manifest["hf_id"],
+        hf_revision=manifest["hf_revision"],
+    )
+    context = SimpleNamespace(artifacts_dir=str(tmp_path))
+
+    output = VoiceChatPinnedModelCardReference().run_stage(
+        case, StageSpec(name="model_card_general_conversation"), context
+    )
+
+    persisted = Path(output.data["audio_output_path"])
+    assert persisted.parent == tmp_path / manifest["name"]
+    assert persisted.read_bytes() == _REFERENCE_AUDIO.read_bytes()
+
+
+def test_standalone_report_embeds_input_trt_and_reference_audio(tmp_path: Path) -> None:
+    generate_e2e_report = _import_report()
+    trt_audio = tmp_path / "trt.wav"
+    _write_wav(trt_audio, [0.2, -0.2, 0.1, -0.1], sample_rate=22050, float32=True)
+    reference_audio = tmp_path / "reference.flac"
+    reference_audio.write_bytes(_REFERENCE_AUDIO.read_bytes())
+    result = {
+        "status": "pass",
+        "case_name": "nemotron-voicechat-11b",
+        "oracle_level": "L3_snapshot_regression",
+        "case_config": {
+            "task_strategy": "speech_to_speech",
+            "reference_backend": "voicechat_pinned_model_card",
+            "inputs": {
+                "audio": ("tests/e2e/models/nemotron_voicechat/assets/sample_general_input.flac")
+            },
+        },
+        "artifacts": {"trt_wav": trt_audio.name},
+        "stage_outputs": {
+            "ref_model_card_general_conversation": {
+                "data": {"audio_output_path": str(reference_audio)}
+            }
+        },
+        "_artifact_dir": str(tmp_path),
+    }
+
+    assert generate_e2e_report.validate_evidence([result], project_dir=_ROOT) == []
+    rendered = generate_e2e_report.render_audio_model(result, project_dir=_ROOT)
+    assert rendered.count("<audio controls") == 3
 
 
 def test_comparator_requires_every_audio_text_and_session_gate() -> None:
