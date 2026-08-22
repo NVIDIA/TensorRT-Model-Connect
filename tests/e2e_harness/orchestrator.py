@@ -400,6 +400,14 @@ def _resolve_bundle(
     logger.info("Building bundle: %s", " ".join(cmd))
     t0 = time.monotonic()
     env = os.environ.copy()
+    if ctx.binary_path:
+        # Direct Python builds do not pass through the native CLI launcher,
+        # which normally tells builder-side plugins where the backend DSO is.
+        # The explicitly selected runtime binary is the provenance-bound
+        # source of that directory for E2E builds.
+        env["_TRTMC_INTERNAL_NATIVE_BIN_DIR"] = str(
+            Path(ctx.binary_path).resolve().parent
+        )
     _apply_manifest_build_env(env, case)
     if ctx.build_profile and ctx.build_profile != "base":
         cmd.extend(["--active-python-profile", ctx.build_profile])

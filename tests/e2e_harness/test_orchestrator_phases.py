@@ -279,6 +279,32 @@ def test_ci_engine_build_guard_passes_manifest_identity_to_builder(
     assert command[command.index("-o") + 1] == str(Path(ctx.engine_dir) / case.bundle)
 
 
+def test_bundle_build_resolves_native_plugins_beside_runtime_binary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("unit-build")
+    ctx = _make_ctx(tmp_path, case)
+    native_dir = tmp_path / "native"
+    native_dir.mkdir()
+    ctx.binary_path = str(native_dir / "trtmc")
+    build_environments: list[dict[str, str]] = []
+
+    def fake_run(cmd, **kwargs):
+        build_environments.append(kwargs["env"])
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"bundle")
+        return subprocess.CompletedProcess(cmd, 0, stdout="built", stderr="")
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    bundle, _elapsed, error, _build_info = orchestrator._resolve_bundle(case, ctx)
+
+    assert bundle == str(Path(ctx.engine_dir) / case.bundle)
+    assert error == ""
+    assert len(build_environments) == 1
+    assert build_environments[0]["_TRTMC_INTERNAL_NATIVE_BIN_DIR"] == str(native_dir)
+
+
 @pytest.mark.parametrize(
     ("max_cache_length", "expected_flag"),
     ((None, False), (256, True)),
