@@ -3,24 +3,71 @@
 
 """Qwen family plugin — Qwen, Qwen2, Qwen3, QwQ (text-only, not VL).
 
-Qwen3 uses only the family-owned TensorRT native KV path and fails closed for
-unsupported build modes. Other Qwen variants retain their legacy graph routes.
+Unquantized Qwen3 uses only the family-owned TensorRT native KV path. Qualified
+FP8 builds retain the family-owned quantized graph; all other unsupported
+Qwen3 modes fail closed. Other Qwen variants retain their legacy graph routes.
 """
 
 from __future__ import annotations
 
 from .config import ModelConfig
 from .checkpoint_mapper import WeightDict, load_standard_weights
-from ...parallel_config import normalize_parallel_config
+from ...parallel_config import ParallelConfig, normalize_parallel_config
 from ...quantization.adapters import StandardDecoderCalibrationAdapter
 from .build_routing import (
     native_kv_architecture_capability,
     native_kv_build_capability,
+    native_kv_cache_geometry,
 )
 from .native_kv_contract import validate_native_kv_weights
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+
+
+def _quant_format_name(quant_ctx) -> str | None:
+    quant_format = getattr(getattr(quant_ctx, "profile", None), "format", None)
+    return getattr(quant_format, "name", None)
+
+
+def _uses_qualified_qwen3_fp8_path(
+    config: ModelConfig,
+    max_cache_length: int,
+    *,
+    precision: str,
+    quant_ctx,
+    parallel: ParallelConfig,
+    debug_layer_outputs: bool,
+) -> bool:
+    """Recognize the explicit, previously qualified Qwen3 FP8 graph route."""
+
+    raw = config.raw
+    precision_name = str(precision).lower()
+    qualified_route = (
+        not parallel.enabled
+        and precision_name == "fp16"
+        and raw.get("_decoder_engine_layout") == "dual_profile"
+    ) or (
+        parallel.enabled
+        and parallel.tp_size == 4
+        and precision_name == "bf16"
+    )
+    if (
+        not native_kv_architecture_capability(config).eligible
+        or _quant_format_name(quant_ctx) != "fp8"
+        or not qualified_route
+        or debug_layer_outputs
+        or raw.get("_rtx_build_requested")
+        or raw.get("_fp32_layers")
+        or raw.get("dynamic_kv_cache")
+        or raw.get("_runtime_dynamic_kv_requested")
+    ):
+        return False
+    try:
+        native_kv_cache_geometry(config, max_cache_length)
+    except ValueError:
+        return False
+    return True
 
 
 class QwenPlugin:
@@ -86,7 +133,7 @@ class QwenPlugin:
         return int(config.max_position_embeddings) if capability.eligible else 256
 
     def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
-        """Keep quantized legacy Qwen variants on the single-engine path."""
+        """Keep quantized Qwen routes on the family-owned single-engine path."""
         return not bool(config.raw.get("_quantized_build_requested"))
 
     def validate_build_request(self, config: ModelConfig) -> None:
@@ -126,6 +173,14 @@ class QwenPlugin:
             quantized=quant_ctx is not None,
             debug_layer_outputs=debug_layer_outputs,
         )
+        qualified_fp8 = _uses_qualified_qwen3_fp8_path(
+            config,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            parallel=parallel,
+            debug_layer_outputs=debug_layer_outputs,
+        )
         if capability.eligible:
             validate_native_kv_weights(config, weights)
             config.raw["_decoder_engine_layout_supported"] = True
@@ -152,7 +207,7 @@ class QwenPlugin:
                 native_kv_cache=True,
             )
 
-        if capability.applicable:
+        if capability.applicable and not qualified_fp8:
             raise ValueError(
                 "Qwen3 requires the fixed-capacity native KV path: "
                 f"{capability.reason}"

@@ -9,6 +9,7 @@ import ast
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,7 @@ from tensorrt_model_connect.families.qwen.config import ModelConfig
 from tensorrt_model_connect.families.qwen.native_kv_contract import (
     validate_native_kv_weights,
 )
+from tensorrt_model_connect.parallel_config import ParallelConfig
 
 
 def _config(*, raw_updates: dict | None = None, **overrides) -> ModelConfig:
@@ -258,6 +260,12 @@ def _weights(config: ModelConfig) -> dict[str, object]:
     return weights
 
 
+def _quant_ctx(name: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        profile=SimpleNamespace(format=SimpleNamespace(name=name)),
+    )
+
+
 def test_weight_contract_rejects_missing_shape_and_bias():
     config = _small_config()
     weights = _weights(config)
@@ -386,13 +394,155 @@ def test_qwen3_dynamic_kv_fails_before_legacy_builder(monkeypatch):
     assert plugin_module.plugin.get_bundle_config_overrides(config) is None
 
 
-def test_qwen3_explicit_legacy_build_options_fail_closed(monkeypatch):
+def test_qwen3_qualified_fp8_uses_family_quantized_builder(monkeypatch):
+    pytest.importorskip("tensorrt")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.plugin"
+    )
+    config = _small_config(role="dual_profile")
+    config.raw["_decoder_engine_layout"] = "dual_profile"
+    config.raw["_native_kv_cache_metadata"] = {"stale": True}
+    quant_ctx = _quant_ctx("fp8")
+    captured: dict[str, object] = {}
+
+    def _build(*args, **kwargs):
+        captured.update(args=args, kwargs=kwargs)
+        return b"legacy-plan"
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_standard_decoder_engine",
+        _build,
+    )
+
+    result = plugin_module.plugin.build_engine(
+        config,
+        _weights(config),
+        128,
+        precision="fp16",
+        quant_ctx=quant_ctx,
+    )
+
+    assert result == b"legacy-plan"
+    assert captured["args"][2] == 128
+    assert captured["kwargs"]["precision"] == "fp16"
+    assert captured["kwargs"]["quant_ctx"] is quant_ctx
+    assert plugin_module.plugin.get_bundle_config_overrides(config) is None
+
+
+def test_qwen3_qualified_fp8_retains_tensor_parallel_builder(monkeypatch):
     pytest.importorskip("tensorrt")
     plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.qwen.plugin"
     )
     config = _small_config(role="decode")
-    config.raw["_native_kv_cache_metadata"] = {"stale": True}
+    quant_ctx = _quant_ctx("fp8")
+    parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=0)
+    captured: dict[str, object] = {}
+
+    def _build(*args, **kwargs):
+        captured.update(args=args, kwargs=kwargs)
+        return b"tp-plan"
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_dual_profile_tp_decoder_engine",
+        _build,
+    )
+
+    result = plugin_module.plugin.build_engine(
+        config,
+        _weights(config),
+        128,
+        precision="bf16",
+        quant_ctx=quant_ctx,
+        parallel_config=parallel,
+    )
+
+    assert result == b"tp-plan"
+    assert captured["kwargs"]["quant_ctx"] is quant_ctx
+    assert captured["kwargs"]["parallel_config"] is parallel
+    assert plugin_module.plugin.get_bundle_config_overrides(config) is None
+
+
+@pytest.mark.parametrize(
+    ("tp_size", "precision"),
+    [
+        (2, "bf16"),
+        (8, "bf16"),
+        (4, "fp16"),
+    ],
+)
+def test_qwen3_unqualified_fp8_parallel_modes_fail_closed(
+    monkeypatch,
+    tp_size,
+    precision,
+):
+    pytest.importorskip("tensorrt")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.plugin"
+    )
+    config = _small_config(role="decode")
+    parallel = ParallelConfig(mode="tensor_parallel", tp_size=tp_size, rank=0)
+    legacy_called = False
+
+    def _unexpected_legacy(*_args, **_kwargs):
+        nonlocal legacy_called
+        legacy_called = True
+        return b"tp-plan"
+
+    monkeypatch.setattr(
+        plugin_module,
+        "build_dual_profile_tp_decoder_engine",
+        _unexpected_legacy,
+    )
+
+    with pytest.raises(ValueError, match="requires the fixed-capacity native KV path"):
+        plugin_module.plugin.build_engine(
+            config,
+            _weights(config),
+            128,
+            precision=precision,
+            quant_ctx=_quant_ctx("fp8"),
+            parallel_config=parallel,
+        )
+
+    assert not legacy_called
+    assert plugin_module.plugin.get_bundle_config_overrides(config) is None
+
+
+@pytest.mark.parametrize(
+    ("quant_format", "precision", "raw_updates", "debug_layer_outputs"),
+    [
+        ("int8_sq", "fp16", {"_decoder_engine_layout": "dual_profile"}, False),
+        ("fp8", "fp32", {"_decoder_engine_layout": "dual_profile"}, False),
+        ("fp8", "bf16", {"_decoder_engine_layout": "dual_profile"}, False),
+        ("fp8", "fp16", {"_decoder_engine_layout": "split"}, False),
+        (
+            "fp8",
+            "fp16",
+            {
+                "_decoder_engine_layout": "dual_profile",
+                "_rtx_build_requested": True,
+            },
+            False,
+        ),
+        ("fp8", "fp16", {"_decoder_engine_layout": "dual_profile"}, True),
+    ],
+)
+def test_qwen3_unqualified_quantized_modes_still_fail_closed(
+    monkeypatch,
+    quant_format,
+    precision,
+    raw_updates,
+    debug_layer_outputs,
+):
+    pytest.importorskip("tensorrt")
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.plugin"
+    )
+    config = _small_config(role="dual_profile")
+    config.raw.update(raw_updates)
     legacy_called = False
 
     def _unexpected_legacy(*_args, **_kwargs):
@@ -411,8 +561,9 @@ def test_qwen3_explicit_legacy_build_options_fail_closed(monkeypatch):
             config,
             _weights(config),
             128,
-            precision="fp16",
-            quant_ctx=object(),
+            precision=precision,
+            quant_ctx=_quant_ctx(quant_format),
+            debug_layer_outputs=debug_layer_outputs,
         )
 
     assert not legacy_called

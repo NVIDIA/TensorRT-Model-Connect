@@ -76,9 +76,17 @@ native default do not re-enter provider selection when precision changes.
 ```bash
 $TRTMC build Qwen/Qwen3-0.6B \
   -o /tmp/qwen3-fp8.bundle \
+  --decoder-engine-layout dual_profile \
+  --precision fp16 \
   --quantize fp8 \
   --quant-calibration-samples 512
 ```
+
+Dense Qwen3 FP8 uses its qualified family-owned quantized dual-profile graph.
+The single-GPU contract uses FP16. The only qualified tensor-parallel contract
+is TP4 with BF16; other TP sizes and base precisions are unsupported.
+Unquantized FP16 and BF16 builds continue to use the fixed-capacity native-KV
+split path; other Qwen3 quantization formats remain unsupported.
 
 The current quantization surface accepts `fp8`, `int8`, `int8_sq`, `int4`, `int4_awq`, `nvfp4`, and `w4a8`. Family plugins can exclude weight patterns, provide calibration data, and return a family-specific calibration adapter through the `FamilyPlugin` protocol.
 
