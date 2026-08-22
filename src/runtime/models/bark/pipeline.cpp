@@ -79,6 +79,39 @@ void mask_coarse_logits_for_codebook(std::vector<float>& logits, int32_t codeboo
     }
 }
 
+int32_t bark_batched_prefill_length(TrtModule* module, BarkKvCache* cache,
+                                    const std::vector<float>& embeddings, int32_t hidden_size,
+                                    int32_t max_length) {
+    if (module == nullptr || cache == nullptr || hidden_size <= 0 || embeddings.empty() ||
+        embeddings.size() % static_cast<std::size_t>(hidden_size) != 0 ||
+        !module->has_input("input_embed")) {
+        return 0;
+    }
+
+    const int32_t seq_len =
+        static_cast<int32_t>(embeddings.size() / static_cast<std::size_t>(hidden_size));
+    return seq_len > 1 && seq_len <= max_length ? seq_len : 0;
+}
+
+void collect_bark_prefill_kv(TrtModule& module, int32_t num_layers,
+                             std::vector<const void*>& present_k,
+                             std::vector<const void*>& present_v) {
+    present_k.reserve(static_cast<std::size_t>(num_layers));
+    present_v.reserve(static_cast<std::size_t>(num_layers));
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const std::string suffix = "_" + std::to_string(layer);
+        const void* key = module.device_ptr("present_k" + suffix);
+        const void* value = module.device_ptr("present_v" + suffix);
+        if (key == nullptr || value == nullptr) {
+            throw std::runtime_error(
+                "BarkPipeline: batched prefill is missing KV output for layer " +
+                std::to_string(layer));
+        }
+        present_k.push_back(key);
+        present_v.push_back(value);
+    }
+}
+
 // Dump tokens to ``<dump_path><suffix>`` when dump_path is non-empty.
 // Replaces the TRTMC_BARK_DUMP env var. Value flows in through the
 // ``audio_bark.dump_path`` schema field.
@@ -168,6 +201,12 @@ void BarkPipeline::set_fine_embeddings(std::vector<float> embed, std::vector<flo
     fine_position_embed_ = std::move(pos_embed);
 }
 
+void BarkPipeline::set_prefill_modules(std::unique_ptr<TrtModule> semantic_prefill,
+                                       std::unique_ptr<TrtModule> coarse_prefill) {
+    semantic_prefill_ = std::move(semantic_prefill);
+    coarse_prefill_ = std::move(coarse_prefill);
+}
+
 AudioResult BarkPipeline::generate_audio(const std::string& prompt, const GenerateConfig& cfg) {
     // Tokenize the prompt
     std::vector<int32_t> input_ids;
@@ -237,7 +276,7 @@ void BarkPipeline::run_step_with_embed(TrtModule& module, BarkInferenceState& st
                                        std::vector<float>& logits) {
     Tensor embed_tensor;
     embed_tensor.data = const_cast<float*>(embed);
-    embed_tensor.shape = {embed_dim};
+    embed_tensor.shape = {1, embed_dim};
     embed_tensor.dtype = DType::kFloat32;
 
     float use_embed = 1.0F;
@@ -306,6 +345,38 @@ void BarkPipeline::run_step_with_token(TrtModule& module, BarkInferenceState& st
     state.advance();
 }
 
+bool BarkPipeline::run_batched_prefill(TrtModule* module, BarkInferenceState& state,
+                                       const std::vector<float>& embeddings, int32_t hidden_size,
+                                       std::vector<float>& logits, const char* stage) {
+    auto* cache = dynamic_cast<BarkKvCache*>(&state);
+    const int32_t seq_len =
+        bark_batched_prefill_length(module, cache, embeddings, hidden_size, state.max_length());
+    if (seq_len == 0)
+        return false;
+
+    TensorMap inputs;
+    inputs["input_embed"] =
+        Tensor{const_cast<float*>(embeddings.data()), {seq_len, hidden_size}, DType::kFloat32};
+    cache->bind_cache_inputs(*module);
+    state.prepare_step(inputs, seq_len);
+
+    const TensorMap outputs = module->forward(inputs);
+    const auto logits_it = outputs.find("logits");
+    if (logits_it == outputs.end())
+        throw std::runtime_error("BarkPipeline: batched prefill has no 'logits' output");
+    const auto& logits_tensor = logits_it->second;
+    logits.resize(static_cast<std::size_t>(logits_tensor.numel()));
+    std::memcpy(logits.data(), logits_tensor.data, logits_tensor.numel() * sizeof(float));
+
+    std::vector<const void*> present_k;
+    std::vector<const void*> present_v;
+    collect_bark_prefill_kv(*module, state.num_layers(), present_k, present_v);
+    cache->write_prefill_kv(present_k, present_v, seq_len);
+    std::cerr << "[trtmc] Bark " << stage << " prefill: " << seq_len << " tokens in one call"
+              << std::endl;
+    return true;
+}
+
 int32_t BarkPipeline::sample_top_k(const float* logits, int32_t vocab_size, float temperature,
                                    int32_t top_k) {
     if (config_.greedy) {
@@ -334,7 +405,8 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
     std::vector<float> logits;
     std::vector<float> embed_a(static_cast<std::size_t>(cfg.hidden_size));
     std::vector<float> embed_b(static_cast<std::size_t>(cfg.hidden_size));
-    std::vector<float> embed_buf(static_cast<std::size_t>(cfg.hidden_size));
+    std::vector<float> prefill_embeddings(static_cast<std::size_t>(kBarkMaxTextLen + 1) *
+                                          cfg.hidden_size);
 
     // Prefill text tokens
     const auto copy_len = std::min(static_cast<int32_t>(text_ids.size()), kBarkMaxTextLen);
@@ -343,15 +415,23 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
         copy_embed_row(semantic_embed_.data(), text_tok, cfg.hidden_size, embed_a.data());
         copy_embed_row(semantic_embed_.data(), cfg.semantic_pad_token, cfg.hidden_size,
                        embed_b.data());
-        sum_embed_rows(embed_a.data(), embed_b.data(), cfg.hidden_size, embed_buf.data());
-        run_step_with_embed(*semantic_, *semantic_state_, embed_buf.data(), cfg.hidden_size,
-                            logits);
+        float* row = prefill_embeddings.data() + static_cast<std::size_t>(pos) * cfg.hidden_size;
+        sum_embed_rows(embed_a.data(), embed_b.data(), cfg.hidden_size, row);
     }
 
     // Prefill infer token
     copy_embed_row(semantic_embed_.data(), cfg.semantic_infer_token, cfg.hidden_size,
-                   embed_buf.data());
-    run_step_with_embed(*semantic_, *semantic_state_, embed_buf.data(), cfg.hidden_size, logits);
+                   prefill_embeddings.data() +
+                       static_cast<std::size_t>(kBarkMaxTextLen) * cfg.hidden_size);
+    if (!run_batched_prefill(semantic_prefill_.get(), *semantic_state_, prefill_embeddings,
+                             cfg.hidden_size, logits, "semantic")) {
+        for (int32_t pos = 0; pos <= kBarkMaxTextLen; ++pos) {
+            run_step_with_embed(*semantic_, *semantic_state_,
+                                prefill_embeddings.data() +
+                                    static_cast<std::size_t>(pos) * cfg.hidden_size,
+                                cfg.hidden_size, logits);
+        }
+    }
 
     // Autoregressive generation
     std::vector<int32_t> semantic_tokens;
@@ -369,8 +449,13 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
 
         semantic_tokens.push_back(token);
 
-        // During decode, use token_id path (no embedding injection)
-        run_step_with_token(*semantic_, *semantic_state_, token, logits);
+        if (semantic_->has_input("token_id")) {
+            run_step_with_token(*semantic_, *semantic_state_, token, logits);
+        } else {
+            copy_embed_row(semantic_embed_.data(), token, cfg.hidden_size, embed_a.data());
+            run_step_with_embed(*semantic_, *semantic_state_, embed_a.data(), cfg.hidden_size,
+                                logits);
+        }
     }
 
     std::cerr << "[trtmc] Bark semantic: generated " << semantic_tokens.size() << " tokens"
@@ -409,18 +494,20 @@ std::vector<int32_t> BarkPipeline::run_coarse(const std::vector<int32_t>& semant
         coarse_state_->reset();
         coarse_state_->bind_to(*coarse_);
 
-        // Prefill coarse window
-        for (std::size_t i = 0; i + 1 < window_plan.input_tokens.size(); ++i) {
+        std::vector<float> prefill_embeddings(window_plan.input_tokens.size() *
+                                              static_cast<std::size_t>(cfg.hidden_size));
+        for (std::size_t i = 0; i < window_plan.input_tokens.size(); ++i) {
             copy_embed_row(coarse_embed_.data(), window_plan.input_tokens[i], cfg.hidden_size,
-                           embed_buf.data());
-            run_step_with_embed(*coarse_, *coarse_state_, embed_buf.data(), cfg.hidden_size,
-                                logits);
+                           prefill_embeddings.data() + i * cfg.hidden_size);
         }
-
-        // Last prefill token
-        copy_embed_row(coarse_embed_.data(), window_plan.input_tokens.back(), cfg.hidden_size,
-                       embed_buf.data());
-        run_step_with_embed(*coarse_, *coarse_state_, embed_buf.data(), cfg.hidden_size, logits);
+        if (!run_batched_prefill(coarse_prefill_.get(), *coarse_state_, prefill_embeddings,
+                                 cfg.hidden_size, logits, "coarse")) {
+            for (std::size_t i = 0; i < window_plan.input_tokens.size(); ++i) {
+                run_step_with_embed(*coarse_, *coarse_state_,
+                                    prefill_embeddings.data() + i * cfg.hidden_size,
+                                    cfg.hidden_size, logits);
+            }
+        }
 
         // Generate
         for (int32_t step = 0; step < window_plan.generated_this_window; ++step) {
@@ -434,8 +521,12 @@ std::vector<int32_t> BarkPipeline::run_coarse(const std::vector<int32_t>& semant
 
             if (step + 1 < window_plan.generated_this_window) {
                 copy_embed_row(coarse_embed_.data(), token, cfg.hidden_size, embed_buf.data());
-                run_step_with_embed(*coarse_, *coarse_state_, embed_buf.data(), cfg.hidden_size,
-                                    logits);
+                if (coarse_->has_input("token_id")) {
+                    run_step_with_token(*coarse_, *coarse_state_, token, logits);
+                } else {
+                    run_step_with_embed(*coarse_, *coarse_state_, embed_buf.data(), cfg.hidden_size,
+                                        logits);
+                }
             }
         }
     }

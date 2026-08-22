@@ -23,6 +23,14 @@ def test_large_acceptance_build_preserves_audited_full_precision() -> None:
     assert manifest["precision"] == "fp32"
 
 
+def test_single_device_builds_share_weights_between_prefill_and_decode() -> None:
+    manifests = Path(__file__).parent / "manifests"
+
+    for name in ("bark-large.json", "bark-small.json", "bark-small-fp32-l0.json"):
+        manifest = json.loads((manifests / name).read_text(encoding="utf-8"))
+        assert manifest["build_args"]["decoder_engine_layout"] == "dual_profile"
+
+
 def test_large_acceptance_build_has_a_precision_matched_l0() -> None:
     model_dir = Path(__file__).parent
     large = json.loads((model_dir / "manifests" / "bark-large.json").read_text(encoding="utf-8"))

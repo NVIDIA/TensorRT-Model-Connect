@@ -494,8 +494,20 @@ class BarkPlugin:
                 verbose=verbose,
                 parallel_config=parallel,
             )
+        engine_role = str(config.raw.get("_decoder_engine_role", "decode"))
+        if engine_role not in {"decode", "dual_profile"}:
+            raise ValueError(
+                "Bark supports decoder_engine_layout='dual_profile' for batched prefill; "
+                f"got engine role {engine_role!r}"
+            )
         return _build_bark_standard_engine(
-            weights, "semantic", sem_cfg, max_cache_length, precision=precision, verbose=verbose
+            weights,
+            "semantic",
+            sem_cfg,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            engine_role=engine_role,
         )
 
     def build_extra_engines(
@@ -540,6 +552,11 @@ class BarkPlugin:
                         parallel_config=rank_parallel,
                     )
         else:
+            engine_role = (
+                "dual_profile"
+                if config.raw.get("_decoder_engine_layout") == "dual_profile"
+                else "decode"
+            )
             with timed_trt_compile(build_timing, "extra_bark_coarse_decoder"):
                 coarse_plan = _build_bark_standard_engine(
                     weights,
@@ -548,6 +565,7 @@ class BarkPlugin:
                     max_cache_length,
                     precision=precision,
                     verbose=verbose,
+                    engine_role=engine_role,
                 )
             result["coarse_engine_plan"] = coarse_plan
 
@@ -698,6 +716,8 @@ def _build_bark_standard_engine(
     max_cache_length: int,
     precision: str = "fp32",
     verbose: bool = False,
+    *,
+    engine_role: str = "decode",
 ) -> bytes:
     """Build a standard decoder engine for semantic or coarse using build_standard_decoder_engine."""
     from .standard_decoder_builder import build_standard_decoder_engine
@@ -719,12 +739,24 @@ def _build_bark_standard_engine(
         max_position_embeddings=sub_cfg.get("max_position", 1024),
         rms_norm_eps=1e-05,
         rope_theta=10000.0,
-        raw={},
+        raw={"_decoder_engine_role": engine_role},
     )
     if verbose:
         print(
             f"[trtmc build]   Building {sub_model} engine: layers={sub_cfg['num_layers']}, hidden={hidden}, vocab={sub_cfg['vocab_size']}, output_vocab={sub_cfg.get('output_vocab', sub_cfg['vocab_size'])}",
             file=sys.stderr,
+        )
+    if engine_role == "dual_profile":
+        from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+
+        return build_dual_profile_decoder_engine(
+            sub_mc,
+            sub_weights,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            profile_mode="dual_profile",
+            embed_input=True,
         )
     return build_standard_decoder_engine(
         sub_mc, sub_weights, max_cache_length, precision=precision, verbose=verbose

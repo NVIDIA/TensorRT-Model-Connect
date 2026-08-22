@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -154,29 +155,59 @@ class BarkPlugin final : public IPipelinePlugin {
         // Load semantic engine (main plan or rank-local TP section)
         const std::string semantic_section =
             tp_config.enabled ? tp_engine_section_name(tp_group.rank) : std::string("engine_plan");
-        auto sem_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, semantic_section), "bark semantic", decoder_opts);
-
-        // Load coarse engine (single plan or rank-local TP section)
         const std::string coarse_section = tp_config.enabled
                                                ? coarse_tp_engine_section_name(tp_group.rank)
                                                : std::string("coarse_engine_plan");
-        auto coarse_loaded = load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, coarse_section), "bark coarse", decoder_opts);
+        const bool dual_profile =
+            !tp_config.enabled &&
+            extract_json_string(json, "decoder_engine_layout", "single") == "dual_profile";
 
-        cudaStream_t stream = sem_loaded.module->stream();
+        std::unique_ptr<TrtModule> semantic;
+        std::unique_ptr<TrtModule> coarse;
+        std::unique_ptr<TrtModule> semantic_prefill;
+        std::unique_ptr<TrtModule> coarse_prefill;
+        cudaStream_t stream = nullptr;
+        if (dual_profile) {
+            auto semantic_profiles =
+                load_dual_profile_modules(ctx.backend, find_section(ctx.bundle, semantic_section),
+                                          "bark semantic", decoder_opts);
+            semantic = std::move(semantic_profiles.decode);
+            semantic_prefill = std::move(semantic_profiles.prefill);
+            stream = semantic->stream();
+
+            ModuleCreateOptions coarse_opts = decoder_opts;
+            coarse_opts.stream = stream;
+            auto coarse_profiles = load_dual_profile_modules(
+                ctx.backend, find_section(ctx.bundle, coarse_section), "bark coarse", coarse_opts);
+            coarse = std::move(coarse_profiles.decode);
+            coarse_prefill = std::move(coarse_profiles.prefill);
+            if (!semantic_prefill || !coarse_prefill)
+                throw std::runtime_error("Bark dual-profile bundle is missing a prefill profile");
+        } else {
+            auto sem_loaded =
+                load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, semantic_section),
+                                          "bark semantic", decoder_opts);
+            semantic = std::move(sem_loaded.module);
+            stream = semantic->stream();
+
+            ModuleCreateOptions coarse_opts = decoder_opts;
+            coarse_opts.stream = stream;
+            auto coarse_loaded = load_trt_module_from_plan(
+                ctx.backend, find_section(ctx.bundle, coarse_section), "bark coarse", coarse_opts);
+            coarse = std::move(coarse_loaded.module);
+        }
+
         BarkConfig bark_cfg = make_bark_config(ctx);
 
         // Create KvCaches for semantic and coarse stages
-        int32_t sem_kv_dim =
-            decoder_cache_row_width(*sem_loaded.module, compute_kv_dim(ctx.config));
+        int32_t sem_kv_dim = decoder_cache_row_width(*semantic, compute_kv_dim(ctx.config));
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<BarkInferenceState> sem_state = std::make_unique<BarkKvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, sem_kv_dim, stream, cache_dtype);
 
         // Coarse engine may have different dimensions -- resolve with semantic fallbacks
-        std::unique_ptr<BarkInferenceState> coarse_state(make_bark_coarse_kv_cache(
-            json, ctx.config, *coarse_loaded.module, stream, cache_dtype));
+        std::unique_ptr<BarkInferenceState> coarse_state(
+            make_bark_coarse_kv_cache(json, ctx.config, *coarse, stream, cache_dtype));
 
         // Load embeddings
         auto sem_embed = section_to_floats(find_section(ctx.bundle, "semantic_embed"));
@@ -188,10 +219,14 @@ class BarkPlugin final : public IPipelinePlugin {
         auto bark_tokenizer = try_create_native_tokenizer(ctx.bundle, /*add_special_tokens=*/false);
 
         auto pipeline = std::make_unique<BarkPipeline>(
-            std::move(sem_loaded.module), std::move(coarse_loaded.module), std::move(sem_state),
-            std::move(coarse_state), std::move(sem_embed), std::move(coarse_embed),
-            std::move(bark_cfg), stream, std::move(bark_tokenizer), ctx.bundle.info.model_id);
+            std::move(semantic), std::move(coarse), std::move(sem_state), std::move(coarse_state),
+            std::move(sem_embed), std::move(coarse_embed), std::move(bark_cfg), stream,
+            std::move(bark_tokenizer), ctx.bundle.info.model_id);
 
+        if (semantic_prefill && coarse_prefill)
+            pipeline->set_prefill_modules(std::move(semantic_prefill), std::move(coarse_prefill));
+
+        opts.stream = stream;
         attach_optional_bark_modules(*pipeline, ctx, opts);
 
         return pipeline;

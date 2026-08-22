@@ -7,6 +7,9 @@
   "task_strategy": "text_to_audio",
   "precision": "fp32",
   "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "decoder_engine_layout": "dual_profile"
+  },
   "max_cache_length": 1024,
   "trust_remote_code": false,
   "testcases": [

@@ -8,6 +8,9 @@
   "precision": "fp16",
   "reference_precision": "fp32",
   "e2e_parallel_resource": "exclusive_gpu",
+  "build_args": {
+    "decoder_engine_layout": "dual_profile"
+  },
   "build_env": {
     "TRTMC_TRT_TIMING_CACHE_PATH": "",
     "TRTMC_TRT_TIMING_CACHE_DIR": "",
