@@ -32,7 +32,9 @@
 #include "trtmc/trtmc_io.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -45,6 +47,62 @@ static void check(bool condition, const char* test_name) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+static void write_wav_fixture(const std::string& path, uint16_t format, uint16_t channels,
+                              uint32_t sample_rate, uint16_t bits_per_sample, const void* samples,
+                              uint32_t data_size, bool add_odd_junk = false) {
+    std::ofstream output(path, std::ios::binary);
+    const uint32_t file_size = 36 + data_size + (add_odd_junk ? 10 : 0);
+    const uint16_t block_align = channels * bits_per_sample / 8;
+    const uint32_t byte_rate = sample_rate * block_align;
+    const uint32_t fmt_size = 16;
+
+    output.write("RIFF", 4);
+    output.write(reinterpret_cast<const char*>(&file_size), 4);
+    output.write("WAVE", 4);
+    if (add_odd_junk) {
+        const uint32_t junk_size = 1;
+        const char junk[2] = {'x', '\0'};
+        output.write("JUNK", 4);
+        output.write(reinterpret_cast<const char*>(&junk_size), 4);
+        output.write(junk, 2); // RIFF chunks are word-aligned.
+    }
+    output.write("fmt ", 4);
+    output.write(reinterpret_cast<const char*>(&fmt_size), 4);
+    output.write(reinterpret_cast<const char*>(&format), 2);
+    output.write(reinterpret_cast<const char*>(&channels), 2);
+    output.write(reinterpret_cast<const char*>(&sample_rate), 4);
+    output.write(reinterpret_cast<const char*>(&byte_rate), 4);
+    output.write(reinterpret_cast<const char*>(&block_align), 2);
+    output.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
+    output.write("data", 4);
+    output.write(reinterpret_cast<const char*>(&data_size), 4);
+    output.write(static_cast<const char*>(samples), data_size);
+}
+
+static void write_truncated_chunk_fixture(const std::string& path) {
+    std::ofstream output(path, std::ios::binary);
+    const uint32_t file_size = 36;
+    const uint32_t declared_chunk_size = 64;
+    const char short_payload[24] = {};
+    output.write("RIFF", 4);
+    output.write(reinterpret_cast<const char*>(&file_size), 4);
+    output.write("WAVE", 4);
+    output.write("JUNK", 4);
+    output.write(reinterpret_cast<const char*>(&declared_chunk_size), 4);
+    output.write(short_payload, sizeof(short_payload));
+}
+
+static bool read_throws_with(const std::string& path, const std::string& expected) {
+    try {
+        (void)trtmc::io::read_wav(path);
+    } catch (const trtmc::io::WavFormatError& error) {
+        return std::string(error.what()).find(expected) != std::string::npos;
+    } catch (...) {
+        return false;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,15 +258,15 @@ static bool test_io_write_bad_path_throws() {
 // Preconditions:  path does not exist on filesystem
 // Postconditions: std::runtime_error is thrown
 static bool test_io_read_missing_throws() {
-    bool threw = false;
     try {
         trtmc::io::read_wav("/nonexistent/path/to/audio.wav");
+    } catch (const trtmc::io::WavFormatError&) {
+        return false;
     } catch (const std::runtime_error&) {
-        threw = true;
+        return true;
     } catch (...) {
     }
-
-    return threw;
+    return false;
 }
 
 // Intention: write_wav then read_wav preserves num_samples field.
@@ -239,6 +297,63 @@ static bool test_io_num_samples_field() {
     return result.num_samples == 4 && result.samples.size() == 4;
 }
 
+static bool test_io_multichannel_pcm16_downmix() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "pcm16-4ch.wav").string();
+    const std::vector<int16_t> interleaved = {
+        16384, 8192, 0,     -8192, // 0.125 after four-channel averaging
+        0,     8192, 16384, 24576, // 0.375 after four-channel averaging
+    };
+    write_wav_fixture(path, 1, 4, 48000, 16, interleaved.data(),
+                      static_cast<uint32_t>(interleaved.size() * sizeof(int16_t)), true);
+
+    const auto result = trtmc::io::read_wav(path);
+    return result.sample_rate == 48000 && result.num_samples == 2 && result.samples.size() == 2 &&
+           std::abs(result.samples[0] - 0.125F) < 1e-6F &&
+           std::abs(result.samples[1] - 0.375F) < 1e-6F;
+}
+
+static bool test_io_multichannel_float32_downmix() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "float32-3ch.wav").string();
+    const std::vector<float> interleaved = {
+        1.0F,  0.5F,  -0.75F, // 0.25 after three-channel averaging
+        -1.0F, 0.25F, 0.75F,  // 0.0 after three-channel averaging
+    };
+    write_wav_fixture(path, 3, 3, 44100, 32, interleaved.data(),
+                      static_cast<uint32_t>(interleaved.size() * sizeof(float)));
+
+    const auto result = trtmc::io::read_wav(path);
+    return result.sample_rate == 44100 && result.num_samples == 2 && result.samples.size() == 2 &&
+           std::abs(result.samples[0] - 0.25F) < 1e-6F && std::abs(result.samples[1]) < 1e-6F;
+}
+
+static bool test_io_rejects_invalid_wav_contract() {
+    trtmc_test::TempDirGuard dir;
+    const auto root = std::filesystem::path(dir.path());
+    const std::vector<uint8_t> pcm8 = {0, 255};
+    const auto unsupported = (root / "pcm8.wav").string();
+    write_wav_fixture(unsupported, 1, 1, 16000, 8, pcm8.data(), static_cast<uint32_t>(pcm8.size()));
+
+    const std::vector<int16_t> incomplete_frame = {1};
+    const auto incomplete = (root / "incomplete-frame.wav").string();
+    write_wav_fixture(incomplete, 1, 2, 16000, 16, incomplete_frame.data(),
+                      static_cast<uint32_t>(incomplete_frame.size() * sizeof(int16_t)));
+
+    const std::vector<int16_t> sample = {1};
+    const auto zero_channels = (root / "zero-channels.wav").string();
+    write_wav_fixture(zero_channels, 1, 0, 16000, 16, sample.data(),
+                      static_cast<uint32_t>(sample.size() * sizeof(int16_t)));
+
+    const auto truncated = (root / "truncated-chunk.wav").string();
+    write_truncated_chunk_fixture(truncated);
+
+    return read_throws_with(unsupported, "PCM16 or IEEE float32") &&
+           read_throws_with(incomplete, "complete audio frames") &&
+           read_throws_with(zero_channels, "channels and sample rate must be positive") &&
+           read_throws_with(truncated, "truncated chunk");
+}
+
 int main() {
     bool all_passed = true;
     std::cout << "test_trtmc_io:" << std::endl;
@@ -256,6 +371,9 @@ int main() {
     run("io_write_bad_path_throws", test_io_write_bad_path_throws);
     run("io_read_missing_throws", test_io_read_missing_throws);
     run("io_num_samples_field", test_io_num_samples_field);
+    run("io_multichannel_pcm16_downmix", test_io_multichannel_pcm16_downmix);
+    run("io_multichannel_float32_downmix", test_io_multichannel_float32_downmix);
+    run("io_rejects_invalid_wav_contract", test_io_rejects_invalid_wav_contract);
 
     if (all_passed) {
         std::cout << "test_trtmc_io passed" << std::endl;

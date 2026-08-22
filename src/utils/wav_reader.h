@@ -16,10 +16,9 @@ struct WavData {
     int32_t sample_rate{0};
 };
 
-// Read a WAV file and return mono float32 samples.
-// Handles: RIFF chunk parsing, PCM int16 + IEEE float32,
-// stereo→mono (channel averaging), multi-channel (first channel).
-// Throws std::runtime_error on failure.
+// Compatibility wrapper for the canonical trtmc::io::read_wav implementation.
+// Returns source-rate mono float32 samples by averaging every interleaved channel.
+// This function never resamples; the receiving model pipeline owns that conversion.
 WavData read_wav(const std::string& path);
 
 // Resample audio using linear interpolation.
