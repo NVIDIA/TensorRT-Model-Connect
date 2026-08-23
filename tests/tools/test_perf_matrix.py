@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import nullcontext
 import json
+import os
 from argparse import Namespace
 from pathlib import Path
 import runpy
@@ -2939,6 +2940,27 @@ def test_bark_reference_maps_public_token_cap_to_semantic_stage() -> None:
         "semantic_max_new_tokens": 128
     }
     assert runner["_bark_generation_options"]({"max_new_tokens": 0}) == {}
+
+
+def test_task_reference_local_only_cli_disables_huggingface_network(monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+    captured: dict[str, str | None] = {}
+
+    def fake_run(_arguments):
+        captured["hub"] = os.environ.get("HF_HUB_OFFLINE")
+        captured["transformers"] = os.environ.get("TRANSFORMERS_OFFLINE")
+        return 0
+
+    parser = SimpleNamespace(
+        parse_args=lambda _argv: Namespace(local_files_only=True)
+    )
+    monkeypatch.setitem(runner["main"].__globals__, "build_parser", lambda: parser)
+    monkeypatch.setitem(runner["main"].__globals__, "run", fake_run)
+
+    assert runner["main"]([]) == 0
+    assert captured == {"hub": "1", "transformers": "1"}
 
 
 def test_magpie_reference_maps_public_token_cap_to_decoder_steps() -> None:

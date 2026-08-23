@@ -2727,7 +2727,11 @@ def run(arguments: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
-        return run(build_parser().parse_args(argv))
+        arguments = build_parser().parse_args(argv)
+        if arguments.local_files_only:
+            os.environ["HF_HUB_OFFLINE"] = "1"
+            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        return run(arguments)
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
