@@ -77,7 +77,7 @@ Source contains exactly these three workflow files:
 
 | Workflow | Trigger and evidence boundary |
 | --- | --- |
-| `.github/workflows/community-cpu.yml` | Pull-request open, update, reopen, or ready-for-review event; automatically runs read-only CPU validation against the exact GitHub merge revision and publishes native checks with public logs. |
+| `.github/workflows/community-cpu.yml` | Pull-request open, update, or reopen event; automatically runs read-only CPU validation against the exact GitHub merge revision and publishes native checks with public logs. |
 | `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, verifies current public CPU success, captures the exact PR head, and dispatches private premerge. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
 

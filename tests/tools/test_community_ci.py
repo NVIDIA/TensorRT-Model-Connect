@@ -138,7 +138,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert workflow["permissions"] == {}
     assert "pull_request:" in source
     assert "branches: [main]" in source
-    assert "types: [opened, synchronize, reopened, ready_for_review]" in source
+    assert "types: [opened, synchronize, reopened]" in source
     assert "issue_comment:" not in source
     assert "pull_request_target" not in source
     assert "workflow_dispatch:" not in source
