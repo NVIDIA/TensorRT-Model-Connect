@@ -145,10 +145,16 @@ CPU` validation by adding this exact comment to the pull request:
 ```
 
 The trusted default-branch `Community CPU` workflow authorizes the actor and
-captures the exact base, head, and merge SHAs without checking out
-pull-request code. Separate jobs in that same workflow run source quality,
-ownership and impact, and source-only C++ and Python units. A maintainer or
-admin may submit the same comment on the author's behalf.
+captures the exact base, head, merge, and request identifiers without checking
+out pull-request code. Separate jobs in that same workflow run source quality,
+ownership and impact, and source-only C++ and Python units. Those jobs restore
+the CI controller, pinned dependencies, build configuration, and baseline tests
+from the captured base SHA before executing the proposed runtime and package
+source. Changes to the controller, `tools/`, tests, or build configuration
+receive their authoritative validation in the protected suite. A passing public
+result is functional evidence, not proof that arbitrary pull-request code is
+benign. A maintainer or admin may submit the same comment on the author's
+behalf.
 
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs, and every public job uses a GitHub-hosted
@@ -161,8 +167,9 @@ merge SHA rather than the pull-request head SHA.
 
 Fix any failures and wait for `Community CPU / Required` to pass. Repeating
 `/run-ci` for the same queued, running, or successful merge is safely
-deduplicated. If the PR head or base changes, comment `/run-ci` again after
-the new revision is ready.
+deduplicated. A merge revision receives at most three attempts; after that,
+push a corrected revision or ask a maintainer to investigate. If the PR head or
+base changes, comment `/run-ci` again after the new revision is ready.
 
 ## 7. Coordinate protected repository CI
 

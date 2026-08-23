@@ -4,3 +4,16 @@
 # Default owner for the public repository. Replace this entry with project
 # teams once those teams are created in the NVIDIA GitHub organization.
 * @yifeif-nv
+
+# The external-comment policy has repository/event granularity, not workflow
+# path granularity. Keep every trusted entrypoint and controller change inside
+# this explicit review boundary.
+/.github/workflows/ @yifeif-nv
+/.github/scripts/restore-community-ci-controller.py @yifeif-nv
+/requirements/community-ci.txt @yifeif-nv
+/Dockerfile.community-cpu @yifeif-nv
+/tools/community_ci.py @yifeif-nv
+/tools/ci/ @yifeif-nv
+/tools/model_ci.py @yifeif-nv
+/tools/test_impact.py @yifeif-nv
+/tests/ @yifeif-nv

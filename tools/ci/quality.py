@@ -9,6 +9,7 @@ Boundary: pre-model CPU validation; isolated model certification is a later stag
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -19,6 +20,13 @@ from .context import CiContext
 from .package import WheelPackageManager
 from .process import CiError
 from .selected_wheel import SelectedWheelRuntime
+
+
+ISOLATED_PYTEST = (
+    "import os, runpy, sys; "
+    "sys.path.extend(path for path in sys.argv.pop(1).split(os.pathsep) if path); "
+    "runpy.run_module('pytest', run_name='__main__')"
+)
 
 
 class EnvironmentVerifier:
@@ -104,6 +112,7 @@ class SourceQualityChecks:
         self.context.run(
             [
                 "python",
+                "-I",
                 "tools/check_cyclomatic_complexity.py",
                 "src",
                 "--exclude",
@@ -134,12 +143,14 @@ class SourceQualityChecks:
             base = self.context.env.get(
                 "CI_BASE_REF", f"origin/{self.context.env.get('GITHUB_REF_NAME', 'main')}"
             )
-        python_files = self._changed_files(base, "*.py")
+        python_files = self._lintable_changed_files(self._changed_files(base, "*.py"))
         if python_files:
             print("Checking Python lint on changed files:")
             print("\n".join(python_files))
             self.context.run(["ruff", "check", "--config", "ruff.toml", *python_files])
-        cpp_files = self._changed_files(base, "*.cpp", "*.h")
+        cpp_files = self._lintable_changed_files(
+            self._changed_files(base, "*.cpp", "*.h")
+        )
         if cpp_files:
             print("Checking C++ formatting on changed files:")
             print("\n".join(cpp_files))
@@ -149,12 +160,15 @@ class SourceQualityChecks:
         self.context.run(
             [
                 "python",
-                "-m",
-                "pytest",
+                "-I",
+                "-c",
+                ISOLATED_PYTEST,
+                str(self.context.repository),
                 "tests/tools/test_model_plugin_encapsulation_static.py",
                 "-q",
                 "-p",
                 "no:cacheprovider",
+                "--import-mode=importlib",
             ],
             limit=self.context.env.get("ARCHITECTURE_CONTRACT_TIMEOUT", "3m"),
         )
@@ -166,6 +180,21 @@ class SourceQualityChecks:
             capture_output=True,
         )
         return [line for line in result.stdout.splitlines() if line]
+
+    def _lintable_changed_files(self, paths: list[str]) -> list[str]:
+        lintable = []
+        for relative in paths:
+            if (self.context.repository / relative).is_file():
+                lintable.append(relative)
+            elif relative == "tools.py" or relative.startswith("tools/"):
+                print(
+                    f"Skipping public lint for trusted-controller path {relative}; "
+                    "protected CI validates the proposed file."
+                )
+            else:
+                # Keep unexpected missing paths so the formatter fails closed.
+                lintable.append(relative)
+        return lintable
 
 
 class UnitTestRunner:
@@ -211,10 +240,17 @@ class UnitTestRunner:
             if self.context.env.get("PYTHONPATH"):
                 python_path += f":{self.context.env['PYTHONPATH']}"
             python_environment = {"PYTHONPATH": python_path}
+        isolated_python_path = (
+            str(source)
+            if selected_wheel
+            else os.pathsep.join((str(source / "python"), str(source)))
+        )
         pytest = [
             python,
-            "-m",
-            "pytest",
+            "-I",
+            "-c",
+            ISOLATED_PYTEST,
+            isolated_python_path,
             *python_tests,
             "-q",
             "-x",
@@ -223,6 +259,7 @@ class UnitTestRunner:
             "--dist=worksteal",
             "-p",
             "no:cacheprovider",
+            "--import-mode=importlib",
             "-m",
             "not gpu and not trt and not e2e and not model_proof_allocator",
             "--ignore=tests/builder/test_flashinfer_benchmark.py",
@@ -235,8 +272,6 @@ class UnitTestRunner:
                 "--deselect=tests/tools/test_model_proof_runner.py::"
                 "test_distinct_explicit_hf_cache_paths_reach_both_containers"
             )
-        if selected_wheel:
-            pytest.append("--import-mode=importlib")
         self.context.run(
             pytest,
             limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
@@ -245,18 +280,19 @@ class UnitTestRunner:
         if scope in {"all", "community-all"}:
             allocator = [
                 python,
-                "-m",
-                "pytest",
+                "-I",
+                "-c",
+                ISOLATED_PYTEST,
+                isolated_python_path,
                 "tests/tools/test_model_proof_runner.py",
                 "-q",
                 "-x",
                 "-p",
                 "no:cacheprovider",
+                "--import-mode=importlib",
                 "-m",
                 "model_proof_allocator",
             ]
-            if selected_wheel:
-                allocator.append("--import-mode=importlib")
             self.context.run(
                 allocator,
                 limit=self.context.env.get("MODEL_PROOF_ALLOCATOR_TIMEOUT", "30m"),

@@ -37,6 +37,7 @@ def _write_public_ci_fake_gh(fake_bin: Path) -> None:
     fake_jq.write_text(
         """#!/usr/bin/env python3
 import json
+import os
 import sys
 
 arguments = sys.argv[1:]
@@ -88,9 +89,18 @@ if null_input:
         }
     else:
         raise SystemExit(f"unsupported null-input jq expression: {expression}")
+elif "Community CPU / Required" in expression and "check_runs" in expression:
+    sys.stdin.read()
+    result = (
+        os.environ.get("FAKE_EXISTING_REQUIRED", "")
+        + "|"
+        + os.environ.get("FAKE_ATTEMPT_COUNT", "0")
+    )
 else:
     result = json.load(sys.stdin)
-    if isinstance(result, list) and "github-actions[bot]" in expression:
+    if isinstance(result, list) and "request_created_at" in variables:
+        result = int(os.environ.get("FAKE_RECENT_REQUEST_COUNT", "1"))
+    elif isinstance(result, list) and "github-actions[bot]" in expression:
         marker = variables["marker"]
         matches = [
             item
@@ -142,7 +152,9 @@ if "/collaborators/" in endpoint:
 elif "/pulls/" in endpoint:
     print(os.environ["FAKE_PULL_JSON"])
 elif "/commits/" in endpoint and "/check-runs" in endpoint:
-    print(os.environ.get("FAKE_EXISTING_REQUIRED", ""))
+    print('{"check_runs": []}')
+elif endpoint.endswith("comments?per_page=100&sort=created&direction=desc"):
+    print(os.environ.get("FAKE_REQUEST_COMMENTS_JSON", "[]"))
 elif "/issues/" in endpoint and endpoint.endswith("comments?per_page=100"):
     print(os.environ["FAKE_COMMENTS_JSON"])
 elif "/issues/" in endpoint and endpoint.endswith("/comments") and "POST" in arguments:
@@ -210,12 +222,16 @@ def _public_ci_environment(tmp_path: Path) -> dict[str, str]:
             "ACTOR": "pr-author",
             "BASE_SHA": base_sha,
             "COMMENT_ID": "99",
+            "REQUEST_ID": "7654321",
+            "REQUEST_CREATED_AT": "2026-08-23T12:00:00Z",
             "FAKE_ACTOR_ROLE": "maintain",
             "FAKE_CHECK_CAPTURE": str(tmp_path / "checks.jsonl"),
             "FAKE_COMMENT_CAPTURE": str(tmp_path / "comment.md"),
             "FAKE_COMMENTS_JSON": "[]",
             "FAKE_PENDING_CHECK_CAPTURE": str(tmp_path / "pending-checks.jsonl"),
             "FAKE_PULL_JSON": json.dumps(pull),
+            "FAKE_RECENT_REQUEST_COUNT": "1",
+            "FAKE_REQUEST_COMMENTS_JSON": "[]",
             "GH_TOKEN": "test-token",
             "GITHUB_OUTPUT": str(tmp_path / "github-output"),
             "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
@@ -394,6 +410,7 @@ def test_public_cpu_request_captures_the_exact_commented_snapshot(
     assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
         "run_tests=true\n"
+        "request_id=7654321\n"
         "pr_number=980\n"
         f"base_sha={'a' * 40}\n"
         f"head_sha={'b' * 40}\n"
@@ -464,6 +481,7 @@ def test_public_cpu_request_deduplicates_the_current_merge(
 ) -> None:
     environment = _public_ci_environment(tmp_path)
     environment["FAKE_EXISTING_REQUIRED"] = existing
+    environment["FAKE_ATTEMPT_COUNT"] = "1"
     result = subprocess.run(
         [
             "bash",
@@ -486,6 +504,100 @@ def test_public_cpu_request_deduplicates_the_current_merge(
     assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
         "run_tests=false\n"
     )
+
+
+def test_public_cpu_request_limits_failed_attempts_for_one_merge(
+    tmp_path: Path,
+) -> None:
+    environment = _public_ci_environment(tmp_path)
+    environment["FAKE_EXISTING_REQUIRED"] = "failure"
+    environment["FAKE_ATTEMPT_COUNT"] = "3"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu.yml",
+                "authorize",
+                "Authorize the current PR merge",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "limit of three Community CPU attempts" in result.stdout + result.stderr
+    assert not (tmp_path / "github-output").exists()
+
+
+def test_public_cpu_request_limits_daily_pr_requests(tmp_path: Path) -> None:
+    environment = _public_ci_environment(tmp_path)
+    environment["FAKE_RECENT_REQUEST_COUNT"] = "7"
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu.yml",
+                "authorize",
+                "Authorize the current PR merge",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "daily Community CPU request budget" in result.stdout + result.stderr
+    assert not (tmp_path / "github-output").exists()
+
+
+@pytest.mark.parametrize(
+    ("run_unit_tests", "unit_scope", "expected"),
+    [
+        ("false", "none", 0),
+        ("true", "builder", 0),
+        ("true", "cli", 0),
+        ("true", "all", 0),
+        ("", "", 1),
+        ("false", "all", 1),
+        ("true", "none", 1),
+    ],
+)
+def test_public_cpu_unit_decision_fails_closed(
+    run_unit_tests: str,
+    unit_scope: str,
+    expected: int,
+) -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-cpu.yml",
+                "unit",
+                "Validate the impact decision",
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "RUN_UNIT_TESTS": run_unit_tests,
+            "UNIT_SCOPE": unit_scope,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == expected
 
 
 def test_public_cpu_initialization_creates_pending_exact_merge_checks(
@@ -520,7 +632,7 @@ def test_public_cpu_initialization_creates_pending_exact_merge_checks(
     assert {check["head_sha"] for check in checks} == {"c" * 40}
     assert {check["status"] for check in checks} == {"in_progress"}
     assert all(
-        check["external_id"].startswith("community-cpu:12345:1:")
+        check["external_id"].startswith("community-cpu:7654321:12345:1:")
         for check in checks
     )
     assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
@@ -559,6 +671,7 @@ def test_public_cpu_initialization_publishes_a_visible_pr_run_link(
     comment = (tmp_path / "comment.md").read_text(encoding="utf-8")
     assert "<!-- trtmc-community-cpu -->" in comment
     assert "**Status:** RUNNING" in comment
+    assert "- Request: <code>7654321</code>" in comment
     assert f"- Exact merge: <code>{'c' * 40}</code>" in comment
     assert "[View live public logs]" in comment
     assert "/actions/runs/12345" in comment
@@ -744,6 +857,37 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     assert "[View public logs]" in source
     assert '"/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID"' in source
     assert "The PR changed after public CPU validation was requested" in source
+    assert "filter=all&per_page=100" in source
+    assert "limit of three Community CPU attempts" in source
+    assert "python3 -I -m pip install" in source
+    assert source.count('runpy.run_module("tools.community_ci"') == 3
+    concurrency_group = workflow["concurrency"]["group"]
+    assert "format('community-cpu-actor-{0}', github.actor)" in concurrency_group
+    assert "format('community-cpu-intake-{0}', github.run_id)" in concurrency_group
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+
+    workflow_paths = sorted(
+        {
+            *(REPO_ROOT / ".github" / "workflows").glob("*.yml"),
+            *(REPO_ROOT / ".github" / "workflows").glob("*.yaml"),
+        }
+    )
+    issue_comment_workflows = []
+    for workflow_path in workflow_paths:
+        document = yaml.load(
+            workflow_path.read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        triggers = document.get("on", {})
+        if isinstance(triggers, str):
+            names = {triggers}
+        elif isinstance(triggers, list):
+            names = set(triggers)
+        else:
+            names = set(triggers)
+        if "issue_comment" in names:
+            issue_comment_workflows.append(workflow_path.name)
+    assert issue_comment_workflows == ["community-cpu.yml"]
 
     jobs = workflow["jobs"]
     assert [job["name"] for job in jobs.values()] == [
@@ -767,6 +911,26 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     for job_name in ("source-quality", "ownership-impact", "unit"):
         assert jobs[job_name]["permissions"] == {"contents": "read"}
+        steps = jobs[job_name]["steps"]
+        restore_index = next(
+            index for index, step in enumerate(steps) if step["name"].startswith("Restore trusted")
+        )
+        run_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step["name"]
+            in {
+                "Run source quality",
+                "Resolve source ownership and CPU scope",
+                "Run hardened source-only units",
+            }
+        )
+        assert restore_index < run_index
+        restore = steps[restore_index]["run"]
+        assert (
+            'git show "$CI_BASE_REF:.github/scripts/restore-community-ci-controller.py"' in restore
+        )
+        assert 'python3 -I "$controller"' in restore
     assert jobs["unit"]["needs"] == [
         "authorize",
         "initialize",
@@ -784,6 +948,130 @@ def test_public_workflow_is_a_single_comment_driven_exact_merge_gate() -> None:
         "contents": "read",
         "pull-requests": "write",
     }
+
+
+def test_trusted_controller_restore_replaces_pr_ci_and_baseline_tests(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "ci-test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.name", "CI Test"],
+        check=True,
+    )
+
+    files = {
+        ".clang-format": "trusted\n",
+        "Dockerfile.community-cpu": "trusted\n",
+        "requirements/community-ci.txt": "trusted\n",
+        "ruff.toml": "trusted\n",
+        "tools/__init__.py": "trusted\n",
+        "tools/check_cyclomatic_complexity.py": "trusted\n",
+        "tools/ci/sentinel.py": "trusted\n",
+        "tools/community_ci.py": "trusted controller\n",
+        "tools/model_ci.py": "trusted\n",
+        "tools/model_plugin_isolation.py": "trusted\n",
+        "tools/test_impact.py": "trusted\n",
+        "tools/test_impact_fallback_allowlist.txt": "trusted\n",
+        "CMakeLists.txt": "trusted\n",
+        "cmake/sentinel.cmake": "trusted\n",
+        "conftest.py": "trusted\n",
+        "pyproject.toml": "trusted\n",
+        "tests/base_test.py": "trusted baseline test\n",
+        "src/feature.py": "base source\n",
+    }
+    for relative, contents in files.items():
+        path = repository / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "base"],
+        check=True,
+    )
+    base = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    (repository / "tools/community_ci.py").write_text("untrusted controller\n", encoding="utf-8")
+    (repository / "tools/added_controller.py").write_text(
+        "untrusted controller extension\n", encoding="utf-8"
+    )
+    (repository / "tests/base_test.py").write_text("disabled\n", encoding="utf-8")
+    (repository / "tests/added_test.py").write_text("untrusted test\n", encoding="utf-8")
+    (repository / "src/feature.py").write_text("proposed source\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-q", "-m", "pull request"],
+        check=True,
+    )
+
+    result = subprocess.run(
+        [
+            "python3",
+            "-I",
+            str(REPO_ROOT / ".github/scripts/restore-community-ci-controller.py"),
+            "--repository",
+            str(repository),
+            "--base",
+            base,
+            "--profile",
+            "unit",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (repository / "tools/community_ci.py").read_text(encoding="utf-8") == (
+        "trusted controller\n"
+    )
+    assert not (repository / "tools/added_controller.py").exists()
+    assert (repository / "tests/base_test.py").read_text(encoding="utf-8") == (
+        "trusted baseline test\n"
+    )
+    assert not (repository / "tests/added_test.py").exists()
+    assert (repository / "src/feature.py").read_text(encoding="utf-8") == (
+        "proposed source\n"
+    )
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "community-ci.txt"
+    sentinel.write_text("must survive\n", encoding="utf-8")
+    (repository / "requirements/community-ci.txt").unlink()
+    (repository / "requirements").rmdir()
+    (repository / "requirements").symlink_to(outside, target_is_directory=True)
+
+    unsafe = subprocess.run(
+        [
+            "python3",
+            "-I",
+            str(REPO_ROOT / ".github/scripts/restore-community-ci-controller.py"),
+            "--repository",
+            str(repository),
+            "--base",
+            base,
+            "--profile",
+            "unit",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert unsafe.returncode != 0
+    assert "crosses a symlink" in unsafe.stdout
+    assert sentinel.read_text(encoding="utf-8") == "must survive\n"
 
 
 def test_cpu_image_installs_the_same_pinned_community_requirements() -> None:

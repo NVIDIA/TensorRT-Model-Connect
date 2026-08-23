@@ -65,7 +65,7 @@ class ContainerStageRunner:
             self.env,
         )
         forwarded = [item for name in names for item in ("-e", name)]
-        return [
+        command = [
             "docker",
             "exec",
             "-w",
@@ -73,11 +73,30 @@ class ContainerStageRunner:
             *forwarded,
             self.config.name,
             "python3",
-            "-m",
-            "tools.ci",
-            "pipeline",
-            self.stage,
         ]
+        if self.config.hardened:
+            command.extend(
+                [
+                    "-I",
+                    "-c",
+                    "import importlib.util, runpy, sys; root=sys.argv.pop(1); "
+                    "spec=importlib.util.spec_from_file_location('tools', "
+                    "root+'/tools/__init__.py', submodule_search_locations=[root+'/tools']); "
+                    "module=importlib.util.module_from_spec(spec); sys.modules['tools']=module; "
+                    "spec.loader.exec_module(module); "
+                    "runpy.run_module('tools.ci', run_name='__main__')",
+                    str(self.config.workspace),
+                ]
+            )
+        else:
+            command.extend(["-m", "tools.ci"])
+        command.extend(
+            [
+                "pipeline",
+                self.stage,
+            ]
+        )
+        return command
 
     def _cancel(self, signal_number: int, _frame: object) -> None:
         subprocess.run(

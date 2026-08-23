@@ -62,14 +62,26 @@ head, and merge SHAs. Its authorization and publisher jobs never check out or
 execute PR code.
 
 The test jobs check out only the authorized merge SHA with read-only repository
-permission and no secrets. Separate publisher jobs create
-and complete contributor-visible checks on that merge SHA. They also maintain
-one PR status comment containing the exact merge SHA, per-stage verdicts, and a
-direct link to the public Actions logs so contributors can always find the
-error output even though the checks are not attached to the PR head. If the PR
-head or base changes before publication, every pending public check becomes
-neutral instead of validating the stale snapshot. Comment `/run-ci` again
-only after the new head is ready.
+permission and no secrets. Before installing dependencies or selecting tests,
+they restore the CI controller, build configuration, and baseline tests from
+the captured base SHA; the proposed runtime and package source remains the
+subject under test. Changes to the controller, `tools/`, tests, or build
+configuration receive authoritative coverage from protected CI, not this
+public baseline gate. A green public result is functional evidence, not a
+security proof about arbitrary pull-request code. Separate publisher jobs
+create and complete contributor-visible checks on that merge SHA. They also
+maintain one PR status comment containing the exact merge SHA, per-stage
+verdicts, and a direct link to the public Actions logs so contributors can
+always find the error output even though the checks are not attached to the PR
+head. If the PR head or base changes before publication, every pending public
+check becomes neutral instead of validating the stale snapshot. Comment
+`/run-ci` again only after the new head is ready. Each merge SHA is limited to
+three attempts.
+
+External authors can reach this workflow only when the repository-scoped
+workflow execution policy permits their `issue_comment` event. The versioned
+policy boundary, canary procedure, and rollback expectation are documented in
+`.github/WORKFLOW_EXECUTION_POLICY.md`.
 
 ## Pre-merge, step by step
 

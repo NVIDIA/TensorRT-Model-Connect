@@ -13,7 +13,13 @@ on:
 permissions: {}
 
 concurrency:
-  group: community-cpu-${{ github.event.issue.number }}
+  # Bound each commenter's public CPU consumption without letting unrelated
+  # comments replace a valid pending request.
+  group: >-
+    ${{ github.event.issue.pull_request != null &&
+        github.event.comment.body == '/run-ci' &&
+        format('community-cpu-actor-{0}', github.actor) ||
+        format('community-cpu-intake-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
@@ -32,6 +38,7 @@ jobs:
       pull-requests: read
     outputs:
       run_tests: ${{ steps.snapshot.outputs.run_tests }}
+      request_id: ${{ steps.snapshot.outputs.request_id }}
       pr_number: ${{ steps.snapshot.outputs.pr_number }}
       base_sha: ${{ steps.snapshot.outputs.base_sha }}
       head_sha: ${{ steps.snapshot.outputs.head_sha }}
@@ -45,10 +52,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
+          REQUEST_ID: ${{ github.event.comment.id }}
+          REQUEST_CREATED_AT: ${{ github.event.comment.created_at }}
           PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          [[ "$REQUEST_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$REQUEST_CREATED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
 
           pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
           state="$(jq -er '.state' <<<"$pull")"
@@ -81,11 +92,25 @@ jobs:
             esac
           fi
 
-          existing_required="$(
-            gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=latest&per_page=100" \
-              --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions" and ((.external_id // "") | startswith("community-cpu:")))) | sort_by(.started_at) | last // {} | if (.status // "") != "completed" then (.status // "") else (.conclusion // "") end'
+          recent_request_count="$(
+            gh api --method GET --paginate \
+              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" \
+            | jq -ser --arg actor "$ACTOR" --arg request_created_at "$REQUEST_CREATED_AT" \
+              '($request_created_at | fromdateiso8601) as $now | [.. | objects | select(.user.login == $actor and .body == "/run-ci" and ((.created_at | fromdateiso8601) >= ($now - 86400)))] | length'
           )"
+          [[ "$recent_request_count" =~ ^[0-9]+$ ]]
+          if [ "$recent_request_count" -gt 6 ]; then
+            echo "::error::This pull request has reached its daily Community CPU request budget."
+            exit 1
+          fi
+
+          required_state_and_count="$(
+            gh api --method GET --paginate \
+              "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=all&per_page=100" \
+            | jq -ser '[.[].check_runs[] | select(.name == "Community CPU / Required" and .app.slug == "github-actions" and ((.external_id // "") | startswith("community-cpu:")))] as $runs | [($runs | sort_by(.started_at) | last // {} | if (.status // "") != "completed" then (.status // "") else (.conclusion // "") end), ($runs | length)] | join("|")'
+          )"
+          IFS='|' read -r existing_required attempt_count <<<"$required_state_and_count"
+          [[ "${attempt_count:-}" =~ ^[0-9]+$ ]]
           case "$existing_required" in
             queued|in_progress|success)
               echo "run_tests=false" >> "$GITHUB_OUTPUT"
@@ -93,9 +118,14 @@ jobs:
               exit 0
               ;;
           esac
+          if [ "$attempt_count" -ge 3 ]; then
+            echo "::error::This exact merge has reached the limit of three Community CPU attempts. Push a new revision or ask a maintainer to investigate."
+            exit 1
+          fi
 
           {
             echo "run_tests=true"
+            echo "request_id=$REQUEST_ID"
             echo "pr_number=$PR_NUMBER"
             echo "base_sha=$base_sha"
             echo "head_sha=$head_sha"
@@ -124,6 +154,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          REQUEST_ID: ${{ needs.authorize.outputs.request_id }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
         run: |
           set -euo pipefail
@@ -144,6 +175,7 @@ jobs:
               "## Community CPU" \
               "" \
               "**Status:** RUNNING" \
+              "- Request: <code>$REQUEST_ID</code>" \
               "- Exact merge: <code>$MERGE_SHA</code>" \
               "" \
               "[View live public logs]($details_url)"
@@ -172,6 +204,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
+          REQUEST_ID: ${{ needs.authorize.outputs.request_id }}
         run: |
           set -euo pipefail
           details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -182,7 +215,7 @@ jobs:
             local name="$2"
             local external_id
             local check_id
-            external_id="community-cpu:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:${key}"
+            external_id="community-cpu:${REQUEST_ID}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:${key}"
             jq -n \
               --arg name "$name" \
               --arg head_sha "$MERGE_SHA" \
@@ -240,11 +273,24 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Restore trusted source-quality controller
+        run: |
+          set -euo pipefail
+          controller="$RUNNER_TEMP/restore-community-ci-controller.py"
+          git show "$CI_BASE_REF:.github/scripts/restore-community-ci-controller.py" > "$controller"
+          python3 -I "$controller" \
+            --repository "$GITHUB_WORKSPACE" \
+            --base "$CI_BASE_REF" \
+            --profile source-quality
+
       - name: Install public CPU quality tools
-        run: python3 -m pip install --disable-pip-version-check --requirement requirements/community-ci.txt
+        run: python3 -I -m pip install --disable-pip-version-check --requirement requirements/community-ci.txt
 
       - name: Run source quality
-        run: python3 -m tools.community_ci source-quality --base "$CI_BASE_REF"
+        run: |
+          python3 -I -c \
+            'import importlib.util, runpy, sys; root=sys.argv.pop(1); spec=importlib.util.spec_from_file_location("tools", root+"/tools/__init__.py", submodule_search_locations=[root+"/tools"]); module=importlib.util.module_from_spec(spec); sys.modules["tools"]=module; spec.loader.exec_module(module); runpy.run_module("tools.community_ci", run_name="__main__")' \
+            "$GITHUB_WORKSPACE" source-quality --base "$CI_BASE_REF"
 
   ownership-impact:
     name: Community CPU / Ownership and impact
@@ -274,9 +320,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Restore trusted impact controller
+        run: |
+          set -euo pipefail
+          controller="$RUNNER_TEMP/restore-community-ci-controller.py"
+          git show "$CI_BASE_REF:.github/scripts/restore-community-ci-controller.py" > "$controller"
+          python3 -I "$controller" \
+            --repository "$GITHUB_WORKSPACE" \
+            --base "$CI_BASE_REF" \
+            --profile impact
+
       - name: Resolve source ownership and CPU scope
         id: impact
-        run: python3 -m tools.community_ci impact --base "$CI_BASE_REF"
+        run: |
+          python3 -I -c \
+            'import importlib.util, runpy, sys; root=sys.argv.pop(1); spec=importlib.util.spec_from_file_location("tools", root+"/tools/__init__.py", submodule_search_locations=[root+"/tools"]); module=importlib.util.module_from_spec(spec); sys.modules["tools"]=module; spec.loader.exec_module(module); runpy.run_module("tools.community_ci", run_name="__main__")' \
+            "$GITHUB_WORKSPACE" impact --base "$CI_BASE_REF"
 
   unit:
     name: Community CPU / Unit / C++ and Python
@@ -303,6 +362,21 @@ jobs:
         run: |
           echo "::error::Ownership and impact did not succeed: $IMPACT_RESULT"
           exit 1
+
+      - name: Validate the impact decision
+        if: ${{ needs.initialize.result == 'success' && needs.ownership-impact.result == 'success' }}
+        env:
+          RUN_UNIT_TESTS: ${{ needs.ownership-impact.outputs.run_unit_tests }}
+          UNIT_SCOPE: ${{ needs.ownership-impact.outputs.unit_scope }}
+        run: |
+          set -euo pipefail
+          case "$RUN_UNIT_TESTS:$UNIT_SCOPE" in
+            false:none|true:builder|true:cli|true:all) ;;
+            *)
+              echo "::error::Ownership and impact returned an invalid or incomplete unit decision."
+              exit 1
+              ;;
+          esac
 
       - name: Explain an empty unit scope
         if: >-
@@ -331,6 +405,22 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Restore trusted unit controller and baseline tests
+        if: >-
+          needs.initialize.result == 'success' &&
+          needs.ownership-impact.result == 'success' &&
+          needs.ownership-impact.outputs.run_unit_tests == 'true'
+        env:
+          CI_BASE_REF: ${{ needs.authorize.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          controller="$RUNNER_TEMP/restore-community-ci-controller.py"
+          git show "$CI_BASE_REF:.github/scripts/restore-community-ci-controller.py" > "$controller"
+          python3 -I "$controller" \
+            --repository "$GITHUB_WORKSPACE" \
+            --base "$CI_BASE_REF" \
+            --profile unit
+
       - name: Run hardened source-only units
         if: >-
           needs.initialize.result == 'success' &&
@@ -338,7 +428,10 @@ jobs:
           needs.ownership-impact.outputs.run_unit_tests == 'true'
         env:
           TRTMC_UNIT_SCOPE: ${{ needs.ownership-impact.outputs.unit_scope }}
-        run: python3 -m tools.community_ci unit --scope "$TRTMC_UNIT_SCOPE"
+        run: |
+          python3 -I -c \
+            'import importlib.util, runpy, sys; root=sys.argv.pop(1); spec=importlib.util.spec_from_file_location("tools", root+"/tools/__init__.py", submodule_search_locations=[root+"/tools"]); module=importlib.util.module_from_spec(spec); sys.modules["tools"]=module; spec.loader.exec_module(module); runpy.run_module("tools.community_ci", run_name="__main__")' \
+            "$GITHUB_WORKSPACE" unit --scope "$TRTMC_UNIT_SCOPE"
 
   required:
     name: Community CPU / Required
@@ -363,6 +456,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+          REQUEST_ID: ${{ needs.authorize.outputs.request_id }}
           BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
           COMMENT_ID: ${{ needs.initialize.outputs.comment_id }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
@@ -425,6 +519,7 @@ jobs:
                 "## Community CPU" \
                 "" \
                 "**Status:** $status" \
+                "- Request: <code>$REQUEST_ID</code>" \
                 "- Exact merge: <code>$MERGE_SHA</code>" \
                 "- Source quality: <code>$SOURCE_QUALITY_RESULT</code>" \
                 "- Ownership and impact: <code>$OWNERSHIP_IMPACT_RESULT</code>" \

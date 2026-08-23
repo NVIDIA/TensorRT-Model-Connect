@@ -157,10 +157,18 @@ comment:
 
 A maintainer or admin may submit the same command on the author's behalf. The
 trusted default-branch `Community CPU` workflow authorizes the actor and
-captures the current base, head, and merge SHAs without checking out
-pull-request code. Separate test jobs then run source quality, ownership and
-impact analysis, and the selected source-only C++ and Python units against that
-exact merge revision.
+captures the current base, head, merge, and request identifiers without
+checking out pull-request code. Separate test jobs then run source quality,
+ownership and impact analysis, and the selected source-only C++ and Python
+units against that exact merge revision. The test jobs restore their CI
+controller, pinned dependencies, build configuration, and baseline tests from
+the captured base SHA before executing the proposed runtime and package source.
+A pull request therefore cannot replace the versioned public controller or
+baseline tests. Changes to the controller, `tools/`, tests, or build
+configuration receive their authoritative validation in the protected suite
+rather than from this public baseline gate. A passing public result is useful
+functional evidence, not proof that arbitrary pull-request code is benign;
+maintainers must still review the diff before authorizing protected CI.
 
 All public jobs run on GitHub-hosted `ubuntu-24.04` runners. Test jobs have
 read-only repository permission and no access to private runners, secrets, or
@@ -173,7 +181,9 @@ than the pull-request head SHA.
 
 Wait for `Community CPU / Required` to pass on the current merge revision.
 Repeating `/run-ci` for an already queued, running, or successful merge is
-safely deduplicated.
+safely deduplicated. A merge revision receives at most three attempts; after
+that, push a corrected revision or ask a maintainer to investigate the repeated
+failure.
 
 If the pull-request head or base changes, the previous merge result is stale.
 Finish the update, rerun local checks, and comment `/run-ci` again for the new

@@ -15,11 +15,12 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.ci.container import CiContainer
 from tools.ci.environment import OPTIONAL_TUNING_ENVIRONMENT
-from tools.ci.quality import UnitTestRunner
+from tools.ci.quality import ISOLATED_PYTEST, SourceQualityChecks, UnitTestRunner
 from tools.ci.stage import ContainerStageRunner
 
 
@@ -578,13 +579,50 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
     architecture_contract = source.split(
         "def architecture_contracts", maxsplit=1
     )[1].split("def _changed_files", maxsplit=1)[0]
-    assert '"pytest"' in architecture_contract
+    assert "ISOLATED_PYTEST" in architecture_contract
+    assert '"-I"' in architecture_contract
     assert (
         "tests/tools/test_model_plugin_encapsulation_static.py"
         in architecture_contract
     )
     assert '"-q"' in architecture_contract
     assert '"no:cacheprovider"' in architecture_contract
+
+
+def test_public_lint_defers_missing_trusted_controller_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "src/kept.py"
+    source.parent.mkdir()
+    source.write_text("value = 1\n", encoding="utf-8")
+
+    class RecordingContext:
+        repository = tmp_path
+        env = {"CI_BASE_REF": "base"}
+
+        def __init__(self) -> None:
+            self.commands: list[list[object]] = []
+
+        def run(self, command: list[object], **_kwargs: object) -> subprocess.CompletedProcess:
+            self.commands.append(command)
+            if command[:3] == ["git", "diff", "--diff-filter=d"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="tools/added.py\nsrc/kept.py\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    context = RecordingContext()
+    monkeypatch.setattr("tools.ci.quality.shutil.which", lambda _name: "/usr/bin/tool")
+
+    SourceQualityChecks(context).lint_changed_files()
+
+    ruff = next(command for command in context.commands if command[0] == "ruff")
+    assert "src/kept.py" in ruff
+    assert "tools/added.py" not in ruff
 
 
 def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> None:
@@ -956,6 +994,24 @@ def test_github_container_only_exports_nonempty_tuning_controls(tmp_path: Path) 
                 assert name not in stage_command
 
 
+def test_hardened_container_stage_uses_an_isolated_controller(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    command = ContainerStageRunner(
+        "premerge-unit",
+        {
+            "TRTMC_CI_WORKSPACE": str(workspace),
+            "TRTMC_CI_IMAGE": "example.invalid/trtmc:test",
+            "TRTMC_CI_HARDENED": "true",
+        },
+    )._docker_command()
+
+    python_index = command.index("python3")
+    assert command[python_index + 1 : python_index + 3] == ["-I", "-c"]
+    assert "spec_from_file_location('tools'" in command[python_index + 3]
+    assert "runpy.run_module('tools.ci'" in command[python_index + 3]
+
+
 def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     text = _ci_source("environment.py")
     assert "TRTMC_E2E_EXCLUDE_GPU0" in text
@@ -1217,7 +1273,7 @@ def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> 
     pytest_commands = [
         command
         for command in context.commands
-        if command[:3] == ["python", "-m", "pytest"]
+        if command[:4] == ["python", "-I", "-c", ISOLATED_PYTEST]
     ]
     assert len(pytest_commands) == 1
     assert "tests/builder/" in pytest_commands[0]
