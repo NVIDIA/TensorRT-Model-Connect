@@ -73,8 +73,8 @@ On Windows, use `py -3 -m pip` in place of `python3 -m pip`.
 The hooks trim trailing whitespace, ensure one final newline, validate YAML,
 check Ruff, and verify clang-format. Pre-commit manages the Ruff and
 clang-format environments on Linux, macOS, and Windows. There is no pre-push
-hook: builds and the broader source-only CPU suite run through the public
-`/run-ci` workflow after the branch is pushed.
+hook: builds and the broader source-only CPU suite run automatically on the
+pull request after the branch is pushed.
 
 Start with repository consistency checks:
 
@@ -147,37 +147,20 @@ what the recorded validation proves.
 
 ### 8. Run contributor-visible public CPU validation
 
-Creating a pull request or pushing to a fork does not automatically start
-Community CPU. After local checks pass, the pull-request author adds this exact
-comment:
-
-```text
-/run-ci
-```
-
-A maintainer or admin may submit the same command on the author's behalf. The
-trusted default-branch `Community CPU` workflow authorizes the actor and
-captures the current base, head, and merge SHAs without checking out
-pull-request code. Separate test jobs then run source quality, ownership and
-impact analysis, and the selected source-only C++ and Python units against that
-exact merge revision.
+Opening a pull request or pushing a new commit automatically starts Community
+CPU against GitHub's exact pull-request merge revision. Separate jobs run
+source quality, ownership and impact analysis, and the selected source-only C++
+and Python units. No comment or maintainer action is required.
 
 All public jobs run on GitHub-hosted `ubuntu-24.04` runners. Test jobs have
 read-only repository permission and no access to private runners, secrets, or
-GPUs. Before testing starts, the workflow creates or updates a `Community CPU`
-status comment on the pull request with the exact merge SHA and a direct link
-to live public Actions logs. At completion, the same comment reports each stage
-verdict and links to the complete error output. This comment is the stable log
-entrypoint because the checks themselves are attached to the merge SHA rather
-than the pull-request head SHA.
+GPUs. GitHub publishes native pull-request checks and public Actions logs,
+including the complete output for every failed command.
 
-Wait for `Community CPU / Required` to pass on the current merge revision.
-Repeating `/run-ci` for an already queued, running, or successful merge is
-safely deduplicated.
-
-If the pull-request head or base changes, the previous merge result is stale.
-Finish the update, rerun local checks, and comment `/run-ci` again for the new
-merge revision.
+Wait for `Community CPU / Required` to pass on the current merge revision. A
+new commit automatically validates the new merge revision and cancels an older
+in-progress run for the same pull request. If `main` advances and GitHub asks
+for an update, rebase or update the branch so the new exact merge is validated.
 
 ### 9. Ask a maintainer to trigger protected CI
 
@@ -198,8 +181,8 @@ captures the current PR head SHA, and dispatches protected premerge validation.
 
 Wait for `trtmc/premerge/required` to pass on the exact pull-request head SHA.
 If you push another commit, the previous result no longer validates the current
-head; finish the update, rerun local checks and `/run-ci`, and mention
-`@yifeif-nv` once to request a new protected run. Private runner details,
+head; finish the update, wait for automatic Community CPU validation, and
+mention `@yifeif-nv` once to request a new protected run. Private runner details,
 logs, artifacts, and URLs are not part of the public contribution interface.
 
 ### 10. Respond to review and keep evidence current

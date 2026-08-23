@@ -141,8 +141,11 @@ if "/collaborators/" in endpoint:
     print(os.environ["FAKE_ACTOR_ROLE"])
 elif "/pulls/" in endpoint:
     print(os.environ["FAKE_PULL_JSON"])
-elif "/check-runs" in endpoint:
-    print(os.environ["FAKE_COMMUNITY_CONCLUSION"])
+elif "/actions/workflows/community-cpu.yml/runs" in endpoint:
+    if os.environ["FAKE_COMMUNITY_CONCLUSION"] == "success":
+        print("12345")
+    else:
+        print("")
 else:
     print(f"unexpected gh invocation: {arguments}", file=sys.stderr)
     raise SystemExit(2)
@@ -279,7 +282,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "permissions: {}" in workflow
     assert authorize_permissions.strip() == (
-        "checks: read\n      contents: read\n      pull-requests: write"
+        "actions: read\n      contents: read\n      pull-requests: write"
     )
     assert dispatch_permissions.strip() == "{}"
 
@@ -303,9 +306,11 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
     assert '[[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
     assert "Community CPU / Required" in authorize
-    assert ".app.slug == \"github-actions\"" in authorize
-    assert '(.external_id // "") | startswith("community-cpu:")' in authorize
-    assert 'if [ "$community_cpu" != "success" ]; then' in authorize
+    assert "/actions/workflows/community-cpu.yml/runs?event=pull_request" in authorize
+    assert '.head_sha == \\"$head_sha\\"' in authorize
+    assert '.conclusion == \\"success\\"' in authorize
+    assert "PR #$PR_NUMBER · public CPU · merge $merge_sha" in authorize
+    assert 'if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
     for legacy in (

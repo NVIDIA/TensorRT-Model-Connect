@@ -4,234 +4,33 @@
 name: Community CPU
 
 run-name: >-
-  PR #${{ github.event.issue.number }} · public CPU validation
+  PR #${{ github.event.pull_request.number }} · public CPU · merge ${{ github.event.pull_request.merge_commit_sha }}
 
 on:
-  issue_comment:
-    types: [created]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
 concurrency:
-  group: community-cpu-${{ github.event.issue.number }}
-  cancel-in-progress: false
+  group: community-cpu-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  authorize:
-    name: Authorize public CPU request
-    if: >-
-      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
-      github.ref == 'refs/heads/main' &&
-      github.event.issue.pull_request != null &&
-      github.event.comment.body == '/run-ci'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      checks: read
-      contents: read
-      pull-requests: read
-    outputs:
-      run_tests: ${{ steps.snapshot.outputs.run_tests }}
-      pr_number: ${{ steps.snapshot.outputs.pr_number }}
-      base_sha: ${{ steps.snapshot.outputs.base_sha }}
-      head_sha: ${{ steps.snapshot.outputs.head_sha }}
-      merge_sha: ${{ steps.snapshot.outputs.merge_sha }}
-
-    steps:
-      # This trusted job reads PR metadata only. It never checks out or
-      # executes pull-request code.
-      - name: Authorize the current PR merge
-        id: snapshot
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ACTOR: ${{ github.actor }}
-          PR_NUMBER: ${{ github.event.issue.number }}
-        run: |
-          set -euo pipefail
-          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
-
-          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
-          state="$(jq -er '.state' <<<"$pull")"
-          pr_author="$(jq -er '.user.login' <<<"$pull")"
-          base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
-          base_ref="$(jq -er '.base.ref' <<<"$pull")"
-          base_sha="$(jq -er '.base.sha' <<<"$pull")"
-          head_sha="$(jq -er '.head.sha' <<<"$pull")"
-          merge_sha="$(jq -er '.merge_commit_sha' <<<"$pull")"
-
-          test "$state" = "open"
-          test "$base_repo" = "$GITHUB_REPOSITORY"
-          test "$base_ref" = "main"
-          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
-
-          if [ "$ACTOR" != "$pr_author" ]; then
-            actor_role="$(
-              gh api --method GET \
-                "/repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
-                --jq '.role_name' 2>/dev/null || true
-            )"
-            case "$actor_role" in
-              maintain|admin) ;;
-              *)
-                echo "::error::Only the PR author or a maintainer/admin may request public CPU CI."
-                exit 1
-                ;;
-            esac
-          fi
-
-          existing_required="$(
-            gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=latest&per_page=100" \
-              --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions" and ((.external_id // "") | startswith("community-cpu:")))) | sort_by(.started_at) | last // {} | if (.status // "") != "completed" then (.status // "") else (.conclusion // "") end'
-          )"
-          case "$existing_required" in
-            queued|in_progress|success)
-              echo "run_tests=false" >> "$GITHUB_OUTPUT"
-              echo "Community CPU is already $existing_required for merge $merge_sha."
-              exit 0
-              ;;
-          esac
-
-          {
-            echo "run_tests=true"
-            echo "pr_number=$PR_NUMBER"
-            echo "base_sha=$base_sha"
-            echo "head_sha=$head_sha"
-            echo "merge_sha=$merge_sha"
-          } >> "$GITHUB_OUTPUT"
-
-  initialize:
-    name: Initialize exact-merge public checks
-    needs: authorize
-    if: ${{ needs.authorize.outputs.run_tests == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      checks: write
-      contents: read
-      pull-requests: write
-    outputs:
-      comment_id: ${{ steps.comment.outputs.comment_id }}
-      source_quality_check_id: ${{ steps.checks.outputs.source_quality_check_id }}
-      ownership_impact_check_id: ${{ steps.checks.outputs.ownership_impact_check_id }}
-      unit_check_id: ${{ steps.checks.outputs.unit_check_id }}
-      required_check_id: ${{ steps.checks.outputs.required_check_id }}
-    steps:
-      - name: Publish public run link
-        id: comment
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
-          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-        run: |
-          set -euo pipefail
-          details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          marker="<!-- trtmc-community-cpu -->"
-          comments="$(
-            gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100"
-          )"
-          comment_id="$(
-            jq -r --arg marker "$marker" \
-              '[.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | contains($marker)))] | last | .id // empty' \
-              <<<"$comments"
-          )"
-          body="$(
-            printf '%s\n' \
-              "$marker" \
-              "## Community CPU" \
-              "" \
-              "**Status:** RUNNING" \
-              "- Exact merge: <code>$MERGE_SHA</code>" \
-              "" \
-              "[View live public logs]($details_url)"
-          )"
-
-          if [[ "$comment_id" =~ ^[1-9][0-9]*$ ]]; then
-            comment_id="$(
-              gh api --method PATCH \
-                "/repos/$GITHUB_REPOSITORY/issues/comments/$comment_id" \
-                -f body="$body" \
-                --jq '.id'
-            )"
-          else
-            comment_id="$(
-              gh api --method POST \
-                "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-                -f body="$body" \
-                --jq '.id'
-            )"
-          fi
-          [[ "$comment_id" =~ ^[1-9][0-9]*$ ]]
-          echo "comment_id=$comment_id" >> "$GITHUB_OUTPUT"
-
-      - name: Publish pending exact-merge checks
-        id: checks
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
-        run: |
-          set -euo pipefail
-          details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          payload="$RUNNER_TEMP/community-cpu-check.json"
-
-          create_check() {
-            local key="$1"
-            local name="$2"
-            local external_id
-            local check_id
-            external_id="community-cpu:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}:${key}"
-            jq -n \
-              --arg name "$name" \
-              --arg head_sha "$MERGE_SHA" \
-              --arg details_url "$details_url" \
-              --arg external_id "$external_id" \
-              '{
-                name: $name,
-                head_sha: $head_sha,
-                status: "in_progress",
-                details_url: $details_url,
-                external_id: $external_id,
-                output: {
-                  title: "Contributor-requested public CPU validation",
-                  summary: "Public CPU validation is running for this exact PR merge revision."
-                }
-              }' > "$payload"
-            check_id="$(
-              gh api --method POST \
-                "/repos/$GITHUB_REPOSITORY/check-runs" \
-                --input "$payload" \
-                --jq '.id'
-            )"
-            [[ "$check_id" =~ ^[1-9][0-9]*$ ]]
-            echo "${key}_check_id=$check_id" >> "$GITHUB_OUTPUT"
-          }
-
-          trap 'rm -f "$payload"' EXIT
-          create_check source_quality "Community CPU / Source quality"
-          create_check ownership_impact "Community CPU / Ownership and impact"
-          create_check unit "Community CPU / Unit / C++ and Python"
-          create_check required "Community CPU / Required"
-
   source-quality:
     name: Community CPU / Source quality
-    needs:
-      - authorize
-      - initialize
-    if: ${{ needs.authorize.outputs.run_tests == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
     env:
-      CI_BASE_REF: ${{ needs.authorize.outputs.base_sha }}
+      CI_BASE_REF: ${{ github.event.pull_request.base.sha }}
     steps:
-      - name: Check out the authorized PR merge
+      - name: Check out the exact PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.authorize.outputs.merge_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -248,24 +47,20 @@ jobs:
 
   ownership-impact:
     name: Community CPU / Ownership and impact
-    needs:
-      - authorize
-      - initialize
-    if: ${{ needs.authorize.outputs.run_tests == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
     env:
-      CI_BASE_REF: ${{ needs.authorize.outputs.base_sha }}
+      CI_BASE_REF: ${{ github.event.pull_request.base.sha }}
     outputs:
       run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
       unit_scope: ${{ steps.impact.outputs.unit_scope }}
     steps:
-      - name: Check out the authorized PR merge
+      - name: Check out the exact PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.authorize.outputs.merge_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -280,24 +75,15 @@ jobs:
 
   unit:
     name: Community CPU / Unit / C++ and Python
-    if: ${{ always() && needs.authorize.outputs.run_tests == 'true' }}
-    needs:
-      - authorize
-      - initialize
-      - ownership-impact
+    if: ${{ always() }}
+    needs: ownership-impact
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
     steps:
-      - name: Require successful request initialization
-        if: ${{ needs.initialize.result != 'success' }}
-        run: |
-          echo "::error::The exact PR snapshot could not be initialized."
-          exit 1
-
       - name: Require successful impact analysis
-        if: ${{ needs.initialize.result == 'success' && needs.ownership-impact.result != 'success' }}
+        if: ${{ needs.ownership-impact.result != 'success' }}
         env:
           IMPACT_RESULT: ${{ needs.ownership-impact.result }}
         run: |
@@ -306,25 +92,22 @@ jobs:
 
       - name: Explain an empty unit scope
         if: >-
-          needs.initialize.result == 'success' &&
           needs.ownership-impact.result == 'success' &&
           needs.ownership-impact.outputs.run_unit_tests != 'true'
         run: echo "No source-only C++ or Python unit tests are required for this change."
 
-      - name: Check out the authorized PR merge
+      - name: Check out the exact PR merge
         if: >-
-          needs.initialize.result == 'success' &&
           needs.ownership-impact.result == 'success' &&
           needs.ownership-impact.outputs.run_unit_tests == 'true'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.authorize.outputs.merge_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
         if: >-
-          needs.initialize.result == 'success' &&
           needs.ownership-impact.result == 'success' &&
           needs.ownership-impact.outputs.run_unit_tests == 'true'
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
@@ -333,7 +116,6 @@ jobs:
 
       - name: Run hardened source-only units
         if: >-
-          needs.initialize.result == 'success' &&
           needs.ownership-impact.result == 'success' &&
           needs.ownership-impact.outputs.run_unit_tests == 'true'
         env:
@@ -342,152 +124,26 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: >-
-      always() &&
-      needs.authorize.outputs.run_tests == 'true' &&
-      needs.initialize.result == 'success'
+    if: ${{ always() }}
     needs:
-      - authorize
-      - initialize
       - source-quality
       - ownership-impact
       - unit
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions:
-      checks: write
-      contents: read
-      pull-requests: write
+    permissions: {}
     steps:
-      - name: Publish exact-merge CPU checks
+      - name: Require every public CPU stage
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
-          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
-          COMMENT_ID: ${{ needs.initialize.outputs.comment_id }}
-          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
-          MERGE_SHA: ${{ needs.authorize.outputs.merge_sha }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           OWNERSHIP_IMPACT_RESULT: ${{ needs.ownership-impact.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
-          SOURCE_QUALITY_CHECK_ID: ${{ needs.initialize.outputs.source_quality_check_id }}
-          OWNERSHIP_IMPACT_CHECK_ID: ${{ needs.initialize.outputs.ownership_impact_check_id }}
-          UNIT_CHECK_ID: ${{ needs.initialize.outputs.unit_check_id }}
-          REQUIRED_CHECK_ID: ${{ needs.initialize.outputs.required_check_id }}
         run: |
           set -euo pipefail
-          details_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          payload="$RUNNER_TEMP/community-cpu-check-result.json"
-          completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-          result_conclusion() {
-            case "$1" in
-              success) echo success ;;
-              failure) echo failure ;;
-              cancelled) echo cancelled ;;
-              skipped) echo skipped ;;
-              *) echo neutral ;;
-            esac
-          }
-
-          update_check() {
-            local check_id="$1"
-            local conclusion="$2"
-            local title="$3"
-            local summary="$4"
-            [[ "$check_id" =~ ^[1-9][0-9]*$ ]]
-            jq -n \
-              --arg conclusion "$conclusion" \
-              --arg completed_at "$completed_at" \
-              --arg details_url "$details_url" \
-              --arg title "$title" \
-              --arg summary "$summary" \
-              '{
-                status: "completed",
-                conclusion: $conclusion,
-                completed_at: $completed_at,
-                details_url: $details_url,
-                output: {title: $title, summary: $summary}
-              }' > "$payload"
-            gh api --silent --method PATCH \
-              "/repos/$GITHUB_REPOSITORY/check-runs/$check_id" \
-              --input "$payload"
-          }
-
-          publish_comment() {
-            local status="$1"
-            local message="$2"
-            local body
-            [[ "$COMMENT_ID" =~ ^[1-9][0-9]*$ ]]
-            body="$(
-              printf '%s\n' \
-                "<!-- trtmc-community-cpu -->" \
-                "## Community CPU" \
-                "" \
-                "**Status:** $status" \
-                "- Exact merge: <code>$MERGE_SHA</code>" \
-                "- Source quality: <code>$SOURCE_QUALITY_RESULT</code>" \
-                "- Ownership and impact: <code>$OWNERSHIP_IMPACT_RESULT</code>" \
-                "- Unit / C++ and Python: <code>$UNIT_RESULT</code>" \
-                "" \
-                "$message" \
-                "" \
-                "[View public logs]($details_url)"
-            )"
-            gh api --silent --method PATCH \
-              "/repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID" \
-              -f body="$body"
-          }
-
-          trap 'rm -f "$payload"' EXIT
-          snapshot_current=false
-          if pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"; then
-            state="$(jq -r '.state // empty' <<<"$pull")"
-            base_sha="$(jq -r '.base.sha // empty' <<<"$pull")"
-            head_sha="$(jq -r '.head.sha // empty' <<<"$pull")"
-            merge_sha="$(jq -r '.merge_commit_sha // empty' <<<"$pull")"
-            if [ "$state" = "open" ] \
-              && [ "$base_sha" = "$BASE_SHA" ] \
-              && [ "$head_sha" = "$HEAD_SHA" ] \
-              && [ "$merge_sha" = "$MERGE_SHA" ]; then
-              snapshot_current=true
-            fi
-          fi
-
-          if [ "$snapshot_current" != true ]; then
-            summary="The PR changed after public CPU validation was requested. Comment /run-ci again."
-            update_check "$SOURCE_QUALITY_CHECK_ID" neutral "Stale PR snapshot" "$summary"
-            update_check "$OWNERSHIP_IMPACT_CHECK_ID" neutral "Stale PR snapshot" "$summary"
-            update_check "$UNIT_CHECK_ID" neutral "Stale PR snapshot" "$summary"
-            update_check "$REQUIRED_CHECK_ID" neutral "Stale PR snapshot" "$summary"
-            publish_comment "STALE" "$summary"
-            echo "::warning::$summary"
-            exit 0
-          fi
-
-          source_conclusion="$(result_conclusion "$SOURCE_QUALITY_RESULT")"
-          impact_conclusion="$(result_conclusion "$OWNERSHIP_IMPACT_RESULT")"
-          unit_conclusion="$(result_conclusion "$UNIT_RESULT")"
-          summary="Source quality: $SOURCE_QUALITY_RESULT; Ownership and impact: $OWNERSHIP_IMPACT_RESULT; Unit: $UNIT_RESULT."
-
-          update_check "$SOURCE_QUALITY_CHECK_ID" "$source_conclusion" \
-            "Source quality: $SOURCE_QUALITY_RESULT" "$summary"
-          update_check "$OWNERSHIP_IMPACT_CHECK_ID" "$impact_conclusion" \
-            "Ownership and impact: $OWNERSHIP_IMPACT_RESULT" "$summary"
-          update_check "$UNIT_CHECK_ID" "$unit_conclusion" \
-            "Unit: $UNIT_RESULT" "$summary"
-
-          required_conclusion=failure
-          if [ "$SOURCE_QUALITY_RESULT" = success ] \
-            && [ "$OWNERSHIP_IMPACT_RESULT" = success ] \
-            && [ "$UNIT_RESULT" = success ]; then
-            required_conclusion=success
-          fi
-          if [ "$required_conclusion" = success ]; then
-            publish_comment "PASSED" "All required public CPU stages passed."
-          else
-            publish_comment "FAILED" "One or more stages failed. Open the public logs for the exact error output."
-          fi
-          update_check "$REQUIRED_CHECK_ID" "$required_conclusion" \
-            "Community CPU: $required_conclusion" "$summary"
-          test "$required_conclusion" = success
+          printf '%s\n' \
+            "Source quality: $SOURCE_QUALITY_RESULT" \
+            "Ownership and impact: $OWNERSHIP_IMPACT_RESULT" \
+            "Unit / C++ and Python: $UNIT_RESULT"
+          test "$SOURCE_QUALITY_RESULT" = success
+          test "$OWNERSHIP_IMPACT_RESULT" = success
+          test "$UNIT_RESULT" = success

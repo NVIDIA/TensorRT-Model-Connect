@@ -7,8 +7,8 @@ graph, and these classes define **what** each test stage does.
 
 The shortest useful reading order is:
 
-1. `.github/workflows/community-cpu.yml` — trusted `/run-ci` authorization and
-   exact-merge public CPU validation.
+1. `.github/workflows/community-cpu.yml` — automatic, exact-merge public CPU
+   validation for pull requests.
 2. `.github/workflows/internal-ci-bridge.yml` — the exact-head protected dispatch boundary.
 3. `tools/ci/__main__.py` — the public command-line interface.
 4. `tools/ci/pipeline.py` — the named non-model stages and their ordered steps.
@@ -18,7 +18,7 @@ The shortest useful reading order is:
 
 ```mermaid
 flowchart LR
-    A[PR author comments /run-ci] --> B[Public CPU checks exact PR merge]
+    A[PR opened or updated] --> B[Public CPU checks exact PR merge]
     B --> C[Public exact-merge verdict]
     C --> D[Trusted actor adds run-internal-ci]
     D --> E[Private Internal premerge exact PR head]
@@ -55,21 +55,16 @@ that enters the run-owned container and invokes `pipeline` there.
 
 ## Community CPU, step by step
 
-The pull-request author comments `/run-ci`; a maintainer or admin may submit the
-same command on the author's behalf. The default-branch Community CPU workflow
-verifies the actor, open PR, and `main` base, then captures the exact base,
-head, and merge SHAs. Its authorization and publisher jobs never check out or
-execute PR code.
+Opening a pull request or pushing a new commit automatically starts Community
+CPU against GitHub's exact pull-request merge revision. Source quality,
+ownership and impact, and selected source-only units run as separate jobs on
+GitHub-hosted public CPU runners.
 
-The test jobs check out only the authorized merge SHA with read-only repository
-permission and no secrets. Separate publisher jobs create
-and complete contributor-visible checks on that merge SHA. They also maintain
-one PR status comment containing the exact merge SHA, per-stage verdicts, and a
-direct link to the public Actions logs so contributors can always find the
-error output even though the checks are not attached to the PR head. If the PR
-head or base changes before publication, every pending public check becomes
-neutral instead of validating the stale snapshot. Comment `/run-ci` again
-only after the new head is ready.
+The jobs check out only the event's immutable merge SHA with read-only
+repository permission, no persisted checkout credentials, and no secrets.
+GitHub publishes the native pull-request checks and public Actions logs. A new
+commit creates a new merge revision and cancels any older in-progress run for
+that pull request.
 
 ## Pre-merge, step by step
 
@@ -137,10 +132,10 @@ gh api --method PATCH \
 
 This is an explicit operator recovery, not an automatic trusted-workflow
 mutation. Wait for the PR API and source branch SHA to match, confirm the PR is
-still open and targets `main`, then add `run-internal-ci` again. Use `/run-ci`
-only to refresh public CPU validation for the current merge revision, and never
-dispatch protected CI while the two heads differ or the current public required
-check is absent.
+still open and targets `main`, and wait for automatic Community CPU validation
+on the current merge revision. Then add `run-internal-ci` again. Never dispatch
+protected CI while the two heads differ or the current public required check is
+absent.
 
 ### 2. Select the work
 

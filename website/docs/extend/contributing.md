@@ -50,9 +50,9 @@ Ruff and clang-format environments on Linux, macOS, and Windows instead of
 depending on host-installed binaries.
 
 The local hook intentionally stays lightweight and does not build the CLI or
-run the complete CPU suite. After pushing, comment `/run-ci` on the pull request
-to run source quality, ownership analysis, and the selected source-only C++ and
-Python units on GitHub-hosted public CPU runners. The protected suite retains
+run the complete CPU suite. After pushing, the pull request automatically runs
+source quality, ownership analysis, and the selected source-only C++ and Python
+units on GitHub-hosted public CPU runners. The protected suite retains
 the filesystem-specific cache-reflink contract that public runners cannot
 portably execute.
 
@@ -137,32 +137,21 @@ performance, and release qualification are different evidence tiers.
 
 ## 6. Run public CPU validation
 
-The pull-request author starts contributor-visible, GitHub-hosted `Community
-CPU` validation by adding this exact comment to the pull request:
-
-```text
-/run-ci
-```
-
-The trusted default-branch `Community CPU` workflow authorizes the actor and
-captures the exact base, head, and merge SHAs without checking out
-pull-request code. Separate jobs in that same workflow run source quality,
-ownership and impact, and source-only C++ and Python units. A maintainer or
-admin may submit the same comment on the author's behalf.
+Opening the pull request or pushing a new commit automatically starts
+contributor-visible, GitHub-hosted `Community CPU` validation against GitHub's
+exact pull-request merge revision. Separate jobs run source quality, ownership
+and impact, and source-only C++ and Python units. No comment or maintainer action
+is required.
 
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs, and every public job uses a GitHub-hosted
-`ubuntu-24.04` runner. Before testing starts, the workflow creates or updates
-a `Community CPU` status comment on the pull request with the exact merge SHA
-and a direct link to live public Actions logs. At completion, the same comment
-reports each stage verdict and links to the complete error output. This comment
-is the stable log entrypoint because the sanitized checks are attached to the
-merge SHA rather than the pull-request head SHA.
+`ubuntu-24.04` runner. GitHub publishes public Actions logs with the complete
+output for every failed command, together with native pull-request checks.
 
-Fix any failures and wait for `Community CPU / Required` to pass. Repeating
-`/run-ci` for the same queued, running, or successful merge is safely
-deduplicated. If the PR head or base changes, comment `/run-ci` again after
-the new revision is ready.
+Fix any failures and wait for `Community CPU / Required` to pass. A new commit
+automatically validates the new merge revision and cancels an older in-progress
+Community CPU run for the same pull request. If `main` advances and GitHub asks
+for an update, rebase or update the branch to validate the new exact merge.
 
 ## 7. Coordinate protected repository CI
 

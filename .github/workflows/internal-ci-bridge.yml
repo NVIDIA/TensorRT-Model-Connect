@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      checks: read
+      actions: read
       contents: read
       pull-requests: write
     outputs:
@@ -103,12 +103,12 @@ jobs:
           # This contributor-visible result is a readiness prerequisite. The
           # maintainer-owned label and this default-branch workflow remain the
           # authorization boundary for protected resources.
-          community_cpu="$(
+          community_cpu_run="$(
             gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/commits/$merge_sha/check-runs?filter=latest&per_page=100" \
-              --jq '.check_runs | map(select(.name == "Community CPU / Required" and .app.slug == "github-actions" and ((.external_id // "") | startswith("community-cpu:")))) | sort_by(.started_at) | last | .conclusion // empty'
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&per_page=100" \
+              --jq ".workflow_runs | map(select(.head_sha == \"$head_sha\" and .conclusion == \"success\" and .display_title == \"PR #$PR_NUMBER · public CPU · merge $merge_sha\")) | sort_by(.updated_at) | last | .id // empty"
           )"
-          if [ "$community_cpu" != "success" ]; then
+          if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Community CPU / Required must pass on the current PR merge before internal CI can run."
             exit 1
           fi
