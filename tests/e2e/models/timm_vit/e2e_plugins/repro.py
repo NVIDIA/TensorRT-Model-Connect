@@ -5,13 +5,8 @@
 
 from __future__ import annotations
 
-import shlex
 
 from .contracts import E2ECase, ReproCommandProvider, RunContext
-
-
-def _shell_quote(value: object) -> str:
-    return shlex.quote(str(value))
 
 
 class TimmVitReproCommandProvider:
@@ -41,7 +36,7 @@ class TimmVitReproCommandProvider:
             "classify",
             bundle_path,
             "--image",
-            _shell_quote(image),
+            str(image),
         ]
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:

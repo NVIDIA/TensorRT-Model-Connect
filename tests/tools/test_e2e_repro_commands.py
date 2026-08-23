@@ -315,3 +315,39 @@ def test_llama_chunked_prefill_repro_preserves_model_only_build(tmp_path) -> Non
     assert "--max-new-tokens 2" in repro["trt_inference"]
     assert "--temperature 0.0" in repro["trt_inference"]
     assert "--e2e-category regression" in repro["rerun_test_rebuild"]
+
+import pytest
+import shlex
+from tests.e2e.models.sam3.e2e_plugins.repro import Sam3ReproCommandProvider
+
+@pytest.mark.parametrize("prompt", [
+    "Simple space",
+    "",
+    "Quote's and \"quotes\"",
+    "Cost is $100",
+    "Backslash \\ and \n newline",
+])
+def test_sam3_repro_command_shlex_round_trip(tmp_path, prompt):
+    provider = Sam3ReproCommandProvider()
+    case = E2ECase(
+        name="sam3-test",
+        hf_id="dummy",
+        family="dummy",
+        runtime_strategy="dummy",
+        bundle="bundle.bundle",
+        stages=[],
+        metadata={"text_prompt": True},
+        inputs={"image": "test.jpg", "prompt": prompt}
+    )
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path),
+        binary_path="./build/trtmc",
+        hf_python="/usr/bin/python3",
+        engine_dir="/tmp/engines",
+    )
+    
+    parts = provider.build_trt_inference_command(case, ctx, "bundle.bundle")
+    rendered = shlex.join(parts)
+    round_tripped = shlex.split(rendered)
+    assert round_tripped == parts
