@@ -371,6 +371,29 @@ class TestBarkEngine(FamilyPluginTestMixin):
 
     # --- Bark-specific Tier 1 tests ---
 
+    def test_pytorch_checkpoint_is_memory_mapped(self, tmp_path, monkeypatch):
+        torch = pytest.importorskip("torch")
+        checkpoint = tmp_path / "pytorch_model.bin"
+        checkpoint.touch()
+        expected = {"weight": object()}
+        load_kwargs = {}
+
+        def fake_load(path, **kwargs):
+            assert path == str(checkpoint)
+            load_kwargs.update(kwargs)
+            return expected
+
+        monkeypatch.setattr(torch, "load", fake_load)
+
+        actual = bark_plugin_module._load_bark_state_dict(str(tmp_path))
+
+        assert actual is expected
+        assert load_kwargs == {
+            "map_location": "cpu",
+            "weights_only": True,
+            "mmap": True,
+        }
+
     def test_dual_profile_builds_one_semantic_and_one_coarse_plan(
         self, tester, tmp_path, monkeypatch
     ):
@@ -421,6 +444,15 @@ class TestBarkEngine(FamilyPluginTestMixin):
         plugin = bark_plugin_module.BarkPlugin()
 
         assert not getattr(plugin, "supports_split_decoder_roles", False)
+
+    def test_load_weights_retains_only_codec_checkpoint_tensors(
+        self, tester, tmp_path
+    ):
+        _, weights, _ = tester.prepare_config_and_weights(tmp_path)
+
+        assert all(
+            key.startswith("codec_model.") for key in weights["_state_dict"]
+        )
 
     def test_fused_qkv_correctly_split(self, tester, tmp_path):
         """Validate that Bark's fused att_proj [3H, H] is correctly split into Q/K/V.
