@@ -462,6 +462,43 @@ bool test_extract_json_string_array_stops_on_non_string() {
 
 } // namespace
 
+
+// ---------------------------------------------------------------------------
+// Additional Tests for Issue #975
+// ---------------------------------------------------------------------------
+
+// Intention: Verify duplicate keys behavior (first occurrence wins).
+bool test_duplicate_keys() {
+    const std::string json = R"({"key": 1, "key": 2})";
+    return trtmc::extract_json_int(json, "key", -1) == 1;
+}
+
+// Intention: Verify trailing comments are ignored.
+bool test_comments() {
+    const std::string json = R"({"key": 42} // trailing comment)";
+    return trtmc::extract_json_int(json, "key", -1) == 42;
+}
+
+// Intention: Verify partial array values are extracted up to the error.
+bool test_partial_values() {
+    const std::string json = R"({"arr": [1, 2, GARBAGE])";
+    auto result = trtmc::extract_json_int_array(json, "arr", 10);
+    return result.size() == 2 && result[0] == 1 && result[1] == 2;
+}
+
+// Intention: Verify maximum array counts.
+bool test_maximum_array_counts() {
+    const std::string json = R"({"arr": [1, 2, 3, 4, 5]})";
+    auto result = trtmc::extract_json_int_array(json, "arr", 2);
+    return result.size() == 2 && result[0] == 1 && result[1] == 2;
+}
+
+// Intention: Verify malformed input returns fallback.
+bool test_malformed_input() {
+    const std::string json = R"({"key": [1, 2, 3])";
+    return trtmc::extract_json_int(json, "key", -99) == -99;
+}
+
 int main() {
     bool all_passed = true;
     std::cout << "test_json_helpers:" << std::endl;
@@ -507,3 +544,10 @@ int main() {
     std::cerr << "test_json_helpers FAILED" << std::endl;
     return 1;
 }
+    RUN_TEST(test_duplicate_keys);
+    RUN_TEST(test_comments);
+    RUN_TEST(test_partial_values);
+    RUN_TEST(test_maximum_array_counts);
+    RUN_TEST(test_malformed_input);
+
+    
