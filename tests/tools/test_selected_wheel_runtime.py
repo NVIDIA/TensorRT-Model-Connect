@@ -20,7 +20,7 @@ from tools.ci import model_proof_inner as model_proof_inner_module
 from tools.ci.model_proof import ModelProofRequest, ModelProofRunner
 from tools.ci.model_proof_inner import ModelProofInnerPipeline
 from tools.ci.process import CiError
-from tools.ci.quality import UnitTestRunner
+from tools.ci.quality import ISOLATED_PYTEST, UnitTestRunner
 from tools.ci.selected_wheel import SelectedWheelRuntime
 
 
@@ -176,9 +176,12 @@ def test_unit_python_tests_use_selected_wheel_target_without_source_python(
     UnitTestRunner(context).premerge()
 
     command, options = next(
-        call for call in context.calls if call[0][:3] == [str(runtime.python), "-m", "pytest"]
+        call
+        for call in context.calls
+        if call[0][:4] == [str(runtime.python), "-I", "-c", ISOLATED_PYTEST]
     )
     assert command[0] == str(runtime.python)
+    assert command[4] == str(repository)
     updates = options["updates"]
     assert isinstance(updates, dict)
     assert updates["PYTHONPATH"] == f"{runtime.site_packages}:{repository}"
