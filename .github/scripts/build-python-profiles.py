@@ -20,7 +20,7 @@ from tensorrt_model_connect.python_profiles import (
 def main() -> None:
     names = prebuilt_python_profile_names(load_python_profile_registry())
     if not names:
-        raise SystemExit("no family-owned Python profiles were declared")
+        raise SystemExit("no prebuilt Python profiles were declared")
 
     base_python = os.environ.get("TRTMC_BASE_PYTHON", "/opt/venv/bin/python")
     resolved: dict[str, dict[str, str]] = {}

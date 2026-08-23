@@ -23,7 +23,7 @@ from .process import CiError, CommandRunner, GitHubFiles
 
 
 FINGERPRINT_LABEL = "org.nvidia.trtmc.ci-input-fingerprint"
-ENVIRONMENT_CONTRACT_VERSION = 1
+ENVIRONMENT_CONTRACT_VERSION = 2
 IMMUTABLE_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 EXACT_TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
 EXACT_APT_VERSION = re.compile(r"[0-9][0-9A-Za-z.+:~_-]*")
@@ -262,11 +262,12 @@ class DockerImageManager:
         profiles = registry["profiles"]
         expected_profiles = ",".join(profile_names)
         if not expected_profiles:
-            raise CiError("No family-owned Python execution profiles were declared")
+            raise CiError("No prebuilt Python execution profiles were declared")
 
         package_root = Path("python/tensorrt_model_connect")
         assets: set[Path] = set()
-        for spec in profiles.values():
+        prebuilt_profiles = {name: profiles[name] for name in profile_names}
+        for spec in prebuilt_profiles.values():
             if not isinstance(spec, dict):
                 continue
             for field in ("requirements", "verification_script_file"):
@@ -280,7 +281,6 @@ class DockerImageManager:
             Path(".github/scripts/build-python-profiles.py"),
             package_root / "__init__.py",
             package_root / "python_profiles.py",
-            package_root / "families/__init__.py",
             *assets,
         }
         dockerfile_text = (self.config.repository / self.config.dockerfile).read_text(
@@ -303,7 +303,7 @@ class DockerImageManager:
         common_semantic_contract = {
             "environment_contract_version": ENVIRONMENT_CONTRACT_VERSION,
             "version": registry.get("version"),
-            "profiles": profiles,
+            "profiles": prebuilt_profiles,
         }
         common_semantic_payload = json.dumps(
             common_semantic_contract,

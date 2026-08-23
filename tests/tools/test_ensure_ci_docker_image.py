@@ -268,7 +268,6 @@ def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     for source in (
         REPO_ROOT / "python" / "tensorrt_model_connect" / "__init__.py",
         REPO_ROOT / "python" / "tensorrt_model_connect" / "python_profiles.py",
-        REPO_ROOT / "python" / "tensorrt_model_connect" / "python_profiles.toml",
     ):
         shutil.copy2(source, package_root / source.name)
     shutil.copy2(
@@ -284,10 +283,27 @@ plugin = "demo"
 module = "plugin"
 aliases = ["demo"]
 prefixes = ["demo"]
+default_execution_profiles = ["reference|demo"]
 python_profile_specs = [
   "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
+  "lazy_demo|families/demo/requirements.lock.txt|families/demo/verify.py|true|false",
 ]
-default_execution_profiles = ["reference|demo"]
+""",
+        encoding="utf-8",
+    )
+    profile_registry = package_root / "python_profiles.toml"
+    profile_registry.write_text(
+        """version = 1
+
+[profiles.base]
+kind = "passthrough"
+
+[profiles.reference_common]
+kind = "venv"
+requirements = "families/demo/requirements.lock.txt"
+system_site_packages = true
+verification_script = "import demo_package"
+
 """,
         encoding="utf-8",
     )
@@ -515,7 +531,7 @@ def test_source_contract_describes_parameterized_tensorrt_overlay(tmp_path: Path
         tensorrt_apt_version="11.2.1.2-1+cuda13.3",
     )
     assert selected_contract["schema_version"] == 1
-    assert selected_contract["environment_contract_version"] == 1
+    assert selected_contract["environment_contract_version"] == 2
     assert (
         selected_contract["common_input_fingerprint"]
         == default_contract["common_input_fingerprint"]
@@ -694,6 +710,55 @@ def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(
     assert ownership_changed == baseline
 
 
+def test_profile_fingerprint_ignores_unrelated_family_loader_changes(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    family_loader = (
+        repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    )
+    family_loader.write_text(
+        family_loader.read_text(encoding="utf-8")
+        + "\n# Unrelated application-only family parsing change.\n",
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "family-loader-change", repo_root)
+    assert changed == baseline
+
+
+def test_profile_fingerprint_ignores_registry_comments(tmp_path: Path) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    registry = repo_root / "python" / "tensorrt_model_connect" / "python_profiles.toml"
+    registry.write_text(
+        "# Review-only comment.\n" + registry.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "registry-comment", repo_root)
+    assert changed == baseline
+
+
+def test_profile_fingerprint_ignores_lazy_profile_declarations(tmp_path: Path) -> None:
+    repo_root, manifest, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "lazy_demo|families/demo/requirements.lock.txt",
+            "renamed_lazy_demo|families/demo/requirements.lock.txt",
+        ),
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "lazy-profile-change", repo_root)
+    assert changed == baseline
+
+
 def test_profile_fingerprint_changes_for_semantic_profile_declaration(
     tmp_path: Path,
 ) -> None:
@@ -702,8 +767,9 @@ def test_profile_fingerprint_changes_for_semantic_profile_declaration(
 
     manifest.write_text(
         manifest.read_text(encoding="utf-8").replace(
-            "families/demo/verify.py|true",
-            "families/demo/verify.py|false",
+            "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
+            "demo|families/demo/requirements.lock.txt|families/demo/verify.py|false",
+            1,
         ),
         encoding="utf-8",
     )

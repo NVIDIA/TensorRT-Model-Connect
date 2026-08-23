@@ -36,6 +36,30 @@ _PROFILE_INSTALL_TIMEOUT_SECONDS = 7200
 _EXACT_REQUIREMENT_RE = re.compile(
     r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9,._-]+\])?==([^\s;]+)$"
 )
+_EXACT_VERSION_RE = re.compile(
+    r"(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*"
+    r"(?:(?:a|b|rc)[0-9]+)?"
+    r"(?:\.post[0-9]+)?"
+    r"(?:\.dev[0-9]+)?"
+    r"(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
+    re.IGNORECASE,
+)
+_PROFILE_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
+_REGISTRY_KEYS = {
+    "version",
+    "profiles",
+    "reference_backend_defaults",
+    "runtime_strategy_defaults",
+}
+_PASSTHROUGH_PROFILE_KEYS = {"kind"}
+_VENV_PROFILE_KEYS = {
+    "kind",
+    "prebuild",
+    "requirements",
+    "system_site_packages",
+    "verification_script",
+    "verification_script_file",
+}
 
 
 def _absolute_python(path: str) -> str:
@@ -87,16 +111,17 @@ def profile_root() -> Path:
 
 @lru_cache(maxsize=1)
 def load_python_profile_registry() -> dict[str, Any]:
-    """Load the declarative profile registry bundled with the Python builder."""
+    """Load generic and family-owned profiles into one validated registry."""
     registry_file = _PACKAGE_DIR / "python_profiles.toml"
     with registry_file.open("rb") as f:
         registry = tomllib.load(f)
     if not isinstance(registry, dict):
         raise ValueError("python_profiles.toml must decode to an object")
     registry = dict(registry)
-    profiles = dict(registry.get("profiles", {}))
-    if not isinstance(profiles, dict):
+    raw_profiles = registry.get("profiles", {})
+    if not isinstance(raw_profiles, dict):
         raise ValueError("python_profiles.toml is missing a [profiles] table")
+    profiles = dict(raw_profiles)
 
     from .families import family_python_profile_specs
 
@@ -108,7 +133,144 @@ def load_python_profile_registry() -> dict[str, Any]:
             )
         profiles[name] = spec
     registry["profiles"] = profiles
+    _validate_python_profile_registry(registry)
     return registry
+
+
+def _profile_asset_path(path_spec: str, *, field: str, profile_name: str) -> Path:
+    path = Path(path_spec)
+    if not path_spec or path.is_absolute() or ".." in path.parts:
+        raise ValueError(
+            f"Execution profile {profile_name!r} has an unsafe {field} path"
+        )
+    resolved = (_PACKAGE_DIR / path).resolve()
+    try:
+        resolved.relative_to(_PACKAGE_DIR.resolve())
+    except ValueError as error:
+        raise ValueError(
+            f"Execution profile {profile_name!r} has an unsafe {field} path"
+        ) from error
+    if not resolved.is_file():
+        raise ValueError(
+            f"Execution profile {profile_name!r} references missing {field} "
+            f"asset {path_spec!r}"
+        )
+    return resolved
+
+
+def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
+    """Reject ambiguous or non-hermetic profile declarations before building."""
+    unknown_registry_keys = set(registry) - _REGISTRY_KEYS
+    if unknown_registry_keys:
+        raise ValueError(
+            "Python profile registry has unknown top-level keys: "
+            + ", ".join(sorted(unknown_registry_keys))
+        )
+    if type(registry.get("version")) is not int or registry["version"] != 1:
+        raise ValueError("python_profiles.toml version must be integer 1")
+
+    profiles = registry.get("profiles")
+    if not isinstance(profiles, Mapping) or DEFAULT_PROFILE not in profiles:
+        raise ValueError("python_profiles.toml must declare profiles.base")
+    for name, raw_spec in profiles.items():
+        if type(name) is not str or _PROFILE_NAME_RE.fullmatch(name) is None:
+            raise ValueError(f"Invalid execution profile name: {name!r}")
+        if not isinstance(raw_spec, Mapping):
+            raise ValueError(f"Execution profile {name!r} must be a table")
+        kind = raw_spec.get("kind")
+        allowed_keys = (
+            _PASSTHROUGH_PROFILE_KEYS
+            if kind == "passthrough"
+            else _VENV_PROFILE_KEYS
+            if kind == "venv"
+            else set()
+        )
+        if not allowed_keys:
+            raise ValueError(
+                f"Execution profile {name!r} has unsupported kind {kind!r}"
+            )
+        unknown_keys = set(raw_spec) - allowed_keys
+        if unknown_keys:
+            raise ValueError(
+                f"Execution profile {name!r} has unknown keys: "
+                + ", ".join(sorted(unknown_keys))
+            )
+        if kind == "passthrough":
+            continue
+        for field in ("system_site_packages", "prebuild"):
+            if field in raw_spec and type(raw_spec[field]) is not bool:
+                raise ValueError(
+                    f"Execution profile {name!r} field {field} must be a bool"
+                )
+        requirements = raw_spec.get("requirements")
+        if type(requirements) is not str:
+            raise ValueError(
+                f"Execution profile {name!r} must declare a requirements path"
+            )
+        requirements_path = _profile_asset_path(
+            requirements, field="requirements", profile_name=name
+        )
+        _exact_pinned_requirements(requirements_path.read_text(encoding="utf-8"))
+
+        inline_verification = raw_spec.get("verification_script")
+        file_verification = raw_spec.get("verification_script_file")
+        if bool(inline_verification) == bool(file_verification):
+            raise ValueError(
+                f"Execution profile {name!r} must declare exactly one of "
+                "verification_script and verification_script_file"
+            )
+        if inline_verification is not None and type(inline_verification) is not str:
+            raise ValueError(
+                f"Execution profile {name!r} verification_script must be a string"
+            )
+        if file_verification is not None:
+            if type(file_verification) is not str:
+                raise ValueError(
+                    f"Execution profile {name!r} verification_script_file "
+                    "must be a string"
+                )
+            _profile_asset_path(
+                file_verification,
+                field="verification_script_file",
+                profile_name=name,
+            )
+
+    declared_profiles = set(profiles)
+    for section_name in (
+        "runtime_strategy_defaults",
+        "reference_backend_defaults",
+    ):
+        section = registry.get(section_name, {})
+        if not isinstance(section, Mapping):
+            raise ValueError(
+                f"python_profiles.toml [{section_name}] must be an object"
+            )
+        for selector, defaults in section.items():
+            if type(selector) is not str or not selector.strip():
+                raise ValueError(
+                    f"python_profiles.toml [{section_name}] keys must be strings"
+                )
+            if not isinstance(defaults, Mapping):
+                raise ValueError(
+                    f"python_profiles.toml [{section_name}.{selector}] "
+                    "must be an object"
+                )
+            for phase, profile in defaults.items():
+                if phase not in PROFILE_PHASES:
+                    raise ValueError(
+                        f"python_profiles.toml [{section_name}.{selector}] "
+                        f"contains unsupported phase {phase!r}"
+                    )
+                if type(profile) is not str or not profile.strip():
+                    raise ValueError(
+                        f"python_profiles.toml [{section_name}.{selector}] "
+                        f"phase {phase!r} must select a profile"
+                    )
+                if profile not in declared_profiles:
+                    raise ValueError(
+                        f"python_profiles.toml [{section_name}.{selector}] "
+                        f"selects undeclared profile {profile!r}"
+                    )
 
 
 def prebuilt_python_profile_names(
@@ -157,6 +319,11 @@ def _exact_pinned_requirements(requirements_text: str) -> dict[str, str]:
                 f"line {line_number} is {raw_line!r}"
             )
         name, version = match.groups()
+        if _EXACT_VERSION_RE.fullmatch(version) is None:
+            raise ValueError(
+                "Python profile requirements must be exact name==version pins; "
+                f"line {line_number} is {raw_line!r}"
+            )
         normalized_name = re.sub(r"[-_.]+", "-", name).lower()
         if normalized_name in pinned:
             raise ValueError(
@@ -256,7 +423,6 @@ def default_execution_profiles(
         )
 
     sections = (
-        ("family_defaults", str(family or "").strip()),
         ("runtime_strategy_defaults", str(runtime_strategy or "").strip()),
         ("reference_backend_defaults", str(reference_backend or "").strip()),
     )
@@ -463,7 +629,7 @@ def _materialize_venv_profile(
         raise RuntimeError(
             f"Execution profile {profile_name!r} is not prebuilt for this source "
             f"at {env_dir}. The CI image is stale or incomplete; rebuild it from "
-            "the current Dockerfile and family-owned profile locks."
+            "the current Dockerfile and declarative profile locks."
         )
 
     root.mkdir(parents=True, exist_ok=True)

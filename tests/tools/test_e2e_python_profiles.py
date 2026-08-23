@@ -265,6 +265,22 @@ def test_family_profile_registry_is_fully_exact_pinned():
         assert pins, name
 
 
+def test_profile_contract_has_one_family_owned_source_of_truth() -> None:
+    package_root = Path(shared_profiles.__file__).resolve().parent
+    with (package_root / "python_profiles.toml").open("rb") as stream:
+        shared_registry = shared_profiles.tomllib.load(stream)
+    from tensorrt_model_connect.families import family_python_profile_specs
+
+    shared_names = set(shared_registry["profiles"])
+    family_names = set(family_python_profile_specs())
+    merged_names = set(shared_profiles.load_python_profile_registry()["profiles"])
+
+    assert shared_names == {"base", "reference_common"}
+    assert family_names
+    assert shared_names.isdisjoint(family_names)
+    assert merged_names == shared_names | family_names
+
+
 def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
@@ -280,6 +296,32 @@ def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
         shared_profiles._exact_pinned_requirements(
             "huggingface-hub==0.28.1\nhuggingface_hub==0.28.1\n"
         )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    (
+        "demo==1.*",
+        "demo===latest",
+        "demo==https://example.invalid/demo.whl",
+    ),
+)
+def test_profile_lock_rejects_non_deterministic_exact_pin_lookalikes(requirement):
+    with pytest.raises(ValueError, match="exact name==version pins"):
+        shared_profiles._exact_pinned_requirements(requirement + "\n")
+
+
+def test_profile_registry_validates_supported_global_defaults():
+    registry = shared_profiles.load_python_profile_registry()
+    registry["runtime_strategy_defaults"] = {
+        "demo": {"runtime": "reference_common"}
+    }
+
+    shared_profiles._validate_python_profile_registry(registry)
+
+    registry["runtime_strategy_defaults"]["demo"]["runtime"] = "missing"
+    with pytest.raises(ValueError, match="undeclared profile"):
+        shared_profiles._validate_python_profile_registry(registry)
 
 
 def test_exact_profile_pin_accepts_only_local_builds_of_same_public_version():
