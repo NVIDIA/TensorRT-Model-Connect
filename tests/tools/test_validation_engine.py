@@ -4073,6 +4073,7 @@ def test_run_tts_bundle_generates_audio_and_batches_asr(tmp_path: Path, monkeypa
         },
     )
     commands: list[list[str]] = []
+    transcribe_options: list[dict[str, object]] = []
 
     class Result:
         returncode = 0
@@ -4086,11 +4087,12 @@ def test_run_tts_bundle_generates_audio_and_batches_asr(tmp_path: Path, monkeypa
         return Result()
 
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        validation_engine,
-        "_transcribe_audio_files",
-        lambda paths, **_kwargs: ["The test sentence." for _path in paths],
-    )
+
+    def fake_transcribe(paths, **kwargs):
+        transcribe_options.append(kwargs)
+        return ["The test sentence." for _path in paths]
+
+    monkeypatch.setattr(validation_engine, "_transcribe_audio_files", fake_transcribe)
     args = argparse.Namespace(
         work_dir=str(work_dir),
         raw_output="",
@@ -4104,6 +4106,7 @@ def test_run_tts_bundle_generates_audio_and_batches_asr(tmp_path: Path, monkeypa
         config="",
         set=[],
         cuda_visible_devices="",
+        local_files_only=True,
     )
 
     validation_engine.run_tts_bundle(args)
@@ -4112,9 +4115,46 @@ def test_run_tts_bundle_generates_audio_and_batches_asr(tmp_path: Path, monkeypa
     assert commands[0][commands[0].index("--max-new-tokens") + 1] == "12"
     assert "audio_magpie.seed=42" in commands[0]
     assert "audio_bark.seed=42" in commands[0]
+    assert transcribe_options == [
+        {
+            "python": sys.executable,
+            "model_id": "openai/whisper-large-v3-turbo",
+            "local_files_only": True,
+        }
+    ]
     predictions = json.loads((work_dir / "bundle_predictions.json").read_text(encoding="utf-8"))
     assert predictions["responses"][0]["output_text"] == "The test sentence."
     assert Path(predictions["responses"][0]["wav_path"]).is_file()
+
+
+def test_tts_asr_passes_local_files_only_to_the_pipeline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wav_path = tmp_path / "sample.wav"
+    _write_pcm_wav(wav_path)
+    scripts: list[str] = []
+    environments: list[dict[str, str]] = []
+
+    def fake_run(command, **kwargs):
+        scripts.append(command[2])
+        environments.append(kwargs["env"])
+        return SimpleNamespace(returncode=0, stdout='["hello"]\n', stderr="")
+
+    monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
+
+    assert validation_engine._transcribe_audio_files(
+        [wav_path],
+        python="python",
+        model_id="openai/whisper-large-v3-turbo",
+        local_files_only=True,
+    ) == ["hello"]
+    assert scripts[0].count("local_files_only=local_files_only") == 2
+    assert "model_kwargs" not in scripts[0]
+    assert "model=model" in scripts[0]
+    assert "tokenizer=processor.tokenizer" in scripts[0]
+    assert "feature_extractor=processor.feature_extractor" in scripts[0]
+    assert environments[0]["HF_HUB_OFFLINE"] == "1"
+    assert environments[0]["TRANSFORMERS_OFFLINE"] == "1"
 
 
 def test_ocrbench_v2_scores_short_vqa_with_contains() -> None:

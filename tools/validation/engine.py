@@ -6293,18 +6293,26 @@ import numpy as np
 import torch
 from scipy.io import wavfile
 from scipy.signal import resample
-from transformers import pipeline
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
 paths = %(paths)r
 model_id = %(model_id)r
 local_files_only = %(local_files_only)r
 device = 0 if torch.cuda.is_available() else -1
-model_kwargs = {"local_files_only": True} if local_files_only else {}
+model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    model_id,
+    local_files_only=local_files_only,
+)
+processor = AutoProcessor.from_pretrained(
+    model_id,
+    local_files_only=local_files_only,
+)
 transcriber = pipeline(
     "automatic-speech-recognition",
-    model=model_id,
+    model=model,
+    tokenizer=processor.tokenizer,
+    feature_extractor=processor.feature_extractor,
     device=device,
-    model_kwargs=model_kwargs,
 )
 target_sample_rate = int(transcriber.feature_extractor.sampling_rate)
 waveforms = []
@@ -6330,12 +6338,17 @@ print(json.dumps([str(item.get("text", "")).strip() for item in outputs]))
         "model_id": model_id,
         "local_files_only": local_files_only,
     }
+    environment = _reference_process_environment()
+    if local_files_only:
+        environment["HF_HUB_OFFLINE"] = "1"
+        environment["TRANSFORMERS_OFFLINE"] = "1"
     proc = subprocess.run(
         [python, "-c", script],
         check=False,
         text=True,
         capture_output=True,
         timeout=max(600, 120 * len(wav_paths)),
+        env=environment,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -8682,6 +8695,7 @@ def run_tts_bundle(args: argparse.Namespace) -> None:
         [Path(row["wav_path"]) for row in responses],
         python=str(args.hf_python or sys.executable),
         model_id=str(scoring.get("asr_model", "openai/whisper-large-v3-turbo")),
+        local_files_only=bool(getattr(args, "local_files_only", False)),
     )
     for row, transcript in zip(responses, transcripts, strict=True):
         row["output_text"] = transcript
@@ -9686,6 +9700,7 @@ def _namespace_for_run_bundle(
         top_p=args.top_p,
         min_p=args.min_p,
         seed=args.seed,
+        local_files_only=bool(getattr(args, "local_files_only", False)),
     )
 
 
