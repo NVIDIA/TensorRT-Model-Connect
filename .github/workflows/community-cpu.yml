@@ -75,7 +75,7 @@ jobs:
 
   unit:
     name: Community CPU / Unit / C++ and Python
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     needs: ownership-impact
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -124,7 +124,7 @@ jobs:
 
   required:
     name: Community CPU / Required
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     needs:
       - source-quality
       - ownership-impact

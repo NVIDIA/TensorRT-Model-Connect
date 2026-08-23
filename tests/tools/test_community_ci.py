@@ -165,6 +165,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     for job_name in ("source-quality", "ownership-impact", "unit"):
         assert jobs[job_name]["permissions"] == {"contents": "read"}
+    assert jobs["unit"]["if"] == "${{ !cancelled() }}"
     assert jobs["unit"]["needs"] == "ownership-impact"
     assert jobs["required"]["needs"] == [
         "source-quality",
@@ -172,6 +173,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
         "unit",
     ]
     assert jobs["required"]["permissions"] == {}
+    assert jobs["required"]["if"] == "${{ !cancelled() }}"
 
 
 @pytest.mark.parametrize(
