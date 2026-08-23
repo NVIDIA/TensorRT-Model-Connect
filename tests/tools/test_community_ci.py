@@ -133,8 +133,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     source = path.read_text(encoding="utf-8")
 
     assert workflow["run-name"] == (
-        "PR #${{ github.event.pull_request.number }} · public CPU · merge "
-        "${{ github.event.pull_request.merge_commit_sha }}"
+        "PR #${{ github.event.pull_request.number }} · public CPU · merge ${{ github.sha }}"
     )
     assert workflow["permissions"] == {}
     assert "pull_request:" in source
