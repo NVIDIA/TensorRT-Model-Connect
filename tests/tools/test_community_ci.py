@@ -147,7 +147,8 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert "pull-requests: write" not in source
     assert "secrets." not in source
     assert "self-hosted" not in source
-    assert "github.event.pull_request.base.sha" in source
+    assert "github.event.pull_request.base.sha" not in source
+    assert source.count("CI_BASE_REF: ${{ github.sha }}^1") == 2
     assert "ref: ${{ github.sha }}" in source
     assert "persist-credentials: false" in source
     assert "cancel-in-progress: true" in source
