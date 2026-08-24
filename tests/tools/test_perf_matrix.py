@@ -313,6 +313,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["eagle_vlm.rerank"]["baseline"]["precision"] == "fp16"
+    assert by_id["eagle_vlm.rerank"]["baseline"]["local_files_only"] is True
     assert by_id["eagle_vlm.rerank"]["baseline"]["output_contract"] == "reranking-order"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
