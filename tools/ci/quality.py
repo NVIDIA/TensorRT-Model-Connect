@@ -99,6 +99,34 @@ class SourceQualityChecks:
     def family_coverage(self) -> None:
         self.context.run(["python", "scripts/check_family_coverage.py"])
 
+    def dco(self) -> None:
+        self.context.run(
+            [
+                "python",
+                "tools/check_dco.py",
+                "--base",
+                self.context.env["CI_BASE_REF"],
+                "--head",
+                self.context.env.get("CI_HEAD_REF", "HEAD"),
+            ]
+        )
+
+    def diff_hygiene(self) -> None:
+        self.context.run(
+            [
+                "git",
+                "diff",
+                "--check",
+                f"{self.context.env['CI_BASE_REF']}...{self.context.env.get('CI_HEAD_REF', 'HEAD')}",
+            ]
+        )
+
+    def structured_files(self) -> None:
+        self.context.run(["python", "tools/check_structured_files.py"])
+
+    def legal_headers(self) -> None:
+        self.context.run(["python", "tools/legal_headers.py", "--check"])
+
     def complexity(self) -> None:
         self.context.run(["lizard", "--version"])
         self.context.run(
@@ -139,7 +167,17 @@ class SourceQualityChecks:
             print("Checking Python lint on changed files:")
             print("\n".join(python_files))
             self.context.run(["ruff", "check", "--config", "ruff.toml", *python_files])
-        cpp_files = self._changed_files(base, "*.cpp", "*.h")
+        cpp_files = self._changed_files(
+            base,
+            "*.cc",
+            "*.cpp",
+            "*.cxx",
+            "*.cu",
+            "*.cuh",
+            "*.h",
+            "*.hh",
+            "*.hpp",
+        )
         if cpp_files:
             print("Checking C++ formatting on changed files:")
             print("\n".join(cpp_files))
@@ -277,7 +315,8 @@ class UnitTestRunner:
                     "Ninja",
                     "-DCMAKE_BUILD_TYPE=Release",
                     "-DTRTMC_BUILD_TESTS=ON",
-                    "-DTRTMC_BUILD_BENCHMARKS=OFF",
+                    "-DTRTMC_BUILD_BENCHMARKS=ON",
+                    "-DTRTMC_STRICT_CXX=ON",
                     "-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF",
                     "-DTRTMC_BUILD_DIFFUSION_KERNELS=OFF",
                     "-DFETCHCONTENT_FULLY_DISCONNECTED=ON",
@@ -295,7 +334,7 @@ class UnitTestRunner:
                 ],
                 limit=self.context.env.get("BUILD_ALL_TIMEOUT", "15m"),
             )
-            if scope == "cli":
+            if scope in {"cli", "all", "community-all"}:
                 self.context.run([build / "trtmc", "version"], limit="1m")
                 self.context.run([build / "trtmc", "--help"], limit="1m")
             leaked = next(build.rglob("libtrtmc_model_*.so*"), None)
@@ -328,8 +367,17 @@ class UnitTestRunner:
                     "tests/builder/test_max_batch_size_cli.py",
                     "tests/builder/test_owned_schedulers.py::test_package_main_module_invokes_build_cli_main",
                 ],
-                ["trtmc", "test_cli_args", "test_config_cli_support"],
-                ["-R", "^(test_cli_args|test_config_cli_support)$"],
+                [
+                    "trtmc",
+                    "trtmc_dataset_benchmark",
+                    "trtmc_benchmark_worker",
+                    "test_cli_args",
+                    "test_config_cli_support",
+                ],
+                [
+                    "-R",
+                    "^(test_benchmark_cli_contract|test_cli_args|test_config_cli_support)$",
+                ],
             )
         if scope in {"all", "community-all"}:
             harness_tests = [

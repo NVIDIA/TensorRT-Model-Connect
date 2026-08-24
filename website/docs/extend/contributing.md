@@ -44,10 +44,11 @@ pre-commit install --install-hooks
 On Windows, use `py -3 -m pip` in place of `python3 -m pip`.
 
 Commit-time hooks trim trailing whitespace, ensure one final newline, validate
-YAML, check Ruff, and verify clang-format. Some commit-time hooks modify files;
-review and stage those fixes before committing again. Pre-commit manages the
-Ruff and clang-format environments on Linux, macOS, and Windows instead of
-depending on host-installed binaries.
+YAML, JSON, and TOML, reject merge and filename conflicts or broken symlinks,
+check Ruff, and verify clang-format. Some commit-time hooks modify files; review
+and stage those fixes before committing again. Pre-commit manages the Ruff and
+clang-format environments on Linux, macOS, and Windows instead of depending on
+host-installed binaries.
 
 The local hook intentionally stays lightweight and does not build the CLI or
 run the complete CPU suite. After pushing, the pull request automatically runs
@@ -139,9 +140,11 @@ performance, and release qualification are different evidence tiers.
 
 Opening the pull request or pushing a new commit automatically starts
 contributor-visible, GitHub-hosted `Community CPU` validation against GitHub's
-exact pull-request merge revision. Separate jobs run source quality, ownership
-and impact, and source-only C++ and Python units. No comment or maintainer action
-is required.
+exact pull-request merge revision. Separate jobs validate DCO sign-offs,
+repository and source quality, documentation, ownership and impact, and
+source-only C++ and Python units. Native CPU builds enforce C++17 and exercise
+the public CLI and benchmark executables. No comment or maintainer action is
+required.
 
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs, and every public job uses a GitHub-hosted

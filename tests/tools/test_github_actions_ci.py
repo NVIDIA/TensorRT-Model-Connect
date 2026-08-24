@@ -1236,7 +1236,9 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert "test_distinct_explicit_hf_cache_paths_reach_both_containers" in stage
     assert 'not model_proof_allocator"' in stage
     assert '"-m"' in stage and '"model_proof_allocator"' in stage
-    assert '["trtmc", "test_cli_args", "test_config_cli_support"]' in script
+    assert '"trtmc_dataset_benchmark"' in script
+    assert '"trtmc_benchmark_worker"' in script
+    assert "test_benchmark_cli_contract" in script
     assert '["trtmc", "trtmc_platform_cpp_tests"]' in script
     assert '"TRTMC_PREMERGE_UNIT_SCOPE", "all"' in stage
     assert "tests/builder/test_cli.py" in script
@@ -1245,6 +1247,8 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert "if native_targets:" in stage
     assert '[build / "trtmc", "version"]' in stage
     assert '[build / "trtmc", "--help"]' in stage
+    assert '"-DTRTMC_BUILD_BENCHMARKS=ON"' in stage
+    assert '"-DTRTMC_STRICT_CXX=ON"' in stage
     assert "--stop-on-failure" in stage
     assert "libtrtmc_model_*.so*" in stage
     assert "-DTRTMC_ENABLE_TRT=OFF" not in stage

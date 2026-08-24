@@ -57,9 +57,11 @@ that enters the run-owned container and invokes `pipeline` there.
 ## Community CPU, step by step
 
 Opening a pull request or pushing a new commit automatically starts Community
-CPU against GitHub's exact pull-request merge revision. Source quality,
-ownership and impact, and selected source-only units run as separate jobs on
-GitHub-hosted public CPU runners.
+CPU against GitHub's exact pull-request merge revision. DCO and source quality,
+documentation, ownership and impact, and selected source-only units run as
+separate jobs on GitHub-hosted public CPU runners. Source quality also validates
+tracked structured files and legal headers; the native unit build enforces
+C++17 conformance and exercises the public CLI and benchmark executables.
 
 The jobs check out only the event's immutable merge SHA with read-only
 repository permission, no persisted checkout credentials, and no secrets.

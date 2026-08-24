@@ -13,6 +13,16 @@ repos:
         stages: [pre-commit]
       - id: check-yaml
         stages: [pre-commit]
+      - id: check-json
+        stages: [pre-commit]
+      - id: check-toml
+        stages: [pre-commit]
+      - id: check-merge-conflict
+        stages: [pre-commit]
+      - id: check-case-conflict
+        stages: [pre-commit]
+      - id: check-symlinks
+        stages: [pre-commit]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.4
@@ -29,5 +39,5 @@ repos:
         name: TRTMC C++ formatting
         entry: clang-format --dry-run --Werror
         args: [-style=file]
-        files: \.(cpp|h)$
+        files: \.(cc|cpp|cxx|cu|cuh|h|hh|hpp)$
         stages: [pre-commit]

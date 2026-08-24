@@ -26,6 +26,7 @@
 //   - Quotes, backslashes, control characters, and Unicode in string fields
 //   - Missing required fields (sample_id, answer, prompt)
 //   - Wrong field types (e.g. integer sample_id, string seed_index)
+//   - Optional seed_index int32 boundaries and overflow rejection
 //   - Malformed JSONL records (truncated, unbalanced, trailing commas)
 //   - Optional seed_index presence and absence
 //   - Output record round-trip (dump -> parse -> field name/value/type match)
@@ -56,7 +57,8 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
-static void check_throws(const char* test_name, auto&& fn) {
+template <typename Function>
+static void check_throws(const char* test_name, Function&& fn) {
     bool threw = false;
     try {
         fn();
@@ -83,6 +85,50 @@ bool test_parse_with_seed_index() {
     const std::string line = R"({"sample_id":"q2","answer":"7","prompt":"3+4","seed_index":5})";
     auto s = trtmc::cli::parse_dataset_line(line, 1);
     return s.seed_index.has_value() && s.seed_index.value() == 5;
+}
+
+bool test_parse_seed_index_int32_boundaries() {
+    const auto minimum = trtmc::cli::parse_dataset_line(
+        R"({"sample_id":"min","answer":"ok","prompt":"test","seed_index":-2147483648})", 1);
+    const auto maximum = trtmc::cli::parse_dataset_line(
+        R"({"sample_id":"max","answer":"ok","prompt":"test","seed_index":2147483647})", 1);
+    return minimum.seed_index == std::numeric_limits<int32_t>::min() &&
+           maximum.seed_index == std::numeric_limits<int32_t>::max();
+}
+
+bool test_parse_seed_index_overflow() {
+    const std::vector<std::string> lines = {
+        R"({"sample_id":"high","answer":"ok","prompt":"test","seed_index":2147483648})",
+        R"({"sample_id":"low","answer":"ok","prompt":"test","seed_index":-2147483649})",
+        R"({"sample_id":"huge","answer":"ok","prompt":"test","seed_index":18446744073709551615})",
+    };
+    for (const auto& line : lines) {
+        try {
+            trtmc::cli::parse_dataset_line(line, 23);
+            return false;
+        } catch (const std::runtime_error& error) {
+            const std::string message = error.what();
+            if (message.find("seed_index") == std::string::npos ||
+                message.find("int32 range") == std::string::npos ||
+                message.find("23") == std::string::npos) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool test_parse_seed_index_float_is_not_an_integer() {
+    try {
+        trtmc::cli::parse_dataset_line(
+            R"({"sample_id":"float","answer":"ok","prompt":"test","seed_index":1.5})", 9);
+        return false;
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        return message.find("seed_index") != std::string::npos &&
+               message.find("integer") != std::string::npos &&
+               message.find("9") != std::string::npos;
+    }
 }
 
 bool test_parse_with_quotes_and_backslashes() {
@@ -366,6 +412,9 @@ int main() {
     // parse_dataset_line
     check(test_parse_basic(), "parse_basic");
     check(test_parse_with_seed_index(), "parse_with_seed_index");
+    check(test_parse_seed_index_int32_boundaries(), "parse_seed_index_int32_boundaries");
+    check(test_parse_seed_index_overflow(), "parse_seed_index_overflow");
+    check(test_parse_seed_index_float_is_not_an_integer(), "parse_seed_index_float");
     check(test_parse_with_quotes_and_backslashes(), "parse_quotes_backslashes");
     check(test_parse_with_control_characters(), "parse_control_characters");
     check(test_parse_with_unicode(), "parse_unicode");

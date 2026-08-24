@@ -51,6 +51,11 @@ class CommunityCI:
         quality = SourceQualityChecks(context)
         failures = self._collect(
             (
+                ("DCO sign-offs", quality.dco),
+                ("Diff hygiene", quality.diff_hygiene),
+                ("Structured file syntax", quality.structured_files),
+                ("Legal source headers", quality.legal_headers),
+                ("Family coverage", quality.family_coverage),
                 ("Cyclomatic complexity", quality.complexity),
                 ("Changed-file lint and formatting", quality.lint_changed_files),
                 ("Model architecture contracts", quality.architecture_contracts),

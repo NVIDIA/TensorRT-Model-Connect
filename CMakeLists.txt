@@ -49,6 +49,7 @@ option(TRTMC_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
 option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
 option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
+option(TRTMC_STRICT_CXX "Treat C++ language-conformance warnings as errors" OFF)
 option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
 option(TRTMC_DISTRIBUTABLE_BUILD
        "Build distributable artifacts without embedding source/build paths" OFF)
@@ -58,6 +59,11 @@ set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
 set(TRTMC_SOURCE_REVISION "" CACHE STRING
   "Source revision embedded in release benchmark worker provenance.")
+if(TRTMC_STRICT_CXX)
+  add_compile_options(
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>:-Werror=pedantic>"
+  )
+endif()
 if(NOT TRTMC_SOURCE_REVISION)
   execute_process(
     COMMAND git rev-parse HEAD
@@ -719,6 +725,23 @@ if(TRTMC_BUILD_TESTS)
 enable_testing()
 add_custom_target(trtmc_cpp_tests)
 add_custom_target(trtmc_platform_cpp_tests)
+
+if(TARGET trtmc_dataset_benchmark AND TARGET trtmc_benchmark_worker)
+  add_dependencies(trtmc_platform_cpp_tests
+    trtmc
+    trtmc_dataset_benchmark
+    trtmc_benchmark_worker
+  )
+  add_test(NAME test_benchmark_cli_contract
+    COMMAND ${CMAKE_COMMAND}
+      "-DTRTMC_CLI=$<TARGET_FILE:trtmc>"
+      "-DTRTMC_DATASET_BENCHMARK=$<TARGET_FILE:trtmc_dataset_benchmark>"
+      "-DTRTMC_BENCHMARK_WORKER=$<TARGET_FILE:trtmc_benchmark_worker>"
+      "-DTRTMC_TEST_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/benchmark-cli-contract"
+      -P "${PROJECT_SOURCE_DIR}/tests/cpp/test_benchmark_cli_contract.cmake"
+  )
+  set_tests_properties(test_benchmark_cli_contract PROPERTIES LABELS "platform")
+endif()
 
 # Generic capsule test doubles. The good and wrong-identity DSOs intentionally
 # have the same filename in different directories so tests can prove that the

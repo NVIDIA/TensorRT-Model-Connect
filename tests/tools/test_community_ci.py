@@ -36,7 +36,16 @@ def test_pre_commit_config_installs_only_lightweight_commit_hooks() -> None:
     assert repositories["https://github.com/pre-commit/mirrors-clang-format"]["rev"] == "v22.1.8"
 
     hooks = {hook["id"]: hook for repository in config["repos"] for hook in repository["hooks"]}
-    for hook_id in ("trailing-whitespace", "end-of-file-fixer", "check-yaml"):
+    for hook_id in (
+        "trailing-whitespace",
+        "end-of-file-fixer",
+        "check-yaml",
+        "check-json",
+        "check-toml",
+        "check-merge-conflict",
+        "check-case-conflict",
+        "check-symlinks",
+    ):
         assert hooks[hook_id]["stages"] == ["pre-commit"]
     assert hooks["ruff-check"]["stages"] == ["pre-commit"]
     assert hooks["clang-format"]["stages"] == ["pre-commit"]
@@ -149,6 +158,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     assert "self-hosted" not in source
     assert "github.event.pull_request.base.sha" not in source
     assert source.count("CI_BASE_REF: ${{ github.sha }}^1") == 2
+    assert source.count("CI_HEAD_REF: ${{ github.event.pull_request.head.sha }}") == 1
     assert "ref: ${{ github.sha }}" in source
     assert "persist-credentials: false" in source
     assert "cancel-in-progress: true" in source
@@ -184,6 +194,7 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
     docs_steps = {step["name"]: step for step in docs["steps"]}
     assert list(docs_steps) == [
         "Check out the exact PR merge",
+        "Check documentation file references",
         "Set up Node",
         "Install website dependencies",
         "Test generated model support inventory",
@@ -199,6 +210,10 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
         "name": "Set up Node",
         "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
         "with": {"node-version": "20"},
+    }
+    assert docs_steps["Check documentation file references"] == {
+        "name": "Check documentation file references",
+        "run": "python3 tools/check_doc_file_references.py --strict website/docs",
     }
     assert docs_steps["Install website dependencies"] == {
         "name": "Install website dependencies",

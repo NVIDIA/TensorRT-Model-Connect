@@ -156,6 +156,8 @@ FULL_UNIT_TEST_INPUT_EXACT = frozenset(
         "Dockerfile.dev.aarch64",
         "Dockerfile.dev.x86",
         "requirements/community-ci.txt",
+        "tools/check_dco.py",
+        "tools/check_structured_files.py",
         "tools/community_ci.py",
         "tools/ci/README.md",
     }

@@ -2002,6 +2002,8 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                     ".pre-commit-config.yaml",
                     "Dockerfile.community-cpu",
                     "requirements/community-ci.txt",
+                    "tools/check_dco.py",
+                    "tools/check_structured_files.py",
                     "tools/community_ci.py",
                 }
             ),

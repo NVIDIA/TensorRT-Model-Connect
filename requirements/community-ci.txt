@@ -10,3 +10,4 @@ lizard==1.24.0
 pytest==8.4.2
 pytest-xdist==3.8.0
 Pillow==12.2.0
+PyYAML>=6.0,<7

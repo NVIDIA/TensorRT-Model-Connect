@@ -6,6 +6,8 @@
 #include "cli/jsonl_io.h"
 
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -44,11 +46,27 @@ DatasetSample parse_dataset_line(const std::string& line, std::size_t line_no) {
 
     auto seed_it = obj.find("seed_index");
     if (seed_it != obj.end()) {
-        if (!seed_it->is_number_integer()) {
+        std::int64_t seed_index = 0;
+        if (seed_it->is_number_unsigned()) {
+            const auto value = seed_it->get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())) {
+                throw std::runtime_error(
+                    "Field \"seed_index\" is outside the int32 range at line " +
+                    std::to_string(line_no));
+            }
+            seed_index = static_cast<std::int64_t>(value);
+        } else if (seed_it->is_number_integer()) {
+            seed_index = seed_it->get<std::int64_t>();
+        } else {
             throw std::runtime_error("Field \"seed_index\" must be an integer at line " +
                                      std::to_string(line_no));
         }
-        sample.seed_index = seed_it->get<int32_t>();
+        if (seed_index < std::numeric_limits<std::int32_t>::min() ||
+            seed_index > std::numeric_limits<std::int32_t>::max()) {
+            throw std::runtime_error("Field \"seed_index\" is outside the int32 range at line " +
+                                     std::to_string(line_no));
+        }
+        sample.seed_index = static_cast<std::int32_t>(seed_index);
     }
 
     return sample;
