@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import importlib
+import importlib.util
 import json
 import os
 import re
 import sys
 import time
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +43,7 @@ TENSORRT_APT_PACKAGES = (
     "libnvonnxparsers-dev",
     "libnvonnxparsers11",
 )
+DEFAULT_IMAGE_LOCK_TIMEOUT_SECONDS = 6 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -57,7 +59,10 @@ class DockerImageConfig:
 
     @classmethod
     def from_environment(cls, repository: Path, env: dict[str, str]) -> "DockerImageConfig":
-        timeout_text = env.get("TRTMC_CI_IMAGE_LOCK_TIMEOUT", "5400")
+        timeout_text = env.get(
+            "TRTMC_CI_IMAGE_LOCK_TIMEOUT",
+            str(DEFAULT_IMAGE_LOCK_TIMEOUT_SECONDS),
+        )
         if not timeout_text.isdigit() or int(timeout_text) < 1:
             raise CiError("TRTMC_CI_IMAGE_LOCK_TIMEOUT must be a positive integer")
         return cls(
@@ -273,13 +278,17 @@ class DockerImageManager:
             for field in ("requirements", "verification_script_file"):
                 value = str(spec.get(field, "") or "").strip()
                 if value:
-                    assets.add(package_root / value)
+                    assets.add(self._profile_asset_input(package_root, value, field))
 
         inputs = {
             self.config.dockerfile,
             Path(".dockerignore"),
             Path(".github/scripts/build-python-profiles.py"),
-            package_root / "__init__.py",
+            Path("tools/__init__.py"),
+            Path("tools/ci/__init__.py"),
+            Path("tools/ci/__main__.py"),
+            Path("tools/ci/docker_image.py"),
+            Path("tools/ci/process.py"),
             package_root / "python_profiles.py",
             *assets,
         }
@@ -339,9 +348,33 @@ class DockerImageManager:
             expected_profiles,
         )
 
+    def _profile_asset_input(
+        self,
+        package_root: Path,
+        path_spec: str,
+        field: str,
+    ) -> Path:
+        relative = Path(path_spec)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise CiError(f"Python profile has an unsafe {field} path: {path_spec!r}")
+        absolute_root = (self.config.repository / package_root).resolve()
+        resolved = (absolute_root / relative).resolve()
+        try:
+            resolved.relative_to(absolute_root)
+        except ValueError as error:
+            raise CiError(
+                f"Python profile has an unsafe {field} path: {path_spec!r}"
+            ) from error
+        if not resolved.is_file():
+            raise CiError(
+                f"Python profile references a missing {field} asset: {path_spec!r}"
+            )
+        return package_root / relative
+
     def _load_profile_registry(self) -> tuple[dict[str, object], tuple[str, ...]]:
-        package_path = str(self.config.repository / "python")
         package_name = "tensorrt_model_connect"
+        package_root = self.config.repository / "python" / package_name
+        module_name = f"{package_name}.python_profiles"
         previous_modules = {
             name: module
             for name, module in sys.modules.items()
@@ -349,13 +382,23 @@ class DockerImageManager:
         }
         for name in previous_modules:
             sys.modules.pop(name, None)
-        sys.path.insert(0, package_path)
+        package = types.ModuleType(package_name)
+        package.__package__ = package_name
+        package.__path__ = [str(package_root)]
+        sys.modules[package_name] = package
         try:
-            module = importlib.import_module("tensorrt_model_connect.python_profiles")
+            spec = importlib.util.spec_from_file_location(
+                module_name,
+                package_root / "python_profiles.py",
+            )
+            if spec is None or spec.loader is None:
+                raise CiError("Could not load the Source Python profile registry")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
             registry = module.load_python_profile_registry()
             return registry, module.prebuilt_python_profile_names(registry)
         finally:
-            sys.path.remove(package_path)
             for name in tuple(sys.modules):
                 if name == package_name or name.startswith(f"{package_name}."):
                     sys.modules.pop(name, None)

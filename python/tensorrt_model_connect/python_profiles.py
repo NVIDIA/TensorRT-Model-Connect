@@ -123,8 +123,6 @@ def load_python_profile_registry() -> dict[str, Any]:
         raise ValueError("python_profiles.toml is missing a [profiles] table")
     profiles = dict(raw_profiles)
 
-    from .families import family_python_profile_specs
-
     for name, spec in family_python_profile_specs().items():
         if name in profiles:
             raise ValueError(
@@ -135,6 +133,66 @@ def load_python_profile_registry() -> dict[str, Any]:
     registry["profiles"] = profiles
     _validate_python_profile_registry(registry)
     return registry
+
+
+def _profile_metadata_bool(value: str, field_name: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"Invalid {field_name} bool {value!r}; expected true or false"
+    )
+
+
+def family_python_profile_specs() -> dict[str, dict[str, object]]:
+    """Read family-owned profile declarations without importing family code."""
+    profiles: dict[str, dict[str, object]] = {}
+    for manifest in sorted((_PACKAGE_DIR / "families").glob("*/MODEL.toml")):
+        with manifest.open("rb") as stream:
+            raw = tomllib.load(stream)
+        family_id = raw.get("id") or raw.get("plugin") or manifest.parent.name
+        raw_specs = raw.get("python_profile_specs", [])
+        if not isinstance(raw_specs, list):
+            raise ValueError(
+                f"python_profile_specs for family {family_id} must be a list"
+            )
+        for spec in raw_specs:
+            if not isinstance(spec, str):
+                raise ValueError(
+                    f"python_profile_specs for family {family_id} must contain strings"
+                )
+            parts = [part.strip() for part in spec.split("|")]
+            if len(parts) not in {3, 4, 5} or any(not part for part in parts[:3]):
+                raise ValueError(
+                    f"Invalid python_profile_specs entry {spec!r} for family "
+                    f"{family_id}; expected 'name|requirements|verification_script|"
+                    "system_site_packages|prebuild'"
+                )
+            name, requirements, verification_script_file = parts[:3]
+            system_site_packages = (
+                _profile_metadata_bool(parts[3], "python_profile_specs")
+                if len(parts) >= 4
+                else True
+            )
+            prebuild = (
+                _profile_metadata_bool(parts[4], "python_profile_specs")
+                if len(parts) == 5
+                else True
+            )
+            if name in profiles:
+                raise ValueError(
+                    f"Python profile {name!r} is declared by multiple families"
+                )
+            profiles[name] = {
+                "kind": "venv",
+                "requirements": requirements,
+                "verification_script_file": verification_script_file,
+                "system_site_packages": system_site_packages,
+                "prebuild": prebuild,
+            }
+    return profiles
 
 
 def _profile_asset_path(path_spec: str, *, field: str, profile_name: str) -> Path:
@@ -387,6 +445,7 @@ def _apply_declared_defaults(
     profiles: dict[str, str],
     defaults: Mapping[str, Any] | None,
     *,
+    declared_profiles: set[str] | None = None,
     source: str,
 ) -> None:
     if not defaults:
@@ -400,6 +459,10 @@ def _apply_declared_defaults(
         name = str(profile).strip()
         if not name:
             raise ValueError(f"{source}[{phase!r}] must be a non-empty string")
+        if declared_profiles is not None and name not in declared_profiles:
+            raise ValueError(
+                f"{source}[{phase!r}] selects undeclared profile {name!r}"
+            )
         profiles[phase] = name
 
 
@@ -412,6 +475,7 @@ def default_execution_profiles(
     """Return declarative default profile selections for a model case."""
     profiles = {phase: DEFAULT_PROFILE for phase in PROFILE_PHASES}
     registry = load_python_profile_registry()
+    declared_profiles = set(registry["profiles"])
 
     if family:
         from .families import family_default_execution_profiles
@@ -419,6 +483,7 @@ def default_execution_profiles(
         _apply_declared_defaults(
             profiles,
             family_default_execution_profiles(family),
+            declared_profiles=declared_profiles,
             source=f"family metadata {family}",
         )
 
@@ -436,6 +501,7 @@ def default_execution_profiles(
         _apply_declared_defaults(
             profiles,
             defaults,
+            declared_profiles=declared_profiles,
             source=f"{section_name}.{key}",
         )
 

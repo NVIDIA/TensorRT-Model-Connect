@@ -464,17 +464,6 @@ def _metadata_warm_file_spec(
     return parts[0], parts[1], parts[2], parts[3]
 
 
-def _metadata_bool(value: str, field_name: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(
-        f"Invalid {field_name} bool {value!r}; expected true or false"
-    )
-
-
 def family_default_execution_profiles(family: object) -> dict[str, str]:
     """Return phase -> Python profile defaults from family-owned metadata."""
     metadata = _matching_family_metadata(family)
@@ -495,40 +484,9 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
     ``name|requirements|verification_script|system_site_packages|prebuild``.
     Paths are package-relative so profile assets stay under the owning family.
     """
-    profiles: dict[str, dict[str, object]] = {}
-    for meta in _load_family_metadata():
-        for spec in meta.python_profile_specs:
-            parts = [part.strip() for part in spec.split("|")]
-            if len(parts) not in {3, 4, 5} or any(
-                not part for part in parts[:3]
-            ):
-                raise ValueError(
-                    f"Invalid python_profile_specs entry {spec!r} for family "
-                    f"{meta.id}; expected "
-                    "'name|requirements|verification_script|"
-                    "system_site_packages|prebuild'"
-                )
-            name, requirements, verification_script_file = parts[:3]
-            system_site_packages = (
-                _metadata_bool(parts[3], "python_profile_specs")
-                if len(parts) >= 4 else True
-            )
-            prebuild = (
-                _metadata_bool(parts[4], "python_profile_specs")
-                if len(parts) == 5 else True
-            )
-            if name in profiles:
-                raise ValueError(
-                    f"Python profile {name!r} is declared by multiple families"
-                )
-            profiles[name] = {
-                "kind": "venv",
-                "requirements": requirements,
-                "verification_script_file": verification_script_file,
-                "system_site_packages": system_site_packages,
-                "prebuild": prebuild,
-            }
-    return profiles
+    from ..python_profiles import family_python_profile_specs as load_specs
+
+    return load_specs()
 
 
 def family_hf_required_files_by_id() -> dict[str, list[str]]:

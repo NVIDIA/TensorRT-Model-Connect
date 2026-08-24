@@ -100,6 +100,12 @@ def test_workflow_image_lock_retries_when_another_runner_creates_file(
     assert modes == ["r+", "x+", "r+"]
 
 
+def test_default_image_lock_wait_covers_one_profile_install_budget() -> None:
+    manager = DockerImageManager(REPO_ROOT, {})
+
+    assert manager.config.lock_timeout >= 7200
+
+
 def _write_fake_docker(tmp_path: Path, existing_images: dict[str, str]) -> tuple[Path, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(parents=True)
@@ -582,6 +588,34 @@ def test_source_contract_loads_profiles_without_ambient_pythonpath(tmp_path: Pat
     assert result.stdout.strip() == "demo,reference_common"
 
 
+def test_image_contract_cli_emits_canonical_contract_json(tmp_path: Path) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tools.ci",
+            "image",
+            "contract",
+            "--tensorrt-version",
+            "11.2.1.2",
+            "--tensorrt-apt-version",
+            "11.2.1.2-1+cuda13.3",
+        ],
+        cwd=repo_root,
+        env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    contract = json.loads(result.stdout)
+    assert contract["environment_contract_version"] == 2
+    assert contract["tensorrt"]["version"] == "11.2.1.2"
+    assert contract["tensorrt"]["apt_version"] == "11.2.1.2-1+cuda13.3"
+
+
 def test_validate_image_contract_returns_the_verified_source_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -662,6 +696,35 @@ def test_source_contract_rejects_mixed_tensorrt_overlay_versions(tmp_path: Path)
         )
 
 
+def test_source_contract_rechecks_profile_asset_containment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    outside = tmp_path / "outside.lock.txt"
+    outside.write_text("demo==1.0\n", encoding="utf-8")
+    manager = DockerImageManager(repo_root)
+    monkeypatch.setattr(
+        manager,
+        "_load_profile_registry",
+        lambda: (
+            {
+                "version": 1,
+                "profiles": {
+                    "demo": {
+                        "kind": "venv",
+                        "prebuild": True,
+                        "requirements": str(outside),
+                    }
+                },
+            },
+            ("demo",),
+        ),
+    )
+
+    with pytest.raises(CiError, match="unsafe requirements path"):
+        manager.source_contract()
+
+
 def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 
@@ -669,6 +732,7 @@ def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> No
     assert "semantic_fingerprint" in script
     assert 'b"python-profile-registry\\0"' in script
     assert "assets: set[Path]" in script
+    assert 'Path("tools/ci/process.py")' in script
     assert 'package_root / "python_profiles.py"' in script
     assert '"-f"' in script
     assert "str(self.config.dockerfile)" in script
@@ -729,6 +793,42 @@ def test_profile_fingerprint_ignores_unrelated_family_loader_changes(
     assert changed == baseline
 
 
+def test_source_contract_does_not_execute_or_fingerprint_package_init(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = DockerImageManager(repo_root).source_contract()
+    package_init = repo_root / "python" / "tensorrt_model_connect" / "__init__.py"
+    package_init.write_text(
+        "raise RuntimeError('package metadata must not execute')\n",
+        encoding="utf-8",
+    )
+
+    changed = DockerImageManager(repo_root).source_contract()
+
+    assert changed["common_input_fingerprint"] == baseline["common_input_fingerprint"]
+    assert changed["input_fingerprint"] == baseline["input_fingerprint"]
+
+
+def test_source_contract_does_not_execute_or_fingerprint_family_loader(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = DockerImageManager(repo_root).source_contract()
+    family_loader = (
+        repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    )
+    family_loader.write_text(
+        "raise RuntimeError('family loader must not execute')\n",
+        encoding="utf-8",
+    )
+
+    changed = DockerImageManager(repo_root).source_contract()
+
+    assert changed["common_input_fingerprint"] == baseline["common_input_fingerprint"]
+    assert changed["input_fingerprint"] == baseline["input_fingerprint"]
+
+
 def test_profile_fingerprint_ignores_registry_comments(tmp_path: Path) -> None:
     repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
     baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
@@ -787,4 +887,30 @@ def test_profile_fingerprint_changes_for_referenced_profile_asset_content(
     requirements.write_text("demo-package==1.0.1\n", encoding="utf-8")
 
     changed = _resolved_image_for_repo(tmp_path / "asset-change", repo_root)
+    assert changed != baseline
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        Path("Dockerfile"),
+        Path(".github/scripts/build-python-profiles.py"),
+        Path("tools/ci/process.py"),
+        Path("python/tensorrt_model_connect/families/demo/verify.py"),
+    ),
+)
+def test_profile_fingerprint_changes_for_every_baked_recipe_input(
+    tmp_path: Path,
+    relative_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+    target = repo_root / relative_path
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n# Environment-affecting recipe change.\n",
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "recipe-change", repo_root)
+
     assert changed != baseline

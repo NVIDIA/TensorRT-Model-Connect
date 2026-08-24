@@ -372,17 +372,26 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Functionality / units:** `DockerImageManager` fingerprints image inputs,
   serializes concurrent builds with `WorkflowImageLock`, verifies dependency
-  versions, and reuses only a matching local image.
-- **Inputs:** Repository files such as the Dockerfile, `.dockerignore`, Python
-  profile registry and requirements, plus `DockerImageConfig` values resolved
-  from the environment.
+  versions, exposes Runtime Contract v2, and reuses only a matching local image.
+- **Inputs:** The common fingerprint includes the Dockerfile, `.dockerignore`,
+  profile builder and registry implementations, the normalized declarations of
+  every prebuilt Python profile, and their referenced lock and verification
+  files. The overlay fingerprint adds the exact TensorRT Python and APT
+  versions. Family metadata remains family-owned; comments, ownership fields,
+  lazy profiles, the general family loader, and package `__init__.py` metadata
+  are deliberately excluded because they do not change the baked environment.
 - **Outputs:** Returns an immutable Docker ID shaped as
   `sha256:<64 lowercase hex characters>`. It exports a fingerprinted
   `TRTMC_CI_IMAGE` tag through `GITHUB_ENV`, may write
   `image_ref=sha256:...` through `GITHUB_OUTPUT`, and maintains a local
-  verification stamp.
+  verification stamp. `python3 -m tools.ci image contract` prints the complete
+  canonical contract JSON, including the full common and overlay fingerprints
+  and `environment_contract_version=2`; callers may select an exact overlay
+  with `--tensorrt-version` and `--tensorrt-apt-version`.
 - **Boundary:** It proves image identity and contents. It neither starts a
-  container nor chooses a CI stage.
+  container nor chooses a CI stage. Local image verification is serialized by
+  a six-hour default lock budget, overridable with
+  `TRTMC_CI_IMAGE_LOCK_TIMEOUT`.
 
 ### `container.py`
 

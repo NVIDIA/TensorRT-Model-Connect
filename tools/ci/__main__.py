@@ -25,6 +25,12 @@ class CiCommand:
         image = commands.add_parser("image", help="Manage the immutable CI Docker image")
         image_commands = image.add_subparsers(dest="image_command", required=True)
         image_commands.add_parser("ensure", help="Build or verify the CI Docker image")
+        image_contract = image_commands.add_parser(
+            "contract",
+            help="Print the canonical Source runtime contract",
+        )
+        image_contract.add_argument("--tensorrt-version")
+        image_contract.add_argument("--tensorrt-apt-version")
         container = commands.add_parser("container", help="Manage the run-owned CI container")
         container_commands = container.add_subparsers(dest="container_command", required=True)
         container_commands.add_parser("start", help="Start a clean CI container")
@@ -66,6 +72,23 @@ class CiCommand:
             from .docker_image import DockerImageManager
 
             DockerImageManager(Path.cwd(), dict(os.environ)).ensure()
+            return 0
+        if (arguments.command, getattr(arguments, "image_command", None)) == (
+            "image",
+            "contract",
+        ):
+            if remaining:
+                self.parser.error(
+                    f"unrecognized image contract arguments: {' '.join(remaining)}"
+                )
+            from .docker_image import DockerImageManager
+
+            print(
+                DockerImageManager(Path.cwd(), dict(os.environ)).source_contract_json(
+                    tensorrt_version=arguments.tensorrt_version,
+                    tensorrt_apt_version=arguments.tensorrt_apt_version,
+                )
+            )
             return 0
         if arguments.command == "container" and arguments.container_command == "start":
             from .container import CiContainer

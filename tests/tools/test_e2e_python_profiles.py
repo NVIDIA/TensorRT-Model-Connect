@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import sys
 import time
 from pathlib import Path
@@ -312,7 +313,7 @@ def test_profile_lock_rejects_non_deterministic_exact_pin_lookalikes(requirement
 
 
 def test_profile_registry_validates_supported_global_defaults():
-    registry = shared_profiles.load_python_profile_registry()
+    registry = copy.deepcopy(shared_profiles.load_python_profile_registry())
     registry["runtime_strategy_defaults"] = {
         "demo": {"runtime": "reference_common"}
     }
@@ -322,6 +323,91 @@ def test_profile_registry_validates_supported_global_defaults():
     registry["runtime_strategy_defaults"]["demo"]["runtime"] = "missing"
     with pytest.raises(ValueError, match="undeclared profile"):
         shared_profiles._validate_python_profile_registry(registry)
+
+
+def test_family_default_profile_must_be_declared(monkeypatch):
+    import tensorrt_model_connect.families as family_profiles
+
+    monkeypatch.setattr(
+        family_profiles,
+        "family_default_execution_profiles",
+        lambda _family: {"runtime": "missing"},
+    )
+
+    with pytest.raises(ValueError, match="selects undeclared profile 'missing'"):
+        shared_profiles.default_execution_profiles(family="demo")
+
+
+@pytest.mark.parametrize(
+    ("path_spec", "message"),
+    (
+        ("/tmp/absolute.lock.txt", "unsafe requirements path"),
+        ("../outside.lock.txt", "unsafe requirements path"),
+        ("missing.lock.txt", "missing requirements asset"),
+    ),
+)
+def test_profile_registry_rejects_unsafe_or_missing_assets(
+    monkeypatch, tmp_path, path_spec, message
+):
+    package_root = tmp_path / "package"
+    package_root.mkdir()
+    monkeypatch.setattr(shared_profiles, "_PACKAGE_DIR", package_root)
+
+    with pytest.raises(ValueError, match=message):
+        shared_profiles._profile_asset_path(
+            path_spec,
+            field="requirements",
+            profile_name="demo",
+        )
+
+
+def test_profile_registry_rejects_symlink_escape(monkeypatch, tmp_path):
+    package_root = tmp_path / "package"
+    package_root.mkdir()
+    outside = tmp_path / "outside.lock.txt"
+    outside.write_text("demo==1.0\n", encoding="utf-8")
+    (package_root / "escaped.lock.txt").symlink_to(outside)
+    monkeypatch.setattr(shared_profiles, "_PACKAGE_DIR", package_root)
+
+    with pytest.raises(ValueError, match="unsafe requirements path"):
+        shared_profiles._profile_asset_path(
+            "escaped.lock.txt",
+            field="requirements",
+            profile_name="demo",
+        )
+
+
+def test_profile_registry_rejects_ambiguous_schema_fields():
+    def add_unknown_top_level(registry):
+        registry["unknown"] = True
+
+    def add_unknown_profile_field(registry):
+        registry["profiles"]["base"]["unknown"] = True
+
+    def use_unknown_kind(registry):
+        registry["profiles"]["base"]["kind"] = "dynamic"
+
+    def use_non_boolean_flag(registry):
+        registry["profiles"]["reference_common"]["prebuild"] = 1
+
+    def declare_two_verification_sources(registry):
+        registry["profiles"]["reference_common"]["verification_script_file"] = (
+            registry["profiles"]["reference_common"]["requirements"]
+        )
+
+    cases = (
+        (add_unknown_top_level, "unknown top-level keys"),
+        (add_unknown_profile_field, "unknown keys"),
+        (use_unknown_kind, "unsupported kind"),
+        (use_non_boolean_flag, "must be a bool"),
+        (declare_two_verification_sources, "exactly one"),
+    )
+    baseline = shared_profiles.load_python_profile_registry()
+    for mutate, message in cases:
+        registry = copy.deepcopy(baseline)
+        mutate(registry)
+        with pytest.raises(ValueError, match=message):
+            shared_profiles._validate_python_profile_registry(registry)
 
 
 def test_exact_profile_pin_accepts_only_local_builds_of_same_public_version():
