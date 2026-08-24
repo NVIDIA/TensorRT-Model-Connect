@@ -157,6 +157,7 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
     requirements = tmp_path / "requirements.lock.txt"
     requirements.write_text("demo-package==1.0\n", encoding="utf-8")
     monkeypatch.delenv("MAX_JOBS", raising=False)
+    monkeypatch.setenv("PYTHONPATH", "/untrusted/profile/source")
     monkeypatch.delenv(shared_profiles.PREBUILT_ONLY_ENV, raising=False)
     monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
     monkeypatch.setattr(
@@ -181,13 +182,17 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
         {
             "requirements": str(requirements),
             "system_site_packages": False,
+            "verification_script": "print('verified')",
         },
         sys.executable,
     )
 
     install = next(call for call in commands if call[1].startswith("install "))
     assert install[3]["env"]["MAX_JOBS"] == "4"
+    assert "PYTHONPATH" not in install[3]["env"]
     assert install[2] == 7200
+    verify = next(call for call in commands if call[1].startswith("verify "))
+    assert "PYTHONPATH" not in verify[3]["env"]
 
 
 def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):

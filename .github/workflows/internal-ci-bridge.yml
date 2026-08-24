@@ -103,8 +103,8 @@ jobs:
           # authorization boundary for protected resources.
           community_cpu_run="$(
             gh api --method GET \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&per_page=100" \
-              --jq ".workflow_runs | map(select(.head_sha == \"$head_sha\" and .conclusion == \"success\")) | sort_by(.updated_at) | last | .id // empty"
+              "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha&per_page=100" \
+              --jq '.workflow_runs | map(select(.conclusion == "success")) | sort_by(.updated_at) | last | .id // empty'
           )"
           if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then
             echo "::error::Community CPU / Required must pass on the current PR head before internal CI can run."

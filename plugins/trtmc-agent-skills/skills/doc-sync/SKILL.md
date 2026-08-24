@@ -106,8 +106,8 @@ Source contains only the Internal CI Bridge and Pages workflows. Premerge,
 including legal compliance, and nightly orchestration are private Internal CI.
 
 - `run-internal-ci` is the one-shot trusted trigger; `run-ci` is retired.
-- The bridge verifies event, PR metadata, and source branch heads before
-  dispatching the exact PR head.
+- The bridge verifies the label event, current PR metadata head, and successful
+  Community CPU result for that head before dispatching it.
 - Source receives only `trtmc/premerge/required` as `PENDING`, `PASS`, or
   `FAIL` on that exact head.
 - A successful bridge dispatch is not a successful premerge result.

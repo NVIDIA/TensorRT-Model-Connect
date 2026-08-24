@@ -312,9 +312,12 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "head_ref" not in authorize
     assert '[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]' in authorize
     assert "Community CPU / Required" in authorize
-    assert "/actions/workflows/community-cpu.yml/runs?event=pull_request" in authorize
-    assert '.head_sha == \\"$head_sha\\"' in authorize
-    assert '.conclusion == \\"success\\"' in authorize
+    assert (
+        "/actions/workflows/community-cpu.yml/runs?event=pull_request&head_sha=$head_sha"
+        in authorize
+    )
+    assert '.head_sha == \\"$head_sha\\"' not in authorize
+    assert '.conclusion == "success"' in authorize
     assert "display_title" not in authorize
     assert 'if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
@@ -656,6 +659,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert 'find_spec("tensorrt") is None' in common
     assert "NvInferVersion.h" in common
     assert "NvOnnxParser.h" in common
+    assert "ENV PYTHONPATH=/opt/trtmc-profile-source" not in dockerfile
 
     overlay = dockerfile.split("FROM ci-common AS ci-runtime", maxsplit=1)[1]
     for package in (

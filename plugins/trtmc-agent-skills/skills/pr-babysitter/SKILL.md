@@ -40,25 +40,14 @@ Read `.github/workflows/internal-ci-bridge.yml` from current `github/main`.
 Source keeps only Internal CI Bridge and Pages workflows. Premerge, including
 legal compliance, and nightly execution stay in private Internal CI.
 
-Before triggering premerge, compare the PR metadata head with the independently
-resolved source branch head. This catches a GitHub PR tracking ref that stopped
-advancing after a push:
+Before triggering premerge, capture the current PR metadata head and inspect its
+existing protected status:
 
 ```bash
 REPOSITORY=NVIDIA/TensorRT-Model-Connect
 PR_NUMBER=<number>
 pull=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
 PR_HEAD_SHA=$(jq -er '.head.sha' <<<"$pull")
-HEAD_REPOSITORY=$(jq -r '.head.repo.full_name // empty' <<<"$pull")
-HEAD_REF=$(jq -r '.head.ref // empty' <<<"$pull")
-test -n "$HEAD_REPOSITORY"
-test -n "$HEAD_REF"
-HEAD_REF_URI=$(jq -rn --arg value "$HEAD_REF" '$value | @uri')
-BRANCH_HEAD_SHA=$(gh api \
-  "repos/$HEAD_REPOSITORY/branches/$HEAD_REF_URI" \
-  --jq .commit.sha)
-test "$PR_HEAD_SHA" = "$BRANCH_HEAD_SHA"
-
 gh api \
   "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" \
   --jq '[.statuses[] |
@@ -69,26 +58,18 @@ gh pr edit "$PR_NUMBER" \
   --add-label run-internal-ci
 ```
 
-Apply this check to both same-repository and accessible fork PRs. If the source
-repository is absent, the source branch cannot be read, or the two SHAs still
-differ after six 10-second retries, do not add the label:
-
-- If the source branch SHA changes during the retries, an author is still
-  pushing. Wait for it to settle and retry.
-- If the source branch remains stable while the PR metadata SHA remains behind,
-  treat the PR tracking ref as stale. Follow the recovery procedure in
-  `tools/ci/README.md`, verify equality, and only then add the label.
-- If a label event was already created for an older SHA, allow the bridge to
-  consume it and report `TRIGGER_SUPERSEDED`; add a new label only after the
-  current PR and branch SHAs agree.
+If a label event was created for an older SHA, let the bridge report the
+superseded trigger, wait for Community CPU on the current PR head, and retry.
+When authorization fails and leaves `run-internal-ci` attached, remove it before
+adding it again; adding an existing label does not emit another label event.
 
 Only an actor whose repository permission is `maintain` or `admin`
 may add the one-shot trigger.
 
 Never use the legacy `run-ci` label. The bridge consumes `run-internal-ci`,
 verifies the open PR targets `main`, and rechecks the event SHA, PR metadata
-SHA, and actual source branch SHA before dispatching only `pr_number` and
-`head_sha`.
+SHA, and successful Community CPU run for that head before dispatching only
+`pr_number` and `head_sha`.
 
 Internal CI runs legal compliance and premerge tests against that exact head.
 It may use the merge base only to select impacted tests; do not describe the
@@ -96,7 +77,7 @@ merge base or a synthetic merge commit as the tested revision.
 
 The Source-visible premerge result is only the sanitized
 `trtmc/premerge/required` status on that exact head: `PENDING`, then `PASS` or
-`FAIL`, with a target URL under the Source commit's `/tests` tree. A successful
+`FAIL`, with a target URL on the pull request's checks page. A successful
 bridge dispatch is not a successful premerge result.
 
 Raw logs, artifacts, internal packages, runner details, and nightly execution

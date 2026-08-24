@@ -144,36 +144,20 @@ Queued, missing, skipped, or failed checks are not green.
 ## 7. Start Exact-Head Premerge When Authorized
 
 Creating or pushing the PR does not start premerge. When CI execution is
-authorized, resolve the PR API head and actual source branch head independently
-before adding the one-shot trigger:
+authorized, resolve the current PR API head before adding the one-shot trigger:
 
 ```bash
 REPOSITORY=NVIDIA/TensorRT-Model-Connect
 PR_NUMBER=<number>
 pull=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
 PR_HEAD_SHA=$(jq -er '.head.sha' <<<"$pull")
-HEAD_REPOSITORY=$(jq -r '.head.repo.full_name // empty' <<<"$pull")
-HEAD_REF=$(jq -r '.head.ref // empty' <<<"$pull")
-test -n "$HEAD_REPOSITORY"
-test -n "$HEAD_REF"
-HEAD_REF_URI=$(jq -rn --arg value "$HEAD_REF" '$value | @uri')
-BRANCH_HEAD_SHA=$(gh api \
-  "repos/$HEAD_REPOSITORY/branches/$HEAD_REF_URI" \
-  --jq .commit.sha)
 test "$PR_HEAD_SHA" = "$PUSHED_SHA"
-test "$PR_HEAD_SHA" = "$BRANCH_HEAD_SHA"
 
 gh api \
   "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" \
   --jq '[.statuses[] |
     select(.context == "trtmc/premerge/required")][0]'
 ```
-
-Apply the equality check to same-repository and accessible fork PRs. Retry for
-up to six 10-second intervals while GitHub metadata settles. If the source
-repository or branch cannot be read, the source branch is still moving, or the
-SHAs do not converge, do not trigger CI; follow `tools/ci/README.md` and hand
-the stale-head recovery to `$pr-babysitter`.
 
 If the exact head already has `PENDING` or `PASS` for
 `trtmc/premerge/required`, do not trigger it again. Otherwise an actor with
@@ -184,6 +168,10 @@ gh pr edit "$PR_NUMBER" \
   --repo "$REPOSITORY" \
   --add-label run-internal-ci
 ```
+
+If authorization fails and retains the label, remove `run-internal-ci` before
+adding it again after the reported prerequisite is satisfied. Re-adding an
+already-present label is a no-op and does not trigger the bridge.
 
 Never use the legacy `run-ci` label. The bridge consumes the trigger, verifies
 the exact head, and dispatches private Internal CI. A successful Source bridge

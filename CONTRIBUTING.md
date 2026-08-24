@@ -179,6 +179,9 @@ collaborators with repository `maintain` or `admin` permission can authorize
 that trigger.
 The trusted bridge consumes the label, rechecks `Community CPU / Required`,
 captures the current PR head SHA, and dispatches protected premerge validation.
+If authorization rejects the request, ask the maintainer to remove and re-add
+the retained label after satisfying the reported prerequisite. Adding an
+already-present label does not create a new trigger event.
 
 Wait for `trtmc/premerge/required` to pass on the exact pull-request head SHA.
 If you push another commit, the previous result no longer validates the current

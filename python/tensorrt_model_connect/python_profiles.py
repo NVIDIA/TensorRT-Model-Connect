@@ -594,6 +594,7 @@ def _run_profile_command(
 
 def _profile_install_environment() -> dict[str, str]:
     environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
     if not environment.get("MAX_JOBS", "").strip():
         environment["MAX_JOBS"] = _DEFAULT_PROFILE_BUILD_JOBS
     return environment
@@ -754,6 +755,7 @@ def _materialize_venv_profile(
                     [str(tmp_python), "-c", verification_script],
                     description=f"verify Python profile {profile_name!r}",
                     timeout=300,
+                    env=_profile_install_environment(),
                 )
 
             ready_path_tmp = tmp_dir / ".ready"

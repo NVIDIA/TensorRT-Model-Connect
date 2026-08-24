@@ -76,6 +76,9 @@ An actor with `maintain` or `admin` permission adds the one-shot
 targets `main` and compares the label event's head SHA with the pull request
 API's current head SHA. It consumes the label only after authorization succeeds,
 so a rejected or stale request does not silently erase the retry signal.
+Because adding an existing label does not create another label event, retry a
+rejected request by removing `run-internal-ci` and adding it again after the
+reported prerequisite is satisfied.
 
 The bridge also requires a successful Community CPU run for that exact head.
 It intentionally does not bind readiness to the synthetic merge SHA: when
