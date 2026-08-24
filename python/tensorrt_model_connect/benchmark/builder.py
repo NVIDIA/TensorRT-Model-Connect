@@ -20,6 +20,7 @@ import tempfile
 import time
 from typing import Any, Iterable, Mapping, Sequence
 
+from .. import trt_compat
 from .types import BenchmarkError, ModelDescriptor, ResolvedCase
 
 
@@ -292,13 +293,13 @@ def _resolve_builder_runtime(backend_abi: str | None) -> _BuilderRuntime:
         current_version = metadata.version("tensorrt")
     except metadata.PackageNotFoundError:
         current_version = "unavailable"
-    current_abi = _version_abi(current_version)
+    current_abi = trt_compat.tensorrt_abi(current_version)
     if backend_abi is None or current_abi == backend_abi:
         return _BuilderRuntime(current_version, current_abi, backend_abi)
 
     for root in _candidate_tensorrt_roots():
         version = _direct_tensorrt_version(root)
-        if _version_abi(version) != backend_abi:
+        if trt_compat.tensorrt_abi(version) != backend_abi:
             continue
         return _BuilderRuntime(
             version=version,
@@ -344,11 +345,6 @@ def _direct_tensorrt_version(root: Path) -> str:
         return ""
     match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
     return match.group(1) if match else ""
-
-
-def _version_abi(version: str) -> str:
-    match = re.search(r"(\d+)\.(\d+)", version)
-    return f"{match.group(1)}.{match.group(2)}" if match else ""
 
 
 def _group_cases(

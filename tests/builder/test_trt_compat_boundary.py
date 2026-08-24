@@ -44,6 +44,14 @@ def _is_sys_modules_subscript(node: ast.AST) -> bool:
     )
 
 
+def test_tensorrt_abi_contract() -> None:
+    assert trt_compat.tensorrt_abi("11.1.0.106") == "11.1"
+    assert trt_compat.tensorrt_abi("11.123.0.999") == "11.123"
+    assert trt_compat.tensorrt_abi("11") == ""
+    assert trt_compat.tensorrt_abi("unknown") == ""
+    assert trt_compat.tensorrt_abi("TensorRT 11.2.0") == "11.2"
+
+
 def test_tensor_rt_python_api_is_imported_only_through_compat_layer():
     """Builder code must route TensorRT Python API access through trt_compat."""
     violations: list[str] = []

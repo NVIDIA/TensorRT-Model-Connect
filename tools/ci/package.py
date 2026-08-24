@@ -54,14 +54,16 @@ def _target_tensorrt_version(
 
 
 def _package_variant_version(repository: Path, tensorrt_version: str) -> str:
+    from tensorrt_model_connect import trt_compat
+
     with (repository / "pyproject.toml").open("rb") as stream:
         pyproject = tomllib.load(stream)
     package = pyproject["tool"]["tensorrt-model-connect"]["package"]
     base_version = str(package["base-version"])
     if "+" in base_version:
         raise CiError("base package version must not contain a local version segment")
-    major, minor, *_ = tensorrt_version.split(".")
-    return f"{base_version}+trt{major}{minor}"
+    abi = trt_compat.tensorrt_abi(tensorrt_version)
+    return f"{base_version}+trt{abi.replace('.', '')}"
 
 
 def _required_tensorrt_version(metadata_text: str) -> str:
@@ -120,17 +122,14 @@ def _validate_package_variant(
     return tensorrt_version, package_version
 
 
-def _tensorrt_abi(version: str) -> str:
-    major, minor, *_ = version.split(".")
-    return f"{major}_{minor}"
-
-
 def _validate_backend_files(
     location: str,
     tensorrt_version: str,
     backends: dict[str, bytes],
 ) -> None:
-    abi = _tensorrt_abi(tensorrt_version)
+    from tensorrt_model_connect import trt_compat
+
+    abi = trt_compat.tensorrt_abi(tensorrt_version).replace(".", "_")
     generic = "libtrtmc_backend_trt.so"
     versioned = f"libtrtmc_backend_trt_{abi}.so"
     expected = {generic, versioned}
@@ -149,7 +148,9 @@ def _validate_backend_identity(
     backend_abi: str,
     runtime_version: str,
 ) -> None:
-    expected_abi = _tensorrt_abi(tensorrt_version)
+    from tensorrt_model_connect import trt_compat
+
+    expected_abi = trt_compat.tensorrt_abi(tensorrt_version).replace(".", "_")
     if backend_abi.replace(".", "_") != expected_abi:
         raise CiError(
             f"{location}: TensorRT backend reports ABI {backend_abi}; expected "

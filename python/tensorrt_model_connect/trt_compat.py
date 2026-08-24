@@ -109,6 +109,7 @@ def tensorrt_version() -> str:
 
 
 def tensorrt_abi(version: str | None = None) -> str:
+    """Return the TensorRT major.minor ABI, or an empty string if unavailable."""
     match = re.search(r"(\d+)\.(\d+)", version or tensorrt_version() or "")
     if not match:
         return ""
