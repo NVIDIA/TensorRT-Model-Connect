@@ -214,7 +214,8 @@ bool rejects_native_contract(cudaStream_t stream, Mutate mutate) {
     return false;
 }
 
-template <typename Pipeline, typename Cache, typename Config>
+template <typename Pipeline, typename Cache, typename Config,
+          bool LastRequestedTokenConsumesKv = true>
 int run_native_kv_contract_tests(const char* model) {
     int failures = 0;
     const auto check = [&](bool condition, const std::string& message) {
@@ -237,11 +238,15 @@ int run_native_kv_contract_tests(const char* model) {
           "rejects a non-int32 cache_write_indices input");
     check(rejects_native_contract<Cache>(
               stream,
-              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16); }),
+              [](auto& module) {
+                  module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16);
+              }),
           "rejects a cache with the wrong capacity");
     check(rejects_native_contract<Cache>(
               stream,
-              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32); }),
+              [](auto& module) {
+                  module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32);
+              }),
           "rejects a cache with the wrong dtype");
 
     {
@@ -294,10 +299,10 @@ int run_native_kv_contract_tests(const char* model) {
               "legacy attention-mask cache path still advances normally");
     }
 
-    const auto make_config = [] {
+    const auto make_config = [](int32_t eos_id = 9) {
         Config config;
         config.vocab_size = 16;
-        config.id_eos = 9;
+        config.id_eos = eos_id;
         config.disable_cuda_graph = true;
         config.prefill_max_length = 4;
         config.num_layers = 1;
@@ -315,16 +320,17 @@ int run_native_kv_contract_tests(const char* model) {
     const std::vector<int32_t> prompt{10, 11, 12, 13, 14, 15, 16, 17, 18, 19};
 
     {
+        const int32_t capacity = LastRequestedTokenConsumesKv ? 11 : 10;
         auto prefill_trace = std::make_shared<NativeKvTrace>();
         auto decode_trace = std::make_shared<NativeKvTrace>();
-        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, prefill_trace);
-        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 11, 1, 2, DType::kFloat16,
-                                                            true, decode_trace);
-        auto cache = std::make_unique<Cache>(1, 11, 2, stream, DType::kFloat16);
+        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, capacity, 1, 2,
+                                                            DType::kFloat16, true, prefill_trace);
+        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, capacity, 1, 2,
+                                                            DType::kFloat16, true, decode_trace);
+        auto cache = std::make_unique<Cache>(1, capacity, 2, stream, DType::kFloat16);
         Cache* cache_ptr = cache.get();
         std::vector<typename Pipeline::DecoderContext> decoders;
-        decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});
+        decoders.push_back(typename Pipeline::DecoderContext{capacity, std::move(decoder)});
         Pipeline pipeline(std::move(decoders), std::move(cache), make_config(), stream, nullptr, "",
                           nullptr, std::move(prefill));
         const auto result = pipeline.generate_ids(prompt, make_request(1));
@@ -360,8 +366,40 @@ int run_native_kv_contract_tests(const char* model) {
         Cache* cache_ptr = cache.get();
         std::vector<typename Pipeline::DecoderContext> decoders;
         decoders.push_back(typename Pipeline::DecoderContext{11, std::move(decoder)});
-        Pipeline pipeline(std::move(decoders), std::move(cache), make_config(), stream, nullptr, "",
+        Pipeline pipeline(std::move(decoders), std::move(cache),
+                          make_config(LastRequestedTokenConsumesKv ? 9 : 15), stream, nullptr, "",
                           nullptr, std::move(prefill));
+        bool overflow = false;
+        std::size_t output_tokens = 0;
+        try {
+            output_tokens = pipeline.generate_ids(prompt, make_request(2)).token_ids.size();
+        } catch (const std::runtime_error&) {
+            overflow = true;
+        }
+        if constexpr (LastRequestedTokenConsumesKv) {
+            check(overflow && prefill_trace->calls.empty() && decode_trace->calls.empty() &&
+                      cache_ptr->position() == 0,
+                  "request over capacity is rejected before any runtime progression");
+        } else {
+            check(!overflow && output_tokens == 12 && prefill_trace->calls.size() == 3 &&
+                      decode_trace->calls.size() == 1 && cache_ptr->position() == 11,
+                  "the final requested token does not consume an extra KV row");
+        }
+    }
+
+    if constexpr (!LastRequestedTokenConsumesKv) {
+        auto prefill_trace = std::make_shared<NativeKvTrace>();
+        auto decode_trace = std::make_shared<NativeKvTrace>();
+        auto prefill = std::make_unique<NativeKvModuleStub>(stream, 1, 10, 1, 2, DType::kFloat16,
+                                                            true, prefill_trace);
+        auto decoder = std::make_unique<NativeKvModuleStub>(stream, 1, 10, 1, 2, DType::kFloat16,
+                                                            true, decode_trace);
+        auto cache = std::make_unique<Cache>(1, 10, 2, stream, DType::kFloat16);
+        Cache* cache_ptr = cache.get();
+        std::vector<typename Pipeline::DecoderContext> decoders;
+        decoders.push_back(typename Pipeline::DecoderContext{10, std::move(decoder)});
+        Pipeline pipeline(std::move(decoders), std::move(cache), make_config(15), stream, nullptr,
+                          "", nullptr, std::move(prefill));
         bool overflow = false;
         try {
             (void)pipeline.generate_ids(prompt, make_request(2));
@@ -370,7 +408,7 @@ int run_native_kv_contract_tests(const char* model) {
         }
         check(overflow && prefill_trace->calls.empty() && decode_trace->calls.empty() &&
                   cache_ptr->position() == 0,
-              "request over capacity is rejected before any runtime progression");
+              "a request needing a decoder row beyond capacity is rejected before execution");
     }
 
     cudaStreamDestroy(stream);

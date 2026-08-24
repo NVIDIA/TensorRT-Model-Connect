@@ -437,9 +437,11 @@ void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t
         return;
 
     const auto capacity = static_cast<std::size_t>(kv->max_length());
-    if (input_ids.size() > capacity ||
-        (max_new_tokens > 0 &&
-         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
+    // Prefill logits produce the first generated token. Only later generated
+    // tokens are fed back through the decoder and consume additional KV rows.
+    const auto decoder_tokens =
+        static_cast<std::size_t>(max_new_tokens > 0 ? max_new_tokens - 1 : 0);
+    if (input_ids.size() > capacity || decoder_tokens > capacity - input_ids.size()) {
         throw std::runtime_error(
             "Qwen requested prompt and generation exceed the model's fixed KV cache capacity");
     }
@@ -560,7 +562,7 @@ void QwenTextGenerationPipeline::prime_decoder_after_batched_prefill(
         return;
 
     TrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
+    if (!decoder.cuda_graph_active() || decoder.cuda_graph_captured())
         return;
 
     int32_t token_id = input_ids.back();

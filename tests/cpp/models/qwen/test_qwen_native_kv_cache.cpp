@@ -79,8 +79,10 @@ int test_trt_external_alias() {
 #endif
 
 int main() {
-    int failures = trtmc::test::run_native_kv_contract_tests<
-        trtmc::QwenTextGenerationPipeline, trtmc::QwenKvCache, trtmc::QwenTextGenConfig>("Qwen");
+    int failures =
+        trtmc::test::run_native_kv_contract_tests<trtmc::QwenTextGenerationPipeline,
+                                                  trtmc::QwenKvCache, trtmc::QwenTextGenConfig,
+                                                  /*LastRequestedTokenConsumesKv=*/false>("Qwen");
 #if NV_TENSORRT_MAJOR >= 11
     failures += test_trt_external_alias();
 #endif
