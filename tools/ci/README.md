@@ -95,7 +95,7 @@ CPU and trigger the new head once.
 ### 2. Select the work
 
 The Internal Ownership and Impact job runs `tools/model_ci.py impact` against
-the merge base and exact tested head. It emits:
+the tested merge revision's first parent and the exact tested merge. It emits:
 
 - directly affected models;
 - representative fallback models for shared-platform changes;

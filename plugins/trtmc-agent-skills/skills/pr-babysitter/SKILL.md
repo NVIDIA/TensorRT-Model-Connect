@@ -71,9 +71,9 @@ verifies the open PR targets `main`, and rechecks the event SHA, PR metadata
 SHA, and successful Community CPU run for that head before dispatching only
 `pr_number` and `head_sha`.
 
-Internal CI runs legal compliance and premerge tests against that exact head.
-It may use the merge base only to select impacted tests; do not describe the
-merge base or a synthetic merge commit as the tested revision.
+Internal CI resolves and tests the exact pull-request merge whose first parent
+is the current `main` revision and whose second parent is the authorized PR
+head. It publishes the sanitized result on that exact head SHA.
 
 The Source-visible premerge result is only the sanitized
 `trtmc/premerge/required` status on that exact head: `PENDING`, then `PASS` or
