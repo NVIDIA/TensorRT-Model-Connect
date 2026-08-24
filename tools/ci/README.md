@@ -72,71 +72,22 @@ that pull request.
 ### 1. Pin and authorize the PR
 
 An actor with `maintain` or `admin` permission adds the one-shot
-`run-internal-ci` label. The Source bridge removes the label even when
-authorization fails, verifies that the open pull request targets `main`, and
-compares three independent views of the requested revision:
+`run-internal-ci` label. The Source bridge verifies that the open pull request
+targets `main` and compares the label event's head SHA with the pull request
+API's current head SHA. It consumes the label only after authorization succeeds,
+so a rejected or stale request does not silently erase the retry signal.
 
-- the head SHA captured by the label event;
-- the pull request API's current head SHA;
-- the source repository's actual branch head SHA.
+The bridge also requires a successful Community CPU run for that exact head.
+It intentionally does not bind readiness to the synthetic merge SHA: when
+`main` advances without a PR push, GitHub changes the merge SHA but does not
+start a new `pull_request` run. The protected workflow still fetches and tests
+the current exact merge independently.
 
-The bridge rereads the PR and branch for up to one minute before classifying a
-mismatch. Accessible forks receive the same check. A missing, deleted, or
-otherwise inaccessible source repository or branch fails closed.
-
-If all three agree, the bridge dispatches only the PR number and exact head SHA.
-If the PR changed after the label was added, it reports a superseded trigger
-instead of dispatching the older revision. If the PR API remains behind a
-stable source branch, it reports a stale PR tracking ref. Guard failures publish
-a failing `trtmc/premerge/required` status on the PR metadata head when
-possible and update one public PR diagnostic comment. The comment contains
-only public SHAs, recovery guidance, and the Source bridge run; it never links
-to or names private CI resources.
-
-Internal CI checks out that exact head. It does not create a synthetic merge or
-overlay newer `main` commits. A merge base may select impacted tests, but it
-does not change the tested tree. If the PR head changes, trigger the new head
-once.
-
-#### Recover a stale pull-request tracking ref
-
-First verify the mismatch independently. Repeat the check for about one minute
-to distinguish normal post-push propagation from a stuck ref:
-
-```bash
-REPOSITORY=NVIDIA/TensorRT-Model-Connect
-PR_NUMBER=<number>
-pull=$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")
-BASE_REF=$(jq -er '.base.ref' <<<"$pull")
-PR_HEAD_SHA=$(jq -er '.head.sha' <<<"$pull")
-HEAD_REPOSITORY=$(jq -r '.head.repo.full_name // empty' <<<"$pull")
-HEAD_REF=$(jq -r '.head.ref // empty' <<<"$pull")
-test -n "$HEAD_REPOSITORY"
-test -n "$HEAD_REF"
-HEAD_REF_URI=$(jq -rn --arg value "$HEAD_REF" '$value | @uri')
-BRANCH_HEAD_SHA=$(gh api \
-  "repos/$HEAD_REPOSITORY/branches/$HEAD_REF_URI" \
-  --jq .commit.sha)
-printf 'PR metadata: %s\nSource branch: %s\n' \
-  "$PR_HEAD_SHA" "$BRANCH_HEAD_SHA"
-```
-
-If `BRANCH_HEAD_SHA` is still changing, wait; the author is pushing. If it is
-stable and `PR_HEAD_SHA` remains behind, refresh GitHub's PR index by setting
-the existing base to the same value:
-
-```bash
-gh api --method PATCH \
-  "repos/$REPOSITORY/pulls/$PR_NUMBER" \
-  -f base="$BASE_REF"
-```
-
-This is an explicit operator recovery, not an automatic trusted-workflow
-mutation. Wait for the PR API and source branch SHA to match, confirm the PR is
-still open and targets `main`, and wait for automatic Community CPU validation
-on the current merge revision. Then add `run-internal-ci` again. Never dispatch
-protected CI while the two heads differ or the current public required check is
-absent.
+If the two head views agree, the bridge dispatches only the PR number and exact
+head SHA. If the PR changed after the label was added, it reports a superseded
+trigger instead of dispatching the older revision. Internal CI then resolves
+and tests the current exact PR merge. If the PR head changes, wait for Community
+CPU and trigger the new head once.
 
 ### 2. Select the work
 

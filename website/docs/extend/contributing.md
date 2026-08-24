@@ -165,10 +165,11 @@ pass and the pull request is ready, add this comment:
 
 After public CPU validation passes, the maintainer verifies the PR's
 `headRefOid` and applies `run-internal-ci`. The trusted bridge consumes that
-label, verifies the current exact-merge public CPU result, captures the
-immutable PR head SHA, and dispatches private premerge validation for that exact
-revision. The public result is contributor feedback, not an authorization
-token; `run-internal-ci` remains the protected-resource security boundary.
+label after authorization succeeds, verifies a successful public CPU run for
+the current head, captures the immutable PR head SHA, and dispatches private
+premerge validation for that exact revision. The public result is contributor
+feedback, not an authorization token; `run-internal-ci` remains the
+protected-resource security boundary.
 
 Wait for the `trtmc/premerge/required` status on the same head SHA to complete
 successfully. If the head changes intentionally, finish the update and local

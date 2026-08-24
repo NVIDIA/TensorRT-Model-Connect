@@ -87,13 +87,11 @@ jobs:
           base_repo="$(jq -er '.base.repo.full_name' <<<"$pull")"
           base_ref="$(jq -er '.base.ref' <<<"$pull")"
           head_sha="$(jq -er '.head.sha' <<<"$pull")"
-          merge_sha="$(jq -er '.merge_commit_sha' <<<"$pull")"
 
           test "$state" = "open"
           test "$base_repo" = "$GITHUB_REPOSITORY"
           test "$base_ref" = "main"
           [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]
           if [ "$EVENT_NAME" = "pull_request_target" ] \
             && [ "$head_sha" != "$EVENT_HEAD_SHA" ]; then
             echo "::error::The CI trigger was superseded by a newer PR head."
@@ -106,10 +104,10 @@ jobs:
           community_cpu_run="$(
             gh api --method GET \
               "/repos/$GITHUB_REPOSITORY/actions/workflows/community-cpu.yml/runs?event=pull_request&per_page=100" \
-              --jq ".workflow_runs | map(select(.head_sha == \"$head_sha\" and .conclusion == \"success\" and .display_title == \"PR #$PR_NUMBER · public CPU · merge $merge_sha\")) | sort_by(.updated_at) | last | .id // empty"
+              --jq ".workflow_runs | map(select(.head_sha == \"$head_sha\" and .conclusion == \"success\")) | sort_by(.updated_at) | last | .id // empty"
           )"
           if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::Community CPU / Required must pass on the current PR merge before internal CI can run."
+            echo "::error::Community CPU / Required must pass on the current PR head before internal CI can run."
             exit 1
           fi
           {
@@ -118,7 +116,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Consume the trusted trigger label
-        if: ${{ always() && github.event_name == 'pull_request_target' }}
+        if: ${{ success() && github.event_name == 'pull_request_target' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}

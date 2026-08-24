@@ -173,9 +173,10 @@ comment:
 @yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
 ```
 
-The maintainer verifies the pull-request head and the current exact-merge public
-result, then applies the one-shot `run-internal-ci` label. Only collaborators
-with repository `maintain` or `admin` permission can authorize that trigger.
+The maintainer verifies the pull-request head and a successful Community CPU
+run for that head, then applies the one-shot `run-internal-ci` label. Only
+collaborators with repository `maintain` or `admin` permission can authorize
+that trigger.
 The trusted bridge consumes the label, rechecks `Community CPU / Required`,
 captures the current PR head SHA, and dispatches protected premerge validation.
 
@@ -188,10 +189,10 @@ logs, artifacts, and URLs are not part of the public contribution interface.
 ### 10. Respond to review and keep evidence current
 
 Address review feedback on the same topic branch and sign off every new commit.
-Keep the pull request current with upstream when requested. Any head or base
-change requires a fresh public merge result; any head change also requires a
-fresh maintainer-triggered protected result before the pull request can merge.
-Maintainers merge accepted changes according to the repository ruleset.
+Keep the pull request current with upstream when requested. A new head requires
+a fresh public merge result and a fresh maintainer-triggered protected result
+before the pull request can merge. Maintainers merge accepted changes according
+to the repository ruleset.
 
 ## Established development practices
 
