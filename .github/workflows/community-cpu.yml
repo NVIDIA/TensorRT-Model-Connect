@@ -45,6 +45,40 @@ jobs:
       - name: Run source quality
         run: python3 -m tools.community_ci source-quality --base "$CI_BASE_REF"
 
+  docs:
+    name: Community CPU / Docs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact PR merge
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "20"
+
+      - name: Install website dependencies
+        working-directory: website
+        run: npm ci
+
+      - name: Test generated model support inventory
+        working-directory: website
+        run: npm run test:model-support
+
+      - name: Build production documentation
+        working-directory: website
+        env:
+          SITE_URL: https://nvidia.github.io
+          BASE_URL: /TensorRT-Model-Connect/
+        run: npm run build
+
   ownership-impact:
     name: Community CPU / Ownership and impact
     runs-on: ubuntu-24.04
@@ -127,6 +161,7 @@ jobs:
     if: ${{ !cancelled() }}
     needs:
       - source-quality
+      - docs
       - ownership-impact
       - unit
     runs-on: ubuntu-24.04
@@ -136,14 +171,17 @@ jobs:
       - name: Require every public CPU stage
         env:
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
+          DOCS_RESULT: ${{ needs.docs.result }}
           OWNERSHIP_IMPACT_RESULT: ${{ needs.ownership-impact.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
         run: |
           set -euo pipefail
           printf '%s\n' \
             "Source quality: $SOURCE_QUALITY_RESULT" \
+            "Docs: $DOCS_RESULT" \
             "Ownership and impact: $OWNERSHIP_IMPACT_RESULT" \
             "Unit / C++ and Python: $UNIT_RESULT"
           test "$SOURCE_QUALITY_RESULT" = success
+          test "$DOCS_RESULT" = success
           test "$OWNERSHIP_IMPACT_RESULT" = success
           test "$UNIT_RESULT" = success

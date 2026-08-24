@@ -266,6 +266,38 @@ def test_only_pages_workflow_creates_deployment_objects() -> None:
     assert deployments == [("pages.yml", "deploy", "github-pages")]
 
 
+def test_community_docs_gate_matches_pages_predeploy_contract() -> None:
+    workflows = REPO_ROOT / ".github" / "workflows"
+    pages = yaml.safe_load((workflows / "pages.yml").read_text(encoding="utf-8"))
+    community = yaml.safe_load(
+        (workflows / "community-cpu.yml").read_text(encoding="utf-8")
+    )
+
+    pages_build = pages["jobs"]["build"]
+    pages_steps = {step["name"]: step for step in pages_build["steps"]}
+    docs = community["jobs"]["docs"]
+    docs_steps = {step["name"]: step for step in docs["steps"]}
+
+    assert str(pages_steps["Set up Node"]["with"]["node-version"]) == "20"
+    assert docs_steps["Set up Node"] == {
+        "name": "Set up Node",
+        "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "with": {"node-version": "20"},
+    }
+    assert pages_build["defaults"]["run"]["working-directory"] == "website"
+    assert docs_steps["Test generated model support inventory"] == {
+        "name": "Test generated model support inventory",
+        "working-directory": "website",
+        "run": pages_steps["Test generated model support inventory"]["run"],
+    }
+    assert pages_steps["Test generated model support inventory"]["run"] == (
+        "npm run test:model-support"
+    )
+    assert docs_steps["Install website dependencies"]["run"] == "npm ci"
+    assert docs_steps["Build production documentation"]["run"] == "npm run build"
+    assert pages_steps["Build site"]["run"].strip().endswith("npm run build")
+
+
 def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     workflow = (
         REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml"
