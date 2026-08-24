@@ -45,6 +45,7 @@ All public commands use one entry point:
 python3 -m tools.ci --help
 python3 -m tools.ci pipeline source-quality
 python3 -m tools.ci image ensure
+python3 -m tools.ci image contract
 python3 -m tools.ci container start
 python3 -m tools.ci stage premerge-unit
 python3 -m tools.ci model-proof --model patchtsmixer --suite premerge
@@ -380,6 +381,10 @@ the producing class remains the source of truth for optional evidence fields.
   versions. Family metadata remains family-owned; comments, ownership fields,
   lazy profiles, the general family loader, and package `__init__.py` metadata
   are deliberately excluded because they do not change the baked environment.
+  The profile builder loads its narrow API through a synthetic package, so
+  package initialization is also absent from the actual image-build path.
+  Contract-producer and CLI control-plane files are reviewed separately and do
+  not perturb the semantic runtime fingerprint when their output is unchanged.
 - **Outputs:** Returns an immutable Docker ID shaped as
   `sha256:<64 lowercase hex characters>`. It exports a fingerprinted
   `TRTMC_CI_IMAGE` tag through `GITHUB_ENV`, may write

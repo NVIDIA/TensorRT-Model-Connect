@@ -732,7 +732,7 @@ def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> No
     assert "semantic_fingerprint" in script
     assert 'b"python-profile-registry\\0"' in script
     assert "assets: set[Path]" in script
-    assert 'Path("tools/ci/process.py")' in script
+    assert 'Path("tools/ci/process.py")' not in script
     assert 'package_root / "python_profiles.py"' in script
     assert '"-f"' in script
     assert "str(self.config.dockerfile)" in script
@@ -808,6 +808,37 @@ def test_source_contract_does_not_execute_or_fingerprint_package_init(
 
     assert changed["common_input_fingerprint"] == baseline["common_input_fingerprint"]
     assert changed["input_fingerprint"] == baseline["input_fingerprint"]
+
+
+def test_profile_builder_does_not_execute_package_init(tmp_path: Path) -> None:
+    package_root = tmp_path / "tensorrt_model_connect"
+    package_root.mkdir()
+    (package_root / "__init__.py").write_text(
+        "raise RuntimeError('package init must not execute')\n",
+        encoding="utf-8",
+    )
+    (package_root / "python_profiles.py").write_text(
+        "def load_python_profile_registry(): return {}\n"
+        "def prebuilt_python_profile_names(registry): return ()\n"
+        "def profile_root(): raise AssertionError('not reached')\n"
+        "def resolve_profile_python(name, base_python): raise AssertionError('not reached')\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["TRTMC_PYTHON_PROFILE_SOURCE"] = str(package_root)
+    env["PYTHONPATH"] = str(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / ".github/scripts/build-python-profiles.py")],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "no prebuilt Python profiles were declared" in result.stderr
+    assert "package init must not execute" not in result.stderr
 
 
 def test_source_contract_does_not_execute_or_fingerprint_family_loader(
@@ -895,7 +926,7 @@ def test_profile_fingerprint_changes_for_referenced_profile_asset_content(
     (
         Path("Dockerfile"),
         Path(".github/scripts/build-python-profiles.py"),
-        Path("tools/ci/process.py"),
+        Path("python/tensorrt_model_connect/python_profiles.py"),
         Path("python/tensorrt_model_connect/families/demo/verify.py"),
     ),
 )
@@ -914,3 +945,30 @@ def test_profile_fingerprint_changes_for_every_baked_recipe_input(
     changed = _resolved_image_for_repo(tmp_path / "recipe-change", repo_root)
 
     assert changed != baseline
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        Path("tools/__init__.py"),
+        Path("tools/ci/__init__.py"),
+        Path("tools/ci/__main__.py"),
+        Path("tools/ci/docker_image.py"),
+        Path("tools/ci/process.py"),
+    ),
+)
+def test_profile_fingerprint_ignores_contract_producer_code(
+    tmp_path: Path,
+    relative_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+    target = repo_root / relative_path
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n# Control-plane-only change.\n",
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "producer-change", repo_root)
+
+    assert changed == baseline

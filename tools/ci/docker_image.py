@@ -284,11 +284,6 @@ class DockerImageManager:
             self.config.dockerfile,
             Path(".dockerignore"),
             Path(".github/scripts/build-python-profiles.py"),
-            Path("tools/__init__.py"),
-            Path("tools/ci/__init__.py"),
-            Path("tools/ci/__main__.py"),
-            Path("tools/ci/docker_image.py"),
-            Path("tools/ci/process.py"),
             package_root / "python_profiles.py",
             *assets,
         }

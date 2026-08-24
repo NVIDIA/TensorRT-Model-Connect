@@ -55,7 +55,6 @@ class _FamilyMetadata:
     default_build_route: str = ""
     debug_runner: str = ""
     debug_runtime_strategies: frozenset[str] = frozenset()
-    python_profile_specs: tuple[str, ...] = ()
     default_execution_profiles: tuple[str, ...] = ()
 
 
@@ -228,9 +227,6 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
             if isinstance(raw.get("debug_runner"), str) else "",
             debug_runtime_strategies=_metadata_strings(
                 raw.get("debug_runtime_strategies")
-            ),
-            python_profile_specs=tuple(
-                _metadata_strings(raw.get("python_profile_specs"))
             ),
             default_execution_profiles=tuple(
                 _metadata_strings(raw.get("default_execution_profiles"))
