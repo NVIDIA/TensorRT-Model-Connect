@@ -50,6 +50,21 @@ project maintainer for inclusion and redistribution under the Apache License
 - `TRTMCHERO-small.gif`; SHA-256
   `2dc2b3ac0526d469748a15543f17ca0fd94e2a4caf3729690fa70e6fe35ec43a`
 
+## AI-native development blog artwork
+
+The following artwork was created for the TensorRT-Model-Connect
+"AI-Native by Design" engineering blog post and is distributed under the
+Apache License 2.0 with the rest of the project:
+
+- `website/static/img/blog/ai-native-by-design/ai-native-by-design-hero.png`;
+  1672 x 941 editorial hero generated for this blog with OpenAI image
+  generation; SHA-256
+  `836697868295331e957a8c53adcce8ad89f3f2cc8e4b9195f1afa56db218b5ce`
+- `website/static/img/blog/ai-native-by-design/software-factory.svg`;
+  SHA-256 `a08d1353deb8c9a8e843f01ccd8e430983a4f5fca836d3eabb29d3138ac7aca0`
+- `website/static/img/blog/ai-native-by-design/isolation-architecture.svg`;
+  SHA-256 `f82f6601f3affb80171d3df8422bc409cacf41726235bb71b078f03138a4dae7`
+
 ## Maintainer voice recording and derived ASR probes
 
 The project maintainer recorded and supplied the original human-voice fixture

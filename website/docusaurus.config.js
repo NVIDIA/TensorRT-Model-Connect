@@ -28,7 +28,12 @@ const config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.js'
         },
-        blog: false,
+        blog: {
+          routeBasePath: 'blog',
+          showReadingTime: true,
+          blogSidebarTitle: 'Recent posts',
+          blogSidebarCount: 'ALL'
+        },
         theme: {
           customCss: './src/css/custom.css'
         }
@@ -51,6 +56,7 @@ const config = {
         { to: '/models-recipes/overview', label: 'Models', position: 'left' },
         { to: '/user-guides/overview', label: 'User Guides', position: 'left' },
         { to: '/learning-path', label: 'Tutorials', position: 'left' },
+        { to: '/blog', label: 'Blog', position: 'left' },
         { to: '/developer-guide/overview', label: 'Developer', position: 'left' },
         { to: '/api/overview', label: 'Reference', position: 'left' },
         { href: `https://github.com/${repository}`, label: 'GitHub', position: 'right' }
@@ -71,6 +77,7 @@ const config = {
           title: 'Learn',
           items: [
             { label: 'Tutorial Curriculum', to: '/learning-path' },
+            { label: 'Blog', to: '/blog' },
             { label: 'Reference', to: '/api/overview' },
             { label: 'Developer Guide', to: '/developer-guide/overview' }
           ]

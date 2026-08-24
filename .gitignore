@@ -129,6 +129,7 @@ recovery-*-clone/
 engines
 *.png
 !website/static/img/readme/*.png
+!website/static/img/blog/ai-native-by-design/*.png
 *.wav
 *.bundle
 *.ttrtb

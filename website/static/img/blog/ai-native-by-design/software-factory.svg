@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="810" viewBox="0 0 1440 810" role="img" aria-labelledby="title desc">
+  <title id="title">An AI-native software factory</title>
+  <desc id="desc">Humans define intent and quality bars, agents explore candidate implementations, automated validation checks the evidence, and changes either ship or return for refinement.</desc>
+  <defs>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill:#111827; }
+      .title { font-size:42px; font-weight:600; letter-spacing:-1px; }
+      .subtitle { font-size:20px; fill:#5d6674; }
+      .node-title { font-size:24px; font-weight:600; }
+      .node-copy { font-size:17px; fill:#5d6674; }
+      .eyebrow { font-size:15px; font-weight:600; letter-spacing:1.2px; text-transform:uppercase; }
+      .edge-label { font-size:15px; fill:#5d6674; }
+      .panel { fill:#ffffff; stroke:#c9d0da; stroke-width:2; }
+      .human { fill:#ffffff; stroke:#c9d0da; }
+      .goal { fill:#eaf1ff; stroke:#2563eb; }
+      .agent { fill:#eaf1ff; stroke:#2563eb; }
+      .validation { fill:#fff4d6; stroke:#b86d00; }
+      .ship { fill:#edf7dc; stroke:#5a8f00; }
+      .retry { fill:#fdecec; stroke:#d14343; }
+      .arrow { fill:none; stroke:#c9d0da; stroke-width:3; marker-end:url(#arrow); }
+      .feedback { fill:none; stroke:#d14343; stroke-width:2.5; stroke-dasharray:9 8; marker-end:url(#arrow-red); }
+      .agent-line { stroke:#2563eb; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa3b2"/></marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#d14343"/></marker>
+  </defs>
+  <rect width="1440" height="810" rx="28" fill="#f7f8fa"/>
+  <text x="70" y="80" class="title">An AI-native software factory</text>
+  <text x="70" y="118" class="subtitle">AI expands exploration. Architecture and evidence control production.</text>
+
+  <g transform="translate(68 248)">
+    <rect width="220" height="190" rx="22" class="panel human"/>
+    <text x="24" y="38" class="eyebrow" fill="#5d6674">HUMAN INTENT</text>
+    <text x="24" y="82" class="node-title">Direction</text>
+    <text x="24" y="116" class="node-copy">Product outcome</text>
+    <text x="24" y="145" class="node-copy">Architecture</text>
+    <text x="24" y="174" class="node-copy">Quality bar</text>
+  </g>
+
+  <path d="M288 343 H345" class="arrow"/>
+  <text x="316" y="319" text-anchor="middle" class="edge-label">define</text>
+
+  <g transform="translate(350 248)">
+    <rect width="220" height="190" rx="22" class="panel goal"/>
+    <text x="24" y="38" class="eyebrow" fill="#2563eb">HIGH-LEVEL GOAL</text>
+    <text x="24" y="82" class="node-title">Outcome</text>
+    <text x="24" y="116" class="node-copy">Explicit constraints</text>
+    <text x="24" y="145" class="node-copy">Reference behavior</text>
+    <text x="24" y="174" class="node-copy">Safe to revert</text>
+  </g>
+
+  <path d="M570 343 H626" class="arrow agent-line"/>
+  <text x="598" y="319" text-anchor="middle" class="edge-label">explore</text>
+
+  <g transform="translate(632 198)">
+    <rect width="240" height="290" rx="22" class="panel agent"/>
+    <text x="24" y="38" class="eyebrow" fill="#2563eb">AGENT RUNS × N</text>
+    <text x="24" y="78" class="node-title">Search in parallel</text>
+    <g transform="translate(24 106)">
+      <rect width="192" height="43" rx="12" fill="#ffffff" stroke="#2563eb"/>
+      <text x="18" y="28" class="node-copy">Implement A</text>
+      <rect y="56" width="192" height="43" rx="12" fill="#ffffff" stroke="#2563eb"/>
+      <text x="18" y="84" class="node-copy">Implement B</text>
+      <rect y="112" width="192" height="43" rx="12" fill="#ffffff" stroke="#2563eb"/>
+      <text x="18" y="140" class="node-copy">Implement C</text>
+    </g>
+    <text x="24" y="278" class="node-copy">generate · test · revise</text>
+  </g>
+
+  <path d="M872 343 H928" class="arrow"/>
+  <text x="900" y="319" text-anchor="middle" class="edge-label">prove</text>
+
+  <g transform="translate(934 218)">
+    <rect width="244" height="250" rx="22" class="panel validation"/>
+    <text x="24" y="38" class="eyebrow" fill="#b86d00">VALIDATION</text>
+    <text x="24" y="80" class="node-title">Quality control</text>
+    <text x="24" y="117" class="node-copy">Reference parity</text>
+    <text x="24" y="148" class="node-copy">Accuracy</text>
+    <text x="24" y="179" class="node-copy">Performance</text>
+    <text x="24" y="210" class="node-copy">Regression &amp; CI</text>
+  </g>
+
+  <path d="M1178 343 H1234" class="arrow"/>
+  <text x="1206" y="319" text-anchor="middle" class="edge-label">pass</text>
+
+  <g transform="translate(1240 258)">
+    <rect width="150" height="170" rx="22" class="panel ship"/>
+    <text x="20" y="38" class="eyebrow" fill="#5a8f00">VERIFIED</text>
+    <circle cx="75" cy="90" r="25" fill="none" stroke="#5a8f00" stroke-width="5"/>
+    <path d="M62 90 l9 9 18-21" fill="none" stroke="#5a8f00" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="75" y="145" text-anchor="middle" class="node-title">Ship</text>
+  </g>
+
+  <g transform="translate(940 588)">
+    <rect width="232" height="92" rx="18" class="panel retry"/>
+    <text x="116" y="39" text-anchor="middle" class="node-title">Refine or revert</text>
+    <text x="116" y="68" text-anchor="middle" class="node-copy">fail safely</text>
+  </g>
+  <path d="M1056 468 V580" class="feedback"/>
+  <path d="M940 634 H752 V496" class="feedback"/>
+
+  <text x="70" y="744" class="subtitle">Humans own intent and release. Agents explore. Evidence decides.</text>
+</svg>

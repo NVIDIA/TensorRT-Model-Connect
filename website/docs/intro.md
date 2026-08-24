@@ -57,6 +57,11 @@ entry path for that goal.
     Understand architecture and choose the owning model, runtime, config,
     validation, or optimized-provider boundary before editing.
   </div>
+  <div className="trtmc-card">
+    <strong>Read engineering stories</strong>
+    See how the project applies architecture, agents, validation, and human
+    judgment to real development work.
+  </div>
 </div>
 
 | Goal | Start here |
@@ -66,6 +71,7 @@ entry path for that goal.
 | Exact model/checkpoint lookup | [Models & Recipes](models-recipes/overview.md) |
 | Task and feature lookup | [User Guides](user-guides/overview.md) |
 | Beginner-to-advanced curriculum | [Tutorials](learning-path.md) |
+| Engineering stories and project lessons | [Blog](/blog) |
 | Exact public interfaces and configuration | [Reference](api/overview.md) |
 | Architecture, extension, and contribution | [Developer Guide](developer-guide/overview.md) |
 | Compatibility and lifecycle policy | [Release & Support](release-support/overview.md) |

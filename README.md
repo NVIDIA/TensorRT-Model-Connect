@@ -12,6 +12,17 @@
 > intended for evaluation and feedback. APIs, scope, and direction may change.
 > See [Project status](#project-status).
 
+<a id="news-and-updates"></a>
+
+## 📰 News and Updates
+
+<!-- Newest first. Keep no more than the three most recent entries. -->
+
+- **2026-08-23 · Blog** — [AI-Native by Design: What We Learned Building
+  TensorRT-Model-Connect](https://nvidia.github.io/TensorRT-Model-Connect/blog/ai-native-by-design)
+- **2026-08-18 · Announcement** — [TensorRT-Model-Connect enters public
+  preview](https://x.com/NVIDIAAI/status/2089750360869233059)
+
 <a id="example-code"></a>
 
 ## 💻 Example Code

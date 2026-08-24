@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="810" viewBox="0 0 1440 810" role="img" aria-labelledby="title desc">
+  <title id="title">Isolation is the unit of scale</title>
+  <desc id="desc">Three model-family implementations evolve independently between the shared Model Connect interface and the stable TensorRT and CUDA foundation. A failure in one family remains local.</desc>
+  <defs>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill:#111827; }
+      .title { font-size:42px; font-weight:600; letter-spacing:-1px; }
+      .subtitle { font-size:20px; fill:#5d6674; }
+      .band-title { font-size:27px; font-weight:600; }
+      .family-title { font-size:24px; font-weight:600; }
+      .copy { font-size:17px; fill:#5d6674; }
+      .small { font-size:15px; fill:#5d6674; }
+      .interface { fill:#edf7dc; stroke:#5a8f00; stroke-width:2; }
+      .family { fill:#ffffff; stroke:#c9d0da; stroke-width:2; }
+      .family-active { fill:#eaf1ff; stroke:#2563eb; stroke-width:2; }
+      .failure { fill:#fdecec; stroke:#d14343; stroke-width:2; stroke-dasharray:8 7; }
+      .arrow { fill:none; stroke:#c9d0da; stroke-width:3; marker-end:url(#arrow); }
+      .shared { stroke:#5a8f00; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#9aa3b2"/></marker>
+  </defs>
+  <rect width="1440" height="810" rx="28" fill="#f7f8fa"/>
+  <text x="70" y="78" class="title">Isolation is the unit of scale</text>
+  <text x="70" y="116" class="subtitle">A narrow shared contract; family-owned implementation and evidence.</text>
+
+  <g transform="translate(80 154)">
+    <rect width="1280" height="98" rx="20" class="interface"/>
+    <text x="34" y="43" class="band-title">Model Connect interface</text>
+    <text x="34" y="73" class="copy">Task APIs · bundle contract · shared loading and configuration mechanics</text>
+    <text x="1240" y="57" text-anchor="end" class="small">fast-moving integration layer</text>
+  </g>
+
+  <path d="M282 252 V306" class="arrow shared"/>
+  <path d="M720 252 V306" class="arrow shared"/>
+  <path d="M1158 252 V306" class="arrow shared"/>
+  <text x="720" y="284" text-anchor="middle" class="small">shared contract</text>
+
+  <g transform="translate(100 312)">
+    <rect width="364" height="290" rx="22" class="family family-active"/>
+    <text x="26" y="43" class="family-title">Model family A</text>
+    <text x="26" y="75" class="copy">Independent agent workspace</text>
+      <rect x="26" y="105" width="312" height="48" rx="12" fill="#ffffff" stroke="#c9d0da"/>
+    <text x="46" y="136" class="copy">Family-owned builder</text>
+      <rect x="26" y="166" width="312" height="48" rx="12" fill="#ffffff" stroke="#c9d0da"/>
+    <text x="46" y="197" class="copy">Runtime pipeline &amp; helpers</text>
+      <rect x="26" y="227" width="312" height="38" rx="12" fill="#edf7dc" stroke="#5a8f00"/>
+    <text x="46" y="252" class="copy">Local tests &amp; evidence</text>
+  </g>
+
+  <g transform="translate(538 312)">
+    <rect width="364" height="290" rx="22" class="family"/>
+    <text x="26" y="43" class="family-title">Model family B</text>
+    <text x="26" y="75" class="copy">Independent agent workspace</text>
+      <rect x="26" y="105" width="312" height="48" rx="12" fill="#ffffff" stroke="#c9d0da"/>
+    <text x="46" y="136" class="copy">Family-owned builder</text>
+      <rect x="26" y="166" width="312" height="48" rx="12" fill="#ffffff" stroke="#c9d0da"/>
+    <text x="46" y="197" class="copy">Runtime pipeline &amp; helpers</text>
+    <rect x="26" y="227" width="312" height="38" rx="12" class="failure"/>
+    <circle cx="49" cy="246" r="10" fill="#d14343"/>
+    <path d="M45 242 l8 8 M53 242 l-8 8" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="70" y="252" class="copy">Failure contained here</text>
+  </g>
+
+  <g transform="translate(976 312)">
+    <rect width="364" height="290" rx="22" class="family family-active"/>
+    <text x="26" y="43" class="family-title">Model family C</text>
+    <text x="26" y="75" class="copy">Independent agent workspace</text>
+      <rect x="26" y="105" width="312" height="48" rx="12" fill="#ffffff" stroke="#c9d0da"/>
+    <text x="46" y="136" class="copy">Family-owned builder</text>
+      <rect x="26" y="166" width="312" height="48" rx="12" fill="#ffffff" stroke="#c9d0da"/>
+    <text x="46" y="197" class="copy">Runtime pipeline &amp; helpers</text>
+      <rect x="26" y="227" width="312" height="38" rx="12" fill="#edf7dc" stroke="#5a8f00"/>
+    <text x="46" y="252" class="copy">Local tests &amp; evidence</text>
+  </g>
+
+  <path d="M282 602 V654" class="arrow"/>
+  <path d="M720 602 V654" class="arrow"/>
+  <path d="M1158 602 V654" class="arrow"/>
+
+  <g transform="translate(80 660)">
+    <rect width="1280" height="100" rx="20" fill="#1e2530"/>
+    <text x="34" y="47" class="band-title" style="fill:#ffffff">TensorRT + CUDA</text>
+    <text x="34" y="76" class="copy" style="fill:#d8dee8">Stable execution foundation</text>
+    <text x="1240" y="58" text-anchor="end" class="small" style="fill:#d8dee8">compatibility · performance · reliability</text>
+  </g>
+
+  <text x="720" y="632" text-anchor="middle" class="small">some duplication by design · no cross-family dependency required</text>
+</svg>
