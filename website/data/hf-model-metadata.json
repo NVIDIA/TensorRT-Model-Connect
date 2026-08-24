@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "snapshot_date": "2026-08-19",
+  "snapshot_date": "2026-08-23",
   "purpose": "Documentation metadata only; checkpoint qualification remains defined by the README release row and E2E manifest.",
   "checkpoints": [
     {
@@ -959,6 +959,15 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B",
+      "revision": "359ada7b1c60851e40ff08065f9b0340244f27e0",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "nvidia/Nemotron-4-Mini-Hindi-4B-Base",
       "revision": "05c6ef6d2ddaad06bce914990facaf08bc4c581e",
       "revision_source": "resolved",
@@ -1035,7 +1044,7 @@
     },
     {
       "hf_id": "nvidia/llama-nemotron-rerank-vl-1b-v2",
-      "revision": "9c20c4aedf9ec87b6b7346c3bc4754ea030dab35",
+      "revision": "9e95da054312436dfc703319dd2b793a3bee2465",
       "revision_source": "resolved",
       "metadata_file": "config.json",
       "model_type": "llama_nemotron_vl_rerank",
