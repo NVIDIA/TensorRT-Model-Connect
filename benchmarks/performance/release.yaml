@@ -496,10 +496,14 @@ entries:
     model: mistral-7b
     workload:
       testcase: mistral-7b
+      runtime:
+        config:
+          runtime.prefer_gpu_greedy: true
     baseline:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
+      precision: fp16
   - id: mixtral.generate
     family: mixtral
     operation: generate
