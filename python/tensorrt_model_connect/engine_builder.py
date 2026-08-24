@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import gc
 import importlib
 import inspect
 import json
@@ -37,7 +38,12 @@ from .families import (
     resolve_nemo_archive_model_dir,
 )
 from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
-from .bundle_writer import BundleInfo, BundleSection, write_bundle
+from .bundle_writer import (
+    BundleInfo,
+    BundleSection,
+    _bundle_section_from_file,
+    write_bundle,
+)
 from . import trt_compat
 from .triattention_export import (
     TriAttentionBundleConfig,
@@ -65,6 +71,59 @@ class _OmittedMaxCacheLength(int):
 
 
 _OMITTED_MAX_CACHE_LENGTH = _OmittedMaxCacheLength(256)
+
+
+def _spool_split_plan(
+    plan: bytes,
+    output_path: str | Path,
+) -> tuple[tempfile.TemporaryDirectory, Path]:
+    spool = tempfile.TemporaryDirectory(
+        prefix=".trtmc-split-plan-",
+        dir=Path(output_path).parent,
+    )
+    plan_path = Path(spool.name) / "prefill.engine"
+    plan_path.write_bytes(plan)
+    return spool, plan_path
+
+
+def _apply_staged_bundle_loading(
+    plugin: object,
+    sections: list[BundleSection],
+) -> None:
+    """Keep plugin-declared model plans out of eager bundle materialization."""
+
+    staged_names = set(getattr(plugin, "staged_bundle_sections", ()))
+    if not staged_names:
+        return
+
+    section_names = [section.name for section in sections]
+    lazy_sections = [name for name in section_names if name in staged_names]
+    if not lazy_sections:
+        raise ValueError(
+            f"Plugin {getattr(plugin, 'name', '<unknown>')} declared staged bundle "
+            "sections, but none are present"
+        )
+
+    config_index = next(
+        (index for index, section in enumerate(sections) if section.name == "config.json"),
+        None,
+    )
+    if config_index is None:
+        raise ValueError("Staged bundle loading requires a config.json section")
+
+    config_section = sections[config_index]
+    config = json.loads(config_section.data)
+    config["bundle_loading"] = {
+        "mode": "staged",
+        "eager_sections": [
+            name for name in section_names if name not in staged_names
+        ],
+        "lazy_sections": lazy_sections,
+    }
+    sections[config_index] = BundleSection(
+        "config.json",
+        json.dumps(config, indent=2).encode("utf-8"),
+    )
 
 
 def _setup_trt_import(rtx: bool) -> None:
@@ -1284,6 +1343,8 @@ def build_bundle(
 
     engine_plan: bytes
     prefill_engine_plan: bytes | None = None
+    prefill_engine_plan_path: Path | None = None
+    prefill_engine_spool: tempfile.TemporaryDirectory | None = None
     tp_engine_plans: dict[int, bytes] = {}
     actual_decoder_engine_layout = "single"
     engine_t0 = time.monotonic()
@@ -1316,8 +1377,22 @@ def build_bundle(
                 file=sys.stderr,
             )
 
+            # A serialized prefill plan can be several GiB. Spool it beside the
+            # destination so the decode build does not retain both plans plus
+            # the model weights in ordinary memory.
+            prefill_engine_spool, prefill_engine_plan_path = _spool_split_plan(
+                prefill_engine_plan,
+                output_path,
+            )
+            prefill_engine_plan = None
+            gc.collect()
+
             decode_t0 = time.monotonic()
-            engine_plan = _build_split_plugin_engine_with_role("decode")
+            try:
+                engine_plan = _build_split_plugin_engine_with_role("decode")
+            except Exception:
+                prefill_engine_spool.cleanup()
+                raise
             decode_elapsed = time.monotonic() - decode_t0
             _add_build_timing(
                 build_timing, "trt_compile_decode_engine_s", decode_elapsed)
@@ -1483,7 +1558,13 @@ def build_bundle(
         # engine for compatibility with existing tools and add the prefill engine
         # under a role-specific section.
         sections = [BundleSection("engine_plan", engine_plan)]
-        if prefill_engine_plan is not None:
+        if prefill_engine_plan_path is not None:
+            sections.append(
+                _bundle_section_from_file(
+                    "prefill_engine_plan", prefill_engine_plan_path
+                )
+            )
+        elif prefill_engine_plan is not None:
             sections.append(BundleSection("prefill_engine_plan", prefill_engine_plan))
 
     # Add vision engine section if present
@@ -1642,8 +1723,14 @@ def build_bundle(
         manifest_json = json.dumps({"kernels": manifest_entries}).encode("utf-8")
         sections.append(BundleSection("kernel_manifest.json", manifest_json))
 
+    _apply_staged_bundle_loading(plugin, sections)
+
     write_t0 = time.monotonic()
-    write_bundle(output_path, info, sections)
+    try:
+        write_bundle(output_path, info, sections)
+    finally:
+        if prefill_engine_spool is not None:
+            prefill_engine_spool.cleanup()
     _add_build_timing(build_timing, "bundle_write_s", time.monotonic() - write_t0)
     t4 = time.monotonic()
     build_timing["total_s"] = t4 - t0
