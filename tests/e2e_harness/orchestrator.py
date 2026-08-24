@@ -814,7 +814,7 @@ def _build_repro_commands(
     _append_declared_build_cli_args(build_parts, case)
     if case.metadata.get("trust_remote_code"):
         build_parts.append("--trust-remote-code")
-    repro["build_bundle"] = " ".join(build_parts)
+    repro["build_bundle"] = shlex.join(build_parts)
 
     # TRT inference command. Model-local repro providers or runner-owned hooks
     # own task-specific CLI recipes; the orchestrator only renders and wraps.
@@ -831,7 +831,7 @@ def _build_repro_commands(
             ]
             if case.inputs.get("prompt_file"):
                 infer_parts.extend(
-                    ["--prompts-file", _shell_quote(str(case.inputs["prompt_file"]))]
+                    ["--prompts-file", str(case.inputs["prompt_file"])]
                 )
             elif case.inputs.get("prompt_repeat") and ctx.artifacts_dir:
                 resolved_prompt = (
@@ -839,11 +839,11 @@ def _build_repro_commands(
                     / "resolved_prompt.txt"
                 )
                 infer_parts.extend(
-                    ["--prompts-file", _shell_quote(str(resolved_prompt))]
+                    ["--prompts-file", str(resolved_prompt)]
                 )
             else:
                 infer_parts.extend(
-                    ["--prompt", _shell_quote(str(case.inputs.get("prompt", "")))]
+                    ["--prompt", str(case.inputs.get("prompt", ""))]
                 )
             infer_parts.extend(
                 ["--max-new-tokens", str(case.inputs.get("max_new_tokens", 20))]
@@ -864,7 +864,7 @@ def _build_repro_commands(
             if runtime_cli_python:
                 infer_parts.extend(["--hf-python", runtime_cli_python])
         infer_parts = _wrap_distributed_repro_command(infer_parts, case)
-        repro["trt_inference"] = " ".join(infer_parts)
+        repro["trt_inference"] = shlex.join(infer_parts)
 
     # Rerun this exact test case
     rerun_parts = [
@@ -882,7 +882,7 @@ def _build_repro_commands(
         rerun_parts.append("--multi-device-only")
     if case.metadata.get("test_category") == "regression":
         rerun_parts.extend(["--e2e-category", "regression"])
-    repro["rerun_test"] = " ".join(rerun_parts)
+    repro["rerun_test"] = shlex.join(rerun_parts)
 
     profile_exports: list[str] = []
     for profile_name, python in (
@@ -901,7 +901,7 @@ def _build_repro_commands(
 
     # Rerun with forced rebuild
     rebuild_parts = list(rerun_parts) + ["--rebuild-engines"]
-    repro["rerun_test_rebuild"] = " ".join(rebuild_parts)
+    repro["rerun_test_rebuild"] = shlex.join(rebuild_parts)
 
     return repro
 
@@ -943,18 +943,6 @@ def _build_plugin_owned_trt_inference_command(
             )
 
     return None
-
-
-def _shell_quote(s: str) -> str:
-    """Simple shell quoting for inclusion in repro commands."""
-    if not s:
-        return '""'
-    # If string contains special chars, wrap in single quotes
-    if any(c in s for c in " \t\n\"'\\$!&|;(){}[]<>?*~`#"):
-        # Escape single quotes inside
-        escaped = s.replace("'", "'\\''")
-        return f"'{escaped}'"
-    return s
 
 
 def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
