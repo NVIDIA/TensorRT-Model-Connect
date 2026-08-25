@@ -238,15 +238,11 @@ int run_native_kv_contract_tests(const char* model) {
           "rejects a non-int32 cache_write_indices input");
     check(rejects_native_contract<Cache>(
               stream,
-              [](auto& module) {
-                  module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16);
-              }),
+              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16); }),
           "rejects a cache with the wrong capacity");
     check(rejects_native_contract<Cache>(
               stream,
-              [](auto& module) {
-                  module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32);
-              }),
+              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32); }),
           "rejects a cache with the wrong dtype");
 
     {
