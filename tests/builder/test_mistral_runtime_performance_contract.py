@@ -5,9 +5,12 @@
 
 from pathlib import Path
 
+import yaml
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_SOURCE = REPOSITORY_ROOT / "src" / "runtime" / "models" / "mistral" / "pipeline.cpp"
+RELEASE_CONFIG = REPOSITORY_ROOT / "benchmarks" / "performance" / "release.yaml"
 
 
 def _function_body(source: str, start: str, end: str) -> str:
@@ -47,3 +50,11 @@ def test_decoder_graph_is_only_primed_before_its_first_capture() -> None:
     assert prime.index("decoder.cuda_graph_captured()") < prime.index(
         "decoder.forward_async(inputs)"
     )
+
+
+def test_release_case_enables_gpu_greedy_with_aligned_fp16_reference() -> None:
+    release = yaml.safe_load(RELEASE_CONFIG.read_text(encoding="utf-8"))
+    entry = next(item for item in release["entries"] if item["id"] == "mistral.generate")
+
+    assert entry["workload"]["runtime"]["config"] == {"runtime.prefer_gpu_greedy": True}
+    assert entry["baseline"]["precision"] == "fp16"
