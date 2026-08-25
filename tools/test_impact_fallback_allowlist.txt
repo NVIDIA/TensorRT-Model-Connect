@@ -24,6 +24,7 @@ catch_all pyproject.toml # tracked path has no precise impact rule yet; catch-al
 catch_all ruff.toml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/assets/test_image.jpg # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all tests/python/test_bundle_reader.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/conftest.py # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/e2e/test_bundle_inspect.py # tracked path has no precise impact rule yet; catch-all stays conservative

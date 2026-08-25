@@ -493,7 +493,6 @@ class BundleReader:
         size = s["size"]
         
         with open(self.path, "rb") as f:
-            abs_offset = 16 + struct.calcsize("<Q") + len(json.dumps(self.header, separators=(',', ':')))
             # Need actual header_len to jump exactly
             # Re-read it for exactness since header string might differ from json.dumps due to spaces
             f.seek(8)
