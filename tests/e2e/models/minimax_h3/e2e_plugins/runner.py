@@ -16,7 +16,10 @@ from . import (
     PROJECT_DIR,
     artifact_dir,
     bundle_path,
+    keyframe_inputs,
+    materialize_reference_inputs,
     model_plugin_dir,
+    reference_cli_args,
     resolve_owned_file,
     source_revision,
     subprocess_env,
@@ -37,7 +40,7 @@ def build_native_command(
 ) -> list[str]:
     validate_fixed_profile(case)
     python = ctx.runtime_python_path() or sys.executable
-    return [
+    command = [
         python,
         str(MODEL_DIR / "native_reference.py"),
         "--bundle",
@@ -53,6 +56,10 @@ def build_native_command(
         "--source-revision",
         source_revision(case, ctx),
     ]
+    for _input_name, flag, path in keyframe_inputs(case):
+        command.extend((flag, str(path)))
+    command.extend(reference_cli_args(materialize_reference_inputs(case, output_dir)))
+    return command
 
 
 class MiniMaxH3NativeRunner:
@@ -105,6 +112,8 @@ class MiniMaxH3NativeRunner:
         receipt_path = output_dir / "trt_receipt.json"
         receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
         frames_path = output_dir / "trt_frames.npy"
+        audio_path = output_dir / "trt_audio.npy"
+        audio_wav_path = output_dir / "audio.wav"
         frames_dir = output_dir / "frames"
         frame_paths = sorted(frames_dir.glob("frame_*.png"))
         data = {
@@ -113,6 +122,14 @@ class MiniMaxH3NativeRunner:
             "frames_dir": str(frames_dir),
             "frame_paths": [str(path) for path in frame_paths],
             "frames_path": str(frames_path) if frames_path.is_file() else "",
+            "audio_path": str(audio_path) if audio_path.is_file() else "",
+            "wav_path": str(audio_wav_path) if audio_wav_path.is_file() else "",
+            "audio_channels": receipt.get("audio_shape", [0])[0]
+            if isinstance(receipt.get("audio_shape"), list) and receipt["audio_shape"]
+            else 0,
+            "audio_num_samples": receipt.get("audio_num_samples_per_channel", 0),
+            "sample_rate": receipt.get("audio_sample_rate_hz", 0),
+            "duration_s": receipt.get("audio_duration_s", 0.0),
             "receipt_path": str(receipt_path) if receipt_path.is_file() else "",
             "receipt": receipt,
             "source_revision": source_revision(case, ctx),

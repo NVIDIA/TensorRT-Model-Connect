@@ -162,6 +162,12 @@ models:
     workloads: [newstest2019_en_ru_marian_translation_parity]
   minimax-h3-768p:
     workloads: [minimax_h3_official_profile_parity]
+  minimax-h3-fl2va-768p:
+    not_compared_reason: >-
+      Optional FL2VA plumbing profile; conditioned HF/native parity is not yet qualified.
+  minimax-h3-ref2va-768p:
+    not_compared_reason: >-
+      Optional Ref2VA plumbing profile; conditioned HF/native parity is not yet qualified.
   minitron-4b-depth:
     workloads: [mmlu_continuation_parity]
   minitron-4b-width:

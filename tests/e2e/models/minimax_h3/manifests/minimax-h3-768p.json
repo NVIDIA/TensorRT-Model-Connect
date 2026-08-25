@@ -24,7 +24,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Pinned MiniMax-H3 1344x768 text-to-video-and-audio visual-parity contract on the native single-device TensorRT runtime",
+      "description": "Pinned MiniMax-H3 1344x768 text-to-video-and-stereo-audio parity contract on the native single-device TensorRT runtime",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "video_num_frames": 124,
@@ -32,6 +32,9 @@
       "video_width": 1344,
       "num_inference_steps": 50,
       "fps": 24,
+      "audio_channels": 2,
+      "audio_sample_rate_hz": 32000,
+      "audio_num_samples_per_channel": 165600,
       "seed": 0,
       "preflight_requirements": [
         {
@@ -76,7 +79,7 @@
           "required": true
         }
       ],
-      "notes": "The production profile is a real single-device execution: it creates no TensorRT distributed collective and performs no NCCL initialization or communication. The HF backend is the pinned Diffusers modular pipeline. The acceptance gate compares every decoded frame for exact shape, finite pixels, low-frequency scene structure, brightness progression, temporal activity, and non-degenerate contrast; PSNR and pixel error remain diagnostic because harmless high-frequency texture drift is allowed."
+      "notes": "The production profile is a real single-device execution: it creates no TensorRT distributed collective and performs no NCCL initialization or communication. The HF backend is the pinned Diffusers modular pipeline and requests its official videos, audio, and sampling_rate outputs. The acceptance gate preserves every visual check and additionally requires exact finite 32 kHz stereo audio shape and duration plus direct per-channel waveform correlation, normalized RMSE, and SI-SDR against the actual HF soundtrack; visual PSNR and pixel error remain diagnostic because harmless high-frequency texture drift is allowed."
     }
   ]
 }

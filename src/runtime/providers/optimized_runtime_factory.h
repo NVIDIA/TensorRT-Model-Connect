@@ -31,6 +31,9 @@ namespace trtmc::internal {
 
 inline constexpr std::uint32_t kOptimizedRuntimeFactoryAbiVersionV1 = 1U;
 inline constexpr std::uint32_t kOptimizedRuntimePipelineAbiVersionV1 = 1U;
+inline constexpr std::uint32_t kOptimizedRuntimePipelineAbiVersionV2 = 2U;
+static_assert(kIPipelineAbiVersion == kOptimizedRuntimePipelineAbiVersionV2);
+inline constexpr std::uint32_t kCurrentOptimizedRuntimePipelineAbiVersion = kIPipelineAbiVersion;
 inline constexpr char kOptimizedRuntimeFactoryEntrypointV1[] =
     "trtmc_get_optimized_runtime_factory_v1";
 
@@ -151,7 +154,7 @@ struct OptimizedRuntimeFactoryV1 {
     CreateOptimizedRuntimePipelineV1 create;
     // Bump this explicit contract version only when IPipeline changes in a
     // binary-incompatible way. Source-only edits do not invalidate adapters.
-    std::uint32_t pipeline_abi_version{kOptimizedRuntimePipelineAbiVersionV1};
+    std::uint32_t pipeline_abi_version{kCurrentOptimizedRuntimePipelineAbiVersion};
     OptimizedRuntimeToolchainAbiV1 toolchain_abi{kCurrentOptimizedRuntimeToolchainAbiV1};
 };
 

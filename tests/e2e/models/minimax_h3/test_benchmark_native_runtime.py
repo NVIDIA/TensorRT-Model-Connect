@@ -96,7 +96,8 @@ def _request_log(*, requests: int, cuda_graph_failure: bool = False, resident: b
             f"text_encoder_ms={21 + index:.3f} "
             f"adaln_ms={22 + index:.3f} "
             f"denoiser_ms={23 + index:.3f} "
-            f"vae_decoder_ms={24 + index:.3f} total_ms={100 + index:.3f}{cache_markers}"
+            f"vae_decoder_ms={24 + index:.3f} audio_vae_decoder_ms=0.000 "
+            f"total_ms={100 + index:.3f}{cache_markers}"
         )
     if resident:
         for stage_index in range(4):

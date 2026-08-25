@@ -15,7 +15,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from .config import native_plan_filenames
+from .config import (
+    FL2VA_PROCESSOR_ASSET_SECTIONS,
+    MINIMAX_H3_WORKFLOWS,
+    REF2VA_MAX_CONDITION_AUDIO_ROWS,
+    REF2VA_MAX_CONDITION_VIDEO_ROWS,
+    REF2VA_MAX_TEXT_ROWS,
+    native_plan_filenames,
+)
 
 CHECKPOINT_REVISION = "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
 CHECKPOINT_REPOSITORY = "MiniMaxAI/MiniMax-H3"
@@ -38,12 +45,27 @@ DIFFUSERS_REFERENCE_CONTAINER_ROOT = "/work/reference-private"
 PLAN_FILENAMES = native_plan_filenames(first_block_cache=False)
 FIRST_BLOCK_CACHE_PLAN_FILENAMES = native_plan_filenames(first_block_cache=True)
 _REQUIRED_SNAPSHOT_FILES = (
+    "audio_vae/config.json",
+    "audio_vae/diffusion_pytorch_model.safetensors",
     "modular_model_index.json",
     "scheduler/scheduler_config.json",
     "text_encoder/model.safetensors.index.json",
     "tokenizer/tokenizer.json",
     "transformer/diffusion_pytorch_model.safetensors.index.json",
     "vae/diffusion_pytorch_model.safetensors.index.json",
+)
+_FL2VA_REQUIRED_SNAPSHOT_FILES = (
+    *_REQUIRED_SNAPSHOT_FILES,
+    "processor/preprocessor_config.json",
+    "processor/video_preprocessor_config.json",
+    "text_encoder/config.json",
+    "transformer/config.json",
+    "vae/config.json",
+)
+_REF2VA_REQUIRED_SNAPSHOT_FILES = (
+    *_FL2VA_REQUIRED_SNAPSHOT_FILES,
+    "transformer_ref/config.json",
+    "transformer_ref/diffusion_pytorch_model.safetensors.index.json",
 )
 _BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 _MAX_BUNDLE_HEADER_BYTES = 100 << 20
@@ -105,12 +127,25 @@ def _validate_record_object(record: object, label: str) -> tuple[int, str]:
     return expected_size, expected_sha
 
 
-def plan_filenames_for_profile(profile) -> tuple[str, ...]:
-    return native_plan_filenames(first_block_cache=profile.first_block_cache)
+def _validated_workflow(workflow: object) -> str:
+    if not isinstance(workflow, str) or workflow not in MINIMAX_H3_WORKFLOWS:
+        raise ValueError("MiniMax-H3 provenance has an invalid workflow")
+    return workflow
+
+
+def plan_filenames_for_profile(profile, *, workflow: str = "t2va") -> tuple[str, ...]:
+    return native_plan_filenames(
+        first_block_cache=profile.first_block_cache,
+        workflow=_validated_workflow(workflow),
+    )
 
 
 def validate_workspace_limit_bytes(
-    record: object, *, profile=None, first_block_cache: bool | None = None
+    record: object,
+    *,
+    profile=None,
+    first_block_cache: bool | None = None,
+    workflow: str = "t2va",
 ) -> dict[str, int]:
     """Validate the exact per-plan TensorRT tactic-workspace provenance."""
 
@@ -121,7 +156,10 @@ def validate_workspace_limit_bytes(
     selected = False if first_block_cache is None else first_block_cache
     if not isinstance(selected, bool):
         raise ValueError("MiniMax-H3 first_block_cache selector must be a boolean")
-    expected = native_plan_filenames(first_block_cache=selected)
+    expected = native_plan_filenames(
+        first_block_cache=selected,
+        workflow=_validated_workflow(workflow),
+    )
     if not isinstance(record, dict) or set(record) != set(expected):
         raise ValueError(
             "MiniMax-H3 workspace_limit_bytes must cover exactly the selected native plans"
@@ -168,7 +206,16 @@ def _canonical_json_sha256(payload: object) -> str:
     return hashlib.sha256(serialized).hexdigest()
 
 
-def checkpoint_snapshot_record(snapshot: Path) -> dict:
+def _required_snapshot_files(workflow: str) -> tuple[str, ...]:
+    workflow = _validated_workflow(workflow)
+    if workflow == "fl2va":
+        return _FL2VA_REQUIRED_SNAPSHOT_FILES
+    if workflow == "ref2va":
+        return _REF2VA_REQUIRED_SNAPSHOT_FILES
+    return _REQUIRED_SNAPSHOT_FILES
+
+
+def checkpoint_snapshot_record(snapshot: Path, *, workflow: str = "t2va") -> dict:
     """Describe the canonical HF snapshot without rereading LFS weight blobs.
 
     Hugging Face names LFS cache blobs by their SHA256. We bind large weight
@@ -177,6 +224,7 @@ def checkpoint_snapshot_record(snapshot: Path) -> dict:
     triggering another 135 GB read.
     """
 
+    required_files = _required_snapshot_files(workflow)
     snapshot = snapshot.absolute()
     if snapshot.is_symlink() or not snapshot.is_dir():
         raise ValueError("MiniMax-H3 model path must be a canonical HF snapshot directory")
@@ -225,14 +273,17 @@ def checkpoint_snapshot_record(snapshot: Path) -> dict:
             "sha256": digest,
         }
 
-    missing = sorted(set(_REQUIRED_SNAPSHOT_FILES) - set(files))
+    missing = sorted(set(required_files) - set(files))
     if missing:
         raise ValueError(f"MiniMax-H3 snapshot is incomplete; missing: {missing}")
-    for index_name in (
+    index_names = [
         "text_encoder/model.safetensors.index.json",
         "transformer/diffusion_pytorch_model.safetensors.index.json",
         "vae/diffusion_pytorch_model.safetensors.index.json",
-    ):
+    ]
+    if workflow == "ref2va":
+        index_names.append("transformer_ref/diffusion_pytorch_model.safetensors.index.json")
+    for index_name in index_names:
         index = json.loads((snapshot / index_name).read_text())
         weight_map = index.get("weight_map") if isinstance(index, dict) else None
         if not isinstance(weight_map, dict) or not weight_map:
@@ -258,7 +309,7 @@ def checkpoint_snapshot_record(snapshot: Path) -> dict:
     }
 
 
-def validate_checkpoint_snapshot_record(record: object) -> dict:
+def validate_checkpoint_snapshot_record(record: object, *, workflow: str = "t2va") -> dict:
     if not isinstance(record, dict):
         raise ValueError("MiniMax-H3 receipt is missing checkpoint_snapshot")
     if record.get("repository") != CHECKPOINT_REPOSITORY:
@@ -270,7 +321,7 @@ def validate_checkpoint_snapshot_record(record: object) -> dict:
         raise ValueError("MiniMax-H3 checkpoint snapshot has no file inventory")
     if record.get("file_count") != len(files):
         raise ValueError("MiniMax-H3 checkpoint snapshot has the wrong file count")
-    missing = sorted(set(_REQUIRED_SNAPSHOT_FILES) - set(files))
+    missing = sorted(set(_required_snapshot_files(workflow)) - set(files))
     if missing:
         raise ValueError(f"MiniMax-H3 checkpoint snapshot is incomplete; missing: {missing}")
     for relative, entry in files.items():
@@ -621,9 +672,17 @@ def _validate_build_receipt_metadata(
     build_helper: Path,
     source_revision: str,
     profile,
+    workflow: str = "t2va",
 ) -> tuple[str, dict, dict]:
     if not isinstance(receipt, dict):
         raise ValueError("MiniMax-H3 build receipt must be a JSON object")
+    workflow = _validated_workflow(workflow)
+    recorded_workflow = _validated_workflow(receipt.get("workflow", "t2va"))
+    if recorded_workflow != workflow:
+        raise ValueError("MiniMax-H3 build receipt does not match current workflow")
+    expected_partition = "transformer_ref" if workflow == "ref2va" else "transformer"
+    if receipt.get("checkpoint_partition", "transformer") != expected_partition:
+        raise ValueError("MiniMax-H3 build receipt does not match current checkpoint_partition")
     source_revision = validate_source_revision(source_revision)
     source_sha = builder_source_sha256()
     expected = {
@@ -636,17 +695,29 @@ def _validate_build_receipt_metadata(
     for key, value in expected.items():
         if receipt.get(key) != value:
             raise ValueError(f"MiniMax-H3 build receipt does not match current {key}")
-    selected_plans = plan_filenames_for_profile(profile)
-    validate_workspace_limit_bytes(receipt.get("workspace_limit_bytes"), profile=profile)
-    snapshot_record = validate_checkpoint_snapshot_record(receipt.get("checkpoint_snapshot"))
+    selected_plans = plan_filenames_for_profile(profile, workflow=workflow)
+    validate_workspace_limit_bytes(
+        receipt.get("workspace_limit_bytes"),
+        profile=profile,
+        workflow=workflow,
+    )
+    snapshot_record = validate_checkpoint_snapshot_record(
+        receipt.get("checkpoint_snapshot"),
+        workflow=workflow,
+    )
     components = receipt.get("components")
     if not isinstance(components, dict) or set(components) != set(selected_plans):
         raise ValueError("MiniMax-H3 build receipt must cover exactly the selected native plans")
     for filename in selected_plans:
         _validate_record_object(components.get(filename), filename)
     assets = receipt.get("assets")
-    tokenizer_record = assets.get("tokenizer.json") if isinstance(assets, dict) else None
-    _validate_record_object(tokenizer_record, "tokenizer.json")
+    expected_assets = {"tokenizer.json"}
+    if workflow in {"fl2va", "ref2va"}:
+        expected_assets.update(FL2VA_PROCESSOR_ASSET_SECTIONS)
+    if not isinstance(assets, dict) or set(assets) != expected_assets:
+        raise ValueError("MiniMax-H3 build receipt must cover exactly the selected assets")
+    for name in expected_assets:
+        _validate_record_object(assets.get(name), name)
     return source_sha, components, snapshot_record
 
 
@@ -660,17 +731,19 @@ def validate_build_receipt(
     source_revision: str,
     profile,
     hash_files: bool,
+    workflow: str = "t2va",
 ) -> tuple[str, dict, dict, dict]:
     source_sha, components, recorded_snapshot = _validate_build_receipt_metadata(
         receipt,
         build_helper=build_helper,
         source_revision=source_revision,
         profile=profile,
+        workflow=workflow,
     )
-    current_snapshot = checkpoint_snapshot_record(snapshot)
+    current_snapshot = checkpoint_snapshot_record(snapshot, workflow=workflow)
     if recorded_snapshot != current_snapshot:
         raise ValueError("MiniMax-H3 build receipt does not match current checkpoint_snapshot")
-    for filename in plan_filenames_for_profile(profile):
+    for filename in plan_filenames_for_profile(profile, workflow=workflow):
         validate_record(
             plans_dir / filename,
             components.get(filename),
@@ -679,6 +752,14 @@ def validate_build_receipt(
         )
     tokenizer_record = receipt["assets"]["tokenizer.json"]
     validate_record(tokenizer, tokenizer_record, "tokenizer.json", hash_file=hash_files)
+    if workflow in {"fl2va", "ref2va"}:
+        for relative in FL2VA_PROCESSOR_ASSET_SECTIONS:
+            validate_record(
+                snapshot / relative,
+                receipt["assets"][relative],
+                relative,
+                hash_file=hash_files,
+            )
     return source_sha, components, tokenizer_record, recorded_snapshot
 
 
@@ -691,14 +772,16 @@ def validate_component_build_receipt(
     source_revision: str,
     profile,
     hash_file: bool,
+    workflow: str = "t2va",
 ) -> tuple[str, dict, dict]:
-    if component not in plan_filenames_for_profile(profile):
+    if component not in plan_filenames_for_profile(profile, workflow=workflow):
         raise ValueError(f"Unknown MiniMax-H3 native component: {component}")
     source_sha, components, snapshot_record = _validate_build_receipt_metadata(
         receipt,
         build_helper=build_helper,
         source_revision=source_revision,
         profile=profile,
+        workflow=workflow,
     )
     component_record = components[component]
     validate_record(artifact, component_record, component, hash_file=hash_file)
@@ -750,6 +833,7 @@ def load_bundle_config(bundle: Path) -> dict:
 def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict:
     source_revision = validate_source_revision(source_revision)
     config = load_bundle_config(bundle)
+    workflow = _validated_workflow(config.get("workflow", "t2va"))
     expected = {
         "model_type": "minimax_h3",
         "runtime_strategy": "diffusion_minimax_h3",
@@ -759,10 +843,48 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         "context_parallel_size": 1,
         "padded_sequence_length": 38247,
         "vae_tile_batch": 28,
+        "audio_sample_rate": 32000,
+        "audio_latent_frames": 207,
+        "audio_output_samples": 165600,
     }
     for key, value in expected.items():
         if config.get(key) != value:
             raise ValueError(f"MiniMax-H3 bundle config does not match current {key}")
+    expected_partition = "transformer_ref" if workflow == "ref2va" else "transformer"
+    if config.get("checkpoint_partition", "transformer") != expected_partition:
+        raise ValueError("MiniMax-H3 bundle config has the wrong checkpoint partition")
+    if workflow == "fl2va":
+        fl2va_expected = {
+            "min_text_rows": 1,
+            "max_text_rows": 4096,
+            "fl2va_keyframe_counts": [0, 1, 2],
+            "fl2va_keyframe_rows": 1008,
+            "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
+        }
+        for key, value in fl2va_expected.items():
+            if config.get(key) != value:
+                raise ValueError(f"MiniMax-H3 FL2VA bundle config has an invalid {key}")
+    elif workflow == "ref2va":
+        ref2va_expected = {
+            "min_text_rows": 1,
+            "opt_text_rows": 8192,
+            "max_text_rows": REF2VA_MAX_TEXT_ROWS,
+            "ref2va_max_condition_video_rows": REF2VA_MAX_CONDITION_VIDEO_ROWS,
+            "ref2va_max_condition_audio_rows": REF2VA_MAX_CONDITION_AUDIO_ROWS,
+            "ref2va_max_images": 9,
+            "ref2va_max_videos": 3,
+            "ref2va_max_audios": 3,
+            "ref2va_max_references": 12,
+            "ref2va_reference_min_seconds": 2,
+            "ref2va_reference_max_seconds": 15,
+            "ref2va_vae_tile_size": 256,
+            "ref2va_vae_tile_min_overlap": 64,
+            "ref2va_vae_temporal_frames": [1, 17],
+            "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
+        }
+        for key, value in ref2va_expected.items():
+            if config.get(key) != value:
+                raise ValueError(f"MiniMax-H3 Ref2VA bundle config has an invalid {key}")
     inventory_sha = config.get("checkpoint_inventory_sha256")
     if not isinstance(inventory_sha, str) or _SHA256.fullmatch(inventory_sha) is None:
         raise ValueError("MiniMax-H3 bundle config has an invalid checkpoint inventory SHA256")
@@ -770,7 +892,20 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
     if cache_mode not in ("monolithic", "first_block"):
         raise ValueError("MiniMax-H3 bundle config has an invalid denoiser cache mode")
     first_block_cache = cache_mode == "first_block"
-    selected_plans = native_plan_filenames(first_block_cache=first_block_cache)
+    selected_plans = native_plan_filenames(
+        first_block_cache=first_block_cache,
+        workflow=workflow,
+    )
+    expected_eager = ["tokenizer.json", "config.json"]
+    if workflow in {"fl2va", "ref2va"}:
+        expected_eager = ["tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS, "config.json"]
+    expected_loading = {
+        "mode": "staged",
+        "eager_sections": expected_eager,
+        "lazy_sections": [f"{filename.removesuffix('.plan')}_plan" for filename in selected_plans],
+    }
+    if config.get("bundle_loading") != expected_loading:
+        raise ValueError("MiniMax-H3 bundle config has an invalid staged-loading section set")
     plan_sha = config.get("plan_sha256")
     if not isinstance(plan_sha, dict) or set(plan_sha) != set(selected_plans):
         raise ValueError("MiniMax-H3 bundle config must identify exactly the selected native plans")
@@ -783,7 +918,19 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         raise ValueError("MiniMax-H3 bundle config has an invalid first_block_cache flag")
     if config.get("first_block_cache", False) != first_block_cache:
         raise ValueError("MiniMax-H3 bundle cache mode and profile flag disagree")
+    if workflow in {"fl2va", "ref2va"}:
+        expected_assets = {"tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS}
+        asset_sha = config.get("asset_sha256")
+        if not isinstance(asset_sha, dict) or set(asset_sha) != expected_assets:
+            raise ValueError("MiniMax-H3 conditioned bundle must hash every processor asset")
+        if any(
+            not isinstance(value, str) or _SHA256.fullmatch(value) is None
+            for value in asset_sha.values()
+        ):
+            raise ValueError("MiniMax-H3 conditioned bundle has an invalid asset SHA256")
     validate_workspace_limit_bytes(
-        config.get("workspace_limit_bytes"), first_block_cache=first_block_cache
+        config.get("workspace_limit_bytes"),
+        first_block_cache=first_block_cache,
+        workflow=workflow,
     )
     return config

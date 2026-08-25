@@ -677,6 +677,7 @@ endif()
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
+  src/cli/reference_media.cpp
 )
 target_link_libraries(trtmc PRIVATE trtmc_core Threads::Threads)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
@@ -758,7 +759,7 @@ target_include_directories(trtmc_test_wrong_optimized_runtime_abi PRIVATE
   ${PROJECT_SOURCE_DIR}/src
 )
 target_compile_definitions(trtmc_test_wrong_optimized_runtime_abi PRIVATE
-  TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION=0
+  TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION=1
 )
 set_target_properties(trtmc_test_wrong_optimized_runtime_abi PROPERTIES
   OUTPUT_NAME trtmc_impl_example_optimized_runtime
@@ -940,6 +941,10 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+trtmc_add_test(test_cli_reference_media
+  EXTRA_INCLUDES ${_trtmc_nlohmann_json_include}
+)
+target_sources(test_cli_reference_media PRIVATE src/cli/reference_media.cpp)
 trtmc_add_test(test_jsonl_dataset_and_output
   EXTRA_INCLUDES ${_trtmc_nlohmann_json_include}
 )

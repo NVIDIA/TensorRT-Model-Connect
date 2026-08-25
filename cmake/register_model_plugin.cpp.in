@@ -22,6 +22,10 @@ extern "C" const char* trtmc_model_plugin_id() {
     return "@TRTMC_MODEL_PLUGIN_ID@";
 }
 
+extern "C" std::uint32_t trtmc_model_plugin_pipeline_abi_version() {
+    return ::trtmc::kIPipelineAbiVersion;
+}
+
 extern "C" void trtmc_register_model_plugin(::trtmc::PipelineRegistry* registry) {
     if (registry == nullptr)
         return;

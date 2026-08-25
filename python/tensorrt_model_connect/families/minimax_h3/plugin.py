@@ -19,8 +19,18 @@ from .checkpoint import (
     validate_component_key_partition,
 )
 from .config import (
+    FL2VA_KEYFRAME_COUNTS,
+    FL2VA_KEYFRAME_ROWS_1344X768,
+    FL2VA_PROCESSOR_ASSET_SECTIONS,
+    FL2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER,
+    MINIMAX_H3_WORKFLOWS,
+    REF2VA_MAX_CONDITION_AUDIO_ROWS,
+    REF2VA_MAX_CONDITION_VIDEO_ROWS,
+    REF2VA_MAX_TEXT_ROWS,
+    REF2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER,
     SOL_ENGINE_1344X768_124F,
     default_workspace_limit_bytes,
+    native_plan_filenames,
 )
 from .provenance import (
     builder_source_sha256,
@@ -53,6 +63,37 @@ def _effective_build_config(raw: dict) -> dict:
     if not isinstance(minimax_options, dict):
         raise ValueError("minimax_h3 build options must be an object")
     return {**raw, **minimax_options}
+
+
+def _workflow(raw: dict) -> str:
+    value = raw.get("workflow", "t2va")
+    if not isinstance(value, str) or value not in MINIMAX_H3_WORKFLOWS:
+        raise ValueError("MiniMax-H3 workflow must be one of 't2va', 'fl2va', or 'ref2va'")
+    return value
+
+
+def _read_json_asset(path: Path, label: str) -> tuple[dict, bytes]:
+    try:
+        payload = path.read_bytes()
+        decoded = json.loads(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"MiniMax-H3 {label} is unavailable or invalid: {path}") from error
+    if not isinstance(decoded, dict):
+        raise ValueError(f"MiniMax-H3 {label} must be a JSON object: {path}")
+    return decoded, payload
+
+
+def _validate_sha256_map(record: object, expected: tuple[str, ...], label: str) -> dict:
+    if not isinstance(record, dict) or set(record) != set(expected):
+        raise ValueError(f"MiniMax-H3 {label} must cover exactly {expected}")
+    for name, value in record.items():
+        if not isinstance(value, str) or len(value) != 64:
+            raise ValueError(f"MiniMax-H3 {label} has an invalid SHA256 for {name}")
+        try:
+            int(value, 16)
+        except ValueError as error:
+            raise ValueError(f"MiniMax-H3 {label} has an invalid SHA256 for {name}") from error
+    return record
 
 
 def _fixed_profile(raw: dict):
@@ -116,15 +157,38 @@ class MiniMaxH3Plugin:
         }
 
     def load_weights(self, model_dir: str, config, **_kwargs) -> dict:
-        del config
         root = Path(model_dir)
-        required_dirs = ("transformer", "text_encoder", "vae", "audio_vae", "tokenizer")
+        raw = _effective_build_config(getattr(config, "raw", {}))
+        workflow = _workflow(raw)
+        transformer_subfolder = (
+            REF2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER
+            if workflow == "ref2va"
+            else FL2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER
+        )
+        required_dirs = (
+            transformer_subfolder,
+            "text_encoder",
+            "vae",
+            "audio_vae",
+            "tokenizer",
+        )
+        if workflow in {"fl2va", "ref2va"}:
+            required_dirs = (*required_dirs, "processor")
         missing = [str(root / name) for name in required_dirs if not (root / name).is_dir()]
+        if workflow in {"fl2va", "ref2va"}:
+            missing.extend(
+                str(root / relative)
+                for relative in FL2VA_PROCESSOR_ASSET_SECTIONS
+                if not (root / relative).is_file()
+            )
         if missing:
             raise FileNotFoundError(
                 "Incomplete MiniMax-H3 Diffusers checkpoint: " + ", ".join(missing)
             )
-        transformer_config = json.loads((root / "transformer" / "config.json").read_text())
+        transformer_config, _ = _read_json_asset(
+            root / transformer_subfolder / "config.json",
+            f"{transformer_subfolder} config",
+        )
         expected = {
             "hidden_size": 5376,
             "num_layers": 50,
@@ -141,11 +205,14 @@ class MiniMaxH3Plugin:
             raise ValueError(f"Unsupported MiniMax-H3 transformer architecture: {mismatches}")
         return {
             "_model_dir": str(root),
-            "_transformer_dir": str(root / "transformer"),
+            "_workflow": workflow,
+            "_transformer_subfolder": transformer_subfolder,
+            "_transformer_dir": str(root / transformer_subfolder),
             "_text_encoder_dir": str(root / "text_encoder"),
             "_vae_dir": str(root / "vae"),
             "_audio_vae_dir": str(root / "audio_vae"),
             "_tokenizer_dir": str(root / "tokenizer"),
+            "_processor_dir": str(root / "processor"),
         }
 
     def build_engine(self, *_args, **_kwargs) -> bytes:
@@ -171,13 +238,42 @@ class MiniMaxH3Plugin:
             raise ValueError("MiniMax-H3 requires parallel.mode=single and cp_size=1")
 
         raw = _effective_build_config(getattr(config, "raw", {}))
+        configured_workflow = _workflow(raw)
+        loaded_workflow = weights.get("_workflow", configured_workflow)
+        if loaded_workflow != configured_workflow:
+            raise ValueError(
+                "MiniMax-H3 workflow changed after checkpoint routing: "
+                f"loaded={loaded_workflow!r}, configured={configured_workflow!r}"
+            )
+        workflow = configured_workflow
+        expected_partition = (
+            REF2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER
+            if workflow == "ref2va"
+            else FL2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER
+        )
+        checkpoint_partition = weights.get(
+            "_transformer_subfolder",
+            Path(weights["_transformer_dir"]).name,
+        )
+        if checkpoint_partition != expected_partition:
+            raise ValueError(
+                "MiniMax-H3 checkpoint partition does not match workflow: "
+                f"workflow={workflow!r}, partition={checkpoint_partition!r}, "
+                f"expected={expected_partition!r}"
+            )
         profile = _fixed_profile(raw)
+        if workflow != "t2va" and profile.first_block_cache:
+            raise ValueError(f"MiniMax-H3 {workflow.upper()} does not support first_block_cache")
         profile.validate()
         workspace_limits = default_workspace_limit_bytes(
-            first_block_cache=profile.first_block_cache
+            first_block_cache=profile.first_block_cache,
+            workflow=workflow,
         )
         source_revision = _build_source_revision()
-        snapshot = checkpoint_snapshot_record(Path(weights["_model_dir"]))
+        snapshot = checkpoint_snapshot_record(
+            Path(weights["_model_dir"]),
+            workflow=workflow,
+        )
         from .adaln_builder import build_adaln_precompute_engine
         from .adaln_builder import checkpoint_keys as adaln_checkpoint_keys
         from .dit_builder import (
@@ -195,7 +291,37 @@ class MiniMaxH3Plugin:
             checkpoint_keys as text_encoder_checkpoint_keys,
         )
 
-        if profile.first_block_cache:
+        if workflow == "fl2va":
+            from .dit_builder import build_fl2va_dit_engine
+
+            denoiser_specs = (
+                (
+                    "fl2va_denoiser",
+                    "fl2va_denoiser.plan",
+                    build_fl2va_dit_engine,
+                    dit_checkpoint_keys(profile),
+                ),
+            )
+            checkpoint_groups = (
+                adaln_checkpoint_keys(profile),
+                dit_checkpoint_keys(profile),
+            )
+        elif workflow == "ref2va":
+            from .dit_builder import build_ref2va_dit_engine
+
+            denoiser_specs = (
+                (
+                    "ref2va_denoiser",
+                    "ref2va_denoiser.plan",
+                    build_ref2va_dit_engine,
+                    dit_checkpoint_keys(profile),
+                ),
+            )
+            checkpoint_groups = (
+                adaln_checkpoint_keys(profile),
+                dit_checkpoint_keys(profile),
+            )
+        elif profile.first_block_cache:
             denoiser_specs = (
                 (
                     "denoiser_head",
@@ -235,20 +361,82 @@ class MiniMaxH3Plugin:
             )
         validate_component_key_partition(weights["_transformer_dir"], checkpoint_groups)
 
-        text_state = load_selected_component_state_dict(
-            weights["_text_encoder_dir"], text_encoder_checkpoint_keys()
-        )
-        text_weights = numpy_state(text_state)
-        del text_state
-        text_encoder_plan = build_text_encoder_engine(
-            text_weights,
-            sequence_length=profile.text_rows,
-            verbose=verbose,
-            consume_weights=True,
-            workspace_bytes=workspace_limits["text_encoder.plan"],
-        )
-        del text_weights
-        gc.collect()
+        conditioner_components = {}
+        conditioner_plan_sha256 = {}
+        if workflow in {"fl2va", "ref2va"}:
+            from .language_conditioner_builder import (
+                build_language_conditioner_engine,
+                checkpoint_keys as language_conditioner_checkpoint_keys,
+            )
+            from .vision_conditioner_builder import (
+                build_vision_conditioner_engine,
+                checkpoint_keys as vision_conditioner_checkpoint_keys,
+            )
+
+            text_config, _ = _read_json_asset(
+                Path(weights["_text_encoder_dir"]) / "config.json",
+                "text-encoder config",
+            )
+            language_state = load_selected_component_state_dict(
+                weights["_text_encoder_dir"],
+                language_conditioner_checkpoint_keys(),
+            )
+            language_weights = numpy_state(language_state)
+            del language_state
+            language_plan = build_language_conditioner_engine(
+                text_config,
+                language_weights,
+                workflow=workflow,
+                verbose=verbose,
+                consume_weights=True,
+                workspace_bytes=workspace_limits["language_conditioner.plan"],
+            )
+            del language_weights
+            gc.collect()
+
+            vision_state = load_selected_component_state_dict(
+                weights["_text_encoder_dir"],
+                vision_conditioner_checkpoint_keys(),
+            )
+            vision_weights = numpy_state(vision_state)
+            del vision_state
+            vision_plan = build_vision_conditioner_engine(
+                text_config,
+                vision_weights,
+                workflow=workflow,
+                verbose=verbose,
+                consume_weights=True,
+                workspace_bytes=workspace_limits["vision_conditioner.plan"],
+            )
+            del vision_weights
+            gc.collect()
+            conditioner_components = {
+                "language_conditioner": language_plan,
+                "vision_conditioner": vision_plan,
+            }
+            conditioner_plan_sha256 = {
+                "language_conditioner.plan": hashlib.sha256(language_plan).hexdigest(),
+                "vision_conditioner.plan": hashlib.sha256(vision_plan).hexdigest(),
+            }
+        else:
+            text_state = load_selected_component_state_dict(
+                weights["_text_encoder_dir"], text_encoder_checkpoint_keys()
+            )
+            text_weights = numpy_state(text_state)
+            del text_state
+            text_encoder_plan = build_text_encoder_engine(
+                text_weights,
+                sequence_length=profile.text_rows,
+                verbose=verbose,
+                consume_weights=True,
+                workspace_bytes=workspace_limits["text_encoder.plan"],
+            )
+            del text_weights
+            gc.collect()
+            conditioner_components = {"text_encoder": text_encoder_plan}
+            conditioner_plan_sha256 = {
+                "text_encoder.plan": hashlib.sha256(text_encoder_plan).hexdigest()
+            }
 
         adaln_state = load_selected_component_state_dict(
             weights["_transformer_dir"], adaln_checkpoint_keys(profile)
@@ -267,7 +455,7 @@ class MiniMaxH3Plugin:
 
         denoiser_components = {}
         plan_sha256 = {
-            "text_encoder.plan": hashlib.sha256(text_encoder_plan).hexdigest(),
+            **conditioner_plan_sha256,
             "adaln_precompute.plan": hashlib.sha256(adaln_plan).hexdigest(),
         }
         for component_name, filename, denoiser_builder, selected_keys in denoiser_specs:
@@ -276,12 +464,17 @@ class MiniMaxH3Plugin:
             )
             dit_weights = numpy_state(dit_state)
             del dit_state
+            denoiser_kwargs = {
+                "verbose": verbose,
+                "consume_weights": True,
+                "workspace_bytes": workspace_limits[filename],
+            }
+            if workflow in {"fl2va", "ref2va"}:
+                denoiser_kwargs["checkpoint_subfolder"] = checkpoint_partition
             denoiser_plan = denoiser_builder(
                 dit_weights,
                 profile,
-                verbose=verbose,
-                consume_weights=True,
-                workspace_bytes=workspace_limits[filename],
+                **denoiser_kwargs,
             )
             del dit_weights
             gc.collect()
@@ -293,6 +486,46 @@ class MiniMaxH3Plugin:
             checkpoint_keys as vae_checkpoint_keys,
         )
 
+        vae_encoder_components = {}
+        if workflow == "fl2va":
+            from .vae_encoder_builder import build_vae_encoder_engine
+
+            vae_encoder_plan = build_vae_encoder_engine(
+                weights["_vae_dir"],
+                batch_size=1,
+                num_frames=1,
+                height=768,
+                width=1344,
+                verbose=verbose,
+                workspace_bytes=workspace_limits["vae_encoder.plan"],
+            )
+            vae_encoder_components["vae_encoder"] = vae_encoder_plan
+            plan_sha256["vae_encoder.plan"] = hashlib.sha256(vae_encoder_plan).hexdigest()
+        elif workflow == "ref2va":
+            from .vae_encoder_builder import build_vae_encoder_tile_engine
+
+            vae_encoder_plans = {
+                frames: build_vae_encoder_tile_engine(
+                    weights["_vae_dir"],
+                    num_frames=frames,
+                    verbose=verbose,
+                    workspace_bytes=workspace_limits[f"vae_encoder_tile_t{frames}.plan"],
+                )
+                for frames in (1, 17)
+            }
+            vae_encoder_components.update(
+                {
+                    "vae_encoder_tile_t1": vae_encoder_plans[1],
+                    "vae_encoder_tile_t17": vae_encoder_plans[17],
+                }
+            )
+            plan_sha256.update(
+                {
+                    "vae_encoder_tile_t1.plan": hashlib.sha256(vae_encoder_plans[1]).hexdigest(),
+                    "vae_encoder_tile_t17.plan": hashlib.sha256(vae_encoder_plans[17]).hexdigest(),
+                }
+            )
+
         vae_state = load_selected_component_state_dict(weights["_vae_dir"], vae_checkpoint_keys())
         vae_weights = numpy_state(vae_state)
         del vae_state
@@ -302,15 +535,59 @@ class MiniMaxH3Plugin:
             consume_weights=True,
             workspace_bytes=workspace_limits["vae_tile_decoder.plan"],
         )
+        del vae_weights
+        gc.collect()
+
+        from .audio_vae_builder import build_audio_vae_decoder_engine
+
+        audio_vae_encoder_components = {}
+        if workflow == "ref2va":
+            from .audio_vae_builder import build_audio_vae_encoder_engine
+
+            audio_vae_encoder_plan = build_audio_vae_encoder_engine(
+                weights["_audio_vae_dir"],
+                verbose=verbose,
+                workspace_bytes=workspace_limits["audio_vae_encoder.plan"],
+            )
+            audio_vae_encoder_components["audio_vae_encoder"] = audio_vae_encoder_plan
+            plan_sha256["audio_vae_encoder.plan"] = hashlib.sha256(
+                audio_vae_encoder_plan
+            ).hexdigest()
+
+        audio_vae_decoder_plan = build_audio_vae_decoder_engine(
+            weights["_audio_vae_dir"],
+            verbose=verbose,
+            workspace_bytes=workspace_limits["audio_vae_decoder.plan"],
+        )
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
+        processor_assets = {}
+        if workflow in {"fl2va", "ref2va"}:
+            for section_name in FL2VA_PROCESSOR_ASSET_SECTIONS:
+                _, payload = _read_json_asset(
+                    Path(weights["_model_dir"]) / section_name,
+                    section_name,
+                )
+                processor_assets[section_name] = payload
 
         plan_sha256["vae_tile_decoder.plan"] = hashlib.sha256(vae_decoder_plan).hexdigest()
-
+        plan_sha256["audio_vae_decoder.plan"] = hashlib.sha256(audio_vae_decoder_plan).hexdigest()
+        asset_sha256 = {
+            "tokenizer.json": hashlib.sha256(tokenizer_json).hexdigest(),
+            **{
+                name: hashlib.sha256(payload).hexdigest()
+                for name, payload in processor_assets.items()
+            },
+        }
         return {
-            "text_encoder": text_encoder_plan,
+            "workflow": workflow,
+            "checkpoint_partition": checkpoint_partition,
+            **conditioner_components,
             "adaln_precompute": adaln_plan,
             **denoiser_components,
+            **vae_encoder_components,
+            **audio_vae_encoder_components,
             "vae_decoder": vae_decoder_plan,
+            "audio_vae_decoder": audio_vae_decoder_plan,
             "profile": profile,
             # Text/VAE paths remain explicit so follow-on native component
             # builders cannot silently substitute a different checkpoint.
@@ -318,12 +595,16 @@ class MiniMaxH3Plugin:
             "audio_vae_dir": weights["_audio_vae_dir"],
             "tokenizer_dir": weights["_tokenizer_dir"],
             "tokenizer_json": tokenizer_json,
+            "processor_assets": processor_assets,
             "provenance": {
+                "workflow": workflow,
+                "checkpoint_partition": checkpoint_partition,
                 "source_revision": source_revision,
                 "builder_source_sha256": builder_source_sha256(),
                 "checkpoint_inventory_sha256": snapshot["inventory_sha256"],
                 "workspace_limit_bytes": workspace_limits,
                 "plan_sha256": plan_sha256,
+                "asset_sha256": asset_sha256,
             },
         }
 
@@ -331,6 +612,47 @@ class MiniMaxH3Plugin:
         self, components: dict, *, parallel_config=None
     ) -> list[tuple[str, bytes]]:
         del parallel_config
+        workflow = components.get("workflow", "t2va")
+        if workflow == "fl2va":
+            processor_assets = components.get("processor_assets")
+            if (
+                not isinstance(processor_assets, dict)
+                or tuple(processor_assets) != FL2VA_PROCESSOR_ASSET_SECTIONS
+            ):
+                raise ValueError("MiniMax-H3 FL2VA components are missing processor config assets")
+            return [
+                ("language_conditioner_plan", components["language_conditioner"]),
+                ("vision_conditioner_plan", components["vision_conditioner"]),
+                ("vae_encoder_plan", components["vae_encoder"]),
+                ("adaln_precompute_plan", components["adaln_precompute"]),
+                ("fl2va_denoiser_plan", components["fl2va_denoiser"]),
+                ("vae_tile_decoder_plan", components["vae_decoder"]),
+                ("audio_vae_decoder_plan", components["audio_vae_decoder"]),
+                ("tokenizer.json", components["tokenizer_json"]),
+                *processor_assets.items(),
+            ]
+        if workflow == "ref2va":
+            processor_assets = components.get("processor_assets")
+            if (
+                not isinstance(processor_assets, dict)
+                or tuple(processor_assets) != FL2VA_PROCESSOR_ASSET_SECTIONS
+            ):
+                raise ValueError("MiniMax-H3 Ref2VA components are missing processor config assets")
+            return [
+                ("language_conditioner_plan", components["language_conditioner"]),
+                ("vision_conditioner_plan", components["vision_conditioner"]),
+                ("vae_encoder_tile_t1_plan", components["vae_encoder_tile_t1"]),
+                ("vae_encoder_tile_t17_plan", components["vae_encoder_tile_t17"]),
+                ("audio_vae_encoder_plan", components["audio_vae_encoder"]),
+                ("adaln_precompute_plan", components["adaln_precompute"]),
+                ("ref2va_denoiser_plan", components["ref2va_denoiser"]),
+                ("vae_tile_decoder_plan", components["vae_decoder"]),
+                ("audio_vae_decoder_plan", components["audio_vae_decoder"]),
+                ("tokenizer.json", components["tokenizer_json"]),
+                *processor_assets.items(),
+            ]
+        if workflow != "t2va":
+            raise ValueError(f"Unsupported MiniMax-H3 packaged workflow: {workflow!r}")
         shared = [
             ("text_encoder_plan", components["text_encoder"]),
             ("adaln_precompute_plan", components["adaln_precompute"]),
@@ -347,11 +669,19 @@ class MiniMaxH3Plugin:
             *shared,
             *denoiser,
             ("vae_tile_decoder_plan", components["vae_decoder"]),
+            ("audio_vae_decoder_plan", components["audio_vae_decoder"]),
             ("tokenizer.json", components["tokenizer_json"]),
         ]
 
     def diffusion_bundle_config(self, config, *, components: dict) -> dict:
         raw = _effective_build_config(getattr(config, "raw", {}))
+        workflow = _workflow(raw)
+        component_workflow = components.get("workflow", "t2va")
+        if component_workflow != workflow:
+            raise ValueError(
+                "MiniMax-H3 bundle workflow does not match built components: "
+                f"configured={workflow!r}, components={component_workflow!r}"
+            )
         profile = components["profile"]
         fixed_request = {
             "video_height": 768,
@@ -369,18 +699,79 @@ class MiniMaxH3Plugin:
         provenance = components.get("provenance")
         if not isinstance(provenance, dict):
             raise ValueError("MiniMax-H3 components are missing exact build provenance")
-        validate_workspace_limit_bytes(provenance.get("workspace_limit_bytes"), profile=profile)
-        if profile.first_block_cache:
+        provenance_workflow = provenance.get("workflow", "t2va")
+        if provenance_workflow != workflow:
+            raise ValueError("MiniMax-H3 provenance workflow does not match bundle workflow")
+        expected_partition = (
+            REF2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER
+            if workflow == "ref2va"
+            else FL2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER
+        )
+        provenance_partition = provenance.get("checkpoint_partition", expected_partition)
+        component_partition = components.get("checkpoint_partition", expected_partition)
+        if provenance_partition != expected_partition or component_partition != expected_partition:
+            raise ValueError(
+                "MiniMax-H3 bundle checkpoint partition does not match workflow: "
+                f"workflow={workflow!r}, provenance={provenance_partition!r}, "
+                f"components={component_partition!r}"
+            )
+        validate_workspace_limit_bytes(
+            provenance.get("workspace_limit_bytes"),
+            profile=profile,
+            workflow=workflow,
+        )
+        expected_plans = native_plan_filenames(
+            first_block_cache=profile.first_block_cache,
+            workflow=workflow,
+        )
+        _validate_sha256_map(provenance.get("plan_sha256"), expected_plans, "plan_sha256")
+        if workflow == "fl2va":
+            expected_assets = ("tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS)
+            _validate_sha256_map(
+                provenance.get("asset_sha256"),
+                expected_assets,
+                "asset_sha256",
+            )
+            eager_sections = [*expected_assets, "config.json"]
+            denoiser_sections = ["fl2va_denoiser_plan"]
+            conditioner_sections = [
+                "language_conditioner_plan",
+                "vision_conditioner_plan",
+                "vae_encoder_plan",
+            ]
+        elif workflow == "ref2va":
+            expected_assets = ("tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS)
+            _validate_sha256_map(
+                provenance.get("asset_sha256"),
+                expected_assets,
+                "asset_sha256",
+            )
+            eager_sections = [*expected_assets, "config.json"]
+            denoiser_sections = ["ref2va_denoiser_plan"]
+            conditioner_sections = [
+                "language_conditioner_plan",
+                "vision_conditioner_plan",
+                "vae_encoder_tile_t1_plan",
+                "vae_encoder_tile_t17_plan",
+                "audio_vae_encoder_plan",
+            ]
+        elif profile.first_block_cache:
+            eager_sections = ["tokenizer.json", "config.json"]
+            conditioner_sections = ["text_encoder_plan"]
             denoiser_sections = [
                 "denoiser_head_plan",
                 "denoiser_tail_plan",
                 "denoiser_finish_plan",
             ]
         else:
+            eager_sections = ["tokenizer.json", "config.json"]
+            conditioner_sections = ["text_encoder_plan"]
             denoiser_sections = ["denoiser_plan"]
-        return {
+        result = {
             "checkpoint_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
             **provenance,
+            "workflow": workflow,
+            "checkpoint_partition": expected_partition,
             "height": 768,
             "width": 1344,
             "num_frames": 124,
@@ -389,12 +780,13 @@ class MiniMaxH3Plugin:
             "seed": int(raw.get("seed", 0)),
             "bundle_loading": {
                 "mode": "staged",
-                "eager_sections": ["tokenizer.json", "config.json"],
+                "eager_sections": eager_sections,
                 "lazy_sections": [
-                    "text_encoder_plan",
+                    *conditioner_sections,
                     "adaln_precompute_plan",
                     *denoiser_sections,
                     "vae_tile_decoder_plan",
+                    "audio_vae_decoder_plan",
                 ],
             },
             "first_block_cache": profile.first_block_cache,
@@ -409,7 +801,41 @@ class MiniMaxH3Plugin:
             "vae_tile_batch": 28,
             "vae_tile_size": 256,
             "vae_tile_overlap": 64,
+            "audio_sample_rate": 32000,
+            "audio_latent_frames": 207,
+            "audio_output_samples": 165600,
         }
+        if workflow == "fl2va":
+            result.update(
+                {
+                    "min_text_rows": profile.min_text_rows,
+                    "max_text_rows": profile.max_text_rows,
+                    "fl2va_keyframe_counts": list(FL2VA_KEYFRAME_COUNTS),
+                    "fl2va_keyframe_rows": FL2VA_KEYFRAME_ROWS_1344X768,
+                    "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
+                }
+            )
+        elif workflow == "ref2va":
+            result.update(
+                {
+                    "min_text_rows": profile.ref2va_min_text_rows,
+                    "opt_text_rows": profile.ref2va_opt_text_rows,
+                    "max_text_rows": REF2VA_MAX_TEXT_ROWS,
+                    "ref2va_max_condition_video_rows": REF2VA_MAX_CONDITION_VIDEO_ROWS,
+                    "ref2va_max_condition_audio_rows": REF2VA_MAX_CONDITION_AUDIO_ROWS,
+                    "ref2va_max_images": 9,
+                    "ref2va_max_videos": 3,
+                    "ref2va_max_audios": 3,
+                    "ref2va_max_references": 12,
+                    "ref2va_reference_min_seconds": 2,
+                    "ref2va_reference_max_seconds": 15,
+                    "ref2va_vae_tile_size": 256,
+                    "ref2va_vae_tile_min_overlap": 64,
+                    "ref2va_vae_temporal_frames": [1, 17],
+                    "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
+                }
+            )
+        return result
 
     def diffusion_tokenizer_add_special_tokens(self, *_args, **_kwargs) -> bool:
         return False

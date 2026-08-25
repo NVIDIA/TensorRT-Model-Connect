@@ -16,6 +16,14 @@ from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, writ
 from tensorrt_model_connect.families.minimax_h3 import provenance
 from tensorrt_model_connect.families.minimax_h3.config import (
     DEFAULT_WORKSPACE_LIMIT_BYTES,
+    FL2VA_DEFAULT_WORKSPACE_LIMIT_BYTES,
+    FL2VA_PLAN_FILENAMES,
+    FL2VA_PROCESSOR_ASSET_SECTIONS,
+    REF2VA_DEFAULT_WORKSPACE_LIMIT_BYTES,
+    REF2VA_MAX_CONDITION_AUDIO_ROWS,
+    REF2VA_MAX_CONDITION_VIDEO_ROWS,
+    REF2VA_MAX_TEXT_ROWS,
+    REF2VA_PLAN_FILENAMES,
     SOL_ENGINE_1344X768_124F,
     default_workspace_limit_bytes,
     native_plan_filenames,
@@ -150,6 +158,10 @@ def _snapshot(tmp_path: Path) -> Path:
             "vae/diffusion_pytorch_model-00001-of-00001.safetensors",
             "vae/diffusion_pytorch_model.safetensors.index.json",
         ),
+        (
+            "transformer_ref/diffusion_pytorch_model-00001-of-00001.safetensors",
+            "transformer_ref/diffusion_pytorch_model.safetensors.index.json",
+        ),
     )
     blob_index = 1
     for shard, index in shard_specs:
@@ -158,10 +170,24 @@ def _snapshot(tmp_path: Path) -> Path:
         index_payload = json.dumps({"weight_map": {"weight": Path(shard).name}}).encode()
         _link_blob(snapshot, index, f"{blob_index:040x}", index_payload)
         blob_index += 1
+    _link_blob(
+        snapshot,
+        "audio_vae/diffusion_pytorch_model.safetensors",
+        f"{blob_index:064x}",
+        b"audio-weight",
+    )
+    blob_index += 1
     for relative, payload in (
+        ("audio_vae/config.json", b"{}"),
         ("modular_model_index.json", b"{}"),
+        ("processor/preprocessor_config.json", b'{"image":true}'),
+        ("processor/video_preprocessor_config.json", b'{"video":true}'),
         ("scheduler/scheduler_config.json", b"{}"),
+        ("text_encoder/config.json", b"{}"),
         ("tokenizer/tokenizer.json", b'{"model":"test"}'),
+        ("transformer/config.json", b"{}"),
+        ("transformer_ref/config.json", b"{}"),
+        ("vae/config.json", b"{}"),
     ):
         _link_blob(snapshot, relative, f"{blob_index:040x}", payload)
         blob_index += 1
@@ -208,6 +234,174 @@ def _validate(receipt: dict, plans: Path, snapshot: Path, tokenizer: Path) -> No
 def test_complete_native_build_receipt_is_accepted(tmp_path: Path) -> None:
     receipt, plans, snapshot, tokenizer = _receipt(tmp_path)
     _validate(receipt, plans, snapshot, tokenizer)
+
+
+def test_fl2va_build_receipt_binds_workflow_partition_plans_and_assets(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path)
+    plans = tmp_path / "fl2va-plans"
+    plans.mkdir()
+    components = {}
+    for index, filename in enumerate(FL2VA_PLAN_FILENAMES, start=1):
+        artifact = plans / filename
+        artifact.write_bytes(bytes([index]) * index)
+        components[filename] = file_record(artifact)
+    tokenizer = snapshot / "tokenizer" / "tokenizer.json"
+    assets = {
+        "tokenizer.json": file_record(tokenizer),
+        **{
+            relative: file_record(snapshot / relative)
+            for relative in FL2VA_PROCESSOR_ASSET_SECTIONS
+        },
+    }
+    receipt = {
+        "workflow": "fl2va",
+        "checkpoint_partition": "transformer",
+        "checkpoint_revision": CHECKPOINT_REVISION,
+        "checkpoint_snapshot": checkpoint_snapshot_record(snapshot, workflow="fl2va"),
+        "source_revision": SOURCE_REVISION,
+        "builder_source_sha256": builder_source_sha256(),
+        "build_helper_sha256": sha256_file(BUILD_HELPER),
+        "profile": serialized_profile(SOL_ENGINE_1344X768_124F),
+        "assets": assets,
+        "workspace_limit_bytes": dict(FL2VA_DEFAULT_WORKSPACE_LIMIT_BYTES),
+        "components": components,
+    }
+
+    validate_build_receipt(
+        receipt,
+        plans_dir=plans,
+        snapshot=snapshot,
+        tokenizer=tokenizer,
+        build_helper=BUILD_HELPER,
+        source_revision=SOURCE_REVISION,
+        profile=SOL_ENGINE_1344X768_124F,
+        hash_files=True,
+        workflow="fl2va",
+    )
+    validate_component_build_receipt(
+        receipt,
+        component="vae_encoder.plan",
+        artifact=plans / "vae_encoder.plan",
+        build_helper=BUILD_HELPER,
+        source_revision=SOURCE_REVISION,
+        profile=SOL_ENGINE_1344X768_124F,
+        hash_file=True,
+        workflow="fl2va",
+    )
+
+    with pytest.raises(ValueError, match="current workflow"):
+        validate_build_receipt(
+            receipt,
+            plans_dir=plans,
+            snapshot=snapshot,
+            tokenizer=tokenizer,
+            build_helper=BUILD_HELPER,
+            source_revision=SOURCE_REVISION,
+            profile=SOL_ENGINE_1344X768_124F,
+            hash_files=False,
+        )
+
+    wrong_partition = copy.deepcopy(receipt)
+    wrong_partition["checkpoint_partition"] = "transformer_ref"
+    with pytest.raises(ValueError, match="checkpoint_partition"):
+        validate_build_receipt(
+            wrong_partition,
+            plans_dir=plans,
+            snapshot=snapshot,
+            tokenizer=tokenizer,
+            build_helper=BUILD_HELPER,
+            source_revision=SOURCE_REVISION,
+            profile=SOL_ENGINE_1344X768_124F,
+            hash_files=False,
+            workflow="fl2va",
+        )
+
+    incomplete_assets = copy.deepcopy(receipt)
+    incomplete_assets["assets"].pop(FL2VA_PROCESSOR_ASSET_SECTIONS[-1])
+    with pytest.raises(ValueError, match="selected assets"):
+        validate_build_receipt(
+            incomplete_assets,
+            plans_dir=plans,
+            snapshot=snapshot,
+            tokenizer=tokenizer,
+            build_helper=BUILD_HELPER,
+            source_revision=SOURCE_REVISION,
+            profile=SOL_ENGINE_1344X768_124F,
+            hash_files=False,
+            workflow="fl2va",
+        )
+
+
+def test_ref2va_build_receipt_binds_workflow_partition_plans_and_assets(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path)
+    plans = tmp_path / "ref2va-plans"
+    plans.mkdir()
+    components = {}
+    for index, filename in enumerate(REF2VA_PLAN_FILENAMES, start=1):
+        artifact = plans / filename
+        artifact.write_bytes(bytes([index]) * index)
+        components[filename] = file_record(artifact)
+    tokenizer = snapshot / "tokenizer" / "tokenizer.json"
+    receipt = {
+        "workflow": "ref2va",
+        "checkpoint_partition": "transformer_ref",
+        "checkpoint_revision": CHECKPOINT_REVISION,
+        "checkpoint_snapshot": checkpoint_snapshot_record(snapshot, workflow="ref2va"),
+        "source_revision": SOURCE_REVISION,
+        "builder_source_sha256": builder_source_sha256(),
+        "build_helper_sha256": sha256_file(BUILD_HELPER),
+        "profile": serialized_profile(SOL_ENGINE_1344X768_124F),
+        "assets": {
+            "tokenizer.json": file_record(tokenizer),
+            **{
+                relative: file_record(snapshot / relative)
+                for relative in FL2VA_PROCESSOR_ASSET_SECTIONS
+            },
+        },
+        "workspace_limit_bytes": dict(REF2VA_DEFAULT_WORKSPACE_LIMIT_BYTES),
+        "components": components,
+    }
+
+    validate_build_receipt(
+        receipt,
+        plans_dir=plans,
+        snapshot=snapshot,
+        tokenizer=tokenizer,
+        build_helper=BUILD_HELPER,
+        source_revision=SOURCE_REVISION,
+        profile=SOL_ENGINE_1344X768_124F,
+        hash_files=True,
+        workflow="ref2va",
+    )
+    validate_component_build_receipt(
+        receipt,
+        component="audio_vae_encoder.plan",
+        artifact=plans / "audio_vae_encoder.plan",
+        build_helper=BUILD_HELPER,
+        source_revision=SOURCE_REVISION,
+        profile=SOL_ENGINE_1344X768_124F,
+        hash_file=True,
+        workflow="ref2va",
+    )
+
+    wrong_partition = copy.deepcopy(receipt)
+    wrong_partition["checkpoint_partition"] = "transformer"
+    with pytest.raises(ValueError, match="checkpoint_partition"):
+        validate_build_receipt(
+            wrong_partition,
+            plans_dir=plans,
+            snapshot=snapshot,
+            tokenizer=tokenizer,
+            build_helper=BUILD_HELPER,
+            source_revision=SOURCE_REVISION,
+            profile=SOL_ENGINE_1344X768_124F,
+            hash_files=False,
+            workflow="ref2va",
+        )
 
 
 def test_first_block_cache_build_receipt_selects_exact_split_plans(tmp_path: Path) -> None:
@@ -395,6 +589,16 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
         "context_parallel_size": 1,
         "padded_sequence_length": 38247,
         "vae_tile_batch": 28,
+        "audio_sample_rate": 32000,
+        "audio_latent_frames": 207,
+        "audio_output_samples": 165600,
+        "bundle_loading": {
+            "mode": "staged",
+            "eager_sections": ["tokenizer.json", "config.json"],
+            "lazy_sections": [
+                f"{filename.removesuffix('.plan')}_plan" for filename in PLAN_FILENAMES
+            ],
+        },
         "plan_sha256": {
             filename: receipt["components"][filename]["sha256"] for filename in PLAN_FILENAMES
         },
@@ -433,6 +637,179 @@ def test_native_bundle_config_is_bound_to_current_family_source(tmp_path: Path) 
         [BundleSection("config.json", json.dumps(config).encode())],
     )
     with pytest.raises(ValueError, match="builder_source_sha256"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+
+def test_fl2va_snapshot_and_bundle_provenance_cover_every_plan_and_asset(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path)
+    snapshot_record = checkpoint_snapshot_record(snapshot, workflow="fl2va")
+    config = {
+        "model_type": "minimax_h3",
+        "runtime_strategy": "diffusion_minimax_h3",
+        "workflow": "fl2va",
+        "checkpoint_partition": "transformer",
+        "checkpoint_revision": CHECKPOINT_REVISION,
+        "source_revision": SOURCE_REVISION,
+        "builder_source_sha256": builder_source_sha256(),
+        "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
+        "workspace_limit_bytes": dict(FL2VA_DEFAULT_WORKSPACE_LIMIT_BYTES),
+        "context_parallel_size": 1,
+        "padded_sequence_length": 38247,
+        "vae_tile_batch": 28,
+        "audio_sample_rate": 32000,
+        "audio_latent_frames": 207,
+        "audio_output_samples": 165600,
+        "first_block_cache": False,
+        "denoiser_cache_mode": "monolithic",
+        "min_text_rows": 1,
+        "max_text_rows": 4096,
+        "fl2va_keyframe_counts": [0, 1, 2],
+        "fl2va_keyframe_rows": 1008,
+        "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
+        "bundle_loading": {
+            "mode": "staged",
+            "eager_sections": [
+                "tokenizer.json",
+                *FL2VA_PROCESSOR_ASSET_SECTIONS,
+                "config.json",
+            ],
+            "lazy_sections": [
+                f"{filename.removesuffix('.plan')}_plan" for filename in FL2VA_PLAN_FILENAMES
+            ],
+        },
+        "plan_sha256": {
+            filename: f"{index:064x}"
+            for index, filename in enumerate(FL2VA_PLAN_FILENAMES, start=1)
+        },
+        "asset_sha256": {
+            name: f"{index:064x}"
+            for index, name in enumerate(
+                ("tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS),
+                start=20,
+            )
+        },
+    }
+    bundle = tmp_path / "fl2va.bundle"
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(config).encode())],
+    )
+    validated = validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+    assert validated["workflow"] == "fl2va"
+    assert set(validated["plan_sha256"]) == set(FL2VA_PLAN_FILENAMES)
+    assert set(validated["asset_sha256"]) == {
+        "tokenizer.json",
+        *FL2VA_PROCESSOR_ASSET_SECTIONS,
+    }
+
+    malformed = copy.deepcopy(config)
+    malformed["asset_sha256"].pop(FL2VA_PROCESSOR_ASSET_SECTIONS[-1])
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(malformed).encode())],
+    )
+    with pytest.raises(ValueError, match="hash every processor asset"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+
+def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_and_assets(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(tmp_path)
+    snapshot_record = checkpoint_snapshot_record(snapshot, workflow="ref2va")
+    config = {
+        "model_type": "minimax_h3",
+        "runtime_strategy": "diffusion_minimax_h3",
+        "workflow": "ref2va",
+        "checkpoint_partition": "transformer_ref",
+        "checkpoint_revision": CHECKPOINT_REVISION,
+        "source_revision": SOURCE_REVISION,
+        "builder_source_sha256": builder_source_sha256(),
+        "checkpoint_inventory_sha256": snapshot_record["inventory_sha256"],
+        "workspace_limit_bytes": dict(REF2VA_DEFAULT_WORKSPACE_LIMIT_BYTES),
+        "context_parallel_size": 1,
+        "padded_sequence_length": 38247,
+        "vae_tile_batch": 28,
+        "audio_sample_rate": 32000,
+        "audio_latent_frames": 207,
+        "audio_output_samples": 165600,
+        "first_block_cache": False,
+        "denoiser_cache_mode": "monolithic",
+        "min_text_rows": 1,
+        "opt_text_rows": 8192,
+        "max_text_rows": REF2VA_MAX_TEXT_ROWS,
+        "ref2va_max_condition_video_rows": REF2VA_MAX_CONDITION_VIDEO_ROWS,
+        "ref2va_max_condition_audio_rows": REF2VA_MAX_CONDITION_AUDIO_ROWS,
+        "ref2va_max_images": 9,
+        "ref2va_max_videos": 3,
+        "ref2va_max_audios": 3,
+        "ref2va_max_references": 12,
+        "ref2va_reference_min_seconds": 2,
+        "ref2va_reference_max_seconds": 15,
+        "ref2va_vae_tile_size": 256,
+        "ref2va_vae_tile_min_overlap": 64,
+        "ref2va_vae_temporal_frames": [1, 17],
+        "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
+        "bundle_loading": {
+            "mode": "staged",
+            "eager_sections": [
+                "tokenizer.json",
+                *FL2VA_PROCESSOR_ASSET_SECTIONS,
+                "config.json",
+            ],
+            "lazy_sections": [
+                f"{filename.removesuffix('.plan')}_plan" for filename in REF2VA_PLAN_FILENAMES
+            ],
+        },
+        "plan_sha256": {
+            filename: f"{index:064x}"
+            for index, filename in enumerate(REF2VA_PLAN_FILENAMES, start=1)
+        },
+        "asset_sha256": {
+            name: f"{index:064x}"
+            for index, name in enumerate(
+                ("tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS),
+                start=20,
+            )
+        },
+    }
+    bundle = tmp_path / "ref2va.bundle"
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(config).encode())],
+    )
+
+    validated = validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+    assert validated["checkpoint_partition"] == "transformer_ref"
+    assert tuple(validated["plan_sha256"]) == REF2VA_PLAN_FILENAMES
+    assert set(validated["asset_sha256"]) == {
+        "tokenizer.json",
+        *FL2VA_PROCESSOR_ASSET_SECTIONS,
+    }
+
+    malformed = copy.deepcopy(config)
+    malformed["ref2va_max_references"] = 11
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(malformed).encode())],
+    )
+    with pytest.raises(ValueError, match="ref2va_max_references"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+    malformed = copy.deepcopy(config)
+    malformed["checkpoint_partition"] = "transformer"
+    write_bundle(
+        bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(malformed).encode())],
+    )
+    with pytest.raises(ValueError, match="checkpoint partition"):
         validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
 
 

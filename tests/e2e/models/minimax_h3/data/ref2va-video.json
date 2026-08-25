@@ -1,0 +1,8 @@
+{
+  "fps": 1,
+  "frames": [
+    "ref2va-subject.ppm",
+    "ref2va-style.ppm"
+  ],
+  "audio": "ref2va-reference.wav"
+}

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import platform
 import shutil
 import subprocess
@@ -17,6 +18,21 @@ from types import MethodType
 import numpy as np
 import torch
 from PIL import Image
+
+try:
+    from tests.e2e.models.minimax_h3.audio_metrics import (
+        EXPECTED_AUDIO_SAMPLE_RATE,
+        audio_summary,
+        canonical_hf_audio,
+        write_float32_wav,
+    )
+except ModuleNotFoundError:  # Direct execution exposes the sibling script directory.
+    from audio_metrics import (  # type: ignore[no-redef]
+        EXPECTED_AUDIO_SAMPLE_RATE,
+        audio_summary,
+        canonical_hf_audio,
+        write_float32_wav,
+    )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
     CHECKPOINT_REVISION,
     atomic_write_json,
@@ -41,6 +57,21 @@ BASE_TRANSFORMERS_ENTRYPOINT_RECORD = {
     "sha256": "91b2c544c6848f4ce8213c770aaa705ce682ee656c995f4ce58352c4b7368ee7",
 }
 EXPECTED_NUM_FRAMES = 124
+_REFERENCE_FLAGS = {
+    "--reference-image": "image",
+    "--reference-video": "video",
+    "--reference-audio": "audio",
+}
+
+
+class _OrderedReferenceAction(argparse.Action):
+    """Append heterogeneous reference flags to one encounter-ordered list."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        del parser
+        references = list(getattr(namespace, self.dest, None) or [])
+        references.append((_REFERENCE_FLAGS[str(option_string)], str(values)))
+        setattr(namespace, self.dest, references)
 
 
 def _write_report_frames(frames: np.ndarray, frames_dir: Path) -> list[Path]:
@@ -208,12 +239,115 @@ def validate_processor_method_unchanged(processor, expected: tuple[object, objec
         raise ValueError("MiniMax-H3 processor compatibility helper changed during the run")
 
 
+def pipeline_arguments(
+    *,
+    prompt: str,
+    generator,
+    steps: int,
+    output_type: str,
+    image=None,
+    last_image=None,
+    references=None,
+) -> dict:
+    """Construct one official Diffusers T2VA/FL2VA/Ref2VA invocation."""
+
+    arguments = {
+        "prompt": prompt,
+        "height": 768,
+        "width": 1344,
+        "num_frames": 124,
+        "num_inference_steps": steps,
+        "generator": generator,
+        "output_type": output_type,
+        "output": ["videos", "audio", "sampling_rate"],
+    }
+    if image is not None:
+        arguments["image"] = image
+    if last_image is not None:
+        arguments["last_image"] = last_image
+    if references is not None:
+        arguments["references"] = references
+    return arguments
+
+
+def _keyframe_mode(image, last_image) -> str:
+    if image is not None and last_image is not None:
+        return "first_and_last"
+    if image is not None:
+        return "first"
+    if last_image is not None:
+        return "last"
+    return "zero"
+
+
+def _video_reference_arguments(path: Path, load_image) -> dict:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or set(manifest) not in (
+        {"fps", "frames"},
+        {"fps", "frames", "audio"},
+    ):
+        raise ValueError("MiniMax-H3 reference video manifest has an invalid schema")
+    fps = manifest["fps"]
+    frames = manifest["frames"]
+    if (
+        not isinstance(fps, (int, float))
+        or isinstance(fps, bool)
+        or not math.isfinite(float(fps))
+        or float(fps) <= 0.0
+    ):
+        raise ValueError("MiniMax-H3 reference video fps must be finite and positive")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("MiniMax-H3 reference video frames must be a non-empty list")
+    frame_paths = []
+    for value in frames:
+        if not isinstance(value, str) or not value:
+            raise ValueError("MiniMax-H3 reference video frame paths must be strings")
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("MiniMax-H3 reference video frame paths must be relative")
+        frame_paths.append((path.parent / relative).resolve(strict=True))
+    arguments = {
+        "video": [load_image(str(frame_path)) for frame_path in frame_paths],
+        "fps": float(fps),
+    }
+    audio = manifest.get("audio")
+    if audio is not None:
+        if not isinstance(audio, str) or not audio:
+            raise ValueError("MiniMax-H3 reference video audio must be a path string")
+        relative = Path(audio)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("MiniMax-H3 reference video audio must be relative")
+        arguments["audio"] = str((path.parent / relative).resolve(strict=True))
+    return arguments
+
+
+def build_official_references(reference_specs, reference_type, load_image) -> list:
+    """Create official Diffusers references without regrouping their modalities."""
+
+    references = []
+    for kind, raw_path in reference_specs:
+        path = Path(raw_path).resolve(strict=True)
+        if kind == "video":
+            arguments = _video_reference_arguments(path, load_image)
+        elif kind in {"image", "audio"}:
+            arguments = {kind: str(path)}
+        else:
+            raise ValueError(f"Unsupported MiniMax-H3 reference kind: {kind!r}")
+        references.append(reference_type(**arguments))
+    return references
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source-revision", required=True)
+    parser.add_argument("--workflow", choices=("t2va", "fl2va", "ref2va"), default="t2va")
+    parser.add_argument("--first-image")
+    parser.add_argument("--last-image")
+    for flag in _REFERENCE_FLAGS:
+        parser.add_argument(flag, dest="reference_specs", action=_OrderedReferenceAction)
     parser.add_argument("--diffusers-evidence")
     parser.add_argument("--compile", action="store_true", dest="use_compile")
     parser.add_argument("--compile-mode", default="max-autotune-no-cudagraphs")
@@ -227,7 +361,7 @@ def main() -> int:
         raise ValueError("warmup must be non-negative; measure and steps must be positive")
 
     model_path = Path(args.model_path)
-    snapshot_record = checkpoint_snapshot_record(model_path)
+    snapshot_record = checkpoint_snapshot_record(model_path, workflow=args.workflow)
     prompt_path = Path(args.prompt_file)
     prompt_identity = file_identity(prompt_path)
     prompt_spec = json.loads(prompt_path.read_text())
@@ -238,27 +372,90 @@ def main() -> int:
         raise ValueError("MiniMax-H3 prompt file must contain a non-empty prompt")
     if not isinstance(prompt_spec.get("seed"), int) or isinstance(prompt_spec["seed"], bool):
         raise ValueError("MiniMax-H3 prompt file must contain an integer seed")
+    keyframe_paths = {
+        name: Path(value).resolve(strict=True)
+        for name, value in (
+            ("first_image", args.first_image),
+            ("last_image", args.last_image),
+        )
+        if value
+    }
+    reference_paths = [
+        (kind, Path(value).resolve(strict=True)) for kind, value in (args.reference_specs or [])
+    ]
+    if args.workflow == "ref2va":
+        if keyframe_paths:
+            raise ValueError("MiniMax-H3 Ref2VA reference does not accept FL2VA keyframes")
+        if not reference_paths:
+            raise ValueError("MiniMax-H3 Ref2VA reference requires ordered references")
+        kinds = [kind for kind, _path in reference_paths]
+        if not ({"image", "video"} & set(kinds)):
+            raise ValueError(
+                "MiniMax-H3 audio references require at least one image or video reference"
+            )
+    elif reference_paths:
+        raise ValueError(
+            f"MiniMax-H3 {args.workflow.upper()} reference does not accept omni-references"
+        )
+    elif args.workflow == "t2va" and keyframe_paths:
+        raise ValueError("MiniMax-H3 T2VA reference does not accept keyframe images")
+    keyframe_records = {}
+    keyframe_identities = {}
+    for name, path in keyframe_paths.items():
+        identity = file_identity(path)
+        record, hashed_identity = stable_file_record(path, name.replace("_", " "))
+        if hashed_identity != identity:
+            raise ValueError(f"MiniMax-H3 {name} changed while it was being read")
+        keyframe_records[name] = record
+        keyframe_identities[name] = hashed_identity
+    reference_records = []
+    reference_identities = []
+    for index, (kind, path) in enumerate(reference_paths):
+        identity = file_identity(path)
+        record, hashed_identity = stable_file_record(path, f"reference {index} {kind}")
+        if hashed_identity != identity:
+            raise ValueError(f"MiniMax-H3 reference {index} changed while it was being read")
+        reference_records.append({"kind": kind, **record})
+        reference_identities.append(hashed_identity)
+    input_records = {"prompt_file": prompt_record, **keyframe_records}
+    if reference_records:
+        input_records["references"] = reference_records
     script_path = Path(__file__).resolve()
     script_record, script_identity = stable_file_record(script_path, "HF reference helper")
     request = {
         "prompt": prompt_spec["prompt"],
         "seed": int(prompt_spec["seed"]),
+        "workflow": args.workflow,
+        "keyframe_mode": _keyframe_mode(
+            keyframe_paths.get("first_image"),
+            keyframe_paths.get("last_image"),
+        ),
         "height": 768,
         "width": 1344,
         "num_frames": 124,
         "num_inference_steps": args.steps,
         "output_type": args.output_type,
+        "outputs": ["videos", "audio", "sampling_rate"],
         "warmup": args.warmup,
         "measure": args.measure,
     }
+    if reference_paths:
+        request["reference_kinds"] = [kind for kind, _path in reference_paths]
 
     import diffusers
     from diffusers import ComponentsManager, ModularPipeline
+    from diffusers.modular_pipelines.minimax_h3 import MiniMaxH3Reference
+    from diffusers.utils import load_image
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     frames_dir = output_dir / "frames"
-    for stale in (output_dir / "hf_receipt.json", output_dir / "hf_frames.npy"):
+    for stale in (
+        output_dir / "hf_receipt.json",
+        output_dir / "hf_frames.npy",
+        output_dir / "hf_audio.npy",
+        output_dir / "audio.wav",
+    ):
         stale.unlink(missing_ok=True)
     shutil.rmtree(frames_dir, ignore_errors=True)
     # Keep the lexical evidence path intact. The provenance validator owns
@@ -270,9 +467,15 @@ def main() -> int:
         Path(diffusers.__file__),
         diffusers_evidence,
     )
+    keyframe_images = {name: load_image(str(path)) for name, path in keyframe_paths.items()}
+    references = build_official_references(reference_paths, MiniMaxH3Reference, load_image)
     manager = ComponentsManager()
     started = time.perf_counter()
-    pipe = ModularPipeline.from_pretrained(args.model_path, components_manager=manager)
+    pipe = ModularPipeline.from_pretrained(
+        args.model_path,
+        workflow=args.workflow,
+        components_manager=manager,
+    )
     # The published modular index records the Hub repo for each component. Override
     # that field so a pinned local snapshot remains fully offline and revision exact.
     pipe.load_components(dtype=torch.bfloat16, pretrained_model_name_or_path=args.model_path)
@@ -301,13 +504,15 @@ def main() -> int:
             torch.cuda.synchronize()
             begin = time.perf_counter()
             state = pipe(
-                prompt=prompt_spec["prompt"],
-                height=768,
-                width=1344,
-                num_frames=124,
-                num_inference_steps=args.steps,
-                generator=generator,
-                output_type=args.output_type,
+                **pipeline_arguments(
+                    prompt=prompt_spec["prompt"],
+                    generator=generator,
+                    steps=args.steps,
+                    output_type=args.output_type,
+                    image=keyframe_images.get("first_image"),
+                    last_image=keyframe_images.get("last_image"),
+                    references=references if args.workflow == "ref2va" else None,
+                )
             )
             torch.cuda.synchronize()
             return state, time.perf_counter() - begin
@@ -332,7 +537,7 @@ def main() -> int:
             "source_revision": source_revision,
             "builder_source": script_record,
             "checkpoint_snapshot": snapshot_record,
-            "inputs": {"prompt_file": prompt_record},
+            "inputs": input_records,
             "request": request,
             "diffusers_revision": DIFFUSERS_REVISION,
             "diffusers_version": diffusers.__version__,
@@ -356,12 +561,39 @@ def main() -> int:
     frames_path = output_dir / "hf_frames.npy"
     np.save(frames_path, frames)
     frames_record, _ = stable_file_record(frames_path, "HF decoded frames")
+    audio_record = None
+    audio_wav_record = None
+    audio_evidence = None
+    if args.output_type != "latent":
+        raw_audio = state.get("audio")
+        if isinstance(raw_audio, torch.Tensor):
+            raw_audio = raw_audio.detach().float().cpu().numpy()
+        sampling_rate = state.get("sampling_rate")
+        if isinstance(sampling_rate, torch.Tensor):
+            if sampling_rate.numel() != 1:
+                raise ValueError("MiniMax-H3 HF sampling_rate must be a scalar")
+            sampling_rate = sampling_rate.detach().cpu().item()
+        audio = canonical_hf_audio(raw_audio, sampling_rate)
+        audio_path = output_dir / "hf_audio.npy"
+        np.save(audio_path, audio, allow_pickle=False)
+        audio_record, _ = stable_file_record(audio_path, "HF decoded audio")
+        audio_wav_path = output_dir / "audio.wav"
+        write_float32_wav(audio_wav_path, audio, EXPECTED_AUDIO_SAMPLE_RATE)
+        audio_wav_record, _ = stable_file_record(audio_wav_path, "HF decoded audio WAV")
+        audio_evidence = {
+            **audio_summary(audio, EXPECTED_AUDIO_SAMPLE_RATE),
+            "raw_shape": [1, *[int(value) for value in audio.shape]],
+        }
     report_frames = _materialize_report_frames(
         frames,
         frames_dir,
         output_type=args.output_type,
     )
     validate_file_identity(prompt_path, prompt_hashed_identity, "prompt file")
+    for name, path in keyframe_paths.items():
+        validate_file_identity(path, keyframe_identities[name], name.replace("_", " "))
+    for index, ((_kind, path), identity) in enumerate(zip(reference_paths, reference_identities)):
+        validate_file_identity(path, identity, f"reference {index}")
     validate_file_identity(script_path, script_identity, "HF reference helper")
     if diffusers_evidence is not None:
         validate_git_archive_source_unchanged(
@@ -378,7 +610,7 @@ def main() -> int:
     ):
         raise ValueError("MiniMax-H3 Transformers source changed during the HF reference run")
     validate_processor_method_unchanged(pipe.processor, processor_method_identity)
-    if checkpoint_snapshot_record(model_path) != snapshot_record:
+    if checkpoint_snapshot_record(model_path, workflow=args.workflow) != snapshot_record:
         raise ValueError("MiniMax-H3 checkpoint snapshot changed during the HF reference run")
     receipt = {
         "backend": "hf_diffusers_torch_compile" if args.use_compile else "hf_diffusers_eager",
@@ -387,7 +619,7 @@ def main() -> int:
         "source_revision": source_revision,
         "builder_source": script_record,
         "checkpoint_snapshot": snapshot_record,
-        "inputs": {"prompt_file": prompt_record},
+        "inputs": input_records,
         "request": request,
         "diffusers_revision": DIFFUSERS_REVISION,
         "diffusers_version": diffusers.__version__,
@@ -406,6 +638,24 @@ def main() -> int:
         "shape": list(frames.shape),
         "frames": frames_record,
     }
+    if audio_evidence is not None:
+        receipt.update(
+            {
+                "audio_shape": audio_evidence["shape"],
+                "raw_audio_shape": audio_evidence["raw_shape"],
+                "audio_sample_rate_hz": audio_evidence["sample_rate_hz"],
+                "audio_num_samples_per_channel": audio_evidence["num_samples_per_channel"],
+                "audio_duration_s": audio_evidence["duration_s"],
+                "audio_all_finite": audio_evidence["all_finite"],
+                "audio_rms": audio_evidence["rms"],
+                "audio_peak_absolute": audio_evidence["peak_absolute"],
+                "audio_layout": audio_evidence["layout"],
+                "audio_encoding": audio_evidence["encoding"],
+                "audio_wav_encoding": "ieee_float32le",
+                "audio": audio_record,
+                "audio_wav": audio_wav_record,
+            }
+        )
     if report_frames is not None:
         receipt["report_frames"] = report_frames
     atomic_write_json(output_dir / "hf_receipt.json", receipt)

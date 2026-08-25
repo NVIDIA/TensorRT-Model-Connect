@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+import numpy as np
+
 from .contracts import (
     CompareResult,
     MetricResult,
@@ -22,6 +24,13 @@ from tests.e2e.models.minimax_h3.visual_metrics import (
     visual_block_size,
     visual_quality_passed,
 )
+from tests.e2e.models.minimax_h3.audio_metrics import (
+    audio_quality_passed,
+    compute_decoded_audio_metrics,
+    evaluate_audio_quality,
+    read_float32_wav,
+)
+from tensorrt_model_connect.families.minimax_h3.provenance import stable_file_record
 
 
 def _checkpoint_inventory_sha256(receipt: dict) -> str | None:
@@ -30,6 +39,44 @@ def _checkpoint_inventory_sha256(receipt: dict) -> str | None:
         return digest
     snapshot = receipt.get("checkpoint_snapshot")
     return snapshot.get("inventory_sha256") if isinstance(snapshot, dict) else None
+
+
+def _validated_audio_evidence(
+    output: StageOutput,
+    receipt: dict,
+    *,
+    label: str,
+) -> tuple[Path, int]:
+    audio_path = Path(str(output.data.get("audio_path", "")))
+    wav_path = Path(str(output.data.get("wav_path", "")))
+    if not audio_path.is_file() or not wav_path.is_file():
+        raise ValueError(f"MiniMax-H3 {label} stereo audio artifacts are missing")
+
+    audio_record, _ = stable_file_record(audio_path, f"{label} decoded audio")
+    wav_record, _ = stable_file_record(wav_path, f"{label} decoded audio WAV")
+    if receipt.get("audio") != audio_record or receipt.get("audio_wav") != wav_record:
+        raise ValueError(f"MiniMax-H3 {label} audio artifacts do not match their receipt")
+
+    samples = np.load(audio_path, mmap_mode="r", allow_pickle=False)
+    wav = read_float32_wav(wav_path)
+    if samples.shape != wav.samples.shape or not np.array_equal(samples, wav.samples):
+        raise ValueError(f"MiniMax-H3 {label} WAV does not preserve its channel-major audio array")
+    sample_rate = receipt.get("audio_sample_rate_hz")
+    if (
+        isinstance(sample_rate, bool)
+        or not isinstance(sample_rate, int)
+        or sample_rate <= 0
+        or wav.sample_rate != sample_rate
+        or output.data.get("sample_rate") != sample_rate
+        or receipt.get("audio_shape") != [int(value) for value in samples.shape]
+        or receipt.get("audio_num_samples_per_channel") != samples.shape[1]
+        or receipt.get("audio_all_finite") is not True
+        or receipt.get("audio_layout") != "channel_major"
+        or receipt.get("audio_encoding") != "float32"
+        or receipt.get("audio_wav_encoding") != "ieee_float32le"
+    ):
+        raise ValueError(f"MiniMax-H3 {label} audio metadata is inconsistent")
+    return audio_path, sample_rate
 
 
 class MiniMaxH3DecodedVideoComparator:
@@ -118,6 +165,24 @@ class MiniMaxH3DecodedVideoComparator:
                 message="MiniMax-H3 decoded frame arrays are missing",
             )
 
+        try:
+            reference_audio_path, reference_sample_rate = _validated_audio_evidence(
+                ref,
+                ref_receipt,
+                label="HF reference",
+            )
+            candidate_audio_path, candidate_sample_rate = _validated_audio_evidence(
+                trt,
+                trt_receipt,
+                label="native candidate",
+            )
+        except (OSError, TypeError, ValueError) as error:
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                message=str(error),
+            )
+
         metrics_config = threshold.metrics
         decoded = compute_decoded_visual_metrics(
             reference_path,
@@ -125,6 +190,13 @@ class MiniMaxH3DecodedVideoComparator:
             block_size=visual_block_size(metrics_config),
         )
         visual_gates = evaluate_visual_quality(decoded, metrics_config)
+        decoded_audio = compute_decoded_audio_metrics(
+            reference_audio_path,
+            candidate_audio_path,
+            reference_sample_rate=reference_sample_rate,
+            candidate_sample_rate=candidate_sample_rate,
+        )
+        audio_gates = evaluate_audio_quality(decoded_audio, metrics_config)
         metrics = {
             name: MetricResult(
                 value=result.value,
@@ -133,9 +205,9 @@ class MiniMaxH3DecodedVideoComparator:
                 passed=result.passed,
                 note=result.note,
             )
-            for name, result in visual_gates.items()
+            for name, result in {**visual_gates, **audio_gates}.items()
         }
-        passed = visual_quality_passed(visual_gates)
+        passed = visual_quality_passed(visual_gates) and audio_quality_passed(audio_gates)
         return CompareResult(
             stage_name=stage.name,
             status=StageStatus.PASSED.value if passed else StageStatus.FAILED.value,
@@ -143,7 +215,9 @@ class MiniMaxH3DecodedVideoComparator:
             composite_rule=(
                 "exact finite decoded RGB shape AND low-frequency frame structure AND "
                 "brightness profile AND temporal activity/profile AND non-degenerate "
-                "frame contrast; PSNR/MAE are diagnostic only"
+                "frame contrast AND exact finite stereo audio shape/rate/duration AND "
+                "direct per-channel HF waveform correlation/NRMSE/SI-SDR; visual "
+                "PSNR/MAE and audio maximum absolute error are diagnostic only"
             ),
             message=(
                 f"{'PASS' if passed else 'FAIL'}: low_frequency_correlation="
@@ -151,7 +225,10 @@ class MiniMaxH3DecodedVideoComparator:
                 f"{decoded.frame_low_frequency_correlation_mean:.4f} (min/mean), "
                 f"temporal_correlation={decoded.temporal_activity_correlation:.4f}, "
                 f"PSNR={decoded.psnr_db:.4f} dB (diagnostic), "
-                f"MAE={decoded.mean_absolute_error:.8f} (diagnostic)"
+                f"MAE={decoded.mean_absolute_error:.8f} (diagnostic), "
+                f"audio_correlation={decoded_audio.waveform_correlation_minimum:.6f}, "
+                f"audio_NRMSE={decoded_audio.normalized_rmse_maximum:.6f}, "
+                f"audio_SI-SDR={decoded_audio.si_sdr_db_minimum:.3f} dB"
             ),
         )
 

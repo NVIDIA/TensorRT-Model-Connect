@@ -40,7 +40,8 @@ STAGES = ("text_encoder", "adaln", "denoiser", "vae_decoder")
 PERF_PATTERN = re.compile(
     r"\[minimax-h3\.perf\] text_encoder_ms=(?P<text_encoder>[0-9.]+) "
     r"adaln_ms=(?P<adaln>[0-9.]+) denoiser_ms=(?P<denoiser>[0-9.]+) "
-    r"vae_decoder_ms=(?P<vae_decoder>[0-9.]+) total_ms=(?P<total>[0-9.]+)"
+    r"vae_decoder_ms=(?P<vae_decoder>[0-9.]+) "
+    r"audio_vae_decoder_ms=(?P<audio_vae_decoder>[0-9.]+) total_ms=(?P<total>[0-9.]+)"
     r"(?P<annotations>[^\n]*)"
 )
 ENGINE_PATTERN = re.compile(
@@ -688,7 +689,7 @@ def main() -> int:
         "residency_contract": _residency_contract(variant_receipts),
         "timing_boundaries": {
             "pipeline_factory_load": (
-                "creates the pipeline/tokenizer but does not deserialize the four lazy plans"
+                "creates the pipeline/tokenizer but does not deserialize the five lazy plans"
             ),
             "stage_wall": (
                 "includes plan read/deserialization, engine execution, transfers, and "
@@ -703,7 +704,7 @@ def main() -> int:
                 "separately_instrumented": False,
                 "included_in": "host_prepost_and_output_assembly_ms",
                 "reason": (
-                    "the current H3 pipeline exposes only four stage walls and total request wall; "
+                    "the visual benchmark exposes four active stage walls and total request wall; "
                     "exact output assembly requires pipeline/runtime instrumentation"
                 ),
             },

@@ -222,7 +222,15 @@ void print_usage() {
            "stdout.\n"
            "  trtmc generate-video  <bundle.bundle> --prompt \"text\" --output DIR [--num-steps N] "
            "[--guidance-scale S] [--initial-latents-raw PATH]\n"
-           "                        [--negative-prompt \"text\"] [--height N] [--width N]\n"
+           "                        [--negative-prompt \"text\"] [--height N] [--width N] "
+           "[--first-image PATH] [--last-image PATH] [--audio-output PATH]\n"
+           "                        [--reference-image PATH] [--reference-audio WAV] "
+           "[--reference-video MANIFEST.json] ...\n"
+           "                        Reference flags may repeat and preserve encounter order; "
+           "they cannot be mixed with first/last images.\n"
+           "                        Video manifest: {\"fps\": NUMBER, \"frames\": [\"IMAGE\", "
+           "...], \"audio\": \"WAV\"}; audio is optional and paths are relative to the "
+           "manifest.\n"
            "  trtmc embed           <bundle.bundle> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.bundle> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -502,6 +510,61 @@ CliArgs parse_args(int argc, char** argv) {
             args.image_path = argv[++i];
             continue;
         }
+        if (arg == "--first-image") {
+            if (args.command != "generate-video") {
+                args.parse_error = true;
+                args.error_message = arg + " is only valid for generate-video";
+                return args;
+            }
+            if (!need_value(arg))
+                return args;
+            args.first_image_path = argv[++i];
+            continue;
+        }
+        if (arg == "--last-image") {
+            if (args.command != "generate-video") {
+                args.parse_error = true;
+                args.error_message = arg + " is only valid for generate-video";
+                return args;
+            }
+            if (!need_value(arg))
+                return args;
+            args.last_image_path = argv[++i];
+            continue;
+        }
+        if (arg == "--reference-image") {
+            if (args.command != "generate-video") {
+                args.parse_error = true;
+                args.error_message = arg + " is only valid for generate-video";
+                return args;
+            }
+            if (!need_value(arg))
+                return args;
+            args.reference_inputs.push_back({ReferenceInputKind::kImage, argv[++i]});
+            continue;
+        }
+        if (arg == "--reference-audio") {
+            if (args.command != "generate-video") {
+                args.parse_error = true;
+                args.error_message = arg + " is only valid for generate-video";
+                return args;
+            }
+            if (!need_value(arg))
+                return args;
+            args.reference_inputs.push_back({ReferenceInputKind::kAudio, argv[++i]});
+            continue;
+        }
+        if (arg == "--reference-video") {
+            if (args.command != "generate-video") {
+                args.parse_error = true;
+                args.error_message = arg + " is only valid for generate-video";
+                return args;
+            }
+            if (!need_value(arg))
+                return args;
+            args.reference_inputs.push_back({ReferenceInputKind::kVideo, argv[++i]});
+            continue;
+        }
         if (arg == "--right-image" && need_value(arg)) {
             args.right_image_path = argv[++i];
             continue;
@@ -635,7 +698,12 @@ CliArgs parse_args(int argc, char** argv) {
             args.audio_in = argv[++i];
             continue;
         }
-        if (arg == "--audio-out" && need_value(arg)) {
+        if (arg == "--audio-output" && args.command != "generate-video") {
+            args.parse_error = true;
+            args.error_message = arg + " is only valid for generate-video";
+            return args;
+        }
+        if ((arg == "--audio-out" || arg == "--audio-output") && need_value(arg)) {
             args.audio_out = argv[++i];
             continue;
         }
@@ -837,6 +905,12 @@ CliArgs parse_args(int argc, char** argv) {
     if (args.command == "run" && !args.prompts_file.empty() && !args.image_path.empty()) {
         args.parse_error = true;
         args.error_message = "--prompts-file cannot be combined with --image";
+    }
+    if (!args.reference_inputs.empty() &&
+        (!args.first_image_path.empty() || !args.last_image_path.empty())) {
+        args.parse_error = true;
+        args.error_message =
+            "--reference-* flags cannot be combined with --first-image or --last-image";
     }
 
     return args;

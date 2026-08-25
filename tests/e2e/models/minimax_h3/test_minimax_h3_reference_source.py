@@ -22,6 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 
 from tensorrt_model_connect.families.minimax_h3.provenance import file_record
 from tests.e2e.models.minimax_h3 import hf_reference
+from tests.e2e.models.minimax_h3.audio_metrics import read_float32_wav, write_float32_wav
 from tests.e2e.models.minimax_h3.e2e_plugins import reference
 from tests.e2e_harness import orchestrator
 from tests.e2e_harness.artifact_sink import FileArtifactSink
@@ -148,6 +149,24 @@ def test_reference_evidence_is_resolved_from_context_and_passed_explicitly(
             frames_dir.mkdir()
             for index in range(2):
                 (frames_dir / f"frame_{index:04d}.png").touch()
+            audio = np.stack(
+                (
+                    np.linspace(-0.25, 0.25, 32, dtype=np.float32),
+                    np.linspace(0.125, -0.125, 32, dtype=np.float32),
+                )
+            )
+            np.save(output_dir / "hf_audio.npy", audio, allow_pickle=False)
+            write_float32_wav(output_dir / "audio.wav", audio, 32000)
+            (output_dir / "hf_receipt.json").write_text(
+                json.dumps(
+                    {
+                        "audio_shape": [2, 32],
+                        "audio_num_samples_per_channel": 32,
+                        "audio_sample_rate_hz": 32000,
+                        "audio_duration_s": 0.001,
+                    }
+                )
+            )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     case = SimpleNamespace(
@@ -179,10 +198,18 @@ def test_reference_evidence_is_resolved_from_context_and_passed_explicitly(
     assert output.data["frame_paths"] == [
         str(output_dir / "frames" / f"frame_{index:04d}.png") for index in range(2)
     ]
+    assert output.data["audio_path"] == str(output_dir / "hf_audio.npy")
+    assert output.data["wav_path"] == str(output_dir / "audio.wav")
+    assert output.data["audio_channels"] == 2
+    assert output.data["audio_num_samples"] == 32
+    assert output.data["sample_rate"] == 32000
 
     for path in (output_dir / "frames").iterdir():
         path.unlink()
     (output_dir / "frames").rmdir()
+    (output_dir / "hf_audio.npy").unlink()
+    (output_dir / "audio.wav").unlink()
+    (output_dir / "hf_receipt.json").unlink()
     emit_frames = False
     output = reference.reference.run_stage(
         case,
@@ -192,6 +219,8 @@ def test_reference_evidence_is_resolved_from_context_and_passed_explicitly(
     assert "num_frames" not in output.data
     assert "frames_dir" not in output.data
     assert "frame_paths" not in output.data
+    assert output.data["audio_path"] == ""
+    assert output.data["wav_path"] == ""
 
 
 def test_hf_report_frames_are_complete_clipped_png_evidence(tmp_path: Path) -> None:
@@ -248,6 +277,42 @@ def test_hf_latent_output_does_not_claim_or_write_report_media(tmp_path: Path) -
     assert not frames_dir.exists()
 
 
+def test_hf_audio_preserves_official_batch_stereo_contract_and_float_wav(
+    tmp_path: Path,
+) -> None:
+    samples = 165600
+    time_axis = np.arange(samples, dtype=np.float32) / 32000
+    raw = np.stack(
+        (
+            0.2 * np.sin(2.0 * np.pi * 311.0 * time_axis),
+            0.15 * np.cos(2.0 * np.pi * 487.0 * time_axis),
+        ),
+        axis=0,
+    )[None, ...]
+
+    canonical = hf_reference.canonical_hf_audio(raw, 32000)
+    assert canonical.shape == (2, 165600)
+    assert canonical.dtype == np.float32
+    assert np.array_equal(canonical[0], raw[0, 0])
+    assert np.array_equal(canonical[1], raw[0, 1])
+
+    wav_path = tmp_path / "audio.wav"
+    write_float32_wav(wav_path, canonical, 32000)
+    decoded = read_float32_wav(wav_path)
+    assert decoded.sample_rate == 32000
+    assert decoded.samples.shape == (2, 165600)
+    assert np.array_equal(decoded.samples, canonical)
+
+    with pytest.raises(ValueError, match=r"shape \(1, 2, 165600\)"):
+        hf_reference.canonical_hf_audio(raw[:, :, :-1], 32000)
+    with pytest.raises(ValueError, match="instead of 32000 Hz"):
+        hf_reference.canonical_hf_audio(raw, 16000)
+    non_finite = raw.copy()
+    non_finite[0, 1, 17] = np.nan
+    with pytest.raises(ValueError, match="non-finite samples"):
+        hf_reference.canonical_hf_audio(non_finite, 32000)
+
+
 def test_hf_report_frames_register_and_satisfy_html_evidence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -260,15 +325,31 @@ def test_hf_report_frames_register_and_satisfy_html_evidence(
     for frames_dir, color in ((trt_frames, (8, 16, 24)), (ref_frames, (24, 16, 8))):
         frames_dir.mkdir(parents=True)
         Image.new("RGB", (4, 4), color).save(frames_dir / "frame_0000.png")
+    audio = np.stack(
+        (
+            np.linspace(-0.25, 0.25, 32, dtype=np.float32),
+            np.linspace(0.125, -0.125, 32, dtype=np.float32),
+        )
+    )
+    trt_wav = sink.base_dir / "trt_native" / "audio.wav"
+    ref_wav = sink.base_dir / "hf_reference" / "audio.wav"
+    write_float32_wav(trt_wav, audio, 32000)
+    write_float32_wav(ref_wav, audio, 32000)
 
     orchestrator._auto_register_artifacts(
         sink,
-        StageOutput(stage_name="end_to_end", data={"frames_dir": str(trt_frames)}),
+        StageOutput(
+            stage_name="end_to_end",
+            data={"frames_dir": str(trt_frames), "wav_path": str(trt_wav)},
+        ),
         "trt",
     )
     orchestrator._auto_register_artifacts(
         sink,
-        StageOutput(stage_name="end_to_end", data={"frames_dir": str(ref_frames)}),
+        StageOutput(
+            stage_name="end_to_end",
+            data={"frames_dir": str(ref_frames), "wav_path": str(ref_wav)},
+        ),
         "ref",
     )
     result_path = sink.finalize(E2EResult(case_name=case.name))
@@ -277,7 +358,9 @@ def test_hf_report_frames_register_and_satisfy_html_evidence(
 
     assert result["artifacts"] == {
         "trt_frames": "trt_native/frames",
+        "trt_wav": "trt_native/audio.wav",
         "ref_frames": "hf_reference/frames",
+        "ref_wav": "hf_reference/audio.wav",
     }
     assert report.validate_evidence([result], project_dir=PROJECT_DIR) == []
 

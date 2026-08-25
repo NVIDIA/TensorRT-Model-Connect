@@ -23,6 +23,8 @@
 //   trtmc speak           <bundle.bundle> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.bundle> --prompt "text" --output DIR [--num-steps N]
 //                        [--negative-prompt "text"] [--height N] [--width N]
+//                        [--audio-output PATH] [--reference-image PATH]
+//                        [--reference-audio WAV] [--reference-video MANIFEST.json]
 //   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
 //   trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]
 //   trtmc detect          <bundle.bundle> --image PATH [--output-json PATH]
@@ -31,6 +33,7 @@
 
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
+#include "cli/reference_media.h"
 #include "cli/speech_session_helpers.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
@@ -750,7 +753,38 @@ int cmd_generate_video(const CliArgs& args) {
         cfg.initial_latents = std::move(*latents);
     }
 
-    auto result = pipeline->generate_image(args.prompt, cfg);
+    trtmc::AudioVideoResult joint_result;
+    if (!args.reference_inputs.empty() &&
+        (!args.first_image_path.empty() || !args.last_image_path.empty()))
+        throw std::runtime_error("reference media cannot be combined with first/last keyframes");
+
+    if (!args.first_image_path.empty() || !args.last_image_path.empty() ||
+        !args.reference_inputs.empty()) {
+        const auto load_keyframe = [](const std::string& path, const char* label) {
+            trtmc::MediaImageInput result;
+            if (path.empty())
+                return result;
+            auto image = trtmc::io::read_image(path);
+            if (image.empty())
+                throw std::runtime_error(std::string("failed to load ") + label + ": " + path);
+            result.pixels = std::move(image.pixels);
+            result.height = image.height;
+            result.width = image.width;
+            return result;
+        };
+        trtmc::AudioVideoRequest request;
+        request.prompt = args.prompt;
+        request.first_image = load_keyframe(args.first_image_path, "first image");
+        request.last_image = load_keyframe(args.last_image_path, "last image");
+        request.references = trtmc::cli::load_reference_inputs(args.reference_inputs);
+        request.config = cfg;
+        joint_result = pipeline->generate_audio_video(request);
+    } else {
+        joint_result = pipeline->generate_audio_video(args.prompt, cfg);
+    }
+    if (!args.audio_out.empty() && joint_result.audio.samples.empty())
+        throw std::runtime_error("--audio-output was requested but the pipeline returned no audio");
+    const auto& result = joint_result.video;
     std::cout << "Generated image: " << result.width << "x" << result.height << " ("
               << result.num_frames << " frames)\n";
 
@@ -846,6 +880,19 @@ int cmd_generate_video(const CliArgs& args) {
     std::cerr << "[trtmc.video_output_timing] frames=" << result.num_frames
               << " workers=" << workers_used << " output_ms=" << std::fixed << std::setprecision(3)
               << output_ms << '\n';
+
+    if (!joint_result.audio.samples.empty()) {
+        const auto audio_path = args.audio_out.empty()
+                                    ? (std::filesystem::path(out_dir) / "audio.wav").string()
+                                    : args.audio_out;
+        const auto audio_parent = std::filesystem::path(audio_path).parent_path();
+        if (!audio_parent.empty())
+            std::filesystem::create_directories(audio_parent);
+        trtmc::io::write_wav(joint_result.audio, audio_path);
+        std::cout << "Saved " << audio_path << " (" << joint_result.audio.num_samples
+                  << " samples/channel, " << joint_result.audio.num_channels << " channels at "
+                  << joint_result.audio.sample_rate << " Hz)\n";
+    }
 
     return EXIT_SUCCESS;
 }

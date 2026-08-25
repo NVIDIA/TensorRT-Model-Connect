@@ -27,8 +27,7 @@ try:
     import tensorrt_model_connect.build_cli as cli
     import tensorrt_model_connect.engine_builder as eb
 except (ImportError, ModuleNotFoundError):  # pragma: no cover - dependency-only
-    pytest.skip(
-        "tensorrt_model_connect requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 def _read_bundle_header(bundle_path: Path) -> dict:
@@ -48,14 +47,19 @@ def _make_fake_diffusion_model_dir(tmp_path: Path) -> Path:
     """
     model_dir = tmp_path / "fake_diffusion_model"
     model_dir.mkdir()
-    (model_dir / "model_index.json").write_text(json.dumps({
-        "_class_name": "FakeBatchPipeline",
-    }))
+    (model_dir / "model_index.json").write_text(
+        json.dumps(
+            {
+                "_class_name": "FakeBatchPipeline",
+            }
+        )
+    )
     return model_dir
 
 
 class _FakeDiffusionPlugin:
     """Plugin stub that mimics a diffusion family plugin contract."""
+
     name = "fake_batch"
     runtime_strategy = "diffusion"
     pipeline_classes = ["FakeBatchPipeline"]
@@ -72,9 +76,16 @@ class _FakeDiffusionPlugin:
         return {}
 
     def build_components(
-        self, model_dir, config, weights, *,
-        precision="fp32", verbose=False, fp8_scales=None,
-        build_timing=None, parallel_config=None,
+        self,
+        model_dir,
+        config,
+        weights,
+        *,
+        precision="fp32",
+        verbose=False,
+        fp8_scales=None,
+        build_timing=None,
+        parallel_config=None,
         max_batch_size: int = 1,
     ):
         # Mirror the per-component batch policy that the three real plugins
@@ -83,13 +94,15 @@ class _FakeDiffusionPlugin:
         dit_mbs = int(max_batch_size)
         te_mbs = min(dit_mbs * 2, 8)
         vae_mbs = 1
-        self.calls.append({
-            "max_batch_size": max_batch_size,
-            "dit_mbs": dit_mbs,
-            "te_mbs": te_mbs,
-            "vae_mbs": vae_mbs,
-            "family_build_options": config.raw.get("_family_build_options", {}),
-        })
+        self.calls.append(
+            {
+                "max_batch_size": max_batch_size,
+                "dit_mbs": dit_mbs,
+                "te_mbs": te_mbs,
+                "vae_mbs": vae_mbs,
+                "family_build_options": config.raw.get("_family_build_options", {}),
+            }
+        )
         out = {
             "text_encoders": [("fake_te", b"te-plan")],
             "denoiser": b"dit-plan",
@@ -122,13 +135,19 @@ class _FakeDiffusionPlugin:
         return sections
 
     def diffusion_tokenizer_add_special_tokens(
-        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+        self,
+        model_dir_path,
+        *,
+        detect_tokenizer_add_special_tokens,
     ):  # noqa: ARG002
         self.tokenizer_add_special_calls += 1
         return False
 
     def diffusion_tokenizer_bundle_sections(
-        self, model_dir_path, *, ensure_tokenizer_json,
+        self,
+        model_dir_path,
+        *,
+        ensure_tokenizer_json,
     ):  # noqa: ARG002
         self.tokenizer_section_calls += 1
         return []
@@ -138,11 +157,14 @@ def _install_stub_plugin(monkeypatch) -> _FakeDiffusionPlugin:
     """Patch ``find_diffusion_plugin`` to return a fresh stub plugin instance."""
     plugin = _FakeDiffusionPlugin()
     monkeypatch.setattr(
-        eb, "find_diffusion_plugin",
+        eb,
+        "find_diffusion_plugin",
         lambda pipeline_class: plugin if pipeline_class == "FakeBatchPipeline" else None,
     )
     monkeypatch.setattr(
-        eb, "find_plugin", lambda _model_type: None,
+        eb,
+        "find_plugin",
+        lambda _model_type: None,
     )
     # Skip TRT version probing for the fake bundle.
     monkeypatch.setattr(eb, "_get_trt_version", lambda: "10.0.0")
@@ -152,8 +174,11 @@ def _install_stub_plugin(monkeypatch) -> _FakeDiffusionPlugin:
     # The diffusion bundle path calls trt_compat.resolved_summary() before
     # invoking the plugin; stub it so the test stays GPU-/TRT-free.
     from tensorrt_model_connect import trt_compat
+
     monkeypatch.setattr(
-        trt_compat, "resolved_summary", lambda: "stub",
+        trt_compat,
+        "resolved_summary",
+        lambda: "stub",
         raising=False,
     )
     return plugin
@@ -258,6 +283,7 @@ def test_diffusion_family_build_options_reach_plugin(monkeypatch, tmp_path):
     assert cli._cmd_build(args) == 0
 
     assert plugin.calls[0]["family_build_options"]["minimax_h3"] == {
+        "workflow": "t2va",
         "first_block_cache": True,
         "first_block_cache_threshold": 0.025,
     }
