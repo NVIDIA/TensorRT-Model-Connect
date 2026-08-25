@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import math
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -134,14 +135,26 @@ def _rope(network, tensor, cos, sin):
     return _rows(network, layer.get_output(0))
 
 
-def _fused_qkv(network, hidden, weights, prefix: str):
+def _fused_qkv(
+    network,
+    hidden,
+    weights,
+    prefix: str,
+    *,
+    consume_weights: bool = False,
+):
+    weight_keys = tuple(f"{prefix}.to_{name}.weight" for name in ("q", "k", "v"))
+    bias_keys = tuple(f"{prefix}.to_{name}.bias" for name in ("q", "k", "v"))
     packed = op.linear(
         network,
         hidden,
-        np.concatenate([weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0),
-        np.concatenate([weights[f"{prefix}.to_{name}.bias"] for name in ("q", "k", "v")], axis=0),
+        np.concatenate([weights[key] for key in weight_keys], axis=0),
+        np.concatenate([weights[key] for key in bias_keys], axis=0),
         compute_dtype=trt.float16,
     )
+    if consume_weights:
+        for key in (*weight_keys, *bias_keys):
+            weights.pop(key)
     return tuple(
         network.add_slice(packed, (0, 0, part * DIM), (BATCH, SEQUENCE, DIM), (1, 1, 1)).get_output(
             0
@@ -175,18 +188,21 @@ def _swiglu(network, hidden, weights, prefix: str):
     )
 
 
+@op.cleanup_failed_build
 def build_vae_tile_decoder_engine(
     weights: dict,
     *,
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
-    op.configure_builder(config)
+    op.configure_builder(config, weight_streaming=weight_streaming)
     op.configure_workspace(
         config,
         workspace_bytes,
@@ -227,7 +243,13 @@ def build_vae_tile_decoder_engine(
     for index in range(LAYERS):
         prefix = f"decoder.transformer_blocks.{index}"
         normalized = op.rms_norm(network, hidden, weights[f"{prefix}.norm1.weight"], DIM, NORM_EPS)
-        q, k, v = _fused_qkv(network, normalized, weights, f"{prefix}.attn")
+        q, k, v = _fused_qkv(
+            network,
+            normalized,
+            weights,
+            f"{prefix}.attn",
+            consume_weights=consume_weights,
+        )
         q, k = _per_head_norm(network, q), _per_head_norm(network, k)
         q, k = _rope(network, q, cos, sin), _rope(network, k, cos, sin)
         q4, k4, v4 = _heads(network, q), _heads(network, k), _heads(network, v)
@@ -307,14 +329,21 @@ def build_vae_tile_decoder_engine(
         f"sequence={SEQUENCE}, layers={LAYERS}",
         file=sys.stderr,
     )
+    plan = None
+    record = None
     try:
-        plan = builder.build_serialized_network(network, config)
+        if output_path is None:
+            plan = builder.build_serialized_network(network, config)
+        else:
+            record = trt_compat.build_serialized_network_to_file(
+                builder, network, config, output_path
+            )
     finally:
         op.release_weight_buffers(network)
         if consume_weights:
             weights.clear()
-    if plan is None:
+    if output_path is None and plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 VAE tile decoder")
     del network, config, builder
     gc.collect()
-    return bytes(plan)
+    return record if record is not None else bytes(plan)

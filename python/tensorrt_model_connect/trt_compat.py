@@ -13,11 +13,13 @@ truth.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import importlib
 import importlib.util
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -245,6 +247,151 @@ def unwrap(value: Any) -> Any:
     return value
 
 
+def _capsule_byte_view(data: object, size: int) -> memoryview:
+    """Expose an advertised TensorRT pointer capsule as a bounded byte view."""
+
+    import ctypes
+
+    get_name = ctypes.pythonapi.PyCapsule_GetName
+    get_name.argtypes = [ctypes.py_object]
+    get_name.restype = ctypes.c_char_p
+    get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+    get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    get_pointer.restype = ctypes.c_void_p
+    name = get_name(data)
+    pointer = get_pointer(data, name)
+    if not pointer and size:
+        raise ValueError("TensorRT stream writer supplied a null data pointer")
+    if size == 0:
+        return memoryview(b"")
+    storage = (ctypes.c_ubyte * size).from_address(pointer or 0)
+    return memoryview(storage).cast("B")
+
+
+def _stream_writer_view(data: object, size: object | None) -> memoryview:
+    """Return a bounded byte view for buffer and ``(PyCapsule, size)`` calls."""
+
+    if size is None:
+        source = memoryview(data)
+        try:
+            view = source.cast("B")
+            source.release()
+            return view
+        except Exception:
+            source.release()
+            raise
+
+    count = int(size)
+    if count < 0:
+        raise ValueError("TensorRT stream writer supplied a negative byte count")
+    try:
+        source = memoryview(data)
+    except TypeError:
+        return _capsule_byte_view(data, count)
+    try:
+        view = source.cast("B")
+        if count > view.nbytes:
+            view.release()
+            raise ValueError("TensorRT stream writer byte count exceeds its source buffer")
+        bounded = view[:count]
+        view.release()
+        source.release()
+        return bounded
+    except Exception:
+        source.release()
+        raise
+
+
+def _file_stream_writer(stream: Any) -> Any:
+    module = load_module()
+    base = getattr(module, "IStreamWriter", None)
+    if base is None:
+        raise RuntimeError(
+            f"{_backend_label} does not expose IStreamWriter; "
+            "direct-to-file serialization is required for staged builds"
+        )
+
+    class FileStreamWriter(base):
+        def __init__(self) -> None:
+            base.__init__(self)
+            self.digest = hashlib.sha256()
+            self.size = 0
+            self.error: BaseException | None = None
+
+        def write(self, data: object, size: object | None = None) -> int:
+            # Exceptions must not unwind through TensorRT's C++ callback.
+            if self.error is not None:
+                return -1
+            view: memoryview | None = None
+            try:
+                view = _stream_writer_view(data, size)
+                total = view.nbytes
+                for offset in range(0, total, 8 << 20):
+                    chunk = view[offset : offset + (8 << 20)]
+                    try:
+                        written = stream.write(chunk)
+                        if written != chunk.nbytes:
+                            raise OSError(
+                                f"short TensorRT stream write: {written}/{chunk.nbytes}"
+                            )
+                        self.digest.update(chunk)
+                    finally:
+                        chunk.release()
+                self.size += total
+                return total
+            except BaseException as exc:
+                self.error = exc
+                return -1
+            finally:
+                if view is not None:
+                    view.release()
+
+    return FileStreamWriter()
+
+
+def build_serialized_network_to_file(
+    builder: Any,
+    network: Any,
+    config: Any,
+    output_path: str | Path,
+) -> dict[str, int | str]:
+    """Build directly to an atomically published plan without ``bytes(plan)``."""
+
+    raw_method = getattr(unwrap(builder), "build_serialized_network_to_stream", None)
+    if not callable(raw_method):
+        raise RuntimeError(
+            f"{_backend_label} does not support build_serialized_network_to_stream"
+        )
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.tmp.", dir=path.parent)
+    temporary = Path(temporary_name)
+    writer = None
+    try:
+        try:
+            stream = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)
+            raise
+        with stream:
+            writer = _file_stream_writer(stream)
+            succeeded = builder.build_serialized_network_to_stream(network, config, writer)
+            if writer.error is not None:
+                raise RuntimeError("TensorRT plan stream writer failed") from writer.error
+            if not succeeded:
+                raise RuntimeError("TensorRT failed to serialize the network to a stream")
+            if writer.size <= 0:
+                raise RuntimeError("TensorRT produced an empty serialized network")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {"bytes": writer.size, "sha256": writer.digest.hexdigest()}
+
+
 def _optional_int_env(name: str) -> int | None:
     value = os.environ.get(name)
     if value is None or not value.strip():
@@ -462,6 +609,25 @@ class _BuilderProxy(_HandleProxy):
             return _wrap_result(
                 self._raw.build_serialized_network(raw_network, raw_config),
                 self._trt_module,
+            )
+        finally:
+            _save_timing_cache(raw_config, timing_cache)
+
+    def build_serialized_network_to_stream(
+        self, network: Any, config: Any, writer: Any
+    ) -> bool:
+        raw_network = unwrap(network)
+        from .tvm_ffi.graph_build import process_network
+
+        process_network(raw_network)
+        raw_config = unwrap(config)
+        _apply_builder_config_env(raw_config)
+        timing_cache = _attach_timing_cache(raw_config)
+        try:
+            return bool(
+                self._raw.build_serialized_network_to_stream(
+                    raw_network, raw_config, unwrap(writer)
+                )
             )
         finally:
             _save_timing_cache(raw_config, timing_cache)

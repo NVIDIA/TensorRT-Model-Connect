@@ -32,6 +32,7 @@
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
 #include "cli/speech_session_helpers.h"
+#include "runtime/platform/dynamic_library.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -68,10 +69,17 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <sys/wait.h>
+#endif
 #include <system_error>
 #include <thread>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
+#include <utility>
 #include <vector>
 
 namespace {
@@ -89,7 +97,7 @@ std::string format_output_path(const std::string& prefix, int index, int total) 
     if (total <= 1)
         return prefix;
     const auto dot = prefix.find_last_of('.');
-    const auto slash = prefix.find_last_of('/');
+    const auto slash = prefix.find_last_of("/\\");
     const bool has_ext = dot != std::string::npos && (slash == std::string::npos || dot > slash);
     std::ostringstream out;
     if (has_ext)
@@ -183,34 +191,54 @@ void preload_cli_config_schema_owner(const CliArgs& args) {
 }
 
 std::filesystem::path current_executable_path() {
-    char buf[4096];
-    const ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len <= 0)
-        return {};
-    buf[len] = '\0';
-    return std::filesystem::path(buf);
+    return trtmc::internal::current_executable_path();
+}
+
+std::string default_temp_output(const char* name) {
+    return (std::filesystem::temp_directory_path() / name).string();
 }
 
 std::string build_python_executable() {
+    if (const char* configured = std::getenv("TRTMC_PYTHON_EXECUTABLE");
+        configured != nullptr && configured[0] != '\0') {
+        return configured;
+    }
+
     const auto current_exe = current_executable_path();
     if (current_exe.empty())
+#if defined(_WIN32)
+        return "python";
+#else
         return "python3";
+#endif
 
     std::error_code ec;
     const std::filesystem::path exe_path = std::filesystem::weakly_canonical(current_exe, ec);
     if (!ec && !exe_path.empty()) {
         const std::filesystem::path exe_dir = exe_path.parent_path();
-        for (const char* name : {"python3", "python"}) {
+#if defined(_WIN32)
+        constexpr const char* python_names[] = {"python.exe", "python3.exe"};
+#else
+        constexpr const char* python_names[] = {"python3", "python"};
+#endif
+        for (const char* name : python_names) {
             const std::filesystem::path candidate = exe_dir / name;
             std::error_code exists_ec;
-            if (std::filesystem::exists(candidate, exists_ec) &&
-                access(candidate.c_str(), X_OK) == 0) {
+            if (std::filesystem::is_regular_file(candidate, exists_ec)
+#if !defined(_WIN32)
+                && access(candidate.c_str(), X_OK) == 0
+#endif
+            ) {
                 return candidate.string();
             }
         }
     }
 
+#if defined(_WIN32)
+    return "python";
+#else
     return "python3";
+#endif
 }
 
 std::string build_pythonpath() {
@@ -243,7 +271,7 @@ std::string build_pythonpath() {
     const char* existing = std::getenv("PYTHONPATH");
     if (existing && existing[0] != '\0') {
         if (!pythonpath.empty())
-            pythonpath += ":";
+            pythonpath += trtmc::internal::path_list_separator();
         pythonpath += existing;
     }
     return pythonpath;
@@ -255,6 +283,46 @@ int run_python_module(const std::vector<std::string>& argv) {
         return EXIT_FAILURE;
     }
 
+#if defined(_WIN32)
+    struct EnvironmentRestore {
+        std::vector<std::pair<std::string, std::optional<std::string>>> values;
+        ~EnvironmentRestore() {
+            for (auto it = values.rbegin(); it != values.rend(); ++it)
+                (void)_putenv_s(it->first.c_str(), it->second ? it->second->c_str() : "");
+        }
+    } environment;
+    const auto set_environment = [&](const char* name, const std::string& value) {
+        const char* old = std::getenv(name);
+        environment.values.emplace_back(name, old ? std::optional<std::string>(old) : std::nullopt);
+        if (_putenv_s(name, value.c_str()) != 0)
+            throw std::runtime_error(std::string("failed to set child environment variable ") +
+                                     name);
+    };
+    const std::string pythonpath = build_pythonpath();
+    if (!pythonpath.empty())
+        set_environment("PYTHONPATH", pythonpath);
+    const auto executable = current_executable_path();
+    if (!executable.empty())
+        set_environment("_TRTMC_INTERNAL_NATIVE_BIN_DIR", executable.parent_path().string());
+
+    std::vector<std::wstring> wide_arguments;
+    wide_arguments.reserve(argv.size());
+    for (const auto& argument : argv)
+        wide_arguments.push_back(std::filesystem::path(argument).wstring());
+    std::vector<const wchar_t*> process_arguments;
+    process_arguments.reserve(wide_arguments.size() + 1);
+    for (const auto& argument : wide_arguments)
+        process_arguments.push_back(argument.c_str());
+    process_arguments.push_back(nullptr);
+
+    const intptr_t result =
+        _wspawnvp(_P_WAIT, wide_arguments.front().c_str(), process_arguments.data());
+    if (result == -1) {
+        std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
+        return EXIT_FAILURE;
+    }
+    return static_cast<int>(result);
+#else
     std::vector<char*> exec_argv;
     exec_argv.reserve(argv.size() + 1);
     for (const auto& arg : argv)
@@ -297,6 +365,7 @@ int run_python_module(const std::vector<std::string>& argv) {
         return 128 + sig;
     }
     return EXIT_FAILURE;
+#endif
 }
 
 int cmd_python(const CliArgs& args) {
@@ -548,8 +617,9 @@ int cmd_run(const CliArgs& args) {
                 if (!parent.empty())
                     std::filesystem::create_directories(parent);
             } else {
-                const std::string out_dir =
-                    args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
+                const std::string out_dir = args.output_dir.empty()
+                                                ? default_temp_output("trtmc_run_output")
+                                                : args.output_dir;
                 std::filesystem::create_directories(out_dir);
                 out_path = out_dir + "/output.png";
             }
@@ -617,8 +687,9 @@ int cmd_run(const CliArgs& args) {
                 if (!parent.empty())
                     std::filesystem::create_directories(parent);
             } else {
-                const std::string out_dir =
-                    args.output_dir.empty() ? "/tmp/trtmc_run_output" : args.output_dir;
+                const std::string out_dir = args.output_dir.empty()
+                                                ? default_temp_output("trtmc_run_output")
+                                                : args.output_dir;
                 std::filesystem::create_directories(out_dir);
                 out_prefix = out_dir + "/output.png";
             }
@@ -729,7 +800,7 @@ int cmd_generate_video(const CliArgs& args) {
     }
 
     const std::string out_dir =
-        args.output_dir.empty() ? "/tmp/trtmc_generate_video" : args.output_dir;
+        args.output_dir.empty() ? default_temp_output("trtmc_generate_video") : args.output_dir;
 
     auto pipeline = load_pipeline(args);
 
@@ -868,7 +939,8 @@ int cmd_segment(const CliArgs& args) {
     auto result = pipeline->segment(image.pixels.data(), image.height, image.width);
 
     // Save class map as grayscale PNG (pixel value = class index)
-    const std::string out_path = args.output_dir.empty() ? "/tmp/seg_output.png" : args.output_dir;
+    const std::string out_path =
+        args.output_dir.empty() ? default_temp_output("seg_output.png") : args.output_dir;
     const int32_t out_h = result.height > 0 ? result.height : image.height;
     const int32_t out_w = result.width > 0 ? result.width : image.width;
     const auto total_px = static_cast<std::size_t>(out_h) * out_w;
@@ -905,7 +977,8 @@ int cmd_disparity(const CliArgs& args) {
     auto pipeline = load_pipeline(args);
     const auto result = pipeline->estimate_disparity(left.pixels.data(), right.pixels.data(),
                                                      left.height, left.width);
-    const std::string out_path = args.output_dir.empty() ? "/tmp/disparity.f32" : args.output_dir;
+    const std::string out_path =
+        args.output_dir.empty() ? default_temp_output("disparity.f32") : args.output_dir;
     std::ofstream output(out_path, std::ios::binary);
     if (!output || result.disparity.empty()) {
         std::cerr << "Error: failed to create disparity output: " << out_path << '\n';
@@ -1101,7 +1174,8 @@ int cmd_segment_prompted(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    const std::string out_dir = args.output_dir.empty() ? "/tmp/trtmc_masks" : args.output_dir;
+    const std::string out_dir =
+        args.output_dir.empty() ? default_temp_output("trtmc_masks") : args.output_dir;
     std::filesystem::create_directories(out_dir);
 
     auto pipeline = load_pipeline(args);
@@ -1255,8 +1329,9 @@ int cmd_generate_audio(const CliArgs& args) {
         // Streaming mode: write raw PCM float32 to output file (or stdout
         // placeholder). Codec runs on chunks during decoding for low latency.
         // Pipe output to: aplay -r 22050 -f FLOAT_LE -c 1 -t raw
-        const std::string out_path =
-            args.output_dir.empty() ? "/tmp/generated_audio_stream.raw" : args.output_dir;
+        const std::string out_path = args.output_dir.empty()
+                                         ? default_temp_output("generated_audio_stream.raw")
+                                         : args.output_dir;
         FILE* fp = std::fopen(out_path.c_str(), "wb");
         if (!fp) {
             std::cerr << "Error: cannot open " << out_path << " for writing\n";
@@ -1279,7 +1354,7 @@ int cmd_generate_audio(const CliArgs& args) {
     auto result = pipeline->generate_audio(args.prompt, cfg);
 
     const std::string out_path =
-        args.output_dir.empty() ? "/tmp/generated_audio.wav" : args.output_dir;
+        args.output_dir.empty() ? default_temp_output("generated_audio.wav") : args.output_dir;
     trtmc::io::write_wav(result, out_path);
 
     std::cout << "Generated " << result.num_samples << " audio samples -> " << out_path << '\n';
@@ -1568,7 +1643,8 @@ int cmd_speak(const CliArgs& args) {
                                  cfg, audio.sample_rate);
     }
 
-    const std::string out_path = args.audio_out.empty() ? "/tmp/speech_output.wav" : args.audio_out;
+    const std::string out_path =
+        args.audio_out.empty() ? default_temp_output("speech_output.wav") : args.audio_out;
     trtmc::io::write_wav(result, out_path);
 
     if (!agent_text.empty())

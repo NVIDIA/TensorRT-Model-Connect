@@ -53,6 +53,25 @@ if(TRTMC_MODEL_PROOF_MODEL)
   endif()
 endif()
 
+if(TRTMC_RUNTIME_MODELS)
+  set(_trtmc_selected_model_manifests)
+  foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODELS)
+    if(NOT _trtmc_model MATCHES "^[A-Za-z0-9_.-]+$")
+      message(FATAL_ERROR
+        "TRTMC_RUNTIME_MODELS contains an unsafe model id: '${_trtmc_model}'")
+    endif()
+    set(_trtmc_selected_manifest
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/MODEL.toml")
+    if(NOT EXISTS "${_trtmc_selected_manifest}")
+      message(FATAL_ERROR
+        "TRTMC_RUNTIME_MODELS requests unknown model '${_trtmc_model}'")
+    endif()
+    list(APPEND _trtmc_selected_model_manifests "${_trtmc_selected_manifest}")
+  endforeach()
+  list(REMOVE_DUPLICATES _trtmc_selected_model_manifests)
+  set(TRTMC_RUNTIME_MODEL_MANIFESTS ${_trtmc_selected_model_manifests})
+endif()
+
 set(TRTMC_RUNTIME_MODEL_IDS)
 foreach(_trtmc_model_manifest IN LISTS TRTMC_RUNTIME_MODEL_MANIFESTS)
   get_filename_component(_trtmc_model_dir "${_trtmc_model_manifest}" DIRECTORY)
@@ -71,7 +90,10 @@ foreach(_trtmc_model_manifest IN LISTS TRTMC_RUNTIME_MODEL_MANIFESTS)
 
   _trtmc_model_manifest_string("${_trtmc_model_manifest_text}" "runtime_library"
     _trtmc_runtime_library)
-  if(NOT _trtmc_runtime_library)
+  if(WIN32)
+    set(_trtmc_runtime_library
+      "${CMAKE_SHARED_LIBRARY_PREFIX}trtmc_model_${_trtmc_model}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  elseif(NOT _trtmc_runtime_library)
     set(_trtmc_runtime_library "libtrtmc_model_${_trtmc_model}.so")
   endif()
 

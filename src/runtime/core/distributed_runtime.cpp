@@ -11,15 +11,33 @@
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#if !defined(_WIN32)
 #include <dlfcn.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 namespace trtmc {
+
+#if defined(_WIN32)
+
+DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size) {
+    DistributedRuntimeGroup group;
+    group.tp_size = tp_size;
+    if (tp_size > 1) {
+        throw std::runtime_error(
+            "Tensor-parallel NCCL runtime is not supported by the native Windows build");
+    }
+    return group;
+}
+
+#else
 
 namespace {
 
@@ -234,5 +252,7 @@ DistributedRuntimeGroup initialize_tensor_parallel_group(int tp_size) {
     group.owner = std::move(runtime);
     return group;
 }
+
+#endif
 
 } // namespace trtmc

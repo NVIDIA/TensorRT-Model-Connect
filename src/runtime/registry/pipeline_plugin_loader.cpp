@@ -5,17 +5,16 @@
 
 #include "trtmc/runtime/pipeline_plugin_loader.h"
 
+#include "runtime/platform/dynamic_library.h"
 #include "trtmc/runtime/pipeline_registry.h"
 
 #include <cstdlib>
-#include <dlfcn.h>
 #include <filesystem>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
-#include <unistd.h>
 #include <unordered_set>
 #include <vector>
 
@@ -45,14 +44,7 @@ std::unordered_set<std::string>& loaded_model_ids() {
 }
 
 std::string exe_dir() {
-    char buf[4096];
-    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len <= 0)
-        return "";
-    buf[len] = '\0';
-    std::string path(buf);
-    auto pos = path.rfind('/');
-    return (pos != std::string::npos) ? path.substr(0, pos) : "";
+    return internal::current_executable_path().parent_path().string();
 }
 
 void append_split_paths(std::vector<std::string>& paths, const char* raw) {
@@ -61,7 +53,7 @@ void append_split_paths(std::vector<std::string>& paths, const char* raw) {
     std::string text(raw);
     std::size_t start = 0;
     while (start <= text.size()) {
-        const std::size_t end = text.find(':', start);
+        const std::size_t end = text.find(internal::path_list_separator(), start);
         auto item = text.substr(start, end == std::string::npos ? std::string::npos : end - start);
         if (!item.empty())
             paths.push_back(std::move(item));
@@ -106,6 +98,7 @@ void append_installed_model_plugin_dirs(std::vector<std::string>& dirs) {
     const fs::path exe_bin_dir(bin_dir);
     if (exe_bin_dir.filename() == "bin") {
         const fs::path prefix = exe_bin_dir.parent_path();
+        dirs.push_back((prefix / "bin" / "trtmc" / "models").string());
         dirs.push_back((prefix / "lib" / "trtmc" / "models").string());
         dirs.push_back((prefix / "lib64" / "trtmc" / "models").string());
         append_python_package_model_dirs(prefix, dirs);
@@ -162,16 +155,14 @@ std::unordered_set<std::string> expected_strategies_for_model(const std::string&
 void close_model_plugin_candidate(ModelPluginCandidate& candidate) {
     if (candidate.handle == nullptr)
         return;
-    dlclose(candidate.handle);
+    internal::close_dynamic_library(candidate.handle);
     candidate.handle = nullptr;
 }
 
 bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std::string& model_id,
                              std::vector<std::string>& errors) {
-    dlerror();
-    auto* id_sym = dlsym(handle, "trtmc_model_plugin_id");
-    const char* id_err = dlerror();
-    if (id_err != nullptr || id_sym == nullptr) {
+    auto* id_sym = internal::dynamic_library_symbol(handle, "trtmc_model_plugin_id");
+    if (id_sym == nullptr) {
         errors.push_back(candidate.string() + ": missing trtmc_model_plugin_id");
         return false;
     }
@@ -188,11 +179,11 @@ bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std:
 std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& path,
                                                                 const std::string& model_id,
                                                                 std::vector<std::string>& errors) {
-    dlerror();
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    std::string error;
+    void* handle =
+        internal::open_dynamic_library(path, internal::DynamicLibraryVisibility::local, &error);
     if (handle == nullptr) {
-        const char* err = dlerror();
-        errors.push_back(path.string() + ": " + (err ? err : "unknown dlopen error"));
+        errors.push_back(path.string() + ": " + error);
         return std::nullopt;
     }
 
@@ -202,10 +193,8 @@ std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& 
         return std::nullopt;
     }
 
-    dlerror();
-    auto* sym = dlsym(handle, "trtmc_register_model_plugin");
-    const char* err = dlerror();
-    if (err != nullptr || sym == nullptr) {
+    auto* sym = internal::dynamic_library_symbol(handle, "trtmc_register_model_plugin");
+    if (sym == nullptr) {
         errors.push_back(path.string() + ": missing trtmc_register_model_plugin");
         close_model_plugin_candidate(candidate);
         return std::nullopt;
@@ -330,7 +319,7 @@ std::string model_plugin_library_name(const std::string& model_id) {
             entry.library_name != nullptr)
             return std::string(entry.library_name);
     }
-    return "libtrtmc_model_" + model_id + ".so";
+    return internal::dynamic_library_filename("trtmc_model_" + model_id);
 }
 
 std::optional<std::string> legacy_runtime_strategy_alias_target(const std::string& strategy,

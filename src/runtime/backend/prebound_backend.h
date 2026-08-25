@@ -8,6 +8,7 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,25 @@ class IPreboundBackend {
     create_module_prebound(const void* plan_data, size_t plan_size,
                            const ModuleCreateOptions& options,
                            const std::vector<ModuleExternalBinding>& external_bindings) = 0;
+
+    // Optional TensorRT-RTX path for large staged plans. The caller supplies a
+    // validated byte range and digest inside a local bundle so the backend can
+    // verify and deserialize without copying the complete plan into host memory.
+    virtual std::unique_ptr<ITrtModule>
+    create_module_from_file(const char* plan_path, std::uint64_t plan_offset,
+                            std::uint64_t plan_size, const char* expected_sha256,
+                            const ModuleCreateOptions& options,
+                            const std::vector<ModuleExternalBinding>& external_bindings,
+                            std::int64_t weight_streaming_budget_bytes) {
+        (void)plan_path;
+        (void)plan_offset;
+        (void)plan_size;
+        (void)expected_sha256;
+        (void)options;
+        (void)external_bindings;
+        (void)weight_streaming_budget_bytes;
+        return nullptr;
+    }
 };
 
 } // namespace trtmc

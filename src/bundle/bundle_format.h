@@ -36,6 +36,11 @@ struct BundleFile {
     std::vector<BundleSection> sections;
 };
 
+struct BundleSectionFileRange {
+    std::uint64_t offset{0};
+    std::uint64_t size{0};
+};
+
 // Read a complete bundle from disk.
 BundleFile ReadBundleFile(const std::string& path);
 
@@ -46,6 +51,11 @@ BundleInfo ReadBundleHeader(const std::string& path);
 // read; other bundle payloads are never materialized. The section metadata must
 // come from ReadBundleHeader(path).
 std::vector<char> ReadBundleSection(const std::string& path, const BundleSectionInfo& section);
+
+// Resolve and validate the absolute byte range for a section without loading
+// its payload. This supports stream-based backends for model-sized plans.
+BundleSectionFileRange ResolveBundleSectionFileRange(const std::string& path,
+                                                     const BundleSectionInfo& section);
 
 // Copy one section to an output stream in bounded-size chunks. This is the
 // preferred path for model-sized payloads that must not be buffered in memory.

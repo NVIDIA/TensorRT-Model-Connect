@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -38,6 +39,20 @@ static void check_message_contains(const std::string& message, const std::string
 }
 
 namespace {
+
+void test_help_uses_platform_neutral_library_names() {
+    std::ostringstream output;
+    std::streambuf* previous = std::cerr.rdbuf(output.rdbuf());
+    trtmc::cli::print_usage();
+    std::cerr.rdbuf(previous);
+
+    check(output.str().find("backend shared libraries") != std::string::npos,
+          "help names backend shared libraries portably");
+    check(output.str().find("model-plugin shared libraries") != std::string::npos,
+          "help names model-plugin shared libraries portably");
+    check(output.str().find("libtrtmc_backend_*.so") == std::string::npos,
+          "help does not hard-code Linux backend filenames");
+}
 
 trtmc::cli::CliArgs parse(std::initializer_list<std::string> args) {
     std::vector<std::string> storage(args);
@@ -495,6 +510,7 @@ void test_initial_latents_are_run_input_source() {
 } // namespace
 
 int main() {
+    test_help_uses_platform_neutral_library_names();
     test_no_args_show_help();
     test_help_aliases_show_help();
     test_version_aliases();

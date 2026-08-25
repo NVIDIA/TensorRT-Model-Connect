@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace trtmc {
 
@@ -132,10 +133,71 @@ void test_bind_external_same_owned_pointer_preserves_ownership() {
     cudaStreamDestroy(stream);
 }
 
+void test_constructor_prebinding_avoids_owned_io_buffers() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    void* input = nullptr;
+    void* output = nullptr;
+    cudaMalloc(&input, 16);
+    cudaMalloc(&output, 16);
+    {
+        auto* ctx = engine->createExecutionContext();
+        const std::vector<trtmc::ModuleExternalBinding> bindings = {
+            {"x", input, 16},
+            {"y", output, 16},
+        };
+        trtmc::TrtModuleImpl module(engine.get(), ctx, stream, 0, nullptr, bindings);
+        check(module.ok(), "constructor prebinding: module is valid");
+        check(module.device_ptr("x") == input && module.device_ptr("y") == output,
+              "constructor prebinding: exact external addresses are used");
+        check(trtmc::TrtModuleImplTestPeer::binding_is_external(module, "x") &&
+                  trtmc::TrtModuleImplTestPeer::binding_is_external(module, "y"),
+              "constructor prebinding: no owned I/O buffers are allocated");
+    }
+    check(cudaMemset(input, 0, 16) == cudaSuccess && cudaMemset(output, 0, 16) == cudaSuccess,
+          "constructor prebinding: module destruction preserves caller buffers");
+    cudaFree(input);
+    cudaFree(output);
+    cudaStreamDestroy(stream);
+}
+
+void test_constructor_failure_preserves_external_buffers() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    void* input = nullptr;
+    void* output = nullptr;
+    cudaMalloc(&input, 16);
+    cudaMalloc(&output, 16);
+    {
+        auto* ctx = engine->createExecutionContext();
+        const std::vector<trtmc::ModuleExternalBinding> invalid_bindings = {
+            {"x", input, 1}, // smaller than the engine tensor
+            {"y", output, 16},
+        };
+        trtmc::TrtModuleImpl module(engine.get(), ctx, stream, 0, nullptr, invalid_bindings);
+        check(!module.ok(), "constructor failure: invalid capacity is rejected");
+    }
+    check(cudaMemset(input, 0, 16) == cudaSuccess && cudaMemset(output, 0, 16) == cudaSuccess,
+          "constructor failure: caller buffers remain live");
+    cudaFree(input);
+    cudaFree(output);
+    cudaStreamDestroy(stream);
+}
+
 } // namespace
 
 int main() {
     test_bind_external_failure_preserves_owned_buffer();
     test_bind_external_same_owned_pointer_preserves_ownership();
+    test_constructor_prebinding_avoids_owned_io_buffers();
+    test_constructor_failure_preserves_external_buffers();
     return failures == 0 ? 0 : 1;
 }

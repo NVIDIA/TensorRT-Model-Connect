@@ -18,6 +18,13 @@ ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES = 64 << 30
 DENOISER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 
+# The RTX path builds each plan in a fresh process, so one conservative
+# workspace and runtime budget cover every stage without coupling the public
+# artifact to a particular workstation identity.
+RTX_STAGED_WORKSPACE_BYTES = 16 << 30
+RTX_WEIGHT_STREAMING_BUDGET_BYTES = 32 << 30
+RTX_CUDA_MAJOR = 12
+
 DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "text_encoder.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "adaln_precompute.plan": ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,

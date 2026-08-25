@@ -6,16 +6,15 @@
 #include "runtime/backend/backend_loader.h"
 
 #include "runtime/backend/prebound_backend.h"
+#include "runtime/platform/dynamic_library.h"
 
 #include <cstdlib>
-#include <dlfcn.h>
 #include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
-#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -29,18 +28,11 @@ namespace {
 namespace fs = std::filesystem;
 
 std::string exe_dir() {
-    char buf[4096];
-    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len <= 0)
-        return "";
-    buf[len] = '\0';
-    std::string path(buf);
-    auto pos = path.rfind('/');
-    return (pos != std::string::npos) ? path.substr(0, pos) : "";
+    return internal::current_executable_path().parent_path().string();
 }
 
 struct CachedBackend {
-    void* dl_handle{nullptr};
+    internal::DynamicLibraryHandle dl_handle{nullptr};
     IBackend* backend{nullptr};
     BackendLoadMetadata metadata;
 };
@@ -63,44 +55,35 @@ void cleanup_backends() {
     for (auto& [name, entry] : g_cache) {
         if (entry.backend) {
             auto destroy = reinterpret_cast<void (*)(IBackend*)>(
-                dlsym(entry.dl_handle, "trtmc_destroy_backend"));
+                internal::dynamic_library_symbol(entry.dl_handle, "trtmc_destroy_backend"));
             if (destroy)
                 destroy(entry.backend);
             entry.backend = nullptr;
         }
         if (entry.dl_handle) {
-            dlclose(entry.dl_handle);
+            internal::close_dynamic_library(entry.dl_handle);
             entry.dl_handle = nullptr;
         }
     }
     for (auto& [path, handle] : g_preloaded_dependencies) {
         if (handle)
-            dlclose(handle);
+            internal::close_dynamic_library(handle);
     }
     g_preloaded_dependencies.clear();
 }
 
-void append_load_error(std::string& tried, const std::string& label) {
-    const char* error = dlerror();
-    tried += "  " + label + ": " + (error ? error : "unknown dlopen error") + "\n";
-}
-
-void* try_open_backend_dso(const std::string& path, const std::string& label, std::string& tried) {
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!handle) {
-        append_load_error(tried, label);
-    }
+internal::DynamicLibraryHandle try_open_backend_dso(const fs::path& path, const std::string& label,
+                                                    std::string& tried) {
+    std::string error;
+    auto handle =
+        internal::open_dynamic_library(path, internal::DynamicLibraryVisibility::local, &error);
+    if (!handle)
+        tried += "  " + label + ": " + error + "\n";
     return handle;
 }
 
 std::string join_path(const std::string& dir, const std::string& dso_name) {
-    if (dir.empty()) {
-        return dso_name;
-    }
-    if (dir.back() == '/') {
-        return dir + dso_name;
-    }
-    return dir + "/" + dso_name;
+    return dir.empty() ? dso_name : (fs::path(dir) / dso_name).string();
 }
 
 void append_python_package_backend_dirs(const fs::path& root, std::vector<std::string>& dirs) {
@@ -144,8 +127,8 @@ void* open_backend_dso(const std::string& dso_name, const std::vector<std::strin
                        std::string& tried) {
     const std::string exe_path = exe_dir();
     if (!exe_path.empty()) {
-        void* handle =
-            try_open_backend_dso(exe_path + "/" + dso_name, exe_path + "/" + dso_name, tried);
+        const std::string path = join_path(exe_path, dso_name);
+        auto handle = try_open_backend_dso(path, path, tried);
         if (handle) {
             return handle;
         }
@@ -153,7 +136,7 @@ void* open_backend_dso(const std::string& dso_name, const std::vector<std::strin
 
     for (const std::string& dir : installed_package_backend_dirs()) {
         const std::string path = join_path(dir, dso_name);
-        void* handle = try_open_backend_dso(path, path, tried);
+        auto handle = try_open_backend_dso(path, path, tried);
         if (handle) {
             return handle;
         }
@@ -164,7 +147,7 @@ void* open_backend_dso(const std::string& dso_name, const std::vector<std::strin
             continue;
         }
         const std::string path = join_path(dir, dso_name);
-        void* handle = try_open_backend_dso(path, path, tried);
+        auto handle = try_open_backend_dso(path, path, tried);
         if (handle) {
             return handle;
         }
@@ -174,8 +157,7 @@ void* open_backend_dso(const std::string& dso_name, const std::vector<std::strin
 }
 
 const char* optional_string_symbol(void* handle, const char* symbol) {
-    dlerror();
-    auto fn = reinterpret_cast<const char* (*)()>(dlsym(handle, symbol));
+    auto fn = reinterpret_cast<const char* (*)()>(internal::dynamic_library_symbol(handle, symbol));
     if (!fn) {
         return "";
     }
@@ -185,15 +167,16 @@ const char* optional_string_symbol(void* handle, const char* symbol) {
 
 CachedBackend create_backend(const std::string& requested_name, const std::string& dso_name,
                              void* handle) {
-    auto create_fn = reinterpret_cast<IBackend* (*)()>(dlsym(handle, "trtmc_create_backend"));
+    auto create_fn = reinterpret_cast<IBackend* (*)()>(
+        internal::dynamic_library_symbol(handle, "trtmc_create_backend"));
     if (!create_fn) {
-        dlclose(handle);
+        internal::close_dynamic_library(handle);
         throw std::runtime_error(dso_name + " loaded but missing trtmc_create_backend symbol");
     }
 
     IBackend* backend = create_fn();
     if (!backend) {
-        dlclose(handle);
+        internal::close_dynamic_library(handle);
         throw std::runtime_error(dso_name + ": trtmc_create_backend() returned nullptr");
     }
 
@@ -208,7 +191,7 @@ CachedBackend create_backend(const std::string& requested_name, const std::strin
 }
 
 std::string backend_dso_name(const std::string& backend_name) {
-    return "libtrtmc_backend_" + backend_name + ".so";
+    return internal::dynamic_library_filename("trtmc_backend_" + backend_name);
 }
 
 void populate_load_outputs(const std::string& backend_name,
@@ -278,15 +261,17 @@ std::string join_backend_names(const std::vector<std::string>& backend_names) {
                                  "inside the installed tensorrt_model_connect/bin package "
                                  "directory,\n"
                                  "in a LoadOptions::backend_search_paths / --backend-dir "
-                                 "directory, or in LD_LIBRARY_PATH.");
+                                 "directory, or in " +
+                                 internal::dynamic_library_search_path_environment() + ".");
     }
 
     throw std::runtime_error("No compatible backend DSO available for candidates: " +
                              join_backend_names(backend_names) + ".\n" + all_tried +
-                             "\nEnsure the matching libtrtmc_backend_<backend>.so is next to the "
+                             "\nEnsure the matching backend library is next to the "
                              "trtmc binary, inside the installed tensorrt_model_connect/bin "
                              "package directory, in a LoadOptions::backend_search_paths / "
-                             "--backend-dir directory, or in LD_LIBRARY_PATH.");
+                             "--backend-dir directory, or in " +
+                             internal::dynamic_library_search_path_environment() + ".");
 }
 
 } // namespace
@@ -311,12 +296,11 @@ void BackendLoader::preload_dependency(const std::string& path) {
 
     register_cleanup_once();
 
-    dlerror();
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    std::string error;
+    void* handle =
+        internal::open_dynamic_library(path, internal::DynamicLibraryVisibility::global, &error);
     if (!handle) {
-        const char* error = dlerror();
-        throw std::runtime_error("Failed to preload dependency " + path + ": " +
-                                 (error ? error : "unknown dlopen error"));
+        throw std::runtime_error("Failed to preload dependency " + path + ": " + error);
     }
     g_preloaded_dependencies[path] = handle;
     std::cerr << "[trtmc] Preloaded dependency: " << path << std::endl;

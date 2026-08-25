@@ -41,6 +41,7 @@ const sidebars = {
         'getting-started/environment-and-repro',
         'getting-started/installation',
         'getting-started/source-build',
+        'getting-started/windows-native-h3',
         'getting-started/quick-start',
         'getting-started/troubleshooting'
       ]

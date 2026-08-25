@@ -178,8 +178,9 @@ def _open_atomic_bundle_output(destination: Path):
         except FileExistsError:
             continue
         try:
-            if destination_mode is not None:
-                os.fchmod(descriptor, destination_mode)
+            fchmod = getattr(os, "fchmod", None)
+            if destination_mode is not None and fchmod is not None:
+                fchmod(descriptor, destination_mode)
             return os.fdopen(descriptor, "wb"), temporary_path
         except Exception:
             os.close(descriptor)

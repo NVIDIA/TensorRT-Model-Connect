@@ -4,9 +4,17 @@
 cmake_minimum_required(VERSION 3.20)
 project(tensorrt_model_connect VERSION 0.1.0 LANGUAGES CXX)
 
+if(MSVC AND NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
+
 # Release wheels package build outputs directly. Keep CMake's automatically
 # generated build-tree RPATH entries relative to each ELF file.
-set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
+if(NOT WIN32)
+  set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
+else()
+  set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
 
 # Standard CUDA installations do not always add their bin directory to PATH
 # (notably bare-metal L4T images). Preserve an explicit CUDACXX selection, but
@@ -52,10 +60,26 @@ option(TRTMC_BUILD_BENCHMARKS "Build benchmark executables" ON)
 option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial sampler" ON)
 option(TRTMC_DISTRIBUTABLE_BUILD
        "Build distributable artifacts without embedding source/build paths" OFF)
+set(TRTMC_RUNTIME_MODELS "" CACHE STRING
+  "Semicolon-separated runtime model plugins to build; empty builds every model.")
 set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
   "Require the source tree to contain exactly this runtime model (CI isolation proof mode).")
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
+set(TRTMC_RTX_ROOT "" CACHE PATH
+  "TensorRT-RTX SDK root containing include, lib, and bin directories.")
+set(TRTMC_RTX_INCLUDE_DIR "" CACHE PATH
+  "TensorRT-RTX SDK include directory; overrides TRTMC_RTX_ROOT/include.")
+set(TRTMC_RTX_LIBRARY_DIR "" CACHE PATH
+  "TensorRT-RTX SDK library directory; overrides TRTMC_RTX_ROOT/lib.")
+set(TRTMC_RTX_RUNTIME_DIR "" CACHE PATH
+  "TensorRT-RTX runtime DLL directory; overrides TRTMC_RTX_ROOT/bin.")
+set(TRTMC_RTX_LIBRARY_FILE "" CACHE FILEPATH
+  "Exact TensorRT-RTX import or shared library.")
+set(TRTMC_RTX_RUNTIME_DLL "" CACHE FILEPATH
+  "Exact TensorRT-RTX runtime DLL on Windows.")
+set(TRTMC_NLOHMANN_JSON_INCLUDE_DIR "" CACHE PATH
+  "Local include root containing nlohmann/json.hpp.")
 set(TRTMC_SOURCE_REVISION "" CACHE STRING
   "Source revision embedded in release benchmark worker provenance.")
 if(NOT TRTMC_SOURCE_REVISION)
@@ -91,14 +115,36 @@ set(_trtmc_default_search_paths
   /usr/local/cuda/targets/sbsa-linux/lib
 )
 
+if(CMAKE_CUDA_COMPILER)
+  list(APPEND _trtmc_default_search_paths
+    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    ${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
+endif()
+
+if(WIN32)
+  foreach(_trtmc_cuda_root IN ITEMS "$ENV{CUDA_PATH}" "$ENV{CUDAToolkit_ROOT}")
+    if(_trtmc_cuda_root)
+      list(APPEND _trtmc_default_search_paths
+        "${_trtmc_cuda_root}"
+        "${_trtmc_cuda_root}/include"
+        "${_trtmc_cuda_root}/lib/x64")
+    endif()
+  endforeach()
+endif()
+
 if(DEFINED ENV{TRT_ROOT})
-  list(APPEND _trtmc_default_search_paths "$ENV{TRT_ROOT}")
+  list(APPEND _trtmc_default_search_paths
+    "$ENV{TRT_ROOT}"
+    "$ENV{TRT_ROOT}/include"
+    "$ENV{TRT_ROOT}/lib"
+    "$ENV{TRT_ROOT}/lib/x64")
 endif()
 
 if(DEFINED ENV{CUDA_HOME})
   list(APPEND _trtmc_default_search_paths "$ENV{CUDA_HOME}")
   list(APPEND _trtmc_default_search_paths "$ENV{CUDA_HOME}/include")
   list(APPEND _trtmc_default_search_paths "$ENV{CUDA_HOME}/lib64")
+  list(APPEND _trtmc_default_search_paths "$ENV{CUDA_HOME}/lib/x64")
 endif()
 
 # The TensorRT pip wheel (tensorrt_cu13) ships libnvinfer.so under a Python
@@ -126,7 +172,7 @@ find_path(TRTMC_TRT_INCLUDE_DIR NvInferRuntime.h
 find_library(TRTMC_TRT_LIBRARY
   NAMES nvinfer libnvinfer.so.11 nvinfer.so.11 libnvinfer.so.10 nvinfer.so.10
   PATHS ${_trtmc_default_search_paths}
-  PATH_SUFFIXES "" lib lib64
+  PATH_SUFFIXES "" lib lib64 lib/x64
 )
 
 find_path(TRTMC_CUDA_INCLUDE_DIR cuda_runtime_api.h
@@ -137,7 +183,7 @@ find_path(TRTMC_CUDA_INCLUDE_DIR cuda_runtime_api.h
 find_library(TRTMC_CUDART_LIBRARY
   NAMES cudart libcudart.so
   PATHS ${_trtmc_default_search_paths}
-  PATH_SUFFIXES "" lib lib64
+  PATH_SUFFIXES "" lib lib64 lib/x64
 )
 
 function(_trtmc_header_define_value OUT_VAR DEFINE_NAME)
@@ -186,22 +232,32 @@ if(TRTMC_ENABLE_TRT AND TRTMC_TRT_INCLUDE_DIR AND TRTMC_TRT_LIBRARY)
 endif()
 
 # --- nlohmann/json for BPE tokenizer JSON parsing ---
-find_package(nlohmann_json CONFIG QUIET)
-if(TARGET nlohmann_json::nlohmann_json)
-  get_target_property(_trtmc_nlohmann_json_include
-    nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
-  message(STATUS "nlohmann/json: using package config")
+if(TRTMC_NLOHMANN_JSON_INCLUDE_DIR)
+  if(NOT EXISTS "${TRTMC_NLOHMANN_JSON_INCLUDE_DIR}/nlohmann/json.hpp")
+    message(FATAL_ERROR
+      "TRTMC_NLOHMANN_JSON_INCLUDE_DIR must contain nlohmann/json.hpp: "
+      "${TRTMC_NLOHMANN_JSON_INCLUDE_DIR}")
+  endif()
+  set(_trtmc_nlohmann_json_include "${TRTMC_NLOHMANN_JSON_INCLUDE_DIR}")
+  message(STATUS "nlohmann/json: using local include directory")
 else()
-  include(FetchContent)
-  set(JSON_Install OFF CACHE INTERNAL "")
-  FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
-    GIT_SHALLOW TRUE
-  )
-  FetchContent_MakeAvailable(nlohmann_json)
-  set(_trtmc_nlohmann_json_include "${nlohmann_json_SOURCE_DIR}/include")
+  find_package(nlohmann_json CONFIG QUIET)
+  if(TARGET nlohmann_json::nlohmann_json)
+    get_target_property(_trtmc_nlohmann_json_include
+      nlohmann_json::nlohmann_json INTERFACE_INCLUDE_DIRECTORIES)
+    message(STATUS "nlohmann/json: using package config")
+  else()
+    include(FetchContent)
+    set(JSON_Install OFF CACHE INTERNAL "")
+    FetchContent_Declare(
+      nlohmann_json
+      GIT_REPOSITORY https://github.com/nlohmann/json.git
+      GIT_TAG v3.11.3
+      GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+    set(_trtmc_nlohmann_json_include "${nlohmann_json_SOURCE_DIR}/include")
+  endif()
 endif()
 
 # --- Bundle-only runtime library ---
@@ -209,6 +265,13 @@ endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(cmake/trtmc_config_schemas.cmake)
 include(cmake/trtmc_pipeline_plugins.cmake)
+if(WIN32)
+  set(_trtmc_optimized_runtime_host_source
+    src/runtime/providers/optimized_runtime_host_windows.cpp)
+else()
+  set(_trtmc_optimized_runtime_host_source
+    src/runtime/providers/optimized_runtime_host.cpp)
+endif()
 add_library(trtmc_core SHARED
   src/bundle/bundle_format.cpp
   src/bundle/bundle_view.cpp
@@ -218,7 +281,8 @@ add_library(trtmc_core SHARED
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
   src/runtime/backend/trt_version.cpp
-  src/runtime/providers/optimized_runtime_host.cpp
+  src/runtime/platform/dynamic_library.cpp
+  ${_trtmc_optimized_runtime_host_source}
   src/runtime/core/distributed_runtime.cpp
   src/runtime/core/device_tensor.cpp
   src/runtime/core/image_features.cpp
@@ -250,6 +314,11 @@ add_library(trtmc_core SHARED
   src/runtime/registry/pipeline_plugin.cpp
   src/runtime/registry/pipeline_plugin_loader.cpp
   ${TRTMC_MODEL_PLUGIN_INDEX_SOURCE}
+)
+set_target_properties(trtmc_core PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
 )
 
 # Keep warning policy strict for project code, but avoid CI log spam from
@@ -286,8 +355,8 @@ endif()
 
 target_compile_options(trtmc_core
   PRIVATE
-    "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
-    "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>"
+    "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<PLATFORM_ID:Windows>>>:-Wall;-Wextra>"
 )
 
 # nlohmann/json: use include-only (header-only lib) to avoid export-set issues
@@ -296,20 +365,25 @@ target_include_directories(trtmc_core SYSTEM PRIVATE
 )
 
 target_link_libraries(trtmc_core PRIVATE ${CMAKE_DL_LIBS})
+if(WIN32)
+  target_link_libraries(trtmc_core PRIVATE Psapi)
+endif()
 
 target_compile_definitions(trtmc_core PRIVATE TRTMC_HAS_TRT=0)
 target_include_directories(trtmc_core SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
 find_library(TRTMC_CUBLAS_LIBRARY NAMES cublas libcublas.so
-  PATHS ${_trtmc_default_search_paths} PATH_SUFFIXES "" lib lib64)
+  PATHS ${_trtmc_default_search_paths} PATH_SUFFIXES "" lib lib64 lib/x64)
 target_link_libraries(trtmc_core PRIVATE ${TRTMC_CUDART_LIBRARY}
   $<$<BOOL:${TRTMC_CUBLAS_LIBRARY}>:${TRTMC_CUBLAS_LIBRARY}>)
-message(STATUS "Core runtime: TensorRT-free (backend DSOs are dlopen-loaded)")
+message(STATUS "Core runtime: TensorRT-free (backend libraries are loaded at runtime)")
 message(STATUS "  CUDA include: ${TRTMC_CUDA_INCLUDE_DIR}")
 message(STATUS "  CUDART lib : ${TRTMC_CUDART_LIBRARY}")
 if(_trtmc_can_build_trt_backend)
   message(STATUS "  Standard TRT backend SDK detected: ${TRTMC_TRT_LIBRARY}")
 else()
-  message(STATUS "  Standard TRT backend SDK not detected; libtrtmc_backend_trt.so will be skipped")
+  message(STATUS
+    "  Standard TRT backend SDK not detected; "
+    "${CMAKE_SHARED_LIBRARY_PREFIX}trtmc_backend_trt${CMAKE_SHARED_LIBRARY_SUFFIX} will be skipped")
 endif()
 
 # --- libtorch multinomial bridge (optional) ---
@@ -498,16 +572,24 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   target_compile_definitions(trtmc_model_${_trtmc_model} PRIVATE TRTMC_HAS_TRT=0)
   target_compile_options(trtmc_model_${_trtmc_model}
     PRIVATE
-      "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
-      "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+      "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>"
+      "$<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<NOT:$<PLATFORM_ID:Windows>>>:-Wall;-Wextra>"
   )
   set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}"
-    BUILD_RPATH "\$ORIGIN/../.."
-    INSTALL_RPATH "\$ORIGIN/../.."
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/models/${_trtmc_model}/$<0:>"
   )
+  if(NOT WIN32)
+    set_target_properties(trtmc_model_${_trtmc_model} PROPERTIES
+      BUILD_RPATH "\$ORIGIN/../.."
+      INSTALL_RPATH "\$ORIGIN/../.."
+    )
+  endif()
   install(TARGETS trtmc_model_${_trtmc_model}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/trtmc/models/${_trtmc_model}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
   )
 endforeach()
 
@@ -523,12 +605,15 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
   target_link_libraries(trtmc_tvm_ffi_plugin PRIVATE
     trtmc_core ${TRTMC_TRT_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${TRTMC_TVM_FFI_LIBRARY})
   target_compile_definitions(trtmc_tvm_ffi_plugin PRIVATE TRTMC_HAS_TRT=1 TRTMC_HAS_TVM_FFI=1)
-  target_compile_options(trtmc_tvm_ffi_plugin PRIVATE -Wall -Wextra -Wpedantic)
-  set_target_properties(trtmc_tvm_ffi_plugin PROPERTIES
-    BUILD_RPATH "\$ORIGIN"
-    BUILD_RPATH_USE_ORIGIN TRUE
-    INSTALL_RPATH "\$ORIGIN"
-  )
+  target_compile_options(trtmc_tvm_ffi_plugin PRIVATE
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>")
+  if(NOT WIN32)
+    set_target_properties(trtmc_tvm_ffi_plugin PROPERTIES
+      BUILD_RPATH "\$ORIGIN"
+      BUILD_RPATH_USE_ORIGIN TRUE
+      INSTALL_RPATH "\$ORIGIN"
+    )
+  endif()
 
   add_library(trtmc_byok_identity_copy SHARED EXCLUDE_FROM_ALL
     examples/byok/identity_copy_kernel.cpp
@@ -542,7 +627,8 @@ if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
     OUTPUT_NAME "identity_copy_kernel"
   )
 
-  message(STATUS "TVM-FFI plugin shared library: trtmc_tvm_ffi_plugin.so")
+  message(STATUS
+    "TVM-FFI plugin shared library: ${CMAKE_SHARED_LIBRARY_PREFIX}trtmc_tvm_ffi_plugin${CMAKE_SHARED_LIBRARY_SUFFIX}")
 endif()
 
 # --- Optional: vendored diffusion CUDA kernels as TVM-FFI modules ---
@@ -593,32 +679,42 @@ if(TRTMC_BUILD_BACKEND_TRT AND _trtmc_can_build_trt_backend)
     target_include_directories(trtmc_backend_trt SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
     target_link_libraries(trtmc_backend_trt PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
   endif()
-  target_compile_options(trtmc_backend_trt PRIVATE -Wall -Wextra -Wpedantic)
+  target_compile_options(trtmc_backend_trt PRIVATE
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>")
   target_compile_definitions(trtmc_backend_trt PRIVATE
     TRTMC_HAS_TRT=1
     TRTMC_HAS_TVM_FFI=$<BOOL:${_trtmc_has_tvm_ffi}>
     TRTMC_TRT_BACKEND_ABI_STRING=\"${TRTMC_TRT_BACKEND_ABI}\"
   )
   set_target_properties(trtmc_backend_trt PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    BUILD_RPATH "\$ORIGIN"
-    INSTALL_RPATH "\$ORIGIN"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
   )
+  if(NOT WIN32)
+    set_target_properties(trtmc_backend_trt PROPERTIES
+      BUILD_RPATH "\$ORIGIN"
+      INSTALL_RPATH "\$ORIGIN"
+    )
+  endif()
   if(TRTMC_TRT_BACKEND_ABI)
+    set(_trtmc_trt_backend_abi_filename
+      "${CMAKE_SHARED_LIBRARY_PREFIX}trtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}${CMAKE_SHARED_LIBRARY_SUFFIX}")
     add_custom_command(TARGET trtmc_backend_trt POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:trtmc_backend_trt>
-        "${CMAKE_BINARY_DIR}/libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so"
-      COMMENT "Writing TensorRT ABI backend alias libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so"
+        "$<TARGET_FILE_DIR:trtmc_backend_trt>/${_trtmc_trt_backend_abi_filename}"
+      COMMENT "Writing TensorRT ABI backend alias ${_trtmc_trt_backend_abi_filename}"
     )
   endif()
   # Also add nlohmann_json include for trt_module_impl (uses DType from tensor.h)
   target_include_directories(trtmc_backend_trt SYSTEM PRIVATE
     ${_trtmc_nlohmann_json_include}
   )
-  message(STATUS "TRT backend DSO: enabled (libtrtmc_backend_trt.so)")
+  message(STATUS
+    "TRT backend DSO: enabled (${CMAKE_SHARED_LIBRARY_PREFIX}trtmc_backend_trt${CMAKE_SHARED_LIBRARY_SUFFIX})")
   if(TRTMC_TRT_BACKEND_ABI)
-    message(STATUS "TRT backend DSO ABI alias: libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so")
+    message(STATUS "TRT backend DSO ABI alias: ${_trtmc_trt_backend_abi_filename}")
   endif()
 elseif(TRTMC_BUILD_BACKEND_TRT)
   message(STATUS "TRT backend DSO: disabled (missing libnvinfer or headers)")
@@ -627,9 +723,64 @@ endif()
 # --- Backend DSO: TRT-RTX (optional) ---
 option(TRTMC_BUILD_BACKEND_RTX "Build TRT-RTX backend DSO" OFF)
 if(TRTMC_BUILD_BACKEND_RTX)
-  find_library(TENSORRT_RTX_LIB tensorrt_rtx HINTS ${TRTMC_RTX_LIBRARY_DIR})
-  # Use TRTMC_RTX_INCLUDE_DIR directly; find_path can pick up standard TRT first.
-  set(TRT_RTX_INCLUDE_DIR "${TRTMC_RTX_INCLUDE_DIR}")
+  set(_trtmc_rtx_roots)
+  if(TRTMC_RTX_ROOT)
+    list(APPEND _trtmc_rtx_roots "${TRTMC_RTX_ROOT}")
+  endif()
+  if(DEFINED ENV{TRTMC_RTX_ROOT})
+    list(APPEND _trtmc_rtx_roots "$ENV{TRTMC_RTX_ROOT}")
+  endif()
+
+  if(TRTMC_RTX_LIBRARY_FILE)
+    if(NOT EXISTS "${TRTMC_RTX_LIBRARY_FILE}")
+      message(FATAL_ERROR "TRTMC_RTX_LIBRARY_FILE does not exist: ${TRTMC_RTX_LIBRARY_FILE}")
+    endif()
+    set(TENSORRT_RTX_LIB "${TRTMC_RTX_LIBRARY_FILE}")
+  else()
+    unset(TENSORRT_RTX_LIB CACHE)
+    find_library(TENSORRT_RTX_LIB
+      NAMES tensorrt_rtx tensorrt_rtx_1_6
+      HINTS "${TRTMC_RTX_LIBRARY_DIR}" ${_trtmc_rtx_roots}
+      PATH_SUFFIXES "" lib lib/x64
+      NO_DEFAULT_PATH
+    )
+  endif()
+
+  if(TRTMC_RTX_INCLUDE_DIR)
+    if(NOT EXISTS "${TRTMC_RTX_INCLUDE_DIR}/NvInfer.h")
+      message(FATAL_ERROR "TRTMC_RTX_INCLUDE_DIR must contain NvInfer.h")
+    endif()
+    set(TRT_RTX_INCLUDE_DIR "${TRTMC_RTX_INCLUDE_DIR}")
+  else()
+    unset(TRT_RTX_INCLUDE_DIR CACHE)
+    find_path(TRT_RTX_INCLUDE_DIR NvInfer.h
+      HINTS ${_trtmc_rtx_roots}
+      PATH_SUFFIXES include
+      NO_DEFAULT_PATH
+    )
+  endif()
+
+  if(WIN32)
+    if(TRTMC_RTX_RUNTIME_DLL)
+      if(NOT EXISTS "${TRTMC_RTX_RUNTIME_DLL}")
+        message(FATAL_ERROR "TRTMC_RTX_RUNTIME_DLL does not exist: ${TRTMC_RTX_RUNTIME_DLL}")
+      endif()
+      set(TENSORRT_RTX_RUNTIME_DLL "${TRTMC_RTX_RUNTIME_DLL}")
+    else()
+      unset(TENSORRT_RTX_RUNTIME_DLL CACHE)
+      find_file(TENSORRT_RTX_RUNTIME_DLL
+        NAMES tensorrt_rtx_1_6.dll tensorrt_rtx.dll
+        HINTS "${TRTMC_RTX_RUNTIME_DIR}" ${_trtmc_rtx_roots}
+        PATH_SUFFIXES "" bin lib
+        NO_DEFAULT_PATH
+      )
+    endif()
+    if(NOT TENSORRT_RTX_RUNTIME_DLL)
+      message(FATAL_ERROR
+        "TRTMC_BUILD_BACKEND_RTX requires a matching TensorRT-RTX runtime DLL on Windows")
+    endif()
+  endif()
+
   if(TENSORRT_RTX_LIB AND TRT_RTX_INCLUDE_DIR)
     add_library(trtmc_backend_rtx SHARED
       src/runtime/backend/trt_logger.cpp
@@ -656,21 +807,37 @@ if(TRTMC_BUILD_BACKEND_RTX)
       target_include_directories(trtmc_backend_rtx SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
       target_link_libraries(trtmc_backend_rtx PRIVATE ${TRTMC_TVM_FFI_LIBRARY})
     endif()
-    target_compile_options(trtmc_backend_rtx PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(trtmc_backend_rtx PRIVATE
+      "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic>")
     target_compile_definitions(trtmc_backend_rtx PRIVATE
       TRTMC_HAS_TRT=1
       TRTMC_HAS_TVM_FFI=$<BOOL:${_trtmc_has_tvm_ffi}>
+      TRTMC_TRT_DELETE_OBJECTS=1
+      TRTMC_TRT_HAS_TENSOR_ALIAS_API=1
+      TRTMC_TRT_HAS_COMMUNICATOR_API=1
     )
     set_target_properties(trtmc_backend_rtx PROPERTIES
       OUTPUT_NAME trtmc_backend_trt_rtx
-      LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
+      ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
     )
+    if(WIN32)
+      add_custom_command(TARGET trtmc_backend_rtx POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "${TENSORRT_RTX_RUNTIME_DLL}"
+          "$<TARGET_FILE_DIR:trtmc_backend_rtx>"
+        COMMENT "Copying TensorRT-RTX runtime DLL next to the backend"
+      )
+    endif()
     target_include_directories(trtmc_backend_rtx SYSTEM PRIVATE
       ${_trtmc_nlohmann_json_include}
     )
-    message(STATUS "TRT-RTX backend DSO: enabled (libtrtmc_backend_trt_rtx.so)")
+    message(STATUS
+      "TRT-RTX backend DSO: enabled (${CMAKE_SHARED_LIBRARY_PREFIX}trtmc_backend_trt_rtx${CMAKE_SHARED_LIBRARY_SUFFIX})")
   else()
-    message(STATUS "TRT-RTX backend DSO: disabled (missing tensorrt_rtx lib or headers)")
+    message(FATAL_ERROR
+      "TRTMC_BUILD_BACKEND_RTX requires explicit TensorRT-RTX library and header inputs")
   endif()
 endif()
 
@@ -685,10 +852,15 @@ target_include_directories(trtmc SYSTEM PRIVATE
   ${_trtmc_nlohmann_json_include}
 )
 set_target_properties(trtmc PROPERTIES
-  BUILD_RPATH "\$ORIGIN"
-  BUILD_RPATH_USE_ORIGIN TRUE
-  INSTALL_RPATH "\$ORIGIN"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<0:>"
 )
+if(NOT WIN32)
+  set_target_properties(trtmc PROPERTIES
+    BUILD_RPATH "\$ORIGIN"
+    BUILD_RPATH_USE_ORIGIN TRUE
+    INSTALL_RPATH "\$ORIGIN"
+  )
+endif()
 
 if(TRTMC_BUILD_BENCHMARKS)
   add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)
@@ -708,11 +880,13 @@ if(TRTMC_BUILD_BENCHMARKS)
     TRTMC_BUILD_CONFIGURATION=\"$<CONFIG>\"
     TRTMC_SOURCE_REVISION=\"${TRTMC_SOURCE_REVISION}\"
   )
-  set_target_properties(trtmc_benchmark_worker PROPERTIES
-    BUILD_RPATH "\$ORIGIN"
-    BUILD_RPATH_USE_ORIGIN TRUE
-    INSTALL_RPATH "\$ORIGIN"
-  )
+  if(NOT WIN32)
+    set_target_properties(trtmc_benchmark_worker PROPERTIES
+      BUILD_RPATH "\$ORIGIN"
+      BUILD_RPATH_USE_ORIGIN TRUE
+      INSTALL_RPATH "\$ORIGIN"
+    )
+  endif()
 endif()
 
 if(TRTMC_BUILD_TESTS)
@@ -900,6 +1074,10 @@ trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
+trtmc_add_test(test_dynamic_library)
+target_compile_definitions(test_dynamic_library PRIVATE
+  TRTMC_TEST_CORE_LIBRARY="$<TARGET_FILE:trtmc_core>"
+)
 trtmc_add_test(test_trt_version)
 trtmc_add_test(test_runtime_measurement)
 
@@ -1053,18 +1231,39 @@ install(TARGETS trtmc_core
   EXPORT trtmcTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 if(TARGET trtmc_backend_trt)
   install(TARGETS trtmc_backend_trt
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   )
   if(TRTMC_TRT_BACKEND_ABI)
-    install(FILES "${CMAKE_BINARY_DIR}/libtrtmc_backend_trt_${TRTMC_TRT_BACKEND_ABI}.so"
-      DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    if(WIN32)
+      set(_trtmc_trt_backend_abi_install_dir "${CMAKE_INSTALL_BINDIR}")
+    else()
+      set(_trtmc_trt_backend_abi_install_dir "${CMAKE_INSTALL_LIBDIR}")
+    endif()
+    install(FILES
+      "$<TARGET_FILE_DIR:trtmc_backend_trt>/${_trtmc_trt_backend_abi_filename}"
+      DESTINATION ${_trtmc_trt_backend_abi_install_dir}
       OPTIONAL
     )
+  endif()
+endif()
+
+if(TARGET trtmc_backend_rtx)
+  install(TARGETS trtmc_backend_rtx
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+  if(WIN32 AND TENSORRT_RTX_RUNTIME_DLL)
+    install(FILES "${TENSORRT_RTX_RUNTIME_DLL}"
+      DESTINATION ${CMAKE_INSTALL_BINDIR})
   endif()
 endif()
 
