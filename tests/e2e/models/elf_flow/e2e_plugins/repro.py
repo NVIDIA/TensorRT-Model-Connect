@@ -4,6 +4,7 @@
 """ELF Flow model-owned E2E repro command provider."""
 
 from __future__ import annotations
+import shlex
 
 
 from .contracts import E2ECase, ReproCommandProvider, RunContext
@@ -30,7 +31,7 @@ class ElfFlowReproCommandProvider:
             "run",
             bundle_path,
             "--prompt",
-            _shell_quote(
+            shlex.quote(
                 case.inputs.get("prompt")
                 or case.inputs.get("source_text")
                 or case.inputs.get("condition_text")

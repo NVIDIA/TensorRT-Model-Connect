@@ -11,9 +11,7 @@ Postconditions: Energy computation is correct for edge cases, WAV I/O round-trip
 
 from __future__ import annotations
 
-import os
 import struct
-import tempfile
 
 import numpy as np
 import pytest
@@ -241,8 +239,7 @@ class TestReadTokenFile:
     def test_empty_file(self, tmp_path):
         mod = _import_diff_audio()
         path = str(tmp_path / "empty.txt")
-        with open(path, "w") as f:
-            pass
+        open(path, "w").close()
 
         tokens = mod.read_token_file(path)
         assert len(tokens) == 0

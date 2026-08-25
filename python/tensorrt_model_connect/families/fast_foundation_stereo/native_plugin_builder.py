@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import ctypes
-import fcntl
+import tensorrt_model_connect.utils.fcntl_shim as fcntl
 import hashlib
 import os
 import re

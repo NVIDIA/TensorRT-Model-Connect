@@ -11,7 +11,7 @@ its private view.
 from __future__ import annotations
 
 from dataclasses import dataclass
-import fcntl
+import tensorrt_model_connect.utils.fcntl_shim as fcntl
 import hashlib
 import os
 from pathlib import Path, PurePosixPath

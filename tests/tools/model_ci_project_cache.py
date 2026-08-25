@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-import fcntl
+import tensorrt_model_connect.utils.fcntl_shim as fcntl
 import hashlib
 import json
 import os

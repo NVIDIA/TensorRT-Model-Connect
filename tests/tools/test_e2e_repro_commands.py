@@ -10,9 +10,12 @@ Postconditions: Generated repro commands contain correct binary subcommand, flag
 """
 
 from __future__ import annotations
-
 from pathlib import Path
 
+import pytest
+import shlex
+
+from tests.e2e.models.sam3.e2e_plugins.repro import Sam3ReproCommandProvider
 from tests.e2e_harness.contracts import E2ECase, RunContext
 from tests.e2e_harness.manifest_loader import load_manifest
 from tests.e2e_harness.orchestrator import _build_repro_commands
@@ -315,10 +318,6 @@ def test_llama_chunked_prefill_repro_preserves_model_only_build(tmp_path) -> Non
     assert "--max-new-tokens 2" in repro["trt_inference"]
     assert "--temperature 0.0" in repro["trt_inference"]
     assert "--e2e-category regression" in repro["rerun_test_rebuild"]
-
-import pytest
-import shlex
-from tests.e2e.models.sam3.e2e_plugins.repro import Sam3ReproCommandProvider
 
 @pytest.mark.parametrize("prompt", [
     "Simple space",

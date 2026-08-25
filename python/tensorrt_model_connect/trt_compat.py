@@ -323,7 +323,7 @@ def _locked_cache(path: Path):
     with lock_path.open("a+b") as lock_file:
         locked = False
         try:
-            import fcntl
+            import tensorrt_model_connect.utils.fcntl_shim as fcntl
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             locked = True
         except (ImportError, OSError):

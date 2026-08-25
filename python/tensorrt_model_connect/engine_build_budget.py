@@ -102,7 +102,7 @@ def _stable_model_dir_argument(model_dir: object) -> object:
 
 @contextmanager
 def _locked_claim(claim_path: Path):
-    import fcntl
+    import tensorrt_model_connect.utils.fcntl_shim as fcntl
 
     lock_path = claim_path.with_suffix(".lock")
     with lock_path.open("a+b") as lock_file:
