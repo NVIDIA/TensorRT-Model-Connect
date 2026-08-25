@@ -2015,6 +2015,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                     "Dockerfile.community-cpu",
                     "requirements/community-ci.txt",
                     "tools/community_ci.py",
+                    "tools/pr_metadata.py",
                 }
             ),
             resolver=_match_result(
