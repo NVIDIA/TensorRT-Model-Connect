@@ -697,7 +697,18 @@ def _export_decoder_onnx(
             f"decoder ({AUDIO_LATENT_FRAMES} latents -> {AUDIO_OUTPUT_SAMPLES} samples) ...",
             file=sys.stderr,
         )
-    with torch.inference_mode():
+    # PyTorch 2.12's aarch64 oneDNN JIT can reject the decoder's longest
+    # depthwise Conv1d during tracing.  Eager convolution and the exported ONNX
+    # graph are unchanged; disable only that CPU implementation while tracing.
+    with (
+        torch.inference_mode(),
+        torch.backends.mkldnn.flags(
+            enabled=False,
+            deterministic=None,
+            allow_tf32=None,
+            fp32_precision=None,
+        ),
+    ):
         torch.onnx.export(
             module,
             dummy,

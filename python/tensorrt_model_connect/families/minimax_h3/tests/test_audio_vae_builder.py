@@ -102,6 +102,49 @@ def test_reference_audio_validation_rejects_nonfinite_or_out_of_range() -> None:
         validate_audio_reference_samples(waveform, sample_rate=32000)
 
 
+def test_decoder_export_disables_mkldnn_only_while_tracing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    torch = pytest.importorskip("torch")
+    module = object()
+    observed = {}
+
+    monkeypatch.setattr(audio_vae_builder, "_make_decoder_module", lambda *_args: module)
+    monkeypatch.setattr(audio_vae_builder, "_load_decoder_weights", lambda *_args: None)
+    monkeypatch.setattr(audio_vae_builder, "_remove_weight_normalization", lambda *_args: None)
+
+    def export(observed_module, dummy, output, **kwargs):
+        observed.update(
+            module=observed_module,
+            shape=tuple(dummy.shape),
+            mkldnn={
+                name: getattr(torch.backends.mkldnn, name)
+                for name in ("enabled", "deterministic", "allow_tf32", "fp32_precision")
+            },
+            kwargs=kwargs,
+        )
+        output.write(b"decoder-onnx")
+
+    monkeypatch.setattr(torch.onnx, "export", export)
+    original = {
+        name: getattr(torch.backends.mkldnn, name)
+        for name in ("enabled", "deterministic", "allow_tf32", "fp32_precision")
+    }
+
+    assert audio_vae_builder._export_decoder_onnx(tmp_path, _tiny_config(), False) == (
+        b"decoder-onnx"
+    )
+    assert observed["module"] is module
+    assert observed["shape"] == (2, 32, 207)
+    assert observed["mkldnn"] == {**original, "enabled": False}
+    assert observed["kwargs"]["opset_version"] == 17
+    assert observed["kwargs"]["dynamo"] is False
+    assert {
+        name: getattr(torch.backends.mkldnn, name)
+        for name in ("enabled", "deterministic", "allow_tf32", "fp32_precision")
+    } == original
+
+
 def test_encoder_reconstructs_only_posterior_mean_path_and_normalizes() -> None:
     torch = pytest.importorskip("torch")
     config = _tiny_config()
