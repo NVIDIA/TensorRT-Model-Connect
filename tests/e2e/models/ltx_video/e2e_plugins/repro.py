@@ -47,9 +47,9 @@ class LtxVideoReproCommandProvider:
             infer_parts.extend(["--seed", str(case.inputs["seed"])])
 
         if ctx.artifacts_dir:
-            latent_path = Path(
-                _case_artifact_dir(ctx.artifacts_dir, case.name)
-            ) / "initial_latents.raw"
+            latent_path = (
+                Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "initial_latents.raw"
+            )
             infer_parts.extend(["--initial-latents-raw", str(latent_path)])
 
         runtime_cli_python = ctx.runtime_cli_hf_python()

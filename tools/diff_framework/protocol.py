@@ -41,20 +41,29 @@ class DiffResult:
         return json.dumps(self.to_dict(), indent=2)
 
     @staticmethod
-    def skip(test_name: str, model: str, runtime_strategy: str,
-             reason: str) -> DiffResult:
+    def skip(test_name: str, model: str, runtime_strategy: str, reason: str) -> DiffResult:
         return DiffResult(
-            test_name=test_name, model=model,
+            test_name=test_name,
+            model=model,
             runtime_strategy=runtime_strategy,
-            passed=True, status="SKIP", message=reason)
+            passed=True,
+            status="SKIP",
+            message=reason,
+        )
 
     @staticmethod
-    def error(test_name: str, model: str, runtime_strategy: str,
-              message: str, details: str = "") -> DiffResult:
+    def error(
+        test_name: str, model: str, runtime_strategy: str, message: str, details: str = ""
+    ) -> DiffResult:
         return DiffResult(
-            test_name=test_name, model=model,
+            test_name=test_name,
+            model=model,
             runtime_strategy=runtime_strategy,
-            passed=False, status="ERROR", message=message, details=details)
+            passed=False,
+            status="ERROR",
+            message=message,
+            details=details,
+        )
 
 
 @dataclass

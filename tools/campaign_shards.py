@@ -34,9 +34,7 @@ def open_campaign(root: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
     if path.is_file():
         current = _read_object(path, "sharded campaign")
         if current != expected:
-            raise CampaignShardError(
-                "sharded campaign request does not match the existing run"
-            )
+            raise CampaignShardError("sharded campaign request does not match the existing run")
         return current
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -49,9 +47,7 @@ def open_campaign(root: Path, manifest: Mapping[str, Any]) -> dict[str, Any]:
     except FileExistsError:
         current = _read_object(path, "sharded campaign")
         if current != expected:
-            raise CampaignShardError(
-                "sharded campaign request does not match the existing run"
-            )
+            raise CampaignShardError("sharded campaign request does not match the existing run")
     finally:
         temporary.unlink(missing_ok=True)
     return expected
@@ -74,9 +70,7 @@ def consolidator_lock(root: Path):
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise CampaignShardError(
-                "another campaign consolidator is already running"
-            ) from error
+            raise CampaignShardError("another campaign consolidator is already running") from error
         try:
             yield
         finally:
@@ -119,9 +113,7 @@ def assign_cases(
     if len(normalized) != len(set(normalized)):
         raise CampaignShardError("campaign case ids must be unique")
     return tuple(
-        case_id
-        for position, case_id in enumerate(normalized)
-        if position % count == index
+        case_id for position, case_id in enumerate(normalized) if position % count == index
     )
 
 
@@ -164,18 +156,14 @@ def _copy_file(source: Path, destination: Path) -> None:
     temporary.replace(destination)
 
 
-def _relocate_hrefs(
-    value: Any, *, source: Path, destination: Path, prefix: Path
-) -> Any:
+def _relocate_hrefs(value: Any, *, source: Path, destination: Path, prefix: Path) -> Any:
     if isinstance(value, Mapping):
         relocated: dict[str, Any] = {}
         for name, item in value.items():
             if name == "href" and isinstance(item, str):
                 relative = Path(item)
                 if relative.is_absolute() or ".." in relative.parts:
-                    raise CampaignShardError(
-                        f"shard artifact href must be relative: {item!r}"
-                    )
+                    raise CampaignShardError(f"shard artifact href must be relative: {item!r}")
                 target = prefix / relative
                 _copy_file(source / relative, destination / target)
                 relocated[name] = target.as_posix()
@@ -228,9 +216,7 @@ def merge_receipt_reports(
     task_kind = "accuracy" if report_kind == "accuracy" else "performance"
     expected = [deepcopy(dict(case)) for case in expected_cases]
     expected_ids = [str(case.get("id", "")) for case in expected]
-    if any(not case_id for case_id in expected_ids) or len(expected_ids) != len(
-        set(expected_ids)
-    ):
+    if any(not case_id for case_id in expected_ids) or len(expected_ids) != len(set(expected_ids)):
         raise CampaignShardError("consolidated case inventory is invalid")
     shard_count = campaign.get("shard_count")
     if not isinstance(shard_count, int) or shard_count < 1:
@@ -244,9 +230,7 @@ def merge_receipt_reports(
     if sum(len(case_ids) for case_ids in expected_by_shard.values()) != len(expected):
         raise CampaignShardError("every consolidated case must belong to one shard")
 
-    rows: dict[str, dict[str, Any]] = {
-        str(case["id"]): _pending_row(case) for case in expected
-    }
+    rows: dict[str, dict[str, Any]] = {str(case["id"]): _pending_row(case) for case in expected}
     shard_runs: list[dict[str, Any]] = []
     receipt_sources: dict[str, str] = {}
     output = Path(output)
@@ -258,33 +242,23 @@ def merge_receipt_reports(
             raise CampaignShardError(str(error)) from error
         report = _read_object(source / "report.json", "shard report")
         if report.get("report_kind") != report_kind:
-            raise CampaignShardError(
-                f"shard {label} report kind does not match {report_kind}"
-            )
+            raise CampaignShardError(f"shard {label} report kind does not match {report_kind}")
         report_rows = report.get("results")
         if not isinstance(report_rows, list):
             raise CampaignShardError(f"shard {label} report results must be an array")
         report_by_id = {
-            str(row.get("id", "")): row
-            for row in report_rows
-            if isinstance(row, Mapping)
+            str(row.get("id", "")): row for row in report_rows if isinstance(row, Mapping)
         }
         ledger_ids = [str(case["id"]) for case in ledger.cases()]
-        assigned_ids = tuple(
-            str(case_id) for case_id in expected_by_shard.get(label, ())
-        )
+        assigned_ids = tuple(str(case_id) for case_id in expected_by_shard.get(label, ()))
         if tuple(ledger_ids) != assigned_ids:
             raise CampaignShardError(
                 f"shard {label} receipt inventory does not match its assignment"
             )
         if set(report_by_id) != set(ledger_ids):
-            raise CampaignShardError(
-                f"shard {label} report does not match its receipts"
-            )
+            raise CampaignShardError(f"shard {label} report does not match its receipts")
         ledger_prefix = Path("ledger") / "shards" / label
-        ledger_manifest = _read_object(
-            source / "ledger" / "campaign.json", "shard ledger"
-        )
+        ledger_manifest = _read_object(source / "ledger" / "campaign.json", "shard ledger")
         receipt_paths = {
             str(entry["case"]["id"]): str(entry["receipt"])
             for entry in ledger_manifest.get("cases", [])
@@ -298,21 +272,17 @@ def merge_receipt_reports(
         for case_id in ledger_ids:
             receipt = ledger.receipt(case_id)
             row = report_by_id[case_id]
-            if row.get("state") != receipt.get("state") or row.get(
+            if row.get("state") != receipt.get("state") or row.get("result") != receipt.get(
                 "result"
-            ) != receipt.get("result"):
-                raise CampaignShardError(
-                    f"shard {label} report is stale for case {case_id!r}"
-                )
+            ):
+                raise CampaignShardError(f"shard {label} report is stale for case {case_id!r}")
             rows[case_id] = _relocate_hrefs(
                 row,
                 source=source,
                 destination=output,
                 prefix=Path("artifacts") / "shards" / label,
             )
-            receipt_sources[case_id] = (
-                ledger_prefix / receipt_paths[case_id]
-            ).as_posix()
+            receipt_sources[case_id] = (ledger_prefix / receipt_paths[case_id]).as_posix()
         shard_run = report.get("run", {})
         shard_run = shard_run if isinstance(shard_run, Mapping) else {}
         shard_runs.append(

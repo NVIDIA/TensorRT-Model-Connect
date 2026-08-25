@@ -59,13 +59,11 @@ class ElfFlowReproCommandProvider:
         if "seed" in case.inputs:
             infer_parts.extend(["--seed", str(case.inputs["seed"])])
 
-        condition_latents = (
-            case.inputs.get("condition_latents_raw")
-            or case.inputs.get("condition_latents_path")
+        condition_latents = case.inputs.get("condition_latents_raw") or case.inputs.get(
+            "condition_latents_path"
         )
-        condition_mask = (
-            case.inputs.get("condition_mask_raw")
-            or case.inputs.get("condition_mask_path")
+        condition_mask = case.inputs.get("condition_mask_raw") or case.inputs.get(
+            "condition_mask_path"
         )
         if condition_latents:
             infer_parts.extend(["--condition-latents-raw", str(condition_latents)])

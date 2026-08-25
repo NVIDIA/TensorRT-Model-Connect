@@ -396,8 +396,6 @@ def _lock_is_busy(path: Path) -> bool:
     return False
 
 
-
-
 def _copy_selection_inputs(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True)
     for path in source.rglob("*"):
@@ -592,9 +590,7 @@ def test_every_owned_e2e_family_has_one_premerge_smoke_case(tmp_path: Path) -> N
     for family in families:
         selection = _run_test_selection(tmp_path, family, "premerge")
         smoke_cases = [
-            case
-            for case in selection["e2e_cases"]
-            if case["test_category"] != "regression"
+            case for case in selection["e2e_cases"] if case["test_category"] != "regression"
         ]
         assert len(smoke_cases) == 1, family
         assert selection["e2e_cases"][0]["ci_tier"] != "nightly_only", family
@@ -615,9 +611,7 @@ def test_dinov3_premerge_uses_public_mirror_and_nightly_keeps_officials(
     premerge = _run_test_selection(tmp_path, "dinov3", "premerge")
     nightly = _run_test_selection(tmp_path, "dinov3", "nightly")
 
-    assert [case["name"] for case in premerge["e2e_cases"]] == [
-        "dinov3-vits16-timm-l0"
-    ]
+    assert [case["name"] for case in premerge["e2e_cases"]] == ["dinov3-vits16-timm-l0"]
     assert premerge["e2e_cases"][0]["ci_tier"] == "l0_only"
     assert {case["name"] for case in nightly["e2e_cases"]} == {
         "dinov3-convnext-tiny-pretrain-lvd1689m",
@@ -629,9 +623,7 @@ def test_dinov3_premerge_uses_public_mirror_and_nightly_keeps_officials(
 def test_sam2_nightly_model_proof_uses_the_public_core_case(tmp_path: Path) -> None:
     selection = _run_test_selection(tmp_path, "sam2", "nightly")
 
-    assert [case["name"] for case in selection["e2e_cases"]] == [
-        "sam2-public-core-l0"
-    ]
+    assert [case["name"] for case in selection["e2e_cases"]] == ["sam2-public-core-l0"]
     assert selection["e2e_cases"][0]["ci_tier"] == "l0_only"
 
 
@@ -825,8 +817,7 @@ def test_lance_selection_projects_reference_environment_into_proof(
     environment = runner._proof_environment("0,1,2,3", contract)
 
     assert (
-        "TRTMC_LANCE_REFERENCE_REPO="
-        "/work/reference-private/lance/reference/Lance-4baeee086648"
+        "TRTMC_LANCE_REFERENCE_REPO=/work/reference-private/lance/reference/Lance-4baeee086648"
     ) in environment
 
 
@@ -1441,8 +1432,6 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert "offline HF cache readiness check failed" in warm
 
 
-
-
 def test_runner_removes_only_its_container_without_masking_exit_status() -> None:
     text = RUNNER.read_text(encoding="utf-8")
     cleanup = text.split("def _cleanup(self)", maxsplit=1)[1].split("def _signal", maxsplit=1)[0]
@@ -1452,8 +1441,6 @@ def test_runner_removes_only_its_container_without_masking_exit_status() -> None
     assert "self.lease.release()" in cleanup
     assert "for number in (signal.SIGINT, signal.SIGTERM)" in text
     assert "raise SystemExit(130 if number == signal.SIGINT else 143)" in text
-
-
 
 
 def test_every_host_container_has_exact_workflow_job_identity_labels(tmp_path: Path) -> None:
@@ -1681,8 +1668,6 @@ def test_orphan_reclamation_rejects_a_failed_remove_when_full_id_remains(
     assert f"could not remove orphaned model-proof container {orphan_id}" in result.stderr
     docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
     assert not any(" --inner " in f" {line} " for line in docker_lines)
-
-
 
 
 def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None:
@@ -4549,19 +4534,14 @@ def _proof_gpu_ids_if_present(docker_log: Path) -> list[str]:
 
 def test_runner_keeps_local_hugging_face_cache_fallbacks() -> None:
     source = RUNNER.read_text(encoding="utf-8")
-    assert (
-        'self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface"))'
-        in source
-    )
+    assert 'self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface"))' in source
     assert 'self.context.env.get("TRTMC_HF_HUB_CACHE"' in source
     assert "TRTMC_HF_MODULES_CACHE" not in source
 
 
 def test_model_proof_always_generates_strict_self_contained_html() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
-    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(
-        encoding="utf-8"
-    )
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
     for contract in (
         "report_rc = self._finalize_report(validation_rc)",
         'self.source / "scripts/generate_e2e_report.py"',
@@ -4589,9 +4569,7 @@ def test_model_proof_always_generates_strict_self_contained_html() -> None:
 def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     source = RUNNER.read_text(encoding="utf-8")
     allocator = (REPO_ROOT / "tools/ci/gpu_lease.py").read_text(encoding="utf-8")
-    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(
-        encoding="utf-8"
-    )
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
     host = source.split("def _run_host(self)", maxsplit=1)[1]
     warm = source.split("def _prepare_hf_cache(", maxsplit=1)[1].split(
         "def _validated_cache_evidence", maxsplit=1
@@ -4607,10 +4585,7 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert 'f"device={self.lease.gpu_id}"' in proof
     assert '"TRTMC_MODEL_PROOF_GPU_ID": str(self.lease.gpu_id)' in source
     assert '"TRTMC_MODEL_PROOF_GPU_SLOT_IDS": slots' in source
-    assert (
-        '"TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class'
-        in source
-    )
+    assert '"TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class' in source
     assert 'f"gpu-{gpu}-slot-{slot}.lock"' in allocator
     assert 'f"gpu-{gpu}-reservation.lock"' in allocator
     assert "TRTMC_GPU_ID must be present in TRTMC_MODEL_PROOF_GPU_IDS" in allocator

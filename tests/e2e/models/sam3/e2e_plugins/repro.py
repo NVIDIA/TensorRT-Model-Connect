@@ -48,12 +48,14 @@ class Sam3ReproCommandProvider:
         if prompt is not None:
             infer_parts.extend(["--prompt", str(prompt)])
         else:
-            infer_parts.extend([
-                "--point-x",
-                str(case.inputs.get("point_x", 0.5)),
-                "--point-y",
-                str(case.inputs.get("point_y", 0.5)),
-            ])
+            infer_parts.extend(
+                [
+                    "--point-x",
+                    str(case.inputs.get("point_x", 0.5)),
+                    "--point-y",
+                    str(case.inputs.get("point_y", 0.5)),
+                ]
+            )
             if not case.inputs.get("is_foreground", True):
                 infer_parts.append("--background")
         runtime_cli_python = ctx.runtime_cli_hf_python()

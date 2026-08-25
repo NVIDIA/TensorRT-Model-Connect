@@ -463,18 +463,13 @@ class GpuLease:
                 reservation.handle.close()
                 return False
             self.gpu_id, self.reservation = best_gpu, reservation
-            self.hold_ticket_while_capacity_drains = (
-                eligible_gpus > 1 and reservable_gpus == 1
-            )
+            self.hold_ticket_while_capacity_drains = eligible_gpus > 1 and reservable_gpus == 1
             print(
                 f"Reserved GPU {best_gpu} for capacity-gated exclusive admission "
                 f"with {best_available_slots}/{self.slots_per_gpu} slots already idle"
             )
             if self.hold_ticket_while_capacity_drains:
-                print(
-                    "Retaining GPU admission queue priority while reserved alternate GPUs "
-                    "drain"
-                )
+                print("Retaining GPU admission queue priority while reserved alternate GPUs drain")
             return True
         finally:
             allocator.close()
@@ -576,12 +571,8 @@ class GpuLease:
             return True
         assert self.gpu_id is not None
         now = time.monotonic()
-        requeue_budget = (
-            max(0, candidates_remaining - 1) * self.CAPACITY_REQUEUE_DELAY_SECONDS
-        )
-        settle_budget = max(0.0, deadline - now - requeue_budget) / max(
-            1, candidates_remaining
-        )
+        requeue_budget = max(0, candidates_remaining - 1) * self.CAPACITY_REQUEUE_DELAY_SECONDS
+        settle_budget = max(0.0, deadline - now - requeue_budget) / max(1, candidates_remaining)
         settle_deadline = now + settle_budget
         settle_poll_interval = max(0.25, min(5.0, self.poll_interval))
         while time.monotonic() < settle_deadline:
@@ -730,8 +721,7 @@ class GpuLease:
             expected_total_kib = (int(raw["total_mib"]) - reserved_mib) * 1024
             if abs(total_kib - expected_total_kib) > page_size // 1024:
                 raise CiError(
-                    f"GPU {gpu} NUMA node {numa_node} total does not match "
-                    f"{pci_bus_id} FB memory"
+                    f"GPU {gpu} NUMA node {numa_node} total does not match {pci_bus_id} FB memory"
                 )
             clean_file_kib = max(
                 0,
@@ -956,10 +946,7 @@ class GpuLease:
             for gpu, free_mib in sorted(self.last_observed_free_mib.items())
         )
         suffix = f"; last observed free memory: {observed}" if observed else ""
-        return (
-            f" requiring at least {self.min_free_gpu_memory_mib} MiB free GPU memory"
-            f"{suffix}"
-        )
+        return f" requiring at least {self.min_free_gpu_memory_mib} MiB free GPU memory{suffix}"
 
     def _requeue_after_capacity_rejection(self, deadline: float) -> bool:
         self._release_ticket()

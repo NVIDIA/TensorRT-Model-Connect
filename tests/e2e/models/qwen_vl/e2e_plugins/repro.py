@@ -25,7 +25,12 @@ class QwenVlReproCommandProvider:
         if case.task_strategy != "vision_language_generation":
             return None
 
-        image = case.inputs.get("image") or case.inputs.get("test_image") or case.inputs.get("image_path") or ""
+        image = (
+            case.inputs.get("image")
+            or case.inputs.get("test_image")
+            or case.inputs.get("image_path")
+            or ""
+        )
         infer_parts = [
             ctx.binary_path,
             "run",

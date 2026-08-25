@@ -19,12 +19,14 @@ import pytest
 
 def _import_diff_audio():
     import importlib
+
     return importlib.import_module("diff_audio")
 
 
 # ---------------------------------------------------------------------------
 # compute_energy
 # ---------------------------------------------------------------------------
+
 
 class TestComputeEnergy:
     """Tests for compute_energy(waveform) — RMS energy."""
@@ -71,6 +73,7 @@ class TestComputeEnergy:
 # ---------------------------------------------------------------------------
 # read_wav_f32 / write_wav_f32 — round-trip
 # ---------------------------------------------------------------------------
+
 
 class TestWavRoundTrip:
     """Tests for write_wav_f32 and read_wav_f32 — WAV I/O."""
@@ -149,6 +152,7 @@ class TestWavRoundTrip:
 # token_stats
 # ---------------------------------------------------------------------------
 
+
 class TestTokenStats:
     """Tests for token_stats(tokens, label) — basic token statistics."""
 
@@ -196,6 +200,7 @@ class TestTokenStats:
 # Argument parsing
 # ---------------------------------------------------------------------------
 
+
 class TestArgParsing:
     """Tests for diff_audio.py argument parser via main() structure."""
 
@@ -222,6 +227,7 @@ class TestArgParsing:
 # ---------------------------------------------------------------------------
 # read_token_file
 # ---------------------------------------------------------------------------
+
 
 class TestReadTokenFile:
     """Tests for read_token_file(path) — newline-delimited token file reader."""

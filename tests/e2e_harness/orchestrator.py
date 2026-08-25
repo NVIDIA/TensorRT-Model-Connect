@@ -349,9 +349,7 @@ def _resolve_bundle(
         str(bundle_path),
     ]
     if "max_cache_length" in case.inputs:
-        cmd.extend(
-            ["--max-cache-length", str(case.inputs["max_cache_length"])]
-        )
+        cmd.extend(["--max-cache-length", str(case.inputs["max_cache_length"])])
     if case.hf_revision:
         cmd.extend(["--model-revision", case.hf_revision])
     _append_declared_build_cli_args(cmd, case)
@@ -454,9 +452,7 @@ def _resolve_bundle(
                     f"build_timing.attempt-{attempt - 1}.json"
                 )
                 shutil.copy2(build_timing_path, recovery_timing_path)
-                pending_recovery["timing"] = _load_build_timing(
-                    recovery_timing_path
-                )
+                pending_recovery["timing"] = _load_build_timing(recovery_timing_path)
                 pending_recovery["timing_path"] = str(recovery_timing_path)
             attempt_timeout_s = build_deadline - time.monotonic()
             if attempt_timeout_s <= 0:
@@ -467,8 +463,7 @@ def _resolve_bundle(
             env[_BUILD_RECOVERY_SIGNAL_ENV] = str(signal.SIGSEGV)
             recovery_attempts.append(pending_recovery)
             logger.warning(
-                "Bundle build for %s exited with SIGSEGV; "
-                "retrying once in a fresh process",
+                "Bundle build for %s exited with SIGSEGV; retrying once in a fresh process",
                 hf_id,
             )
         else:
@@ -655,9 +650,9 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
                 # Store relative to artifacts dir if possible.
                 rel = value
                 try:
-                    rel = Path(value).resolve().relative_to(
-                        Path(sink.base_dir).resolve()
-                    ).as_posix()
+                    rel = (
+                        Path(value).resolve().relative_to(Path(sink.base_dir).resolve()).as_posix()
+                    )
                 except (OSError, RuntimeError, ValueError):
                     pass
                 sink.register_artifact(f"{prefix}_{artifact_key}", rel)
@@ -799,9 +794,7 @@ def _build_repro_commands(
         bundle_target,
     ]
     if "max_cache_length" in case.inputs:
-        build_parts.extend(
-            ["--max-cache-length", str(case.inputs["max_cache_length"])]
-        )
+        build_parts.extend(["--max-cache-length", str(case.inputs["max_cache_length"])])
     if case.hf_revision:
         build_parts.extend(["--model-revision", case.hf_revision])
     precision = case.metadata.get("precision", "fp32")
@@ -830,28 +823,17 @@ def _build_repro_commands(
                 bundle_path,
             ]
             if case.inputs.get("prompt_file"):
-                infer_parts.extend(
-                    ["--prompts-file", str(case.inputs["prompt_file"])]
-                )
+                infer_parts.extend(["--prompts-file", str(case.inputs["prompt_file"])])
             elif case.inputs.get("prompt_repeat") and ctx.artifacts_dir:
                 resolved_prompt = (
-                    Path(_case_artifact_dir(ctx.artifacts_dir, case.name))
-                    / "resolved_prompt.txt"
+                    Path(_case_artifact_dir(ctx.artifacts_dir, case.name)) / "resolved_prompt.txt"
                 )
-                infer_parts.extend(
-                    ["--prompts-file", str(resolved_prompt)]
-                )
+                infer_parts.extend(["--prompts-file", str(resolved_prompt)])
             else:
-                infer_parts.extend(
-                    ["--prompt", str(case.inputs.get("prompt", ""))]
-                )
-            infer_parts.extend(
-                ["--max-new-tokens", str(case.inputs.get("max_new_tokens", 20))]
-            )
+                infer_parts.extend(["--prompt", str(case.inputs.get("prompt", ""))])
+            infer_parts.extend(["--max-new-tokens", str(case.inputs.get("max_new_tokens", 20))])
             if case.inputs.get("temperature", 1.0) != 1.0:
-                infer_parts.extend(
-                    ["--temperature", str(case.inputs["temperature"])]
-                )
+                infer_parts.extend(["--temperature", str(case.inputs["temperature"])])
             if case.inputs.get("top_p", 1.0) < 1.0 - 1e-6:
                 infer_parts.extend(["--top-p", str(case.inputs["top_p"])])
             if case.inputs.get("min_p", 0.0) > 1e-6:
@@ -943,8 +925,6 @@ def _build_plugin_owned_trt_inference_command(
             )
 
     return None
-
-
 
 
 def _manifest_build_method(build_args: dict[str, Any]) -> str | None:
@@ -1067,9 +1047,7 @@ _REQUIRED_BUILD_ENVIRONMENT_INPUTS = frozenset(
 def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
     """Apply generic build-time environment entries declared by the manifest."""
     required_inputs = {
-        name: env.pop(name)
-        for name in _REQUIRED_BUILD_ENVIRONMENT_INPUTS
-        if name in env
+        name: env.pop(name) for name in _REQUIRED_BUILD_ENVIRONMENT_INPUTS if name in env
     }
     build_env = case.metadata.get("build_env")
     if not isinstance(build_env, dict):
@@ -1088,9 +1066,7 @@ def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
             if "required_from_env" in spec:
                 required_from_env = True
                 if spec.get("required_from_env") is not True:
-                    raise ValueError(
-                        f"build_env {name} required_from_env must be true"
-                    )
+                    raise ValueError(f"build_env {name} required_from_env must be true")
                 unknown = set(spec) - {"required_from_env", "path_like"}
                 if unknown:
                     raise ValueError(
@@ -1107,9 +1083,7 @@ def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
                     )
                 value = required_inputs.get(name)
                 if not isinstance(value, str) or not value or value != value.strip():
-                    raise RuntimeError(
-                        f"required build environment variable {name} is missing"
-                    )
+                    raise RuntimeError(f"required build environment variable {name} is missing")
                 path_like = bool(spec.get("path_like", False))
             else:
                 value = spec.get("path", spec.get("value", ""))
@@ -1123,9 +1097,7 @@ def _apply_manifest_build_env(env: dict[str, str], case: E2ECase) -> None:
             if required_from_env and (
                 not path.is_absolute() or path.is_symlink() or not path.is_file()
             ):
-                raise RuntimeError(
-                    f"required build environment file {name} is unavailable"
-                )
+                raise RuntimeError(f"required build environment file {name} is unavailable")
             if not path.is_absolute():
                 base = model_test_dir if relative_to == "model" else project_root
                 path = base / path

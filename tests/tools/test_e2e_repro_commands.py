@@ -68,12 +68,14 @@ class _PromptedSegmentationReproProvider:
         if prompt:
             parts.extend(["--prompt", str(prompt)])
         else:
-            parts.extend([
-                "--point-x",
-                str(case.inputs.get("point_x")),
-                "--point-y",
-                str(case.inputs.get("point_y")),
-            ])
+            parts.extend(
+                [
+                    "--point-x",
+                    str(case.inputs.get("point_x")),
+                    "--point-y",
+                    str(case.inputs.get("point_y")),
+                ]
+            )
         return parts
 
 
@@ -308,24 +310,23 @@ def test_llama_chunked_prefill_repro_preserves_model_only_build(tmp_path) -> Non
     assert "--max-cache-length" not in repro["build_bundle"]
     assert "--precision" not in repro["build_bundle"]
     assert f"--model-revision {case.hf_revision}" in repro["build_bundle"]
-    resolved_prompt = (
-        tmp_path
-        / "artifacts"
-        / case.name
-        / "resolved_prompt.txt"
-    )
+    resolved_prompt = tmp_path / "artifacts" / case.name / "resolved_prompt.txt"
     assert f"--prompts-file {resolved_prompt}" in repro["trt_inference"]
     assert "--max-new-tokens 2" in repro["trt_inference"]
     assert "--temperature 0.0" in repro["trt_inference"]
     assert "--e2e-category regression" in repro["rerun_test_rebuild"]
 
-@pytest.mark.parametrize("prompt", [
-    "Simple space",
-    "",
-    "Quote's and \"quotes\"",
-    "Cost is $100",
-    "Backslash \\ and \n newline",
-])
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Simple space",
+        "",
+        'Quote\'s and "quotes"',
+        "Cost is $100",
+        "Backslash \\ and \n newline",
+    ],
+)
 def test_sam3_repro_command_shlex_round_trip(tmp_path, prompt):
     provider = Sam3ReproCommandProvider()
     case = E2ECase(
@@ -336,7 +337,7 @@ def test_sam3_repro_command_shlex_round_trip(tmp_path, prompt):
         bundle="bundle.bundle",
         stages=[],
         metadata={"text_prompt": True},
-        inputs={"image": "test.jpg", "prompt": prompt}
+        inputs={"image": "test.jpg", "prompt": prompt},
     )
     ctx = RunContext(
         case=case,
@@ -345,7 +346,7 @@ def test_sam3_repro_command_shlex_round_trip(tmp_path, prompt):
         hf_python="/usr/bin/python3",
         engine_dir="/tmp/engines",
     )
-    
+
     parts = provider.build_trt_inference_command(case, ctx, "bundle.bundle")
     rendered = shlex.join(parts)
     round_tripped = shlex.split(rendered)

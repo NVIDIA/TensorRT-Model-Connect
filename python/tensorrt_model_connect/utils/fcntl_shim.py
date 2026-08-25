@@ -1,8 +1,10 @@
 """Cross-platform compatibility shim for fcntl."""
+
 import sys
 
 try:
     import fcntl
+
     LOCK_EX = fcntl.LOCK_EX
     LOCK_NB = fcntl.LOCK_NB
     LOCK_UN = fcntl.LOCK_UN
@@ -12,12 +14,12 @@ except ImportError:
     if sys.platform == "win32":
         import msvcrt
         import os
-        
+
         LOCK_EX = 2
         LOCK_SH = 1
         LOCK_NB = 4
         LOCK_UN = 8
-        
+
         def flock(fd, operation):
             if hasattr(fd, "fileno"):
                 fd = fd.fileno()

@@ -94,11 +94,7 @@ def load_module() -> ModuleType:
 def module_version(module_name: str | None = None) -> str:
     """Return a TensorRT module's Python package version, or an empty string."""
     try:
-        module = (
-            load_module()
-            if module_name is None
-            else importlib.import_module(module_name)
-        )
+        module = load_module() if module_name is None else importlib.import_module(module_name)
     except (ImportError, AttributeError):
         return ""
     return str(getattr(module, "__version__", ""))
@@ -119,11 +115,7 @@ def tensorrt_abi(version: str | None = None) -> str:
 def module_file(module_name: str | None = None) -> str:
     """Return the resolved Python module path for diagnostics."""
     try:
-        module = (
-            load_module()
-            if module_name is None
-            else importlib.import_module(module_name)
-        )
+        module = load_module() if module_name is None else importlib.import_module(module_name)
     except (ImportError, AttributeError):
         return ""
     return str(getattr(module, "__file__", "") or "")
@@ -152,8 +144,7 @@ def resolved_summary() -> str:
     libs = loaded_libnvinfer_paths()
     lib_text = libs[0] if libs else "not loaded yet"
     return (
-        f"{_backend_label}: version={version}, abi={abi}, "
-        f"python={module_path}, native={lib_text}"
+        f"{_backend_label}: version={version}, abi={abi}, python={module_path}, native={lib_text}"
     )
 
 
@@ -262,11 +253,9 @@ def _set_optional_builder_int(config: Any, attr: str, env_name: str) -> None:
 
 
 def _apply_builder_config_env(config: Any) -> None:
-    _set_optional_builder_int(
-        config, "builder_optimization_level", _BUILDER_OPT_LEVEL_ENV)
+    _set_optional_builder_int(config, "builder_optimization_level", _BUILDER_OPT_LEVEL_ENV)
     _set_optional_builder_int(config, "max_num_tactics", _MAX_NUM_TACTICS_ENV)
-    _set_optional_builder_int(
-        config, "avg_timing_iterations", _AVG_TIMING_ITERATIONS_ENV)
+    _set_optional_builder_int(config, "avg_timing_iterations", _AVG_TIMING_ITERATIONS_ENV)
 
 
 def _sanitize_cache_name(value: str) -> str:
@@ -324,6 +313,7 @@ def _locked_cache(path: Path):
         locked = False
         try:
             import tensorrt_model_connect.utils.fcntl_shim as fcntl
+
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             locked = True
         except (ImportError, OSError):
@@ -388,8 +378,7 @@ def _save_timing_cache(config: Any, state: _TimingCacheState | None) -> None:
             payload = _serialize_cache(cache)
             if payload is None:
                 return
-            tmp_path = state.path.with_name(
-                f".{state.path.name}.{os.getpid()}.tmp")
+            tmp_path = state.path.with_name(f".{state.path.name}.{os.getpid()}.tmp")
             tmp_path.write_bytes(payload)
             os.replace(tmp_path, state.path)
     except (OSError, RuntimeError, TypeError, ValueError):
