@@ -279,7 +279,7 @@ def test_qwen_native_kv_repro_preserves_model_only_build(tmp_path) -> None:
     assert "--precision" not in repro["build_bundle"]
     assert f"--model-revision {case.hf_revision}" in repro["build_bundle"]
     resolved_prompt = tmp_path / "artifacts" / case.name / "resolved_prompt.txt"
-    assert f"--prompts-file {resolved_prompt}" in repro["trt_inference"]
+    assert f"--prompts-file {shlex.quote(str(resolved_prompt))}" in repro["trt_inference"]
     assert "--max-new-tokens 2" in repro["trt_inference"]
     assert "--temperature 0.0" in repro["trt_inference"]
     assert "--e2e-category regression" in repro["rerun_test_rebuild"]
@@ -311,7 +311,7 @@ def test_llama_chunked_prefill_repro_preserves_model_only_build(tmp_path) -> Non
     assert "--precision" not in repro["build_bundle"]
     assert f"--model-revision {case.hf_revision}" in repro["build_bundle"]
     resolved_prompt = tmp_path / "artifacts" / case.name / "resolved_prompt.txt"
-    assert f"--prompts-file {resolved_prompt}" in repro["trt_inference"]
+    assert f"--prompts-file {shlex.quote(str(resolved_prompt))}" in repro["trt_inference"]
     assert "--max-new-tokens 2" in repro["trt_inference"]
     assert "--temperature 0.0" in repro["trt_inference"]
     assert "--e2e-category regression" in repro["rerun_test_rebuild"]
@@ -333,7 +333,7 @@ def test_sam3_repro_command_shlex_round_trip(tmp_path, prompt):
         name="sam3-test",
         hf_id="dummy",
         family="dummy",
-        runtime_strategy="dummy",
+        runtime_strategy="prompted_segmentation",
         bundle="bundle.bundle",
         stages=[],
         metadata={"text_prompt": True},
