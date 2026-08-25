@@ -5,7 +5,19 @@
 
 from __future__ import annotations
 
-import tensorrt_model_connect.utils.fcntl_shim as fcntl
+import sys
+
+if sys.platform == "win32":
+
+    class _FcntlMock:
+        LOCK_EX = 1
+
+        def flock(self, fd, op):
+            pass
+
+    fcntl = _FcntlMock()
+else:
+    import fcntl
 import hashlib
 import os
 import subprocess
