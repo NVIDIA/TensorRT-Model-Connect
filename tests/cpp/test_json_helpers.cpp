@@ -333,14 +333,14 @@ bool test_extract_json_string_array_missing() {
     return true;
 }
 
-// Intention: Verify empty-string JSON values are treated as malformed by
-//            the lightweight extractor and return fallback.
+// Intention: Verify empty-string JSON values are correctly parsed as empty strings
+//            by the nlohmann::json extractor rather than falling back.
 // Setup:     JSON with "name": "".
-// Mechanism: Calls extract_json_string and checks fallback is returned.
+// Mechanism: Calls extract_json_string and checks empty string is returned.
 bool test_extract_json_string_empty_value_returns_fallback() {
     const std::string json = R"({"name": ""})";
     const std::string result = trtmc::extract_json_string(json, "name", "fallback");
-    if (result != "fallback") {
+    if (result != "") {
         std::cerr << "extract_json_string_empty_value: got '" << result << "'" << std::endl;
         return false;
     }
