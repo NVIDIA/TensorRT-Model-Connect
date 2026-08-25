@@ -72,8 +72,6 @@ no_impact scripts/hf_generate.py # developer utility script; no CI test impact i
 no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact is intentional
 no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
-no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
-no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
 no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helper; no CI test impact is intentional
 no_impact scripts/templates/model_family/registration.cpp # developer utility script; no CI test impact is intentional
 no_impact scripts/validate_family.sh # developer utility script; no CI test impact is intentional
@@ -185,3 +183,10 @@ shared_builder_module python/tensorrt_model_connect/triattention_runtime.py # sh
 shared_builder_module python/tensorrt_model_connect/trt_compat.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tvm_ffi/plugin.py # shared TVM-FFI plugin insertion helper; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/tokenizer_conversion.py # shared tokenizer conversion primitives used by family adapters; broad builder impact is intentional
+catch_all bindings/nodejs/binding.gyp # node.js prototype; no CI test impact is intentional
+catch_all bindings/nodejs/example.js # node.js prototype; no CI test impact is intentional
+catch_all bindings/nodejs/package-lock.json # node.js prototype; no CI test impact is intentional
+catch_all bindings/nodejs/package.json # node.js prototype; no CI test impact is intentional
+catch_all bindings/nodejs/src/addon.cpp # node.js prototype; no CI test impact is intentional
+catch_all bindings/nodejs/src/pipeline_wrapper.cpp # node.js prototype; no CI test impact is intentional
+catch_all bindings/nodejs/src/pipeline_wrapper.h # node.js prototype; no CI test impact is intentional
