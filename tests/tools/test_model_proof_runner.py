@@ -232,6 +232,19 @@ def _fake_gpu_lease_context(
     return CiContext(REPO_ROOT, env)
 
 
+def _use_deterministic_gpu_lease_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = SimpleNamespace(now=0.0)
+
+    def advance_clock(seconds: float) -> None:
+        clock.now += seconds
+
+    monkeypatch.setattr(
+        gpu_lease_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock.now, sleep=advance_clock),
+    )
+
+
 def _fake_proof_environment(
     tmp_path: Path,
     fake_bin: Path,
@@ -2403,12 +2416,15 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
 @pytest.mark.model_proof_allocator
 def test_capacity_gated_exclusive_lease_skips_a_memory_busy_gpu(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Keep subprocess scheduling from consuming the deliberately short lease
+    # deadline while preserving the queue and capacity transitions under test.
+    _use_deterministic_gpu_lease_clock(monkeypatch)
     context = _fake_gpu_lease_context(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 34208, 250000",
     )
-    context.env["FAKE_NVIDIA_SMI_DELAY_SECONDS"] = "0.25"
     artifacts = tmp_path / "artifacts"
     lease = GpuLease(
         context,
@@ -2778,16 +2794,7 @@ def test_capacity_gated_lease_waits_for_memory_reclaim_without_requeueing(
 ) -> None:
     # Drive the short capacity settle window explicitly so host scheduling
     # cannot turn the second memory sample into an unrelated GPU requeue.
-    clock = SimpleNamespace(now=0.0)
-
-    def advance_clock(seconds: float) -> None:
-        clock.now += seconds
-
-    monkeypatch.setattr(
-        gpu_lease_module,
-        "time",
-        SimpleNamespace(monotonic=lambda: clock.now, sleep=advance_clock),
-    )
+    _use_deterministic_gpu_lease_clock(monkeypatch)
     context = _fake_gpu_lease_context(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 174208, 110000",
