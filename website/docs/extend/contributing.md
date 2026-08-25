@@ -154,6 +154,10 @@ exact pull-request merge revision. Separate jobs run source quality, ownership
 and impact, and source-only C++ and Python units. No comment or maintainer action
 is required.
 
+For directly changed Python unit tests, impact analysis also passes the exact
+test files to the CPU unit job. This includes non-E2E model-owned tests under
+`tests/e2e/models/`; tests marked `gpu`, `trt`, or `e2e` remain excluded.
+
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs, and every public job uses a GitHub-hosted
 `ubuntu-24.04` runner. GitHub publishes public Actions logs with the complete

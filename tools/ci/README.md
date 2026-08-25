@@ -61,6 +61,12 @@ CPU against GitHub's exact pull-request merge revision. Source quality,
 ownership and impact, and selected source-only units run as separate jobs on
 GitHub-hosted public CPU runners.
 
+Impact analysis also passes directly changed, non-E2E Python test files to the
+unit job. The unit job adds those exact targets to its normal scope, so a
+model-owned CPU test under `tests/e2e/models/` is not hidden merely because the
+normal `builder` scope starts at `tests/builder/`. Pytest still excludes tests
+marked `gpu`, `trt`, or `e2e`; the public runner does not execute GPU inference.
+
 The jobs check out only the event's immutable merge SHA with read-only
 repository permission, no persisted checkout credentials, and no secrets.
 GitHub publishes the native pull-request checks and public Actions logs. A new

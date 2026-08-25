@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -117,11 +118,32 @@ def test_impact_publishes_only_the_public_cpu_scope(
             ],
         },
     )
+    monkeypatch.setattr(
+        runner.commands,
+        "run",
+        lambda command, **_kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "builder_tests": [
+                        "tests/e2e/models/qwen/test_qwen_native_kv_routing.py"
+                    ],
+                    "tools_tests": [],
+                }
+            ),
+            stderr="",
+        ),
+    )
 
     result = runner.impact(None)
 
     assert result["unit_scope"] == "cli"
-    assert github_output.read_text(encoding="utf-8") == ("run_unit_tests=true\nunit_scope=cli\n")
+    assert github_output.read_text(encoding="utf-8") == (
+        "run_unit_tests=true\n"
+        "unit_scope=cli\n"
+        'python_test_targets=["tests/e2e/models/qwen/test_qwen_native_kv_routing.py"]\n'
+    )
     summary = github_summary.read_text(encoding="utf-8")
     assert "Unit scope: `cli`" in summary
     assert "src/runtime/config/cli_support.cpp" in summary
@@ -169,6 +191,13 @@ def test_public_workflow_is_an_automatic_read_only_exact_merge_gate() -> None:
         assert jobs[job_name]["permissions"] == {"contents": "read"}
     assert jobs["unit"]["if"] == "${{ !cancelled() }}"
     assert jobs["unit"]["needs"] == "ownership-impact"
+    assert jobs["ownership-impact"]["outputs"]["python_test_targets"] == (
+        "${{ steps.impact.outputs.python_test_targets }}"
+    )
+    unit_steps = {step["name"]: step for step in jobs["unit"]["steps"]}
+    assert unit_steps["Run hardened source-only units"]["env"][
+        "TRTMC_PREMERGE_PYTHON_TEST_TARGETS"
+    ] == "${{ needs.ownership-impact.outputs.python_test_targets }}"
     assert jobs["required"]["needs"] == [
         "source-quality",
         "docs",

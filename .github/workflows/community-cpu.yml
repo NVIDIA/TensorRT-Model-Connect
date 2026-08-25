@@ -90,6 +90,7 @@ jobs:
     outputs:
       run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
       unit_scope: ${{ steps.impact.outputs.unit_scope }}
+      python_test_targets: ${{ steps.impact.outputs.python_test_targets }}
     steps:
       - name: Check out the exact PR merge
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -154,6 +155,8 @@ jobs:
           needs.ownership-impact.outputs.run_unit_tests == 'true'
         env:
           TRTMC_UNIT_SCOPE: ${{ needs.ownership-impact.outputs.unit_scope }}
+          TRTMC_PREMERGE_PYTHON_TEST_TARGETS: >-
+            ${{ needs.ownership-impact.outputs.python_test_targets }}
         run: python3 -m tools.community_ci unit --scope "$TRTMC_UNIT_SCOPE"
 
   required:

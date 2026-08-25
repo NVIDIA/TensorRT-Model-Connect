@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from tools import model_plugin_isolation
 from tools.test_impact import ImpactResult, format_human
@@ -191,6 +191,7 @@ class UnitTestRunner:
         )
         scope = self.context.env.get("TRTMC_PREMERGE_UNIT_SCOPE", "all")
         python_tests, native_targets, ctest_selector = self._premerge_scope(scope)
+        python_tests.extend(self._selected_python_test_targets(python_tests))
         print(f"Premerge unit scope: {scope}")
 
         selected_wheel = SelectedWheelRuntime.prepare(
@@ -346,6 +347,72 @@ class UnitTestRunner:
         raise CiError(
             "TRTMC_PREMERGE_UNIT_SCOPE must be builder, cli, all, or community-all"
         )
+
+    def _selected_python_test_targets(self, baseline: list[str]) -> list[str]:
+        raw = self.context.env.get("TRTMC_PREMERGE_PYTHON_TEST_TARGETS", "").strip()
+        if not raw:
+            return []
+        try:
+            values = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise CiError(
+                f"TRTMC_PREMERGE_PYTHON_TEST_TARGETS is invalid JSON: {error}"
+            ) from error
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise CiError("TRTMC_PREMERGE_PYTHON_TEST_TARGETS must be a JSON string list")
+
+        allowed_roots = (
+            PurePosixPath("tests/builder"),
+            PurePosixPath("tests/tools"),
+            PurePosixPath("tests/e2e_harness"),
+            PurePosixPath("tests/e2e/models"),
+            PurePosixPath("python/tensorrt_model_connect/families"),
+        )
+        repository = self.context.repository.resolve()
+        selected: list[str] = []
+        for target in values:
+            path_text = target.split("::", maxsplit=1)[0]
+            path = PurePosixPath(path_text)
+            invalid = (
+                not target
+                or target.startswith("-")
+                or "\\" in target
+                or any(ord(character) < 32 for character in target)
+                or path.is_absolute()
+                or ".." in path.parts
+                or path.suffix != ".py"
+                or path.name.endswith("_e2e.py")
+                or not any(path == root or path.is_relative_to(root) for root in allowed_roots)
+            )
+            if invalid:
+                raise CiError(f"invalid selected Python test target: {target!r}")
+            try:
+                candidate = (repository / path_text).resolve()
+            except (OSError, RuntimeError, ValueError) as error:
+                raise CiError(f"invalid selected Python test target: {target!r}") from error
+            if not candidate.is_relative_to(repository) or not candidate.is_file():
+                raise CiError(f"invalid selected Python test target: {target!r}")
+            if self._covered_by_python_baseline(target, path_text, baseline):
+                continue
+            if target not in selected:
+                selected.append(target)
+        if selected:
+            print("Additional selected Python tests: " + ", ".join(selected))
+        return selected
+
+    @staticmethod
+    def _covered_by_python_baseline(
+        target: str,
+        path_text: str,
+        baseline: list[str],
+    ) -> bool:
+        for baseline_target in baseline:
+            baseline_path = baseline_target.split("::", maxsplit=1)[0]
+            if baseline_target == target or baseline_path == path_text:
+                return True
+            if baseline_target.endswith("/") and path_text.startswith(baseline_target):
+                return True
+        return False
 
     def cpp_targets(self) -> list[str]:
         if self.context.env.get("FULL_E2E", "false") == "true":
