@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "cli/jsonl_io.h"
 #include "cli/args.h"
+#include "cli/jsonl_io.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/schema_registry.h"
 #include "trtmc/pipeline.h"
