@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
-import tensorrt_model_connect.utils.fcntl_shim as fcntl
+import fcntl
 import json
 import os
 from pathlib import Path

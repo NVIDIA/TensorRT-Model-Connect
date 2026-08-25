@@ -9,7 +9,7 @@ Boundary: cross-process fairness and locking only; this module never runs a mode
 from __future__ import annotations
 
 from collections.abc import Callable
-import tensorrt_model_connect.utils.fcntl_shim as fcntl
+import fcntl
 import hashlib
 import os
 import re

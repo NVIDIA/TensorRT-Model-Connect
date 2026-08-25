@@ -8,7 +8,7 @@ Boundary: image fingerprinting and readiness only; containers are started elsewh
 
 from __future__ import annotations
 
-import tensorrt_model_connect.utils.fcntl_shim as fcntl
+import fcntl
 import hashlib
 import importlib.util
 import json

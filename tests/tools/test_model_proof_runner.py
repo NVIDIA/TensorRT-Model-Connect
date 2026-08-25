@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-import tensorrt_model_connect.utils.fcntl_shim as fcntl
+import fcntl
 import json
 import os
 import re
