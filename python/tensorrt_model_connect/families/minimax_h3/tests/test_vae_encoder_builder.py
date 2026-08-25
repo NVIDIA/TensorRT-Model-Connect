@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect.families.minimax_h3 import vae_encoder_builder
@@ -284,6 +286,59 @@ def test_tiny_raw_tile_graph_preserves_keys_and_defers_token_drop() -> None:
     assert raw_moments.shape == (1, 2, 3, 8, 8)
     assert dropped_moments.shape == (1, 2, 2, 8, 8)
     assert raw_moments.dtype == dropped_moments.dtype == torch.float32
+
+
+def test_static_full_encoder_export_precomputes_python_tile_geometry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = pytest.importorskip("torch")
+    onnx = pytest.importorskip("onnx")
+    reference = pytest.importorskip("onnx.reference")
+    config = replace(_tiny_config(), in_channels=3)
+    shape = VideoVaeEncoderShape(1, 1, 32, 32)
+    observed = []
+    original_split = vae_encoder_builder.split_spatial_tiles
+
+    def record_split(length, **kwargs):
+        observed.append((length, type(length)))
+        return original_split(length, **kwargs)
+
+    monkeypatch.setattr(vae_encoder_builder, "split_spatial_tiles", record_split)
+    module = _make_encoder_module(torch, config, build_shape=shape)
+    assert observed == [(32, int), (32, int)]
+
+    def reject_trace_geometry(*_args, **_kwargs):
+        raise AssertionError("static export must not derive tile geometry from traced tensors")
+
+    monkeypatch.setattr(vae_encoder_builder, "split_spatial_tiles", reject_trace_geometry)
+    torch.manual_seed(11)
+    normalized_rgb = torch.randn(shape.input_shape, dtype=torch.float32)
+    buffer = io.BytesIO()
+    torch.onnx.export(
+        module,
+        normalized_rgb,
+        buffer,
+        opset_version=17,
+        input_names=["normalized_rgb"],
+        output_names=["posterior_moments"],
+        dynamo=False,
+    )
+    model = onnx.load_model_from_string(buffer.getvalue())
+    onnx.checker.check_model(model)
+    assert [dim.dim_value for dim in model.graph.input[0].type.tensor_type.shape.dim] == [
+        1,
+        3,
+        1,
+        32,
+        32,
+    ]
+
+    with torch.inference_mode():
+        expected = module(normalized_rgb).numpy()
+    (actual,) = reference.ReferenceEvaluator(model).run(
+        None, {"normalized_rgb": normalized_rgb.numpy()}
+    )
+    np.testing.assert_allclose(actual, expected, rtol=2e-4, atol=2e-4)
 
 
 def test_builder_exports_then_builds_one_explicit_static_shape(tmp_path: Path, monkeypatch) -> None:

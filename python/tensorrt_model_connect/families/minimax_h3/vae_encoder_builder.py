@@ -723,7 +723,13 @@ def checkpoint_keys(config: VideoVaeEncoderConfig | None = None) -> tuple[str, .
     return tuple(names)
 
 
-def _make_encoder_module(torch: Any, config: VideoVaeEncoderConfig, *, raw_tile: bool = False):
+def _make_encoder_module(
+    torch: Any,
+    config: VideoVaeEncoderConfig,
+    *,
+    raw_tile: bool = False,
+    build_shape: VideoVaeEncoderShape | None = None,
+):
     """Reconstruct the pinned Diffusers encoder under exact checkpoint names.
 
     ``raw_tile`` exposes only ``quant_conv(encoder(tile))``.  It intentionally
@@ -733,6 +739,14 @@ def _make_encoder_module(torch: Any, config: VideoVaeEncoderConfig, *, raw_tile:
 
     nn = torch.nn
     functional = torch.nn.functional
+    fixed_num_frames = None
+    fixed_y_tiles = None
+    fixed_x_tiles = None
+    if build_shape is not None:
+        build_shape.validate()
+        fixed_num_frames = build_shape.num_frames
+        fixed_y_tiles = tuple(tuple(values) for values in split_spatial_tiles(build_shape.height))
+        fixed_x_tiles = tuple(tuple(values) for values in split_spatial_tiles(build_shape.width))
 
     class MiniMaxH3VideoCausalConv3d(nn.Conv3d):
         def __init__(
@@ -984,9 +998,13 @@ def _make_encoder_module(torch: Any, config: VideoVaeEncoderConfig, *, raw_tile:
             return torch.cat(rows, dim=-2)
 
         def _encode_clip(self, normalized_rgb):
-            height, width = normalized_rgb.shape[-2:]
-            y_starts, y_lengths, y_overlaps = split_spatial_tiles(height)
-            x_starts, x_lengths, x_overlaps = split_spatial_tiles(width)
+            if fixed_y_tiles is None or fixed_x_tiles is None:
+                height, width = normalized_rgb.shape[-2:]
+                y_starts, y_lengths, y_overlaps = split_spatial_tiles(height)
+                x_starts, x_lengths, x_overlaps = split_spatial_tiles(width)
+            else:
+                y_starts, y_lengths, y_overlaps = fixed_y_tiles
+                x_starts, x_lengths, x_overlaps = fixed_x_tiles
             if len(y_starts) == len(x_starts) == 1:
                 return self.quant_conv(self.encoder(normalized_rgb))
 
@@ -1013,13 +1031,20 @@ def _make_encoder_module(torch: Any, config: VideoVaeEncoderConfig, *, raw_tile:
             normalized_rgb = normalized_rgb.to(torch.float32)
             if raw_tile:
                 return self.quant_conv(self.encoder(normalized_rgb))
-            num_frames = normalized_rgb.shape[2]
+            num_frames = (
+                fixed_num_frames if fixed_num_frames is not None else normalized_rgb.shape[2]
+            )
             if num_frames == 1:
                 return self._encode_clip(normalized_rgb)
             if num_frames % config.clip_length:
                 padding = (-num_frames) % config.clip_length
                 tail = normalized_rgb[:, :, -1:].repeat(1, 1, padding, 1, 1)
                 normalized_rgb = torch.cat([normalized_rgb, tail], dim=2)
+            clip_count = (
+                math.ceil(fixed_num_frames / config.clip_length)
+                if fixed_num_frames is not None
+                else normalized_rgb.shape[2] // config.clip_length
+            )
             moments = torch.cat(
                 [
                     self._encode_clip(
@@ -1029,7 +1054,7 @@ def _make_encoder_module(torch: Any, config: VideoVaeEncoderConfig, *, raw_tile:
                             index * config.clip_length : (index + 1) * config.clip_length,
                         ]
                     )
-                    for index in range(normalized_rgb.shape[2] // config.clip_length)
+                    for index in range(clip_count)
                 ],
                 dim=2,
             )
@@ -1077,7 +1102,7 @@ def _export_encoder_onnx(
 ) -> bytes:
     import torch
 
-    module = _make_encoder_module(torch, config)
+    module = _make_encoder_module(torch, config, build_shape=shape)
     _load_encoder_weights(torch, module, vae_dir, config)
     dummy = torch.zeros(shape.input_shape, dtype=torch.float32)
     onnx_buffer = io.BytesIO()
