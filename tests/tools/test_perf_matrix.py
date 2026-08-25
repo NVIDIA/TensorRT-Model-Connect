@@ -336,6 +336,10 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert by_id["opt.generate"]["workload"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
     assert by_id["llama.generate@minitron-4b-width"]["baseline"]["precision"] == "fp16"
+    assert by_id["nemotron.generate@nemotron-mini-4b"]["workload"]["runtime"] == {
+        "prefer_gpu_greedy": True
+    }
+    assert by_id["nemotron.generate@nemotron-mini-4b"]["baseline"]["precision"] == "fp16"
     assert by_id["nemotron_h.generate"]["baseline"]["mode"] == "hf-eager"
     assert by_id["nemotron_h.generate"]["workload"]["runtime"] == {"cuda_graphs": True}
     nemotron_baseline = by_id["nemotron_speech_streaming.transcribe"]["baseline"]
@@ -787,9 +791,7 @@ def test_reranking_order_contract_checks_all_document_scores() -> None:
         "baseline": {"output_contract": "reranking-order"},
     }
     candidate = {"output_summary": {"documents": 3, "scores": [0.8, 0.1, 0.4]}}
-    reference = {
-        "output_summary": {"document_count": 3, "scores": [12.0, -4.0, 2.0]}
-    }
+    reference = {"output_summary": {"document_count": 3, "scores": [12.0, -4.0, 2.0]}}
 
     assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
@@ -2817,11 +2819,13 @@ def test_candidate_preflight_requires_modelopt_for_auto_fp8(
     monkeypatch.setattr(
         perf_matrix,
         "_run_command",
-        lambda argv, _environment, timeout: calls.append((argv, timeout))
-        or {
-            "exit_code": 1,
-            "stderr_tail": "ModuleNotFoundError: No module named 'modelopt'",
-        },
+        lambda argv, _environment, timeout: (
+            calls.append((argv, timeout))
+            or {
+                "exit_code": 1,
+                "stderr_tail": "ModuleNotFoundError: No module named 'modelopt'",
+            }
+        ),
     )
 
     with pytest.raises(
@@ -2917,6 +2921,54 @@ def test_hf_runner_bridges_removed_input_check_decorator() -> None:
     assert GenericModule.check_model_inputs(forward) is forward
 
 
+def test_hf_runner_loads_model_directly_on_cuda() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py"))
+    captured: dict[str, object] = {}
+
+    class FakeTorch:
+        float16 = "float16"
+        float32 = "float32"
+        bfloat16 = "bfloat16"
+
+    class FakeModel:
+        def eval(self):
+            captured["eval"] = True
+            return self
+
+        def to(self, _device):
+            pytest.fail("direct CUDA loading must not copy a complete CPU model")
+
+    class FakeModelClass:
+        @staticmethod
+        def from_pretrained(model, **options):
+            captured.update(model=model, options=options)
+            return FakeModel()
+
+    arguments = Namespace(
+        model="example/model",
+        precision="fp16",
+        experts_implementation=None,
+    )
+    model = runner["_load_model"](
+        FakeModelClass,
+        arguments,
+        FakeTorch,
+        {"local_files_only": True},
+    )
+
+    assert isinstance(model, FakeModel)
+    assert captured == {
+        "model": "example/model",
+        "options": {
+            "torch_dtype": "float16",
+            "low_cpu_mem_usage": True,
+            "device_map": "cuda",
+            "local_files_only": True,
+        },
+        "eval": True,
+    }
+
+
 def test_hf_runner_closes_ignored_disabled_thinking_prompt() -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py"))
     captured: dict[str, object] = {}
@@ -2981,9 +3033,7 @@ def test_task_reference_local_only_cli_disables_huggingface_network(monkeypatch)
         captured["transformers"] = os.environ.get("TRANSFORMERS_OFFLINE")
         return 0
 
-    parser = SimpleNamespace(
-        parse_args=lambda _argv: Namespace(local_files_only=True)
-    )
+    parser = SimpleNamespace(parse_args=lambda _argv: Namespace(local_files_only=True))
     monkeypatch.setitem(runner["main"].__globals__, "build_parser", lambda: parser)
     monkeypatch.setitem(runner["main"].__globals__, "run", fake_run)
 

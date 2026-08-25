@@ -1022,6 +1022,11 @@ additional_profiles:
       precision: fp16
   - model: nemotron-mini-4b
     inherit: nemotron.generate
+    workload:
+      runtime:
+        prefer_gpu_greedy: true
+    baseline:
+      precision: fp16
   - model: nemotron-nano-4b
     inherit: llama.generate
   - model: nemotron-speech-streaming-en-0.6b

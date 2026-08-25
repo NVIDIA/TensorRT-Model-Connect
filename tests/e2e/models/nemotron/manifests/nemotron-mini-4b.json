@@ -6,6 +6,15 @@
   "runtime_strategy": "nemotron_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
+  "build_args": {
+    "decoder_engine_layout": "dual_profile"
+  },
+  "build_cli_args": [
+    {
+      "flag": "--set",
+      "value": "nemotron_decoder.builder_workspace_gib=2"
+    }
+  ],
   "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [

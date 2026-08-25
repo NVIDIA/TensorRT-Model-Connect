@@ -882,6 +882,19 @@ def test_sana_runtime_config_resolves_manifest_assets_for_native_worker(tmp_path
     assert Path(worker_config["sana_wm.image_path"]).is_file()
 
 
+def test_gpu_greedy_override_reaches_native_runtime_config(tmp_path: Path) -> None:
+    case = resolve_case(
+        ManifestCatalog().resolve("nemotron-mini-4b"),
+        tmp_path / "pending.bundle",
+        overrides={"runtime.prefer_gpu_greedy": True},
+    )
+
+    assert case.runtime["prefer_gpu_greedy"] is True
+    assert case.worker_request()["runtime"]["config"] == {
+        "runtime.prefer_gpu_greedy": True
+    }
+
+
 def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: Path) -> None:
     vlm = resolve_case(
         ManifestCatalog().resolve("deepseek-ocr-l0"),

@@ -28,7 +28,7 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
-from .utils import const_in_work_dtype, create_builder_context
+from .utils import builder_workspace_bytes, const_in_work_dtype, create_builder_context
 
 trt = trt_compat.get_trt()
 
@@ -150,7 +150,10 @@ def build_standard_decoder_engine(
         dynamic_kv_profile_rows.sort()
     else:
         dynamic_kv_profile_rows = []
-    builder_context = create_builder_context(verbose=verbose)
+    builder_context = create_builder_context(
+        verbose=verbose,
+        workspace_bytes=builder_workspace_bytes(config),
+    )
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config

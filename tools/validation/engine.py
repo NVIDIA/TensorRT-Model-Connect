@@ -9038,6 +9038,28 @@ def _model_asset_path(model: dict[str, Any], value: str) -> Path:
     return REPO_ROOT / "tests" / "e2e" / "data" / asset
 
 
+def _append_manifest_build_cli_args(cmd: list[str], model: dict[str, Any]) -> None:
+    specs = model.get("build_cli_args", [])
+    if not isinstance(specs, list):
+        return
+    for spec in specs:
+        if not isinstance(spec, dict):
+            continue
+        flag = spec.get("flag")
+        if not isinstance(flag, str) or not flag or "value" not in spec:
+            continue
+        value = spec["value"]
+        if value is None or value is False:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                cmd.extend([flag, str(item)])
+            continue
+        cmd.append(flag)
+        if value is not True:
+            cmd.append(str(value))
+
+
 def build_bundle_command(
     model: dict[str, Any],
     *,
@@ -9107,6 +9129,7 @@ def build_bundle_command(
         scales_path = _model_asset_path(model, str(fp8_scales))
         if scales_path.is_file():
             cmd.extend(["--fp8-scales", str(scales_path)])
+    _append_manifest_build_cli_args(cmd, model)
     if extra_build_args:
         cmd.extend(extra_build_args)
     return cmd

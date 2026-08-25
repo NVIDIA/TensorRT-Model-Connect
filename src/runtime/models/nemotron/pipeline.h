@@ -190,8 +190,8 @@ class NemotronTextGenerationPipeline final : public IPipeline {
                            TrtModule* prefill_override = nullptr);
     // Returns true if the batched prefill engine handled the prompt; false
     // means caller must fall back to the per-token decode loop.
-    bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
-    void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);
+    bool run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
+                             bool retain_device_logits);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
                                const GenerateConfig& cfg, int32_t steps, int32_t stop_interval,
                                bool is_eos) const;

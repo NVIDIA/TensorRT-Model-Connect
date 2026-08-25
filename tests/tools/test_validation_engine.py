@@ -4544,6 +4544,12 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
             "decoder_engine_layout": "dual_profile",
             "parallel": {"mode": "tensor_parallel", "tp_size": 2},
         },
+        "build_cli_args": [
+            {
+                "flag": "--set",
+                "value": "nemotron_decoder.builder_workspace_gib=2",
+            }
+        ],
         "quantization": {"format": "fp8", "calibration_samples": 4},
     }
 
@@ -4563,6 +4569,9 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
         cmd.index("--decoder-engine-layout") : cmd.index("--decoder-engine-layout") + 2
     ]
     assert ["--precision", "bf16"] == cmd[cmd.index("--precision") : cmd.index("--precision") + 2]
+    assert ["--set", "nemotron_decoder.builder_workspace_gib=2"] == cmd[
+        cmd.index("--set") : cmd.index("--set") + 2
+    ]
     assert "--trust-remote-code" in cmd
     assert "--verbose" in cmd
 
