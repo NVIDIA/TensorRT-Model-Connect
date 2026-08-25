@@ -108,5 +108,58 @@ std::vector<std::string> extract_json_string_array(const std::string& text, cons
     }
     return out;
 }
+std::vector<float> extract_json_float_array(const std::string& text, const std::string& key,
+                                            std::size_t max_count) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    std::vector<float> out;
+    if (it != j.end() && it->is_array()) {
+        for (const auto& elem : *it) {
+            if (out.size() >= max_count) break;
+            if (elem.is_number()) {
+                out.push_back(elem.get<float>());
+            } else {
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+bool extract_json_bool(const std::string& text, const std::string& key, bool fallback) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end() && it->is_boolean()) {
+        return it->get<bool>();
+    }
+    return fallback;
+}
+
+std::vector<bool> extract_json_bool_array(const std::string& text, const std::string& key,
+                                          std::size_t max_count) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    std::vector<bool> out;
+    if (it != j.end() && it->is_array()) {
+        for (const auto& elem : *it) {
+            if (out.size() >= max_count) break;
+            if (elem.is_boolean()) {
+                out.push_back(elem.get<bool>());
+            } else {
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+std::string extract_json_object_text(const std::string& text, const std::string& key) {
+    nlohmann::json j = parse_json_prefix(text);
+    auto it = j.find(key);
+    if (it != j.end() && it->is_object()) {
+        return it->dump();
+    }
+    return "";
+}
 
 } // namespace trtmc

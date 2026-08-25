@@ -537,6 +537,12 @@ int main() {
     run("string_array_missing", test_extract_json_string_array_missing);
     run("string_array_non_string", test_extract_json_string_array_stops_on_non_string);
 
+    run("duplicate_keys", test_duplicate_keys);
+    run("comments", test_comments);
+    run("partial_values", test_partial_values);
+    run("maximum_array_counts", test_maximum_array_counts);
+    run("malformed_input", test_malformed_input);
+
     if (all_passed) {
         std::cout << "test_json_helpers passed" << std::endl;
         return 0;
@@ -544,10 +550,3 @@ int main() {
     std::cerr << "test_json_helpers FAILED" << std::endl;
     return 1;
 }
-    RUN_TEST(test_duplicate_keys);
-    RUN_TEST(test_comments);
-    RUN_TEST(test_partial_values);
-    RUN_TEST(test_maximum_array_counts);
-    RUN_TEST(test_malformed_input);
-
-    
