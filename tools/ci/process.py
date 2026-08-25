@@ -57,10 +57,10 @@ class GitHubFiles:
         self.env = dict(env or os.environ)
 
     def environment(self, name: str, value: str) -> None:
-        self._append("GITHUB_ENV", f"{name}={value}\n")
+        self._append("GITHUB_ENV", self._assignment(name, value))
 
     def output(self, name: str, value: str) -> None:
-        self._append("GITHUB_OUTPUT", f"{name}={value}\n", create_parent=True)
+        self._append("GITHUB_OUTPUT", self._assignment(name, value), create_parent=True)
 
     def summary(self, text: str = "") -> None:
         self._append("GITHUB_STEP_SUMMARY", f"{text}\n")
@@ -74,3 +74,14 @@ class GitHubFiles:
             path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(text)
+
+    @staticmethod
+    def _assignment(name: str, value: str) -> str:
+        if "\n" not in value and "\r" not in value:
+            return f"{name}={value}\n"
+
+        delimiter = "TRTMC_EOF"
+        value_lines = set(value.splitlines())
+        while delimiter in value_lines:
+            delimiter += "_"
+        return f"{name}<<{delimiter}\n{value}\n{delimiter}\n"
