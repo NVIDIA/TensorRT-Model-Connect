@@ -53,16 +53,22 @@ def _target_tensorrt_version(
     return version
 
 
-def _package_variant_version(repository: Path, tensorrt_version: str) -> str:
-    from tensorrt_model_connect import trt_compat
+def _tensorrt_abi(version: str) -> str:
+    """Return an exact package target's major.minor ABI without importing the package."""
+    if not EXACT_TENSORRT_VERSION.fullmatch(version):
+        raise CiError(f"TensorRT ABI requires an exact four-part version, got {version!r}")
+    major, minor, *_ = version.split(".")
+    return f"{major}.{minor}"
 
+
+def _package_variant_version(repository: Path, tensorrt_version: str) -> str:
     with (repository / "pyproject.toml").open("rb") as stream:
         pyproject = tomllib.load(stream)
     package = pyproject["tool"]["tensorrt-model-connect"]["package"]
     base_version = str(package["base-version"])
     if "+" in base_version:
         raise CiError("base package version must not contain a local version segment")
-    abi = trt_compat.tensorrt_abi(tensorrt_version)
+    abi = _tensorrt_abi(tensorrt_version)
     return f"{base_version}+trt{abi.replace('.', '')}"
 
 
@@ -127,9 +133,7 @@ def _validate_backend_files(
     tensorrt_version: str,
     backends: dict[str, bytes],
 ) -> None:
-    from tensorrt_model_connect import trt_compat
-
-    abi = trt_compat.tensorrt_abi(tensorrt_version).replace(".", "_")
+    abi = _tensorrt_abi(tensorrt_version).replace(".", "_")
     generic = "libtrtmc_backend_trt.so"
     versioned = f"libtrtmc_backend_trt_{abi}.so"
     expected = {generic, versioned}
@@ -148,9 +152,7 @@ def _validate_backend_identity(
     backend_abi: str,
     runtime_version: str,
 ) -> None:
-    from tensorrt_model_connect import trt_compat
-
-    expected_abi = trt_compat.tensorrt_abi(tensorrt_version).replace(".", "_")
+    expected_abi = _tensorrt_abi(tensorrt_version).replace(".", "_")
     if backend_abi.replace(".", "_") != expected_abi:
         raise CiError(
             f"{location}: TensorRT backend reports ABI {backend_abi}; expected "

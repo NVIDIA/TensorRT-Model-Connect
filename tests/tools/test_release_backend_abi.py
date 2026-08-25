@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -66,6 +69,51 @@ def test_package_profile_resolves_unique_metadata(
         f'tensorrt=={tensorrt_version}; platform_machine == "x86_64"',
     ]
     assert _package_variant_version(REPO_ROOT, tensorrt_version) == package_version
+
+
+def test_package_ci_abi_validation_does_not_require_source_package_import() -> None:
+    script = textwrap.dedent(
+        """
+        from pathlib import Path
+        import sys
+
+        sys.path.insert(0, str(Path.cwd()))
+        from tools.ci.package import (
+            _package_variant_version,
+            _validate_backend_files,
+            _validate_backend_identity,
+        )
+
+        version = "11.1.0.106"
+        package_version = _package_variant_version(Path.cwd(), version)
+        _validate_backend_files(
+            "wheel",
+            version,
+            {
+                "libtrtmc_backend_trt.so": b"backend",
+                "libtrtmc_backend_trt_11_1.so": b"backend",
+            },
+        )
+        _validate_backend_identity("wheel", version, "11_1", version)
+        print(package_version)
+        """
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            script,
+        ],
+        cwd=REPO_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().endswith("+trt111")
 
 
 def test_package_profile_default_preserves_development_metadata(
@@ -259,17 +307,20 @@ def test_backend_identity_matches_wheel_tensorrt_version() -> None:
     _validate_backend_identity("wheel", TENSORRT_VERSION, "11_1", TENSORRT_VERSION)
 
 
-def test_backend_contract_derives_future_tensorrt_abi() -> None:
-    version = "11.2.0.113"
+@pytest.mark.parametrize(
+    ("version", "abi"),
+    (("11.2.0.113", "11_2"), ("100.42.0.113", "100_42")),
+)
+def test_backend_contract_derives_future_tensorrt_abi(version: str, abi: str) -> None:
     metadata = TENSORRT_METADATA.replace(TENSORRT_VERSION, version)
 
     assert _required_tensorrt_version(metadata) == version
     _validate_backend_files(
         "wheel",
         version,
-        _backend_files("libtrtmc_backend_trt.so", "libtrtmc_backend_trt_11_2.so"),
+        _backend_files("libtrtmc_backend_trt.so", f"libtrtmc_backend_trt_{abi}.so"),
     )
-    _validate_backend_identity("wheel", version, "11_2", version)
+    _validate_backend_identity("wheel", version, abi, version)
 
 
 def test_backend_identity_rejects_wrong_abi() -> None:
