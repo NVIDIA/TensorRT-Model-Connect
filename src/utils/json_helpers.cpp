@@ -4,6 +4,7 @@
  */
 
 #include "utils/json_helpers.h"
+
 #include <nlohmann/json.hpp>
 
 namespace trtmc {
@@ -53,11 +54,13 @@ int32_t extract_json_int_or_first_array(const std::string& text, const std::stri
     auto it = j.find(key);
     if (it != j.end()) {
         if (it->is_number()) {
-            return it->is_number_float() ? static_cast<int32_t>(it->get<double>()) : it->get<int32_t>();
+            return it->is_number_float() ? static_cast<int32_t>(it->get<double>())
+                                         : it->get<int32_t>();
         } else if (it->is_array() && !it->empty()) {
             auto first = it->at(0);
             if (first.is_number()) {
-                return first.is_number_float() ? static_cast<int32_t>(first.get<double>()) : first.get<int32_t>();
+                return first.is_number_float() ? static_cast<int32_t>(first.get<double>())
+                                               : first.get<int32_t>();
             }
         }
     }
@@ -80,9 +83,11 @@ std::vector<int32_t> extract_json_int_array(const std::string& text, const std::
     std::vector<int32_t> out;
     if (it != j.end() && it->is_array()) {
         for (const auto& elem : *it) {
-            if (out.size() >= max_count) break;
+            if (out.size() >= max_count)
+                break;
             if (elem.is_number()) {
-                out.push_back(elem.is_number_float() ? static_cast<int32_t>(elem.get<double>()) : elem.get<int32_t>());
+                out.push_back(elem.is_number_float() ? static_cast<int32_t>(elem.get<double>())
+                                                     : elem.get<int32_t>());
             } else {
                 break;
             }
@@ -98,7 +103,8 @@ std::vector<std::string> extract_json_string_array(const std::string& text, cons
     std::vector<std::string> out;
     if (it != j.end() && it->is_array()) {
         for (const auto& elem : *it) {
-            if (out.size() >= max_count) break;
+            if (out.size() >= max_count)
+                break;
             if (elem.is_string()) {
                 out.push_back(elem.get<std::string>());
             } else {
@@ -115,7 +121,8 @@ std::vector<float> extract_json_float_array(const std::string& text, const std::
     std::vector<float> out;
     if (it != j.end() && it->is_array()) {
         for (const auto& elem : *it) {
-            if (out.size() >= max_count) break;
+            if (out.size() >= max_count)
+                break;
             if (elem.is_number()) {
                 out.push_back(elem.get<float>());
             } else {
@@ -142,7 +149,8 @@ std::vector<bool> extract_json_bool_array(const std::string& text, const std::st
     std::vector<bool> out;
     if (it != j.end() && it->is_array()) {
         for (const auto& elem : *it) {
-            if (out.size() >= max_count) break;
+            if (out.size() >= max_count)
+                break;
             if (elem.is_boolean()) {
                 out.push_back(elem.get<bool>());
             } else {
