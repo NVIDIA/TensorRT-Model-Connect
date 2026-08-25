@@ -171,6 +171,73 @@ void test_diffusion_flags() {
     check(args.initial_latents_raw == "latents.raw", "diffusion latents");
 }
 
+void test_generate_video_audio_output_flags() {
+    auto canonical = parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "paint",
+                            "--output", "frames", "--first-image", "first.png", "--last-image",
+                            "last.png", "--audio-output", "soundtrack.wav"});
+    check(!canonical.parse_error, "generate-video audio-output parses cleanly");
+    check(canonical.audio_out == "soundtrack.wav", "generate-video audio-output path");
+    check(canonical.first_image_path == "first.png", "generate-video first image path");
+    check(canonical.last_image_path == "last.png", "generate-video last image path");
+
+    auto alias = parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "paint",
+                        "--audio-out", "alias.wav"});
+    check(!alias.parse_error, "generate-video audio-out alias parses cleanly");
+    check(alias.audio_out == "alias.wav", "generate-video audio-out alias path");
+}
+
+void test_generate_video_reference_flags_preserve_order() {
+    auto args = parse({"trtmc", "generate-video", "bundle.bundle", "--prompt", "paint",
+                       "--reference-audio", "voice.wav", "--reference-image", "portrait.png",
+                       "--reference-video", "clip.json", "--reference-image", "style.png"});
+    check(!args.parse_error, "generate-video reference flags parse cleanly");
+    check(args.reference_inputs.size() == 4, "generate-video reference count");
+    if (args.reference_inputs.size() == 4) {
+        check(args.reference_inputs[0].kind == trtmc::cli::ReferenceInputKind::kAudio &&
+                  args.reference_inputs[0].path == "voice.wav",
+              "generate-video first reference is audio");
+        check(args.reference_inputs[1].kind == trtmc::cli::ReferenceInputKind::kImage &&
+                  args.reference_inputs[1].path == "portrait.png",
+              "generate-video second reference is image");
+        check(args.reference_inputs[2].kind == trtmc::cli::ReferenceInputKind::kVideo &&
+                  args.reference_inputs[2].path == "clip.json",
+              "generate-video third reference is video");
+        check(args.reference_inputs[3].kind == trtmc::cli::ReferenceInputKind::kImage &&
+                  args.reference_inputs[3].path == "style.png",
+              "generate-video repeated image reference stays last");
+    }
+}
+
+void test_generate_video_rejects_references_with_keyframes() {
+    auto first = parse({"trtmc", "generate-video", "bundle.bundle", "--reference-image", "ref.png",
+                        "--first-image", "first.png"});
+    check(first.parse_error, "reference plus first keyframe rejected");
+    check(first.error_message ==
+              "--reference-* flags cannot be combined with --first-image or --last-image",
+          "reference plus first keyframe message");
+
+    auto last = parse({"trtmc", "generate-video", "bundle.bundle", "--last-image", "last.png",
+                       "--reference-audio", "voice.wav"});
+    check(last.parse_error, "last keyframe plus reference rejected regardless of order");
+}
+
+void test_generate_video_media_flags_are_command_specific() {
+    auto reference = parse(
+        {"trtmc", "run", "bundle.bundle", "--prompt", "paint", "--reference-image", "ref.png"});
+    check(reference.parse_error, "run rejects generate-video reference flag");
+    check(reference.error_message == "--reference-image is only valid for generate-video",
+          "run reference flag error message");
+
+    auto keyframe = parse(
+        {"trtmc", "classify", "bundle.bundle", "--image", "input.png", "--last-image", "end.png"});
+    check(keyframe.parse_error, "classify rejects generate-video keyframe flag");
+    check(keyframe.error_message == "--last-image is only valid for generate-video",
+          "classify keyframe flag error message");
+
+    auto audio_output = parse({"trtmc", "speak", "bundle.bundle", "--audio-output", "output.wav"});
+    check(audio_output.parse_error, "speak rejects generate-video audio-output spelling");
+}
+
 void test_detect_parses_contract_flags() {
     auto args = parse({"trtmc", "detect", "bundle.bundle", "--image", "img.jpg", "--output-json",
                        "detections.json", "--score-threshold", "0.42"});
@@ -322,6 +389,11 @@ void test_missing_value_fails() {
     check(bindings.parse_error, "missing kernel bindings value parse error");
     check(bindings.error_message == "--kernel-bindings requires a value",
           "missing kernel bindings value message");
+
+    auto reference = parse({"trtmc", "generate-video", "bundle.bundle", "--reference-video"});
+    check(reference.parse_error, "missing reference video value parse error");
+    check(reference.error_message == "--reference-video requires a value",
+          "missing reference video value message");
 }
 
 void test_missing_prompt_is_distinct_from_empty_prompt() {
@@ -501,6 +573,10 @@ int main() {
     test_build_forwards_args_verbatim();
     test_run_parses_common_flags();
     test_diffusion_flags();
+    test_generate_video_audio_output_flags();
+    test_generate_video_reference_flags_preserve_order();
+    test_generate_video_rejects_references_with_keyframes();
+    test_generate_video_media_flags_are_command_specific();
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
     test_disparity_parses_stereo_images();

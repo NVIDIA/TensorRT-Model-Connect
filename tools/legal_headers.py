@@ -152,6 +152,7 @@ NON_SOURCE_SUFFIXES = frozenset(
         ".patch",
         ".pdf",
         ".png",
+        ".ppm",
         ".rst",
         ".safetensors",
         ".svg",

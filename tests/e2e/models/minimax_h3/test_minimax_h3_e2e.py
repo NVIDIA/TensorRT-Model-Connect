@@ -21,6 +21,12 @@ from tests.e2e.models.minimax_h3.e2e_plugins.reference import (
     _model_snapshot,
     _reference_allow_patterns,
 )
+from tests.e2e.models.minimax_h3.audio_metrics import (
+    audio_summary,
+    compute_decoded_audio_metrics,
+    evaluate_audio_quality,
+    write_float32_wav,
+)
 from tensorrt_model_connect.families import find_diffusion_plugin, load_plugin_by_id
 from tensorrt_model_connect.families.minimax_h3.provenance import file_record
 from tests.e2e_harness.contracts import RunContext, StageOutput, StageSpec, ThresholdProfile
@@ -77,11 +83,35 @@ def test_minimax_h3_manifest_is_truthful_single_device_contract() -> None:
     assert case.inputs["video_height"] == 768
     assert case.inputs["video_width"] == 1344
     assert case.inputs["num_inference_steps"] == 50
+    assert case.inputs["audio_channels"] == 2
+    assert case.inputs["audio_sample_rate_hz"] == 32000
+    assert case.inputs["audio_num_samples_per_channel"] == 165600
     assert case.threshold_overrides["low_frequency_block_size"] == 16
     assert case.threshold_overrides["minimum_frame_low_frequency_correlation"] == 0.8
     assert case.threshold_overrides["minimum_mean_low_frequency_correlation"] == 0.9
+    assert case.threshold_overrides["exact_audio_channels"] == 2
+    assert case.threshold_overrides["exact_audio_num_samples"] == 165600
+    assert case.threshold_overrides["exact_audio_sample_rate_hz"] == 32000
+    assert case.threshold_overrides["minimum_audio_waveform_correlation"] == 0.99
     assert "minimum_psnr_db" not in case.threshold_overrides
     assert "maximum_mean_absolute_error" not in case.threshold_overrides
+
+    validation = json.loads(
+        (_MODEL_DIR / "validation" / "minimax-h3-768p.json").read_text(encoding="utf-8")
+    )
+    assert validation["requests"] == [
+        {
+            "sample_id": "minimax-h3-768p-official-profile",
+            "testcase": "minimax-h3-768p",
+            "stage": "end_to_end",
+            "category": "official-t2va-video-stereo-audio-profile",
+            "inputs": {
+                "audio_channels": 2,
+                "audio_sample_rate_hz": 32000,
+                "audio_num_samples_per_channel": 165600,
+            },
+        }
+    ]
 
 
 def test_minimax_h3_plugins_cover_native_reference_and_comparison() -> None:
@@ -200,6 +230,8 @@ def _visual_thresholds(
     width: int,
     *,
     block_size: int = 16,
+    audio_samples: int = 4096,
+    audio_sample_rate: int = 32000,
 ) -> dict[str, float]:
     return {
         "exact_num_frames": frames,
@@ -216,6 +248,17 @@ def _visual_thresholds(
         "maximum_temporal_activity_ratio": 1.5,
         "minimum_frame_std_ratio": 0.7,
         "maximum_frame_std_ratio": 1.4,
+        "exact_audio_channels": 2,
+        "exact_audio_num_samples": audio_samples,
+        "exact_audio_sample_rate_hz": audio_sample_rate,
+        "exact_audio_duration_s": audio_samples / audio_sample_rate,
+        "minimum_audio_waveform_correlation": 0.99,
+        "maximum_audio_normalized_rmse": 0.15,
+        "minimum_audio_si_sdr_db": 15.0,
+        "minimum_reference_audio_rms": 0.0001,
+        "minimum_candidate_audio_rms_ratio": 0.8,
+        "maximum_candidate_audio_rms_ratio": 1.25,
+        "maximum_audio_peak_absolute": 1.0,
     }
 
 
@@ -246,12 +289,56 @@ def _synthetic_video() -> np.ndarray:
     return np.asarray(video, dtype=np.float32)
 
 
+def _synthetic_audio(samples: int = 4096, sample_rate: int = 32000) -> np.ndarray:
+    time_axis = np.arange(samples, dtype=np.float32) / sample_rate
+    envelope = np.linspace(0.35, 1.0, samples, dtype=np.float32)
+    left = envelope * (
+        0.22 * np.sin(2.0 * np.pi * 311.0 * time_axis)
+        + 0.07 * np.sin(2.0 * np.pi * 997.0 * time_axis + 0.2)
+    )
+    right = envelope[::-1] * (
+        0.19 * np.sin(2.0 * np.pi * 457.0 * time_axis + 0.8)
+        + 0.05 * np.sin(2.0 * np.pi * 1321.0 * time_axis)
+    )
+    return np.ascontiguousarray(np.stack((left, right)), dtype=np.float32)
+
+
+def _audio_receipt(tmp_path: Path, label: str, audio: np.ndarray, sample_rate: int) -> dict:
+    audio_path = tmp_path / f"{label}_audio.npy"
+    wav_path = tmp_path / f"{label}_audio.wav"
+    np.save(audio_path, audio, allow_pickle=False)
+    write_float32_wav(wav_path, audio, sample_rate)
+    summary = audio_summary(audio, sample_rate)
+    return {
+        "audio_path": audio_path,
+        "wav_path": wav_path,
+        "metadata": {
+            "audio_shape": summary["shape"],
+            "audio_sample_rate_hz": summary["sample_rate_hz"],
+            "audio_num_samples_per_channel": summary["num_samples_per_channel"],
+            "audio_duration_s": summary["duration_s"],
+            "audio_all_finite": summary["all_finite"],
+            "audio_rms": summary["rms"],
+            "audio_peak_absolute": summary["peak_absolute"],
+            "audio_layout": summary["layout"],
+            "audio_encoding": summary["encoding"],
+            "audio_wav_encoding": "ieee_float32le",
+            "audio": file_record(audio_path),
+            "audio_wav": file_record(wav_path),
+        },
+    }
+
+
 def _compare_arrays(
     tmp_path: Path,
     reference: np.ndarray,
     candidate: np.ndarray,
     *,
     thresholds: dict[str, float] | None = None,
+    reference_audio: np.ndarray | None = None,
+    candidate_audio: np.ndarray | None = None,
+    reference_sample_rate: int = 32000,
+    candidate_sample_rate: int = 32000,
 ):
     reference_path = tmp_path / "reference.npy"
     candidate_path = tmp_path / "candidate.npy"
@@ -259,12 +346,25 @@ def _compare_arrays(
     np.save(candidate_path, candidate)
     revision = "1" * 40
     inventory = "a" * 64
+    if reference_audio is None:
+        reference_audio = _synthetic_audio()
+    if candidate_audio is None:
+        candidate_audio = reference_audio.copy()
+    reference_audio_evidence = _audio_receipt(
+        tmp_path, "reference", reference_audio, reference_sample_rate
+    )
+    candidate_audio_evidence = _audio_receipt(
+        tmp_path, "candidate", candidate_audio, candidate_sample_rate
+    )
     return comparator.compare(
         StageOutput(
             stage_name="end_to_end",
             data={
                 "returncode": 0,
                 "frames_path": str(candidate_path),
+                "audio_path": str(candidate_audio_evidence["audio_path"]),
+                "wav_path": str(candidate_audio_evidence["wav_path"]),
+                "sample_rate": candidate_sample_rate,
                 "source_revision": revision,
                 "receipt": {
                     "status": "passed",
@@ -273,6 +373,7 @@ def _compare_arrays(
                     "collective_transport": "none",
                     "source_revision": revision,
                     "checkpoint_inventory_sha256": inventory,
+                    **candidate_audio_evidence["metadata"],
                 },
             },
         ),
@@ -281,17 +382,26 @@ def _compare_arrays(
             data={
                 "returncode": 0,
                 "frames_path": str(reference_path),
+                "audio_path": str(reference_audio_evidence["audio_path"]),
+                "wav_path": str(reference_audio_evidence["wav_path"]),
+                "sample_rate": reference_sample_rate,
                 "source_revision": revision,
                 "receipt": {
                     "status": "passed",
                     "source_revision": revision,
                     "checkpoint_snapshot": {"inventory_sha256": inventory},
+                    **reference_audio_evidence["metadata"],
                 },
             },
         ),
         ThresholdProfile(
             task_strategy="diffusion_media_generation",
-            metrics=thresholds or _visual_thresholds(*reference.shape[:3]),
+            metrics=thresholds
+            or _visual_thresholds(
+                *reference.shape[:3],
+                audio_samples=reference_audio.shape[1],
+                audio_sample_rate=reference_sample_rate,
+            ),
         ),
         StageSpec(name="end_to_end"),
     )
@@ -373,12 +483,84 @@ def test_minimax_h3_comparator_requires_exact_shape_and_finite_pixels(
         _compare_arrays(tmp_path, reference, out_of_range)
 
 
+def test_minimax_h3_comparator_gates_actual_stereo_waveform_parity(tmp_path: Path) -> None:
+    video = _synthetic_video()
+    reference_audio = _synthetic_audio()
+
+    matching = _compare_arrays(
+        tmp_path,
+        video,
+        video.copy(),
+        reference_audio=reference_audio,
+        candidate_audio=reference_audio.copy(),
+    )
+    assert matching.status == "passed"
+    assert matching.metrics["reference_audio_shape"].passed
+    assert matching.metrics["candidate_audio_sample_rate_hz"].passed
+    assert matching.metrics["audio_waveform_correlation_minimum"].value == pytest.approx(1.0)
+    assert matching.metrics["audio_normalized_rmse_maximum"].value == pytest.approx(0.0)
+    assert matching.metrics["audio_si_sdr_db_minimum"].passed
+
+    swapped = _compare_arrays(
+        tmp_path,
+        video,
+        video.copy(),
+        reference_audio=reference_audio,
+        candidate_audio=reference_audio[::-1].copy(),
+    )
+    assert swapped.status == "failed"
+    assert not swapped.metrics["audio_waveform_correlation_minimum"].passed
+
+    silent = _compare_arrays(
+        tmp_path,
+        video,
+        video.copy(),
+        reference_audio=reference_audio,
+        candidate_audio=np.zeros_like(reference_audio),
+    )
+    assert silent.status == "failed"
+    assert not silent.metrics["audio_normalized_rmse_maximum"].passed
+    assert not silent.metrics["candidate_audio_rms_ratio_minimum"].passed
+
+
+def test_minimax_h3_audio_gates_require_shape_rate_duration_and_finite_samples(
+    tmp_path: Path,
+) -> None:
+    reference = _synthetic_audio(samples=512)
+    reference_path = tmp_path / "reference_audio.npy"
+    candidate_path = tmp_path / "candidate_audio.npy"
+    np.save(reference_path, reference, allow_pickle=False)
+    malformed = reference[:, :-1].copy()
+    malformed[0, 7] = np.nan
+    np.save(candidate_path, malformed, allow_pickle=False)
+
+    metrics = compute_decoded_audio_metrics(
+        reference_path,
+        candidate_path,
+        reference_sample_rate=32000,
+        candidate_sample_rate=16000,
+    )
+    gates = evaluate_audio_quality(
+        metrics,
+        _visual_thresholds(1, 16, 16, audio_samples=512, audio_sample_rate=32000),
+    )
+
+    assert not gates["candidate_audio_shape"].passed
+    assert not gates["candidate_audio_sample_rate_hz"].passed
+    assert not gates["candidate_audio_duration_s"].passed
+    assert not gates["candidate_audio_finite"].passed
+    assert not gates["audio_waveform_correlation_minimum"].passed
+
+
 def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Path) -> None:
     reference_path = tmp_path / "reference.npy"
     candidate_path = tmp_path / "candidate.npy"
     frames = np.zeros((1, 16, 16, 3), dtype=np.float32)
     np.save(reference_path, frames)
     np.save(candidate_path, frames)
+    audio = _synthetic_audio(samples=128)
+    reference_audio = _audio_receipt(tmp_path, "reference_cli", audio, 32000)
+    candidate_audio = _audio_receipt(tmp_path, "candidate_cli", audio.copy(), 32000)
     revision = "1" * 40
     workload = {
         "prompt": "test",
@@ -398,6 +580,7 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
                 "checkpoint_inventory_sha256": "a" * 64,
                 "workload": workload,
                 "frames": file_record(reference_path),
+                **reference_audio["metadata"],
             }
         )
     )
@@ -411,6 +594,7 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
         "checkpoint_inventory_sha256": "a" * 64,
         "request": workload,
         "frames": file_record(candidate_path),
+        **candidate_audio["metadata"],
     }
     candidate_receipt_path.write_text(json.dumps(candidate_receipt))
     thresholds_path = tmp_path / "thresholds.json"
@@ -418,7 +602,7 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
         json.dumps(
             {
                 "threshold_overrides": {
-                    **_visual_thresholds(1, 16, 16),
+                    **_visual_thresholds(1, 16, 16, audio_samples=128),
                 }
             }
         )
@@ -429,6 +613,14 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
         str(_MODEL_DIR / "compare_video.py"),
         str(reference_path),
         str(candidate_path),
+        "--reference-audio",
+        str(reference_audio["audio_path"]),
+        "--candidate-audio",
+        str(candidate_audio["audio_path"]),
+        "--reference-wav",
+        str(reference_audio["wav_path"]),
+        "--candidate-wav",
+        str(candidate_audio["wav_path"]),
         "--reference-receipt",
         str(reference_receipt_path),
         "--candidate-receipt",
@@ -451,6 +643,7 @@ def test_compare_video_cli_binds_threshold_schema_and_run_receipts(tmp_path: Pat
     assert comparison["passed"] is True
     assert comparison["pixel_metrics_gating"] is False
     assert comparison["metrics"]["psnr_db"]["operator"] == "diagnostic"
+    assert comparison["metrics"]["audio_waveform_correlation_minimum"]["passed"] is True
 
     candidate_receipt["source_revision"] = "2" * 40
     candidate_receipt_path.write_text(json.dumps(candidate_receipt))

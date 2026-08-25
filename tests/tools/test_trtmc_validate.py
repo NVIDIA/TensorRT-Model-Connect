@@ -45,8 +45,19 @@ def test_model_workload_catalog_covers_every_ready_model():
         task_models=task_models,
     )
 
-    assert len(catalog["models"]) == len(ready_models) == 115
-    assert sum("not_compared_reason" in spec for spec in catalog["models"].values()) == 0
+    assert len(catalog["models"]) == len(ready_models) == 117
+    assert {
+        name: spec["not_compared_reason"]
+        for name, spec in catalog["models"].items()
+        if "not_compared_reason" in spec
+    } == {
+        "minimax-h3-fl2va-768p": (
+            "Optional FL2VA plumbing profile; conditioned HF/native parity is not yet qualified."
+        ),
+        "minimax-h3-ref2va-768p": (
+            "Optional Ref2VA plumbing profile; conditioned HF/native parity is not yet qualified."
+        ),
+    }
     assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())
     assert "reference_cache_identity" not in catalog["models"]["personaplex-7b"]
     assert (
@@ -64,7 +75,7 @@ def test_model_workload_catalog_covers_every_ready_model():
     }
     assert len(qwen_identities) == 1
     bindings = trtmc_validate.resolve_bindings(catalog, catalog["models"])
-    assert len(bindings) == 115
+    assert len(bindings) == 117
     assert {
         binding.model for binding in bindings if binding.workload == "mmlu_continuation_parity"
     } >= {
@@ -127,8 +138,12 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
             "sample_id": "minimax-h3-768p-official-profile",
             "testcase": "minimax-h3-768p",
             "stage": "end_to_end",
-            "category": "official-profile",
-            "inputs": {},
+            "category": "official-t2va-video-stereo-audio-profile",
+            "inputs": {
+                "audio_channels": 2,
+                "audio_sample_rate_hz": 32000,
+                "audio_num_samples_per_channel": 165600,
+            },
         }
     ]
     resolved = validation_catalog.resolve_suite_for_model(suite, model)

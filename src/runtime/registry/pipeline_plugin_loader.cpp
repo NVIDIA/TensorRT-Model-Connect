@@ -27,6 +27,7 @@ namespace fs = std::filesystem;
 
 using RegisterModelPluginFn = void (*)(PipelineRegistry*);
 using ModelPluginIdFn = const char* (*)();
+using ModelPluginPipelineAbiFn = std::uint32_t (*)();
 
 struct ModelPluginCandidate {
     fs::path path;
@@ -185,6 +186,23 @@ bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std:
     return false;
 }
 
+bool model_plugin_pipeline_abi_matches(const fs::path& candidate, void* handle,
+                                       std::vector<std::string>& errors) {
+    dlerror();
+    auto* abi_sym = dlsym(handle, "trtmc_model_plugin_pipeline_abi_version");
+    const char* abi_err = dlerror();
+    if (abi_err != nullptr || abi_sym == nullptr) {
+        errors.push_back(candidate.string() + ": missing trtmc_model_plugin_pipeline_abi_version");
+        return false;
+    }
+    const auto actual = reinterpret_cast<ModelPluginPipelineAbiFn>(abi_sym)();
+    if (actual == kIPipelineAbiVersion)
+        return true;
+    errors.push_back(candidate.string() + ": IPipeline ABI mismatch, expected " +
+                     std::to_string(kIPipelineAbiVersion) + ", got " + std::to_string(actual));
+    return false;
+}
+
 std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& path,
                                                                 const std::string& model_id,
                                                                 std::vector<std::string>& errors) {
@@ -197,6 +215,10 @@ std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& 
     }
 
     ModelPluginCandidate candidate{path, handle, nullptr};
+    if (!model_plugin_pipeline_abi_matches(path, handle, errors)) {
+        close_model_plugin_candidate(candidate);
+        return std::nullopt;
+    }
     if (!model_plugin_id_matches(path, handle, model_id, errors)) {
         close_model_plugin_candidate(candidate);
         return std::nullopt;

@@ -25,10 +25,14 @@ from . import (
     MODEL_DIR,
     PROJECT_DIR,
     artifact_dir,
+    keyframe_inputs,
+    materialize_reference_inputs,
+    reference_cli_args,
     resolve_owned_file,
     source_revision,
     subprocess_env,
     validate_fixed_profile,
+    workflow,
 )
 from .contracts import E2ECase, RunContext, StageOutput, StageSpec
 
@@ -42,9 +46,7 @@ _FAMILY_MANIFEST = (
 
 def _reference_source_revision(case: E2ECase, ctx: RunContext) -> str:
     if case.metadata.get("validation_sample_id"):
-        return validate_source_revision(
-            str(case.metadata.get("reference_source_revision", ""))
-        )
+        return validate_source_revision(str(case.metadata.get("reference_source_revision", "")))
     return source_revision(case, ctx)
 
 
@@ -119,6 +121,49 @@ def _model_snapshot(case: E2ECase) -> Path:
     ).resolve()
 
 
+def build_hf_command(
+    case: E2ECase,
+    ctx: RunContext,
+    output_dir: Path,
+    *,
+    resolved_model: Path | None = None,
+    revision: str | None = None,
+    evidence_path: Path | None = None,
+) -> list[str]:
+    """Build the pinned reference command without executing or resolving weights."""
+
+    validate_fixed_profile(case)
+    python = ctx.reference_python_path() or sys.executable
+    command = [
+        python,
+        str(MODEL_DIR / "hf_reference.py"),
+        "--model-path",
+        str(resolved_model or _model_snapshot(case)),
+        "--prompt-file",
+        str(resolve_owned_file(str(case.inputs["prompt_file"]))),
+        "--output-dir",
+        str(output_dir),
+        "--source-revision",
+        revision or _reference_source_revision(case, ctx),
+        "--workflow",
+        workflow(case),
+        "--warmup",
+        "0",
+        "--measure",
+        "1",
+        "--steps",
+        str(case.inputs["num_inference_steps"]),
+        "--output-type",
+        "np",
+    ]
+    for _input_name, flag, path in keyframe_inputs(case):
+        command.extend((flag, str(path)))
+    command.extend(reference_cli_args(materialize_reference_inputs(case, output_dir)))
+    if evidence_path is not None:
+        command.extend(("--diffusers-evidence", str(evidence_path)))
+    return command
+
+
 class MiniMaxH3HfReference:
     @property
     def backend_name(self) -> str:
@@ -131,33 +176,16 @@ class MiniMaxH3HfReference:
                 data={"error": f"Unsupported MiniMax-H3 reference stage: {stage.name}"},
             )
 
-        validate_fixed_profile(case)
         output_dir = artifact_dir(ctx, case, "hf_reference")
-        python = ctx.reference_python_path() or sys.executable
         revision = _reference_source_revision(case, ctx)
-        command = [
-            python,
-            str(MODEL_DIR / "hf_reference.py"),
-            "--model-path",
-            str(_model_snapshot(case)),
-            "--prompt-file",
-            str(resolve_owned_file(str(case.inputs["prompt_file"]))),
-            "--output-dir",
-            str(output_dir),
-            "--source-revision",
-            revision,
-            "--warmup",
-            "0",
-            "--measure",
-            "1",
-            "--steps",
-            str(case.inputs["num_inference_steps"]),
-            "--output-type",
-            "np",
-        ]
         evidence_path = _reference_evidence_path(ctx)
-        if evidence_path is not None:
-            command.extend(("--diffusers-evidence", str(evidence_path)))
+        command = build_hf_command(
+            case,
+            ctx,
+            output_dir,
+            revision=revision,
+            evidence_path=evidence_path,
+        )
         timeout_s = int(case.metadata.get("reference_timeout_s", 7200))
         started = time.monotonic()
         result = subprocess.run(
@@ -174,11 +202,21 @@ class MiniMaxH3HfReference:
         receipt_path = output_dir / "hf_receipt.json"
         receipt = json.loads(receipt_path.read_text()) if receipt_path.is_file() else {}
         frames_path = output_dir / "hf_frames.npy"
+        audio_path = output_dir / "hf_audio.npy"
+        audio_wav_path = output_dir / "audio.wav"
         frames_dir = output_dir / "frames"
         frame_paths = sorted(frames_dir.glob("frame_*.png"))
         data = {
             "returncode": result.returncode,
             "frames_path": str(frames_path) if frames_path.is_file() else "",
+            "audio_path": str(audio_path) if audio_path.is_file() else "",
+            "wav_path": str(audio_wav_path) if audio_wav_path.is_file() else "",
+            "audio_channels": receipt.get("audio_shape", [0])[0]
+            if isinstance(receipt.get("audio_shape"), list) and receipt["audio_shape"]
+            else 0,
+            "audio_num_samples": receipt.get("audio_num_samples_per_channel", 0),
+            "sample_rate": receipt.get("audio_sample_rate_hz", 0),
+            "duration_s": receipt.get("audio_duration_s", 0.0),
             "receipt_path": str(receipt_path) if receipt_path.is_file() else "",
             "receipt": receipt,
             "source_revision": revision,

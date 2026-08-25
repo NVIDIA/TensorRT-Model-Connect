@@ -60,6 +60,49 @@ class DummyPipeline final : public trtmc::IPipeline {
     const char* pipeline_type() const override { return "DummyPipeline"; }
 };
 
+class RecordingImagePipeline final : public trtmc::IPipeline {
+  public:
+    const char* model_id() const override { return "recording-image"; }
+    const char* pipeline_type() const override { return "RecordingImagePipeline"; }
+
+    trtmc::ImageResult generate_image(const std::string& prompt,
+                                      const trtmc::GenerateConfig& cfg) override {
+        observed_prompt = prompt;
+        observed_seed = cfg.seed;
+        trtmc::ImageResult result;
+        result.pixels = {0.25F, 0.5F, 0.75F};
+        result.height = 1;
+        result.width = 1;
+        result.channels = 3;
+        return result;
+    }
+
+    std::string observed_prompt;
+    int32_t observed_seed{-1};
+};
+
+class RecordingJointPipeline final : public trtmc::IPipeline {
+  public:
+    using trtmc::IPipeline::generate_audio_video;
+
+    const char* model_id() const override { return "recording-joint"; }
+    const char* pipeline_type() const override { return "RecordingJointPipeline"; }
+
+    trtmc::AudioVideoResult generate_audio_video(const std::string& prompt,
+                                                 const trtmc::GenerateConfig& cfg) override {
+        ++calls;
+        observed_prompt = prompt;
+        observed_seed = cfg.seed;
+        trtmc::AudioVideoResult result;
+        result.video.width = 9;
+        return result;
+    }
+
+    int calls{0};
+    std::string observed_prompt;
+    int32_t observed_seed{-1};
+};
+
 class RecordingTranscriptionPipeline final : public trtmc::IPipeline {
   public:
     const char* model_id() const override { return "recording"; }
@@ -275,6 +318,16 @@ static void test_ipipeline_default_virtuals() {
     }
     check(threw, "default generate_image(string,image) throws");
 
+    // Default joint audio-video generation delegates to generate_image, so a
+    // pipeline without image generation keeps the same unsupported behavior.
+    threw = false;
+    try {
+        pipeline.generate_audio_video("prompt");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "default generate_audio_video delegates to generate_image");
+
     // Default generate_audio should throw
     threw = false;
     try {
@@ -373,6 +426,125 @@ static void test_ipipeline_default_virtuals() {
         threw = true;
     }
     check(threw, "default detect throws");
+}
+
+static void test_audio_video_default_wraps_image_result() {
+    RecordingImagePipeline pipeline;
+    trtmc::GenerateConfig cfg;
+    cfg.seed = 123;
+
+    const auto result = pipeline.generate_audio_video("joint prompt", cfg);
+    check(pipeline.observed_prompt == "joint prompt" && pipeline.observed_seed == 123,
+          "generate_audio_video forwards prompt and config");
+    check(result.video.height == 1 && result.video.width == 1 && result.video.channels == 3 &&
+              result.video.num_frames == 1 &&
+              result.video.pixels == std::vector<float>({0.25F, 0.5F, 0.75F}),
+          "generate_audio_video wraps image result");
+    check(result.audio.samples.empty() && result.audio.num_samples == 0 &&
+              result.audio.sample_rate == 0 && result.audio.num_channels == 0,
+          "generate_audio_video default audio is empty");
+}
+
+static void test_ipipeline_abi_tracks_joint_media_virtuals() {
+    check(trtmc::kIPipelineAbiVersion == 2U,
+          "IPipeline ABI v2 identifies the appended joint-media virtual surface");
+}
+
+static void test_audio_video_request_value_contract() {
+    trtmc::MediaImageInput image;
+    image.pixels = {0.1F, 0.2F, 0.3F};
+    image.height = 1;
+    image.width = 1;
+
+    trtmc::MediaVideoInput video;
+    video.pixels = {0.1F, 0.2F, 0.3F, 0.4F, 0.5F, 0.6F};
+    video.num_frames = 2;
+    video.height = 1;
+    video.width = 1;
+    video.fps = 24.0F;
+    trtmc::MultiChannelAudioResult soundtrack;
+    soundtrack.samples = {0.25F, 0.5F, -0.25F, -0.5F};
+    soundtrack.num_samples = 2;
+    soundtrack.sample_rate = 48000;
+    soundtrack.num_channels = 2;
+    video.soundtrack = soundtrack;
+
+    trtmc::AudioVideoReference image_reference;
+    image_reference.kind = trtmc::AudioVideoReferenceKind::kImage;
+    image_reference.image = image;
+    trtmc::AudioVideoReference video_reference;
+    video_reference.kind = trtmc::AudioVideoReferenceKind::kVideo;
+    video_reference.video = video;
+    trtmc::AudioVideoReference audio_reference;
+    audio_reference.kind = trtmc::AudioVideoReferenceKind::kAudio;
+    audio_reference.audio = soundtrack;
+
+    trtmc::AudioVideoRequest request;
+    request.prompt = "ordered media";
+    request.first_image = image;
+    request.last_image = image;
+    request.references = {image_reference, video_reference, audio_reference};
+    request.config.seed = 42;
+
+    check(request.first_image.pixels == image.pixels && request.last_image.pixels == image.pixels,
+          "audio-video request owns optional keyframe pixels");
+    check(request.references.size() == 3 &&
+              request.references[0].kind == trtmc::AudioVideoReferenceKind::kImage &&
+              request.references[1].kind == trtmc::AudioVideoReferenceKind::kVideo &&
+              request.references[2].kind == trtmc::AudioVideoReferenceKind::kAudio,
+          "audio-video request preserves reference order and kinds");
+    check(request.references[1].video.num_frames == 2 && request.references[1].video.fps == 24.0F &&
+              request.references[1].video.soundtrack.has_value() &&
+              request.references[1].video.soundtrack->samples == soundtrack.samples &&
+              request.references[2].audio.num_channels == 2 && request.config.seed == 42,
+          "audio-video request owns video soundtrack, audio reference, and config");
+}
+
+static void test_audio_video_request_default_is_fail_closed() {
+    RecordingJointPipeline pipeline;
+    trtmc::AudioVideoRequest text_only;
+    text_only.prompt = "text only";
+    text_only.config.seed = 77;
+    // Optional-by-empty keyframes remain absent even when dimensions are set.
+    text_only.first_image.height = 10;
+    text_only.last_image.width = 20;
+    const auto result = pipeline.generate_audio_video(text_only);
+    check(pipeline.observed_prompt == "text only" && pipeline.observed_seed == 77 &&
+              pipeline.calls == 1 && result.video.width == 9,
+          "media-free audio-video request delegates to existing joint method");
+
+    const auto rejects_without_generation = [&](const trtmc::AudioVideoRequest& request) {
+        pipeline.observed_prompt.clear();
+        const int calls_before = pipeline.calls;
+        bool threw = false;
+        try {
+            (void)pipeline.generate_audio_video(request);
+        } catch (const std::runtime_error& e) {
+            threw = std::string(e.what()).find("media-conditioned") != std::string::npos;
+        }
+        return threw && pipeline.observed_prompt.empty() && pipeline.calls == calls_before;
+    };
+
+    auto first_image = text_only;
+    first_image.first_image.pixels = {0.1F, 0.2F, 0.3F};
+    check(rejects_without_generation(first_image),
+          "default audio-video request rejects first-image conditioning");
+
+    auto last_image = text_only;
+    last_image.last_image.pixels = {0.1F, 0.2F, 0.3F};
+    check(rejects_without_generation(last_image),
+          "default audio-video request rejects last-image conditioning");
+
+    auto references = text_only;
+    trtmc::AudioVideoReference reference;
+    reference.kind = trtmc::AudioVideoReferenceKind::kAudio;
+    reference.audio.samples = {0.5F};
+    reference.audio.num_samples = 1;
+    reference.audio.sample_rate = 16000;
+    reference.audio.num_channels = 1;
+    references.references.push_back(std::move(reference));
+    check(rejects_without_generation(references),
+          "default audio-video request rejects ordered reference media");
 }
 
 static void test_speech_session_value_contract() {
@@ -531,6 +703,10 @@ int main() {
     test_sizeof_ipipeline_is_vtable();
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
+    test_audio_video_default_wraps_image_result();
+    test_ipipeline_abi_tracks_joint_media_virtuals();
+    test_audio_video_request_value_contract();
+    test_audio_video_request_default_is_fail_closed();
     test_speech_session_value_contract();
     test_speech_session_virtual_interface();
     test_transcription_batch_preserves_per_request_config();

@@ -32,8 +32,12 @@
 #include "trtmc/trtmc_io.hpp"
 
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -45,6 +49,52 @@ static void check(bool condition, const char* test_name) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
+}
+
+template <typename T>
+static T read_binary_value(const std::vector<char>& bytes, std::size_t offset) {
+    T value{};
+    std::memcpy(&value, bytes.data() + offset, sizeof(value));
+    return value;
+}
+
+static void write_pcm16_wav(const std::string& path, uint16_t channels, uint32_t sample_rate,
+                            const std::vector<int16_t>& interleaved) {
+    const uint16_t block_align = static_cast<uint16_t>(channels * sizeof(int16_t));
+    const uint32_t byte_rate = sample_rate * block_align;
+    const uint32_t data_size = static_cast<uint32_t>(interleaved.size() * sizeof(int16_t));
+    const uint32_t chunk_size = 36U + data_size;
+    constexpr uint32_t fmt_size = 16U;
+    constexpr uint16_t audio_format = 1U;
+    constexpr uint16_t bits_per_sample = 16U;
+
+    std::ofstream file(path, std::ios::binary);
+    file.write("RIFF", 4);
+    file.write(reinterpret_cast<const char*>(&chunk_size), sizeof(chunk_size));
+    file.write("WAVEfmt ", 8);
+    file.write(reinterpret_cast<const char*>(&fmt_size), sizeof(fmt_size));
+    file.write(reinterpret_cast<const char*>(&audio_format), sizeof(audio_format));
+    file.write(reinterpret_cast<const char*>(&channels), sizeof(channels));
+    file.write(reinterpret_cast<const char*>(&sample_rate), sizeof(sample_rate));
+    file.write(reinterpret_cast<const char*>(&byte_rate), sizeof(byte_rate));
+    file.write(reinterpret_cast<const char*>(&block_align), sizeof(block_align));
+    file.write(reinterpret_cast<const char*>(&bits_per_sample), sizeof(bits_per_sample));
+    file.write("data", 4);
+    file.write(reinterpret_cast<const char*>(&data_size), sizeof(data_size));
+    file.write(reinterpret_cast<const char*>(interleaved.data()),
+               static_cast<std::streamsize>(data_size));
+}
+
+static void rewrite_wav_u32(const std::string& path, std::streamoff offset, uint32_t value) {
+    const char bytes[] = {
+        static_cast<char>(value & 0xFFU),
+        static_cast<char>((value >> 8U) & 0xFFU),
+        static_cast<char>((value >> 16U) & 0xFFU),
+        static_cast<char>((value >> 24U) & 0xFFU),
+    };
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.seekp(offset);
+    file.write(bytes, sizeof(bytes));
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +147,199 @@ static bool test_io_write_read_roundtrip() {
         }
     }
     return true;
+}
+
+// Intention: channel-major multichannel audio is written as interleaved IEEE
+//            float32 WAV sample frames with correct stereo metadata.
+// Preconditions:  two channels with three samples per channel
+// Postconditions: WAV header describes stereo float32 and payload is LRLRLR
+static bool test_io_write_stereo_channel_major_layout() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "stereo.wav").string();
+
+    trtmc::MultiChannelAudioResult audio;
+    audio.samples = {0.1F, 0.2F, 0.3F, -0.1F, -0.2F, -0.3F};
+    audio.num_samples = 3;
+    audio.sample_rate = 48000;
+    audio.num_channels = 2;
+
+    try {
+        trtmc::io::write_wav(audio, path);
+    } catch (const std::exception& e) {
+        std::cerr << "io_write_stereo_channel_major_layout: write threw: " << e.what() << '\n';
+        return false;
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    const std::vector<char> bytes{std::istreambuf_iterator<char>(file),
+                                  std::istreambuf_iterator<char>()};
+    if (bytes.size() != 44U + 6U * sizeof(float))
+        return false;
+    if (std::string(bytes.data(), 4) != "RIFF" || std::string(bytes.data() + 8, 4) != "WAVE" ||
+        std::string(bytes.data() + 12, 4) != "fmt " || std::string(bytes.data() + 36, 4) != "data")
+        return false;
+    if (read_binary_value<uint32_t>(bytes, 4) != 60U ||
+        read_binary_value<uint32_t>(bytes, 16) != 16U ||
+        read_binary_value<int16_t>(bytes, 20) != 3 || read_binary_value<int16_t>(bytes, 22) != 2 ||
+        read_binary_value<int32_t>(bytes, 24) != 48000 ||
+        read_binary_value<int32_t>(bytes, 28) != 384000 ||
+        read_binary_value<int16_t>(bytes, 32) != 8 || read_binary_value<int16_t>(bytes, 34) != 32 ||
+        read_binary_value<uint32_t>(bytes, 40) != 24U)
+        return false;
+
+    const std::vector<float> expected{0.1F, -0.1F, 0.2F, -0.2F, 0.3F, -0.3F};
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        if (std::abs(read_binary_value<float>(bytes, 44U + i * sizeof(float)) - expected[i]) >
+            1e-6F)
+            return false;
+    }
+    return true;
+}
+
+// Intention: read_wav_multichannel reverses WAV interleaving and preserves a
+//            float32 stereo signal in channel-major layout.
+// Preconditions:  write_wav receives two channels with distinct samples
+// Postconditions: channel count, frame count, sample rate, and samples survive
+static bool test_io_read_stereo_float_channel_major() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "stereo-float.wav").string();
+
+    trtmc::MultiChannelAudioResult input;
+    input.samples = {0.1F, 0.2F, 0.3F, -0.4F, -0.5F, -0.6F};
+    input.num_samples = 3;
+    input.sample_rate = 44100;
+    input.num_channels = 2;
+    try {
+        trtmc::io::write_wav(input, path);
+        const auto result = trtmc::io::read_wav_multichannel(path);
+        if (result.num_channels != 2 || result.num_samples != 3 || result.sample_rate != 44100 ||
+            result.samples.size() != input.samples.size())
+            return false;
+        for (std::size_t i = 0; i < input.samples.size(); ++i) {
+            if (std::abs(result.samples[i] - input.samples[i]) > 1e-6F)
+                return false;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "io_read_stereo_float_channel_major: " << e.what() << '\n';
+        return false;
+    }
+    return true;
+}
+
+// Intention: one-channel inputs use the same channel-major API without adding
+//            or dropping samples.
+// Preconditions:  valid mono IEEE-float32 WAV
+// Postconditions: reader reports one channel and preserves all samples
+static bool test_io_read_mono_multichannel_contract() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "mono-float.wav").string();
+    trtmc::AudioResult input;
+    input.samples = {-0.75F, 0.0F, 0.5F};
+    input.num_samples = 3;
+    input.sample_rate = 22050;
+    try {
+        trtmc::io::write_wav(input, path);
+        const auto result = trtmc::io::read_wav_multichannel(path);
+        return result.num_channels == 1 && result.num_samples == 3 && result.sample_rate == 22050 &&
+               result.samples == input.samples;
+    } catch (const std::exception& e) {
+        std::cerr << "io_read_mono_multichannel_contract: " << e.what() << '\n';
+        return false;
+    }
+}
+
+// Intention: PCM16 stereo is decoded channel-major while read_wav keeps its
+//            historical average-to-mono behavior.
+// Preconditions:  hand-authored interleaved PCM16 stereo WAV
+// Postconditions: multichannel samples preserve L/R and mono samples average
+static bool test_io_read_stereo_pcm16_and_mono_compatibility() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "stereo-pcm16.wav").string();
+    write_pcm16_wav(path, 2, 16000, {32767, -32768, 16384, -16384, 0, 8192});
+
+    try {
+        const auto multichannel = trtmc::io::read_wav_multichannel(path);
+        const std::vector<float> expected_channels{
+            32767.0F / 32768.0F, 0.5F, 0.0F, -1.0F, -0.5F, 0.25F};
+        if (multichannel.num_channels != 2 || multichannel.num_samples != 3 ||
+            multichannel.sample_rate != 16000 ||
+            multichannel.samples.size() != expected_channels.size())
+            return false;
+        for (std::size_t i = 0; i < expected_channels.size(); ++i) {
+            if (std::abs(multichannel.samples[i] - expected_channels[i]) > 1e-6F)
+                return false;
+        }
+
+        const auto mono = trtmc::io::read_wav(path);
+        const std::vector<float> expected_mono{(-1.0F / 32768.0F) * 0.5F, 0.0F, 0.125F};
+        if (mono.num_samples != 3 || mono.sample_rate != 16000 ||
+            mono.samples.size() != expected_mono.size())
+            return false;
+        for (std::size_t i = 0; i < expected_mono.size(); ++i) {
+            if (std::abs(mono.samples[i] - expected_mono[i]) > 1e-6F)
+                return false;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "io_read_stereo_pcm16_and_mono_compatibility: " << e.what() << '\n';
+        return false;
+    }
+    return true;
+}
+
+// Intention: the new reader has an explicit one/two-channel contract without
+//            narrowing the legacy mono reader's multichannel behavior.
+// Preconditions:  valid three-channel IEEE-float32 WAV
+// Postconditions: multichannel reader rejects it; mono reader averages all 3
+static bool test_io_multichannel_channel_limit_preserves_mono_behavior() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "three-channel.wav").string();
+    trtmc::MultiChannelAudioResult input;
+    input.samples = {0.0F, 0.3F, 0.3F, 0.6F, 0.6F, 0.9F};
+    input.num_samples = 2;
+    input.sample_rate = 24000;
+    input.num_channels = 3;
+    try {
+        trtmc::io::write_wav(input, path);
+        bool rejected = false;
+        try {
+            (void)trtmc::io::read_wav_multichannel(path);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected)
+            return false;
+        const auto mono = trtmc::io::read_wav(path);
+        return mono.samples.size() == 2U && std::abs(mono.samples[0] - 0.3F) < 1e-6F &&
+               std::abs(mono.samples[1] - 0.6F) < 1e-6F;
+    } catch (const std::exception& e) {
+        std::cerr << "io_multichannel_channel_limit_preserves_mono_behavior: " << e.what() << '\n';
+        return false;
+    }
+}
+
+// Intention: chunk traversal is bounded by the RIFF container's declared size.
+// Preconditions:  valid WAV whose RIFF-size word is rewritten too small/large
+// Postconditions: chunks outside the extent and truncated extents are rejected
+static bool test_io_riff_declared_size_bounds_chunks() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "riff-size.wav").string();
+    const auto rejected_with = [&](const char* expected) {
+        try {
+            (void)trtmc::io::read_wav_multichannel(path);
+        } catch (const std::runtime_error& e) {
+            return std::string(e.what()).find(expected) != std::string::npos;
+        }
+        return false;
+    };
+
+    write_pcm16_wav(path, 1, 16000, {0, 1});
+    rewrite_wav_u32(path, 4, 4U);
+    if (!rejected_with("missing fmt or data chunk"))
+        return false;
+
+    write_pcm16_wav(path, 1, 16000, {0, 1});
+    rewrite_wav_u32(path, 4, 4096U);
+    return rejected_with("truncated RIFF container");
 }
 
 // Intention: write_wav preserves the sample rate into the WAV header.
@@ -250,6 +493,14 @@ int main() {
     };
 
     run("io_write_read_roundtrip", test_io_write_read_roundtrip);
+    run("io_write_stereo_channel_major_layout", test_io_write_stereo_channel_major_layout);
+    run("io_read_stereo_float_channel_major", test_io_read_stereo_float_channel_major);
+    run("io_read_mono_multichannel_contract", test_io_read_mono_multichannel_contract);
+    run("io_read_stereo_pcm16_and_mono_compatibility",
+        test_io_read_stereo_pcm16_and_mono_compatibility);
+    run("io_multichannel_channel_limit_preserves_mono_behavior",
+        test_io_multichannel_channel_limit_preserves_mono_behavior);
+    run("io_riff_declared_size_bounds_chunks", test_io_riff_declared_size_bounds_chunks);
     run("io_sample_rate_preserved", test_io_sample_rate_preserved);
     run("io_single_sample", test_io_single_sample);
     run("io_write_empty_throws", test_io_write_empty_throws);

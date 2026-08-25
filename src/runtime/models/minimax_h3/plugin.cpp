@@ -31,12 +31,26 @@ struct CacheConfig {
     float threshold{0.025F};
 };
 
-SectionMap index_sections(const BundleInfo& info, bool first_block_cache) {
-    constexpr std::array<const char*, 4> monolithic_names = {
-        "text_encoder_plan", "adaln_precompute_plan", "denoiser_plan", "vae_tile_decoder_plan"};
-    constexpr std::array<const char*, 6> first_block_cache_names = {
-        "text_encoder_plan",  "adaln_precompute_plan", "denoiser_head_plan",
-        "denoiser_tail_plan", "denoiser_finish_plan",  "vae_tile_decoder_plan"};
+MiniMaxH3Workflow load_workflow(const PipelineContext& ctx) {
+    const std::string value = extract_json_string(ctx.config_json, "workflow", "t2va");
+    if (value == "t2va")
+        return MiniMaxH3Workflow::kT2va;
+    if (value == "fl2va")
+        return MiniMaxH3Workflow::kFl2va;
+    if (value == "ref2va")
+        return MiniMaxH3Workflow::kRef2va;
+    throw std::runtime_error("MiniMax-H3 bundle has an invalid workflow");
+}
+
+SectionMap index_sections(const BundleInfo& info, bool first_block_cache,
+                          MiniMaxH3Workflow workflow) {
+    constexpr std::array<const char*, 5> monolithic_names = {
+        "text_encoder_plan", "adaln_precompute_plan", "denoiser_plan", "vae_tile_decoder_plan",
+        "audio_vae_decoder_plan"};
+    constexpr std::array<const char*, 7> first_block_cache_names = {
+        "text_encoder_plan",     "adaln_precompute_plan", "denoiser_head_plan",
+        "denoiser_tail_plan",    "denoiser_finish_plan",  "vae_tile_decoder_plan",
+        "audio_vae_decoder_plan"};
     SectionMap sections;
     const auto add_section = [&](const char* name) {
         const auto it =
@@ -46,7 +60,21 @@ SectionMap index_sections(const BundleInfo& info, bool first_block_cache) {
             throw std::runtime_error(std::string("MiniMax-H3 bundle is missing ") + name);
         sections.emplace(name, *it);
     };
-    if (first_block_cache) {
+    constexpr std::array<const char*, 7> fl2va_names = {
+        "language_conditioner_plan", "vision_conditioner_plan", "vae_encoder_plan",
+        "adaln_precompute_plan",     "fl2va_denoiser_plan",     "vae_tile_decoder_plan",
+        "audio_vae_decoder_plan"};
+    if (workflow == MiniMaxH3Workflow::kFl2va) {
+        for (const char* name : fl2va_names)
+            add_section(name);
+    } else if (workflow == MiniMaxH3Workflow::kRef2va) {
+        constexpr std::array<const char*, 9> ref2va_names = {
+            "language_conditioner_plan", "vision_conditioner_plan", "vae_encoder_tile_t1_plan",
+            "vae_encoder_tile_t17_plan", "audio_vae_encoder_plan",  "adaln_precompute_plan",
+            "ref2va_denoiser_plan",      "vae_tile_decoder_plan",   "audio_vae_decoder_plan"};
+        for (const char* name : ref2va_names)
+            add_section(name);
+    } else if (first_block_cache) {
         for (const char* name : first_block_cache_names)
             add_section(name);
     } else {
@@ -66,6 +94,55 @@ std::unique_ptr<ITokenizer> load_tokenizer(const BundleFile& bundle) {
     return tokenizer;
 }
 
+void validate_audio_profile(const PipelineContext& ctx) {
+    if (extract_json_int(ctx.config_json, "audio_sample_rate", 32000) != 32000 ||
+        extract_json_int(ctx.config_json, "audio_latent_frames", 207) != 207 ||
+        extract_json_int(ctx.config_json, "audio_output_samples", 165600) != 165600)
+        throw std::runtime_error("MiniMax-H3 bundle has an incompatible audio output profile");
+}
+
+void validate_fl2va_profile(const PipelineContext& ctx) {
+    if (extract_json_int(ctx.config_json, "min_text_rows", 1) != 1 ||
+        extract_json_int(ctx.config_json, "max_text_rows", 4096) != 4096 ||
+        extract_json_int(ctx.config_json, "fl2va_keyframe_rows", 1008) != 1008)
+        throw std::runtime_error("MiniMax-H3 FL2VA bundle has an incompatible dynamic profile");
+    for (const char* name :
+         {"processor/preprocessor_config.json", "processor/video_preprocessor_config.json"}) {
+        const auto* section = find_section(ctx.bundle, name);
+        if (section == nullptr || section->empty())
+            throw std::runtime_error(std::string("MiniMax-H3 FL2VA bundle is missing ") + name);
+    }
+}
+
+void validate_ref2va_profile(const PipelineContext& ctx) {
+    constexpr std::array<std::pair<const char*, int32_t>, 13> expected = {{
+        {"min_text_rows", 1},
+        {"opt_text_rows", 8192},
+        {"max_text_rows", 262144},
+        {"ref2va_max_condition_video_rows", 258120},
+        {"ref2va_max_condition_audio_rows", 2408},
+        {"ref2va_max_images", 9},
+        {"ref2va_max_videos", 3},
+        {"ref2va_max_audios", 3},
+        {"ref2va_max_references", 12},
+        {"ref2va_reference_min_seconds", 2},
+        {"ref2va_reference_max_seconds", 15},
+        {"ref2va_vae_tile_size", 256},
+        {"ref2va_vae_tile_min_overlap", 64},
+    }};
+    for (const auto& [name, value] : expected) {
+        if (extract_json_int(ctx.config_json, name, value) != value)
+            throw std::runtime_error(
+                "MiniMax-H3 Ref2VA bundle has an incompatible dynamic profile");
+    }
+    for (const char* name :
+         {"processor/preprocessor_config.json", "processor/video_preprocessor_config.json"}) {
+        const auto* section = find_section(ctx.bundle, name);
+        if (section == nullptr || section->empty())
+            throw std::runtime_error(std::string("MiniMax-H3 Ref2VA bundle is missing ") + name);
+    }
+}
+
 void validate_profile(const PipelineContext& ctx) {
     if (ctx.backend == nullptr)
         throw std::runtime_error("MiniMax-H3 requires the TensorRT backend");
@@ -75,6 +152,12 @@ void validate_profile(const PipelineContext& ctx) {
         throw std::runtime_error("MiniMax-H3 requires 38247 unpadded sequence rows");
     if (extract_json_int(ctx.config_json, "vae_tile_batch", 28) != 28)
         throw std::runtime_error("MiniMax-H3 requires vae_tile_batch=28");
+    validate_audio_profile(ctx);
+    const auto workflow = load_workflow(ctx);
+    if (workflow == MiniMaxH3Workflow::kFl2va)
+        validate_fl2va_profile(ctx);
+    else if (workflow == MiniMaxH3Workflow::kRef2va)
+        validate_ref2va_profile(ctx);
 }
 
 CacheConfig load_cache_config(const PipelineContext& ctx) {
@@ -119,17 +202,41 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
     };
 }
 
+MiniMaxH3ProfileModuleLoader make_profile_module_loader(const PipelineContext& ctx,
+                                                        SectionMap sections) {
+    const std::string bundle_path = ctx.bundle_path;
+    const std::string runtime_cache = ctx.runtime_cache_path;
+    IBackend* const backend = ctx.backend;
+    const bool cuda_graphs = ctx.cuda_graphs;
+    return [sections = std::move(sections), bundle_path, runtime_cache, backend,
+            cuda_graphs](const std::string& name, cudaStream_t stream, int32_t profile) {
+        const auto it = sections.find(name);
+        if (it == sections.end())
+            throw std::runtime_error("Unknown MiniMax-H3 profiled plan section: " + name);
+        auto plan = ReadBundleSection(bundle_path, it->second);
+        ModuleCreateOptions options;
+        options.stream = stream;
+        options.runtime_cache_path = runtime_cache.c_str();
+        options.cuda_graphs = cuda_graphs;
+        options.optimization_profile = profile;
+        return backend->create_module(plan.data(), plan.size(), options);
+    };
+}
+
 } // namespace
 
 class MiniMaxH3Plugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         validate_profile(ctx);
+        const MiniMaxH3Workflow workflow = load_workflow(ctx);
         const CacheConfig cache = load_cache_config(ctx);
-        auto loader = make_module_loader(ctx, index_sections(ctx.bundle.info, cache.enabled));
-        return std::make_unique<MiniMaxH3Pipeline>(std::move(loader), load_tokenizer(ctx.bundle),
-                                                   ctx.bundle.info.model_id, cache.enabled,
-                                                   cache.threshold);
+        auto sections = index_sections(ctx.bundle.info, cache.enabled, workflow);
+        auto loader = make_module_loader(ctx, sections);
+        auto profile_loader = make_profile_module_loader(ctx, std::move(sections));
+        return std::make_unique<MiniMaxH3Pipeline>(
+            std::move(loader), load_tokenizer(ctx.bundle), ctx.bundle.info.model_id, cache.enabled,
+            cache.threshold, workflow, std::move(profile_loader));
     }
 };
 

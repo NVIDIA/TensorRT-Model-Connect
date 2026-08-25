@@ -8,7 +8,11 @@ runtime_config_schemas = ["config_schema.cpp|register_minimax_h3_schema"]
 runtime_strategies = ["diffusion_minimax_h3"]
 runtime_tests = [
   "test_minimax_h3_config_schema|test_minimax_h3_config_schema.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_conditioner_preprocess|test_minimax_h3_conditioner_preprocess.cpp|_|conditioner_preprocess.cpp|_",
+  "test_minimax_h3_ref2va_conditioner|test_minimax_h3_ref2va_conditioner.cpp|_|ref2va_conditioner.cpp|_",
+  "test_minimax_h3_vae_encoder_tiles|test_minimax_h3_vae_encoder_tiles.cpp|_|vae_encoder_tiles.cpp|_",
   "test_minimax_h3_math|test_minimax_h3_math.cpp|trtmc_model_minimax_h3|_|_",
+  "test_minimax_h3_media_preprocess|test_minimax_h3_media_preprocess.cpp|_|media_preprocess.cpp|_",
   "test_minimax_h3_cuda_rng|test_minimax_h3_cuda_rng.cpp|trtmc_model_minimax_h3|_|REQUIRES_GPU",
   "test_minimax_h3_trt_module_bind_external|test_minimax_h3_trt_module_bind_external.cpp|trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

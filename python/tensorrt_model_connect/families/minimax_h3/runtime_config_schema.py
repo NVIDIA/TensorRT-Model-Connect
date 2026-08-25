@@ -13,6 +13,7 @@ from tensorrt_model_connect.runtime_config import (
     Schema,
     register_schema,
 )
+from tensorrt_model_connect.families.minimax_h3.config import MINIMAX_H3_WORKFLOWS
 
 
 # The build CLI currently contributes ``--config`` / ``--set`` values at
@@ -23,6 +24,13 @@ _BUILD = frozenset({Layer.BUILD_TIME, Layer.BUNDLE_DEFAULT, Layer.SESSION_REQUES
 SCHEMA = Schema(
     namespace="minimax_h3",
     fields=(
+        ConfigField(
+            name="workflow",
+            type_tag="string",
+            default="t2va",
+            allowed_layers=_BUILD,
+            validator=lambda value: value in MINIMAX_H3_WORKFLOWS,
+        ),
         ConfigField(
             name="first_block_cache",
             type_tag="bool",

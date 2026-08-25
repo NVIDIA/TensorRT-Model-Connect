@@ -7,8 +7,12 @@
       "sample_id": "minimax-h3-768p-official-profile",
       "testcase": "minimax-h3-768p",
       "stage": "end_to_end",
-      "category": "official-profile",
-      "inputs": {}
+      "category": "official-t2va-video-stereo-audio-profile",
+      "inputs": {
+        "audio_channels": 2,
+        "audio_sample_rate_hz": 32000,
+        "audio_num_samples_per_channel": 165600
+      }
     }
   ]
 }

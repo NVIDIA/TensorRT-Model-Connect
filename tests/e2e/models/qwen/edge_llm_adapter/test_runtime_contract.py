@@ -318,7 +318,7 @@ def test_fake_runtime_exports_exact_identity_and_validates_create_metadata(
     assert factory.runtime_name == b"tensorrt-edge-llm"
     assert factory.runtime_version.decode() == EDGE_RUNTIME_VERSION
     assert factory.runtime_commit.decode() == EDGE_RUNTIME_COMMIT
-    assert factory.pipeline_abi_version == 1
+    assert factory.pipeline_abi_version == 2
 
     exported = subprocess.run(
         ["nm", "-D", "--defined-only", str(dso_path)],

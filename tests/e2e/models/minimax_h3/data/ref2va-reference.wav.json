@@ -1,0 +1,8 @@
+{
+  "format": "pcm_s16le_wav",
+  "sample_rate_hz": 32000,
+  "duration_seconds": 2.0,
+  "channels": 2,
+  "frequencies_hz": [400, 500],
+  "amplitude": 0.125
+}

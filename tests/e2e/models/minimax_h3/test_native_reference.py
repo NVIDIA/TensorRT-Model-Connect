@@ -8,7 +8,10 @@ import os
 from pathlib import Path
 import tomllib
 
+import numpy as np
 import pytest
+
+from tests.e2e.models.minimax_h3.audio_metrics import write_float32_wav
 
 
 SCRIPT = Path(__file__).with_name("native_reference.py")
@@ -24,6 +27,46 @@ def test_cache_threshold_cli_args_are_model_namespaced() -> None:
         "--set",
         "minimax_h3.first_block_cache_threshold=0.05",
     ]
+
+
+def test_native_float32_wav_reader_preserves_stereo_channels(tmp_path: Path) -> None:
+    left = np.linspace(-0.75, 0.5, 32, dtype=np.float32)
+    right = np.linspace(0.25, -0.5, 32, dtype=np.float32)
+    expected = np.stack((left, right))
+    path = tmp_path / "audio.wav"
+    write_float32_wav(path, expected, 32000)
+
+    decoded = MODULE.read_float32_wav(path)
+
+    assert decoded.sample_rate == 32000
+    assert decoded.samples.shape == (2, 32)
+    assert np.array_equal(decoded.samples[0], left)
+    assert np.array_equal(decoded.samples[1], right)
+
+
+def test_native_perf_pattern_requires_audio_decoder_timing() -> None:
+    stderr = (
+        "[minimax-h3.perf] text_encoder_ms=1.0 adaln_ms=2.0 denoiser_ms=3.0 "
+        "vae_decoder_ms=4.0 audio_vae_decoder_ms=5.0 total_ms=15.0"
+    )
+
+    match = MODULE.PERF_PATTERN.search(stderr)
+
+    assert match is not None
+    assert match.groupdict()["audio_vae"] == "5.0"
+
+
+def test_fl2va_perf_pattern_captures_conditioning_and_dynamic_rows() -> None:
+    stderr = (
+        "[minimax-h3.fl2va.perf] language_ms=1.0 condition_ms=2.0 adaln_ms=3.0 "
+        "denoiser_ms=4.0 vae_decoder_ms=5.0 audio_vae_decoder_ms=6.0 total_ms=21.0 "
+        "keyframes=2 text_rows=2048 full_denoiser_steps=49"
+    )
+    match = MODULE.FL2VA_PERF_PATTERN.search(stderr)
+    assert match is not None
+    assert match.groupdict()["condition"] == "2.0"
+    assert match.groupdict()["keyframes"] == "2"
+    assert match.groupdict()["text_rows"] == "2048"
 
 
 def test_canonical_build_selects_first_block_cache() -> None:

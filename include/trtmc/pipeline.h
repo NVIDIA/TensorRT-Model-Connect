@@ -16,12 +16,18 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace trtmc {
+
+// Explicit cross-DSO virtual-interface contract. Increment whenever IPipeline
+// gains, removes, or reorders a virtual member. Model and optimized-runtime
+// providers must advertise this exact value before returning an IPipeline.
+inline constexpr std::uint32_t kIPipelineAbiVersion = 2U;
 
 // --- Result types (all value types, user owns the data) ---
 
@@ -115,6 +121,18 @@ struct AudioResult {
     std::vector<float> samples; // mono float32 [-1,1]
     int32_t num_samples{0};
     int32_t sample_rate{24000};
+};
+
+struct MultiChannelAudioResult {
+    std::vector<float> samples; // [channels, samples] channel-major float32 [-1,1]
+    int32_t num_samples{0};
+    int32_t sample_rate{0};
+    int32_t num_channels{0};
+};
+
+struct AudioVideoResult {
+    ImageResult video;
+    MultiChannelAudioResult audio;
 };
 
 struct TranscriptionStreamConfig {
@@ -231,6 +249,44 @@ struct GenerateConfig {
     // Appended to preserve the offsets of every pre-existing field across the
     // dynamically loaded model-plugin ABI. 1.0 disables the processor.
     float repetition_penalty{1.0f};
+};
+
+struct MediaImageInput {
+    std::vector<float> pixels; // [H, W, 3] HWC float32 in [0,1]
+    int32_t height{0};
+    int32_t width{0};
+};
+
+struct MediaVideoInput {
+    std::vector<float> pixels; // [frames, H, W, 3] frame-major HWC float32 in [0,1]
+    int32_t num_frames{0};
+    int32_t height{0};
+    int32_t width{0};
+    float fps{0.0F};
+    std::optional<MultiChannelAudioResult> soundtrack;
+};
+
+enum class AudioVideoReferenceKind {
+    kImage,
+    kVideo,
+    kAudio,
+};
+
+struct AudioVideoReference {
+    AudioVideoReferenceKind kind{AudioVideoReferenceKind::kImage};
+    MediaImageInput image;
+    MediaVideoInput video;
+    MultiChannelAudioResult audio;
+};
+
+struct AudioVideoRequest {
+    std::string prompt;
+    // Optional keyframes: an empty pixel buffer means the keyframe is absent.
+    MediaImageInput first_image;
+    MediaImageInput last_image;
+    // Reference order is semantically significant and is preserved verbatim.
+    std::vector<AudioVideoReference> references;
+    GenerateConfig config;
 };
 
 class ITranscriptionStream {
@@ -670,6 +726,28 @@ class IPipeline {
     // -- Metadata --
     virtual const char* model_id() const = 0;
     virtual const char* pipeline_type() const = 0;
+
+    // -- Joint audio-video generation --
+    // Appended after the original metadata slots to preserve the offsets of
+    // every pre-existing virtual method across the model-plugin ABI.
+    virtual AudioVideoResult generate_audio_video(const std::string& prompt,
+                                                  const GenerateConfig& cfg = {}) {
+        AudioVideoResult result;
+        result.video = generate_image(prompt, cfg);
+        return result;
+    }
+
+    // Appended after the original joint-generation slot. The generic fallback
+    // is safe only for text-only requests; conditioned media must never be
+    // silently discarded by an implementation that has not opted in.
+    virtual AudioVideoResult generate_audio_video(const AudioVideoRequest& request) {
+        if (!request.first_image.pixels.empty() || !request.last_image.pixels.empty() ||
+            !request.references.empty())
+            throw std::runtime_error(std::string(pipeline_type()) +
+                                     " does not support media-conditioned "
+                                     "generate_audio_video()");
+        return generate_audio_video(request.prompt, request.config);
+    }
 };
 
 // --- Factory ---

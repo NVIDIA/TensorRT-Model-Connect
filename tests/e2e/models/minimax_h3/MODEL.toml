@@ -3,7 +3,11 @@
 
 id = "minimax_h3"
 plugin = "minimax_h3"
-test_manifests = ["manifests/minimax-h3-768p.json"]
+test_manifests = [
+  "manifests/minimax-h3-768p.json",
+  "manifests/minimax-h3-fl2va-768p.json",
+  "manifests/minimax-h3-ref2va-768p.json",
+]
 
 [model_reference_cache]
 repository = "https://github.com/huggingface/diffusers.git"
@@ -17,12 +21,19 @@ reference_backend = "hf_diffusers"
 oracle_level = "L1_external_reference"
 stages = [{ name = "end_to_end", required = true }]
 input_fields = [
+  { input = "workflow", manifest = "workflow", default = "t2va" },
   { input = "prompt_file", manifest = "prompt_file" },
+  { input = "first_image", manifest = "first_image", required_manifest = "first_image" },
+  { input = "last_image", manifest = "last_image", required_manifest = "last_image" },
+  { input = "references", manifest = "references", required_manifest = "references" },
   { input = "video_num_frames", manifest = "video_num_frames" },
   { input = "video_height", manifest = "video_height" },
   { input = "video_width", manifest = "video_width" },
   { input = "num_inference_steps", manifest = "num_inference_steps" },
   { input = "fps", manifest = "fps" },
+  { input = "audio_channels", manifest = "audio_channels" },
+  { input = "audio_sample_rate_hz", manifest = "audio_sample_rate_hz" },
+  { input = "audio_num_samples_per_channel", manifest = "audio_num_samples_per_channel" },
 ]
 build_cli_args = [
   { flag = "--set", value = "minimax_h3.first_block_cache=true" },

@@ -12,6 +12,17 @@
 
 namespace trtmc::cli {
 
+enum class ReferenceInputKind {
+    kImage,
+    kAudio,
+    kVideo,
+};
+
+struct ReferenceInput {
+    ReferenceInputKind kind{ReferenceInputKind::kImage};
+    std::string path;
+};
+
 struct CliArgs {
     std::string command;
     std::vector<std::string> build_args;
@@ -21,6 +32,11 @@ struct CliArgs {
     std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
+    std::string first_image_path;
+    std::string last_image_path;
+    // Ref2VA reference order is semantically significant. Keep all reference
+    // kinds in one encounter-ordered vector rather than grouping by flag.
+    std::vector<ReferenceInput> reference_inputs;
     std::string right_image_path;
     std::string lora_adapter_path;
     std::string lora_adapter_id{"default"};
@@ -34,7 +50,7 @@ struct CliArgs {
     std::string document;
     std::string audio_in;
     std::vector<std::string> audio_inputs;
-    std::string audio_out;
+    std::string audio_out; // --audio-out/--audio-output
     std::string field_input;
     std::string branch_input;
     std::string trunk_input;

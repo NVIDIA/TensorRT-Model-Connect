@@ -511,7 +511,7 @@ void test_pipeline_abi_version_fails_before_create() {
         threw =
             std::string(error.what()).find("IPipeline ABI version mismatch") != std::string::npos;
     }
-    check(threw, "mismatched IPipeline ABI version fails closed");
+    check(threw, "legacy IPipeline ABI v1 fails closed after the v2 virtual surface change");
     const auto events_before_return = read_lines(events);
     check(count_line(events_before_return, "dlopen") == 1,
           "mismatched IPipeline DSO is inspected exactly once");
