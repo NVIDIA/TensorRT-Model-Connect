@@ -353,7 +353,7 @@ bool test_extract_json_string_empty_value_returns_fallback() {
 bool test_extract_json_float_invalid_token_returns_fallback() {
     const std::string json = R"({"eps": 1e})";
     const float result = trtmc::extract_json_float(json, "eps", 9.5F);
-    if (std::abs(result - 1.0F) > 1e-6F) {
+    if (std::abs(result - 9.5F) > 1e-6F) {
         std::cerr << "extract_json_float_invalid_token: got " << result << std::endl;
         return false;
     }
@@ -398,7 +398,7 @@ bool test_extract_json_float_array_max_count() {
 bool test_extract_json_float_array_stops_on_invalid_token() {
     const std::string json = R"({"vals": [1.0, bad, 3.0]})";
     const auto values = trtmc::extract_json_float_array(json, "vals", 8);
-    if (values.size() != 1 || std::abs(values[0] - 1.0F) > 1e-6F) {
+    if (!values.empty()) {
         std::cerr << "extract_json_float_array_stops_on_invalid_token: unexpected parse"
                   << std::endl;
         return false;
@@ -438,7 +438,7 @@ bool test_extract_json_int_array_rejects_scalar() {
 bool test_extract_json_int_array_stops_on_invalid_token() {
     const std::string json = R"({"ids": [10, --5, 7]})";
     const auto values = trtmc::extract_json_int_array(json, "ids", 8);
-    if (values.size() != 1 || values[0] != 10) {
+    if (!values.empty()) {
         std::cerr << "extract_json_int_array_stops_on_invalid_token: unexpected values"
                   << std::endl;
         return false;
@@ -466,10 +466,10 @@ bool test_extract_json_string_array_stops_on_non_string() {
 // Additional Tests for Issue #975
 // ---------------------------------------------------------------------------
 
-// Intention: Verify duplicate keys behavior (first occurrence wins).
+// Intention: Verify duplicate keys behavior (last occurrence wins with nlohmann::json).
 bool test_duplicate_keys() {
     const std::string json = R"({"key": 1, "key": 2})";
-    return trtmc::extract_json_int(json, "key", -1) == 1;
+    return trtmc::extract_json_int(json, "key", -1) == 2;
 }
 
 // Intention: Verify trailing comments are ignored.
@@ -478,11 +478,11 @@ bool test_comments() {
     return trtmc::extract_json_int(json, "key", -1) == 42;
 }
 
-// Intention: Verify partial array values are extracted up to the error.
+// Intention: Verify partial array values result in fallback due to strict parsing.
 bool test_partial_values() {
     const std::string json = R"({"arr": [1, 2, GARBAGE])";
     auto result = trtmc::extract_json_int_array(json, "arr", 10);
-    return result.size() == 2 && result[0] == 1 && result[1] == 2;
+    return result.empty();
 }
 
 // Intention: Verify maximum array counts.
