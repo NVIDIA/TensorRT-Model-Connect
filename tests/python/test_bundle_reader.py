@@ -1,9 +1,6 @@
-import os
 import json
 import struct
-import tempfile
 import pytest
-from pathlib import Path
 from tensorrt_model_connect.bundle_writer import BundleReader, BUNDLE_MAGIC
 
 def create_bundle(path, magic, header, sections_data):
