@@ -28,6 +28,10 @@ reviews:
       enabled: false
     autofix:
       enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
 
   path_filters:
     - "!third_party/**"
@@ -35,11 +39,12 @@ reviews:
   path_instructions:
     - path: ".github/**"
       instructions: |
-        Treat fork pull requests as untrusted. Preserve the Community CPU to
-        maintainer authorization to internal CI boundary. Never execute or
-        check out an untrusted pull-request head in a privileged workflow.
-        Require least-privilege permissions and full-SHA pinning for
-        third-party actions.
+        Treat fork pull requests as untrusted. Preserve the trust boundary
+        between unprivileged Community CPU validation, maintainer
+        authorization, and protected internal CI. Never execute or check out
+        an untrusted pull-request head in a privileged workflow. Require
+        least-privilege permissions and full-SHA pinning for third-party
+        actions.
 
     - path: "tests/**"
       instructions: |
