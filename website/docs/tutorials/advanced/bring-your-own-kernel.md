@@ -345,9 +345,13 @@ Capture the raw decode graph:
 
 #### Select the current primitive attention core
 
-Start by displaying the named layer-0 attention nodes:
+Save the complete node listing for boundary tracing and the later logits
+example, then display the named layer-0 attention nodes:
 
 ```bash
+"$TRTMC" graph list "$WORK/decode.graph.json" \
+  | tee "$WORK/decode.nodes.txt"
+
 "$TRTMC" graph list "$WORK/decode.graph.json" \
   --match "*layer.0.attn*" \
   | tee "$WORK/decode.attention.nodes.txt"
