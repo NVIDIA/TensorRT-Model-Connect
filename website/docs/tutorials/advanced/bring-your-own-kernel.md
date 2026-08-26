@@ -138,6 +138,9 @@ them without compiling an engine:
   --snapshot "$WORK/decode.graph.json" \
   "${BUILD_ARGS[@]}"
 
+"$TRTMC" graph list "$WORK/decode.graph.json" \
+  > "$WORK/decode.nodes.txt"
+
 "$TRTMC" graph recipes "$WORK/decode.graph.json" \
   | tee "$WORK/decode.recipes.txt"
 ```
@@ -315,12 +318,14 @@ inactive cache suffix or reject FP16 graphs on some targets. Current bundles
 construct a BOOL active-prefix causal mask and express attention with primitive
 matrix, select, and softmax operations instead.
 
-Use the manual graph inspection and selection flow below for a replacement
-attention kernel. Derive its ABI from the current snapshot; do not reuse an
-old `qwen.decode_attention_region@2` or `llama.decode_attention_region@1`
-selection receipt. The historical Qwen FlashInfer exporter is retained as
-reference code, but its `int32` length input is not compatible with the current
-explicit-mask graph.
+Derive a replacement attention kernel's ABI from a current graph snapshot; do
+not reuse an old `qwen.decode_attention_region@2` or
+`llama.decode_attention_region@1` selection receipt. Step 6 includes an
+attention-specific selection after snapshot capture. Its separate logits-copy
+example demonstrates the general mechanism only; it is not an attention
+receipt. The historical Qwen FlashInfer exporter is retained as reference code,
+but its `int32` length input is incompatible with the current explicit-mask
+graph.
 
 ## Level 2: choose an arbitrary region yourself
 
@@ -329,17 +334,59 @@ The build and runtime mechanisms stay identical; only selection changes.
 
 ### 6. Inspect and circle raw TRT nodes
 
-Capture the raw decode graph, then list its final layers:
+Capture the raw decode graph:
 
 ```bash
 "$TRTMC" graph inspect \
   --engine-role decode \
   --snapshot "$WORK/decode.graph.json" \
   "${BUILD_ARGS[@]}"
+```
 
+#### Select the current primitive attention core
+
+Start by displaying the named layer-0 attention nodes:
+
+```bash
 "$TRTMC" graph list "$WORK/decode.graph.json" \
-  | tee "$WORK/decode.nodes.txt" \
-  | tail -n 10
+  --match "*layer.0.attn*" \
+  | tee "$WORK/decode.attention.nodes.txt"
+```
+
+`--match` is discovery-only. The explicit attention core also contains unnamed
+reshape, cast, select, and scale nodes, so follow tensor edges in the complete
+listing before selecting it. For the pinned Qwen3-8B build used in this
+tutorial, the connected, convex core is this receipt:
+
+```bash
+ATTENTION_NODES=(
+  node:99 node:100 node:101 node:102 node:103
+  node:104 node:105 node:106 node:107 node:108
+  node:109 node:110 node:111 node:112 node:113
+  node:114 node:115 node:116 node:117 node:118
+)
+
+"$TRTMC" graph select "$WORK/decode.graph.json" \
+  --nodes "${ATTENTION_NODES[@]}" \
+  --binding-id qwen3.decode.attention.layer0.manual@1 \
+  --workspace-bytes 0 \
+  --output-shape-like-input 0 \
+  -o "$WORK/attention.selection.json"
+```
+
+Copy node IDs from your own snapshot because any graph change can renumber
+them. This boundary has five inputs: query, present K, present V, the causal
+mask, and the active-prefix mask. Its output is the attention context. The
+identity-copy DSO used later in this tutorial does not implement that ABI; an
+attention replacement must provide a matching five-input kernel.
+
+#### Select the logits-copy example
+
+The remaining example selects final logits to demonstrate the same manual
+selection and binding mechanics with the supplied identity-copy DSO:
+
+```bash
+tail -n 10 "$WORK/decode.nodes.txt"
 ```
 
 For the pinned revision, the tail includes:

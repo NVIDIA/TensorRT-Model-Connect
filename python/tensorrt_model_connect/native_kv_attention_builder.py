@@ -268,6 +268,10 @@ def add_explicit_masked_grouped_query_attention(
     ).get_output(0)
     scaled_query = _cast(network, scaled_query, query.dtype)
 
+    # The current native-KV ABI profiles KVL only as an execution input. Using
+    # it as a dynamic ISlice size would also make it a shape input and require
+    # shape-value profile/runtime plumbing. This correctness-first graph keeps
+    # the existing ABI and deliberately masks the complete configured capacity.
     scores = network.add_matrix_multiply(
         scaled_query,
         trt.MatrixOperation.NONE,

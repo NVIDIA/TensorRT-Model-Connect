@@ -478,15 +478,17 @@ bool LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
         return false;
 
     int32_t chunk_count = 0;
+    int32_t max_chunk_size = 0;
     for (int32_t start = 0; start < sq;) {
         const int32_t chunk_size = std::min(chunk_limit, sq - start);
         run_prefill_chunk(input_ids.data() + start, chunk_size, pk, pv, *kv, logits,
                           retain_device_logits);
         ++chunk_count;
+        max_chunk_size = std::max(max_chunk_size, chunk_size);
         start += chunk_size;
     }
 
-    log_batched_prefill(sq, chunk_count, chunk_limit);
+    log_batched_prefill(sq, chunk_count, max_chunk_size);
     return true;
 }
 
@@ -534,7 +536,9 @@ void LlamaTextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, in
 }
 
 void LlamaTextGenerationPipeline::log_batched_prefill(int32_t token_count, int32_t chunk_count,
-                                                      int32_t chunk_limit) const {
+                                                      int32_t max_chunk_size) const {
+    std::cerr << "[trtmc.prefill] tokens=" << token_count << " launches=" << chunk_count
+              << " max_chunk=" << max_chunk_size << '\n';
     if (!config_.log_runtime_stats)
         return;
 
@@ -547,7 +551,7 @@ void LlamaTextGenerationPipeline::log_batched_prefill(int32_t token_count, int32
     std::cerr << "): " << token_count << " tokens in " << chunk_count << " call";
     if (chunk_count != 1)
         std::cerr << 's';
-    std::cerr << " (max chunk=" << chunk_limit << ")\n";
+    std::cerr << " (max chunk=" << max_chunk_size << ")\n";
 }
 
 const TrtModule* LlamaTextGenerationPipeline::generation_capacity_module() const {

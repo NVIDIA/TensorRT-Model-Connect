@@ -67,9 +67,9 @@ def test_chat_instruct_accepts_matching_native_kv_runtime_markers() -> None:
             "cpp": {
                 "stderr": "\n".join(
                     [
-                        "[trtmc] KV cache rows=40960 "
-                        "(bundle max=40960, row=1 B)",
-                        '[trtmc.engine_timing] '
+                        "[trtmc] KV cache rows=40960 (bundle max=40960, row=1 B)",
+                        "[trtmc.prefill] tokens=96 launches=2 max_chunk=64",
+                        "[trtmc.engine_timing] "
                         'label="prefill_engine_plan:prefill" '
                         "execute_ms=1 launches=2",
                     ]
@@ -86,6 +86,7 @@ def test_chat_instruct_accepts_matching_native_kv_runtime_markers() -> None:
 
     assert result.status == StageStatus.PASSED.value
     assert result.metrics["prefill_chunks"].passed
+    assert result.metrics["prefill_chunk_limit"].passed
     assert result.metrics["native_kv_capacity"].passed
 
 
@@ -103,6 +104,7 @@ def test_chat_instruct_rejects_missing_native_kv_runtime_markers() -> None:
 
     assert result.status == StageStatus.FAILED.value
     assert not result.metrics["prefill_chunks"].passed
+    assert not result.metrics["prefill_chunk_limit"].passed
     assert not result.metrics["native_kv_capacity"].passed
     assert "runtime markers diverged" in result.message
 
@@ -116,9 +118,9 @@ def test_chat_instruct_requires_exact_prefill_launch_count() -> None:
                 "cpp": {
                     "stderr": "\n".join(
                         [
-                            "[trtmc] KV cache rows=40960 "
-                            "(bundle max=40960, row=1 B)",
-                            '[trtmc.engine_timing] '
+                            "[trtmc] KV cache rows=40960 (bundle max=40960, row=1 B)",
+                            "[trtmc.prefill] tokens=96 launches=2 max_chunk=64",
+                            "[trtmc.engine_timing] "
                             'label="prefill_engine_plan:prefill" '
                             "execute_ms=1 launches=20",
                         ]
@@ -133,4 +135,35 @@ def test_chat_instruct_requires_exact_prefill_launch_count() -> None:
 
     assert result.status == StageStatus.FAILED.value
     assert not result.metrics["prefill_chunks"].passed
+    assert result.metrics["prefill_chunk_limit"].passed
+    assert result.metrics["native_kv_capacity"].passed
+
+
+def test_chat_instruct_rejects_oversized_prefill_chunk() -> None:
+    result = QwenPostTrainedChatPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            text="Paris",
+            metadata={
+                "cpp": {
+                    "stderr": "\n".join(
+                        [
+                            "[trtmc] KV cache rows=40960 (bundle max=40960, row=1 B)",
+                            "[trtmc.prefill] tokens=96 launches=2 max_chunk=65",
+                            "[trtmc.engine_timing] "
+                            'label="prefill_engine_plan:prefill" '
+                            "execute_ms=1 launches=2",
+                        ]
+                    )
+                }
+            },
+        ),
+        StageOutput(stage_name="full_generation", text="Paris"),
+        _case(native_kv_runtime_contract=True),
+        ThresholdProfile(task_strategy="text_generation_causal"),
+    )
+
+    assert result.status == StageStatus.FAILED.value
+    assert result.metrics["prefill_chunks"].passed
+    assert not result.metrics["prefill_chunk_limit"].passed
     assert result.metrics["native_kv_capacity"].passed

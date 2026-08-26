@@ -52,6 +52,7 @@ def test_native_kv_contract_requires_full_capacity_chunking_and_decode() -> None
                 "stderr": "\n".join(
                     [
                         "[trtmc] KV cache rows=40960 (bundle max=40960, row=1 B)",
+                        "[trtmc.prefill] tokens=32769 launches=513 max_chunk=64",
                         '[trtmc.engine_timing] label="prefill_engine_plan:prefill" '
                         "execute_ms=100 launches=513",
                     ]
@@ -84,6 +85,7 @@ def test_native_kv_contract_rejects_single_prefill_launch() -> None:
                 "stderr": "\n".join(
                     [
                         "[trtmc] KV cache rows=40960 (bundle max=40960, row=1 B)",
+                        "[trtmc.prefill] tokens=32769 launches=1 max_chunk=32769",
                         '[trtmc.engine_timing] label="prefill_engine_plan:prefill" '
                         "execute_ms=100 launches=1",
                     ]
@@ -101,3 +103,37 @@ def test_native_kv_contract_rejects_single_prefill_launch() -> None:
 
     assert not result.passed
     assert "chunked_prefill_executed" in result.message
+
+
+def test_native_kv_contract_rejects_oversized_prefill_chunk() -> None:
+    output = StageOutput(
+        stage_name="full_generation",
+        data={
+            "cpp_returncode": 0,
+            "prompt_token_count": 32769,
+            "token_ids": [123, 456],
+        },
+        metadata={
+            "cpp": {
+                "trt_engine_decode_s": 0.001,
+                "stderr": "\n".join(
+                    [
+                        "[trtmc] KV cache rows=40960 (bundle max=40960, row=1 B)",
+                        "[trtmc.prefill] tokens=32769 launches=513 max_chunk=65",
+                        '[trtmc.engine_timing] label="prefill_engine_plan:prefill" '
+                        "execute_ms=100 launches=513",
+                    ]
+                ),
+            }
+        },
+    )
+
+    result = QwenNativeKvChunkedPrefillRegressionPlugin().verify(
+        output,
+        _reference_output(),
+        _case(),
+        ThresholdProfile(task_strategy="text_generation_causal"),
+    )
+
+    assert not result.passed
+    assert "prefill_chunk_limit_observed" in result.message

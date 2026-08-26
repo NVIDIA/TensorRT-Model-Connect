@@ -61,6 +61,11 @@ with an explicit active-prefix causal mask. Long prompts are submitted in
 chunks of at most 64 tokens; this preserves the configured cache capacity but
 trades prefill throughput for avoiding version-specific fused-attention
 behavior.
+The primitive decode matrix multiplications still span the full configured
+cache capacity rather than only the active prefix, so a larger capacity can
+increase per-token memory traffic and latency. Dynamically slicing to the
+active length would require a new shape-input profile and runtime contract and
+is left as a future optimization.
 The 16,384-token Quick Start capacity remains a conservative memory and
 throughput choice, not a correctness ceiling; Qwen3 may still use its full
 40,960-token model capacity. Rebuild existing bundles to adopt this behavior,
