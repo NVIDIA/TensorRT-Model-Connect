@@ -41,7 +41,9 @@ int run_serve_worker(const CliArgs& args) {
             throw std::runtime_error("native worker pipeline is unavailable");
         return serve::run_worker_protocol(*pipeline, bundle_info, std::cin, std::cout);
     } catch (const std::exception&) {
-        std::cerr << "Error: native worker failed to start\n";
+        // Do not print error.what(): worker failures can contain bundle paths or
+        // provider diagnostics that must remain outside the public protocol.
+        std::cerr << "Error: native worker failed\n";
         return EXIT_FAILURE;
     }
 }

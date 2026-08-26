@@ -445,7 +445,7 @@ Json error_response(const Json& id, const char* type, const std::string& message
 }
 
 bool write_message(std::ostream& output, const Json& message) {
-    output << message.dump() << '\n';
+    output << message.dump(-1, ' ', false, Json::error_handler_t::replace) << '\n';
     output.flush();
     return static_cast<bool>(output);
 }

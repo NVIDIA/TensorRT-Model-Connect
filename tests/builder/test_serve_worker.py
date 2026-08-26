@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tensorrt_model_connect.serve import worker as worker_module
 from tensorrt_model_connect.serve.errors import (
     WorkerCrashedError,
     WorkerProtocolError,
@@ -125,7 +126,7 @@ def test_worker_startup_rejects_invalid_ready_shape(
 def test_worker_startup_timeout_terminates_process_without_exposing_stderr(
     tmp_path: Path,
 ) -> None:
-    worker = make_worker(tmp_path, "startup-timeout", startup_timeout=0.05)
+    worker = make_worker(tmp_path, "startup-timeout", startup_timeout=1.0)
     with pytest.raises(WorkerStartupError, match="did not become ready") as failure:
         worker.start()
     assert "startup detail" not in str(failure.value)
@@ -217,6 +218,32 @@ def test_worker_environment_is_an_explicit_runtime_allowlist(
         assert worker.ready_payload["allowed_cuda_visible_devices"] == "7"
     finally:
         worker.close()
+
+
+def test_worker_environment_adds_windows_process_basics_only_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    windows_values = {
+        "COMSPEC": r"C:\Windows\System32\cmd.exe",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "SYSTEMROOT": r"C:\Windows",
+        "TEMP": r"C:\Temp",
+        "TMP": r"C:\Temp",
+        "USERPROFILE": r"C:\Users\trtmc",
+    }
+    for name, value in windows_values.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("TRTMC_SERVE_TOKEN", "must-stay-private")
+
+    with monkeypatch.context() as windows:
+        windows.setattr(worker_module.os, "name", "nt")
+        environment = worker_module._worker_environment()
+
+    assert {name: environment[name] for name in windows_values} == windows_values
+    assert "TRTMC_SERVE_TOKEN" not in environment
+    if worker_module.os.name != "nt":
+        posix_environment = worker_module._worker_environment()
+        assert windows_values.keys().isdisjoint(posix_environment)
 
 
 def test_worker_forwards_native_load_options_verbatim(tmp_path: Path) -> None:

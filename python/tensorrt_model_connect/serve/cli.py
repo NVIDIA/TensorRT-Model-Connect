@@ -136,7 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help="Native trtmc executable (injected by `trtmc serve`; PATH lookup otherwise)",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: loopback)")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind loopback IP literal (default: 127.0.0.1)",
+    )
     parser.add_argument(
         "--port",
         type=_port,
@@ -218,15 +222,11 @@ def parse_replica_assignment(value: str) -> tuple[str, int]:
 
 def validate_bind_policy(host: str) -> None:
     if not is_loopback_host(host):
-        raise ValueError(
-            f"refusing non-loopback host {host!r}; the initial release is loopback-only"
-        )
+        raise ValueError(f"refusing host {host!r}; --host must be a loopback IP literal")
 
 
 def is_loopback_host(host: str) -> bool:
     normalized = host.strip().lower()
-    if normalized == "localhost":
-        return True
     try:
         return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
@@ -350,7 +350,10 @@ def main(argv: list[str] | None = None) -> int:
         if "python-multipart" in str(exc):
             parser.error("serve dependencies are missing; install 'tensorrt-model-connect[serve]'")
         raise
-    listener = bind_socket(args.host, args.port)
+    try:
+        listener = bind_socket(args.host, args.port)
+    except OSError as exc:
+        parser.error(str(exc))
     actual_port = int(listener.getsockname()[1])
 
     try:

@@ -31,8 +31,9 @@ trtmc serve \
   --port 8000
 ```
 
-The initial server is loopback-only and rejects every non-loopback bind. Access
-logs are disabled by default because browser WebSocket
+The initial server accepts only loopback IP literals such as `127.0.0.1` and
+`::1`; hostnames such as `localhost` and every non-loopback bind are rejected.
+Access logs are disabled by default because browser WebSocket
 clients authenticate through an `access_token` query parameter. Other server
 logs continue on stderr.
 
@@ -142,5 +143,3 @@ offline endpoint.
   clear, failure cleanup, or disconnect.
 - The Python control plane never receives TensorRT objects; bundle execution
   remains in the native worker process.
-
-{/* Collaborative review anchor: batch 2. */}

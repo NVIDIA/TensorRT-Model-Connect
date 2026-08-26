@@ -112,18 +112,28 @@ inline std::vector<char> read_file(const std::string& path) {
     return bytes;
 }
 
-inline void validate_container(const std::vector<char>& bytes) {
+inline std::size_t validate_container(const std::vector<char>& bytes) {
     if (bytes.size() < 44)
         throw WavFormatError("read_wav: WAV file is too small");
     if (std::memcmp(bytes.data(), "RIFF", 4) != 0)
         throw WavFormatError("read_wav: not a RIFF file");
     if (std::memcmp(bytes.data() + 8, "WAVE", 4) != 0)
         throw WavFormatError("read_wav: not a WAVE file");
+
+    const uint32_t declared_size = read_u32_le(bytes.data() + 4);
+    if (declared_size < 4)
+        throw WavFormatError("read_wav: WAV RIFF chunk is too small");
+    if (static_cast<std::size_t>(declared_size) > bytes.size() - 8U)
+        throw WavFormatError("read_wav: WAV contains a truncated RIFF chunk");
+    return 8U + static_cast<std::size_t>(declared_size);
 }
 
-inline void require_chunk_fits(std::size_t file_size, std::size_t data_offset,
+inline void require_chunk_fits(std::size_t container_end, std::size_t data_offset,
                                uint32_t chunk_size) {
-    if (static_cast<std::size_t>(chunk_size) > file_size - data_offset)
+    const std::size_t available = container_end - data_offset;
+    const std::size_t payload_size = static_cast<std::size_t>(chunk_size);
+    const std::size_t padding_size = chunk_size & 1U;
+    if (payload_size > available || padding_size > available - payload_size)
         throw WavFormatError("read_wav: WAV contains a truncated chunk");
 }
 
@@ -168,15 +178,15 @@ inline void validate_required_fields(const ParsedWav& parsed) {
 }
 
 inline ParsedWav parse(const std::vector<char>& bytes) {
-    validate_container(bytes);
+    const std::size_t container_end = validate_container(bytes);
 
     ParsedWav parsed;
     std::size_t position = 12;
-    while (position + 8 <= bytes.size()) {
+    while (position + 8 <= container_end) {
         const char* chunk = bytes.data() + position;
         const uint32_t chunk_size = read_u32_le(chunk + 4);
         const std::size_t data_offset = position + 8;
-        require_chunk_fits(bytes.size(), data_offset, chunk_size);
+        require_chunk_fits(container_end, data_offset, chunk_size);
         parse_chunk(bytes, chunk, data_offset, chunk_size, parsed);
         position = data_offset + static_cast<std::size_t>(chunk_size) + (chunk_size & 1U);
     }

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 import websockets
 
+from tensorrt_model_connect.serve import cli as serve_cli_module
 from tensorrt_model_connect.serve.cli import (
     _RedactAccessToken,
     bind_socket,
@@ -35,6 +37,10 @@ from tensorrt_model_connect.serve.cli import (
 
 FAKE_TRTMC = Path(__file__).with_name("fake_serve_worker.py")
 REPOSITORY = Path(__file__).resolve().parents[2]
+_REQUIRES_PROC = pytest.mark.skipif(
+    not Path("/proc").is_dir(),
+    reason="process-lifecycle assertions require Linux /proc",
+)
 
 
 def test_model_assignment_and_bind_policy(tmp_path: Path) -> None:
@@ -47,10 +53,12 @@ def test_model_assignment_and_bind_policy(tmp_path: Path) -> None:
 
     assert is_loopback_host("127.0.0.1")
     assert is_loopback_host("::1")
-    assert is_loopback_host("localhost")
+    assert not is_loopback_host("localhost")
     assert not is_loopback_host("0.0.0.0")
-    with pytest.raises(ValueError, match="loopback-only"):
+    with pytest.raises(ValueError, match="loopback IP literal"):
         validate_bind_policy("0.0.0.0")
+    with pytest.raises(ValueError, match="loopback IP literal"):
+        validate_bind_policy("localhost")
     validate_bind_policy("127.0.0.1")
 
 
@@ -62,6 +70,34 @@ def test_prebound_port_zero_returns_actual_port() -> None:
         assert listener.getblocking() is False
     finally:
         listener.close()
+
+
+def test_cli_reports_bind_failures_without_a_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    bundle = tmp_path / "chat.bundle"
+    bundle.write_bytes(b"fixture")
+
+    def fail_to_bind(_host: str, _port: int) -> socket.socket:
+        raise OSError("cannot bind test listener")
+
+    monkeypatch.setattr(serve_cli_module, "bind_socket", fail_to_bind)
+    with pytest.raises(SystemExit) as failure:
+        serve_main(
+            [
+                "--chat-model",
+                f"chat={bundle}",
+                "--trtmc-binary",
+                str(FAKE_TRTMC),
+            ]
+        )
+
+    assert failure.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "error: cannot bind test listener" in stderr
+    assert "Traceback" not in stderr
 
 
 def test_model_replicas_are_explicit_and_default_to_one() -> None:
@@ -154,6 +190,7 @@ def test_cli_rejects_duplicate_and_unknown_replica_assignments(tmp_path: Path) -
         )
 
 
+@_REQUIRES_PROC
 def test_cli_port_zero_emits_single_machine_readable_ready_record(
     tmp_path: Path,
 ) -> None:
@@ -300,6 +337,7 @@ def test_cli_port_zero_emits_single_machine_readable_ready_record(
             process.wait(timeout=5)
 
 
+@_REQUIRES_PROC
 def test_parent_liveness_stdin_eof_gracefully_stops_server_and_worker(
     tmp_path: Path,
 ) -> None:
@@ -316,6 +354,7 @@ def test_parent_liveness_stdin_eof_gracefully_stops_server_and_worker(
             process.wait(timeout=5)
 
 
+@_REQUIRES_PROC
 def test_server_sigkill_does_not_leave_native_worker(tmp_path: Path) -> None:
     process, _ready = _start_test_server(tmp_path, "sigkill", parent_liveness=False)
     try:

@@ -29,6 +29,7 @@ from .worker import WorkerSession
 
 
 _LOGGER = logging.getLogger(__name__)
+_TIMEOUT_ERRORS = (TimeoutError, asyncio.TimeoutError)
 
 
 class RealtimeTranscriptionConnection:
@@ -87,7 +88,7 @@ class RealtimeTranscriptionConnection:
                         self.websocket.receive_json(),
                         timeout=min(self.idle_timeout_seconds, remaining),
                     )
-                except TimeoutError:
+                except _TIMEOUT_ERRORS:
                     elapsed = loop.time() - started_at
                     if elapsed >= self.max_session_seconds:
                         code = "session_duration_exceeded"

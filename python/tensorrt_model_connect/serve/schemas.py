@@ -34,7 +34,11 @@ class ChatMessage(_OpenAIRequest):
 
 class ChatCompletionRequest(_OpenAIRequest):
     model: str | None = None
-    messages: list[ChatMessage] = Field(min_length=1)
+    messages: list[ChatMessage] = (
+        Field(min_length=1)
+        if hasattr(BaseModel, "model_fields")
+        else Field(min_items=1)  # pragma: no cover - Pydantic 1 compatibility
+    )
     max_tokens: int | None = Field(default=None, ge=1)
     max_completion_tokens: int | None = Field(default=None, ge=1)
     temperature: float | None = Field(default=None, ge=0)

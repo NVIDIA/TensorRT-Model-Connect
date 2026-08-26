@@ -94,6 +94,27 @@ static void write_truncated_chunk_fixture(const std::string& path) {
     output.write(short_payload, sizeof(short_payload));
 }
 
+static void write_riff_bound_violation_fixture(const std::string& path) {
+    const int16_t sample = 1;
+    write_wav_fixture(path, 1, 1, 16000, 16, &sample, static_cast<uint32_t>(sizeof(sample)));
+
+    // The physical file contains the sample, but the RIFF container ends after
+    // the data header. A parser must not consume bytes outside that boundary.
+    const uint32_t declared_riff_size = 36;
+    std::fstream output(path, std::ios::binary | std::ios::in | std::ios::out);
+    output.seekp(4);
+    output.write(reinterpret_cast<const char*>(&declared_riff_size), 4);
+}
+
+static void append_trailing_truncated_chunk(const std::string& path) {
+    const uint32_t declared_chunk_size = 64;
+    const char short_payload = 'x';
+    std::ofstream output(path, std::ios::binary | std::ios::app);
+    output.write("JUNK", 4);
+    output.write(reinterpret_cast<const char*>(&declared_chunk_size), 4);
+    output.write(&short_payload, 1);
+}
+
 static bool read_throws_with(const std::string& path, const std::string& expected) {
     try {
         (void)trtmc::io::read_wav(path);
@@ -328,6 +349,19 @@ static bool test_io_multichannel_float32_downmix() {
            std::abs(result.samples[0] - 0.25F) < 1e-6F && std::abs(result.samples[1]) < 1e-6F;
 }
 
+static bool test_io_ignores_bytes_after_riff_container() {
+    trtmc_test::TempDirGuard dir;
+    const auto path = (std::filesystem::path(dir.path()) / "trailing-bytes.wav").string();
+    const std::vector<int16_t> samples = {16384, -16384};
+    write_wav_fixture(path, 1, 1, 16000, 16, samples.data(),
+                      static_cast<uint32_t>(samples.size() * sizeof(int16_t)));
+    append_trailing_truncated_chunk(path);
+
+    const auto result = trtmc::io::read_wav(path);
+    return result.sample_rate == 16000 && result.num_samples == 2 && result.samples.size() == 2 &&
+           std::abs(result.samples[0] - 0.5F) < 1e-6F && std::abs(result.samples[1] + 0.5F) < 1e-6F;
+}
+
 static bool test_io_rejects_invalid_wav_contract() {
     trtmc_test::TempDirGuard dir;
     const auto root = std::filesystem::path(dir.path());
@@ -348,10 +382,14 @@ static bool test_io_rejects_invalid_wav_contract() {
     const auto truncated = (root / "truncated-chunk.wav").string();
     write_truncated_chunk_fixture(truncated);
 
+    const auto outside_riff = (root / "outside-riff-bound.wav").string();
+    write_riff_bound_violation_fixture(outside_riff);
+
     return read_throws_with(unsupported, "PCM16 or IEEE float32") &&
            read_throws_with(incomplete, "complete audio frames") &&
            read_throws_with(zero_channels, "channels and sample rate must be positive") &&
-           read_throws_with(truncated, "truncated chunk");
+           read_throws_with(truncated, "truncated chunk") &&
+           read_throws_with(outside_riff, "truncated chunk");
 }
 
 int main() {
@@ -373,6 +411,7 @@ int main() {
     run("io_num_samples_field", test_io_num_samples_field);
     run("io_multichannel_pcm16_downmix", test_io_multichannel_pcm16_downmix);
     run("io_multichannel_float32_downmix", test_io_multichannel_float32_downmix);
+    run("io_ignores_bytes_after_riff_container", test_io_ignores_bytes_after_riff_container);
     run("io_rejects_invalid_wav_contract", test_io_rejects_invalid_wav_contract);
 
     if (all_passed) {

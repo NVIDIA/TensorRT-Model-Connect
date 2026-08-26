@@ -571,12 +571,21 @@ def _valid_authorization(header: str | None, expected: str) -> bool:
     if header is None:
         return False
     scheme, separator, token = header.partition(" ")
-    return bool(separator) and scheme.lower() == "bearer" and hmac.compare_digest(token, expected)
+    return bool(separator) and scheme.lower() == "bearer" and _tokens_match(token, expected)
+
+
+def _tokens_match(candidate: str, expected: str) -> bool:
+    """Compare arbitrary text tokens without leaking timing or raising on Unicode."""
+
+    try:
+        return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
 
 
 def _valid_websocket_token(websocket: WebSocket, expected: str) -> bool:
     query_token = websocket.query_params.get("access_token")
-    if query_token is not None and hmac.compare_digest(query_token, expected):
+    if query_token is not None and _tokens_match(query_token, expected):
         return True
     return _valid_authorization(websocket.headers.get("authorization"), expected)
 

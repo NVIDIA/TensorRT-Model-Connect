@@ -163,8 +163,9 @@ registered model; the default is one. Replicas may duplicate GPU memory, and
 requests receive HTTP 429 immediately when every lane is busy.
 `--port 0` selects a free port and emits a machine-readable ready record for a
 supervising process. `--api-key` falls back to `TRTMC_SERVE_TOKEN`.
-The initial release rejects non-loopback binds. Startup and request timeouts are
-controlled independently.
+The initial release accepts only loopback IP literals such as `127.0.0.1` and
+`::1`; hostnames are rejected. Startup and request timeouts are controlled
+independently.
 
 The serve extra supplies FastAPI, Uvicorn, and multipart support:
 

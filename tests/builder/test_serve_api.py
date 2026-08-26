@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from httpx import Response
 from starlette.websockets import WebSocketDisconnect
 
+from tensorrt_model_connect.serve import realtime as realtime_module
 from tensorrt_model_connect.serve.app import ServerConfig, _worker_request, create_app
 from tensorrt_model_connect.serve.errors import WorkerProtocolError, WorkerRemoteError
 from tensorrt_model_connect.serve.protocol import (
@@ -25,6 +26,7 @@ from tensorrt_model_connect.serve.protocol import (
     prepare_chat_prompt,
 )
 from tensorrt_model_connect.serve.registry import ModelRegistry, ModelSpec
+from tensorrt_model_connect.serve.realtime import RealtimeTranscriptionConnection
 from tensorrt_model_connect.serve.worker import WorkerProcess, WorkerSession
 
 
@@ -250,6 +252,12 @@ def test_health_readiness_models_and_bearer_auth(tmp_path: Path) -> None:
         assert denied.status_code == 401
         assert denied.headers["www-authenticate"] == "Bearer"
 
+        non_ascii = client.get(
+            "/v1/models",
+            headers=[(b"authorization", b"Bearer \xff")],
+        )
+        assert non_ascii.status_code == 401
+
         response = client.get("/v1/models", headers=authorization())
         assert response.status_code == 200
         models = response.json()["data"]
@@ -362,6 +370,16 @@ def test_chat_generation_and_explicit_stream_rejection(tmp_path: Path) -> None:
     assert flattened[1:] == (False, "role_annotated_flattened")
     single = prepare_chat_prompt([{"role": "user", "content": "question"}])
     assert single == ("question", True, "single_user_template")
+
+
+def test_chat_rejects_empty_messages(tmp_path: Path) -> None:
+    app = create_app(make_registry(tmp_path))
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json={"messages": []})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.json()["error"]["param"] == "messages"
 
 
 @pytest.mark.parametrize(
@@ -894,6 +912,11 @@ def test_realtime_rejects_bad_token_and_invalid_audio(tmp_path: Path) -> None:
                 pass
         assert denied.value.code == 4401
 
+        with pytest.raises(WebSocketDisconnect) as non_ascii_token:
+            with client.websocket_connect("/v1/realtime?intent=transcription&access_token=%C3%BF"):
+                pass
+        assert non_ascii_token.value.code == 4401
+
         with pytest.raises(WebSocketDisconnect) as denied_origin:
             with client.websocket_connect(
                 "/v1/realtime?intent=transcription&access_token=test-token",
@@ -911,6 +934,43 @@ def test_realtime_rejects_bad_token_and_invalid_audio(tmp_path: Path) -> None:
             error = websocket.receive_json()
             assert error["type"] == "error"
             assert error["error"]["code"] == "invalid_audio"
+
+
+def test_realtime_handles_distinct_asyncio_timeout_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LegacyAsyncioTimeoutError(Exception):
+        pass
+
+    class TimeoutWebSocket:
+        def __init__(self) -> None:
+            self.events: list[dict[str, object]] = []
+
+        async def send_json(self, event: dict[str, object]) -> None:
+            self.events.append(event)
+
+        async def receive_json(self) -> dict[str, object]:
+            raise LegacyAsyncioTimeoutError
+
+    class Registry:
+        default_transcription_model = "asr"
+
+    websocket = TimeoutWebSocket()
+    monkeypatch.setattr(
+        realtime_module,
+        "_TIMEOUT_ERRORS",
+        (TimeoutError, LegacyAsyncioTimeoutError),
+    )
+    connection = RealtimeTranscriptionConnection(
+        websocket,  # type: ignore[arg-type]
+        Registry(),  # type: ignore[arg-type]
+        idle_timeout_seconds=1,
+    )
+
+    asyncio.run(connection.run())
+
+    assert websocket.events[0]["type"] == "session.created"
+    assert websocket.events[1]["error"]["code"] == "session_idle_timeout"  # type: ignore[index]
 
 
 def test_realtime_worker_diagnostics_are_not_returned_to_clients(

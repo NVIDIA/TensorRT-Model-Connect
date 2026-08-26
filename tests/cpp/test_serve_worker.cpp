@@ -104,6 +104,8 @@ class FakePipeline final : public trtmc::IPipeline {
         if (generate_runtime_error)
             throw std::runtime_error("sensitive native runtime detail at /tmp/private.bundle");
         trtmc::TextResult result{"generated: " + prompt, {8, 9}, 1.25, 2.5};
+        if (generate_invalid_utf8)
+            result.text.push_back(static_cast<char>(0xFF));
         result.setup_ms = 0.5;
         return result;
     }
@@ -138,6 +140,7 @@ class FakePipeline final : public trtmc::IPipeline {
     int create_stream_calls{0};
     bool stream_supported{true};
     bool generate_invalid_argument{false};
+    bool generate_invalid_utf8{false};
     bool generate_runtime_error{false};
     std::string last_prompt;
     trtmc::GenerateConfig last_generate_config;
@@ -226,13 +229,15 @@ void test_ready_metadata_and_stream_probe() {
 
     const auto messages = parse_output_lines(output.str());
     check(messages.size() == 4, "ready plus two probes and shutdown");
-    check(messages[0].value("runtime_strategy", "") == "fake_streaming_asr",
-          "ready includes runtime strategy");
-    check(messages[0].value("max_cache_length", 0) == 512, "ready includes max cache length");
-    check(messages[1]["result"] == Json{{"supported", true}},
-          "first stream probe returns only supported=true");
-    check(messages[2]["result"] == Json{{"supported", true}},
-          "second probe returns only supported=true");
+    if (messages.size() == 4) {
+        check(messages[0].value("runtime_strategy", "") == "fake_streaming_asr",
+              "ready includes runtime strategy");
+        check(messages[0].value("max_cache_length", 0) == 512, "ready includes max cache length");
+        check(messages[1]["result"] == Json{{"supported", true}},
+              "first stream probe returns only supported=true");
+        check(messages[2]["result"] == Json{{"supported", true}},
+              "second probe returns only supported=true");
+    }
     check(pipeline.create_stream_calls == 2 && pipeline.stream_history.size() == 2,
           "each probe creates an isolated stream");
     check(pipeline.stream_config_history.size() == 2 &&
@@ -265,11 +270,39 @@ void test_failed_stream_probe_keeps_worker_usable() {
 
     const auto messages = parse_output_lines(output.str());
     check(messages.size() == 4, "failed probe still emits later generation and shutdown");
-    check(!messages[1].value("ok", true) &&
-              messages[1]["error"].value("type", "") == "runtime_error",
-          "unsupported probe is a structured runtime error");
-    check(messages[2].value("ok", false) && pipeline.generate_calls == 1,
-          "generation succeeds after failed probe");
+    if (messages.size() == 4) {
+        check(!messages[1].value("ok", true) &&
+                  messages[1]["error"].value("type", "") == "runtime_error",
+              "unsupported probe is a structured runtime error");
+        check(messages[2].value("ok", false) && pipeline.generate_calls == 1,
+              "generation succeeds after failed probe");
+    }
+}
+
+void test_invalid_utf8_result_is_replaced_in_jsonl() {
+    std::ostringstream requests;
+    append_request(requests, {{"id", "generate"}, {"op", "generate"}, {"prompt", "text"}});
+    append_request(requests, {{"id", "stop"}, {"op", "shutdown"}});
+
+    FakePipeline pipeline;
+    pipeline.generate_invalid_utf8 = true;
+    std::istringstream input(requests.str());
+    std::ostringstream output;
+    const int status =
+        trtmc::serve::run_worker_protocol(pipeline, trtmc::BundleInfo{}, input, output);
+    check(status == 0, "worker survives invalid UTF-8 in native output");
+
+    const auto messages = parse_output_lines(output.str());
+    check(messages.size() == 3, "invalid UTF-8 result still emits response and shutdown");
+    if (messages.size() == 3) {
+        const std::string text = messages[1]["result"].value("text", "");
+        check(messages[1].value("ok", false), "invalid UTF-8 result remains successful");
+        check(text.find("\xEF\xBF\xBD") != std::string::npos,
+              "invalid UTF-8 is replaced with the Unicode replacement character");
+        check(messages[2].value("ok", false), "worker remains usable after UTF-8 replacement");
+    }
+    check(output.str().find(static_cast<char>(0xFF)) == std::string::npos,
+          "invalid UTF-8 byte is absent from JSONL output");
 }
 
 void test_runtime_error_is_generic_on_stdout_and_detailed_on_stderr() {
@@ -401,6 +434,10 @@ void test_full_worker_lifecycle() {
 
     const auto messages = parse_output_lines(output.str());
     check(messages.size() == 9, "ready plus eight request responses");
+    if (messages.size() != 9) {
+        trtmc_test::remove_all_safe(temporary);
+        return;
+    }
     check(messages[0].value("event", "") == "ready", "first message is ready event");
     check(messages[0].value("protocol_version", 0) == 2, "ready protocol version");
     check(messages[0].value("model_id", "") == "fake/streaming-asr", "ready model id");
@@ -634,6 +671,8 @@ void test_protocol_errors_remain_structured() {
 
     const auto messages = parse_output_lines(output.str());
     check(messages.size() == 11, "ready plus ten error/lifecycle responses");
+    if (messages.size() != 11)
+        return;
     check(messages[1]["id"].is_null() && !messages[1].value("ok", true),
           "malformed JSON gets id=null error response");
     check(messages[1]["error"].value("type", "") == "invalid_request_error",
@@ -660,6 +699,7 @@ int main() {
     try {
         test_ready_metadata_and_stream_probe();
         test_failed_stream_probe_keeps_worker_usable();
+        test_invalid_utf8_result_is_replaced_in_jsonl();
         test_runtime_error_is_generic_on_stdout_and_detailed_on_stderr();
         test_provider_invalid_argument_is_not_a_public_client_error();
         test_full_worker_lifecycle();

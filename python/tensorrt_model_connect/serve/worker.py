@@ -75,12 +75,25 @@ _WORKER_ENVIRONMENT_ALLOWLIST = frozenset(
         "XDG_DATA_HOME",
     }
 )
+_WINDOWS_WORKER_ENVIRONMENT_ALLOWLIST = frozenset(
+    {
+        "COMSPEC",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+    }
+)
 
 
 def _worker_environment() -> dict[str, str]:
     """Copy only runtime variables that a native worker is allowed to observe."""
 
-    return {name: os.environ[name] for name in _WORKER_ENVIRONMENT_ALLOWLIST if name in os.environ}
+    allowed = _WORKER_ENVIRONMENT_ALLOWLIST
+    if os.name == "nt":
+        allowed = allowed | _WINDOWS_WORKER_ENVIRONMENT_ALLOWLIST
+    return {name: os.environ[name] for name in allowed if name in os.environ}
 
 
 @dataclass(frozen=True)
