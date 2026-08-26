@@ -335,7 +335,9 @@ def prebuilt_python_profile_names(
     registry: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
     """Return non-default profiles that belong in the shared CI image."""
-    selected = registry if registry is not None else load_python_profile_registry()
+    selected = (
+        registry if registry is not None else load_python_profile_registry()
+    )
     profiles = selected.get("profiles", {})
     if not isinstance(profiles, Mapping):
         raise ValueError("Python profile registry is missing a profiles mapping")
@@ -382,7 +384,9 @@ def _exact_pinned_requirements(requirements_text: str) -> dict[str, str]:
             )
         normalized_name = re.sub(r"[-_.]+", "-", name).lower()
         if normalized_name in pinned:
-            raise ValueError(f"Python profile requirements declare {name!r} more than once")
+            raise ValueError(
+                f"Python profile requirements declare {name!r} more than once"
+            )
         pinned[normalized_name] = version
     return pinned
 
@@ -449,7 +453,8 @@ def _apply_declared_defaults(
     for phase, profile in defaults.items():
         if phase not in PROFILE_PHASES:
             raise ValueError(
-                f"{source} contains unsupported phase {phase!r}; expected one of {PROFILE_PHASES}"
+                f"{source} contains unsupported phase {phase!r}; "
+                f"expected one of {PROFILE_PHASES}"
             )
         name = str(profile).strip()
         if not name:
@@ -582,7 +587,8 @@ def _run_profile_command(
     if process.returncode != 0:
         stderr = (stderr or stdout or "").strip()
         raise RuntimeError(
-            f"Failed to {description}: {stderr or f'command exited with rc={process.returncode}'}"
+            f"Failed to {description}: "
+            f"{stderr or f'command exited with rc={process.returncode}'}"
         )
 
 
@@ -595,7 +601,10 @@ def _profile_install_environment() -> dict[str, str]:
 
 
 def _python_site_packages(python: str) -> list[str]:
-    script = "import json, site; print(json.dumps(site.getsitepackages()))"
+    script = (
+        "import json, site; "
+        "print(json.dumps(site.getsitepackages()))"
+    )
     result = subprocess.run(
         [python, "-c", script],
         capture_output=True,
@@ -637,15 +646,21 @@ def _materialize_venv_profile(
 ) -> str:
     base_python = _absolute_python(base_python)
     if not base_python:
-        raise ValueError(f"Execution profile {profile_name!r} requires a base Python interpreter")
+        raise ValueError(
+            f"Execution profile {profile_name!r} requires a base Python interpreter"
+        )
 
     requirements_spec = str(spec.get("requirements", "") or "").strip()
     if not requirements_spec:
-        raise ValueError(f"Execution profile {profile_name!r} must declare a requirements file")
+        raise ValueError(
+            f"Execution profile {profile_name!r} must declare a requirements file"
+        )
     requirements_text = _read_requirements_text(requirements_spec)
     pinned_requirements = _exact_pinned_requirements(requirements_text)
     verification_script = str(spec.get("verification_script", "") or "").strip()
-    verification_script_file = str(spec.get("verification_script_file", "") or "").strip()
+    verification_script_file = str(
+        spec.get("verification_script_file", "") or ""
+    ).strip()
     if verification_script_file:
         if verification_script:
             raise ValueError(
@@ -786,7 +801,9 @@ def resolve_profile_python(
     if kind in {"base", "passthrough"}:
         return _absolute_python(base_python)
     if kind != "venv":
-        raise ValueError(f"Execution profile {name!r} declares unsupported kind {kind!r}")
+        raise ValueError(
+            f"Execution profile {name!r} declares unsupported kind {kind!r}"
+        )
     return _materialize_venv_profile(
         name,
         spec,
@@ -809,5 +826,6 @@ def resolve_case_python_profiles(case: Any, base_python: str) -> dict[str, str]:
     """Resolve all execution profile interpreters for a case-like object."""
     profiles = resolve_case_profile_names(case)
     return {
-        phase: resolve_profile_python(profile, base_python) for phase, profile in profiles.items()
+        phase: resolve_profile_python(profile, base_python)
+        for phase, profile in profiles.items()
     }

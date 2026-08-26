@@ -326,7 +326,10 @@ class DockerImageManager:
             sort_keys=True,
         ).encode("utf-8")
         fingerprint = hashlib.sha256(
-            b"tensorrt-overlay\0" + common_fingerprint.encode("ascii") + b"\0" + overlay_payload
+            b"tensorrt-overlay\0"
+            + common_fingerprint.encode("ascii")
+            + b"\0"
+            + overlay_payload
         ).hexdigest()
 
         modelopt = self._docker_argument(dockerfile_text, "MODELOPT_VERSION")
