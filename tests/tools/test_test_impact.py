@@ -273,6 +273,13 @@ class TorchReference:
             "hf_id": "example/speech-streaming-case",
         },
         {
+            "name": "voicechat-case",
+            "family": "nemotron_voicechat",
+            "runtime_strategy": "nemotron_voicechat_full_duplex",
+            "task_strategy": "speech_to_speech",
+            "hf_id": "example/voicechat-case",
+        },
+        {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
@@ -1922,6 +1929,27 @@ class TestUnitTiers:
         assert match.rule == "cpp_example_tool"
         assert match.models == []
         assert match.unit_tiers == ["cpp"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/nemotron_voicechat/full_duplex/main.cpp",
+            "examples/models/nemotron_voicechat/full_duplex/playback_queue.h",
+            "examples/models/nemotron_voicechat/full_duplex/test_playback_queue.cpp",
+            "examples/models/nemotron_voicechat/full_duplex/Dockerfile",
+            "examples/models/nemotron_voicechat/full_duplex/Dockerfile.dockerignore",
+            "examples/models/nemotron_voicechat/full_duplex/CMakeLists.txt",
+            "examples/models/nemotron_voicechat/full_duplex/README.md",
+        ],
+    )
+    def test_voicechat_full_duplex_example_is_model_owned(self, imap, path):
+        """The live example runs VoiceChat plus its host-side C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "nemotron_voicechat_full_duplex_example"
+        assert match.models == ["voicechat-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
         assert match.rebuild_cpp is True
 
     @pytest.mark.parametrize(

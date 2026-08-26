@@ -808,6 +808,9 @@ def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> Non
         ("tests/builder/test_cli.py", "all"),
         ("tests/cpp/test_cli_args.cpp", "all"),
         ("tests/tools/test_cli_contract.py", "all"),
+        ("examples/models/nemotron_voicechat/full_duplex/main.cpp", "all"),
+        ("examples/models/nemotron_voicechat/full_duplex/Dockerfile", "all"),
+        ("examples/models/nemotron_voicechat/full_duplex/CMakeLists.txt", "all"),
     ),
 )
 def test_cli_and_unit_test_changes_run_units_without_model_proofs(

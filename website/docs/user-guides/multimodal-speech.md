@@ -107,6 +107,36 @@ commit/clear and response create/cancel/truncate; tool-enabled sessions expose
 `ISpeechToolSession`. Finite WAV inference uses `ISpeechBatchSessionProvider`,
 so this live path does not change the model-card `trtmc speak` result.
 
+### Full-duplex microphone example
+
+The repository includes a local Linux ALSA
+[microphone application](https://github.com/NVIDIA/TensorRT-Model-Connect/tree/main/examples/models/nemotron_voicechat/full_duplex).
+Build its image once from the repository root; the example README documents
+the pinned x86_64 override:
+
+```bash
+docker build --platform linux/arm64 \
+  --file examples/models/nemotron_voicechat/full_duplex/Dockerfile \
+  --tag trtmc-voicechat-full-duplex:local \
+  .
+```
+
+After that build, start each conversation with one offline `docker run`. The
+bundle remains a read-only host file and is not copied into the image:
+
+```bash
+docker run --rm --interactive --tty \
+  --network none \
+  --gpus 'device=0' \
+  --device /dev/snd:/dev/snd \
+  --mount "type=bind,src=$PWD/nemotron-voicechat-11b.bundle,dst=/models/model.bundle,readonly" \
+  trtmc-voicechat-full-duplex:local
+```
+
+Use a headset or hardware acoustic echo cancellation so speaker output does
+not look like a user interruption. See the example README for explicit ALSA
+devices, x86_64 builds, and desktop audio boundaries.
+
 For an opt-in real-engine lifecycle check, build the standalone model-owned
 probe and run it against a prebuilt bundle and the pinned public sample:
 

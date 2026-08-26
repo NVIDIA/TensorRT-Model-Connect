@@ -1845,6 +1845,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_local_qwen3_fixture_scopes_to_qwen3",),
         ),
         ClassificationRule(
+            priority=454,
+            name="nemotron_voicechat_full_duplex_example",
+            matcher=_regex_rule(r"examples/models/(nemotron_voicechat)/full_duplex/.+$"),
+            resolver=_match_result(
+                "nemotron_voicechat_full_duplex_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=("TestUnitTiers.test_voicechat_full_duplex_example_is_model_owned",),
+        ),
+        ClassificationRule(
             priority=455,
             name="cpp_example_tool",
             matcher=_regex_rule(r"examples/.+\.cpp$"),
