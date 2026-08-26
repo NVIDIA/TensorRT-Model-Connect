@@ -861,6 +861,15 @@ def test_ci_image_installs_declared_server_test_dependencies() -> None:
     )[1].split("\n\n", maxsplit=1)[0]
     assert set(re.findall(r'"([^"]+)"', dependency_block)) == set(declared.values())
 
+    community_requirements = {
+        line.strip()
+        for line in (REPO_ROOT / "requirements/community-ci.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert set(declared.values()) <= community_requirements
+
 
 def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
     source = _ci_source("container.py", "environment.py")
