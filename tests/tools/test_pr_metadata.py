@@ -267,7 +267,10 @@ def test_triage_workflow_never_checks_out_or_executes_pull_request_code() -> Non
 
     assert "pull_request_target:" in source
     assert workflow["permissions"] == {}
-    assert job["permissions"] == {"contents": "read", "issues": "write"}
+    assert job["permissions"] == {
+        "contents": "read",
+        "pull-requests": "write",
+    }
     assert "ref: ${{ github.event.pull_request.base.sha }}" in source
     assert "persist-credentials: false" in source
     assert "refs/remotes/trtmc/pr-head" in source

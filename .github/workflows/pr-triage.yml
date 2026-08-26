@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      issues: write
+      pull-requests: write
     steps:
       # This privileged workflow executes only code from the trusted base SHA.
       # It fetches pull-request Git objects for declarative impact analysis but
