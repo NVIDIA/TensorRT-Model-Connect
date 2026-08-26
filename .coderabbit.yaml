@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+language: en-US
+early_access: false
+
+reviews:
+  # Start with low-noise, advisory reviews. Human reviewers and repository CI
+  # remain the merge authority.
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  poem: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  # Do not let review finishing touches create follow-up code changes. Authors
+  # remain responsible for applying and validating any suggested change.
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    autofix:
+      enabled: false
+
+  path_filters:
+    - "!third_party/**"
+
+  path_instructions:
+    - path: ".github/**"
+      instructions: |
+        Treat fork pull requests as untrusted. Preserve the Community CPU to
+        maintainer authorization to internal CI boundary. Never execute or
+        check out an untrusted pull-request head in a privileged workflow.
+        Require least-privilege permissions and full-SHA pinning for
+        third-party actions.
+
+    - path: "tests/**"
+      instructions: |
+        Do not suggest weakening assertions, expected values, validation
+        criteria, comparison oracles, or acceptance thresholds merely to make
+        tests pass.
+
+    - path: "src/**"
+      instructions: |
+        Check ownership boundaries, public API compatibility, runtime safety,
+        TensorRT lifetime rules, error propagation, and cross-platform
+        behavior.
+
+    - path: "include/**"
+      instructions: |
+        Treat public header and ABI changes as high risk. Check lifetime,
+        ownership, compatibility, and documentation implications.
+
+    - path: "python/**"
+      instructions: |
+        Check model-family ownership, configuration isolation, error
+        propagation, deterministic behavior, and parity between Python and
+        native runtime paths.
+
+chat:
+  auto_reply: true
+  art: false
+  allow_non_org_members: true
