@@ -519,6 +519,30 @@ def test_selective_warm_of_cached_snapshot_makes_no_network_download() -> None:
     assert downloads == []
 
 
+def test_selective_warm_of_uncached_public_snapshot_downloads() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[tuple[str, str, str]] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
+
+    def fake_download(operation: str, hf_id: str, **kwargs):
+        downloads.append((operation, hf_id, kwargs["revision"]))
+        return "/cache/snapshot", "downloaded once"
+
+    helpers["_run_download_attempts"] = fake_download
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/model",
+        revision="0123456789abcdef",
+        gated=False,
+        token_available=False,
+        selective=True,
+        local_only=False,
+    )
+
+    assert (status, detail) == ("downloaded", "downloaded once")
+    assert downloads == [("snapshot", "org/model", "0123456789abcdef")]
+
+
 def test_uncached_gated_snapshot_without_token_fails_before_download() -> None:
     helpers = _load_cache_helpers()
     downloads: list[str] = []

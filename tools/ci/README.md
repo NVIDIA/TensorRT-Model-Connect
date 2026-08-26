@@ -157,8 +157,10 @@ The host half, `ModelProofRunner`, performs trusted setup:
    platform files, but no peer model source.
 3. Select the model-owned runtime, Python tests, E2E cases, resource class, and
    optional reference checkout.
-4. Warm only the selected Hugging Face repositories and reflink them into a
-   proof-private cache view.
+4. Prepare only the selected Hugging Face repositories and reflink them into a
+   proof-private cache view. Premerge downloads a missing snapshot into the
+   current host cache; nightly model proofs reuse the cache prepared by the
+   separate Nightly cache-warm job.
 5. Acquire either shared GPU slots or a whole GPU through `GpuLease`.
 6. Start a read-only, network-disabled proof container.
 

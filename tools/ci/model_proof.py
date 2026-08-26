@@ -423,6 +423,22 @@ class ModelProofRunner:
         hub = Path(self.context.env.get("TRTMC_HF_HUB_CACHE", str(Path(root) / "hub"))).resolve()
         if hub in {Path("/"), self.context.repository}:
             raise CiError("unsafe HF Hub cache path")
+        # Premerge fills the current runner's cache on first use. Nightly keeps
+        # this per-model step offline after its separate cache-warm job.
+        online_cache_warm = self.request.suite == "premerge"
+        if online_cache_warm:
+            try:
+                hub.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise CiError(f"could not prepare writable HF Hub cache: {hub}") from error
+        cache_mount = f"type=bind,src={hub},dst=/hf-cache/hub"
+        if not online_cache_warm:
+            cache_mount += ",readonly"
+        online_environment = (
+            ["env", "-u", "HF_HUB_OFFLINE", "-u", "TRANSFORMERS_OFFLINE"]
+            if online_cache_warm
+            else []
+        )
         name = self._base_container_name() + "-cache-check"
         self.container_name = name
         self.context.run(["docker", "rm", "-f", name], check=False, capture_output=True)
@@ -435,7 +451,7 @@ class ModelProofRunner:
             *self._job_labels(),
             "--read-only",
             "--network",
-            "none",
+            "bridge" if online_cache_warm else "none",
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -447,7 +463,7 @@ class ModelProofRunner:
             "--mount",
             f"type=bind,src={self.artifacts_dir},dst=/artifacts",
             "--mount",
-            f"type=bind,src={hub},dst=/hf-cache/hub,readonly",
+            cache_mount,
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=1g",
             "--workdir",
@@ -465,19 +481,25 @@ class ModelProofRunner:
             "-e",
             "PYTHONDONTWRITEBYTECODE=1",
             image,
+            *online_environment,
             "/opt/venv/bin/python",
             "/src/scripts/warm_hf_cache.py",
             "--models-file",
             "/artifacts/cache-check-models.txt",
-            "--local-only",
+            *([] if online_cache_warm else ["--local-only"]),
             "--strict",
             "--emit-cache-repos",
             "/artifacts/hf-cache-repos.json",
         ]
         result = self._run_logged(command, self.artifacts_dir / "cache-check.log")
         if result:
+            action = (
+                "online HF cache warm"
+                if online_cache_warm
+                else "offline HF cache readiness check"
+            )
             raise CiError(
-                f"offline HF cache readiness check failed for {self.request.model} (exit {result})"
+                f"{action} failed for {self.request.model} (exit {result})"
             )
         try:
             evidence = self._validated_cache_evidence(hub)

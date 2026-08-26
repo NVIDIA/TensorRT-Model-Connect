@@ -1397,8 +1397,9 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
         assert contract in text
     assert "scratch build produced" in inner
     assert "staged plugin DSO does not byte-match" in inner
-    assert '"--network"' in warm and '"none"' in warm
-    assert "dst=/hf-cache/hub,readonly" in warm
+    assert '"bridge" if online_cache_warm else "none"' in warm
+    assert 'cache_mount = f"type=bind,src={hub},dst=/hf-cache/hub"' in warm
+    assert 'cache_mount += ",readonly"' in warm
     assert "dst=/hf-cache/modules" not in warm
     assert '"HF_HOME=/tmp/hf-home"' in warm
     assert '"HF_MODULES_CACHE=/tmp/hf-modules"' in warm
@@ -1435,10 +1436,12 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert "cache-check-models.txt" in warm
     assert "scripts/warm_hf_cache.py" in warm
     assert '"--models-file"' in warm and '"/artifacts/cache-check-models.txt"' in warm
+    assert 'online_cache_warm = self.request.suite == "premerge"' in warm
     assert '"--local-only"' in warm and '"--strict"' in warm
     assert '"--emit-cache-repos"' in warm and '"/artifacts/hf-cache-repos.json"' in warm
     assert host.index("_prepare_hf_cache") < host.index("_run_proof_container")
-    assert "offline HF cache readiness check failed" in warm
+    assert "online HF cache warm" in warm
+    assert "offline HF cache readiness check" in warm
 
 
 
@@ -1849,7 +1852,43 @@ def test_host_projection_failure_preserves_error_and_html(tmp_path: Path) -> Non
     assert status["exit_code"] == result.returncode
 
 
-def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    (
+        "suite",
+        "expected_error",
+        "expected_network",
+        "expected_local_only",
+        "expected_readonly",
+        "expected_online_environment",
+    ),
+    [
+        (
+            "premerge",
+            "online HF cache warm failed for convbert",
+            "bridge",
+            False,
+            False,
+            True,
+        ),
+        (
+            "nightly",
+            "offline HF cache readiness check failed for convbert",
+            "none",
+            True,
+            True,
+            False,
+        ),
+    ],
+)
+def test_strict_cache_preparation_failure_stops_before_hermetic_proof(
+    tmp_path: Path,
+    suite: str,
+    expected_error: str,
+    expected_network: str,
+    expected_local_only: bool,
+    expected_readonly: bool,
+    expected_online_environment: bool,
+) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     docker_log = tmp_path / "docker.log"
@@ -1864,8 +1903,7 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
     )
     docker.chmod(0o755)
     output = tmp_path / "proof"
-    (tmp_path / "hf-cache" / "hub").mkdir(parents=True)
-    (tmp_path / "hf-cache" / "modules").mkdir(parents=True)
+    hub_cache = tmp_path / "hf-cache" / "hub"
     env = os.environ.copy()
     env.update(
         {
@@ -1880,6 +1918,8 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
             *RUNNER_COMMAND,
             "--model",
             "convbert",
+            "--suite",
+            suite,
             "--revision",
             "HEAD",
             "--output-dir",
@@ -1893,7 +1933,8 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
     )
 
     assert result.returncode != 0
-    assert "offline HF cache readiness check failed for convbert" in result.stderr
+    assert expected_error in result.stderr
+    assert hub_cache.exists() is (suite == "premerge")
     assert (output / "artifacts" / "cache-check-models.txt").read_text().splitlines() == [
         "convbert-base"
     ]
@@ -1904,9 +1945,16 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
     ]
     assert len(docker_runs) == 1
     assert "scripts/warm_hf_cache.py" in docker_runs[0]
-    assert "--local-only" in docker_runs[0]
+    assert "--read-only" in docker_runs[0]
+    assert ("--local-only" in docker_runs[0]) is expected_local_only
     assert "--strict" in docker_runs[0]
-    assert "--network none" in docker_runs[0]
+    assert "--emit-cache-repos /artifacts/hf-cache-repos.json" in docker_runs[0]
+    assert f"--network {expected_network}" in docker_runs[0]
+    online_environment = "env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE"
+    assert (online_environment in docker_runs[0]) is expected_online_environment
+    cache_mount = f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub"
+    assert cache_mount in docker_runs[0]
+    assert (f"{cache_mount},readonly" in docker_runs[0]) is expected_readonly
 
 
 def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -> None:
@@ -1921,7 +1969,8 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
     assert "HF Hub cache directory does not exist" not in host
     assert 'hub in {Path("/"), self.context.repository}' in host
     assert "hf_modules_cache" not in host
-    assert 'f"type=bind,src={hub},dst=/hf-cache/hub,readonly"' in cache_check
+    assert 'cache_mount = f"type=bind,src={hub},dst=/hf-cache/hub"' in cache_check
+    assert 'cache_mount += ",readonly"' in cache_check
     assert "dst=/hf-cache/modules" not in cache_check
     assert 'f"type=bind,src={private_hub},dst=/hf-cache/hub"' in proof
     assert "src={private_hub},dst=/hf-cache/hub,readonly" not in proof
@@ -2101,8 +2150,26 @@ def test_sana_reference_cache_wrong_revision_fails_before_docker(
         )
 
 
+@pytest.mark.parametrize(
+    (
+        "suite",
+        "expected_network",
+        "expected_local_only",
+        "expected_readonly",
+        "expected_online_environment",
+    ),
+    [
+        ("premerge", "bridge", False, False, True),
+        ("nightly", "none", True, True, False),
+    ],
+)
 def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     tmp_path: Path,
+    suite: str,
+    expected_network: str,
+    expected_local_only: bool,
+    expected_readonly: bool,
+    expected_online_environment: bool,
 ) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2125,6 +2192,8 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
             *RUNNER_COMMAND,
             "--model",
             "convbert",
+            "--suite",
+            suite,
             "--revision",
             "HEAD",
             "--output-dir",
@@ -2145,7 +2214,16 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     ]
     assert len(docker_runs) == 3
     warm, cache_copy, proof = docker_runs
-    assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly" in warm
+    cache_mount = f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub"
+    assert cache_mount in warm
+    assert (f"{cache_mount},readonly" in warm) is expected_readonly
+    assert f"--network {expected_network}" in warm
+    online_environment = "env -u HF_HUB_OFFLINE -u TRANSFORMERS_OFFLINE"
+    assert (online_environment in warm) is expected_online_environment
+    assert "--read-only" in warm
+    assert ("--local-only" in warm) is expected_local_only
+    assert "--strict" in warm
+    assert "--emit-cache-repos /artifacts/hf-cache-repos.json" in warm
     assert f"src={modules_cache}" not in warm
     assert f"--mount type=bind,src={selected_repo},dst=/selected-hf-repo,readonly" in cache_copy
     private_repo = output / "work" / "hf-private" / "hub" / "models--fixture--model"
@@ -2158,6 +2236,7 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     assert f"src={hub_cache},dst=/hf-cache/hub" not in proof
     assert f"src={selected_repo}" not in proof
     assert f"src={modules_cache}" not in proof
+    assert "--network none" in proof
     private_hub = output / "work" / "hf-private" / "hub"
     assert f"--mount type=bind,src={private_hub},dst=/hf-cache/hub" in proof
     assert f"src={private_hub},dst=/hf-cache/hub,readonly" not in proof
@@ -2303,7 +2382,7 @@ def test_selected_hf_cache_evidence_rejects_path_escape_before_proof(
     assert "warm_hf_cache.py" in docker_runs[0]
 
 
-def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
+def test_premerge_online_warm_creates_missing_host_cache_source(
     tmp_path: Path,
 ) -> None:
     fake_bin = tmp_path / "bin"
@@ -2349,16 +2428,19 @@ def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
     )
 
     assert result.returncode != 0
-    assert "offline HF cache readiness check failed for convbert" in result.stderr
+    assert "online HF cache warm failed for convbert" in result.stderr
+    assert hub_cache.is_dir()
     docker_runs = [
         line
         for line in docker_log.read_text(encoding="utf-8").splitlines()
         if line.startswith("run ")
     ]
     assert len(docker_runs) == 1
-    assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly" in docker_runs[0]
+    assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub" in docker_runs[0]
+    assert "dst=/hf-cache/hub,readonly" not in docker_runs[0]
     assert "dst=/hf-cache/modules" not in docker_runs[0]
-    assert "--network none" in docker_runs[0]
+    assert "--network bridge" in docker_runs[0]
+    assert "--local-only" not in docker_runs[0]
 
 
 def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> None:
