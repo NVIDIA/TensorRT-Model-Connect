@@ -518,6 +518,35 @@ class WheelPackageManager:
     def __init__(self, context: CiContext):
         self.context = context
 
+    def preflight(self) -> None:
+        """Validate pre-install package metadata without build tools or network access."""
+        tensorrt_version = _target_tensorrt_version(self.context.env, required=True)
+        assert tensorrt_version is not None
+        package_version = _package_variant_version(
+            self.context.repository,
+            tensorrt_version,
+        )
+        abi = _tensorrt_abi(tensorrt_version).replace(".", "_")
+        payload = b"package-preflight"
+        _validate_backend_files(
+            "package preflight",
+            tensorrt_version,
+            {
+                "libtrtmc_backend_trt.so": payload,
+                f"libtrtmc_backend_trt_{abi}.so": payload,
+            },
+        )
+        _validate_backend_identity(
+            "package preflight",
+            tensorrt_version,
+            abi,
+            tensorrt_version,
+        )
+        print(
+            f"package_preflight=TensorRT {tensorrt_version} package {package_version} "
+            f"backend ABI {abi}"
+        )
+
     def build(self) -> None:
         target_tensorrt_version = _target_tensorrt_version(
             self.context.env,

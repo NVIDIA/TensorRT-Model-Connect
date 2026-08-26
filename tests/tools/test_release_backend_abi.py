@@ -8,11 +8,13 @@ import sys
 import textwrap
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import _pyproject_backend as backend
 from tools.ci.package import (
+    WheelPackageManager,
     _package_variant_version,
     _probe_backend_identity,
     _required_tensorrt_version,
@@ -114,6 +116,21 @@ def test_package_ci_abi_validation_does_not_require_source_package_import() -> N
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("+trt111")
+
+
+def test_package_preflight_exercises_preinstall_abi_consumers(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    context = SimpleNamespace(
+        repository=REPO_ROOT,
+        env={"TRTMC_PACKAGE_TENSORRT_VERSION": TENSORRT_VERSION},
+    )
+
+    WheelPackageManager(context).preflight()
+
+    assert capsys.readouterr().out.strip() == (
+        "package_preflight=TensorRT 11.1.0.106 package 0.1.0+trt111 backend ABI 11_1"
+    )
 
 
 def test_package_profile_default_preserves_development_metadata(

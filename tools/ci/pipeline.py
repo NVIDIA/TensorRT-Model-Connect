@@ -95,6 +95,10 @@ class CiPipeline:
                 ("Build trtmc pip package", self.package.build),
                 ("Install trtmc pip package", self.package.install_once),
             ],
+            "package-preflight": [
+                ("Setup TensorRT-Model-Connect package preflight", self.environment.verify),
+                ("Validate pre-install package metadata", self.package.preflight),
+            ],
             "wheel-model-smoke": [
                 ("Setup TensorRT-Model-Connect source checks", self.environment.verify),
                 ("Model smoke test from trtmc pip package", self.package.model_smoke),

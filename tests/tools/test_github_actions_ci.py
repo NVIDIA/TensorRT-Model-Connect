@@ -865,6 +865,13 @@ def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
         "TRUSTED_ENVIRONMENT =", maxsplit=1
     )[0]
     assert "TRTMC_PREMERGE_UNIT_SCOPE" in common
+    for name in (
+        "TRTMC_PACKAGE_PYTHON_TAGS",
+        "TRTMC_PACKAGE_TENSORRT_VERSION",
+        "TRTMC_PACKAGE_WHEEL_ARCH",
+    ):
+        assert name in common
+    assert "TRTMC_PACKAGE_BUILD_ROOT" not in common
     assert "HF_TOKEN" not in common
     assert "HUGGING_FACE_HUB_TOKEN" not in common
 
