@@ -134,6 +134,7 @@ _ORCHESTRATOR_MODULES = {
 _NO_IMPACT_PATTERNS = [
     r"^docs/",
     r"^website/",
+    r"^\.coderabbit\.yaml$",
     r"^\.gitignore$",
     r"^\.clang-format$",
     r"^\.editorconfig$",

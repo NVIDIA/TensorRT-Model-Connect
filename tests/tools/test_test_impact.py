@@ -1567,6 +1567,7 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
+            ".coderabbit.yaml",
             "CODEOWNERS",
             "ruff.toml",
             "tests/__init__.py",
