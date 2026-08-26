@@ -24,6 +24,7 @@
       },
       "expected_prompt_tokens": 32769,
       "expected_kv_cache_rows": 131072,
+      "expected_runtime_prefill_tokens": 32770,
       "expected_prefill_chunks": 513,
       "expected_prefill_chunk_limit": 64,
       "max_new_tokens": 2,

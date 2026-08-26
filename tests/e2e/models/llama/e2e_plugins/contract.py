@@ -367,6 +367,11 @@ class LlamaNativeKvChunkedPrefillRegressionPlugin:
         expected_rows = int(case.metadata.get("expected_kv_cache_rows", -1))
         expected_chunks = int(case.metadata.get("expected_prefill_chunks", -1))
         expected_limit = int(case.metadata.get("expected_prefill_chunk_limit", -1))
+        # The harness counts the raw prompt without special tokens, while the
+        # runtime observation counts the exact engine inputs (including BOS).
+        expected_runtime_tokens = int(
+            case.metadata.get("expected_runtime_prefill_tokens", -1)
+        )
         cache_marker = f"KV cache rows={expected_rows} (bundle max={expected_rows}"
         prefill_marker = 'label="prefill_engine_plan:prefill"'
         prefill_observations = _parse_prefill_observations(stderr)
@@ -375,8 +380,9 @@ class LlamaNativeKvChunkedPrefillRegressionPlugin:
         observed_max_chunk = max((item[2] for item in prefill_observations), default=0)
         chunk_plan_is_consistent = (
             expected_limit > 0
+            and expected_runtime_tokens > 0
             and expected_chunks
-            == (expected_prompt + expected_limit - 1) // expected_limit
+            == (expected_runtime_tokens + expected_limit - 1) // expected_limit
         )
         chunked_prefill_observed = chunk_plan_is_consistent and any(
             prefill_marker in line and f"launches={expected_chunks}" in line.split()
@@ -384,7 +390,7 @@ class LlamaNativeKvChunkedPrefillRegressionPlugin:
         )
         chunk_limit_observed = (
             bool(prefill_observations)
-            and observed_tokens == expected_prompt
+            and observed_tokens == expected_runtime_tokens
             and observed_launches == expected_chunks
             and 0 < observed_max_chunk <= expected_limit
         )
@@ -408,7 +414,7 @@ class LlamaNativeKvChunkedPrefillRegressionPlugin:
             ),
             "prefill_chunk_limit_observed": (
                 chunk_limit_observed,
-                f"expected tokens={expected_prompt}, launches={expected_chunks}, "
+                f"expected tokens={expected_runtime_tokens}, launches={expected_chunks}, "
                 f"max_chunk<={expected_limit}; observed={prefill_observations}",
             ),
             "requested_tokens_generated": (
