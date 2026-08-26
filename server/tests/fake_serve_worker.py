@@ -11,13 +11,55 @@ import json
 import os
 import sys
 import time
-import wave
 from pathlib import Path
 from typing import Any
 
 
 def emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+def supports_transcription_wav(path: Path) -> bool:
+    """Mirror the native PCM16/IEEE-float32 WAV format boundary."""
+
+    payload = path.read_bytes()
+    if len(payload) < 12 or payload[:4] != b"RIFF" or payload[8:12] != b"WAVE":
+        return False
+    container_end = 8 + int.from_bytes(payload[4:8], "little")
+    if container_end < 12 or container_end > len(payload):
+        return False
+
+    audio_format = channels = sample_rate = bits_per_sample = data_size = 0
+    position = 12
+    while position + 8 <= container_end:
+        chunk_id = payload[position : position + 4]
+        chunk_size = int.from_bytes(payload[position + 4 : position + 8], "little")
+        data_offset = position + 8
+        next_position = data_offset + chunk_size + (chunk_size & 1)
+        if next_position > container_end:
+            return False
+        if chunk_id == b"fmt ":
+            if chunk_size < 16:
+                return False
+            audio_format = int.from_bytes(payload[data_offset : data_offset + 2], "little")
+            channels = int.from_bytes(payload[data_offset + 2 : data_offset + 4], "little")
+            sample_rate = int.from_bytes(payload[data_offset + 4 : data_offset + 8], "little")
+            bits_per_sample = int.from_bytes(payload[data_offset + 14 : data_offset + 16], "little")
+        elif chunk_id == b"data" and chunk_size > 0:
+            data_size = chunk_size
+        position = next_position
+
+    supported_format = (audio_format, bits_per_sample) in {(1, 16), (3, 32)}
+    frame_width = channels * (bits_per_sample // 8)
+    return (
+        position == container_end
+        and supported_format
+        and channels > 0
+        and 0 < sample_rate <= 0x7FFF_FFFF
+        and data_size > 0
+        and frame_width > 0
+        and data_size % frame_width == 0
+    )
 
 
 def main() -> int:
@@ -133,12 +175,9 @@ def main() -> int:
             elif op == "transcribe":
                 audio_path = Path(request["audio_path"])
                 try:
-                    with wave.open(str(audio_path), "rb") as audio:
-                        supported = audio.getsampwidth() == 2 and audio.getnframes() > 0
+                    supported = supports_transcription_wav(audio_path)
                 except FileNotFoundError as exc:
                     raise RuntimeError("read_wav: cannot open input file") from exc
-                except (EOFError, wave.Error):
-                    supported = False
                 if not supported:
                     raise ValueError("read_wav: WAV samples must be PCM16 or IEEE float32")
                 result = {"text": f"transcribed {audio_path.stat().st_size} bytes"}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import io
+import struct
 import threading
 import time
 import wave
@@ -132,6 +133,30 @@ def wav_fixture(samples: bytes = b"\x01\x00\x02\x00", *, sample_width: int = 2) 
         wav.setframerate(16000)
         wav.writeframes(samples)
     return output.getvalue()
+
+
+def typed_wav_fixture(audio_format: int, bits_per_sample: int, samples: bytes) -> bytes:
+    sample_width = bits_per_sample // 8
+    channels = 1
+    sample_rate = 16000
+    block_align = channels * sample_width
+    byte_rate = sample_rate * block_align
+    fmt = struct.pack(
+        "<HHIIHH",
+        audio_format,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+    )
+
+    def chunk(name: bytes, data: bytes) -> bytes:
+        padding = b"\x00" if len(data) & 1 else b""
+        return name + struct.pack("<I", len(data)) + data + padding
+
+    body = b"WAVE" + chunk(b"fmt ", fmt) + chunk(b"data", samples)
+    return b"RIFF" + struct.pack("<I", len(body)) + body
 
 
 def make_registry(
@@ -796,6 +821,30 @@ def test_multipart_audio_transcription_json_text_and_empty_rejection(
         )
         assert unsupported_wav.status_code == 415
         assert "PCM16 or IEEE float32" in unsupported_wav.json()["error"]["message"]
+
+
+def test_audio_transcription_accepts_ieee_float32_but_rejects_pcm32(
+    tmp_path: Path,
+) -> None:
+    float32_wav = typed_wav_fixture(3, 32, struct.pack("<ff", 0.25, -0.5))
+    pcm32_wav = typed_wav_fixture(1, 32, struct.pack("<ii", 1, -1))
+    app = create_app(make_registry(tmp_path))
+
+    with TestClient(app) as client:
+        accepted = client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("float32.wav", float32_wav, "audio/wav")},
+        )
+        rejected = client.post(
+            "/v1/audio/transcriptions",
+            files={"file": ("pcm32.wav", pcm32_wav, "audio/wav")},
+        )
+
+    assert accepted.status_code == 200
+    assert accepted.json() == {"text": f"transcribed {len(float32_wav)} bytes"}
+    assert rejected.status_code == 415
+    assert rejected.json()["error"]["code"] == "unsupported_media_type"
+    assert "PCM16 or IEEE float32" in rejected.json()["error"]["message"]
 
 
 def test_verbose_transcription_response_has_a_fixed_public_schema(
