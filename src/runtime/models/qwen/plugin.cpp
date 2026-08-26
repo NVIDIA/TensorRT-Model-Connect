@@ -221,14 +221,18 @@ bool engine_uses_native_kv_updates(const TrtModule& module, const QwenKvCacheNam
     return has_write_indices;
 }
 
+int32_t native_kv_contract_version(const std::string& config_json) {
+    return extract_json_int(config_json, "native_kv_contract_version", 0);
+}
+
 void validate_native_kv_marker(const std::string& config_json, bool engine_uses_native_kv) {
     const bool declares_native_kv = extract_json_bool(config_json, "native_kv_cache", false);
     const bool has_version =
         config_json.find("\"native_kv_contract_version\"") != std::string::npos;
     if (!declares_native_kv && !has_version && !engine_uses_native_kv)
         return;
-    if (!declares_native_kv || !engine_uses_native_kv ||
-        extract_json_int(config_json, "native_kv_contract_version", 0) != 1) {
+    const int32_t version = native_kv_contract_version(config_json);
+    if (!declares_native_kv || !engine_uses_native_kv || (version != 1 && version != 2)) {
         throw std::runtime_error("Qwen native KV metadata does not match the engine contract");
     }
 }
@@ -252,6 +256,11 @@ bool validate_native_kv_runtime(const PipelineContext& ctx, const TrtModule& mod
     if (module.tensor_shape(kv_names.cache_k.front()) != expected_shape) {
         throw std::runtime_error(
             "Qwen native KV requires cache shape [1,num_kv_heads,capacity,128]");
+    }
+    if (module.tensor_dtype(kv_names.cache_k.front()) != cache_dtype ||
+        module.tensor_dtype(kv_names.cache_v.front()) != cache_dtype) {
+        throw std::runtime_error(
+            "Qwen native KV cache dtype metadata does not match the engine contract");
     }
     return true;
 }
@@ -376,7 +385,8 @@ class QwenDecoderPlugin final : public IPipelinePlugin {
         QwenKvCacheNames kv_names;
         build_kv_names(ctx, io, kv_names);
 
-        const DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        const DType cache_dtype =
+            resolve_qwen_native_kv_cache_dtype(ctx.config_json, ctx.config.precision);
         QwenTriAttentionConfig tri_cfg = qwen_parse_triattention_bundle_config(
             ctx.config_json, ctx.config.max_cache_length, ctx.runtime_config);
 

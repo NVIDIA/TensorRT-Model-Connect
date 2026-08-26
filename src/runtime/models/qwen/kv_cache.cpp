@@ -59,7 +59,7 @@ void validate_native_cache_pair(TrtModule& module, const std::string& cache_name
     }
     if (module.tensor_dtype(cache_name) != cache_dtype ||
         module.tensor_dtype(present_name) != cache_dtype) {
-        throw std::runtime_error("Qwen native KV cache dtype does not match model precision");
+        throw std::runtime_error("Qwen native KV cache dtype does not match declared cache dtype");
     }
 }
 

@@ -37,7 +37,12 @@ qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 # Helper: run a small TRT graph on a STRONGLY_TYPED network
 # ---------------------------------------------------------------------------
 
-def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _run_strongly_typed(
+    build_fn,
+    inputs: dict[str, np.ndarray],
+    *,
+    output_aliases: dict[str, str] | None = None,
+) -> dict[str, np.ndarray]:
     """Build and run a STRONGLY_TYPED TRT engine from build_fn.
 
     IAttention and IRotaryEmbeddingLayer require a STRONGLY_TYPED network;
@@ -50,6 +55,24 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
         from cuda.bindings import runtime as cudart
     except ImportError:
         from cuda import cudart  # type: ignore[no-redef]
+
+    try:
+        import ml_dtypes
+    except ImportError:
+        ml_dtypes = None
+
+    def numpy_dtype(dtype):
+        if dtype == trt.float16:
+            return np.dtype(np.float16)
+        if dtype == trt.bfloat16:
+            if ml_dtypes is None:
+                raise RuntimeError("BF16 TensorRT tests require ml_dtypes")
+            return np.dtype(ml_dtypes.bfloat16)
+        if dtype == trt.float32:
+            return np.dtype(np.float32)
+        if dtype == trt.int32:
+            return np.dtype(np.int32)
+        raise TypeError(f"Unsupported TensorRT test dtype: {dtype}")
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -64,6 +87,8 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
             dt = trt.int32
         elif arr.dtype == np.float16:
             dt = trt.float16
+        elif ml_dtypes is not None and arr.dtype == np.dtype(ml_dtypes.bfloat16):
+            dt = trt.bfloat16
         else:
             dt = trt.float32
         t = network.add_input(name, dt, tuple(arr.shape))
@@ -81,29 +106,47 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
     runtime = trt.Runtime(logger)
     engine = runtime.deserialize_cuda_engine(plan)
     ctx = engine.create_execution_context()
+    output_aliases = output_aliases or {}
 
     err, stream = cudart.cudaStreamCreate()
     assert err == 0, f"cudaStreamCreate failed: {err}"
 
-    device_bufs = {}
-    host_out = {}
+    io_tensors = {}
     for i in range(engine.num_io_tensors):
         tname = engine.get_tensor_name(i)
-        shape = tuple(engine.get_tensor_shape(tname))
-        dtype_trt = engine.get_tensor_dtype(tname)
-        np_dtype = np.float16 if dtype_trt == trt.float16 else np.float32
-        nbytes = int(np.prod(shape)) * np.dtype(np_dtype).itemsize
+        io_tensors[tname] = (
+            tuple(engine.get_tensor_shape(tname)),
+            engine.get_tensor_dtype(tname),
+            engine.get_tensor_mode(tname),
+        )
+
+    device_bufs = {}
+    host_out = {}
+    host_inputs = {}
+    for tname, (shape, dtype_trt, mode) in io_tensors.items():
+        if tname in output_aliases:
+            continue
+        np_dtype = numpy_dtype(dtype_trt)
+        nbytes = int(np.prod(shape)) * np_dtype.itemsize
         err, ptr = cudart.cudaMallocAsync(nbytes, stream)
         assert err == 0, f"cudaMalloc failed: {err}"
         device_bufs[tname] = (ptr, nbytes, np_dtype)
-        mode = engine.get_tensor_mode(tname)
         if mode == trt.TensorIOMode.INPUT:
-            arr = inputs[tname].astype(np_dtype if np_dtype != np.float32 else inputs[tname].dtype)
+            arr = np.ascontiguousarray(inputs[tname], dtype=np_dtype)
+            host_inputs[tname] = arr
             cudart.cudaMemcpyAsync(
                 ptr, arr.ctypes.data, arr.nbytes,
                 cudart.cudaMemcpyKind.cudaMemcpyHostToDevice, stream)
         else:
             host_out[tname] = np.zeros(shape, dtype=np_dtype)
+
+    for output_name, input_name in output_aliases.items():
+        assert io_tensors[output_name][2] == trt.TensorIOMode.OUTPUT
+        assert io_tensors[input_name][2] == trt.TensorIOMode.INPUT
+        assert io_tensors[output_name][:2] == io_tensors[input_name][:2]
+        device_bufs[output_name] = device_bufs[input_name]
+
+    for tname, (ptr, _nbytes, _np_dtype) in device_bufs.items():
         ctx.set_tensor_address(tname, ptr)
 
     ctx.execute_async_v3(stream)
@@ -115,7 +158,8 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
             cudart.cudaMemcpyKind.cudaMemcpyDeviceToHost, stream)
 
     cudart.cudaStreamSynchronize(stream)
-    for ptr, nbytes, _ in device_bufs.values():
+    unique_device_bufs = {ptr: (ptr, nbytes) for ptr, nbytes, _ in device_bufs.values()}
+    for ptr, nbytes in unique_device_bufs.values():
         cudart.cudaFreeAsync(ptr, stream)
     cudart.cudaStreamDestroy(stream)
 
@@ -150,6 +194,116 @@ def test_qwen_native_kv_mask_matches_active_causal_prefix():
     expected[0, 0, 1, :4] = 0
     expected[0, 0, 2, :5] = 0
     np.testing.assert_array_equal(actual, expected)
+
+
+@requires_trt
+@pytest.mark.parametrize(
+    ("model_dtype_name", "model_numpy_dtype"),
+    [
+        pytest.param("bfloat16", "bfloat16", id="bf16"),
+        pytest.param("float16", "float16", id="fp16-model-bf16-attention"),
+    ],
+)
+def test_qwen_native_kv_attention_masks_poisoned_inactive_suffix(
+    model_dtype_name,
+    model_numpy_dtype,
+):
+    """The explicit mask exposes only the active, causal cache prefix."""
+    import tensorrt as trt
+
+    ml_dtypes = pytest.importorskip("ml_dtypes")
+    model_dtype = getattr(trt, model_dtype_name)
+    model_numpy_dtype = (
+        ml_dtypes.bfloat16
+        if model_numpy_dtype == "bfloat16"
+        else np.float16
+    )
+    attention_numpy_dtype = ml_dtypes.bfloat16
+
+    query_length = 3
+    cache_capacity = 16
+    cache_write_index = 2
+    active_length = 5
+    num_heads = 4
+    num_kv_heads = 2
+    head_dim = 128
+
+    q = np.ones(
+        (query_length, num_heads * head_dim), dtype=model_numpy_dtype
+    )
+    k_update = np.zeros(
+        (query_length, num_kv_heads * head_dim), dtype=model_numpy_dtype
+    )
+    update_values = np.array([5.0, 7.0, 9.0], dtype=np.float32)
+    v_update = np.broadcast_to(
+        update_values[:, None], (query_length, num_kv_heads * head_dim)
+    ).astype(model_numpy_dtype)
+
+    cache_k = np.zeros(
+        (1, num_kv_heads, cache_capacity, head_dim), dtype=np.float32
+    )
+    cache_v = np.zeros_like(cache_k)
+    cache_v[:, :, 0, :] = 1.0
+    cache_v[:, :, 1, :] = 3.0
+    # If the inactive suffix leaks through attention, these keys dominate the
+    # logits and the large values make the numerical error unmistakable.
+    cache_k[:, :, active_length:, :] = 16.0
+    cache_v[:, :, active_length:, :] = 1000.0
+    cache_k = cache_k.astype(attention_numpy_dtype)
+    cache_v = cache_v.astype(attention_numpy_dtype)
+
+    inputs = {
+        "q": q,
+        "k_update": k_update,
+        "v_update": v_update,
+        "cache_k": cache_k,
+        "cache_v": cache_v,
+        "cache_write_indices": np.array([cache_write_index], dtype=np.int32),
+        "key_value_lengths": np.array([active_length], dtype=np.int32),
+    }
+
+    def build(network, trt_inputs):
+        mask = qwen_graph_ops.add_native_kv_attention_mask(
+            network,
+            trt_inputs["q"],
+            trt_inputs["cache_write_indices"],
+            trt_inputs["key_value_lengths"],
+            cache_capacity,
+            trt.bfloat16,
+        )
+        result = qwen_graph_ops.add_native_kv_cache_attention_from_rows(
+            network,
+            trt_inputs["q"],
+            trt_inputs["k_update"],
+            trt_inputs["v_update"],
+            trt_inputs["cache_k"],
+            trt_inputs["cache_v"],
+            trt_inputs["cache_write_indices"],
+            trt_inputs["key_value_lengths"],
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            q_seq=query_length,
+            explicit_mask=mask,
+            attention_dtype=trt.bfloat16,
+        )
+        assert result["context"].dtype == model_dtype
+        return {
+            "context": result["context"],
+            "present_k": result["present_k"],
+            "present_v": result["present_v"],
+        }
+
+    actual = _run_strongly_typed(
+        build,
+        inputs,
+        output_aliases={"present_k": "cache_k", "present_v": "cache_v"},
+    )["context"].astype(np.float32)
+    expected_rows = np.array([3.0, 4.0, 5.0], dtype=np.float32)
+    expected = np.broadcast_to(
+        expected_rows[:, None], (query_length, num_heads * head_dim)
+    )
+    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0625)
 
 
 # ---------------------------------------------------------------------------

@@ -97,6 +97,12 @@ int32_t compute_kv_dim(const BaseConfig& cfg);
 // for use as KV cache element type.
 DType cache_dtype_from_precision(const std::string& precision);
 
+// Resolve the Qwen native-KV cache dtype from its versioned bundle contract.
+// Contract v1 inherits the model precision. Contract v2 requires an explicit
+// native_kv_cache_dtype declaration and fails closed for unsupported values.
+DType resolve_qwen_native_kv_cache_dtype(const std::string& config_json,
+                                         const std::string& precision);
+
 // Reinterpret a raw char section as a vector of floats.
 std::vector<float> section_to_floats(const std::vector<char>* sec);
 

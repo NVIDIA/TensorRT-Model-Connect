@@ -11,6 +11,7 @@ from typing import Any
 
 _EXPLICIT_NATIVE_KV_MASK_SMS = frozenset({(8, 6), (12, 1)})
 _EXPLICIT_NATIVE_KV_MASK_TRT_RELEASES = frozenset({(11, 1), (11, 2)})
+_EXPLICIT_NATIVE_KV_MASK_MAX_CACHE_LENGTH = 16384
 
 
 def _trt_major_minor(trt_version: str) -> tuple[int, int] | None:
@@ -28,12 +29,28 @@ def requires_explicit_native_kv_mask(
     trt_version: str,
     compute_capability: tuple[int, int],
 ) -> bool:
-    """Select the validated workaround for broken native active-length masking."""
+    """Select the validated workaround for broken native active-length masking.
+
+    On affected targets, BF16 uses the explicit-mask fused kernel directly.
+    FP16 uses the same kernel behind a narrow BF16 attention/KV boundary,
+    because the target's FP16 fused kernel rejects every fourth live input.
+    """
     return (
-        precision.lower() == "bf16"
+        precision.lower() in {"fp16", "bf16"}
         and _trt_major_minor(trt_version)
         in _EXPLICIT_NATIVE_KV_MASK_TRT_RELEASES
         and tuple(compute_capability) in _EXPLICIT_NATIVE_KV_MASK_SMS
+    )
+
+
+def validate_explicit_native_kv_cache_length(max_cache_length: int) -> None:
+    """Fail before TRT for compatibility-path capacities not yet qualified."""
+    if max_cache_length <= _EXPLICIT_NATIVE_KV_MASK_MAX_CACHE_LENGTH:
+        return
+    raise ValueError(
+        "Qwen native-KV attention on this GPU/TensorRT combination currently "
+        "supports max_cache_length <= 16384; got "
+        f"{max_cache_length}. Rebuild with --max-cache-length 16384"
     )
 
 

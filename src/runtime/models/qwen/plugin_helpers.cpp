@@ -313,6 +313,20 @@ DType cache_dtype_from_precision(const std::string& precision) {
     return DType::kFloat32;
 }
 
+DType resolve_qwen_native_kv_cache_dtype(const std::string& config_json,
+                                         const std::string& precision) {
+    const int32_t contract_version = extract_json_int(config_json, "native_kv_contract_version", 0);
+    if (contract_version < 2)
+        return cache_dtype_from_precision(precision);
+
+    const std::string declared = extract_json_string(config_json, "native_kv_cache_dtype", "");
+    if (declared != "fp16" && declared != "bf16") {
+        throw std::runtime_error("Qwen native KV contract v2 requires native_kv_cache_dtype "
+                                 "to be 'fp16' or 'bf16'");
+    }
+    return cache_dtype_from_precision(declared);
+}
+
 // Section data conversion.
 
 std::vector<float> section_to_floats(const std::vector<char>* sec) {

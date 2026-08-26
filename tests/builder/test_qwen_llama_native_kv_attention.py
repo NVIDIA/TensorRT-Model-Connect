@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""TensorRT topology checks for the qualified BF16 native-KV path."""
+"""TensorRT topology checks for qualified Qwen native-KV attention paths."""
 
 from __future__ import annotations
 
@@ -236,6 +236,59 @@ def test_qwen_explicit_mask_omits_native_lengths_on_real_trt_network():
     assert attention.decomposable is False
     assert attention.get_input(1) is result["present_k"]
     assert attention.get_input(2) is result["present_v"]
+
+
+@requires_trt
+def test_qwen_fp16_explicit_mask_uses_bf16_native_attention_boundary():
+    graph_ops = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.graph_ops"
+    )
+    builder = trt.Builder(trt.Logger(trt.Logger.ERROR))
+    raw_network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    )
+    network = _AttentionRecordingNetwork(raw_network)
+    q = network.add_input("q", trt.float16, (1, 512))
+    k = network.add_input("k", trt.float16, (1, 256))
+    v = network.add_input("v", trt.float16, (1, 256))
+    cache_k = network.add_input("cache_k", trt.bfloat16, (1, 2, 8, 128))
+    cache_v = network.add_input("cache_v", trt.bfloat16, (1, 2, 8, 128))
+    write_indices = network.add_input(
+        "cache_write_indices", trt.int32, (1,)
+    )
+    lengths = network.add_input("key_value_lengths", trt.int32, (1,))
+    mask = network.add_input("explicit_mask", trt.bfloat16, (1, 1, 1, 8))
+
+    result = graph_ops.add_native_kv_cache_attention_from_rows(
+        network,
+        q,
+        k,
+        v,
+        cache_k,
+        cache_v,
+        write_indices,
+        lengths,
+        num_heads=4,
+        num_kv_heads=2,
+        head_dim=128,
+        q_seq=1,
+        explicit_mask=mask,
+        attention_dtype=trt.bfloat16,
+    )
+
+    attention = network.attention
+    assert isinstance(attention, trt.IAttention)
+    assert attention.num_inputs == 4
+    assert attention.get_input(0).dtype == trt.bfloat16
+    assert attention.get_input(1).dtype == trt.bfloat16
+    assert attention.get_input(2).dtype == trt.bfloat16
+    assert attention.mask is mask
+    assert attention.key_value_lengths is None
+    assert attention.causal_kind == trt.CausalMaskKind.NONE
+    assert attention.decomposable is False
+    assert result["present_k"].dtype == trt.bfloat16
+    assert result["present_v"].dtype == trt.bfloat16
+    assert result["context"].dtype == trt.float16
 
 
 @pytest.mark.parametrize("module_name", _FAMILIES)

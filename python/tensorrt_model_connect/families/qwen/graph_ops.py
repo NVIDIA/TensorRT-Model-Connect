@@ -1234,13 +1234,17 @@ def add_native_kv_cache_attention_from_rows(
     tag: str | None = None,
     recipe_instance: str | None = None,
     explicit_mask: trt.ITensor | None = None,
+    attention_dtype: trt.DataType | None = None,
 ) -> dict[str, trt.ITensor]:
     """Update a user-owned KV cache and attend over its active prefix.
 
     ``IKVCacheUpdateLayer`` writes this step's K/V rows into the static,
     full-capacity cache in place. The normal contract passes active lengths to
     ``IAttention``. The compatibility contract supplies a correct explicit
-    additive mask and omits the broken native length input.
+    additive mask and omits the broken native length input. On targets whose
+    FP16 fused kernel rejects a fourth live input, ``attention_dtype`` allows a
+    narrow BF16 cache/attention boundary while the surrounding model remains
+    FP16.
 
     Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The caller
     must bind each output to the same device address as its corresponding
@@ -1253,6 +1257,24 @@ def add_native_kv_cache_attention_from_rows(
             "Qwen native KV cache requires TensorRT add_kv_cache_update "
             "and add_attention_v2 support"
         )
+
+    output_dtype = q.dtype
+    if attention_dtype is None:
+        attention_dtype = cache_k.dtype
+    if attention_dtype not in {trt.float16, trt.bfloat16}:
+        raise ValueError("Qwen native KV attention requires FP16 or BF16")
+    if cache_k.dtype != attention_dtype or cache_v.dtype != attention_dtype:
+        raise ValueError(
+            "Qwen native KV cache dtype must match the attention dtype"
+        )
+    if explicit_mask is not None and explicit_mask.dtype != attention_dtype:
+        raise ValueError(
+            "Qwen native KV explicit mask dtype must match the attention dtype"
+        )
+    if k_update.dtype != attention_dtype:
+        k_update = network.add_cast(k_update, attention_dtype).get_output(0)
+    if v_update.dtype != attention_dtype:
+        v_update = network.add_cast(v_update, attention_dtype).get_output(0)
 
     k_update_4d = reshape_rows_to_heads_4d(
         network,
@@ -1317,7 +1339,7 @@ def add_native_kv_cache_attention_from_rows(
     q_scaled = network.add_elementwise(
         q_scale_input, scale_t, trt.ElementWiseOperation.PROD
     ).get_output(0)
-    q_scaled = network.add_cast(q_scaled, q_4d.dtype).get_output(0)
+    q_scaled = network.add_cast(q_scaled, attention_dtype).get_output(0)
 
     recipe = nullcontext()
     if recipe_instance is not None:
@@ -1354,9 +1376,12 @@ def add_native_kv_cache_attention_from_rows(
         if tag:
             attention.name = tag
 
+    context_4d = attention.get_output(0)
+    if context_4d.dtype != output_dtype:
+        context_4d = network.add_cast(context_4d, output_dtype).get_output(0)
     context = reshape_heads_4d_to_rows(
         network,
-        attention.get_output(0),
+        context_4d,
         num_heads * head_dim,
         sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx",

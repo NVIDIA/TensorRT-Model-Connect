@@ -8,6 +8,7 @@ import pytest
 from tensorrt_model_connect.families.qwen.builder_policy import (
     configure_qwen_builder,
     requires_explicit_native_kv_mask,
+    validate_explicit_native_kv_cache_length,
 )
 
 
@@ -24,8 +25,13 @@ def _quant_context(format_name: str):
     [
         ("bf16", "11.1.0.106", (8, 6), True),
         ("BF16", "11.2.1.2", (12, 1), True),
-        ("fp16", "11.1.0.106", (8, 6), False),
+        ("fp16", "11.1.0.106", (8, 6), True),
+        ("FP16", "11.2.1.2", (12, 1), True),
+        ("fp16", "11.2.1.2", (10, 3), False),
         ("bf16", "11.2.1.2", (10, 3), False),
+        ("fp8", "11.2.1.2", (12, 1), False),
+        ("fp32", "11.2.1.2", (12, 1), False),
+        ("fp16", "11.0.0", (8, 6), False),
         ("bf16", "11.0.0", (8, 6), False),
         ("bf16", "11.3.0", (12, 1), False),
         ("bf16", "unknown", (8, 6), False),
@@ -42,6 +48,19 @@ def test_explicit_native_kv_mask_policy_is_narrow(
         trt_version=trt_version,
         compute_capability=compute_capability,
     ) is expected
+
+
+@pytest.mark.parametrize("max_cache_length", [1, 4096, 16384])
+def test_explicit_native_kv_cache_length_accepts_qualified_range(
+    max_cache_length,
+):
+    validate_explicit_native_kv_cache_length(max_cache_length)
+
+
+@pytest.mark.parametrize("max_cache_length", [16385, 40960])
+def test_explicit_native_kv_cache_length_fails_closed(max_cache_length):
+    with pytest.raises(ValueError, match="--max-cache-length 16384"):
+        validate_explicit_native_kv_cache_length(max_cache_length)
 
 
 @pytest.mark.parametrize("override", [None, "", "   "])
