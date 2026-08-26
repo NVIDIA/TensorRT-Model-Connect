@@ -23,6 +23,28 @@ Source has no separate pull-request documentation-validation workflow. The
 Pages workflow builds the site before deployment from `main`, but it is not a
 pull-request documentation gate.
 
+### Local protected-failure report prototype
+
+`tools/public_failure/` contains a local-only P0 implementation for reviewing a
+possible sanitized protected-CI failure report. It rebuilds a new object from a
+closed allowlist, validates `public-failure-v1`, renders a deterministic
+script-free HTML file, and scans the JSON and HTML for sensitive-looking data.
+
+Generate the synthetic preview locally:
+
+```bash
+python3 -m tools.public_failure \
+  --input tests/tools/fixtures/public_failure/internal-failure.json \
+  --context tests/tools/fixtures/public_failure/context.json \
+  --output-dir /tmp/trtmc-public-failure-preview
+```
+
+This command only writes files under the selected local directory. No Source
+workflow calls it, and it cannot upload a report, update a GitHub status, or
+write a PR comment. Its presence is not evidence that protected failure details
+are currently public. Raw logs and arbitrary diagnostic text remain outside the
+public contract.
+
 ## Local documentation validation
 
 Use the checks that are present on this snapshot. The following is a

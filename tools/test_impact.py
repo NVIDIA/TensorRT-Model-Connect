@@ -1942,6 +1942,17 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
+            priority=481,
+            name="public_failure_report_tool",
+            matcher=_path_startswith("tools/public_failure/"),
+            resolver=_match_result(
+                "public_failure_report_tool", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestUnitTiers.test_public_failure_report_tool_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
             priority=485,
             name="model_ci_tool",
             matcher=_path_equals("tools/model_ci.py"),

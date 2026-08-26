@@ -1,0 +1,11 @@
+{
+  "repository": "NVIDIA/TensorRT-Model-Connect",
+  "pr_number": 123,
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "base_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "tested_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "tested_revision_kind": "head",
+  "run_attempt": 1,
+  "result": "failure",
+  "generated_at": "2026-08-26T00:00:00Z"
+}

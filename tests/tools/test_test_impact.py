@@ -1841,6 +1841,17 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    def test_public_failure_report_tool_triggers_tools_tier(self, imap):
+        """Protected-failure report edits run tools tests without model E2E."""
+        match = test_impact.classify_file(
+            "tools/public_failure/assets/public-failure-v1.schema.json", imap
+        )
+
+        assert match.rule == "public_failure_report_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     @pytest.mark.parametrize(
         "path",
         [

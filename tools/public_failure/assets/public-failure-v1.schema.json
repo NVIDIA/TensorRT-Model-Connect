@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NVIDIA/TensorRT-Model-Connect/schemas/public-failure-v1.json",
+  "title": "TRTMC public failure report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_version",
+    "report_id",
+    "repository",
+    "pr_number",
+    "head_sha",
+    "base_sha",
+    "tested_revision",
+    "tested_revision_kind",
+    "run_attempt",
+    "result",
+    "failures",
+    "omitted_failure_count",
+    "generated_at"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "policy_version": { "const": "2026-08-26" },
+    "report_id": {
+      "type": "string",
+      "maxLength": 100,
+      "pattern": "^trtmc-pr[1-9][0-9]*-[0-9a-f]{7}-attempt[1-9][0-9]*$"
+    },
+    "repository": { "const": "NVIDIA/TensorRT-Model-Connect" },
+    "pr_number": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "head_sha": { "$ref": "#/$defs/sha" },
+    "base_sha": { "$ref": "#/$defs/sha" },
+    "tested_revision": { "$ref": "#/$defs/sha" },
+    "tested_revision_kind": { "const": "head" },
+    "run_attempt": { "type": "integer", "minimum": 1, "maximum": 1000 },
+    "result": { "enum": ["failure", "error"] },
+    "failures": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/failure" }
+    },
+    "omitted_failure_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "generated_at": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  },
+  "$defs": {
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "observed", "operator", "threshold"],
+      "properties": {
+        "name": {
+          "enum": [
+            "max_absolute_error",
+            "max_relative_l2",
+            "mean_relative_l2",
+            "prediction_agreement_rate",
+            "sample_agreement_rate"
+          ]
+        },
+        "observed": { "type": "number" },
+        "operator": { "enum": ["<", "<=", "==", ">=", ">"] },
+        "threshold": { "type": "number" }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "public_stage",
+        "model",
+        "backend",
+        "gpu_type",
+        "test_id",
+        "failure_class",
+        "reason_code",
+        "disclosure"
+      ],
+      "properties": {
+        "public_stage": {
+          "enum": [
+            "precheck",
+            "build",
+            "trt-run",
+            "reference-run",
+            "comparison",
+            "determinism",
+            "artifact-write",
+            "model-proof",
+            "protected-ci"
+          ]
+        },
+        "model": {
+          "enum": [
+            "chronos_bolt",
+            "codegen",
+            "llama",
+            "patchtsmixer",
+            "personaplex",
+            "sam3",
+            "segformer",
+            "other-model"
+          ]
+        },
+        "backend": { "enum": ["native", "tensorrt", "trtfb", "other-backend"] },
+        "gpu_type": {
+          "enum": ["A100", "H100", "H200", "L4", "GB200", "GB300", "protected-gpu"]
+        },
+        "test_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "^[A-Za-z0-9_./:\\[\\],=+\\-]+$",
+          "not": { "pattern": "(^/|\\.\\.|\\\\)" }
+        },
+        "failure_class": {
+          "enum": [
+            "accuracy_regression",
+            "determinism_failure",
+            "build_error",
+            "runtime_error",
+            "reference_error",
+            "harness_error",
+            "infrastructure_error",
+            "timeout",
+            "out_of_memory",
+            "unknown"
+          ]
+        },
+        "reason_code": {
+          "enum": [
+            "artifact_write_failed",
+            "build_failed",
+            "determinism_check_failed",
+            "infrastructure_failed",
+            "metric_threshold_exceeded",
+            "out_of_memory",
+            "reference_failed",
+            "runtime_failed",
+            "timed_out",
+            "unknown"
+          ]
+        },
+        "metric": { "$ref": "#/$defs/metric" },
+        "disclosure": { "enum": ["full", "truncated", "withheld"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "disclosure": { "const": "full" } },
+            "required": ["disclosure"]
+          },
+          "then": { "required": ["metric"] }
+        }
+      ]
+    }
+  }
+}

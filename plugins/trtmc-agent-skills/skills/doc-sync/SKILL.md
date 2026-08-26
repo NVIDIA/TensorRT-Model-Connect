@@ -102,8 +102,9 @@ root graph helpers, or paths copied from another branch.
 
 ## CI Documentation Contract
 
-Source contains only the Internal CI Bridge and Pages workflows. Premerge,
-including legal compliance, and nightly orchestration are private Internal CI.
+Source contains Community CPU, the Internal CI Bridge, and Pages workflows.
+Premerge, including legal compliance, and nightly orchestration are private
+Internal CI.
 
 - `run-internal-ci` is the one-shot trusted trigger; `run-ci` is retired.
 - The bridge verifies the label event, current PR metadata head, and successful
@@ -111,6 +112,9 @@ including legal compliance, and nightly orchestration are private Internal CI.
 - Source receives only `trtmc/premerge/required` as `PENDING`, `PASS`, or
   `FAIL` on that exact head.
 - A successful bridge dispatch is not a successful premerge result.
+- `tools/public_failure/` is a local-only P0 renderer until a separately
+  reviewed private finalizer is integrated; its presence does not mean failure
+  reports or comments are published.
 - Never copy private logs, artifacts, package coordinates, runner details, or
   internal URLs into Source docs, Actions, Pages, or PR comments.
 
