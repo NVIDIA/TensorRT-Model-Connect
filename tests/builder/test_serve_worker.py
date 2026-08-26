@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -54,6 +55,12 @@ def test_worker_ready_request_ids_metadata_stderr_and_cleanup(tmp_path: Path) ->
     assert worker.ready_payload["protocol_version"] == 2
     assert worker.ready_payload["model_id"] == "chat"
     assert worker.ready_payload["pipeline_type"] == "chat"
+    deadline = time.monotonic() + 1
+    while (
+        not any("fake worker ready" in line for line in worker.stderr_tail)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
     assert any("fake worker ready" in line for line in worker.stderr_tail)
 
     worker.close()

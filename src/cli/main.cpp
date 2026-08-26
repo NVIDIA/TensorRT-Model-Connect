@@ -31,8 +31,8 @@
 
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
-#include "cli/speech_session_helpers.h"
 #include "cli/serve_worker.h"
+#include "cli/speech_session_helpers.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
