@@ -23,13 +23,19 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+pytest.importorskip("tensorrt", reason="native graph tests require TensorRT")
+
 from tests.builder.conftest import requires_trt
 from tests.builder.owned_graph_modules import load_family_graph_ops, load_graph_ops
+from tensorrt_model_connect.native_kv_attention_builder import (
+    add_active_prefix_causal_masks,
+)
 
-pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
+pytest.importorskip("tensorrt_model_connect")
 graph_ops = load_graph_ops()
 eagle_vlm_graph_ops = load_family_graph_ops("eagle_vlm")
 qwen_graph_ops = load_family_graph_ops("qwen")
+llama_graph_ops = load_family_graph_ops("llama")
 qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 
 
@@ -72,6 +78,8 @@ def _run_strongly_typed(
             return np.dtype(np.float32)
         if dtype == trt.int32:
             return np.dtype(np.int32)
+        if dtype == trt.bool:
+            return np.dtype(np.bool_)
         raise TypeError(f"Unsupported TensorRT test dtype: {dtype}")
 
     logger = trt.Logger(trt.Logger.WARNING)
@@ -168,8 +176,6 @@ def _run_strongly_typed(
 
 @requires_trt
 def test_qwen_native_kv_mask_matches_active_causal_prefix():
-    import tensorrt as trt
-
     inputs = {
         "token_id": np.array([11, 12, 13], dtype=np.int32),
         "cache_write_indices": np.array([2], dtype=np.int32),
@@ -178,37 +184,40 @@ def test_qwen_native_kv_mask_matches_active_causal_prefix():
 
     def build(network, trt_inputs):
         return {
-            "mask": qwen_graph_ops.add_native_kv_attention_mask(
+            "mask": add_active_prefix_causal_masks(
                 network,
                 trt_inputs["token_id"],
                 trt_inputs["cache_write_indices"],
                 trt_inputs["key_value_lengths"],
                 8,
-                trt.float16,
-            )
+            ).attention
         }
 
     actual = _run_strongly_typed(build, inputs)["mask"]
-    expected = np.full((1, 1, 3, 8), -1.0e4, dtype=np.float16)
-    expected[0, 0, 0, :3] = 0
-    expected[0, 0, 1, :4] = 0
-    expected[0, 0, 2, :5] = 0
+    expected = np.zeros((1, 1, 3, 8), dtype=np.bool_)
+    expected[0, 0, 0, :3] = True
+    expected[0, 0, 1, :4] = True
+    expected[0, 0, 2, :5] = True
     np.testing.assert_array_equal(actual, expected)
 
 
 @requires_trt
 @pytest.mark.parametrize(
-    ("model_dtype_name", "model_numpy_dtype"),
+    ("family_name", "model_dtype_name", "model_numpy_dtype"),
     [
-        pytest.param("bfloat16", "bfloat16", id="bf16"),
-        pytest.param("float16", "float16", id="fp16-model-bf16-attention"),
+        pytest.param("qwen", "bfloat16", "bfloat16", id="qwen-bf16"),
+        pytest.param("qwen", "float16", "float16", id="qwen-fp16"),
+        pytest.param("llama", "bfloat16", "bfloat16", id="llama-bf16"),
     ],
 )
-def test_qwen_native_kv_attention_masks_poisoned_inactive_suffix(
+@pytest.mark.parametrize("query_length", [1, 3])
+def test_native_kv_attention_masks_poisoned_inactive_suffix(
+    family_name,
     model_dtype_name,
     model_numpy_dtype,
+    query_length,
 ):
-    """The explicit mask exposes only the active, causal cache prefix."""
+    """Explicit GQA matches an independent active-prefix causal reference."""
     import tensorrt as trt
 
     ml_dtypes = pytest.importorskip("ml_dtypes")
@@ -218,44 +227,55 @@ def test_qwen_native_kv_attention_masks_poisoned_inactive_suffix(
         if model_numpy_dtype == "bfloat16"
         else np.float16
     )
-    attention_numpy_dtype = ml_dtypes.bfloat16
+    attention_numpy_dtype = model_numpy_dtype
+    native_graph_ops = (
+        qwen_graph_ops if family_name == "qwen" else llama_graph_ops
+    )
 
-    query_length = 3
     cache_capacity = 16
     cache_write_index = 2
-    active_length = 5
+    active_length = cache_write_index + query_length
     num_heads = 4
     num_kv_heads = 2
     head_dim = 128
+    groups = num_heads // num_kv_heads
+    scale = 1.0 / np.sqrt(head_dim)
+    rng = np.random.default_rng(20260826 + query_length)
 
-    q = np.ones(
-        (query_length, num_heads * head_dim), dtype=model_numpy_dtype
-    )
-    k_update = np.zeros(
-        (query_length, num_kv_heads * head_dim), dtype=model_numpy_dtype
-    )
-    update_values = np.array([5.0, 7.0, 9.0], dtype=np.float32)
-    v_update = np.broadcast_to(
-        update_values[:, None], (query_length, num_kv_heads * head_dim)
+    q = rng.normal(
+        0.0, 0.3, (query_length, num_heads, head_dim)
+    ).astype(model_numpy_dtype)
+    k_update = rng.normal(
+        0.0, 0.3, (query_length, num_kv_heads, head_dim)
+    ).astype(model_numpy_dtype)
+    v_update = rng.normal(
+        0.0, 0.3, (query_length, num_kv_heads, head_dim)
     ).astype(model_numpy_dtype)
 
-    cache_k = np.zeros(
-        (1, num_kv_heads, cache_capacity, head_dim), dtype=np.float32
-    )
-    cache_v = np.zeros_like(cache_k)
-    cache_v[:, :, 0, :] = 1.0
-    cache_v[:, :, 1, :] = 3.0
-    # If the inactive suffix leaks through attention, these keys dominate the
-    # logits and the large values make the numerical error unmistakable.
-    cache_k[:, :, active_length:, :] = 16.0
-    cache_v[:, :, active_length:, :] = 1000.0
+    cache_k = rng.normal(
+        0.0, 0.3, (1, num_kv_heads, cache_capacity, head_dim)
+    ).astype(np.float32)
+    cache_v = rng.normal(
+        0.0, 0.3, (1, num_kv_heads, cache_capacity, head_dim)
+    ).astype(np.float32)
+    # Non-finite inactive cache data catches both score-mask leakage and the
+    # otherwise subtle 0 * NaN hazard in the context matmul.
+    cache_k[:, :, active_length:, :] = np.nan
+    cache_v[:, :, active_length:, :] = np.nan
     cache_k = cache_k.astype(attention_numpy_dtype)
     cache_v = cache_v.astype(attention_numpy_dtype)
 
+    q_rows = q.reshape(query_length, num_heads * head_dim)
+    k_update_rows = k_update.reshape(
+        query_length, num_kv_heads * head_dim
+    )
+    v_update_rows = v_update.reshape(
+        query_length, num_kv_heads * head_dim
+    )
     inputs = {
-        "q": q,
-        "k_update": k_update,
-        "v_update": v_update,
+        "q": q_rows,
+        "k_update": k_update_rows,
+        "v_update": v_update_rows,
         "cache_k": cache_k,
         "cache_v": cache_v,
         "cache_write_indices": np.array([cache_write_index], dtype=np.int32),
@@ -263,15 +283,14 @@ def test_qwen_native_kv_attention_masks_poisoned_inactive_suffix(
     }
 
     def build(network, trt_inputs):
-        mask = qwen_graph_ops.add_native_kv_attention_mask(
+        masks = add_active_prefix_causal_masks(
             network,
             trt_inputs["q"],
             trt_inputs["cache_write_indices"],
             trt_inputs["key_value_lengths"],
             cache_capacity,
-            trt.bfloat16,
         )
-        result = qwen_graph_ops.add_native_kv_cache_attention_from_rows(
+        result = native_graph_ops.add_native_kv_cache_attention_from_rows(
             network,
             trt_inputs["q"],
             trt_inputs["k_update"],
@@ -279,13 +298,11 @@ def test_qwen_native_kv_attention_masks_poisoned_inactive_suffix(
             trt_inputs["cache_k"],
             trt_inputs["cache_v"],
             trt_inputs["cache_write_indices"],
-            trt_inputs["key_value_lengths"],
+            masks,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             q_seq=query_length,
-            explicit_mask=mask,
-            attention_dtype=trt.bfloat16,
         )
         assert result["context"].dtype == model_dtype
         return {
@@ -299,11 +316,53 @@ def test_qwen_native_kv_attention_masks_poisoned_inactive_suffix(
         inputs,
         output_aliases={"present_k": "cache_k", "present_v": "cache_v"},
     )["context"].astype(np.float32)
-    expected_rows = np.array([3.0, 4.0, 5.0], dtype=np.float32)
-    expected = np.broadcast_to(
-        expected_rows[:, None], (query_length, num_heads * head_dim)
+
+    actual = actual.reshape(query_length, num_heads, head_dim)
+    present_k = cache_k[0, :, :active_length, :].astype(
+        np.float32, copy=True
     )
-    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0625)
+    present_v = cache_v[0, :, :active_length, :].astype(
+        np.float32, copy=True
+    )
+    present_k[:, cache_write_index:active_length, :] = np.asarray(
+        k_update, dtype=np.float32
+    ).transpose(1, 0, 2)
+    present_v[:, cache_write_index:active_length, :] = np.asarray(
+        v_update, dtype=np.float32
+    ).transpose(1, 0, 2)
+    scaled_q = (np.asarray(q, dtype=np.float32) * scale).astype(
+        model_numpy_dtype
+    ).astype(np.float32)
+    expected = np.empty(
+        (query_length, num_heads, head_dim), dtype=np.float32
+    )
+    for row in range(query_length):
+        valid_length = cache_write_index + row + 1
+        for head in range(num_heads):
+            kv_head = head // groups
+            scores = np.matmul(
+                scaled_q[row, head],
+                present_k[kv_head, :valid_length].T,
+            ).astype(model_numpy_dtype).astype(np.float32)
+            scores -= np.max(scores)
+            probabilities = np.exp(scores)
+            probabilities /= np.sum(probabilities)
+            probabilities = probabilities.astype(model_numpy_dtype).astype(
+                np.float32
+            )
+            expected[row, head] = np.matmul(
+                probabilities,
+                present_v[kv_head, :valid_length],
+            ).astype(model_numpy_dtype).astype(np.float32)
+
+    assert np.isfinite(actual).all()
+    tolerance = 0.01 if model_dtype_name == "float16" else 0.02
+    np.testing.assert_allclose(
+        actual,
+        expected,
+        rtol=tolerance,
+        atol=tolerance,
+    )
 
 
 # ---------------------------------------------------------------------------

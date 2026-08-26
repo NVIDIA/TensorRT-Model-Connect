@@ -51,6 +51,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
+from ...native_kv_attention_builder import (
+    EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
+    add_active_prefix_causal_masks,
+)
 
 from . import graph_ops
 from . import graph_blocks
@@ -61,9 +65,6 @@ if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
     from ...quantization.context import QuantContext
-
-
-_NATIVE_PREFILL_CHUNK_TOKENS = 32768
 
 
 def _const_in_work_dtype(
@@ -264,9 +265,10 @@ def build_dual_profile_decoder_engine(
     mode. In either mode, cache_k/cache_v inputs are declared dynamic when
     bucket profiles are requested so each profile can constrain their row count.
 
-    ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` and
-    ``IAttention.key_value_lengths`` contract. Llama enables it internally by
-    default; it is not exposed as a user build flag.
+    ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` and a
+    primitive attention graph with an explicit active-prefix causal mask.
+    Llama enables it internally by default; it is not exposed as a user build
+    flag.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill", "decode"):
@@ -275,14 +277,16 @@ def build_dual_profile_decoder_engine(
             f"got {profile_mode!r}")
 
     if max_prefill_length is None:
+        max_prefill_length = max_cache_length
+    if native_kv_cache:
         # Physical KV capacity and one TensorRT enqueue's query length are
         # separate limits. Keep the complete model context in the cache while
-        # bounding activation/workspace pressure for very long prompts; the
-        # family runtime transparently advances through multiple chunks.
-        max_prefill_length = (
-            min(max_cache_length, _NATIVE_PREFILL_CHUNK_TOKENS)
-            if native_kv_cache
-            else max_cache_length
+        # bounding the explicit score matrix; the runtime transparently
+        # advances through multiple chunks. Clamp explicit caller overrides as
+        # well as the default so they cannot bypass this safety bound.
+        max_prefill_length = min(
+            max_prefill_length,
+            EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
         )
     max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
     opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
@@ -337,8 +341,8 @@ def build_dual_profile_decoder_engine(
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    # Native full-context Llama prefill can require a large fused-attention
-    # tactic workspace while TensorRT is building the plan. This is build-time
+    # Native full-context Llama builds can require substantial tactic workspace
+    # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
     # does not allocate the bytes eagerly. Other paths keep TensorRT's device
     # default instead of imposing the former 1 GiB cap.
@@ -578,9 +582,8 @@ def build_dual_profile_decoder_engine(
             network, hidden_state, hidden, embed_norm, embed_norm_beta,
             eps_tensor, "layernorm", work_np_dtype)
 
-    # The native cache path uses LOWER_RIGHT causal attention plus
-    # key_value_lengths, so it does not materialize a dense [Sq, capacity]
-    # mask. The legacy path retains its existing additive-mask graph.
+    # The native cache path shares one explicit BOOL mask across every layer.
+    # The legacy path retains its existing additive-mask graph.
     mask_4d: trt.ITensor | None
     if native_kv_cache:
         mask_4d = None
@@ -593,6 +596,18 @@ def build_dual_profile_decoder_engine(
     else:
         assert attention_mask_work is not None
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
+
+    native_attention_masks = None
+    if native_kv_cache:
+        assert cache_write_indices is not None
+        assert key_value_lengths is not None
+        native_attention_masks = add_active_prefix_causal_masks(
+            network,
+            token_id,
+            cache_write_indices,
+            key_value_lengths,
+            max_cache_length,
+        )
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
@@ -659,7 +674,7 @@ def build_dual_profile_decoder_engine(
 
         if native_kv_cache:
             assert cache_write_indices is not None
-            assert key_value_lengths is not None
+            assert native_attention_masks is not None
             native_attention = graph_ops.add_native_kv_cache_attention_from_rows(
                 network,
                 q,
@@ -668,18 +683,13 @@ def build_dual_profile_decoder_engine(
                 cache_k_inputs[layer_idx],
                 cache_v_inputs[layer_idx],
                 cache_write_indices,
-                key_value_lengths,
+                native_attention_masks,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
                 q_seq=None,
                 scale=attn_scale,
                 tag=f"{prefix}.attn",
-                recipe_instance=(
-                    f"decoder.layers.{layer_idx}.decode_attention"
-                    if profile_mode == "decode"
-                    else None
-                ),
             )
             context = native_attention["context"]
             present_k_outs.append(native_attention["present_k"])

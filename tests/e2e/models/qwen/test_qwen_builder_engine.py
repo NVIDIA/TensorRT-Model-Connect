@@ -86,30 +86,15 @@ def test_native_qwen3_split_role_engine_contract(
     import tensorrt as trt
 
     importlib.import_module("tensorrt_model_connect.families.qwen.plugin")
-    builder = importlib.import_module(
-        "tensorrt_model_connect.families.qwen.dual_profile_decoder_builder"
-    )
     graph_ops = importlib.import_module(
         "tensorrt_model_connect.families.qwen.graph_ops"
-    )
-    policy = importlib.import_module(
-        "tensorrt_model_connect.families.qwen.builder_policy"
-    )
-    expected_explicit_mask = policy.requires_explicit_native_kv_mask(
-        precision,
-        trt.__version__,
-        builder._current_cuda_compute_capability(),
     )
     native_attention_calls = []
     original_native_attention = graph_ops.add_native_kv_cache_attention_from_rows
 
     def _record_native_attention(*args, **kwargs):
         native_attention_calls.append(
-            (
-                kwargs.get("explicit_mask"),
-                kwargs.get("recipe_instance"),
-                kwargs.get("attention_dtype"),
-            )
+            (args[7].attention.dtype, args[7].active_prefix.dtype)
         )
         return original_native_attention(*args, **kwargs)
 
@@ -127,31 +112,17 @@ def test_native_qwen3_split_role_engine_contract(
         weights,
         tester.spec.max_cache_length,
         precision=precision,
-        verbose=False,
+        verbose=precision == "fp16" and role == "prefill",
     )
     engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
 
     assert engine is not None
     assert len(native_attention_calls) == tester.spec.num_hidden_layers
-    explicit_masks = [call[0] for call in native_attention_calls]
-    recipe_instances = [call[1] for call in native_attention_calls]
-    attention_dtypes = [call[2] for call in native_attention_calls]
     precision_dtype = trt.float16 if precision == "fp16" else trt.bfloat16
-    expected_cache_dtype = (
-        trt.bfloat16
-        if expected_explicit_mask and precision == "fp16"
-        else precision_dtype
-    )
-    if expected_explicit_mask:
-        assert all(mask is not None for mask in explicit_masks)
-        assert all(recipe is None for recipe in recipe_instances)
-    else:
-        assert all(mask is None for mask in explicit_masks)
-        expected_recipe = (
-            "decoder.layers.0.decode_attention" if role == "decode" else None
-        )
-        assert recipe_instances == [expected_recipe]
-    assert attention_dtypes == [expected_cache_dtype]
+    expected_cache_dtype = precision_dtype
+    assert native_attention_calls == [
+        (trt.bool, trt.bool)
+    ] * tester.spec.num_hidden_layers
     assert engine.num_optimization_profiles == 1
     assert [
         tuple(shape) for shape in engine.get_tensor_profile_shape("token_id", 0)
@@ -196,15 +167,9 @@ def test_native_qwen3_split_role_engine_contract(
         assert engine.get_aliased_input_tensor(present_name) == cache_name
 
     expected_metadata = {
-        "native_kv_contract_version": (
-            2 if expected_cache_dtype != precision_dtype else 1
-        ),
+        "native_kv_contract_version": 1,
         "native_kv_cache": True,
     }
-    if expected_cache_dtype != precision_dtype:
-        expected_metadata["native_kv_cache_dtype"] = (
-            "bf16" if expected_cache_dtype == trt.bfloat16 else "fp16"
-        )
     assert tester.get_plugin().get_bundle_config_overrides(config) == expected_metadata
 
 

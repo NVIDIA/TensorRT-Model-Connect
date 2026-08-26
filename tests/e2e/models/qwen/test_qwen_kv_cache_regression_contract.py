@@ -53,7 +53,7 @@ def test_native_kv_contract_requires_full_capacity_chunking_and_decode() -> None
                     [
                         "[trtmc] KV cache rows=40960 (bundle max=40960, row=1 B)",
                         '[trtmc.engine_timing] label="prefill_engine_plan:prefill" '
-                        "execute_ms=100 launches=2",
+                        "execute_ms=100 launches=513",
                     ]
                 ),
             }

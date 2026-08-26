@@ -38,7 +38,7 @@ def test_repeat_prompt_fixture_is_deterministic() -> None:
     assert prompt.endswith("a\n")
 
 
-def test_chunked_prefill_contract_requires_native_capacity_and_two_calls() -> None:
+def test_chunked_prefill_contract_requires_native_capacity_and_all_chunks() -> None:
     output = StageOutput(
         stage_name="full_generation",
         data={
@@ -53,7 +53,7 @@ def test_chunked_prefill_contract_requires_native_capacity_and_two_calls() -> No
                     [
                         "[trtmc] KV cache rows=131072 (bundle max=131072, row=1 B)",
                         '[trtmc.engine_timing] label="prefill_engine_plan:prefill" '
-                        "execute_ms=953.48 launches=2",
+                        "execute_ms=953.48 launches=513",
                     ]
                 ),
             }

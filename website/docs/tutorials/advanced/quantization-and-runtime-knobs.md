@@ -55,9 +55,16 @@ $TRTMC build Qwen/Qwen3-0.6B \
 Supported precision choices in the CLI are `fp32`, `fp16`, and `bf16`.
 
 Precision changes the numeric type used by the engine. It affects memory, speed, and numerical behavior.
-For this eligible dense Qwen3 checkpoint, explicitly requesting FP16 keeps the
-family's native route but opts out of its BF16 full-context native-KV contract;
-the family uses its legacy native builder instead.
+Eligible dense Qwen3 checkpoints use the same fixed-capacity native-KV route
+for FP16 and BF16. That route updates the cache in place and computes attention
+with an explicit active-prefix causal mask. Long prompts are submitted in
+chunks of at most 64 tokens; this preserves the configured cache capacity but
+trades prefill throughput for avoiding version-specific fused-attention
+behavior.
+The 16,384-token Quick Start capacity remains a conservative memory and
+throughput choice, not a correctness ceiling; Qwen3 may still use its full
+40,960-token model capacity. Rebuild existing bundles to adopt this behavior,
+because a bundle retains the attention graph serialized when it was built.
 
 | Precision | Typical use |
 | --- | --- |

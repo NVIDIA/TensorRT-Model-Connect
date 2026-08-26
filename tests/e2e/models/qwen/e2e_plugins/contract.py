@@ -205,9 +205,63 @@ class QwenPostTrainedChatPlugin:
             ),
         }
 
-        rule = "exact_match OR ned <= threshold"
-        if exact_match or ned <= ned_threshold:
+        expected_chunks = int(
+            case.metadata.get("expected_prefill_chunks", 0) or 0
+        )
+        chunking_matches = True
+        if expected_chunks > 0:
+            stderr = str(
+                (trt_output.metadata or {}).get("cpp", {}).get("stderr", "")
+            )
+            marker = 'label="prefill_engine_plan:prefill"'
+            chunking_matches = any(
+                marker in line
+                and f"launches={expected_chunks}" in line.split()
+                for line in stderr.splitlines()
+            )
+            metrics["prefill_chunks"] = MetricResult(
+                value=1.0 if chunking_matches else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=chunking_matches,
+                note=f"{marker} with launches={expected_chunks}",
+            )
+
+        expected_rows = int(
+            case.metadata.get("expected_kv_cache_rows", 0) or 0
+        )
+        cache_capacity_matches = True
+        if expected_rows > 0:
+            stderr = str(
+                (trt_output.metadata or {}).get("cpp", {}).get("stderr", "")
+            )
+            cache_marker = (
+                f"KV cache rows={expected_rows} (bundle max={expected_rows}"
+            )
+            cache_capacity_matches = cache_marker in stderr
+            metrics["native_kv_capacity"] = MetricResult(
+                value=1.0 if cache_capacity_matches else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=cache_capacity_matches,
+                note=cache_marker,
+            )
+
+        text_matches = exact_match or ned <= ned_threshold
+        runtime_matches = chunking_matches and cache_capacity_matches
+        rule = (
+            "(exact_match OR ned <= threshold)"
+            " AND optional_native_kv_runtime_contract"
+        )
+        if text_matches and runtime_matches:
             return make_pass("full_generation", metrics, rule)
+        if text_matches:
+            return make_fail(
+                "full_generation",
+                metrics,
+                rule,
+                "Qwen text matched but native-KV runtime markers diverged",
+            )
         return make_fail(
             "full_generation",
             metrics,

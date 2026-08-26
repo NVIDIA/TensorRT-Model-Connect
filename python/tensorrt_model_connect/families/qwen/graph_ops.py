@@ -8,9 +8,12 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 import numpy as np
 from tensorrt_model_connect import trt_compat
+from ...native_kv_attention_builder import (
+    NativeKvMasks,
+    add_explicit_masked_grouped_query_attention,
+)
 
 
 trt = trt_compat.get_trt()
@@ -1131,91 +1134,6 @@ def add_attention_from_rows(
     )
 
 
-def add_native_kv_attention_mask(
-    network: trt.INetworkDefinition,
-    query_rows: trt.ITensor,
-    cache_write_indices: trt.ITensor,
-    key_value_lengths: trt.ITensor,
-    cache_capacity: int,
-    target_dtype: trt.DataType,
-) -> trt.ITensor:
-    """Build an additive ``[1, 1, Sq, K]`` active-prefix causal mask.
-
-    The valid region is the intersection of the runtime-active KV prefix and
-    the causal prefix for each query row. This deliberately bypasses
-    ``IAttention.key_value_lengths`` on TensorRT/GPU combinations where that
-    optional input exposes the inactive cache suffix instead of the prefix.
-    """
-    query_shape = network.add_shape(query_rows).get_output(0)
-    query_length = network.add_slice(
-        query_shape, start=(0,), shape=(1,), stride=(1,)
-    ).get_output(0)
-    zero_i32 = add_constant(
-        network, (), np.array(0, dtype=np.int32), dtype=np.int32
-    )
-    one_i32 = add_constant(
-        network, (1,), np.array([1], dtype=np.int32), dtype=np.int32
-    )
-    query_iota = network.add_fill((1,), trt.FillOperation.LINSPACE, trt.int32)
-    query_iota.set_input(0, query_length)
-    query_iota.set_input(1, zero_i32)
-    query_iota.set_input(2, one_i32)
-    query_positions = network.add_elementwise(
-        query_iota.get_output(0),
-        cache_write_indices,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
-    query_limits = network.add_elementwise(
-        query_positions, one_i32, trt.ElementWiseOperation.SUM
-    ).get_output(0)
-
-    one_i64 = add_constant(
-        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64
-    )
-    query_limit_shape = network.add_concatenation([query_length, one_i64])
-    query_limit_shape.axis = 0
-    query_limits_2d = network.add_shuffle(query_limits)
-    query_limits_2d.set_input(1, query_limit_shape.get_output(0))
-
-    key_positions = add_constant(
-        network,
-        (1, cache_capacity),
-        np.arange(cache_capacity, dtype=np.int32).reshape(1, cache_capacity),
-        dtype=np.int32,
-    )
-    key_value_lengths_2d = network.add_shuffle(key_value_lengths)
-    key_value_lengths_2d.reshape_dims = (1, 1)
-    causal = network.add_elementwise(
-        key_positions,
-        query_limits_2d.get_output(0),
-        trt.ElementWiseOperation.LESS,
-    ).get_output(0)
-    active = network.add_elementwise(
-        key_positions,
-        key_value_lengths_2d.get_output(0),
-        trt.ElementWiseOperation.LESS,
-    ).get_output(0)
-    valid_positions = network.add_elementwise(
-        causal, active, trt.ElementWiseOperation.AND
-    ).get_output(0)
-
-    zero = add_constant(
-        network, (1, 1), np.array([[0.0]], dtype=np.float32), dtype=np.float32
-    )
-    blocked = add_constant(
-        network,
-        (1, 1),
-        np.array([[-1.0e4]], dtype=np.float32),
-        dtype=np.float32,
-    )
-    zero = _cast_back_to_trt_dtype(network, zero, target_dtype)
-    blocked = _cast_back_to_trt_dtype(network, blocked, target_dtype)
-    additive_mask = network.add_select(
-        valid_positions, zero, blocked
-    ).get_output(0)
-    return add_2d_mask_to_4d(network, additive_mask)
-
-
 def add_native_kv_cache_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -1224,7 +1142,7 @@ def add_native_kv_cache_attention_from_rows(
     cache_k: trt.ITensor,
     cache_v: trt.ITensor,
     cache_write_indices: trt.ITensor,
-    key_value_lengths: trt.ITensor,
+    attention_masks: NativeKvMasks,
     *,
     num_heads: int,
     num_kv_heads: int,
@@ -1232,44 +1150,31 @@ def add_native_kv_cache_attention_from_rows(
     q_seq: int | None,
     scale: float | None = None,
     tag: str | None = None,
-    recipe_instance: str | None = None,
-    explicit_mask: trt.ITensor | None = None,
-    attention_dtype: trt.DataType | None = None,
 ) -> dict[str, trt.ITensor]:
     """Update a user-owned KV cache and attend over its active prefix.
 
     ``IKVCacheUpdateLayer`` writes this step's K/V rows into the static,
-    full-capacity cache in place. The normal contract passes active lengths to
-    ``IAttention``. The compatibility contract supplies a correct explicit
-    additive mask and omits the broken native length input. On targets whose
-    FP16 fused kernel rejects a fourth live input, ``attention_dtype`` allows a
-    narrow BF16 cache/attention boundary while the surrounding model remains
-    FP16.
+    full-capacity cache in place. Attention is expressed with primitive matrix,
+    select, and softmax operations plus an explicit active-prefix causal mask;
+    it never relies on ``IAttention.key_value_lengths`` or fused-kernel
+    availability.
 
     Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The caller
     must bind each output to the same device address as its corresponding
     input, as required by TensorRT's KV-cache aliasing contract.
     """
-    if not hasattr(network, "add_kv_cache_update") or not hasattr(
-        network, "add_attention_v2"
-    ):
+    if not hasattr(network, "add_kv_cache_update"):
         raise RuntimeError(
-            "Qwen native KV cache requires TensorRT add_kv_cache_update "
-            "and add_attention_v2 support"
+            "Qwen native KV cache requires TensorRT add_kv_cache_update support"
         )
 
     output_dtype = q.dtype
-    if attention_dtype is None:
-        attention_dtype = cache_k.dtype
+    attention_dtype = cache_k.dtype
     if attention_dtype not in {trt.float16, trt.bfloat16}:
         raise ValueError("Qwen native KV attention requires FP16 or BF16")
     if cache_k.dtype != attention_dtype or cache_v.dtype != attention_dtype:
         raise ValueError(
             "Qwen native KV cache dtype must match the attention dtype"
-        )
-    if explicit_mask is not None and explicit_mask.dtype != attention_dtype:
-        raise ValueError(
-            "Qwen native KV explicit mask dtype must match the attention dtype"
         )
     if k_update.dtype != attention_dtype:
         k_update = network.add_cast(k_update, attention_dtype).get_output(0)
@@ -1321,62 +1226,22 @@ def add_native_kv_cache_attention_from_rows(
         sequence_length=q_seq,
         tag=None if tag is None else tag + ".q",
     )
-    if scale is None:
-        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-
     if q_4d.dtype not in {trt.float16, trt.bfloat16}:
         raise ValueError("Qwen native KV attention requires FP16 or BF16 queries")
-
-    # Match the native fused-attention contract exactly: TensorRT consumes an
-    # FP16/BF16 query after the FP32 scale has already been applied and rounded.
-    q_scale_input = network.add_cast(q_4d, trt.float32).get_output(0)
-    scale_t = add_constant(
+    if q_4d.dtype != attention_dtype:
+        q_4d = network.add_cast(q_4d, attention_dtype).get_output(0)
+    context_4d = add_explicit_masked_grouped_query_attention(
         network,
-        (1, 1, 1, 1),
-        np.array([[[[scale]]]]),
-        dtype=np.float32,
+        q_4d,
+        updated_k,
+        updated_v,
+        attention_masks,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        scale=scale,
+        tag=tag,
     )
-    q_scaled = network.add_elementwise(
-        q_scale_input, scale_t, trt.ElementWiseOperation.PROD
-    ).get_output(0)
-    q_scaled = network.add_cast(q_scaled, attention_dtype).get_output(0)
-
-    recipe = nullcontext()
-    if recipe_instance is not None:
-        from ...tvm_ffi.graph_build import graph_recipe_region
-
-        recipe = graph_recipe_region(
-            network,
-            "qwen.decode_attention_region@2",
-            recipe_instance,
-            output_shape_input=0,
-        )
-    with recipe:
-        attention = network.add_attention_v2(
-            q_scaled,
-            updated_k,
-            updated_v,
-            trt.AttentionNormalizationOp.SOFTMAX,
-            (
-                trt.CausalMaskKind.NONE
-                if explicit_mask is not None
-                else trt.CausalMaskKind.LOWER_RIGHT
-            ),
-        )
-        if attention is None:
-            raise RuntimeError("TensorRT failed to create Qwen native attention")
-        # The prototype deliberately requires TensorRT's fused attention tactic.
-        # Unsupported dtype/head geometries fail at build time instead of silently
-        # falling back to a primitive graph with materially lower decode speed.
-        attention.decomposable = False
-        if explicit_mask is None:
-            attention.key_value_lengths = key_value_lengths
-        else:
-            attention.mask = explicit_mask
-        if tag:
-            attention.name = tag
-
-    context_4d = attention.get_output(0)
     if context_4d.dtype != output_dtype:
         context_4d = network.add_cast(context_4d, output_dtype).get_output(0)
     context = reshape_heads_4d_to_rows(

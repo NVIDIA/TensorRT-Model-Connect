@@ -675,13 +675,22 @@ def test_premerge_selects_smoke_and_native_kv_regression(
     selection = _run_test_selection(tmp_path, family, "premerge")
 
     assert selection["suite"] == "premerge"
-    assert [case["name"] for case in selection["e2e_cases"]] == [
-        smoke_case,
-        regression_case,
-    ]
+    expected_cases = [smoke_case]
+    if family == "qwen":
+        expected_cases.extend(
+            [
+                "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
+                "qwen3-0.6b-fp16-native-kv-two-chunk-parity",
+            ]
+        )
+    expected_cases.append(regression_case)
+    assert [case["name"] for case in selection["e2e_cases"]] == expected_cases
     assert selection["e2e_cases"][0]["test_category"] == "e2e"
-    assert selection["e2e_cases"][1]["test_category"] == "regression"
-    assert selection["e2e_cases"][1]["ci_tier"] == "default"
+    assert all(
+        case["test_category"] == "regression"
+        and case["ci_tier"] == "default"
+        for case in selection["e2e_cases"][1:]
+    )
 
 
 def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -> None:
@@ -689,7 +698,9 @@ def test_qwen_nightly_includes_production_and_regression_cases(tmp_path: Path) -
 
     assert selection["suite"] == "nightly"
     assert {case["name"] for case in selection["e2e_cases"]} == {
+        "qwen3-0.6b-bf16-native-kv-two-chunk-parity",
         "qwen3-0.6b-fp16",
+        "qwen3-0.6b-fp16-native-kv-two-chunk-parity",
         "qwen3-0.6b-fp8",
         "qwen3-0.6b-regression-native-kv-chunked-prefill",
         "qwen3-0.6b-topp",
