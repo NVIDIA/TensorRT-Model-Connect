@@ -46,9 +46,13 @@ jobs:
             --arg number "$PR_NUMBER" \
             --arg title "$PR_TITLE" \
             --arg url "$PR_URL" \
-            '{text: (":rotating_light: *External pull request opened*\\n" +
+            'def slack_escape:
+              gsub("&"; "&amp;") |
+              gsub("<"; "&lt;") |
+              gsub(">"; "&gt;");
+             {text: (":rotating_light: *External pull request opened*\\n" +
               "*Repository:* " + $repository + "\\n" +
-              "*PR:* <" + $url + "|#" + $number + " — " + $title + ">\\n" +
+              "*PR:* <" + $url + "|#" + $number + " — " + ($title | slack_escape) + ">\\n" +
               "*Author:* " + $author + " (" + $association + ")")}')"
 
           curl --fail-with-body --silent --show-error \
