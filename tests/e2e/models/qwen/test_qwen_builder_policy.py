@@ -7,6 +7,7 @@ import pytest
 
 from tensorrt_model_connect.families.qwen.builder_policy import (
     configure_qwen_builder,
+    requires_explicit_native_kv_mask,
 )
 
 
@@ -16,6 +17,31 @@ def _quant_context(format_name: str):
             format=SimpleNamespace(name=format_name),
             exclude_patterns=[],
         ))
+
+
+@pytest.mark.parametrize(
+    ("precision", "trt_version", "compute_capability", "expected"),
+    [
+        ("bf16", "11.1.0.106", (8, 6), True),
+        ("BF16", "11.2.1.2", (12, 1), True),
+        ("fp16", "11.1.0.106", (8, 6), False),
+        ("bf16", "11.2.1.2", (10, 3), False),
+        ("bf16", "11.0.0", (8, 6), False),
+        ("bf16", "11.3.0", (12, 1), False),
+        ("bf16", "unknown", (8, 6), False),
+    ],
+)
+def test_explicit_native_kv_mask_policy_is_narrow(
+    precision,
+    trt_version,
+    compute_capability,
+    expected,
+):
+    assert requires_explicit_native_kv_mask(
+        precision=precision,
+        trt_version=trt_version,
+        compute_capability=compute_capability,
+    ) is expected
 
 
 @pytest.mark.parametrize("override", [None, "", "   "])

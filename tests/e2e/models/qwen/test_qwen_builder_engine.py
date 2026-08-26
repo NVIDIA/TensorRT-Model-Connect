@@ -9,6 +9,8 @@ Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU re
 Postconditions: All standard decoder weight keys are present with correct shapes and the engine builds successfully.
 """
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -73,8 +75,43 @@ class Qwen3NativePluginTester(FamilyPluginTester):
 )
 @pytest.mark.trt
 @pytest.mark.gpu
-def test_native_qwen3_split_role_engine_contract(tmp_path, role, profile_shapes):
+def test_native_qwen3_split_role_engine_contract(
+    tmp_path,
+    role,
+    profile_shapes,
+    monkeypatch,
+):
     import tensorrt as trt
+
+    importlib.import_module("tensorrt_model_connect.families.qwen.plugin")
+    builder = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.dual_profile_decoder_builder"
+    )
+    graph_ops = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.graph_ops"
+    )
+    policy = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.builder_policy"
+    )
+    expected_explicit_mask = policy.requires_explicit_native_kv_mask(
+        "bf16",
+        trt.__version__,
+        builder._current_cuda_compute_capability(),
+    )
+    native_attention_calls = []
+    original_native_attention = graph_ops.add_native_kv_cache_attention_from_rows
+
+    def _record_native_attention(*args, **kwargs):
+        native_attention_calls.append(
+            (kwargs.get("explicit_mask"), kwargs.get("recipe_instance"))
+        )
+        return original_native_attention(*args, **kwargs)
+
+    monkeypatch.setattr(
+        graph_ops,
+        "add_native_kv_cache_attention_from_rows",
+        _record_native_attention,
+    )
 
     tester = Qwen3NativePluginTester()
     config, weights, _ = tester.prepare_config_and_weights(tmp_path)
@@ -89,6 +126,18 @@ def test_native_qwen3_split_role_engine_contract(tmp_path, role, profile_shapes)
     engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
 
     assert engine is not None
+    assert len(native_attention_calls) == tester.spec.num_hidden_layers
+    explicit_masks = [call[0] for call in native_attention_calls]
+    recipe_instances = [call[1] for call in native_attention_calls]
+    if expected_explicit_mask:
+        assert all(mask is not None for mask in explicit_masks)
+        assert all(recipe is None for recipe in recipe_instances)
+    else:
+        assert all(mask is None for mask in explicit_masks)
+        expected_recipe = (
+            "decoder.layers.0.decode_attention" if role == "decode" else None
+        )
+        assert recipe_instances == [expected_recipe]
     assert engine.num_optimization_profiles == 1
     assert [
         tuple(shape) for shape in engine.get_tensor_profile_shape("token_id", 0)

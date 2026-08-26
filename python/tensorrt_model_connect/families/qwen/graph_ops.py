@@ -1131,6 +1131,91 @@ def add_attention_from_rows(
     )
 
 
+def add_native_kv_attention_mask(
+    network: trt.INetworkDefinition,
+    query_rows: trt.ITensor,
+    cache_write_indices: trt.ITensor,
+    key_value_lengths: trt.ITensor,
+    cache_capacity: int,
+    target_dtype: trt.DataType,
+) -> trt.ITensor:
+    """Build an additive ``[1, 1, Sq, K]`` active-prefix causal mask.
+
+    The valid region is the intersection of the runtime-active KV prefix and
+    the causal prefix for each query row. This deliberately bypasses
+    ``IAttention.key_value_lengths`` on TensorRT/GPU combinations where that
+    optional input exposes the inactive cache suffix instead of the prefix.
+    """
+    query_shape = network.add_shape(query_rows).get_output(0)
+    query_length = network.add_slice(
+        query_shape, start=(0,), shape=(1,), stride=(1,)
+    ).get_output(0)
+    zero_i32 = add_constant(
+        network, (), np.array(0, dtype=np.int32), dtype=np.int32
+    )
+    one_i32 = add_constant(
+        network, (1,), np.array([1], dtype=np.int32), dtype=np.int32
+    )
+    query_iota = network.add_fill((1,), trt.FillOperation.LINSPACE, trt.int32)
+    query_iota.set_input(0, query_length)
+    query_iota.set_input(1, zero_i32)
+    query_iota.set_input(2, one_i32)
+    query_positions = network.add_elementwise(
+        query_iota.get_output(0),
+        cache_write_indices,
+        trt.ElementWiseOperation.SUM,
+    ).get_output(0)
+    query_limits = network.add_elementwise(
+        query_positions, one_i32, trt.ElementWiseOperation.SUM
+    ).get_output(0)
+
+    one_i64 = add_constant(
+        network, (1,), np.array([1], dtype=np.int64), dtype=np.int64
+    )
+    query_limit_shape = network.add_concatenation([query_length, one_i64])
+    query_limit_shape.axis = 0
+    query_limits_2d = network.add_shuffle(query_limits)
+    query_limits_2d.set_input(1, query_limit_shape.get_output(0))
+
+    key_positions = add_constant(
+        network,
+        (1, cache_capacity),
+        np.arange(cache_capacity, dtype=np.int32).reshape(1, cache_capacity),
+        dtype=np.int32,
+    )
+    key_value_lengths_2d = network.add_shuffle(key_value_lengths)
+    key_value_lengths_2d.reshape_dims = (1, 1)
+    causal = network.add_elementwise(
+        key_positions,
+        query_limits_2d.get_output(0),
+        trt.ElementWiseOperation.LESS,
+    ).get_output(0)
+    active = network.add_elementwise(
+        key_positions,
+        key_value_lengths_2d.get_output(0),
+        trt.ElementWiseOperation.LESS,
+    ).get_output(0)
+    valid_positions = network.add_elementwise(
+        causal, active, trt.ElementWiseOperation.AND
+    ).get_output(0)
+
+    zero = add_constant(
+        network, (1, 1), np.array([[0.0]], dtype=np.float32), dtype=np.float32
+    )
+    blocked = add_constant(
+        network,
+        (1, 1),
+        np.array([[-1.0e4]], dtype=np.float32),
+        dtype=np.float32,
+    )
+    zero = _cast_back_to_trt_dtype(network, zero, target_dtype)
+    blocked = _cast_back_to_trt_dtype(network, blocked, target_dtype)
+    additive_mask = network.add_select(
+        valid_positions, zero, blocked
+    ).get_output(0)
+    return add_2d_mask_to_4d(network, additive_mask)
+
+
 def add_native_kv_cache_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -1148,14 +1233,14 @@ def add_native_kv_cache_attention_from_rows(
     scale: float | None = None,
     tag: str | None = None,
     recipe_instance: str | None = None,
+    explicit_mask: trt.ITensor | None = None,
 ) -> dict[str, trt.ITensor]:
     """Update a user-owned KV cache and attend over its active prefix.
 
     ``IKVCacheUpdateLayer`` writes this step's K/V rows into the static,
-    full-capacity cache in place. ``IAttention`` consumes the aliased cache
-    outputs, while ``key_value_lengths`` limits work to the valid prefix.
-    ``LOWER_RIGHT`` causal alignment gives correct autoregressive semantics
-    when the query sequence is shorter than the active KV sequence.
+    full-capacity cache in place. The normal contract passes active lengths to
+    ``IAttention``. The compatibility contract supplies a correct explicit
+    additive mask and omits the broken native length input.
 
     Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The caller
     must bind each output to the same device address as its corresponding
@@ -1250,7 +1335,11 @@ def add_native_kv_cache_attention_from_rows(
             updated_k,
             updated_v,
             trt.AttentionNormalizationOp.SOFTMAX,
-            trt.CausalMaskKind.LOWER_RIGHT,
+            (
+                trt.CausalMaskKind.NONE
+                if explicit_mask is not None
+                else trt.CausalMaskKind.LOWER_RIGHT
+            ),
         )
         if attention is None:
             raise RuntimeError("TensorRT failed to create Qwen native attention")
@@ -1258,7 +1347,10 @@ def add_native_kv_cache_attention_from_rows(
         # Unsupported dtype/head geometries fail at build time instead of silently
         # falling back to a primitive graph with materially lower decode speed.
         attention.decomposable = False
-        attention.key_value_lengths = key_value_lengths
+        if explicit_mask is None:
+            attention.key_value_lengths = key_value_lengths
+        else:
+            attention.mask = explicit_mask
         if tag:
             attention.name = tag
 

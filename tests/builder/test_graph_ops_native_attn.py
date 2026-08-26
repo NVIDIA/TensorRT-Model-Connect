@@ -122,6 +122,36 @@ def _run_strongly_typed(build_fn, inputs: dict[str, np.ndarray]) -> dict[str, np
     return host_out
 
 
+@requires_trt
+def test_qwen_native_kv_mask_matches_active_causal_prefix():
+    import tensorrt as trt
+
+    inputs = {
+        "token_id": np.array([11, 12, 13], dtype=np.int32),
+        "cache_write_indices": np.array([2], dtype=np.int32),
+        "key_value_lengths": np.array([5], dtype=np.int32),
+    }
+
+    def build(network, trt_inputs):
+        return {
+            "mask": qwen_graph_ops.add_native_kv_attention_mask(
+                network,
+                trt_inputs["token_id"],
+                trt_inputs["cache_write_indices"],
+                trt_inputs["key_value_lengths"],
+                8,
+                trt.float16,
+            )
+        }
+
+    actual = _run_strongly_typed(build, inputs)["mask"]
+    expected = np.full((1, 1, 3, 8), -1.0e4, dtype=np.float16)
+    expected[0, 0, 0, :3] = 0
+    expected[0, 0, 1, :4] = 0
+    expected[0, 0, 2, :5] = 0
+    np.testing.assert_array_equal(actual, expected)
+
+
 # ---------------------------------------------------------------------------
 # 1. add_layer_norm_native — pure numpy reference comparison
 # ---------------------------------------------------------------------------

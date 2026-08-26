@@ -9,6 +9,34 @@ import os
 from typing import Any
 
 
+_EXPLICIT_NATIVE_KV_MASK_SMS = frozenset({(8, 6), (12, 1)})
+_EXPLICIT_NATIVE_KV_MASK_TRT_RELEASES = frozenset({(11, 1), (11, 2)})
+
+
+def _trt_major_minor(trt_version: str) -> tuple[int, int] | None:
+    parts = trt_version.split(".", maxsplit=2)
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+
+
+def requires_explicit_native_kv_mask(
+    precision: str,
+    trt_version: str,
+    compute_capability: tuple[int, int],
+) -> bool:
+    """Select the validated workaround for broken native active-length masking."""
+    return (
+        precision.lower() == "bf16"
+        and _trt_major_minor(trt_version)
+        in _EXPLICIT_NATIVE_KV_MASK_TRT_RELEASES
+        and tuple(compute_capability) in _EXPLICIT_NATIVE_KV_MASK_SMS
+    )
+
+
 def configure_qwen_builder(
     trt_config: Any,
     quant_ctx: Any | None,

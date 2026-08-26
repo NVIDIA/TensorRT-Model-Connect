@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+
+from tests.builder.conftest import requires_trt
 
 trt = pytest.importorskip("tensorrt")
 
@@ -61,6 +64,19 @@ class _FakeNetwork:
         return layer
 
 
+class _AttentionRecordingNetwork:
+    def __init__(self, network):
+        self._network = network
+        self.attention = None
+
+    def __getattr__(self, name):
+        return getattr(self._network, name)
+
+    def add_attention_v2(self, *args, **kwargs):
+        self.attention = self._network.add_attention_v2(*args, **kwargs)
+        return self.attention
+
+
 def _add_native_attention(monkeypatch, graph_ops, dtype):
     network = _FakeNetwork()
     heads, kv_heads, head_dim = 4, 2, 128
@@ -98,6 +114,128 @@ def _add_native_attention(monkeypatch, graph_ops, dtype):
         q_seq=1,
     )
     return network, tensors, result
+
+
+def _dual_profile_builder_module():
+    # The Qwen package lazy-loads its plugin; enter through that public module
+    # so its builder imports are initialized in the same order as production.
+    importlib.import_module("tensorrt_model_connect.families.qwen.plugin")
+    return importlib.import_module(
+        "tensorrt_model_connect.families.qwen.dual_profile_decoder_builder"
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "native_kv_cache",
+        "explicit_mask",
+        "profile_mode",
+        "cache_length",
+        "opt_length",
+        "requested",
+        "expected",
+    ),
+    [
+        (True, True, "prefill", 16384, 64, None, (64, 64)),
+        (True, True, "prefill", 16384, 128, 128, (64, 64)),
+        (True, True, "prefill", 16384, 64, 32, (32, 32)),
+        (True, True, "dual_profile", 16384, 128, None, (64, 64)),
+        (True, True, "decode", 16384, 64, None, (64, 16384)),
+        (True, False, "prefill", 40960, 64, None, (64, 32768)),
+        (False, False, "prefill", 40960, 64, None, (64, 40960)),
+    ],
+)
+def test_explicit_mask_prefill_limit(
+    native_kv_cache,
+    explicit_mask,
+    profile_mode,
+    cache_length,
+    opt_length,
+    requested,
+    expected,
+):
+    builder = _dual_profile_builder_module()
+
+    assert builder._resolve_prefill_lengths(
+        cache_length,
+        opt_length,
+        requested,
+        native_kv_cache=native_kv_cache,
+        explicit_native_attention_mask=explicit_mask,
+        profile_mode=profile_mode,
+    ) == expected
+
+
+@pytest.mark.parametrize("compute_capability", [(8, 6), (12, 1)])
+def test_current_cuda_compute_capability(monkeypatch, compute_capability):
+    builder = _dual_profile_builder_module()
+    properties = SimpleNamespace(
+        major=compute_capability[0], minor=compute_capability[1]
+    )
+    runtime = SimpleNamespace(
+        cudaGetDevice=lambda: (0, 0),
+        cudaGetDeviceProperties=lambda _device: (0, properties),
+    )
+    monkeypatch.setattr(builder, "_cuda_runtime", lambda: runtime)
+
+    assert builder._current_cuda_compute_capability() == compute_capability
+
+
+def test_current_cuda_compute_capability_fails_closed(monkeypatch):
+    builder = _dual_profile_builder_module()
+    runtime = SimpleNamespace(cudaGetDevice=lambda: (7, 0))
+    monkeypatch.setattr(builder, "_cuda_runtime", lambda: runtime)
+
+    with pytest.raises(RuntimeError, match="cudaGetDevice failed"):
+        builder._current_cuda_compute_capability()
+
+
+@requires_trt
+def test_qwen_explicit_mask_omits_native_lengths_on_real_trt_network():
+    graph_ops = importlib.import_module(
+        "tensorrt_model_connect.families.qwen.graph_ops"
+    )
+    builder = trt.Builder(trt.Logger(trt.Logger.ERROR))
+    raw_network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
+    )
+    network = _AttentionRecordingNetwork(raw_network)
+    q = network.add_input("q", trt.bfloat16, (1, 512))
+    k = network.add_input("k", trt.bfloat16, (1, 256))
+    v = network.add_input("v", trt.bfloat16, (1, 256))
+    cache_k = network.add_input("cache_k", trt.bfloat16, (1, 2, 8, 128))
+    cache_v = network.add_input("cache_v", trt.bfloat16, (1, 2, 8, 128))
+    write_indices = network.add_input(
+        "cache_write_indices", trt.int32, (1,)
+    )
+    lengths = network.add_input("key_value_lengths", trt.int32, (1,))
+    mask = network.add_input("explicit_mask", trt.bfloat16, (1, 1, 1, 8))
+
+    result = graph_ops.add_native_kv_cache_attention_from_rows(
+        network,
+        q,
+        k,
+        v,
+        cache_k,
+        cache_v,
+        write_indices,
+        lengths,
+        num_heads=4,
+        num_kv_heads=2,
+        head_dim=128,
+        q_seq=1,
+        explicit_mask=mask,
+    )
+
+    attention = network.attention
+    assert isinstance(attention, trt.IAttention)
+    assert attention.num_inputs == 4
+    assert attention.mask is mask
+    assert attention.key_value_lengths is None
+    assert attention.causal_kind == trt.CausalMaskKind.NONE
+    assert attention.decomposable is False
+    assert attention.get_input(1) is result["present_k"]
+    assert attention.get_input(2) is result["present_v"]
 
 
 @pytest.mark.parametrize("module_name", _FAMILIES)
