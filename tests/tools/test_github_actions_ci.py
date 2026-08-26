@@ -233,7 +233,6 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         "internal-ci-bridge.yml",
         "pages.yml",
         "pr-metadata.yml",
-        "pr-triage.yml",
     ]
 
     bridge = (workflows / "internal-ci-bridge.yml").read_text(encoding="utf-8")
