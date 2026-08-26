@@ -674,25 +674,17 @@ if(TRTMC_BUILD_BACKEND_RTX)
   endif()
 endif()
 
-add_library(trtmc_serve_worker STATIC
-  src/serve/worker.cpp
-)
-target_link_libraries(trtmc_serve_worker PRIVATE trtmc_core)
-target_include_directories(trtmc_serve_worker PRIVATE
-  ${PROJECT_SOURCE_DIR}/src
-)
-target_include_directories(trtmc_serve_worker SYSTEM PRIVATE
-  ${_trtmc_nlohmann_json_include}
-)
-target_compile_options(trtmc_serve_worker PRIVATE -Wall -Wextra -Wpedantic)
+add_subdirectory(server)
 
 add_executable(trtmc
   src/cli/args.cpp
   src/cli/main.cpp
-  src/cli/serve_worker.cpp
 )
-target_link_libraries(trtmc PRIVATE trtmc_core trtmc_serve_worker Threads::Threads)
-target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(trtmc PRIVATE trtmc_core trtmc_server_native Threads::Threads)
+target_include_directories(trtmc PRIVATE
+  ${PROJECT_SOURCE_DIR}/src
+  ${PROJECT_SOURCE_DIR}/server
+)
 target_include_directories(trtmc SYSTEM PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/stb
   ${_trtmc_nlohmann_json_include}
@@ -951,9 +943,12 @@ trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 
 # Native serving worker protocol
-trtmc_add_test(test_serve_worker)
-target_link_libraries(test_serve_worker PRIVATE trtmc_serve_worker)
-target_sources(test_serve_worker PRIVATE src/cli/args.cpp src/cli/serve_worker.cpp)
+trtmc_add_test(test_serve_worker SOURCE server/tests/test_serve_worker.cpp)
+target_link_libraries(test_serve_worker PRIVATE trtmc_server_native)
+target_include_directories(test_serve_worker PRIVATE
+  ${PROJECT_SOURCE_DIR}/server
+  ${PROJECT_SOURCE_DIR}/tests/cpp
+)
 target_include_directories(test_serve_worker SYSTEM PRIVATE ${_trtmc_nlohmann_json_include})
 
 # Config / parsing

@@ -11,6 +11,7 @@ Postconditions: Coverage maps are correctly merged and test selection returns ex
 
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,7 +21,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
 from coverage_map.python_collector import parse_coverage_db  # noqa: E402
-from coverage_map.cpp_collector import parse_gcovr_json, build_cpp_map_from_jsons  # noqa: E402
+from coverage_map.cpp_collector import (  # noqa: E402
+    build_cpp_map_from_jsons,
+    collect_cpp_coverage,
+    parse_gcovr_json,
+)
 from coverage_map.generate import merge_maps, validate_map, load_coverage_map, main as generate_main  # noqa: E402
 from coverage_map.select_tests import select_tests  # noqa: E402
 from coverage_map.fetch_latest import resolve_coverage_map  # noqa: E402
@@ -118,6 +123,29 @@ class TestPythonCollector:
             "tests/builder/test_config.py::test_from_wheel",
         ]
 
+    def test_parse_coverage_db_normalizes_installed_server_wheel_paths(self, tmp_path):
+        db_path = tmp_path / ".coverage"
+        installed_path = (
+            tmp_path
+            / "venv"
+            / "lib"
+            / "python3.12"
+            / "site-packages"
+            / "trtmc_server"
+            / "app.py"
+        )
+        _create_fake_coverage_db(db_path, {
+            str(installed_path): {
+                "server/tests/test_serve_api.py::test_from_wheel|run": [1],
+            },
+        })
+
+        result = parse_coverage_db(db_path, repo_root=tmp_path / "repo")
+
+        assert result["server/python/trtmc_server/app.py"] == [
+            "server/tests/test_serve_api.py::test_from_wheel",
+        ]
+
     def test_parse_coverage_db_empty(self, tmp_path):
         """Empty DB returns empty mapping."""
         db_path = tmp_path / ".coverage"
@@ -132,6 +160,35 @@ class TestPythonCollector:
 
 
 class TestCppCollector:
+    def test_default_gcovr_filters_include_server_native(self, tmp_path, monkeypatch):
+        """Default collection keeps detached native server sources in the map."""
+        repo_root = tmp_path / "repo"
+        build_dir = tmp_path / "build"
+        output_dir = tmp_path / "reports"
+        build_dir.mkdir()
+        commands: list[list[str]] = []
+
+        def fake_run(command, **_kwargs):
+            rendered = [str(item) for item in command]
+            commands.append(rendered)
+            stdout = "  Test #1: test_serve_worker\n" if "-N" in rendered else ""
+            return subprocess.CompletedProcess(rendered, 0, stdout, "")
+
+        monkeypatch.setattr("coverage_map.cpp_collector.subprocess.run", fake_run)
+
+        assert collect_cpp_coverage(repo_root, build_dir, output_dir=output_dir) == {}
+        gcovr = next(command for command in commands if command[0] == "gcovr")
+        observed_filters = [
+            gcovr[index + 1]
+            for index, value in enumerate(gcovr[:-1])
+            if value == "--filter"
+        ]
+        assert observed_filters == [
+            str(repo_root / "src"),
+            str(repo_root / "include"),
+            str(repo_root / "server/native"),
+        ]
+
     def test_parse_gcovr_json_basic(self, tmp_path):
         """Extracts covered source files from a gcovr JSON report."""
         gcovr_data = {
@@ -309,6 +366,28 @@ class TestSelectTests:
             "builder": ["python/tensorrt_model_connect/new_module.py"],
         }
         assert result.builder_tests == []
+
+    @pytest.mark.parametrize(
+        "path, tier",
+        (
+            ("server/python/trtmc_server/app.py", "builder"),
+            ("server/native/worker.cpp", "cpp"),
+            ("server/CMakeLists.txt", "cpp"),
+        ),
+    )
+    def test_unknown_server_source_falls_back_to_its_owned_tier(
+        self, sample_map, path, tier
+    ):
+        result = select_tests([path], sample_map)
+
+        assert result.fallback_tiers == [tier]
+        assert result.fallback_files == {tier: [path]}
+
+    def test_changed_server_python_test_runs_directly(self, sample_map):
+        result = select_tests(["server/tests/test_serve_api.py"], sample_map)
+
+        assert result.builder_tests == ["server/tests/test_serve_api.py"]
+        assert result.fallback_tiers == []
 
     def test_direct_python_test_file_runs_directly_without_fallback(self, sample_map):
         """Changed Python tests should run directly without forcing full-tier fallback."""

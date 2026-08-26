@@ -106,6 +106,7 @@ class SourceQualityChecks:
                 "python",
                 "tools/check_cyclomatic_complexity.py",
                 "src",
+                "server/native",
                 "--exclude",
                 "src/cli",
                 "--max-ccn",
@@ -152,7 +153,7 @@ class SourceQualityChecks:
                 "-m",
                 "pytest",
                 "tests/tools/test_model_plugin_encapsulation_static.py",
-                "tests/tools/test_server_dependency_direction.py",
+                "server/tests/test_dependency_direction.py",
                 "-q",
                 "-p",
                 "no:cacheprovider",
@@ -209,7 +210,7 @@ class UnitTestRunner:
         if selected_wheel:
             python_environment = selected_wheel.environment(source, self.context.env)
         else:
-            python_path = f"{source / 'python'}:{source}"
+            python_path = f"{source / 'python'}:{source / 'server' / 'python'}:{source}"
             if self.context.env.get("PYTHONPATH"):
                 python_path += f":{self.context.env['PYTHONPATH']}"
             python_environment = {"PYTHONPATH": python_path}
@@ -300,6 +301,12 @@ class UnitTestRunner:
             if scope == "cli":
                 self.context.run([build / "trtmc", "version"], limit="1m")
                 self.context.run([build / "trtmc", "--help"], limit="1m")
+            if "trtmc" in native_targets:
+                self.context.run(
+                    [build / "trtmc", "serve", "--help"],
+                    limit="1m",
+                    updates=python_environment,
+                )
             leaked = next(build.rglob("libtrtmc_model_*.so*"), None)
             if leaked:
                 raise CiError(f"source-only unit build produced a model plugin: {leaked}")
@@ -319,7 +326,7 @@ class UnitTestRunner:
 
     def _premerge_scope(self, scope: str) -> tuple[list[str], list[str], list[str]]:
         if scope == "builder":
-            return (["tests/builder/"], [], [])
+            return (["tests/builder/", "server/tests/"], [], [])
         if scope == "cli":
             return (
                 [
@@ -341,7 +348,7 @@ class UnitTestRunner:
                 )
             ]
             return (
-                ["tests/builder/", "tests/tools/", *harness_tests],
+                ["tests/builder/", "tests/tools/", "server/tests/", *harness_tests],
                 ["trtmc", "trtmc_platform_cpp_tests"],
                 ["-L", "platform"],
             )
@@ -363,6 +370,7 @@ class UnitTestRunner:
             raise CiError("TRTMC_PREMERGE_PYTHON_TEST_TARGETS must be a JSON string list")
 
         allowed_roots = (
+            PurePosixPath("server/tests"),
             PurePosixPath("tests/builder"),
             PurePosixPath("tests/tools"),
             PurePosixPath("tests/e2e_harness"),

@@ -808,6 +808,11 @@ def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> Non
         ("tests/builder/test_cli.py", "all"),
         ("tests/cpp/test_cli_args.cpp", "all"),
         ("tests/tools/test_cli_contract.py", "all"),
+        ("server/python/trtmc_server/app.py", "all"),
+        ("server/native/worker.cpp", "all"),
+        ("server/CMakeLists.txt", "all"),
+        ("server/tests/test_serve_api.py", "all"),
+        ("server/tests/test_serve_worker.cpp", "all"),
         ("examples/models/nemotron_voicechat/full_duplex/main.cpp", "all"),
         ("examples/models/nemotron_voicechat/full_duplex/Dockerfile", "all"),
         ("examples/models/nemotron_voicechat/full_duplex/CMakeLists.txt", "all"),
@@ -831,6 +836,10 @@ def test_cli_and_unit_test_changes_run_units_without_model_proofs(
     assert result["matrix"] == {"include": []}
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == expected_scope
+
+
+def test_server_root_is_available_to_isolated_platform_projections() -> None:
+    assert "server/" in model_ci.PLATFORM_PROJECTION_PREFIXES
 
 
 @pytest.mark.parametrize("path", ("src/cli/main.cpp", "src/cli/args.h"))

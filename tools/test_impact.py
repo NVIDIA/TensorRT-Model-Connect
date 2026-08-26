@@ -883,6 +883,28 @@ def _infer_unit_tiers(path: str) -> List[str]:
     tiers: List[str] = []
     if path.startswith("python/tensorrt_model_connect/"):
         tiers.append("builder")
+    if path.startswith("server/python/") or (
+        path.startswith("server/tests/") and path.endswith(".py")
+    ):
+        tiers.append("builder")
+    if (
+        path.startswith("server/native/")
+        or path == "server/CMakeLists.txt"
+        or (
+            path.startswith("server/tests/")
+            and path.endswith((
+                ".c",
+                ".cc",
+                ".cpp",
+                ".cxx",
+                ".cu",
+                ".cuh",
+                ".h",
+                ".hpp",
+            ))
+        )
+    ):
+        tiers.append("cpp")
     if (
         path.startswith("src/")
         or path.startswith("include/")
@@ -907,6 +929,21 @@ def _infer_rebuild_cpp(path: str) -> bool:
         or path == "CMakeLists.txt"
         or path.startswith("cmake/")
         or path.startswith("tests/cpp/")
+        or path.startswith("server/native/")
+        or path == "server/CMakeLists.txt"
+        or (
+            path.startswith("server/tests/")
+            and path.endswith((
+                ".c",
+                ".cc",
+                ".cpp",
+                ".cxx",
+                ".cu",
+                ".cuh",
+                ".h",
+                ".hpp",
+            ))
+        )
     )
 
 
@@ -1417,15 +1454,15 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=97,
-            name="serve_control_plane",
-            matcher=_path_startswith("python/tensorrt_model_connect/serve/"),
+            name="server_python",
+            matcher=_regex_rule(r"server/(?:python/.+|tests/(?:.+/)?[^/]+\.py)$"),
             resolver=_match_result(
-                "serve_control_plane",
+                "server_python",
                 _no_models,
                 ["builder"],
                 False,
             ),
-            covered_by=("TestUnitTiers.test_serve_control_plane",),
+            covered_by=("TestUnitTiers.test_server_python",),
         ),
         ClassificationRule(
             priority=100,
@@ -1436,15 +1473,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=105,
-            name="serve_native_worker",
-            matcher=_regex_rule(r"(?:src/serve/|src/cli/serve_worker\.(?:cpp|h)$)"),
+            name="server_native",
+            matcher=_regex_rule(
+                r"server/(?:native/.+|CMakeLists\.txt|"
+                r"tests/(?:.+/)?[^/]+\.(?:c|cc|cpp|cxx|cu|cuh|h|hpp))$"
+            ),
             resolver=_match_result(
-                "serve_native_worker",
+                "server_native",
                 _no_models,
                 ["cpp"],
                 True,
             ),
-            covered_by=("TestUnitTiers.test_serve_native_worker",),
+            covered_by=("TestUnitTiers.test_server_native",),
         ),
         ClassificationRule(
             priority=110,
@@ -2121,6 +2161,7 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
             continue
         if (
             path.startswith("tests/builder/")
+            or path.startswith("server/tests/")
             or _is_family_builder_test(path)
             or _is_model_owned_python_unit_test(path)
         ):

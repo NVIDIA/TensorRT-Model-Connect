@@ -26,6 +26,7 @@ coverage unnecessary.
 | --- | --- | --- |
 | Ownership/static | `tools/model_ci.py`, `tools/test_impact.py`, static tests | Descriptors, ownership roots, impact selection, and forbidden coupling |
 | Python builder | `tests/builder/` | Config parsing, family matching, checkpoint mapping, graph/build orchestration, bundle emission |
+| Local server | `server/tests/` | HTTP/Realtime contracts, process lifecycle, native JSONL protocol, and one-way library dependency |
 | C++ runtime | `tests/cpp/` and model-declared runtime tests | Public API behavior, bundle parsing, DSO loading, config, state, plugins, backends |
 | Tooling | `tests/tools/` | CI selection, validators, reports, comparison utilities, packaging logic |
 | E2E harness | `tests/e2e_harness/` | Manifest loading, orchestration, runners, reference backends, comparators |

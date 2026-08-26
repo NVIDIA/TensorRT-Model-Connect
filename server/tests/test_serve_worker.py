@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect.serve import worker as worker_module
-from tensorrt_model_connect.serve.errors import (
+from trtmc_server import worker as worker_module
+from trtmc_server.errors import (
     WorkerCrashedError,
     WorkerProtocolError,
     WorkerRemoteError,
@@ -19,7 +19,7 @@ from tensorrt_model_connect.serve.errors import (
     WorkerStartupError,
     WorkerTimeoutError,
 )
-from tensorrt_model_connect.serve.worker import WorkerGroup, WorkerLoadOptions, WorkerProcess
+from trtmc_server.worker import WorkerGroup, WorkerLoadOptions, WorkerProcess
 
 
 FAKE_TRTMC = Path(__file__).with_name("fake_serve_worker.py")

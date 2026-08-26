@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "serve/worker.h"
+#include "native/worker.h"
 
 #include "trtmc/trtmc_io.hpp"
 

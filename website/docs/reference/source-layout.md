@@ -38,6 +38,9 @@ source of truth.
 | `src/tokenizer/` | Tokenizer implementations |
 | `python/tensorrt_model_connect/` | Python build package |
 | `python/tensorrt_model_connect/runtime_provider/` | Family-scoped optimized implementation discovery, isolated build, and generic bundle packaging |
+| `server/python/trtmc_server/` | Optional local HTTP/WebSocket control plane package |
+| `server/native/` | Native JSONL worker and CLI adapter downstream of `trtmc_core` |
+| `server/tests/` | Source-only Python and C++ server contract tests |
 | `tests/builder/` | Python builder tests |
 | `tests/cpp/` | C++ runtime tests |
 | `tests/e2e/` | E2E entry points and model-owned cases |

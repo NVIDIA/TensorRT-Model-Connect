@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
+import tarfile
 import textwrap
+import tomllib
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,6 +48,24 @@ def _backend_files(*names: str, distinct: bool = False) -> dict[str, bytes]:
     }
 
 
+def _write_sdist(tmp_path: Path, members: tuple[str, ...]) -> Path:
+    archive_path = tmp_path / "tensorrt_model_connect-0.1.0.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for relative in members:
+            payload = b"fixture\n"
+            info = tarfile.TarInfo(f"tensorrt_model_connect-0.1.0/{relative}")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return archive_path
+
+
+def _server_sdist_members() -> tuple[str, ...]:
+    return tuple(
+        f"server/python/trtmc_server/{module}.py"
+        for module in backend._SERVER_PACKAGE_MODULES
+    )
+
+
 def test_tensorrt_requirement_resolves_one_exact_version() -> None:
     assert _required_tensorrt_version(TENSORRT_METADATA) == TENSORRT_VERSION
 
@@ -71,6 +92,68 @@ def test_package_profile_resolves_unique_metadata(
         f'tensorrt=={tensorrt_version}; platform_machine == "x86_64"',
     ]
     assert _package_variant_version(REPO_ROOT, tensorrt_version) == package_version
+
+
+def test_package_layout_includes_detached_server() -> None:
+    with (REPO_ROOT / "pyproject.toml").open("rb") as stream:
+        pyproject = tomllib.load(stream)
+
+    assert pyproject["tool"]["conan-py-build"]["wheel"]["packages"] == [
+        "python/tensorrt_model_connect",
+        "server/python/trtmc_server",
+    ]
+    assert "server" in pyproject["tool"]["conan-py-build"]["sdist"]["include"]
+    assert backend._PYTHON_SOURCE_ROOTS == ("python", "server/python")
+    extras = pyproject["project"]["optional-dependencies"]
+    assert "pydantic>=1.10,<3" in extras["serve"]
+    assert "pydantic>=1.10,<3" in extras["test"]
+    metadata = backend._metadata_text(backend._project_metadata())
+    assert 'Requires-Dist: pydantic>=1.10,<3; extra == "serve"' in metadata
+    assert 'Requires-Dist: pydantic>=1.10,<3; extra == "test"' in metadata
+
+
+def test_sdist_validation_requires_only_the_detached_server_package(tmp_path: Path) -> None:
+    archive = _write_sdist(
+        tmp_path,
+        (
+            "pyproject.toml",
+            *_server_sdist_members(),
+        ),
+    )
+
+    backend._validate_server_package_in_sdist(archive)
+
+
+@pytest.mark.parametrize(
+    ("members", "message"),
+    (
+        (("pyproject.toml",), "missing the detached server package"),
+        (
+            tuple(
+                member
+                for member in _server_sdist_members()
+                if not member.endswith("/worker.py")
+            ),
+            "missing the detached server package",
+        ),
+        (
+            (
+                *_server_sdist_members(),
+                "python/tensorrt_model_connect/serve/__init__.py",
+            ),
+            "retired server package",
+        ),
+    ),
+)
+def test_sdist_validation_rejects_missing_or_legacy_server_layout(
+    tmp_path: Path,
+    members: tuple[str, ...],
+    message: str,
+) -> None:
+    archive = _write_sdist(tmp_path, members)
+
+    with pytest.raises(RuntimeError, match=message):
+        backend._validate_server_package_in_sdist(archive)
 
 
 def test_package_ci_abi_validation_does_not_require_source_package_import() -> None:

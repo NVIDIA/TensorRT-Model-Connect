@@ -21,8 +21,9 @@ from pathlib import Path
 import pytest
 import websockets
 
-from tensorrt_model_connect.serve import cli as serve_cli_module
-from tensorrt_model_connect.serve.cli import (
+import trtmc_server
+from trtmc_server import cli as serve_cli_module
+from trtmc_server.cli import (
     _RedactAccessToken,
     bind_socket,
     build_parser,
@@ -37,10 +38,39 @@ from tensorrt_model_connect.serve.cli import (
 
 FAKE_TRTMC = Path(__file__).with_name("fake_serve_worker.py")
 REPOSITORY = Path(__file__).resolve().parents[2]
+SERVER_SOURCE_ROOT = REPOSITORY / "server" / "python"
 _REQUIRES_PROC = pytest.mark.skipif(
     not Path("/proc").is_dir(),
     reason="process-lifecycle assertions require Linux /proc",
 )
+
+
+def _server_process_environment() -> dict[str, str]:
+    environment = dict(os.environ)
+    if environment.get("TRTMC_TEST_INSTALLED_WHEEL") == "1":
+        return environment
+    source = str(SERVER_SOURCE_ROOT)
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = source if not existing else f"{source}{os.pathsep}{existing}"
+    return environment
+
+
+def test_server_import_and_subprocess_environment_follow_selected_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_path = Path(trtmc_server.__file__).resolve()
+    installed_wheel = os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"
+    assert package_path.is_relative_to(SERVER_SOURCE_ROOT) is not installed_wheel
+
+    monkeypatch.setenv("TRTMC_TEST_INSTALLED_WHEEL", "1")
+    monkeypatch.setenv("PYTHONPATH", "/selected/site-packages:/source")
+    selected = _server_process_environment()
+    assert selected["PYTHONPATH"] == "/selected/site-packages:/source"
+    assert str(SERVER_SOURCE_ROOT) not in selected["PYTHONPATH"]
+
+    monkeypatch.delenv("TRTMC_TEST_INSTALLED_WHEEL")
+    source = _server_process_environment()
+    assert source["PYTHONPATH"].split(os.pathsep, maxsplit=1)[0] == str(SERVER_SOURCE_ROOT)
 
 
 def test_model_assignment_and_bind_policy(tmp_path: Path) -> None:
@@ -211,19 +241,13 @@ def test_cli_port_zero_emits_single_machine_readable_ready_record(
 ) -> None:
     bundle = tmp_path / "asr.bundle"
     bundle.write_bytes(b"fixture")
-    environment = dict(os.environ)
-    python_path = str(REPOSITORY / "python")
-    environment["PYTHONPATH"] = (
-        python_path
-        if not environment.get("PYTHONPATH")
-        else f"{python_path}{os.pathsep}{environment['PYTHONPATH']}"
-    )
+    environment = _server_process_environment()
     environment["TRTMC_SERVE_TOKEN"] = "environment-token"
     process = subprocess.Popen(
         [
             sys.executable,
             "-m",
-            "tensorrt_model_connect.serve.cli",
+            "trtmc_server",
             "--transcription-model",
             f"asr={bundle}",
             "--trtmc-binary",
@@ -388,13 +412,12 @@ def _start_test_server(
 ) -> tuple[subprocess.Popen[str], dict[str, object]]:
     bundle = tmp_path / f"{name}-asr.bundle"
     bundle.write_bytes(b"fixture")
-    environment = dict(os.environ)
-    environment["PYTHONPATH"] = str(REPOSITORY / "python")
+    environment = _server_process_environment()
     environment["TRTMC_SERVE_TOKEN"] = "environment-token"
     command = [
         sys.executable,
         "-m",
-        "tensorrt_model_connect.serve.cli",
+        "trtmc_server",
         "--transcription-model",
         f"asr={bundle}",
         "--trtmc-binary",

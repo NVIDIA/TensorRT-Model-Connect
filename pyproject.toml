@@ -36,6 +36,7 @@ dependencies = [
 [project.optional-dependencies]
 serve = [
     "fastapi>=0.115,<0.142",
+    "pydantic>=1.10,<3",
     "uvicorn>=0.30,<0.53",
     "python-multipart>=0.0.9,<1",
     "websockets>=13,<17",
@@ -44,6 +45,7 @@ test = [
     "pytest>=7.0",
     "torch>=2.0",
     "fastapi>=0.115,<0.142",
+    "pydantic>=1.10,<3",
     "uvicorn>=0.30,<0.53",
     "python-multipart>=0.0.9,<1",
     "httpx>=0.27,<0.29",
@@ -64,11 +66,12 @@ clip = ["open-clip-torch>=2.20", "Pillow>=9.0"]
 validation = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
 
 [tool.conan-py-build.wheel]
-packages = ["python/tensorrt_model_connect"]
+packages = ["python/tensorrt_model_connect", "server/python/trtmc_server"]
 
 [tool.conan-py-build.sdist]
 include = [
     "python",
+    "server",
     "src/runtime/models/fast_foundation_stereo/native_plugins",
     "third_party",
 ]
@@ -77,10 +80,12 @@ exclude = [
     "*.pyc",
     "python/tensorrt_model_connect/build",
     "python/tensorrt_model_connect/*.egg-info",
+    "server/python/trtmc_server/*.egg-info",
 ]
 
 [tool.pytest.ini_options]
 testpaths = [
+    "server/tests",
     "tests/builder",
     "tests/tools",
     "tests/e2e",
@@ -100,7 +105,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["tensorrt_model_connect"]
+source = ["tensorrt_model_connect", "trtmc_server"]
 omit = ["*/tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]

@@ -1756,11 +1756,17 @@ class TestE2EDataFiles:
 
 
 class TestUnitTiers:
-    def test_serve_control_plane(self, imap):
-        match = test_impact.classify_file(
-            "python/tensorrt_model_connect/serve/app.py", imap
-        )
-        assert match.rule == "serve_control_plane"
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "server/python/trtmc_server/app.py",
+            "server/tests/test_serve_api.py",
+            "server/tests/nested/test_protocol.py",
+        ],
+    )
+    def test_server_python(self, imap, path):
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "server_python"
         assert match.models == []
         assert match.unit_tiers == ["builder"]
         assert match.rebuild_cpp is False
@@ -1768,18 +1774,27 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
-            "src/serve/worker.cpp",
-            "src/serve/worker.h",
-            "src/cli/serve_worker.cpp",
-            "src/cli/serve_worker.h",
+            "server/native/worker.cpp",
+            "server/native/worker.h",
+            "server/CMakeLists.txt",
+            "server/tests/test_serve_worker.cpp",
         ],
     )
-    def test_serve_native_worker(self, imap, path):
+    def test_server_native(self, imap, path):
         match = test_impact.classify_file(path, imap)
-        assert match.rule == "serve_native_worker"
+        assert match.rule == "server_native"
         assert match.models == []
         assert match.unit_tiers == ["cpp"]
         assert match.rebuild_cpp is True
+
+    def test_changed_server_python_test_is_selected_directly(self, imap):
+        result = test_impact.analyze_impact(
+            ["server/tests/test_serve_api.py"],
+            imap,
+        )
+
+        assert result.builder_tests == ["server/tests/test_serve_api.py"]
+        assert result.e2e_models == []
 
     def test_unit_tier_builder(self, imap):
         """tests/builder/ -> unit tier 'builder', no E2E."""

@@ -76,7 +76,7 @@ def collect_cpp_coverage(
         repo_root: Repository root directory.
         build_dir: CMake build directory (must be built with --coverage).
         output_dir: Where to write per-test gcovr JSONs (default: temp dir).
-        gcovr_filters: gcovr --filter values (default: src/ and include/).
+        gcovr_filters: gcovr --filter values (default: src/, include/, and server/native/).
     """
     import tempfile
 
@@ -84,6 +84,7 @@ def collect_cpp_coverage(
         gcovr_filters = [
             str(repo_root / "src"),
             str(repo_root / "include"),
+            str(repo_root / "server" / "native"),
         ]
 
     if output_dir is None:

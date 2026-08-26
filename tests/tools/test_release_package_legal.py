@@ -75,6 +75,13 @@ def test_python_only_editable_wheel_contains_release_legal_payload(
 
     _validate_legal_payload(wheel)
     with zipfile.ZipFile(wheel) as archive:
+        editable_roots = (
+            archive.read("__editable__.tensorrt_model_connect.pth").decode().splitlines()
+        )
+        assert editable_roots == [
+            str((REPOSITORY_ROOT / "python").resolve()),
+            str((REPOSITORY_ROOT / "server/python").resolve()),
+        ]
         metadata_name = next(
             name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
         )
@@ -82,6 +89,8 @@ def test_python_only_editable_wheel_contains_release_legal_payload(
         assert metadata["Metadata-Version"] == "2.4"
         assert metadata["License-Expression"] == "Apache-2.0"
         assert sorted(metadata.get_all("License-File")) == sorted(RELEASE_LEGAL_FILES)
+    assert (REPOSITORY_ROOT / "server/python/trtmc_server/__main__.py").is_file()
+    assert not (REPOSITORY_ROOT / "python/tensorrt_model_connect/serve/__init__.py").exists()
 
 
 def test_wheel_legal_validator_rejects_missing_file(tmp_path: Path) -> None:

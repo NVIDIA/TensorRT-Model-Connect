@@ -31,8 +31,8 @@
 
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
-#include "cli/serve_worker.h"
 #include "cli/speech_session_helpers.h"
+#include "native/entrypoint.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -217,10 +217,18 @@ std::string build_pythonpath() {
                                                !rel_exe_path.empty() &&
                                                first_component.string().rfind("build", 0) == 0;
         if (running_from_source_build) {
-            const auto source_pkg = std::filesystem::path(TRTMC_SOURCE_DIR) / "python";
-            std::error_code ec;
-            if (std::filesystem::is_directory(source_pkg, ec)) {
-                pythonpath = source_pkg.string();
+            const auto source_root_path = std::filesystem::path(TRTMC_SOURCE_DIR);
+            const std::array<std::filesystem::path, 2> source_packages = {
+                source_root_path / "python",
+                source_root_path / "server" / "python",
+            };
+            for (const auto& source_package : source_packages) {
+                std::error_code ec;
+                if (!std::filesystem::is_directory(source_package, ec))
+                    continue;
+                if (!pythonpath.empty())
+                    pythonpath += ":";
+                pythonpath += source_package.string();
             }
         }
     }
@@ -312,7 +320,7 @@ int cmd_python(const CliArgs& args) {
         std::vector<std::string> command = {
             build_python_executable(),
             "-m",
-            "tensorrt_model_connect.serve.cli",
+            "trtmc_server",
         };
         command.insert(command.end(), args.build_args.begin(), args.build_args.end());
 
@@ -1776,7 +1784,8 @@ int main(int argc, char** argv) {
         if (args.command == "build" || args.command == "graph" || args.command == "serve")
             return cmd_python(args);
         if (args.command == "_serve-worker")
-            return trtmc::cli::run_serve_worker(args);
+            return trtmc::server::run_native_worker(args.bundle_path, make_load_options(args),
+                                                    args.kernel_bindings_path);
         if (args.command == "run")
             return cmd_run(args);
         if (args.command == "encode")

@@ -17,17 +17,17 @@ from fastapi.testclient import TestClient
 from httpx import Response
 from starlette.websockets import WebSocketDisconnect
 
-from tensorrt_model_connect.serve import realtime as realtime_module
-from tensorrt_model_connect.serve.app import ServerConfig, _worker_request, create_app
-from tensorrt_model_connect.serve.errors import WorkerProtocolError, WorkerRemoteError
-from tensorrt_model_connect.serve.protocol import (
+from trtmc_server import realtime as realtime_module
+from trtmc_server.app import ServerConfig, _worker_request, create_app
+from trtmc_server.errors import WorkerProtocolError, WorkerRemoteError
+from trtmc_server.protocol import (
     extract_text,
     invalid_request_message,
     prepare_chat_prompt,
 )
-from tensorrt_model_connect.serve.registry import ModelRegistry, ModelSpec
-from tensorrt_model_connect.serve.realtime import RealtimeTranscriptionConnection
-from tensorrt_model_connect.serve.worker import WorkerProcess, WorkerSession
+from trtmc_server.registry import ModelRegistry, ModelSpec
+from trtmc_server.realtime import RealtimeTranscriptionConnection
+from trtmc_server.worker import WorkerProcess, WorkerSession
 
 
 FAKE_TRTMC = Path(__file__).with_name("fake_serve_worker.py")
@@ -826,7 +826,7 @@ def test_verbose_transcription_response_has_a_fixed_public_schema(
             ],
         }
 
-    monkeypatch.setattr("tensorrt_model_connect.serve.app._worker_request", native_result)
+    monkeypatch.setattr("trtmc_server.app._worker_request", native_result)
     app = create_app(make_registry(tmp_path))
     with TestClient(app) as client:
         response = client.post(
