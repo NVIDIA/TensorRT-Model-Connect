@@ -84,6 +84,7 @@ RUN pip install "nvidia-modelopt==${MODELOPT_VERSION}"
 RUN pip install \
     "pytest<9" \
     pytest-cov \
+    "jsonschema==4.26.0" \
     coverage \
     gcovr \
     pytest-xdist \
