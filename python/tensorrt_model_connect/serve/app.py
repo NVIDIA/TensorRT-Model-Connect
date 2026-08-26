@@ -38,6 +38,7 @@ from .protocol import (
     extract_text,
     extract_usage,
     invalid_request_message,
+    is_text_only_content,
     prepare_chat_prompt,
     public_worker_error_message,
 )
@@ -220,8 +221,12 @@ def create_app(
         )
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    async def healthz() -> JSONResponse:
+        available = registry.has_healthy_worker
+        return JSONResponse(
+            status_code=200 if available else 503,
+            content={"status": "ok" if available else "unavailable"},
+        )
 
     @app.get("/readyz")
     async def readyz() -> JSONResponse:
@@ -252,6 +257,14 @@ def create_app(
                 param="stream",
             )
         raw_messages = [model_to_dict(message) for message in request.messages]
+        unsupported = _unsupported_chat_parameter(request, raw_messages)
+        if unsupported is not None:
+            return _error_response(
+                400,
+                "unsupported_parameter",
+                f"{unsupported} is not supported",
+                param=unsupported,
+            )
         prompt, use_chat_template, prompt_mode = prepare_chat_prompt(raw_messages)
         if len(prompt.encode("utf-8")) > server_config.max_prompt_bytes:
             return _error_response(
@@ -467,6 +480,81 @@ def _effective_generation_tokens(
     if isinstance(default, bool) or not isinstance(default, int) or default <= 0:
         default = 128
     return min(default, hard_cap)
+
+
+def _unsupported_chat_parameter(
+    request: ChatCompletionRequest,
+    messages: list[Mapping[str, Any]],
+) -> str | None:
+    """Reject meaningful OpenAI options that this server cannot honor."""
+
+    payload = model_to_dict(request, exclude_none=True)
+    supported = {
+        "model",
+        "messages",
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "min_p",
+        "top_k",
+        "seed",
+        "enable_thinking",
+        "stop",
+        "stream",
+    }
+    no_op = {
+        "n",
+        "best_of",
+        "logprobs",
+        "top_logprobs",
+        "frequency_penalty",
+        "presence_penalty",
+        "logit_bias",
+        "ignore_eos",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "response_format",
+        "stream_options",
+    }
+    metadata = {"user", "metadata"}
+    unknown = sorted(set(payload) - supported - no_op - metadata)
+    if unknown:
+        return unknown[0]
+    for name in sorted(no_op):
+        if name in payload and not _is_no_op_chat_parameter(name, payload[name]):
+            return name
+    for message in messages:
+        if set(message) != {"role", "content"}:
+            return "messages"
+        if message["role"].lower() not in {"assistant", "developer", "system", "user"}:
+            return "messages"
+        if not is_text_only_content(message["content"]):
+            return "messages"
+    return None
+
+
+def _is_no_op_chat_parameter(name: str, value: Any) -> bool:
+    if name in {"n", "best_of"}:
+        return isinstance(value, int) and not isinstance(value, bool) and value == 1
+    if name == "top_logprobs":
+        return isinstance(value, int) and not isinstance(value, bool) and value == 0
+    if name in {"frequency_penalty", "presence_penalty"}:
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+    if name in {"logprobs", "ignore_eos", "parallel_tool_calls"}:
+        return value is False
+    if name == "logit_bias":
+        return isinstance(value, Mapping) and not value
+    if name == "tools":
+        return isinstance(value, list) and not value
+    if name == "tool_choice":
+        return value == "none"
+    if name == "response_format":
+        return value == {"type": "text"}
+    if name == "stream_options":
+        return isinstance(value, Mapping) and not value
+    return False
 
 
 def _apply_stop(text: str, stop: str | list[str] | None) -> str:

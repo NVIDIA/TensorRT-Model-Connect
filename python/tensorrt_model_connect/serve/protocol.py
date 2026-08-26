@@ -125,7 +125,7 @@ def prepare_chat_prompt(
     if (
         len(messages) == 1
         and str(messages[0].get("role", "")).lower() == "user"
-        and _is_text_only(messages[0].get("content"))
+        and is_text_only_content(messages[0].get("content"))
     ):
         return _render_content(messages[0].get("content")), True, "single_user_template"
 
@@ -137,7 +137,7 @@ def prepare_chat_prompt(
     return "\n".join(rendered), False, "role_annotated_flattened"
 
 
-def _is_text_only(content: Any) -> bool:
+def is_text_only_content(content: Any) -> bool:
     if isinstance(content, str):
         return True
     if not isinstance(content, list):
@@ -146,6 +146,8 @@ def _is_text_only(content: Any) -> bool:
         isinstance(part, str)
         or (
             isinstance(part, Mapping)
+            and set(part) <= {"text", "type"}
+            and isinstance(part.get("type", "text"), str)
             and part.get("type", "text") in {"text", "input_text"}
             and isinstance(part.get("text"), str)
         )

@@ -364,6 +364,136 @@ def test_chat_generation_and_explicit_stream_rejection(tmp_path: Path) -> None:
     assert single == ("question", True, "single_user_template")
 
 
+@pytest.mark.parametrize(
+    ("parameter", "value"),
+    [
+        ("n", 2),
+        ("best_of", 2),
+        ("logprobs", True),
+        ("top_logprobs", 2),
+        ("frequency_penalty", 0.5),
+        ("presence_penalty", 0.5),
+        ("logit_bias", {"42": 1}),
+        ("ignore_eos", True),
+        ("tools", [{"type": "function"}]),
+        ("tool_choice", "auto"),
+        ("parallel_tool_calls", True),
+        ("response_format", {"type": "json_object"}),
+        ("stream_options", {"include_usage": True}),
+        ("functions", [{"name": "lookup"}]),
+        ("function_call", "auto"),
+        ("modalities", ["text", "audio"]),
+        ("audio", {"format": "wav"}),
+        ("prediction", {"type": "content", "content": "expected"}),
+        ("reasoning_effort", "high"),
+        ("future_semantic_option", True),
+    ],
+)
+def test_chat_rejects_meaningful_unsupported_parameters(
+    tmp_path: Path,
+    parameter: str,
+    value: object,
+) -> None:
+    app = create_app(make_registry(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json=chat_request("hello", **{parameter: value}),
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "message": f"{parameter} is not supported",
+        "type": "invalid_request_error",
+        "param": parameter,
+        "code": "unsupported_parameter",
+    }
+
+
+def test_chat_accepts_no_op_and_metadata_fields(tmp_path: Path) -> None:
+    app = create_app(make_registry(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json=chat_request(
+                "hello",
+                n=1,
+                best_of=1,
+                logprobs=False,
+                top_logprobs=0,
+                frequency_penalty=0,
+                presence_penalty=0,
+                logit_bias={},
+                ignore_eos=False,
+                tools=[],
+                tool_choice="none",
+                parallel_tool_calls=False,
+                response_format={"type": "text"},
+                stream_options={},
+                user="client-metadata",
+                metadata={"request_class": "interactive"},
+            ),
+        )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "tool", "content": "tool output"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/image.png"}}
+            ],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello", "unsupported": True}],
+        },
+        {"role": "user", "content": "hello", "name": "named-participant"},
+    ],
+)
+def test_chat_rejects_unsupported_message_semantics(
+    tmp_path: Path,
+    message: dict[str, object],
+) -> None:
+    app = create_app(make_registry(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [message]},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "unsupported_parameter"
+    assert response.json()["error"]["param"] == "messages"
+
+
+@pytest.mark.parametrize("part_type", [[], {}, None, 7])
+def test_chat_rejects_non_string_content_part_types(
+    tmp_path: Path,
+    part_type: object,
+) -> None:
+    app = create_app(make_registry(tmp_path))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [{"type": part_type, "text": "hello"}],
+                    }
+                ]
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["param"] == "messages"
+
+
 def test_model_capability_and_unknown_model_errors_are_openai_shaped(
     tmp_path: Path,
 ) -> None:
@@ -444,6 +574,7 @@ def test_saturated_worker_returns_429_without_waiting_for_active_request(
         while not registry.status()["models"]["chat"]["busy"] and time.monotonic() < deadline:
             time.sleep(0.005)
         assert registry.status()["models"]["chat"]["busy"]
+        assert client.get("/healthz").status_code == 200
         saturated = client.post("/v1/chat/completions", json=chat_request("second"))
         assert saturated.status_code == 429
         assert not active.done()
@@ -476,6 +607,43 @@ def test_model_replicas_execute_requests_in_parallel_and_bound_overload(
         assert saturated.status_code == 429
         assert saturated.json()["error"]["code"] == "server_busy"
         assert [response.result().status_code for response in active] == [200, 200]
+
+
+def test_health_remains_ok_while_one_replica_can_serve(tmp_path: Path) -> None:
+    registry = make_single_chat_registry(
+        tmp_path,
+        "crash-request-chat",
+        request_timeout=1,
+        replicas=2,
+    )
+    app = create_app(registry)
+    with TestClient(app) as client:
+        failed = client.post("/v1/chat/completions", json=chat_request("trigger"))
+        assert failed.status_code == 503
+        assert registry.status()["models"]["chat"]["ready_replicas"] == 1
+        assert client.get("/healthz").json() == {"status": "ok"}
+        assert client.get("/readyz").status_code == 200
+
+
+def test_health_and_registry_readiness_have_distinct_failure_scopes(tmp_path: Path) -> None:
+    chat = tmp_path / "crash-request-chat.bundle"
+    asr = tmp_path / "healthy-asr.bundle"
+    chat.write_bytes(b"chat")
+    asr.write_bytes(b"asr")
+    registry = ModelRegistry(
+        [
+            ModelSpec("chat", chat, "chat"),
+            ModelSpec("asr", asr, "transcription"),
+        ],
+        trtmc_binary=FAKE_TRTMC,
+        request_timeout=1,
+    )
+    app = create_app(registry)
+    with TestClient(app) as client:
+        failed = client.post("/v1/chat/completions", json=chat_request("trigger"))
+        assert failed.status_code == 503
+        assert client.get("/healthz").status_code == 200
+        assert client.get("/readyz").status_code == 503
 
 
 @pytest.mark.parametrize(
@@ -528,6 +696,11 @@ def test_worker_failures_are_http_errors_and_clear_readiness(
         assert any(record.message == "Model worker request failed" for record in caplog.records)
         assert private_detail not in caplog.text
         assert "worker-secret" not in caplog.text
+
+        health = client.get("/healthz")
+        assert health.status_code == 503
+        assert health.json() == {"status": "unavailable"}
+        assert private_detail not in health.text
 
         readiness = client.get("/readyz", headers=authorization())
         assert readiness.status_code == 503

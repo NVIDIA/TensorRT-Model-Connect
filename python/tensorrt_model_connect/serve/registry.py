@@ -137,6 +137,13 @@ class ModelRegistry:
                 and all(group.ready for group in self._groups.values())
             )
 
+    @property
+    def has_healthy_worker(self) -> bool:
+        """Return whether this process can still execute any model request."""
+
+        with self._lock:
+            return self._started and any(group.ready for group in self._groups.values())
+
     def start(self) -> None:
         """Start every configured worker replica."""
 

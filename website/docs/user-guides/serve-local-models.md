@@ -46,6 +46,11 @@ curl http://127.0.0.1:8000/v1/models \
   -H "Authorization: Bearer $TRTMC_SERVE_TOKEN"
 ```
 
+`/healthz` is an unauthenticated, detail-free supervisor probe. It returns 200
+while at least one native worker remains usable and 503 after every worker has
+failed. `/readyz` remains the whole-registry readiness check and requires the
+bearer token when authentication is configured.
+
 ## Generate a summary
 
 ```bash
@@ -65,6 +70,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 Text generation currently requires `"stream": false`. A request with
 `"stream": true` fails explicitly until the native pipeline exposes token
 callbacks and cooperative cancellation.
+
+Request-affecting OpenAI options that are not implemented are also rejected
+explicitly instead of being silently ignored. Their documented no-op values,
+such as `n=1`, remain accepted for client compatibility. The `user` and
+`metadata` fields are accepted as non-execution metadata; other unknown fields
+with non-null values fail closed.
 
 ## Add bounded request lanes
 
