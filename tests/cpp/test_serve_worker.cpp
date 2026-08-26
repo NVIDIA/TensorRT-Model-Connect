@@ -305,6 +305,56 @@ void test_invalid_utf8_result_is_replaced_in_jsonl() {
           "invalid UTF-8 byte is absent from JSONL output");
 }
 
+void test_oversized_jsonl_record_is_discarded_before_next_request() {
+    constexpr std::size_t request_limit = 16U * 1024U * 1024U;
+    std::ostringstream requests;
+    requests << std::string(request_limit + 4096U, 'x') << '\n';
+    append_request(requests, {{"id", "healthy"}, {"op", "generate"}, {"prompt", "still alive"}});
+    append_request(requests, {{"id", "stop"}, {"op", "shutdown"}});
+
+    FakePipeline pipeline;
+    std::istringstream input(requests.str());
+    std::ostringstream output;
+    const int status =
+        trtmc::serve::run_worker_protocol(pipeline, trtmc::BundleInfo{}, input, output);
+    check(status == 0, "worker survives an oversized JSONL record");
+
+    const auto messages = parse_output_lines(output.str());
+    check(messages.size() == 4, "oversized JSONL record emits an error before later responses");
+    if (messages.size() == 4) {
+        const auto& error = messages[1]["error"];
+        check(messages[1]["id"].is_null() && !messages[1].value("ok", true) &&
+                  error.value("type", "") == "invalid_request_error" &&
+                  error.value("message", "") == "request exceeds the 16 MiB JSONL limit",
+              "oversized JSONL record keeps the existing invalid-request response");
+        check(messages[2]["id"] == "healthy" && messages[2].value("ok", false) &&
+                  messages[2]["result"].value("text", "") == "generated: still alive",
+              "worker accepts the request after an oversized JSONL record");
+        check(messages[3]["id"] == "stop" && messages[3].value("ok", false),
+              "worker shuts down normally after an oversized JSONL record");
+    }
+    check(pipeline.generate_calls == 1, "oversized JSONL record is never dispatched");
+
+    const std::string unterminated_record(request_limit + 4096U, 'x');
+    std::istringstream eof_input(unterminated_record);
+    std::ostringstream eof_output;
+    FakePipeline eof_pipeline;
+    const int eof_status =
+        trtmc::serve::run_worker_protocol(eof_pipeline, trtmc::BundleInfo{}, eof_input, eof_output);
+    check(eof_status == 0, "worker handles an oversized JSONL record ending at EOF");
+
+    const auto eof_messages = parse_output_lines(eof_output.str());
+    check(eof_messages.size() == 2, "oversized EOF record emits one structured error");
+    if (eof_messages.size() == 2) {
+        const auto& error = eof_messages[1]["error"];
+        check(eof_messages[1]["id"].is_null() && !eof_messages[1].value("ok", true) &&
+                  error.value("type", "") == "invalid_request_error" &&
+                  error.value("message", "") == "request exceeds the 16 MiB JSONL limit",
+              "oversized EOF record keeps the existing invalid-request response");
+    }
+    check(eof_pipeline.generate_calls == 0, "oversized EOF record is never dispatched");
+}
+
 void test_runtime_error_is_generic_on_stdout_and_detailed_on_stderr() {
     std::ostringstream requests;
     append_request(requests, {{"id", "generate"}, {"op", "generate"}, {"prompt", "private"}});
@@ -700,6 +750,7 @@ int main() {
         test_ready_metadata_and_stream_probe();
         test_failed_stream_probe_keeps_worker_usable();
         test_invalid_utf8_result_is_replaced_in_jsonl();
+        test_oversized_jsonl_record_is_discarded_before_next_request();
         test_runtime_error_is_generic_on_stdout_and_detailed_on_stderr();
         test_provider_invalid_argument_is_not_a_public_client_error();
         test_full_worker_lifecycle();

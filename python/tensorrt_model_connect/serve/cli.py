@@ -9,6 +9,7 @@ import argparse
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -414,8 +415,8 @@ def _positive_float(value: str) -> float:
         parsed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be a number") from exc
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
     return parsed
 
 

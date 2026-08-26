@@ -190,6 +190,8 @@ inline ParsedWav parse(const std::vector<char>& bytes) {
         parse_chunk(bytes, chunk, data_offset, chunk_size, parsed);
         position = data_offset + static_cast<std::size_t>(chunk_size) + (chunk_size & 1U);
     }
+    if (position != container_end)
+        throw WavFormatError("read_wav: WAV contains a truncated chunk header");
 
     validate_required_fields(parsed);
     return parsed;

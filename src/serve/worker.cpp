@@ -19,6 +19,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -455,6 +456,32 @@ struct ProcessedRequest {
     bool shutdown{false};
 };
 
+enum class RequestLineRead { kRecord, kEnd, kError };
+
+RequestLineRead read_request_line(std::istream& input, std::vector<char>& buffer,
+                                  std::size_t& line_size) {
+    input.getline(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize extracted = input.gcount();
+    if (input.bad())
+        return RequestLineRead::kError;
+    if (input.eof() && extracted == 0)
+        return RequestLineRead::kEnd;
+
+    if (input.fail()) {
+        input.clear(input.rdstate() & ~std::ios::failbit);
+        input.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        if (input.bad())
+            return RequestLineRead::kError;
+        line_size = kMaxRequestLineBytes + 1U;
+        return RequestLineRead::kRecord;
+    }
+
+    line_size = static_cast<std::size_t>(extracted);
+    if (!input.eof())
+        --line_size; // getline() counts, but does not store, the delimiter.
+    return RequestLineRead::kRecord;
+}
+
 Json extract_request_id(const Json& request) {
     if (!request.is_object())
         return nullptr;
@@ -469,12 +496,12 @@ bool is_invalid_request_exception(const std::exception& error) {
            dynamic_cast<const nlohmann::json::exception*>(&error) != nullptr;
 }
 
-ProcessedRequest process_request_line(Worker& worker, const std::string& line) {
+ProcessedRequest process_request_line(Worker& worker, std::string_view line) {
     Json request_id = nullptr;
     try {
         if (line.size() > kMaxRequestLineBytes)
             throw ProtocolError("request exceeds the 16 MiB JSONL limit");
-        const Json request = Json::parse(line);
+        const Json request = Json::parse(line.begin(), line.end());
         request_id = extract_request_id(request);
         if (request_id.is_null())
             throw ProtocolError("id must be a non-empty string");
@@ -504,18 +531,24 @@ int run_worker_protocol(IPipeline& pipeline, const BundleInfo& bundle_info, std:
     if (!write_message(output, worker.ready_event()))
         return 2;
 
-    std::string line;
-    while (std::getline(input, line)) {
-        if (line.empty())
+    std::vector<char> line_buffer(kMaxRequestLineBytes + 2U);
+    while (true) {
+        std::size_t line_size = 0;
+        const RequestLineRead read = read_request_line(input, line_buffer, line_size);
+        if (read == RequestLineRead::kEnd)
+            return 0;
+        if (read == RequestLineRead::kError)
+            return 2;
+        if (line_size == 0)
             continue;
 
-        auto processed = process_request_line(worker, line);
+        auto processed =
+            process_request_line(worker, std::string_view(line_buffer.data(), line_size));
         if (!write_message(output, processed.response))
             return 2;
         if (processed.shutdown)
             return 0;
     }
-    return input.bad() ? 2 : 0;
 }
 
 } // namespace trtmc::serve

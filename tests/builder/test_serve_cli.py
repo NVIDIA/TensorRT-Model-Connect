@@ -117,6 +117,21 @@ def test_cli_log_level_is_a_fixed_non_debug_allowlist() -> None:
             parser.parse_args(["--log-level", level])
 
 
+@pytest.mark.parametrize(
+    "option",
+    (
+        "--startup-timeout",
+        "--request-timeout",
+        "--realtime-idle-timeout",
+        "--realtime-max-session-seconds",
+    ),
+)
+@pytest.mark.parametrize("value", ("nan", "+inf", "-inf"))
+def test_cli_timeouts_require_finite_values(option: str, value: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([f"{option}={value}"])
+
+
 def test_log_filter_recursively_redacts_transport_credentials() -> None:
     record = logging.LogRecord(
         "uvicorn.access",

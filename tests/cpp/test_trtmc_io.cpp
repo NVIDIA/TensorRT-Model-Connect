@@ -106,6 +106,21 @@ static void write_riff_bound_violation_fixture(const std::string& path) {
     output.write(reinterpret_cast<const char*>(&declared_riff_size), 4);
 }
 
+static void write_partial_chunk_header_fixture(const std::string& path) {
+    const int16_t sample = 1;
+    write_wav_fixture(path, 1, 1, 16000, 16, &sample, static_cast<uint32_t>(sizeof(sample)));
+
+    {
+        std::ofstream output(path, std::ios::binary | std::ios::app);
+        output.write("JUNK", 4);
+    }
+    const uint32_t declared_riff_size =
+        static_cast<uint32_t>(std::filesystem::file_size(path) - 8U);
+    std::fstream output(path, std::ios::binary | std::ios::in | std::ios::out);
+    output.seekp(4);
+    output.write(reinterpret_cast<const char*>(&declared_riff_size), 4);
+}
+
 static void append_trailing_truncated_chunk(const std::string& path) {
     const uint32_t declared_chunk_size = 64;
     const char short_payload = 'x';
@@ -385,11 +400,15 @@ static bool test_io_rejects_invalid_wav_contract() {
     const auto outside_riff = (root / "outside-riff-bound.wav").string();
     write_riff_bound_violation_fixture(outside_riff);
 
+    const auto partial_header = (root / "partial-chunk-header.wav").string();
+    write_partial_chunk_header_fixture(partial_header);
+
     return read_throws_with(unsupported, "PCM16 or IEEE float32") &&
            read_throws_with(incomplete, "complete audio frames") &&
            read_throws_with(zero_channels, "channels and sample rate must be positive") &&
            read_throws_with(truncated, "truncated chunk") &&
-           read_throws_with(outside_riff, "truncated chunk");
+           read_throws_with(outside_riff, "truncated chunk") &&
+           read_throws_with(partial_header, "truncated chunk header");
 }
 
 int main() {
