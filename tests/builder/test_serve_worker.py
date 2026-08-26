@@ -46,6 +46,15 @@ def make_worker(
     )
 
 
+def wait_for_stderr(worker: WorkerProcess, text: str, timeout: float = 1.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(text in line for line in worker.stderr_tail):
+            return True
+        time.sleep(0.005)
+    return any(text in line for line in worker.stderr_tail)
+
+
 def test_worker_ready_request_ids_metadata_stderr_and_cleanup(tmp_path: Path) -> None:
     worker = make_worker(tmp_path)
     worker.start()
@@ -55,13 +64,7 @@ def test_worker_ready_request_ids_metadata_stderr_and_cleanup(tmp_path: Path) ->
     assert worker.ready_payload["protocol_version"] == 2
     assert worker.ready_payload["model_id"] == "chat"
     assert worker.ready_payload["pipeline_type"] == "chat"
-    deadline = time.monotonic() + 1
-    while (
-        not any("fake worker ready" in line for line in worker.stderr_tail)
-        and time.monotonic() < deadline
-    ):
-        time.sleep(0.005)
-    assert any("fake worker ready" in line for line in worker.stderr_tail)
+    assert wait_for_stderr(worker, "fake worker ready")
 
     worker.close()
     assert worker.state == "closed"
@@ -127,7 +130,7 @@ def test_worker_startup_timeout_terminates_process_without_exposing_stderr(
         worker.start()
     assert "startup detail" not in str(failure.value)
     assert str(tmp_path) not in str(failure.value)
-    assert any("startup detail" in line for line in worker.stderr_tail)
+    assert wait_for_stderr(worker, "startup detail")
     assert worker.state == "failed"
     assert not worker.ready
     worker.close()
@@ -333,7 +336,7 @@ def test_worker_crash_keeps_stderr_out_of_exception_and_status(tmp_path: Path) -
     assert "intentional fake crash" not in str(failure.value)
     assert "worker-secret" not in str(failure.value)
     assert str(tmp_path) not in str(failure.value)
-    assert any("intentional fake crash" in line for line in worker.stderr_tail)
+    assert wait_for_stderr(worker, "intentional fake crash")
     assert worker.state == "failed"
     assert not worker.ready
     worker.close()
