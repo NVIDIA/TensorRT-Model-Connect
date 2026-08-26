@@ -137,3 +137,37 @@ def test_chunked_prefill_contract_rejects_oversized_chunk() -> None:
 
     assert not result.passed
     assert "prefill_chunk_limit_observed" in result.message
+
+
+def test_chunked_prefill_contract_rejects_runtime_token_count_mismatch() -> None:
+    output = StageOutput(
+        stage_name="full_generation",
+        data={
+            "cpp_returncode": 0,
+            "prompt_token_count": 32769,
+            "token_ids": [17, 13],
+        },
+        metadata={
+            "cpp": {
+                "trt_engine_decode_s": 0.001,
+                "stderr": "\n".join(
+                    [
+                        "[trtmc] KV cache rows=131072 (bundle max=131072, row=1 B)",
+                        "[trtmc.prefill] tokens=32769 launches=513 max_chunk=64",
+                        '[trtmc.engine_timing] label="prefill_engine_plan:prefill" '
+                        "execute_ms=953.48 launches=513",
+                    ]
+                ),
+            }
+        },
+    )
+
+    result = LlamaNativeKvChunkedPrefillRegressionPlugin().verify(
+        output,
+        _reference_output(),
+        _case(),
+        ThresholdProfile(task_strategy="text_generation_causal"),
+    )
+
+    assert not result.passed
+    assert "prefill_chunk_limit_observed" in result.message
