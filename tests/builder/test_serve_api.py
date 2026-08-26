@@ -711,6 +711,7 @@ def test_worker_failures_are_http_errors_and_clear_readiness(
         assert public_error["code"] == expected_code
         assert public_error["message"] == expected_message
         assert private_detail not in failed.text
+        assert "worker-secret" not in failed.text
         assert any(record.message == "Model worker request failed" for record in caplog.records)
         assert private_detail not in caplog.text
         assert "worker-secret" not in caplog.text
@@ -719,10 +720,15 @@ def test_worker_failures_are_http_errors_and_clear_readiness(
         assert health.status_code == 503
         assert health.json() == {"status": "unavailable"}
         assert private_detail not in health.text
+        assert "worker-secret" not in health.text
 
         readiness = client.get("/readyz", headers=authorization())
         assert readiness.status_code == 503
         assert private_detail not in readiness.text
+        assert "worker-secret" not in readiness.text
+        registry_status = str(registry.status())
+        assert private_detail not in registry_status
+        assert "worker-secret" not in registry_status
         for model_status in readiness.json()["models"].values():
             assert {"pid", "pids", "returncode", "error"}.isdisjoint(model_status)
 

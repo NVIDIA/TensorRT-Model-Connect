@@ -78,6 +78,7 @@
 namespace {
 
 using trtmc::cli::CliArgs;
+using trtmc::cli::make_load_options;
 using trtmc::cli::parse_args;
 using trtmc::cli::print_usage;
 
@@ -141,22 +142,6 @@ normalize_explicit_image_batch_seeds(const std::vector<std::uint64_t>& explicit_
         out.push_back(static_cast<std::uint32_t>(v));
     }
     return out;
-}
-
-trtmc::LoadOptions make_load_options(const CliArgs& args) {
-    trtmc::LoadOptions options;
-    options.hf_python = args.hf_python;
-    options.runtime_cache_path = args.runtime_cache;
-    options.cuda_graphs = args.cuda_graphs;
-    options.kv_cache_size_bytes = args.kv_cache_size_bytes;
-    // Forward --config/--set into the factory so ConfigBundle resolution
-    // actually sees them. Without this, every --set call silently no-ops
-    // because pipeline_factory only reads from LoadOptions.
-    options.config_path = args.config_path;
-    options.set_tokens = args.set_tokens;
-    options.backend_search_paths = args.backend_search_paths;
-    options.model_plugin_search_paths = args.model_plugin_search_paths;
-    return options;
 }
 
 std::unique_ptr<trtmc::IPipeline> load_pipeline(const CliArgs& args) {

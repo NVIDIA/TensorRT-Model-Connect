@@ -953,6 +953,7 @@ trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 # Native serving worker protocol
 trtmc_add_test(test_serve_worker)
 target_link_libraries(test_serve_worker PRIVATE trtmc_serve_worker)
+target_sources(test_serve_worker PRIVATE src/cli/args.cpp src/cli/serve_worker.cpp)
 target_include_directories(test_serve_worker SYSTEM PRIVATE ${_trtmc_nlohmann_json_include})
 
 # Config / parsing

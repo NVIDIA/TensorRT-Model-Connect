@@ -16,6 +16,7 @@
 // =============================================================================
 
 #include "cli/args.h"
+#include "trtmc/pipeline.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -86,6 +87,29 @@ void test_serve_forwards_args() {
     check(args.build_args ==
               std::vector<std::string>({"--chat-model", "chat=model.bundle", "--port", "0"}),
           "serve forwards Python facade args verbatim");
+}
+
+void test_make_load_options_maps_every_field() {
+    trtmc::cli::CliArgs args;
+    args.hf_python = "/opt/python";
+    args.runtime_cache = "/tmp/runtime.cache";
+    args.cuda_graphs = true;
+    args.kv_cache_size_bytes = 123456U;
+    args.config_path = "/tmp/config.json";
+    args.set_tokens = {"runtime.a=1", "runtime.b=true"};
+    args.backend_search_paths = {"/opt/backend-a", "/opt/backend-b"};
+    args.model_plugin_search_paths = {"/opt/model-a", "/opt/model-b"};
+
+    const auto options = trtmc::cli::make_load_options(args);
+    check(options.hf_python == args.hf_python, "load options hf_python");
+    check(options.runtime_cache_path == args.runtime_cache, "load options runtime cache");
+    check(options.cuda_graphs == args.cuda_graphs, "load options CUDA graphs");
+    check(options.kv_cache_size_bytes == args.kv_cache_size_bytes, "load options KV cache size");
+    check(options.config_path == args.config_path, "load options config path");
+    check(options.set_tokens == args.set_tokens, "load options set tokens");
+    check(options.backend_search_paths == args.backend_search_paths, "load options backend paths");
+    check(options.model_plugin_search_paths == args.model_plugin_search_paths,
+          "load options model plugin paths");
 }
 
 void test_run_parses_common_flags() {
@@ -543,6 +567,7 @@ int main() {
     test_version_aliases();
     test_build_forwards_args_verbatim();
     test_serve_forwards_args();
+    test_make_load_options_maps_every_field();
     test_run_parses_common_flags();
     test_diffusion_flags();
     test_detect_parses_contract_flags();

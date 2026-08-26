@@ -5,6 +5,8 @@
 
 #include "cli/args.h"
 
+#include "trtmc/pipeline.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -64,6 +66,20 @@ bool parse_strict_float(const char* text, float& out) {
 }
 
 } // namespace
+
+// Keep run and _serve-worker on one complete factory-option mapping.
+LoadOptions make_load_options(const CliArgs& args) {
+    LoadOptions options;
+    options.hf_python = args.hf_python;
+    options.runtime_cache_path = args.runtime_cache;
+    options.cuda_graphs = args.cuda_graphs;
+    options.kv_cache_size_bytes = args.kv_cache_size_bytes;
+    options.config_path = args.config_path;
+    options.set_tokens = args.set_tokens;
+    options.backend_search_paths = args.backend_search_paths;
+    options.model_plugin_search_paths = args.model_plugin_search_paths;
+    return options;
+}
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text) {
     if (text.empty())

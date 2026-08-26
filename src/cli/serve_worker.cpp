@@ -25,25 +25,14 @@ int run_serve_worker(const CliArgs& args) {
     }
 
     try {
-        LoadOptions options;
-        options.hf_python = args.hf_python;
-        options.runtime_cache_path = args.runtime_cache;
-        options.cuda_graphs = args.cuda_graphs;
-        options.kv_cache_size_bytes = args.kv_cache_size_bytes;
-        options.config_path = args.config_path;
-        options.set_tokens = args.set_tokens;
-        options.backend_search_paths = args.backend_search_paths;
-        options.model_plugin_search_paths = args.model_plugin_search_paths;
-
         const auto bundle_info = InspectBundle(args.bundle_path);
-        auto pipeline = load(args.bundle_path, options, args.kernel_bindings_path);
+        auto pipeline = load(args.bundle_path, make_load_options(args), args.kernel_bindings_path);
         if (!pipeline)
             throw std::runtime_error("native worker pipeline is unavailable");
         return serve::run_worker_protocol(*pipeline, bundle_info, std::cin, std::cout);
-    } catch (const std::exception&) {
-        // Do not print error.what(): worker failures can contain bundle paths or
-        // provider diagnostics that must remain outside the public protocol.
-        std::cerr << "Error: native worker failed\n";
+    } catch (const std::exception& error) {
+        // stderr is the private diagnostic channel; JSONL stdout stays redacted.
+        std::cerr << "Error: native worker failed: " << error.what() << '\n';
         return EXIT_FAILURE;
     }
 }

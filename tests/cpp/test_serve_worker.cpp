@@ -7,12 +7,15 @@
 // they cover the long-lived JSONL dispatch and audio conversion without a GPU,
 // TensorRT engine, or bundle artifact.
 
+#include "cli/args.h"
+#include "cli/serve_worker.h"
 #include "serve/worker.h"
 #include "test_helpers.h"
 #include "trtmc/pipeline.h"
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -303,6 +306,28 @@ void test_invalid_utf8_result_is_replaced_in_jsonl() {
     }
     check(output.str().find(static_cast<char>(0xFF)) == std::string::npos,
           "invalid UTF-8 byte is absent from JSONL output");
+}
+
+void test_cli_worker_startup_detail_is_stderr_only() {
+    const auto temporary = make_temp_dir();
+    trtmc::cli::CliArgs args;
+    args.bundle_path = (temporary / "private-startup-detail.bundle").string();
+
+    std::ostringstream protocol;
+    std::ostringstream diagnostics;
+    auto* previous_stdout = std::cout.rdbuf(protocol.rdbuf());
+    auto* previous_stderr = std::cerr.rdbuf(diagnostics.rdbuf());
+    const int status = trtmc::cli::run_serve_worker(args);
+    std::cout.rdbuf(previous_stdout);
+    std::cerr.rdbuf(previous_stderr);
+
+    check(status == EXIT_FAILURE, "CLI worker startup failure returns failure");
+    check(diagnostics.str().find("Error: native worker failed:") != std::string::npos &&
+              diagnostics.str().find(args.bundle_path) != std::string::npos,
+          "CLI worker startup detail remains on private stderr");
+    check(protocol.str().empty() && protocol.str().find(args.bundle_path) == std::string::npos,
+          "CLI worker startup detail never enters JSONL stdout");
+    trtmc_test::remove_all_safe(temporary);
 }
 
 void test_oversized_jsonl_record_is_discarded_before_next_request() {
@@ -750,6 +775,7 @@ int main() {
         test_ready_metadata_and_stream_probe();
         test_failed_stream_probe_keeps_worker_usable();
         test_invalid_utf8_result_is_replaced_in_jsonl();
+        test_cli_worker_startup_detail_is_stderr_only();
         test_oversized_jsonl_record_is_discarded_before_next_request();
         test_runtime_error_is_generic_on_stdout_and_detailed_on_stderr();
         test_provider_invalid_argument_is_not_a_public_client_error();
