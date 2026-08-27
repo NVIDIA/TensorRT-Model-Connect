@@ -943,6 +943,93 @@ def _task_bindings(plan: Mapping[str, Any], task: str) -> list[dict[str, Any]]:
     ]
 
 
+def _public_report_identity(path: Path) -> tuple[str, set[str]] | None:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(report, Mapping):
+        return None
+    identity = report.get("identity")
+    results = report.get("results")
+    if not isinstance(identity, Mapping) or not isinstance(results, list):
+        return None
+    revision = str(identity.get("source_revision", ""))
+    result_ids = {
+        str(row["id"])
+        for row in results
+        if isinstance(row, Mapping) and str(row.get("id", ""))
+    }
+    if not revision or not result_ids:
+        return None
+    return revision, result_ids
+
+
+def _model_source_identity(
+    execution_root: Path,
+    *,
+    task_bindings: Mapping[str, Sequence[Mapping[str, Any]]],
+    task_results: Mapping[str, int],
+    expected_revision: str,
+) -> dict[str, Any]:
+    """Verify each selected model's task evidence against public reports."""
+    expected_ids: dict[str, dict[str, set[str]]] = {}
+    for task, bindings in task_bindings.items():
+        for binding in bindings:
+            model = str(binding["model"])
+            if task == "accuracy":
+                result_id = f"{model}::{binding['workload']}"
+            else:
+                result_id = str(binding["entry"])
+            expected_ids.setdefault(model, {}).setdefault(task, set()).add(result_id)
+
+    report_paths = {
+        "accuracy": [execution_root / "accuracy" / "report.json"],
+        "perf": sorted((execution_root / "perf" / "results").glob("*/report.json")),
+    }
+    reports = {
+        task: [
+            record
+            for path in report_paths.get(task, [])
+            if (record := _public_report_identity(path)) is not None
+        ]
+        for task in task_bindings
+    }
+
+    models: dict[str, Any] = {}
+    for model, expected_tasks in sorted(expected_ids.items()):
+        observed_tasks: set[str] = set()
+        observed_revisions: set[str] = set()
+        for task, ids in expected_tasks.items():
+            if task_results.get(task) != 0:
+                continue
+            matched_ids: set[str] = set()
+            task_revisions: set[str] = set()
+            for revision, result_ids in reports.get(task, []):
+                overlap = ids & result_ids
+                if not overlap:
+                    continue
+                matched_ids.update(overlap)
+                task_revisions.add(revision)
+            if matched_ids == ids and task_revisions:
+                observed_tasks.add(task)
+                observed_revisions.update(task_revisions)
+        source_revision = (
+            next(iter(observed_revisions)) if len(observed_revisions) == 1 else None
+        )
+        models[model] = {
+            "status": (
+                "consistent"
+                if observed_tasks == set(expected_tasks)
+                and observed_revisions == {expected_revision}
+                else "inconsistent"
+            ),
+            "source_revision": source_revision,
+            "tasks": sorted(observed_tasks),
+        }
+    return {"models": models}
+
+
 def _campaign_cases(
     plan: Mapping[str, Any],
     *,
@@ -1672,7 +1759,14 @@ def _run(arguments: argparse.Namespace) -> int:
         "schema_version": "trtmc.model-check-run-result/v1",
         "run_id": run_id,
         "resumed": bool(arguments.resume),
+        "execution_revision": arguments.revision,
         "task_exit_codes": task_results,
+        "model_source_identity": _model_source_identity(
+            execution_root,
+            task_bindings=task_bindings,
+            task_results=task_results,
+            expected_revision=arguments.revision,
+        ),
         "status": "passed" if all(code == 0 for code in task_results.values()) else "failed",
     }
     (execution_root / "result.json").write_text(

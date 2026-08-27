@@ -126,6 +126,83 @@ def test_plan_can_select_distinct_accuracy_suites_per_model():
     ] == [("model-a", "suite-b"), ("model-b", "suite-c")]
 
 
+def test_model_source_identity_reads_public_task_reports(tmp_path: Path) -> None:
+    revision = "a" * 40
+    accuracy = tmp_path / "accuracy"
+    perf = tmp_path / "perf/results/perf-run"
+    accuracy.mkdir()
+    perf.mkdir(parents=True)
+    (accuracy / "report.json").write_text(
+        json.dumps(
+            {
+                "identity": {"source_revision": revision},
+                "results": [{"id": "model-a::suite-a"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (perf / "report.json").write_text(
+        json.dumps(
+            {
+                "identity": {"source_revision": revision},
+                "results": [{"id": "family-a.default"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bindings = {
+        "accuracy": [{"model": "model-a", "workload": "suite-a"}],
+        "perf": [{"model": "model-a", "entry": "family-a.default"}],
+    }
+
+    identity = model_checks._model_source_identity(
+        tmp_path,
+        task_bindings=bindings,
+        task_results={"accuracy": 0, "perf": 0},
+        expected_revision=revision,
+    )
+
+    assert identity == {
+        "models": {
+            "model-a": {
+                "source_revision": revision,
+                "status": "consistent",
+                "tasks": ["accuracy", "perf"],
+            }
+        }
+    }
+
+
+def test_model_source_identity_rejects_report_revision_mismatch(tmp_path: Path) -> None:
+    accuracy = tmp_path / "accuracy"
+    accuracy.mkdir()
+    (accuracy / "report.json").write_text(
+        json.dumps(
+            {
+                "identity": {"source_revision": "b" * 40},
+                "results": [{"id": "model-a::suite-a"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = model_checks._model_source_identity(
+        tmp_path,
+        task_bindings={
+            "accuracy": [{"model": "model-a", "workload": "suite-a"}],
+            "perf": [],
+        },
+        task_results={"accuracy": 0},
+        expected_revision="a" * 40,
+    )
+
+    assert identity["models"]["model-a"] == {
+        "source_revision": "b" * 40,
+        "status": "inconsistent",
+        "tasks": ["accuracy"],
+    }
+
+
 def test_platform_model_exclusion_applies_to_every_accuracy_and_perf_binding():
     plan = model_checks.resolve_plan(
         models=["model-a"],
