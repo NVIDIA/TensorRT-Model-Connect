@@ -5,6 +5,7 @@ id = "lfm2_moe"
 plugin = "lfm2_moe"
 test_manifests = [
   "manifests/lfm2-8b-a1b.json",
+  "manifests/lfm2-8b-a1b-l0.json",
 ]
 
 [e2e_defaults.text_generation_causal]

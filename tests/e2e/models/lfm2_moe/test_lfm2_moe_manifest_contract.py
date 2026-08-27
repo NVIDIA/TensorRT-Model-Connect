@@ -26,7 +26,7 @@ def test_model_root_registers_the_single_moe_manifest() -> None:
     model = tomllib.loads((_ROOT / "MODEL.toml").read_text(encoding="utf-8"))
     assert model["id"] == "lfm2_moe"
     assert model["plugin"] == "lfm2_moe"
-    assert model["test_manifests"] == ["manifests/lfm2-8b-a1b.json"]
+    assert model["test_manifests"] == ["manifests/lfm2-8b-a1b.json", "manifests/lfm2-8b-a1b-l0.json"]
     defaults = model["e2e_defaults"]["text_generation_causal"]
     assert defaults["reference_backend"] == "hf_transformers"
     assert defaults["oracle_level"] == "L1_external_reference"
@@ -51,7 +51,10 @@ def test_core_bf16_manifest_is_revision_pinned() -> None:
 def test_cases_cover_nightly_continuation_and_l0_replacement() -> None:
     manifest = _read_manifest("lfm2-8b-a1b.json")
     cases = {case["name"]: case for case in manifest["testcases"]}
-    assert set(cases) == {"lfm2-8b-a1b", "lfm2-8b-a1b-l0"}
+    assert set(cases) == {"lfm2-8b-a1b"}
+    l0_manifest = _read_manifest("lfm2-8b-a1b-l0.json")
+    l0_cases = {case["name"]: case for case in l0_manifest["testcases"]}
+    assert set(l0_cases) == {"lfm2-8b-a1b-l0"}
 
     nightly = cases["lfm2-8b-a1b"]
     assert nightly["ci_tier"] == "nightly_only"
@@ -61,7 +64,7 @@ def test_cases_cover_nightly_continuation_and_l0_replacement() -> None:
     assert nightly["inputs"]["do_sample"] is False
     assert nightly["contract_config"]["use_chat_template"] is False
 
-    smoke = cases["lfm2-8b-a1b-l0"]
+    smoke = l0_cases["lfm2-8b-a1b-l0"]
     assert smoke["ci_tier"] == "l0_only"
     assert smoke["reference_family"] == "lfm2_moe_greedy_continuation"
     assert smoke["inputs"]["do_sample"] is False
@@ -101,7 +104,7 @@ def test_ci_selection_keeps_the_8b_run_nightly_with_an_l0_premerge_smoke() -> No
 
 def test_manifest_excludes_dense_vl_and_external_runtime_dependencies() -> None:
     manifests = [_read_manifest(path.name) for path in sorted((_ROOT / "manifests").glob("*.json"))]
-    assert len(manifests) == 1
+    assert len(manifests) == 2
     model_ids = {manifest["hf_id"] for manifest in manifests}
     assert all("-VL" not in model_id for model_id in model_ids)
     assert all("8B-A1B" in model_id for model_id in model_ids)

@@ -1,0 +1,32 @@
+{
+  "name": "lfm2-8b-a1b-l0",
+  "hf_id": "LiquidAI/LFM2-8B-A1B",
+  "hf_revision": "c1c44ff9fc00db3ebf4516970563f5f383d23670",
+  "bundle": "lfm2-8b-a1b-l0.bundle",
+  "family": "lfm2_moe",
+  "runtime_strategy": "lfm2_moe_hybrid_conv_attention",
+  "task_strategy": "text_generation_causal",
+  "precision": "bf16",
+  "max_cache_length": 512,
+  "trust_remote_code": false,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "testcases": [
+    {
+      "name": "lfm2-8b-a1b-l0",
+      "trace_id": "IT-E2E-LFM2MOE-L0-01",
+      "ci_tier": "l0_only",
+      "reference_precision": "bf16",
+      "reference_family": "lfm2_moe_greedy_continuation",
+      "user_contract": "continuation_parity",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 4,
+      "inputs": {
+        "do_sample": false
+      },
+      "contract_config": {
+        "use_chat_template": false
+      },
+      "notes": "PR L0 repro for LFM2-8B-A1B. Same checkpoint, lfm2_moe_hybrid_conv_attention runtime, runner, comparator, and continuation contract with a shorter decode budget."
+    }
+  ]
+}
