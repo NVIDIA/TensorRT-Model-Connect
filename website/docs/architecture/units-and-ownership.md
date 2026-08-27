@@ -60,6 +60,7 @@ opaque-handle ownership API, so they are not a stable pure-C ABI.
 | Public C++ API | `include/trtmc/` | Task methods, typed results, load options, bundle inspection |
 | CLI | `src/cli/` | Argument parsing, file/media adaptation, and calls into public APIs |
 | Python package | `python/tensorrt_model_connect/` | Public build API, CLI bridge, family resolution, and bundle writing |
+| Local server | `server/` | Optional HTTP/WebSocket control plane, native worker process, and server-owned tests; depends one-way on public library contracts |
 | Python families | `python/tensorrt_model_connect/families/<family>/` | Checkpoint/config semantics, native builders, and optional optimized implementations |
 | Bundle implementation | `src/bundle/` | Safe header parsing and section access |
 | Runtime registry | `src/runtime/registry/` | Native strategy resolution, DSO loading, plugin lookup, and pipeline creation |

@@ -97,6 +97,17 @@ RUN pip install \
     sentencepiece \
     ftfy
 
+# Local serving control-plane and test dependencies. Keep these bounds aligned
+# with the serve/test optional extras in pyproject.toml so offline CI can collect
+# and run the server tests without relying on transitive packages.
+RUN pip install \
+    "fastapi>=0.115,<0.142" \
+    "pydantic>=1.10,<3" \
+    "uvicorn>=0.30,<0.53" \
+    "python-multipart>=0.0.9,<1" \
+    "httpx>=0.27,<0.29" \
+    "websockets>=13,<17"
+
 # CLIP semantic metrics for the Flux diffusion E2E comparator.
 # open-clip-torch must be pinned to a CPU-compatible version; it will use
 # the torch installation already present in this image for GPU inference.

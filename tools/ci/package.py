@@ -12,6 +12,7 @@ import ctypes
 import datetime as dt
 import importlib.metadata
 import importlib.resources
+import importlib.util
 import re
 import shutil
 import sys
@@ -211,6 +212,7 @@ class InstalledWheelValidator:
 
     def validate(self, wheel: Path) -> None:
         import tensorrt_model_connect
+        import trtmc_server
         from tensorrt_model_connect.benchmark.catalog import ManifestCatalog
 
         package_file = Path(tensorrt_model_connect.__file__).resolve()
@@ -218,6 +220,13 @@ class InstalledWheelValidator:
             raise CiError(
                 f"tensorrt_model_connect imported from source tree after wheel install: {package_file}"
             )
+        server_package_file = Path(trtmc_server.__file__).resolve()
+        if server_package_file.is_relative_to(self.repository):
+            raise CiError(
+                f"trtmc_server imported from source tree after wheel install: {server_package_file}"
+            )
+        if importlib.util.find_spec("tensorrt_model_connect.serve") is not None:
+            raise CiError("wheel still exposes the retired tensorrt_model_connect.serve package")
         installed_script = shutil.which("trtmc")
         if not installed_script:
             raise CiError("wheel did not install trtmc on PATH")
@@ -271,6 +280,7 @@ class InstalledWheelValidator:
         print(f"installed_wheel={wheel}")
         print(f"installed_package_version={package_version}")
         print(f"imported_package={package_file}")
+        print(f"imported_server_package={server_package_file}")
         print(f"installed_trtmc={script_path}")
         print(f"packaged_native_trtmc={native}")
         print(f"installed_trtmc_bench={benchmark_script}")
@@ -311,6 +321,28 @@ class WheelArchiveValidator:
             raise CiError(f"{wheel}: expected platform tag {self.platform}")
         with zipfile.ZipFile(wheel) as archive:
             names = set(archive.namelist())
+            required_server_modules = {
+                f"trtmc_server/{name}.py"
+                for name in (
+                    "__init__",
+                    "__main__",
+                    "app",
+                    "cli",
+                    "errors",
+                    "protocol",
+                    "realtime",
+                    "registry",
+                    "schemas",
+                    "worker",
+                )
+            }
+            missing_server_modules = sorted(required_server_modules - names)
+            if missing_server_modules:
+                raise CiError(
+                    f"{wheel}: packaged trtmc_server modules are missing: {missing_server_modules}"
+                )
+            if any(name.startswith("tensorrt_model_connect/serve/") for name in names):
+                raise CiError(f"{wheel}: retired tensorrt_model_connect.serve package is present")
             repository_marker = str(self.context.repository.resolve()).encode()
             leaked_entries = sorted(
                 name
@@ -613,14 +645,15 @@ class WheelPackageManager:
             self.context.state_dir / WHEEL_INSTALL_STATE,
             "python/tensorrt_model_connect/build",
         )
-        for egg_info in (self.context.repository / "python/tensorrt_model_connect").glob(
-            "*.egg-info"
-        ):
-            self.context.remove(egg_info)
-        for cache in (self.context.repository / "python/tensorrt_model_connect").rglob(
-            "__pycache__"
-        ):
-            self.context.remove(cache)
+        package_roots = (
+            self.context.repository / "python/tensorrt_model_connect",
+            self.context.repository / "server/python/trtmc_server",
+        )
+        for package_root in package_roots:
+            for egg_info in package_root.glob("*.egg-info"):
+                self.context.remove(egg_info)
+            for cache in package_root.rglob("__pycache__"):
+                self.context.remove(cache)
         (self.context.repository / "dist").mkdir(parents=True, exist_ok=True)
 
         tags = self.context.env.get("TRTMC_PACKAGE_PYTHON_TAGS", "py310 py312").split()
@@ -631,10 +664,9 @@ class WheelPackageManager:
         for tag in tags:
             tag_root = build_root / tag
             self.context.remove(tag_root, "python/tensorrt_model_connect/build")
-            for egg_info in (self.context.repository / "python/tensorrt_model_connect").glob(
-                "*.egg-info"
-            ):
-                self.context.remove(egg_info)
+            for package_root in package_roots:
+                for egg_info in package_root.glob("*.egg-info"):
+                    self.context.remove(egg_info)
             self.context.run(
                 [
                     "python",
@@ -858,6 +890,7 @@ class WheelPackageManager:
         self.context.remove(root)
         self._create_venv(root, wheel)
         trtmc = root / "bin/trtmc"
+        python = root / "bin/python"
         InstalledWheelValidator.require_elf(trtmc)
         dynamic = self.context.output(["readelf", "-d", trtmc])
         if "$ORIGIN" not in dynamic:
@@ -867,6 +900,19 @@ class WheelPackageManager:
         self.context.run([trtmc, "version"])
         self.context.run([trtmc, "--help"], capture_output=True)
         self.context.run([trtmc, "build", "--help"], capture_output=True)
+        self.context.run([trtmc, "serve", "--help"], capture_output=True)
+        self.context.run(
+            [
+                python,
+                "-I",
+                "-c",
+                (
+                    "import importlib.util, trtmc_server; "
+                    "assert importlib.util.find_spec('tensorrt_model_connect.serve') is None"
+                ),
+            ]
+        )
+        self.context.run([python, "-I", "-m", "trtmc_server", "--help"])
 
     def _create_venv(self, path: Path, wheel: Path) -> None:
         self.context.run(["python", "-m", "venv", path])

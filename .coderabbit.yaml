@@ -70,6 +70,19 @@ reviews:
         propagation, deterministic behavior, and parity between Python and
         native runtime paths.
 
+    - path: "server/**"
+      instructions: |
+        Keep this surface application-independent. Check the one-way dependency
+        on public library contracts, bounded request and process lifecycles,
+        sanitized public errors, and packaging/source-build parity. Do not
+        introduce UI, example-application, or model-specific policy here.
+
+    - path: "server/tests/**"
+      instructions: |
+        Do not suggest weakening assertions, expected values, validation
+        criteria, security boundaries, or acceptance thresholds merely to make
+        tests pass.
+
 chat:
   auto_reply: true
   art: false

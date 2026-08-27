@@ -10,6 +10,10 @@
 #include <string>
 #include <vector>
 
+namespace trtmc {
+struct LoadOptions;
+}
+
 namespace trtmc::cli {
 
 struct CliArgs {
@@ -120,6 +124,7 @@ inline bool text_stdout_requires_jsonl(const CliArgs& args, int total_samples) {
 }
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);
+LoadOptions make_load_options(const CliArgs& args);
 // Parse a CSV of unsigned-64 integers (e.g. "0,1,2"). Returns nullopt when
 // any token fails to parse. Empty string returns an empty vector wrapped
 // in an optional (caller should treat empty CSV the same as no flag).

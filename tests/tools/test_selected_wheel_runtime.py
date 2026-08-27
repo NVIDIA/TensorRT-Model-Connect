@@ -84,19 +84,25 @@ def test_selected_wheel_installs_one_wheel_without_dependencies_and_records_safe
         if "pip" in command:
             target = work / "site-packages"
             package = target / "tensorrt_model_connect"
+            server_package = target / "trtmc_server"
             (package / "bin").mkdir(parents=True)
             (package / "__init__.py").touch()
             (package / "bin/trtmc").write_bytes(b"\x7fELFfixture")
+            server_package.mkdir()
+            (server_package / "__init__.py").touch()
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     def output(command: list[object], **_kwargs: object) -> str:
         assert command[-2] == "-c"
         package = work / "site-packages/tensorrt_model_connect/__init__.py"
+        server_package = work / "site-packages/trtmc_server/__init__.py"
         return json.dumps(
             {
                 "python": str(base_python.resolve()),
                 "python_tag": PYTHON_TAG,
                 "package_file": str(package.resolve()),
+                "server_package_file": str(server_package.resolve()),
+                "legacy_server_present": False,
                 "package_version": PACKAGE_VERSION,
                 "tensorrt_distribution_version": TENSORRT_VERSION,
                 "tensorrt_runtime_version": TENSORRT_VERSION,
@@ -183,6 +189,7 @@ def test_unit_python_tests_use_selected_wheel_target_without_source_python(
     assert isinstance(updates, dict)
     assert updates["PYTHONPATH"] == f"{runtime.site_packages}:{repository}"
     assert str(repository / "python") not in updates["PYTHONPATH"]
+    assert str(repository / "server/python") not in updates["PYTHONPATH"]
     assert "--import-mode=importlib" in command
     assert updates["TRTMC_BINARY"] == str(runtime.trtmc)
     assert updates["TRTMC_TEST_INSTALLED_WHEEL"] == "1"

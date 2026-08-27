@@ -56,6 +56,7 @@ class CppCoverageEngine:
         filters = self._words("GCOVR_FILTERS") or [
             str(self.repository / "src"),
             str(self.repository / "include"),
+            str(self.repository / "server/native"),
         ]
         excludes = self._words("GCOVR_EXCLUDES") or [
             str(self.repository / "tests"),
@@ -256,6 +257,7 @@ class PythonCoverageEngine:
         targets = shlex.split(self.context.env.get("PYTHON_TEST_TARGETS", "")) or [
             "tests/builder",
             "tests/tools",
+            "server/tests",
         ]
         line_min = float(self.context.env.get("PYTHON_COVERAGE_MIN_LINE") or "100")
         branch_min = float(self.context.env.get("PYTHON_COVERAGE_MIN_BRANCH") or "100")
@@ -312,7 +314,13 @@ class PythonCoverageEngine:
 
     def _environment(self) -> dict[str, str]:
         existing = self.context.env.get("PYTHONPATH", "")
-        pythonpath = str(self.repository)
+        pythonpath = ":".join(
+            (
+                str(self.repository / "python"),
+                str(self.repository / "server" / "python"),
+                str(self.repository),
+            )
+        )
         if existing:
             pythonpath += f":{existing}"
         return {
@@ -354,6 +362,7 @@ class CoverageRunner:
             config = self._write_python_config()
             coverage_args = [
                 "--cov=tensorrt_model_connect",
+                "--cov=trtmc_server",
                 "--cov-branch",
                 f"--cov-config={config}",
                 "--cov-report=term-missing",
@@ -391,6 +400,7 @@ class CoverageRunner:
                     "pytest",
                     "tests/builder/",
                     "tests/tools/",
+                    "server/tests/",
                     *harness_tests,
                     "-v",
                     "-n",
@@ -447,6 +457,10 @@ class CoverageRunner:
                     "src/**/*.cpp",
                     "src/**/*.h",
                     "include/**/*.h",
+                    "server/native/**",
+                    "server/tests/**/*.cpp",
+                    "server/tests/**/*.h",
+                    "server/CMakeLists.txt",
                     "tests/cpp/**/*.cpp",
                     "tests/cpp/**/*.h",
                     "CMakeLists.txt",
@@ -454,7 +468,10 @@ class CoverageRunner:
                 check=False,
             )
             if not changed:
-                print("Skipping: no C++ source, C++ tests, or CMake changes in premerge diff")
+                print(
+                    "Skipping: no core/server C++ source, C++ tests, or CMake changes "
+                    "in premerge diff"
+                )
                 return
             print("C++ coverage triggered by changed files:")
             print(changed)
@@ -602,7 +619,10 @@ class CoverageRunner:
                 if text and text not in selected:
                     selected.append(text)
 
-        add(["tests/builder/"] if "builder" in fallback else impact.get("builder_tests", []))
+        if "builder" in fallback:
+            add(["tests/builder/", "server/tests/"])
+        else:
+            add(impact.get("builder_tests", []))
         if "tools" in fallback:
             add(["tests/tools/"])
             add(
@@ -629,6 +649,7 @@ class CoverageRunner:
             """[run]
 source_pkgs =
     tensorrt_model_connect
+    trtmc_server
 branch = True
 omit =
     */tests/*

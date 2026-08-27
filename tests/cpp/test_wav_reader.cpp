@@ -205,13 +205,13 @@ static void write_float32_wav(const std::string& path, const std::vector<float>&
               static_cast<std::streamsize>(data_size));
 }
 
-// Write a stereo PCM16 WAV file.
-static void write_stereo_pcm16_wav(const std::string& path, const std::vector<int16_t>& samples,
-                                   uint32_t sample_rate) {
+// Write an interleaved multi-channel PCM16 WAV file.
+static void write_multichannel_pcm16_wav(const std::string& path,
+                                         const std::vector<int16_t>& samples, uint32_t sample_rate,
+                                         uint16_t channels) {
     std::ofstream out(path, std::ios::binary);
     const uint32_t data_size = static_cast<uint32_t>(samples.size() * sizeof(int16_t));
     const uint32_t file_size = 36 + data_size;
-    const uint16_t channels = 2;
     const uint16_t bits = 16;
     const uint32_t byte_rate = sample_rate * channels * bits / 8;
     const uint16_t block_align = channels * bits / 8;
@@ -268,12 +268,27 @@ int main() {
         // stereo: [L0, R0, L1, R1] = [1000, 3000, -2000, -4000]
         std::vector<int16_t> stereo = {1000, 3000, -2000, -4000};
         auto path = (tmp / "stereo16.wav").string();
-        write_stereo_pcm16_wav(path, stereo, 16000);
+        write_multichannel_pcm16_wav(path, stereo, 16000, 2);
         auto wav = trtmc::read_wav(path);
         check(wav.samples.size() == 2, "stereo_to_mono: 2 mono samples");
         // Expected: (1000+3000)/2/32768 ~ 0.061, (-2000-4000)/2/32768 ~ -0.0916
         float expected0 = (1000.0F / 32768.0F + 3000.0F / 32768.0F) * 0.5F;
         check(std::abs(wav.samples[0] - expected0) < 0.001F, "stereo_to_mono: sample[0]");
+    }
+
+    // Test 3b: the compatibility wrapper averages every channel, not only channel zero.
+    {
+        std::vector<int16_t> interleaved = {
+            16384, 8192, 0,     -8192, // 0.125
+            0,     8192, 16384, 24576, // 0.375
+        };
+        auto path = (tmp / "four-channel16.wav").string();
+        write_multichannel_pcm16_wav(path, interleaved, 48000, 4);
+        auto wav = trtmc::read_wav(path);
+        check(wav.sample_rate == 48000, "multichannel_to_mono: source sample rate preserved");
+        check(wav.samples.size() == 2, "multichannel_to_mono: frame count preserved");
+        check(std::abs(wav.samples[0] - 0.125F) < 1e-6F, "multichannel_to_mono: sample[0]");
+        check(std::abs(wav.samples[1] - 0.375F) < 1e-6F, "multichannel_to_mono: sample[1]");
     }
 
     // Test 4: resample_linear (16kHz -> 8kHz: half the samples)

@@ -32,6 +32,7 @@
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
 #include "cli/speech_session_helpers.h"
+#include "native/entrypoint.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -77,6 +78,7 @@
 namespace {
 
 using trtmc::cli::CliArgs;
+using trtmc::cli::make_load_options;
 using trtmc::cli::parse_args;
 using trtmc::cli::print_usage;
 
@@ -140,22 +142,6 @@ normalize_explicit_image_batch_seeds(const std::vector<std::uint64_t>& explicit_
         out.push_back(static_cast<std::uint32_t>(v));
     }
     return out;
-}
-
-trtmc::LoadOptions make_load_options(const CliArgs& args) {
-    trtmc::LoadOptions options;
-    options.hf_python = args.hf_python;
-    options.runtime_cache_path = args.runtime_cache;
-    options.cuda_graphs = args.cuda_graphs;
-    options.kv_cache_size_bytes = args.kv_cache_size_bytes;
-    // Forward --config/--set into the factory so ConfigBundle resolution
-    // actually sees them. Without this, every --set call silently no-ops
-    // because pipeline_factory only reads from LoadOptions.
-    options.config_path = args.config_path;
-    options.set_tokens = args.set_tokens;
-    options.backend_search_paths = args.backend_search_paths;
-    options.model_plugin_search_paths = args.model_plugin_search_paths;
-    return options;
 }
 
 std::unique_ptr<trtmc::IPipeline> load_pipeline(const CliArgs& args) {
@@ -231,10 +217,18 @@ std::string build_pythonpath() {
                                                !rel_exe_path.empty() &&
                                                first_component.string().rfind("build", 0) == 0;
         if (running_from_source_build) {
-            const auto source_pkg = std::filesystem::path(TRTMC_SOURCE_DIR) / "python";
-            std::error_code ec;
-            if (std::filesystem::is_directory(source_pkg, ec)) {
-                pythonpath = source_pkg.string();
+            const auto source_root_path = std::filesystem::path(TRTMC_SOURCE_DIR);
+            const std::array<std::filesystem::path, 2> source_packages = {
+                source_root_path / "python",
+                source_root_path / "server" / "python",
+            };
+            for (const auto& source_package : source_packages) {
+                std::error_code ec;
+                if (!std::filesystem::is_directory(source_package, ec))
+                    continue;
+                if (!pythonpath.empty())
+                    pythonpath += ":";
+                pythonpath += source_package.string();
             }
         }
     }
@@ -247,6 +241,17 @@ std::string build_pythonpath() {
         pythonpath += existing;
     }
     return pythonpath;
+}
+
+void configure_python_module_environment() {
+    const std::string pythonpath = build_pythonpath();
+    if (!pythonpath.empty())
+        setenv("PYTHONPATH", pythonpath.c_str(), 1);
+    const auto executable = current_executable_path();
+    if (!executable.empty()) {
+        const std::string native_bin_dir = executable.parent_path().string();
+        setenv("_TRTMC_INTERNAL_NATIVE_BIN_DIR", native_bin_dir.c_str(), 1);
+    }
 }
 
 int run_python_module(const std::vector<std::string>& argv) {
@@ -268,14 +273,7 @@ int run_python_module(const std::vector<std::string>& argv) {
     }
 
     if (pid == 0) {
-        const std::string pythonpath = build_pythonpath();
-        if (!pythonpath.empty())
-            setenv("PYTHONPATH", pythonpath.c_str(), 1);
-        const auto executable = current_executable_path();
-        if (!executable.empty()) {
-            const std::string native_bin_dir = executable.parent_path().string();
-            setenv("_TRTMC_INTERNAL_NATIVE_BIN_DIR", native_bin_dir.c_str(), 1);
-        }
+        configure_python_module_environment();
         execvp(exec_argv[0], exec_argv.data());
         std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
         _exit(127);
@@ -299,7 +297,51 @@ int run_python_module(const std::vector<std::string>& argv) {
     return EXIT_FAILURE;
 }
 
+int replace_with_python_module(const std::vector<std::string>& argv) {
+    if (argv.empty()) {
+        std::cerr << "Error: empty Python command\n";
+        return EXIT_FAILURE;
+    }
+
+    std::vector<char*> exec_argv;
+    exec_argv.reserve(argv.size() + 1);
+    for (const auto& arg : argv)
+        exec_argv.push_back(const_cast<char*>(arg.c_str()));
+    exec_argv.push_back(nullptr);
+
+    configure_python_module_environment();
+    execvp(exec_argv[0], exec_argv.data());
+    std::cerr << "Error: failed to execute " << argv[0] << ": " << std::strerror(errno) << '\n';
+    return 127;
+}
+
 int cmd_python(const CliArgs& args) {
+    if (args.command == "serve") {
+        std::vector<std::string> command = {
+            build_python_executable(),
+            "-m",
+            "trtmc_server",
+        };
+        command.insert(command.end(), args.build_args.begin(), args.build_args.end());
+
+        const bool binary_provided =
+            std::any_of(args.build_args.begin(), args.build_args.end(), [](const std::string& arg) {
+                return arg == "--trtmc-binary" || arg.rfind("--trtmc-binary=", 0) == 0;
+            });
+        if (!binary_provided) {
+            const auto executable = current_executable_path();
+            if (executable.empty()) {
+                std::cerr << "Error: cannot resolve the current trtmc binary for serve\n";
+                return EXIT_FAILURE;
+            }
+            command.emplace_back("--trtmc-binary");
+            command.push_back(executable.string());
+        }
+        // Keep the caller-visible PID so lifecycle signals reach the long-lived
+        // Python facade directly. Short-lived build helpers still use fork/wait.
+        return replace_with_python_module(command);
+    }
+
     std::vector<std::string> command = {
         build_python_executable(),
         "-m",
@@ -1739,8 +1781,11 @@ int main(int argc, char** argv) {
     try {
         if (args.command == "version")
             return cmd_version();
-        if (args.command == "build" || args.command == "graph")
+        if (args.command == "build" || args.command == "graph" || args.command == "serve")
             return cmd_python(args);
+        if (args.command == "_serve-worker")
+            return trtmc::server::run_native_worker(args.bundle_path, make_load_options(args),
+                                                    args.kernel_bindings_path);
         if (args.command == "run")
             return cmd_run(args);
         if (args.command == "encode")

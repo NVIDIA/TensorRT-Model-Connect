@@ -67,6 +67,12 @@ def _classify_tier(path: str) -> Optional[str]:
         return "cpp"
     if path.startswith("python/tensorrt_model_connect/"):
         return "builder"
+    if path.startswith("server/python/"):
+        return "builder"
+    if path.startswith("server/native/") or path == "server/CMakeLists.txt":
+        return "cpp"
+    if path.startswith("server/tests/"):
+        return "builder" if path.endswith(".py") else "cpp"
     if path.startswith("tests/builder/"):
         return "builder"
     if path.startswith("tests/cpp/"):
@@ -81,6 +87,8 @@ def _classify_tier(path: str) -> Optional[str]:
 def _direct_python_test_tier(path: str) -> Optional[str]:
     """Return the tier for Python test files that pytest can run directly."""
     if path.startswith("tests/builder/"):
+        return "builder"
+    if path.startswith("server/tests/") and path.endswith(".py"):
         return "builder"
     if path.startswith("tests/tools/") or path.startswith("tests/e2e_harness/test_"):
         return "tools"

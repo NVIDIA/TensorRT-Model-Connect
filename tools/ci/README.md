@@ -64,8 +64,9 @@ GitHub-hosted public CPU runners.
 Impact analysis also passes directly changed, non-E2E Python test files to the
 unit job. The unit job adds those exact targets to its normal scope, so a
 model-owned CPU test under `tests/e2e/models/` is not hidden merely because the
-normal `builder` scope starts at `tests/builder/`. Pytest still excludes tests
-marked `gpu`, `trt`, or `e2e`; the public runner does not execute GPU inference.
+normal `builder` scope starts at `tests/builder/` and `server/tests/`. Pytest
+still excludes tests marked `gpu`, `trt`, or `e2e`; the public runner does not
+execute GPU inference.
 
 The jobs check out only the event's immutable merge SHA with read-only
 repository permission, no persisted checkout credentials, and no secrets.
@@ -112,9 +113,9 @@ This is why a model-only change validates that model, while a CI-platform change
 selects a small representative set instead of all models.
 
 Every model-owned change also selects the `builder` unit scope. That scope runs
-the Python `tests/builder/` suite without a native build. CLI-only changes
-select `cli`; changes that need both scopes, or any broad source/tooling change,
-select `all`.
+the Python `tests/builder/` and `server/tests/` suites without a native build.
+CLI-only changes select `cli`; changes that need both scopes, or any broad
+source/tooling change, select `all`.
 
 ### 3. Reject cheap failures first
 
@@ -404,7 +405,7 @@ the producing class remains the source of truth for optional evidence fields.
     "e2e_test_ids": ["tests/e2e/models/qwen3_5/test_qwen3_5_e2e.py::test_model_e2e[qwen3_5]"],
     "unit_tiers": ["cpp", "builder"],
     "cpp_tests": ["test_name"],
-    "builder_tests": ["tests/builder/test_name.py"],
+    "builder_tests": ["server/tests/test_serve_api.py"],
     "tools_tests": [],
     "fallback_tiers": [],
     "rebuild_cpp": true,

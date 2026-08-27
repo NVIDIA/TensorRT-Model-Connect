@@ -883,6 +883,28 @@ def _infer_unit_tiers(path: str) -> List[str]:
     tiers: List[str] = []
     if path.startswith("python/tensorrt_model_connect/"):
         tiers.append("builder")
+    if path.startswith("server/python/") or (
+        path.startswith("server/tests/") and path.endswith(".py")
+    ):
+        tiers.append("builder")
+    if (
+        path.startswith("server/native/")
+        or path == "server/CMakeLists.txt"
+        or (
+            path.startswith("server/tests/")
+            and path.endswith((
+                ".c",
+                ".cc",
+                ".cpp",
+                ".cxx",
+                ".cu",
+                ".cuh",
+                ".h",
+                ".hpp",
+            ))
+        )
+    ):
+        tiers.append("cpp")
     if (
         path.startswith("src/")
         or path.startswith("include/")
@@ -907,6 +929,21 @@ def _infer_rebuild_cpp(path: str) -> bool:
         or path == "CMakeLists.txt"
         or path.startswith("cmake/")
         or path.startswith("tests/cpp/")
+        or path.startswith("server/native/")
+        or path == "server/CMakeLists.txt"
+        or (
+            path.startswith("server/tests/")
+            and path.endswith((
+                ".c",
+                ".cc",
+                ".cpp",
+                ".cxx",
+                ".cu",
+                ".cuh",
+                ".h",
+                ".hpp",
+            ))
+        )
     )
 
 
@@ -1416,11 +1453,38 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_benchmark_python_triggers_owned_units",),
         ),
         ClassificationRule(
+            priority=97,
+            name="server_python",
+            matcher=_regex_rule(r"server/(?:python/.+|tests/(?:.+/)?[^/]+\.py)$"),
+            resolver=_match_result(
+                "server_python",
+                _no_models,
+                ["builder"],
+                False,
+            ),
+            covered_by=("TestUnitTiers.test_server_python",),
+        ),
+        ClassificationRule(
             priority=100,
             name="shared_builder_module",
             matcher=_path_startswith("python/tensorrt_model_connect/"),
             resolver=_match_result("shared_builder_module", _all_models),
             covered_by=("TestSharedModules.test_shared_module_all_models",),
+        ),
+        ClassificationRule(
+            priority=105,
+            name="server_native",
+            matcher=_regex_rule(
+                r"server/(?:native/.+|CMakeLists\.txt|"
+                r"tests/(?:.+/)?[^/]+\.(?:c|cc|cpp|cxx|cu|cuh|h|hpp))$"
+            ),
+            resolver=_match_result(
+                "server_native",
+                _no_models,
+                ["cpp"],
+                True,
+            ),
+            covered_by=("TestUnitTiers.test_server_native",),
         ),
         ClassificationRule(
             priority=110,
@@ -2097,6 +2161,7 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
             continue
         if (
             path.startswith("tests/builder/")
+            or path.startswith("server/tests/")
             or _is_family_builder_test(path)
             or _is_model_owned_python_unit_test(path)
         ):
@@ -2507,6 +2572,10 @@ class DiffRefinementRule:
     def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
         raise NotImplementedError
 
+    def matches_diff(self, path: str, diff_text: str, imap: ImpactMap) -> bool:
+        """Match a raw diff; subclasses may preserve added/removed direction."""
+        return self.matches(path, _significant_diff_lines(diff_text), imap)
+
     def refine(
         self,
         path: str,
@@ -2895,6 +2964,68 @@ class PyprojectValidationOptionalDependenciesRule(DiffRefinementRule):
         )
 
 
+class PyprojectServeOptionalDependenciesRule(DiffRefinementRule):
+    """Scope only the exact serve/test optional-extra migration in this PR."""
+
+    name = "pyproject_serve_optional_dependencies"
+    path = "pyproject.toml"
+    _removed_lines = ('test = ["pytest>=7.0", "torch>=2.0"]',)
+    _added_lines = (
+        "serve = [",
+        '"fastapi>=0.115,<0.142",',
+        '"uvicorn>=0.30,<0.53",',
+        '"python-multipart>=0.0.9,<1",',
+        '"websockets>=13,<17",',
+        "]",
+        "test = [",
+        '"pytest>=7.0",',
+        '"torch>=2.0",',
+        '"fastapi>=0.115,<0.142",',
+        '"uvicorn>=0.30,<0.53",',
+        '"python-multipart>=0.0.9,<1",',
+        '"httpx>=0.27,<0.29",',
+        '"websockets>=13,<17",',
+        "]",
+    )
+
+    @staticmethod
+    def _signed_lines(diff_text: str, sign: str) -> tuple[str, ...]:
+        header = "+++" if sign == "+" else "---"
+        return tuple(
+            raw_line[1:].strip()
+            for raw_line in diff_text.splitlines()
+            if raw_line.startswith(sign)
+            and not raw_line.startswith(header)
+            and raw_line[1:].strip()
+        )
+
+    def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
+        del imap
+        expected = (
+            *self._removed_lines,
+            *[line for line in self._added_lines if line != "]"],
+        )
+        return path == self.path and tuple(lines) == expected
+
+    def matches_diff(self, path: str, diff_text: str, imap: ImpactMap) -> bool:
+        del imap
+        return (
+            path == self.path
+            and self._signed_lines(diff_text, "-") == self._removed_lines
+            and self._signed_lines(diff_text, "+") == self._added_lines
+        )
+
+    def refine(
+        self,
+        path: str,
+        match: RuleMatch,
+        lines: List[str],
+        imap: ImpactMap,
+    ) -> RuleMatch:
+        del path, match, lines, imap
+        return RuleMatch(self.name, [], ["builder", "tools"], False)
+
+
 class HarnessSharedFp8ScalesRule(DiffRefinementRule):
     name = "harness_shared_fp8_scales"
     path = "tests/e2e_harness/orchestrator.py"
@@ -3127,6 +3258,7 @@ class E2EWaivesModelLinesRule(DiffRefinementRule):
 
 
 DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
+    PyprojectServeOptionalDependenciesRule(),
     PyprojectValidationOptionalDependenciesRule(),
     HarnessSharedFp8ScalesRule(),
     KnownModelTimingEstimateRule(),
@@ -3414,7 +3546,7 @@ def maybe_refine_match_with_diff(
                     candidate_models,
                 )
             continue
-        if rule.matches(path, lines, imap):
+        if rule.matches_diff(path, diff_text, imap):
             return rule.refine(path, match, lines, imap)
 
     return match

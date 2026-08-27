@@ -111,6 +111,7 @@ PLATFORM_PROJECTION_PREFIXES = (
     "cmake/",
     "include/",
     "python/tensorrt_model_connect/",
+    "server/",
     "src/",
     "tensorrt_model_connect/",
     "tests/cpp/",
@@ -190,6 +191,7 @@ FULL_UNIT_TEST_ONLY_EXACT = frozenset(
 )
 UNIT_TEST_ONLY_PREFIXES = (
     "examples/models/nemotron_voicechat/full_duplex/",
+    "server/",
     "tests/builder/",
     "tests/cpp/",
     "tests/validation/",

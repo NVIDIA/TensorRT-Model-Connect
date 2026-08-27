@@ -27,7 +27,19 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 
 _CONAN_PY_BUILD_REQUIREMENT = "conan-py-build==0.4.3"
-_PYTHON_SOURCE_ROOT = "python"
+_PYTHON_SOURCE_ROOTS = ("python", "server/python")
+_SERVER_PACKAGE_MODULES = (
+    "__init__",
+    "__main__",
+    "app",
+    "cli",
+    "errors",
+    "protocol",
+    "realtime",
+    "registry",
+    "schemas",
+    "worker",
+)
 _PACKAGE_TENSORRT_VERSION_ENV = "TRTMC_PACKAGE_TENSORRT_VERSION"
 _PACKAGE_VERSION_ENV = "TRTMC_PACKAGE_VERSION"
 _TENSORRT_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
@@ -87,8 +99,31 @@ def build_sdist(
         raise RuntimeError("TensorRT package profiles apply to wheels, not source archives")
     with _variant_conan_build_backend() as conan_build:
         filename = conan_build.build_sdist(sdist_directory, config_settings)
-    _append_benchmark_catalog_to_sdist(Path(sdist_directory) / filename)
+    sdist_path = Path(sdist_directory) / filename
+    _append_benchmark_catalog_to_sdist(sdist_path)
+    _validate_server_package_in_sdist(sdist_path)
     return filename
+
+
+def _validate_server_package_in_sdist(sdist_path: Path) -> None:
+    """Require the detached server package and reject its retired location."""
+
+    with tarfile.open(sdist_path, "r:gz") as archive:
+        files = {member.name.strip("/") for member in archive.getmembers() if member.isfile()}
+    roots = {name.partition("/")[0] for name in files if "/" in name}
+    if len(roots) != 1:
+        raise RuntimeError(f"source archive must contain one project root: {sdist_path}")
+    root = next(iter(roots))
+    required = {
+        f"{root}/server/python/trtmc_server/{module}.py"
+        for module in _SERVER_PACKAGE_MODULES
+    }
+    missing = sorted(required - files)
+    if missing:
+        raise RuntimeError("source archive is missing the detached server package")
+    retired = f"{root}/python/tensorrt_model_connect/serve/"
+    if any(name.startswith(retired) for name in files):
+        raise RuntimeError("source archive still contains the retired server package")
 
 
 def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
@@ -420,9 +455,10 @@ def _wheel_text() -> str:
 
 
 def _write_editable_wheel(wheel_path: Path, dist_info: Path, dist_info_name: str) -> None:
-    source_path = (Path.cwd() / _PYTHON_SOURCE_ROOT).resolve()
+    source_paths = tuple((Path.cwd() / root).resolve() for root in _PYTHON_SOURCE_ROOTS)
     pth_name = "__editable__.tensorrt_model_connect.pth"
-    entries: list[tuple[str, bytes]] = [(pth_name, f"{source_path}\n".encode())]
+    pth = "".join(f"{path}\n" for path in source_paths).encode()
+    entries: list[tuple[str, bytes]] = [(pth_name, pth)]
     for path in sorted(dist_info.rglob("*")):
         if path.is_file() and path.name != "RECORD":
             relative = path.relative_to(dist_info).as_posix()

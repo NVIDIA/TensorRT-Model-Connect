@@ -197,6 +197,7 @@ class SelectedWheelRuntime:
     ) -> str:
         probe = r"""
 import importlib.metadata
+import importlib.util
 import json
 import shutil
 import sys
@@ -204,11 +205,14 @@ from pathlib import Path
 
 import tensorrt
 import tensorrt_model_connect
+import trtmc_server
 
 print(json.dumps({
     "python": str(Path(sys.executable).resolve()),
     "python_tag": f"py{sys.version_info.major}{sys.version_info.minor}",
     "package_file": str(Path(tensorrt_model_connect.__file__).resolve()),
+    "server_package_file": str(Path(trtmc_server.__file__).resolve()),
+    "legacy_server_present": importlib.util.find_spec("tensorrt_model_connect.serve") is not None,
     "package_version": importlib.metadata.version("tensorrt-model-connect"),
     "tensorrt_distribution_version": importlib.metadata.version("tensorrt"),
     "tensorrt_runtime_version": tensorrt.__version__,
@@ -236,6 +240,7 @@ print(json.dumps({
             "tensorrt_distribution_version": contract.tensorrt_version,
             "tensorrt_runtime_version": contract.tensorrt_version,
             "trtmc": str(trtmc.resolve()),
+            "legacy_server_present": False,
         }
         for name, value in expected.items():
             if payload.get(name) != value:
@@ -245,10 +250,18 @@ print(json.dumps({
                 )
         try:
             package_file = Path(str(payload["package_file"])).resolve(strict=True)
-        except OSError as error:
+        except (KeyError, OSError) as error:
             raise CiError("selected wheel package import path is unavailable") from error
         if not package_file.is_relative_to(target):
             raise CiError(f"selected wheel package imported outside its target: {package_file}")
+        try:
+            server_package_file = Path(str(payload["server_package_file"])).resolve(strict=True)
+        except (KeyError, OSError) as error:
+            raise CiError("selected wheel server import path is unavailable") from error
+        if not server_package_file.is_relative_to(target):
+            raise CiError(
+                f"selected wheel server imported outside its target: {server_package_file}"
+            )
         if not trtmc.is_file() or trtmc.read_bytes()[:4] != b"\x7fELF":
             raise CiError(f"selected wheel did not install the native trtmc CLI: {trtmc}")
         package_version = payload.get("package_version")

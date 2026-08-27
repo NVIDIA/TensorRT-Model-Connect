@@ -142,6 +142,40 @@ convex region and must still match the live graph fingerprint. See
 end-to-end workflow and [TVM FFI](../features/tvm-ffi.md) for the feature
 contract and current limitations.
 
+## `trtmc serve`
+
+Keep one or more text-generation and transcription bundles loaded behind local
+HTTP and Realtime APIs:
+
+```bash
+trtmc serve \
+  --chat-model chat=/models/qwen.bundle \
+  --transcription-model asr=/models/nemotron-streaming.bundle \
+  --default-chat-model chat \
+  --default-transcription-model asr \
+  --host 127.0.0.1 \
+  --port 8000
+```
+
+`--chat-model NAME=PATH` and `--transcription-model NAME=PATH` are repeatable.
+`--model-replicas NAME=N` adds fixed independent execution lanes for one
+registered model; the default is one. Replicas may duplicate GPU memory, and
+requests receive HTTP 429 immediately when every lane is busy.
+`--port 0` selects a free port and emits a machine-readable ready record for a
+supervising process. `--api-key` falls back to `TRTMC_SERVE_TOKEN`.
+The initial release accepts only loopback IP literals such as `127.0.0.1` and
+`::1`; hostnames are rejected. Startup and request timeouts are controlled
+independently.
+
+The serve extra supplies FastAPI, Uvicorn, and multipart support:
+
+```bash
+python -m pip install "tensorrt-model-connect[serve]"
+```
+
+See [Serve Local Models](../user-guides/serve-local-models.md) for endpoint,
+Realtime transcription, security, and lifecycle details.
+
 ## Runtime commands
 
 `trtmc` also inspects and runs bundles from C++.

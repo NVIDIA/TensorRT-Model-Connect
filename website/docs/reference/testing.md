@@ -90,8 +90,9 @@ no active optimized-runtime hardware qualification route.
 Run Python tests with both the package and repository root importable:
 
 ```bash
-PYTHONPATH=python:. python3 -m pytest tests/builder -q
-PYTHONPATH=python:. python3 -m pytest tests/tools -q
+PYTHONPATH=python:server/python:. python3 -m pytest tests/builder -q
+PYTHONPATH=python:server/python:. python3 -m pytest server/tests -q
+PYTHONPATH=python:server/python:. python3 -m pytest tests/tools -q
 PYTHONPATH=python:. python3 tools/model_ci.py validate
 PYTHONPATH=python:. python3 tools/test_impact.py --validate
 ```

@@ -1756,6 +1756,46 @@ class TestE2EDataFiles:
 
 
 class TestUnitTiers:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "server/python/trtmc_server/app.py",
+            "server/tests/test_serve_api.py",
+            "server/tests/nested/test_protocol.py",
+        ],
+    )
+    def test_server_python(self, imap, path):
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "server_python"
+        assert match.models == []
+        assert match.unit_tiers == ["builder"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "server/native/worker.cpp",
+            "server/native/worker.h",
+            "server/CMakeLists.txt",
+            "server/tests/test_serve_worker.cpp",
+        ],
+    )
+    def test_server_native(self, imap, path):
+        match = test_impact.classify_file(path, imap)
+        assert match.rule == "server_native"
+        assert match.models == []
+        assert match.unit_tiers == ["cpp"]
+        assert match.rebuild_cpp is True
+
+    def test_changed_server_python_test_is_selected_directly(self, imap):
+        result = test_impact.analyze_impact(
+            ["server/tests/test_serve_api.py"],
+            imap,
+        )
+
+        assert result.builder_tests == ["server/tests/test_serve_api.py"]
+        assert result.e2e_models == []
+
     def test_unit_tier_builder(self, imap):
         """tests/builder/ -> unit tier 'builder', no E2E."""
         match = test_impact.classify_file("tests/builder/test_config.py", imap)
@@ -2224,6 +2264,7 @@ class CustomTorchReference:
     def test_diff_refinement_rules_are_named_in_dispatch_order(self, imap):
         """Diff refinement dispatch keeps named rules in reviewable order."""
         assert [rule.name for rule in test_impact.DIFF_REFINEMENT_RULES] == [
+            "pyproject_serve_optional_dependencies",
             "pyproject_validation_optional_dependencies",
             "harness_shared_fp8_scales",
             "e2e_timing_estimates_known_models",
@@ -2412,6 +2453,95 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
         )
         assert refined_loader.rule == "harness_shared_known_identifiers"
         assert refined_loader.models == expected
+
+    def test_serve_optional_dependencies_staged_diff_selects_only_host_tests(
+        self,
+        imap,
+        mock_repo,
+        monkeypatch,
+    ):
+        """The exact staged serve/test extra migration avoids model E2E fanout."""
+        diff = """
+diff --git a/pyproject.toml b/pyproject.toml
+index eb5ea4d42..68d6635db 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -37 +37,15 @@ dependencies = [
+-test = ["pytest>=7.0", "torch>=2.0"]
++serve = [
++    "fastapi>=0.115,<0.142",
++    "uvicorn>=0.30,<0.53",
++    "python-multipart>=0.0.9,<1",
++    "websockets>=13,<17",
++]
++test = [
++    "pytest>=7.0",
++    "torch>=2.0",
++    "fastapi>=0.115,<0.142",
++    "uvicorn>=0.30,<0.53",
++    "python-multipart>=0.0.9,<1",
++    "httpx>=0.27,<0.29",
++    "websockets>=13,<17",
++]
+"""
+        monkeypatch.setattr(
+            test_impact,
+            "get_file_diff",
+            lambda _base, _head, _repo_root, path: diff if path == "pyproject.toml" else "",
+        )
+
+        result = test_impact.analyze_impact(
+            ["pyproject.toml"],
+            imap,
+            base="base",
+            head="head",
+            repo_root=mock_repo,
+        )
+
+        assert result.e2e_models == []
+        assert result.e2e_test_ids == []
+        assert result.unit_tiers == ["builder", "tools"]
+        assert result.rebuild_cpp is False
+        assert result.matched_rules == [
+            {
+                "file": "pyproject.toml",
+                "rule": "pyproject_serve_optional_dependencies",
+                "models": [],
+            }
+        ]
+
+    def test_serve_extra_mixed_with_default_dependency_stays_conservative(self, imap):
+        """A runtime dependency mixed into the serve migration remains catch-all."""
+        diff = """
+diff --git a/pyproject.toml b/pyproject.toml
+@@ -20,0 +21 @@ dependencies = [
++    "new-runtime-dependency>=1",
+@@ -37 +38,15 @@ dependencies = [
+-test = ["pytest>=7.0", "torch>=2.0"]
++serve = [
++    "fastapi>=0.115,<0.142",
++    "uvicorn>=0.30,<0.53",
++    "python-multipart>=0.0.9,<1",
++    "websockets>=13,<17",
++]
++test = [
++    "pytest>=7.0",
++    "torch>=2.0",
++    "fastapi>=0.115,<0.142",
++    "uvicorn>=0.30,<0.53",
++    "python-multipart>=0.0.9,<1",
++    "httpx>=0.27,<0.29",
++    "websockets>=13,<17",
++]
+"""
+        broad = test_impact.classify_file("pyproject.toml", imap)
+        refined = test_impact.maybe_refine_match_with_diff(
+            "pyproject.toml", broad, diff, imap
+        )
+
+        assert refined.rule == "catch_all"
+        assert refined.models == imap.all_model_names
+        assert refined.rebuild_cpp is True
 
     def test_validation_optional_dependencies_do_not_select_e2e_models(
         self,

@@ -98,6 +98,8 @@ parity from the existence of a family package alone.
 | Public Python build API | `python/tensorrt_model_connect/engine_builder.py` |
 | Family discovery | `python/tensorrt_model_connect/families/__init__.py` |
 | Optimized selection and packaging | `python/tensorrt_model_connect/runtime_provider/` |
+| Local serving control plane | `server/python/trtmc_server/` |
+| Native serving worker | `server/native/` |
 | Bundle writer and reader | `python/tensorrt_model_connect/bundle_writer.py`, `src/bundle/` |
 | Public task API | `include/trtmc/pipeline.h` |
 | Pipeline creation | `src/runtime/registry/pipeline_factory.cpp` |

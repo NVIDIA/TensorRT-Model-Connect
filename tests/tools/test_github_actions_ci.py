@@ -18,6 +18,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
+    import tomli as tomllib  # type: ignore[no-redef]
+
 from tools.ci.container import CiContainer
 from tools.ci.environment import OPTIONAL_TUNING_ENVIRONMENT
 from tools.ci.process import CiError
@@ -669,6 +674,8 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
         "tests/tools/test_model_plugin_encapsulation_static.py"
         in architecture_contract
     )
+    assert "server/tests/test_dependency_direction.py" in architecture_contract
+    assert '"server/native"' in source
     assert '"-q"' in architecture_contract
     assert '"no:cacheprovider"' in architecture_contract
 
@@ -824,6 +831,46 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "_validate_package_variant" in package
     assert "_validate_backend_files" in package
     assert "_validate_backend_identity" in package
+
+
+def test_ci_image_installs_declared_server_test_dependencies() -> None:
+    pyproject = tomllib.loads(
+        (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    extras = pyproject["project"]["optional-dependencies"]
+    server_dependency_names = {
+        "fastapi",
+        "uvicorn",
+        "python-multipart",
+        "httpx",
+        "pydantic",
+        "websockets",
+    }
+    declared: dict[str, str] = {}
+    for extra_name in ("serve", "test"):
+        for requirement in extras[extra_name]:
+            name = re.split(r"[<>=!~;@\s\[]", requirement, maxsplit=1)[0].lower()
+            if name not in server_dependency_names:
+                continue
+            if name in declared:
+                assert declared[name] == requirement
+            declared[name] = requirement
+    assert set(declared) == server_dependency_names
+
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dependency_block = dockerfile.split(
+        "# Local serving control-plane and test dependencies.", maxsplit=1
+    )[1].split("\n\n", maxsplit=1)[0]
+    assert set(re.findall(r'"([^"]+)"', dependency_block)) == set(declared.values())
+
+    community_requirements = {
+        line.strip()
+        for line in (REPO_ROOT / "requirements/community-ci.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert set(declared.values()) <= community_requirements
 
 
 def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
@@ -1165,6 +1212,8 @@ def test_full_python_builder_preserves_parallel_and_allocator_coverage() -> None
     assert '"TRTMC_TEST_INSTALLED_WHEEL": "1"' in builder
     assert "source_pkgs =" in text
     assert "tensorrt_model_connect" in text
+    assert "trtmc_server" in text
+    assert '"server/tests/"' in builder
     assert (
         'os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"'
         in builder_conftest
@@ -1235,11 +1284,13 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
 
     assert "pip install" not in stage
     assert "source / 'python'" in stage
+    assert "source / 'server' / 'python'" in stage
     assert '"TRTMC_CI_SCRATCH_DIR", "/tmp"' in stage
     assert "TRTMC_PREMERGE_UNIT_BUILD_DIR" in stage
     assert '"not gpu and not trt and not e2e and not model_proof_allocator"' in stage
     assert "tests/builder/" in stage
     assert "tests/tools/" in stage
+    assert "server/tests/" in script
     assert 'glob("test_*.py")' in script
     assert '"-q"' in stage and '"-x"' in stage
     assert '"--dist=worksteal"' in stage
@@ -1252,10 +1303,13 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '"TRTMC_PREMERGE_UNIT_SCOPE", "all"' in stage
     assert "tests/builder/test_cli.py" in script
     assert 'if scope == "builder"' in script
-    assert '["tests/builder/"]' in script
+    assert '["tests/builder/", "server/tests/"]' in script
+    assert 'PurePosixPath("server/tests")' in script
     assert "if native_targets:" in stage
     assert '[build / "trtmc", "version"]' in stage
     assert '[build / "trtmc", "--help"]' in stage
+    serve_smoke = stage.split('[build / "trtmc", "serve", "--help"]', maxsplit=1)[1]
+    assert "updates=python_environment" in serve_smoke.split(")", maxsplit=1)[0]
     assert "--stop-on-failure" in stage
     assert "libtrtmc_model_*.so*" in stage
     assert "-DTRTMC_ENABLE_TRT=OFF" not in stage
@@ -1490,7 +1544,8 @@ def test_impact_stage_reuses_cached_json_for_summary() -> None:
 def test_python_builder_fallback_is_per_tier() -> None:
     script = _ci_source("coverage.py")
     assert 'if {"builder", "tools"}.issubset(fallback)' in script
-    assert '["tests/builder/"] if "builder" in fallback' in script
+    assert 'if "builder" in fallback' in script
+    assert 'add(["tests/builder/", "server/tests/"])' in script
     assert 'if "tools" in fallback' in script
     assert 'add(["tests/tools/"])' in script
     assert 'glob("test_*.py")' in script
@@ -1616,6 +1671,13 @@ def test_cpp_coverage_builds_excluded_test_target() -> None:
     assert '"CPP_COVERAGE_BUILD_TARGET", "trtmc_cpp_tests"' in coverage
     assert '["cmake", "--build", build_dir, "--target", build_target, *parallel]' in coverage
     assert "CommandRunner(cwd=build_dir" in coverage
+    for pathspec in (
+        "server/native/**",
+        "server/tests/**/*.cpp",
+        "server/tests/**/*.h",
+        "server/CMakeLists.txt",
+    ):
+        assert f'"{pathspec}"' in coverage
 
 
 def test_cpp_coverage_gate_excludes_model_owned_runtime_plugins() -> None:
@@ -1681,6 +1743,18 @@ def test_cpp_coverage_engine_runs_tools_directly_without_shell(tmp_path: Path, m
         "platform",
     ] in commands
     assert len(gcovr_commands) == 3
+    expected_filters = [
+        str(tmp_path / "src"),
+        str(tmp_path / "include"),
+        str(tmp_path / "server/native"),
+    ]
+    for command in gcovr_commands:
+        observed_filters = [
+            command[index + 1]
+            for index, value in enumerate(command[:-1])
+            if value == "--filter"
+        ]
+        assert observed_filters == expected_filters
     assert all(
         "--gcov-ignore-parse-errors" in command
         and command[command.index("--gcov-ignore-parse-errors") + 1]
@@ -1727,7 +1801,7 @@ def test_python_coverage_engine_runs_coverage_directly(tmp_path: Path) -> None:
     PythonCoverageEngine(Context(), report).run(["-q"])
 
     coverage_run = next(command for command in commands if command[2:4] == ["coverage", "run"])
-    assert coverage_run[-3:] == ["tests/builder", "tests/tools", "-q"]
+    assert coverage_run[-4:] == ["tests/builder", "tests/tools", "server/tests", "-q"]
     assert all(command[0] != "bash" for command in commands)
     assert (report / "python-cobertura.xml").is_file()
     assert (report / "python-coverage.txt").read_text() == "TOTAL 10 0 100%\n"
@@ -1741,7 +1815,11 @@ def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     assert "conan_build.build_wheel" in backend_text
     assert "conan_build.build_sdist" in backend_text
     assert "_py_only_enabled" in backend_text
-    assert 'packages = ["python/tensorrt_model_connect"]' in text
+    pyproject = tomllib.loads(text)
+    assert pyproject["tool"]["conan-py-build"]["wheel"]["packages"] == [
+        "python/tensorrt_model_connect",
+        "server/python/trtmc_server",
+    ]
     assert "[project.scripts]" not in text
 
 
@@ -1801,6 +1879,7 @@ def test_wheel_model_smoke_installs_pinned_cpu_torch() -> None:
         "def _create_venv", maxsplit=1
     )[0]
     assert "_install_model_smoke_dependencies" not in clean_smoke_block
+    assert 'self.context.run([trtmc, "serve", "--help"]' in clean_smoke_block
 
     for dockerfile_name in ("Dockerfile.dev.aarch64", "Dockerfile.dev.x86"):
         dockerfile = (REPO_ROOT / dockerfile_name).read_text()

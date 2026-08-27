@@ -15,6 +15,8 @@ from typing import Dict, List, Optional
 
 _PYTHON_PACKAGE = "tensorrt_model_connect"
 _PYTHON_SOURCE_PREFIX = f"python/{_PYTHON_PACKAGE}"
+_SERVER_PACKAGE = "trtmc_server"
+_SERVER_SOURCE_PREFIX = f"server/python/{_SERVER_PACKAGE}"
 
 
 def _normalize_source_path(src_path: str, repo_root: Optional[Path] = None) -> str:
@@ -28,12 +30,15 @@ def _normalize_source_path(src_path: str, repo_root: Optional[Path] = None) -> s
             pass
 
     parts = [part for part in path_text.strip("/").split("/") if part]
-    if _PYTHON_PACKAGE in parts:
-        package_index = parts.index(_PYTHON_PACKAGE)
-        if package_index > 0 and parts[package_index - 1] == "python":
-            return "/".join(parts[package_index - 1:])
-        package_tail = "/".join(parts[package_index + 1:])
-        return f"{_PYTHON_SOURCE_PREFIX}/{package_tail}" if package_tail else _PYTHON_SOURCE_PREFIX
+    for package, source_prefix in (
+        (_PYTHON_PACKAGE, _PYTHON_SOURCE_PREFIX),
+        (_SERVER_PACKAGE, _SERVER_SOURCE_PREFIX),
+    ):
+        if package not in parts:
+            continue
+        package_index = parts.index(package)
+        package_tail = "/".join(parts[package_index + 1 :])
+        return f"{source_prefix}/{package_tail}" if package_tail else source_prefix
 
     return path_text.strip("/")
 
@@ -81,7 +86,7 @@ def collect_python_coverage(
 
     Args:
         repo_root: Repository root directory.
-        test_targets: pytest target directories (default: tests/builder tests/tools).
+        test_targets: pytest target directories (default: builder, tools, and server tests).
         cov_source: Package to measure coverage for.
         python_bin: Python executable to use.
 
@@ -89,7 +94,7 @@ def collect_python_coverage(
         {source_file_path: [test_node_ids]}
     """
     if test_targets is None:
-        test_targets = ["tests/builder", "tests/tools"]
+        test_targets = ["tests/builder", "tests/tools", "server/tests"]
 
     coverage_file = repo_root / ".coverage-map-gen"
 
@@ -98,10 +103,14 @@ def collect_python_coverage(
     for wal in [coverage_file.with_suffix(".db-wal"), coverage_file.with_suffix(".db-shm")]:
         wal.unlink(missing_ok=True)
 
+    coverage_sources = [cov_source]
+    if cov_source == _PYTHON_PACKAGE:
+        coverage_sources.append(_SERVER_PACKAGE)
+
     cmd = [
         python_bin, "-m", "pytest",
         *test_targets,
-        f"--cov={cov_source}",
+        *(f"--cov={source}" for source in coverage_sources),
         "--cov-context=test",
         "--cov-report=",  # suppress report output
         "-q",
@@ -110,7 +119,13 @@ def collect_python_coverage(
 
     env = {
         "COVERAGE_FILE": str(coverage_file),
-        "PYTHONPATH": str(repo_root),
+        "PYTHONPATH": os.pathsep.join(
+            (
+                str(repo_root / "python"),
+                str(repo_root / "server" / "python"),
+                str(repo_root),
+            )
+        ),
     }
 
     full_env = {**os.environ, **env}
