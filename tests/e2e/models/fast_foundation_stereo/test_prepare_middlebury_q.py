@@ -14,6 +14,15 @@ from PIL import Image
 from tests.e2e.models.fast_foundation_stereo import prepare_middlebury_q
 
 
+def test_archives_use_the_official_evaluation_download_directory() -> None:
+    assert prepare_middlebury_q.DATA_URL.startswith(
+        "https://vision.middlebury.edu/stereo/submit3/zip/"
+    )
+    assert prepare_middlebury_q.GROUND_TRUTH_URL.startswith(
+        "https://vision.middlebury.edu/stereo/submit3/zip/"
+    )
+
+
 def _write_pfm(path: Path, values: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     height, width = values.shape

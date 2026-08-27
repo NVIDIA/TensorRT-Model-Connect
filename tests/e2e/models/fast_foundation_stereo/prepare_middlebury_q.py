@@ -18,9 +18,9 @@ import numpy as np
 from PIL import Image
 
 
-DATA_URL = "https://vision.middlebury.edu/stereo/data/scenes2014/zip/MiddEval3-data-Q.zip"
+DATA_URL = "https://vision.middlebury.edu/stereo/submit3/zip/MiddEval3-data-Q.zip"
 GROUND_TRUTH_URL = (
-    "https://vision.middlebury.edu/stereo/data/scenes2014/zip/MiddEval3-GT0-Q.zip"
+    "https://vision.middlebury.edu/stereo/submit3/zip/MiddEval3-GT0-Q.zip"
 )
 DATA_SHA256 = "a1411f283b523541e0d2e8b3a1dd6618974a0e539aea0122490791a041fffc09"
 GROUND_TRUTH_SHA256 = (
