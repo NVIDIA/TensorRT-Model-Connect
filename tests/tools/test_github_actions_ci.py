@@ -332,7 +332,9 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert authorize_permissions.strip() == (
         "actions: read\n      contents: read\n      pull-requests: write"
     )
-    assert dispatch_permissions.strip() == "{}"
+    assert dispatch_permissions.strip() == (
+        "contents: read\n      pull-requests: read\n      statuses: write"
+    )
 
     assert "collaborators/$ACTOR/permission" in authorize
     assert "--jq '.role_name'" in authorize
@@ -391,16 +393,20 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     for secret in secret_references:
         assert secret not in authorize
         assert secret in dispatch
-    assert workflow.count("${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}") == 1
+    assert workflow.count("${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}") == 3
 
     assert "actions/create-github-app-token@" not in workflow
     assert "permission-checks:" not in workflow
-    assert "actions/checkout@" not in workflow
+    assert (
+        "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+        in workflow
+    )
+    assert "persist-credentials: false" in dispatch
     assert "private_ci_bridge.py" not in workflow
     assert "self-hosted" not in workflow
     assert "secrets: inherit" not in workflow
     assert "report-guard-failure" not in workflow
-    assert "/statuses/" not in workflow
+    assert workflow.count("/statuses/") == 1
     assert "/comments" not in workflow
     assert (
         "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/"
@@ -412,12 +418,28 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert 'echo "$PRIVATE_CI_' not in dispatch
     assert "GITHUB_STEP_SUMMARY" not in dispatch
 
-    assert dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") == 1
+    assert dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") >= 1
 
     assert 'ref: "main"' in dispatch
     for name in ("pr_number", "head_sha"):
         assert f"{name}: ${name}" in dispatch
     assert "umask 077" in dispatch
+    assert 'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA"' in dispatch
+    assert ".display_title == $title" in dispatch
+    assert ".created_at >= $dispatched_at" in dispatch
+    assert "actions/workflows/premerge.yml/runs?event=workflow_dispatch" in dispatch
+    assert "actions/runs/$RUN_ID" in dispatch
+    assert "--name public-failure-payload" in dispatch
+    assert "--log" not in dispatch
+    assert "validate_public_failure(report)" in dispatch
+    assert "assert_public_payload_safe(report, document)" in dispatch
+    assert "name: public-failure-log" in dispatch
+    assert "Automated internal CI failed; open the public failure log" in dispatch
+    assert "TRTMC Internal CI / Automated premerge gate" in dispatch
+    assert "actions/runs/$GITHUB_RUN_ID" in dispatch
+    assert dispatch.index("- name: Confirm the exact open pull-request head") < (
+        dispatch.index("- name: Print public-failure.log")
+    )
     assert 'trap \'rm -f "$payload"\' EXIT' in dispatch
     assert 'if: ${{ failure() }}' not in dispatch
 

@@ -132,11 +132,15 @@ jobs:
     environment:
       name: ci-dispatch
       deployment: false
-    timeout-minutes: 5
-    permissions: {}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
 
     steps:
       - name: Dispatch internal premerge CI
+        id: private_run
         env:
           # Fine-grained PAT scoped only to the internal CI repository with
           # Actions: write. The protected environment owns this secret.
@@ -151,6 +155,7 @@ jobs:
           [[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$ ]]
 
           umask 077
+          dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           payload="$RUNNER_TEMP/internal-ci-dispatch.json"
           trap 'rm -f "$payload"' EXIT
           jq -n \
@@ -166,3 +171,158 @@ jobs:
           gh api --silent --method POST \
             "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches" \
             --input "$payload"
+
+          expected_title="Source PR #$PR_NUMBER · $HEAD_SHA"
+          run_id=""
+          for _ in $(seq 1 20); do
+            runs="$(
+              gh api --method GET \
+                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/runs?event=workflow_dispatch&per_page=100"
+            )"
+            run_id="$(
+              jq -r \
+                --arg title "$expected_title" \
+                --arg dispatched_at "$dispatched_at" \
+                '[
+                  .workflow_runs[]
+                  | select(
+                      .display_title == $title and
+                      .created_at >= $dispatched_at
+                    )
+                ]
+                | sort_by(.created_at)
+                | last
+                | .id // empty' <<<"$runs"
+            )"
+            if [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+              break
+            fi
+            sleep 3
+          done
+          if ! [[ "$run_id" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The exact dispatched Internal CI run was not found."
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the exact Internal CI result
+        id: private_result
+        env:
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          RUN_ID: ${{ steps.private_run.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          for _ in $(seq 1 220); do
+            run="$(
+              gh api --method GET \
+                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/runs/$RUN_ID"
+            )"
+            status="$(jq -er '.status' <<<"$run")"
+            if [ "$status" = "completed" ]; then
+              conclusion="$(jq -er '.conclusion' <<<"$run")"
+              echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::error::Timed out waiting for the exact Internal CI run."
+          exit 1
+
+      - name: Download closed public failure payload
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}
+          PRIVATE_CI_OWNER: ${{ secrets.TRTMC_PRIVATE_CI_OWNER }}
+          PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
+          RUN_ID: ${{ steps.private_run.outputs.run_id }}
+          PAYLOAD_DIR: ${{ runner.temp }}/private-public-failure
+        run: |
+          set -euo pipefail
+          mkdir -p "$PAYLOAD_DIR"
+          gh run download "$RUN_ID" \
+            --repo "$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY" \
+            --name public-failure-payload \
+            --dir "$PAYLOAD_DIR"
+          test -s "$PAYLOAD_DIR/public-failure.json"
+
+      - name: Check out trusted failure-report tooling
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Validate payload and render public-failure.log
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        id: render
+        env:
+          PUBLIC_FAILURE_JSON: ${{ runner.temp }}/private-public-failure/public-failure.json
+          PUBLIC_FAILURE_LOG: ${{ runner.temp }}/public-failure.log
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          from tools.public_failure.contract import validate_public_failure
+          from tools.public_failure.render import render_failure_report
+          from tools.public_failure.safety import assert_public_payload_safe
+
+          report = json.loads(
+              Path(os.environ["PUBLIC_FAILURE_JSON"]).read_text(encoding="utf-8")
+          )
+          validate_public_failure(report)
+          document = render_failure_report(report)
+          assert_public_payload_safe(report, document)
+          Path(os.environ["PUBLIC_FAILURE_LOG"]).write_bytes(document)
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              output.write(f"head_sha={report['head_sha']}\n")
+              output.write(f"pr_number={report['pr_number']}\n")
+          PY
+
+      - name: Confirm the exact open pull-request head
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.render.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.render.outputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          EXPECTED_PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          test "$HEAD_SHA" = "$EXPECTED_HEAD_SHA"
+          test "$PR_NUMBER" = "$EXPECTED_PR_NUMBER"
+          pull="$(gh api --method GET "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          test "$(jq -er '.state' <<<"$pull")" = "open"
+          test "$(jq -er '.base.repo.full_name' <<<"$pull")" = "$GITHUB_REPOSITORY"
+          test "$(jq -er '.base.ref' <<<"$pull")" = "main"
+          test "$(jq -er '.head.sha' <<<"$pull")" = "$HEAD_SHA"
+
+      - name: Print public-failure.log
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        run: cat "${{ runner.temp }}/public-failure.log"
+
+      - name: Upload public-failure.log
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-failure-log
+          path: ${{ runner.temp }}/public-failure.log
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish the automated failure status
+        if: ${{ steps.private_result.outputs.conclusion != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.render.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          gh api --silent --method POST \
+            "/repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state=failure \
+            -f context="TRTMC Internal CI / Automated premerge gate" \
+            -f description="Automated internal CI failed; open the public failure log" \
+            -f target_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

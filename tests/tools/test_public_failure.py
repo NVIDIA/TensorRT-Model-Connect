@@ -74,6 +74,27 @@ def _build_failure(*, test_id: str) -> dict[str, object]:
     }
 
 
+def test_fast_foundation_stereo_failure_keeps_the_public_model_name() -> None:
+    report = export_failure(
+        {
+            "failures": [
+                {
+                    "failure_type": "unit_fail",
+                    "stage": "unit",
+                    "model": "fast_foundation_stereo",
+                    "backend": "other-backend",
+                    "gpu_type": "protected-gpu",
+                    "test_id": "ctest::test_fast_foundation_stereo_native_plugins",
+                    "reason_code": "test_failed",
+                }
+            ]
+        },
+        _context(),
+    )
+
+    assert report["failures"][0]["model"] == "fast_foundation_stereo"
+
+
 def test_export_failure_rebuilds_a_public_result_from_approved_fields() -> None:
     failure = _comparison_failure()
     failure["raw_log"] = "Bearer must-not-escape"
@@ -514,6 +535,23 @@ def test_public_failure_relay_uses_the_existing_status_context() -> None:
     assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 1
     assert "actions/runs/$GITHUB_RUN_ID" in workflow
     assert "pulls/$PR_NUMBER" in workflow
+    assert workflow.index("- name: Confirm the exact open pull-request head") < workflow.index(
+        "- name: Print public-failure.log"
+    )
+
+
+def test_internal_ci_bridge_publishes_the_private_sanitized_artifact() -> None:
+    workflow = (
+        Path(__file__).parents[2] / ".github/workflows/internal-ci-bridge.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "--name public-failure-payload" in workflow
+    assert "--log" not in workflow
+    assert "validate_public_failure(report)" in workflow
+    assert "assert_public_payload_safe(report, document)" in workflow
+    assert "name: public-failure-log" in workflow
+    assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 1
+    assert "actions/runs/$GITHUB_RUN_ID" in workflow
     assert workflow.index("- name: Confirm the exact open pull-request head") < workflow.index(
         "- name: Print public-failure.log"
     )

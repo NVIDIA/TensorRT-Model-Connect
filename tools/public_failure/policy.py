@@ -49,6 +49,7 @@ PUBLIC_MODELS: Final = frozenset(
     {
         "chronos_bolt",
         "codegen",
+        "fast_foundation_stereo",
         "llama",
         "patchtsmixer",
         "personaplex",
