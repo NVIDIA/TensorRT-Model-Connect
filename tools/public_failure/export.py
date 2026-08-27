@@ -20,11 +20,13 @@ from .policy import (
     public_model,
     public_reason_code,
     public_stage,
+    public_subject,
 )
 
 
 MAX_PUBLIC_FAILURES = 20
 SAFE_TEST_ID_PATTERN = re.compile(r"[A-Za-z0-9_./:\[\],=+-]{1,300}\Z")
+SAFE_EXCERPT_LINE_PATTERN = re.compile(r"[\x20-\x7e]{1,240}\Z")
 
 
 @dataclass(frozen=True)
@@ -74,8 +76,24 @@ def _export_test_id(value: object) -> str:
     return value
 
 
+def _export_excerpt(value: object) -> list[str] | None:
+    if not isinstance(value, list) or not value or len(value) > 20:
+        return None
+    lines: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or SAFE_EXCERPT_LINE_PATTERN.fullmatch(item) is None:
+            return None
+        lines.append(item)
+    if sum(len(line) for line in lines) > 4000:
+        return None
+    return lines
+
+
 def _export_one_failure(value: Mapping[str, object]) -> dict[str, Any]:
     metric = _export_metric(value.get("metric"))
+    reason_code = public_reason_code(value.get("reason_code"))
+    subject = public_subject(value.get("subject"))
+    excerpt = _export_excerpt(value.get("excerpt"))
     public = {
         "public_stage": public_stage(value.get("stage")),
         "model": public_model(value.get("model")),
@@ -83,11 +101,21 @@ def _export_one_failure(value: Mapping[str, object]) -> dict[str, Any]:
         "gpu_type": public_gpu_type(value.get("gpu_type")),
         "test_id": _export_test_id(value.get("test_id")),
         "failure_class": public_failure_class(value.get("failure_type")),
-        "reason_code": public_reason_code(value.get("reason_code")),
-        "disclosure": "full" if metric is not None else "withheld",
+        "reason_code": reason_code,
+        "disclosure": (
+            "truncated"
+            if excerpt is not None
+            else "full"
+            if reason_code != "unknown"
+            else "withheld"
+        ),
     }
     if metric is not None:
         public["metric"] = metric
+    if subject is not None:
+        public["subject"] = subject
+    if excerpt is not None:
+        public["excerpt"] = excerpt
     return public
 
 

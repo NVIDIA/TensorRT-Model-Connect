@@ -85,7 +85,7 @@ def test_export_failure_rebuilds_a_public_result_from_approved_fields() -> None:
 
     assert report == {
         "schema_version": 1,
-        "policy_version": "2026-08-26",
+        "policy_version": "2026-08-27",
         "report_id": f"trtmc-pr123-{HEAD_SHA[:7]}-attempt1",
         "repository": "NVIDIA/TensorRT-Model-Connect",
         "pr_number": 123,
@@ -234,7 +234,7 @@ def test_json_schema_accepts_the_exported_report_and_is_itself_valid() -> None:
     Draft202012Validator(schema).validate(report)
 
 
-def test_renderer_produces_deterministic_self_contained_html() -> None:
+def test_renderer_produces_deterministic_plain_text() -> None:
     report = _comparison_report()
 
     first = render_failure_report(report)
@@ -242,24 +242,202 @@ def test_renderer_produces_deterministic_self_contained_html() -> None:
 
     assert first == second
     document = first.decode("utf-8")
-    assert "TRTMC Protected CI failure report" in document
+    assert "TRTMC Protected CI failure" in document
     assert "patchtsmixer" in document
     assert "max_relative_l2" in document
     assert "0.021" in document
-    assert "&lt;=" in document
-    assert "default-src 'none'" in document
-    assert '<span class="status">FAILED</span>' in document
-    assert '<table class="run-meta">' in document
-    assert '<table class="failure-table">' in document
+    assert "Requirement: <= 0.01" in document
+    assert "Status: FAILED" in document
     lowered = document.lower()
-    assert 'class="banner"' not in lowered
-    assert 'class="card"' not in lowered
-    assert 'class="eyebrow"' not in lowered
-    assert "<script" not in lowered
-    assert "<link" not in lowered
-    assert "<img" not in lowered
+    assert "<!doctype" not in lowered
+    assert "<html" not in lowered
     assert "http://" not in lowered
     assert "https://" not in lowered
+
+
+def test_renderer_includes_a_bounded_sanitized_failed_step_tail() -> None:
+    failure = _comparison_failure()
+    failure["excerpt"] = [
+        "E   AssertionError: output mismatch",
+        "FAILED tests/e2e/models/patchtsmixer/test_e2e.py::test_forecast",
+    ]
+    report = export_failure({"failures": [failure]}, _context())
+
+    validate_public_failure(report)
+    document = render_failure_report(report).decode("utf-8")
+
+    assert report["failures"][0]["disclosure"] == "truncated"
+    assert "Sanitized failed-step excerpt (tail):" in document
+    assert "E   AssertionError: output mismatch" in document
+    assert "FAILED tests/e2e/models/patchtsmixer/test_e2e.py::test_forecast" in document
+
+
+@pytest.mark.parametrize(
+    "excerpt",
+    [
+        [],
+        ["x"] * 21,
+        ["line with\nnewline"],
+        ["x" * 241],
+        ["x" * 201] * 20,
+    ],
+)
+def test_public_contract_rejects_invalid_excerpts(excerpt: list[str]) -> None:
+    report = _comparison_report()
+    report["failures"][0]["excerpt"] = excerpt
+
+    with pytest.raises(PublicFailureValidationError):
+        validate_public_failure(report)
+
+
+def test_safety_scan_rejects_a_sensitive_excerpt() -> None:
+    failure = _comparison_failure()
+    failure["excerpt"] = ["request failed at https://runner.internal/log"]
+    report = export_failure({"failures": [failure]}, _context())
+    document = render_failure_report(report)
+
+    with pytest.raises(PublicFailureSafetyError, match="URL"):
+        assert_public_payload_safe(report, document)
+
+
+def test_safety_scan_rejects_an_unredacted_registry_image_reference() -> None:
+    failure = _comparison_failure()
+    failure["excerpt"] = ["pull nvcr.io/private/image:build failed"]
+    report = export_failure({"failures": [failure]}, _context())
+    document = render_failure_report(report)
+
+    with pytest.raises(PublicFailureSafetyError, match="registry image reference"):
+        assert_public_payload_safe(report, document)
+
+
+@pytest.mark.parametrize(
+    ("internal_failure", "expected_lines"),
+    [
+        (
+            {
+                "failure_type": "unit_fail",
+                "stage": "unit",
+                "test_id": "tests/tools/test_public_failure.py::collection",
+                "reason_code": "python_dependency_missing",
+                "subject": "jsonschema",
+            },
+            (
+                "Cause: A required Python dependency is unavailable.",
+                "Subject: jsonschema",
+                "Test: tests/tools/test_public_failure.py::collection",
+            ),
+        ),
+        (
+            {
+                "failure_type": "legal_fail",
+                "stage": "legal",
+                "test_id": "bindings/nodejs/example.js",
+                "reason_code": "spdx_preamble_invalid",
+            },
+            (
+                "Cause: An SPDX directive is outside the approved file preamble.",
+                "Test: bindings/nodejs/example.js",
+            ),
+        ),
+        (
+            {
+                "failure_type": "source_quality_fail",
+                "stage": "source-quality",
+                "test_id": "cpp/src/example.cpp:42",
+                "reason_code": "source_formatting_failed",
+            },
+            (
+                "Cause: Source formatting validation failed.",
+                "Test: cpp/src/example.cpp:42",
+            ),
+        ),
+        (
+            {
+                "failure_type": "infrastructure_error",
+                "stage": "runtime-control",
+                "test_id": "runtime-catalog",
+                "reason_code": "runtime_catalog_miss",
+            },
+            (
+                "Cause: No qualified runtime exists for this exact Source revision.",
+                "Test: runtime-catalog",
+            ),
+        ),
+        (
+            {
+                "failure_type": "compare_fail",
+                "stage": "model-proof",
+                "model": "internvl3-2b",
+                "test_id": "internvl3-2b::full_generation",
+                "reason_code": "model_output_mismatch",
+            },
+            (
+                "Cause: Model output did not match the required reference.",
+                "Test: internvl3-2b::full_generation",
+            ),
+        ),
+        (
+            {
+                "failure_type": "package_fail",
+                "stage": "package",
+                "test_id": "python-wheel::import",
+                "reason_code": "python_package_import_failed",
+                "subject": "tensorrt_model_connect",
+            },
+            (
+                "Cause: The built Python package could not be imported.",
+                "Subject: tensorrt_model_connect",
+            ),
+        ),
+        (
+            {
+                "failure_type": "infrastructure_error",
+                "stage": "model-cache",
+                "test_id": "model-cache",
+                "reason_code": "model_cache_warm_failed",
+            },
+            (
+                "Cause: A required public model cache could not be warmed.",
+                "Test: model-cache",
+            ),
+        ),
+        (
+            {
+                "failure_type": "infrastructure_error",
+                "stage": "model-proof",
+                "test_id": "qwen3_omni::gpu-admission",
+                "reason_code": "gpu_capacity_unavailable",
+            },
+            (
+                "Cause: The protected GPU did not have enough allocatable capacity.",
+                "Test: qwen3_omni::gpu-admission",
+            ),
+        ),
+    ],
+)
+def test_real_internal_ci_failure_classes_render_actionable_text(
+    internal_failure: dict[str, object], expected_lines: tuple[str, ...]
+) -> None:
+    artifacts = build_failure_artifacts({"failures": [internal_failure]}, _context())
+    document = artifacts.log_bytes.decode("utf-8")
+
+    for line in expected_lines:
+        assert line in document
+
+
+def test_public_failure_relay_uses_the_existing_status_context() -> None:
+    workflow = (
+        Path(__file__).parents[2] / ".github/workflows/internal-ci-failure-log.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "repository_dispatch:" in workflow
+    assert "types: [trtmc-public-failure-v1]" in workflow
+    assert "Publish public-failure.log" in workflow
+    assert "validate_public_failure(report)" in workflow
+    assert "assert_public_payload_safe(report, document)" in workflow
+    assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 1
+    assert "actions/runs/$GITHUB_RUN_ID" in workflow
+    assert "pulls/$PR_NUMBER" in workflow
 
 
 def test_poison_scan_rejects_sensitive_text_even_when_schema_allows_the_characters() -> None:
@@ -288,8 +466,8 @@ def test_build_failure_artifacts_runs_the_complete_local_pipeline() -> None:
     )
 
     assert json.loads(artifacts.json_bytes) == artifacts.report
-    assert b"TRTMC Protected CI failure report" in artifacts.html_bytes
-    assert b"Raw logs and internal diagnostics are not included" in artifacts.html_bytes
+    assert b"TRTMC Protected CI failure" in artifacts.log_bytes
+    assert b"approved structured fields" in artifacts.log_bytes
 
 
 def test_local_cli_writes_preview_files_without_publishing(tmp_path: Path) -> None:
@@ -323,4 +501,7 @@ def test_local_cli_writes_preview_files_without_publishing(tmp_path: Path) -> No
 
     assert exit_code == 0
     assert json.loads((output_dir / "public-failure.json").read_text())["result"] == "failure"
-    assert "TRTMC Protected CI failure report" in (output_dir / "report.html").read_text()
+    assert "TRTMC Protected CI failure" in (
+        output_dir / "public-failure.log"
+    ).read_text()
+    assert not (output_dir / "report.html").exists()

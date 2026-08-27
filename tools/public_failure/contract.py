@@ -19,6 +19,7 @@ from .policy import (
     PUBLIC_METRIC_OPERATORS,
     PUBLIC_MODELS,
     PUBLIC_REASON_CODES,
+    PUBLIC_SUBJECTS,
     PUBLIC_STAGE_BY_INTERNAL_STAGE,
 )
 
@@ -51,15 +52,18 @@ FAILURE_FIELDS = frozenset(
         "failure_class",
         "reason_code",
         "metric",
+        "subject",
+        "excerpt",
         "disclosure",
     }
 )
 METRIC_FIELDS = frozenset({"name", "observed", "operator", "threshold"})
-FAILURE_REQUIRED_FIELDS = FAILURE_FIELDS - {"metric"}
+FAILURE_REQUIRED_FIELDS = FAILURE_FIELDS - {"metric", "subject", "excerpt"}
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 REPORT_ID_PATTERN = re.compile(r"trtmc-pr[1-9][0-9]*-[0-9a-f]{7}-attempt[1-9][0-9]*\Z")
 TIMESTAMP_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 TEST_ID_PATTERN = re.compile(r"[A-Za-z0-9_./:\[\],=+-]+\Z")
+EXCERPT_LINE_PATTERN = re.compile(r"[\x20-\x7e]{1,240}\Z")
 PUBLIC_FAILURE_CLASSES = frozenset(FAILURE_CLASS_BY_INTERNAL_TYPE.values()) | {"unknown"}
 PUBLIC_STAGES = frozenset(PUBLIC_STAGE_BY_INTERNAL_STAGE.values()) | {"protected-ci"}
 PUBLIC_MODEL_NAMES = PUBLIC_MODELS | {"other-model"}
@@ -130,6 +134,25 @@ def _validate_failure(failure: Mapping[str, object], index: int) -> None:
     _require_enum(failure.get("gpu_type"), PUBLIC_GPU_NAMES, f"{path}.gpu_type")
     _require_enum(failure.get("failure_class"), PUBLIC_FAILURE_CLASSES, f"{path}.failure_class")
     _require_enum(failure.get("reason_code"), PUBLIC_REASON_CODES, f"{path}.reason_code")
+    if "subject" in failure:
+        _require_enum(failure.get("subject"), PUBLIC_SUBJECTS, f"{path}.subject")
+    if "excerpt" in failure:
+        excerpt = failure.get("excerpt")
+        if not isinstance(excerpt, list) or not excerpt or len(excerpt) > 20:
+            raise PublicFailureValidationError(
+                f"{path}.excerpt must be a non-empty array of at most 20 lines"
+            )
+        if sum(len(line) for line in excerpt if isinstance(line, str)) > 4000:
+            raise PublicFailureValidationError(
+                f"{path}.excerpt must contain at most 4000 characters"
+            )
+        for line_index, line in enumerate(excerpt):
+            _require_string(
+                line,
+                f"{path}.excerpt[{line_index}]",
+                max_length=240,
+                pattern=EXCERPT_LINE_PATTERN,
+            )
     _require_enum(
         failure.get("disclosure"),
         {"full", "truncated", "withheld"},
@@ -144,9 +167,9 @@ def _validate_failure(failure: Mapping[str, object], index: int) -> None:
     if test_id.startswith("/") or ".." in test_id or "\\" in test_id:
         raise PublicFailureValidationError(f"{path}.test_id is not a safe relative test ID")
     metric = failure.get("metric")
+    if failure.get("reason_code") == "unknown" and failure.get("disclosure") == "full":
+        raise PublicFailureValidationError(f"{path} cannot fully disclose an unknown reason")
     if metric is None:
-        if failure.get("disclosure") == "full":
-            raise PublicFailureValidationError(f"{path}.metric is required for full disclosure")
         return
     if not isinstance(metric, Mapping):
         raise PublicFailureValidationError(f"{path}.metric must be an object")
@@ -181,7 +204,7 @@ def validate_public_failure(report: Mapping[str, object]) -> None:
     )
     for key in ("head_sha", "base_sha", "tested_revision"):
         _require_string(report.get(key), key, max_length=40, pattern=SHA_PATTERN)
-    _require_enum(report.get("tested_revision_kind"), {"head"}, "tested_revision_kind")
+    _require_enum(report.get("tested_revision_kind"), {"head", "merge"}, "tested_revision_kind")
     _require_enum(report.get("result"), {"failure", "error"}, "result")
     _require_string(
         report.get("generated_at"),

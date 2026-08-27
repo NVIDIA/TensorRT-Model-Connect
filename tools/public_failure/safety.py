@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import html
 import re
 from typing import Mapping
 
@@ -29,7 +28,20 @@ SENSITIVE_PATTERNS = (
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
     ("email address", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
     ("URL", re.compile(r"\bhttps?://", re.I)),
-    ("internal hostname", re.compile(r"\b[A-Za-z0-9.-]+\.(?:internal|nvidia\.com)\b", re.I)),
+    (
+        "internal hostname",
+        re.compile(
+            r"\b[A-Za-z0-9.-]+\.(?:internal|local|corp|lan|cluster|nvidia\.com)\b",
+            re.I,
+        ),
+    ),
+    (
+        "registry image reference",
+        re.compile(
+            r"\b[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::[0-9]+)?/"
+            r"[A-Za-z0-9._/@:+-]+"
+        ),
+    ),
     ("IP address", re.compile(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])")),
     ("internal filesystem path", re.compile(r"/(?:home|workspace|mnt|var|tmp|builds|opt)/")),
     ("internal CI name", re.compile(r"\b(?:jenkins|slurm)\b", re.I)),
@@ -38,10 +50,10 @@ SENSITIVE_PATTERNS = (
 
 
 def assert_public_payload_safe(report: Mapping[str, object], document: bytes) -> None:
-    """Scan canonical JSON and decoded HTML without echoing a matched secret."""
+    """Scan canonical JSON and rendered text without echoing a matched secret."""
     candidates = (
         serialize_public_failure(report).decode("utf-8"),
-        html.unescape(document.decode("utf-8")),
+        document.decode("utf-8"),
     )
     for candidate in candidates:
         for label, pattern in SENSITIVE_PATTERNS:

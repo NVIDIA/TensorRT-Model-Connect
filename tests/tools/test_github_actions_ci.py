@@ -231,6 +231,7 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
     assert sorted(path.name for path in workflow_files) == [
         "community-cpu.yml",
         "internal-ci-bridge.yml",
+        "internal-ci-failure-log.yml",
         "pages.yml",
         "pr-metadata.yml",
     ]
