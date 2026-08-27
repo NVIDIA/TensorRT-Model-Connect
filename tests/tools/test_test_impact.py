@@ -1328,6 +1328,7 @@ class TestCppScope:
 
     def test_third_party_stb_scopes_to_image_models(self, imap):
         """STB image headers affect image/video runtimes, not text-only models."""
+        assert "monocular_geometry" in test_impact.STB_IMAGE_TASK_STRATEGIES
         match = test_impact.classify_file("third_party/stb/stb_image.h", imap)
         assert match.rule == "third_party_stb_image"
         assert "vision-core" in match.models

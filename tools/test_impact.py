@@ -94,6 +94,7 @@ STB_IMAGE_TASK_STRATEGIES = [
     "diffusion_media_generation",
     "image_classification",
     "image_feature_extraction",
+    "monocular_geometry",
     "object_detection",
     "omni_multimodal",
     "prompted_segmentation",

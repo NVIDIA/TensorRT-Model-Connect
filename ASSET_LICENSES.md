@@ -16,6 +16,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `tests/e2e/models/internvl/data/test_img.jpeg`
 - `tests/e2e/models/lance/data/test_img.jpeg`
 - `tests/e2e/models/locateanything/data/test_img.jpeg`
+- `tests/e2e/models/moge/data/test_img.jpeg`
 - `tests/e2e/models/phi4_multimodal/data/test_img.jpeg`
 - `tests/e2e/models/qwen_image/data/test_img.jpeg`
 - `tests/e2e/models/qwen_vl/data/test_img.jpeg`

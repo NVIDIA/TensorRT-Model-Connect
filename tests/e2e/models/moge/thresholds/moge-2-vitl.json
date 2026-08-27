@@ -1,0 +1,11 @@
+{
+  "threshold_overrides": {
+    "mask_iou": 0.999,
+    "depth_absrel_mean": 0.005,
+    "depth_rel_l2": 0.02,
+    "points_rel_l2": 0.02,
+    "points_cosine": 0.99999,
+    "intrinsics_max_relative_error": 0.002,
+    "point_depth_consistency": 0.00001
+  }
+}

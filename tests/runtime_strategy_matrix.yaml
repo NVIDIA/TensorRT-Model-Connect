@@ -56,6 +56,7 @@
     "sam2_bbox_video_tracking",
     "sam3_prompted_segmentation",
     "dinov3_image_feature_extraction",
+    "moge_monocular_geometry",
     "timm_vit_image_classification",
     "whisper_speech_to_text",
     "canary_speech_to_text",
@@ -884,6 +885,17 @@
       "comparator_class": "image_feature_extraction.ImageFeatureExtractionComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['dinov3_image_feature_extraction']; the model-owned E2E comparator gates full semantic tensor parity against Hugging Face.",
+      "performance_mode": "single_pass"
+    },
+    "moge_monocular_geometry": {
+      "task_strategy": "monocular_geometry",
+      "cli_commands": [
+        "geometry"
+      ],
+      "runner_class": "monocular_geometry.MonocularGeometryRunner",
+      "comparator_class": "monocular_geometry.MonocularGeometryComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['moge_monocular_geometry']; the model-owned E2E comparator gates explicit-token mask, depth, point-map, and normalized-intrinsics numerical parity against the pinned official MoGe-2 reference.",
       "performance_mode": "single_pass"
     },
     "timm_vit_image_classification": {

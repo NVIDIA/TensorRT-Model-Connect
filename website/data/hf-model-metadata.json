@@ -312,6 +312,15 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "Ruicheng/moge-2-vitl",
+      "revision": "39c4d5e957afe587e04eec59dc2bcc3be5ecd968",
+      "revision_source": "declared",
+      "metadata_file": null,
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "Salesforce/codegen-350M-mono",
       "revision": "d9107f71cca463240db1143f4a75a927a27fcb27",
       "revision_source": "resolved",
