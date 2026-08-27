@@ -58,6 +58,24 @@ python3 tools/perf_matrix.py run \
   --entry gpt2.generate
 ```
 
+For a source-bound qualification, materialize bundles before the campaign and
+then disable builds during measurement:
+
+```bash
+export TRTMC_PERF_SOURCE_REVISION=<40-character-commit-sha>
+export TRTMC_ENGINE_BUILD_REVISION=$TRTMC_PERF_SOURCE_REVISION
+python3 tools/perf_matrix.py prepare \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --entry gpt2.generate \
+  --output artifacts/perf/bundle-preparation.json
+python3 tools/perf_matrix.py run \
+  benchmarks/performance/release.yaml \
+  --environment benchmarks/performance/environments/gb300.yaml \
+  --entry gpt2.generate \
+  --no-build
+```
+
 Run every release entry bound to one or more canonical model names:
 
 ```bash
@@ -211,11 +229,13 @@ TRTMC_PERF_RUNTIME_DIRS
 ```
 
 Bundles below the managed cache are reusable only when their cache key matches
-the current model manifest, build options and assets, TensorRT platform, and
-generic plus family-owned builder sources. A stale managed bundle discovered
-through a bundle root is preserved but ignored while the current bundle is
-built. Bundles outside the managed cache are explicit prebuilt inputs and are
-therefore trusted as supplied.
+the current model manifest, build options and assets, TensorRT platform,
+generic plus family-owned builder sources, and any exact source revision
+supplied through `TRTMC_ENGINE_BUILD_REVISION`. A stale managed bundle
+discovered through a bundle root is preserved but ignored while the current
+bundle is built. When an exact build revision is supplied, bundles outside the
+managed cache must embed the same revision in `config.json`; missing or
+mismatched provenance is rejected.
 
 The script expands these values before preflight and records the resolved
 environment, source path, and configuration SHA-256 in `results.json`. Missing

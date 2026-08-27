@@ -554,7 +554,7 @@ def _declared_profile(
     return profile
 
 
-def _binding_profiles(
+def binding_profiles(
     binding: Binding,
     *,
     task_models: Mapping[str, dict[str, Any]],
@@ -612,7 +612,15 @@ def ensure_environments(
     )
 
 
-def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
+REFERENCE_SOURCES_PREBUILT_ONLY_ENV = "TRTMC_REFERENCE_SOURCES_PREBUILT_ONLY"
+
+
+def _ensure_reference_source(
+    source: ReferenceSource,
+    cache_root: Path,
+    *,
+    prebuilt_only: bool = False,
+) -> Path:
     checkout = cache_root / source.relative_checkout
     entrypoint = checkout / source.entrypoint
     if entrypoint.exists():
@@ -620,6 +628,11 @@ def _ensure_reference_source(source: ReferenceSource, cache_root: Path) -> Path:
         return checkout
     if checkout.exists():
         raise ValidationError(f"Incomplete cached {source.name} reference: {checkout}")
+    if prebuilt_only:
+        raise ValidationError(
+            f"Missing prepared {source.name} reference source: {checkout}; "
+            "qualification prepare phase did not materialize it"
+        )
 
     checkout.parent.mkdir(parents=True, exist_ok=True)
     print(f"Creating reference source: {source.name}", flush=True)
@@ -671,9 +684,18 @@ def ensure_reference_sources(
     model_reference_cache: Mapping[str, Any] | None = None,
     *,
     source_cache_root: Path | None = None,
+    prebuilt_only: bool | None = None,
 ) -> ReferenceSourceSelection:
     environment = {"TRTMC_STORAGE_ROOT": str(cache_root)}
     checkout_root = source_cache_root or cache_root
+    if prebuilt_only is None:
+        prebuilt_only = os.environ.get(REFERENCE_SOURCES_PREBUILT_ONLY_ENV) == "1"
+
+    def prepare(source: ReferenceSource) -> Path:
+        if prebuilt_only:
+            return _ensure_reference_source(source, checkout_root, prebuilt_only=True)
+        return _ensure_reference_source(source, checkout_root)
+
     declared_source = None
     if model_reference_cache:
         required = ("repository", "revision", "relative_path", "entrypoint")
@@ -689,7 +711,7 @@ def ensure_reference_sources(
             relative_checkout=Path(str(model_reference_cache["relative_path"])),
             entrypoint=Path(str(model_reference_cache["entrypoint"])),
         )
-        checkout = _ensure_reference_source(declared_source, checkout_root)
+        checkout = prepare(declared_source)
         environment_variable = str(
             model_reference_cache.get("environment_variable", "") or ""
         ).strip()
@@ -702,7 +724,7 @@ def ensure_reference_sources(
             environment[environment_variable] = str(checkout)
 
     if family == "elf_flow":
-        checkout = _ensure_reference_source(ELF_SOURCE, checkout_root)
+        checkout = prepare(ELF_SOURCE)
         return ReferenceSourceSelection(
             environment=environment,
             elf_reference_repo=checkout,
@@ -710,7 +732,7 @@ def ensure_reference_sources(
     if family == "sana_wm":
         if declared_source is None:
             declared_source = SANA_WM_SOURCE
-            checkout = _ensure_reference_source(declared_source, checkout_root)
+            checkout = prepare(declared_source)
         environment["SANA_WM_SCRIPT"] = str(checkout / declared_source.entrypoint)
     return ReferenceSourceSelection(environment=environment)
 
@@ -1828,7 +1850,7 @@ def run_binding(
             encoding="utf-8",
         )
         return result
-    profiles = _binding_profiles(
+    profiles = binding_profiles(
         binding,
         task_models=task_models,
         suites=suites,

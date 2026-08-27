@@ -23,8 +23,8 @@ export TRTMC_CHECK_PYTHON=/opt/venv/bin/python3
 the Accuracy binaries, model plugins, TensorRT backend, Perf worker, and Perf
 bundle cache from this directory and `TRTMC_CHECK_STORAGE_ROOT`.
 
-The controller Python must contain the repository's base dependencies. Missing
-family build, reference, and scoring profiles are created under
+The controller Python must contain the repository's base dependencies. Debug
+runs create missing family build, reference, and scoring profiles under
 `${TRTMC_CHECK_STORAGE_ROOT}/python-profiles` when first needed.
 
 ## Select
@@ -54,7 +54,14 @@ model in `tests/validation/model_workloads.yaml`.
 
 ## Run
 
-Run one model through Accuracy and then Perf:
+By default, `run` is a formal qualification run. It freezes source identity,
+prepares missing dependencies, runs preflight, and then switches measurement to
+prebuilt-only mode. During development, add `--debug` to allow a dirty worktree
+and on-demand dependency creation. Every run still resolves the active worktree
+HEAD to a 40-character commit SHA and places the current repository Python paths
+first in each child process.
+
+Run one model through formal Accuracy and then Perf qualification:
 
 ```bash
 $TRTMC_CHECK_PYTHON tools/model_checks.py run \
@@ -62,6 +69,33 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --model distilgpt2 \
   --run-id gb300-distilgpt2-smoke
 ```
+
+The single command owns both preparation and frozen measurement:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform gb300 \
+  --model distilgpt2 \
+  --run-id gb300-distilgpt2-qualification
+```
+
+For an editable debug run:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform gb300 \
+  --model distilgpt2 \
+  --debug \
+  --run-id gb300-distilgpt2-debug
+```
+
+The controller creates missing Python profiles, pinned reference-source
+checkouts, and Perf bundles before measurement. Measurement then runs with
+dependency creation and Perf bundle builds disabled. Qualification also rejects
+a dirty worktree, imports outside the active worktree, and a requested revision
+different from HEAD. It rechecks that identity after preparation and before and
+after every task, so a mid-run edit invalidates the campaign. Accuracy and Perf
+receive the same frozen SHA; native workers and bundles must report that SHA.
 
 Run full Accuracy and Perf on separate GB300 machines:
 
@@ -101,7 +135,7 @@ Results are written below:
 ${TRTMC_CHECK_STORAGE_ROOT}/results/<run-id>/
 ```
 
-Resume with the same selection and run ID:
+Resume with the same selection, intent, exact HEAD, and run ID:
 
 ```bash
 $TRTMC_CHECK_PYTHON tools/model_checks.py run \

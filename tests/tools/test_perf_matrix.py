@@ -2355,6 +2355,79 @@ def test_check_runs_preflight_without_creating_results(
     assert not scratch_root.exists()
 
 
+def test_prepare_materializes_bundles_without_starting_campaign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "a" * 40
+    output = tmp_path / "preparation.json"
+    selected = [
+        {
+            "id": "gpt2.generate",
+            "family": "gpt2",
+            "model": "distilgpt2",
+            "workload": {"testcase": "distilgpt2"},
+            "measurement": {"warmup": 1, "iterations": 2},
+            "baseline": {"runner": "hf-transformers", "asset_loading_included": False},
+        }
+    ]
+    environment = {
+        "storage": {"results_root": str(tmp_path / "results")},
+    }
+    options = Namespace(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_dirs=(),
+        timeout_seconds=30,
+        require_prebuilt_bundles=False,
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_load_suite_request",
+        lambda _arguments: (None, selected, environment),
+    )
+    monkeypatch.setattr(perf_matrix, "_run_options", lambda *_args, **_kwargs: options)
+    monkeypatch.setattr(perf_matrix, "_environment_preflight", lambda *_args: {})
+    monkeypatch.setattr(perf_matrix, "_preflight_worker", lambda *_args: {})
+    monkeypatch.setattr(
+        perf_matrix,
+        "_preflight_candidates",
+        lambda cases, _options: ({cases[0]["id"]: ({}, [], {})}, {}),
+    )
+    monkeypatch.setattr(perf_matrix, "_git_commit", lambda: revision)
+
+    def run(command, *_args):
+        assert "--prepare-only" in command
+        return {
+            "exit_code": 0,
+            "stdout": json.dumps(
+                {
+                    "bundles": [
+                        {
+                            "model": "distilgpt2",
+                            "status": "built",
+                            "bundle": str(tmp_path / "bundles/distilgpt2.bundle"),
+                            "build_time_s": 1.0,
+                            "source_revision": revision,
+                            "included_in_performance_metrics": False,
+                        }
+                    ]
+                }
+            ),
+            "stderr_tail": "",
+        }
+
+    monkeypatch.setattr(perf_matrix, "_run_command", run)
+
+    assert perf_matrix._prepare(Namespace(output=output)) == 0
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["git_commit"] == revision
+    assert receipt["bundles"][0]["source_revision"] == revision
+
+
 def test_run_records_preflight_failure_and_finishes_campaign(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2590,6 +2663,27 @@ def test_candidate_command_forwards_workload_runtime_overrides(tmp_path: Path) -
     argv = perf_matrix._candidate_base_argv(case, options)
 
     assert "runtime.cuda_graphs=true" in argv
+
+
+def test_candidate_command_requires_prebuilt_bundle_when_requested(tmp_path: Path) -> None:
+    case = {
+        "id": "gpt2.generate",
+        "family": "gpt2",
+        "model": "distilgpt2",
+        "workload": {"testcase": "distilgpt2"},
+        "measurement": {"warmup": 2, "iterations": 10},
+        "baseline": {"runner": "hf-transformers", "asset_loading_included": False},
+    }
+    options = Namespace(
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+        require_prebuilt_bundles=True,
+    )
+
+    assert "--no-build" in perf_matrix._candidate_base_argv(case, options)
 
 
 def test_task_reference_can_require_local_model_files_per_case(tmp_path: Path) -> None:

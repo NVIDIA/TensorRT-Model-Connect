@@ -74,6 +74,7 @@ from tools import qualification_report  # noqa: E402
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
 PREPARATION_SCHEMA = "trtmc.perf-bundle-preparation/v1"
 ENVIRONMENT_SCHEMA = "trtmc.perf-environment/v1"
+EXACT_SOURCE_REVISION_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
 SEQUENCE_RUNTIME_MARKERS = ("bart_", "marian_", "m2m_100_", "t5_")
 REPRODUCTION_ENVIRONMENT_NAMES = (
     "CUDA_VISIBLE_DEVICES",
@@ -125,6 +126,7 @@ class RunOptions:
     hf_cache_mode: str = "shared"
     hf_cache_retention: str = "retain"
     verbose: bool = False
+    require_prebuilt_bundles: bool = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -132,6 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("check", "resolve and validate the selected matrix entries"),
+        ("prepare", "materialize selected bundles without measuring them"),
         ("run", "run the selected matrix entries"),
     ):
         command = commands.add_parser(name, help=help_text)
@@ -167,12 +170,30 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="print full TRTMC and reference commands",
         )
+        if name == "prepare":
+            command.add_argument(
+                "--output",
+                required=True,
+                type=Path,
+                help="write bundle preparation evidence to this JSON file",
+            )
+        if name == "run":
+            command.add_argument(
+                "--no-build",
+                action="store_true",
+                help="require bundles prepared before the performance campaign",
+            )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
     resume.add_argument(
         "--verbose",
         action="store_true",
         help="print full TRTMC and reference commands",
+    )
+    resume.add_argument(
+        "--no-build",
+        action="store_true",
+        help="require bundles prepared before the resumed campaign",
     )
     report = commands.add_parser(
         "report",
@@ -400,6 +421,7 @@ def _run_options(
     output: Path,
     *,
     verbose: bool = False,
+    require_prebuilt_bundles: bool = False,
 ) -> RunOptions:
     tools = environment["tools"]
     storage = environment["storage"]
@@ -423,6 +445,7 @@ def _run_options(
         hf_cache_mode=str(execution["hf_cache_mode"]),
         hf_cache_retention=str(execution["hf_cache_retention"]),
         verbose=verbose,
+        require_prebuilt_bundles=require_prebuilt_bundles,
     )
 
 
@@ -629,6 +652,8 @@ def _candidate_base_argv(case: Mapping[str, Any], options: RunOptions) -> list[s
         argv.extend(["--bundle-cache", str(options.bundle_cache.resolve())])
     if options.trtmc_worker is not None:
         argv.extend(["--worker", str(options.trtmc_worker.resolve())])
+    if getattr(options, "require_prebuilt_bundles", False):
+        argv.append("--no-build")
     for root in options.bundle_roots:
         argv.extend(["--bundle-root", str(root.resolve())])
     for directory in options.runtime_dirs:
@@ -3607,6 +3632,68 @@ def _check(arguments: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _prepare(arguments: argparse.Namespace) -> int:
+    _, selected, environment = _load_suite_request(arguments)
+    options = _run_options(environment, Path(str(environment["storage"]["results_root"])))
+    _environment_preflight(environment, options)
+    _preflight_worker(options)
+    _preflight, failures = _preflight_candidates(selected, options)
+    if failures:
+        for case_id, failure in sorted(failures.items()):
+            print(f"[{case_id}] {failure['stage']}: {failure['reason']}", file=sys.stderr)
+        return 1
+
+    revision = str(_git_commit() or "").strip().lower()
+    if EXACT_SOURCE_REVISION_PATTERN.fullmatch(revision) is None:
+        raise PerfMatrixError("bundle preparation requires an exact 40-character source revision")
+    bundles: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for case in selected:
+        case_id = str(case["id"])
+        print(f"[{case_id}] bundle preparation", flush=True)
+        command = _run_command(
+            [*_candidate_base_argv(case, options), "--prepare-only"],
+            _command_environment(),
+            options.timeout_seconds,
+        )
+        if command["exit_code"] != 0:
+            raise PerfMatrixError(
+                f"bundle preparation failed for {case_id}: {command['stderr_tail']}"
+            )
+        try:
+            receipt = json.loads(command["stdout"])
+        except json.JSONDecodeError as exc:
+            raise PerfMatrixError(
+                f"trtmc-bench returned invalid bundle preparation JSON for {case_id}"
+            ) from exc
+        records = receipt.get("bundles") if isinstance(receipt, Mapping) else None
+        if not isinstance(records, list) or not records:
+            raise PerfMatrixError(f"trtmc-bench prepared no bundle for {case_id}")
+        for record in records:
+            if not isinstance(record, Mapping):
+                raise PerfMatrixError(f"trtmc-bench returned invalid bundle evidence for {case_id}")
+            if record.get("source_revision") != revision:
+                raise PerfMatrixError(
+                    f"bundle for {case_id} does not match source revision {revision}"
+                )
+            key = (str(record.get("model", "")), str(record.get("bundle", "")))
+            if key not in seen:
+                seen.add(key)
+                bundles.append(dict(record))
+    _write_json(
+        arguments.output.resolve(),
+        {
+            "schema_version": PREPARATION_SCHEMA,
+            "scope": "test_task",
+            "git_commit": revision,
+            "included_in_performance_metrics": False,
+            "bundles": bundles,
+        },
+    )
+    print(f"Bundle preparation: {arguments.output.resolve()}")
+    return 0
+
+
 def _run_new(arguments: argparse.Namespace) -> int:
     suite, selected, environment = _load_suite_request(arguments)
     results_root = Path(str(environment["storage"]["results_root"]))
@@ -3614,11 +3701,17 @@ def _run_new(arguments: argparse.Namespace) -> int:
         environment,
         results_root,
         verbose=arguments.verbose,
+        require_prebuilt_bundles=arguments.no_build,
     )
     storage = _environment_preflight(environment, preliminary_options)
     worker = _preflight_worker(preliminary_options)
     run_id, output = _new_run_directory(results_root, suite.definition)
-    options = _run_options(environment, output, verbose=arguments.verbose)
+    options = _run_options(
+        environment,
+        output,
+        verbose=arguments.verbose,
+        require_prebuilt_bundles=arguments.no_build,
+    )
     results = _initial_results(suite, selected, environment)
     results["run_id"] = run_id
     ledger = _open_perf_ledger(output, selected, results)
@@ -3670,7 +3763,12 @@ def _resume(arguments: argparse.Namespace) -> int:
     environment = _read_environment(environment_path)
     if environment != environment_record:
         raise PerfMatrixError("cannot resume because the resolved environment values changed")
-    options = _run_options(environment, output, verbose=arguments.verbose)
+    options = _run_options(
+        environment,
+        output,
+        verbose=arguments.verbose,
+        require_prebuilt_bundles=arguments.no_build,
+    )
     ledger = _open_perf_ledger(output, selected, results)
     ledger.recover_interrupted()
     ledger.reopen_retryable()
@@ -3695,6 +3793,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments = build_parser().parse_args(argv)
         if arguments.command == "check":
             return _check(arguments)
+        if arguments.command == "prepare":
+            return _prepare(arguments)
         if arguments.command == "run":
             return _run_new(arguments)
         if arguments.command == "resume":

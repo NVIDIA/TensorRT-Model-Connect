@@ -2599,7 +2599,7 @@ def test_default_reference_backends_share_common_environment(reference_backend):
 
 
 def test_model_specific_reference_environment_keeps_common_validation_base() -> None:
-    profiles = trtmc_validate._binding_profiles(
+    profiles = trtmc_validate.binding_profiles(
         trtmc_validate.Binding("elf", "dataset"),
         task_models={
             "elf": {
@@ -2617,7 +2617,7 @@ def test_model_specific_reference_environment_keeps_common_validation_base() -> 
 
 
 def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
-    profiles = trtmc_validate._binding_profiles(
+    profiles = trtmc_validate.binding_profiles(
         trtmc_validate.Binding("personaplex-7b", "full-duplex"),
         task_models={
             "personaplex-7b": {
@@ -2706,6 +2706,21 @@ def test_reference_sources_create_once_then_reuse(
     assert f"Using reference source: {cold}" in cold_output
     assert "Creating reference source" not in warm_output
     assert f"Using reference source: {warm}" in warm_output
+
+
+def test_reference_source_prebuilt_only_rejects_a_missing_checkout(tmp_path: Path) -> None:
+    source = trtmc_validate.ReferenceSource(
+        name="ELF",
+        repository="https://example.invalid/ELF.git",
+        revision="0123456789abcdef",
+        relative_checkout=Path("elf/reference/ELF-0123456789ab"),
+        entrypoint=Path("src/entrypoint.py"),
+    )
+
+    with pytest.raises(trtmc_validate.ValidationError, match="prepare"):
+        trtmc_validate._ensure_reference_source(source, tmp_path, prebuilt_only=True)
+
+    assert not (tmp_path / source.relative_checkout).exists()
 
 
 def test_elf_reference_source_is_pinned_to_upstream_pytorch_implementation() -> None:

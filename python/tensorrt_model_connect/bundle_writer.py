@@ -24,6 +24,7 @@ from typing import Any, cast
 
 BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 _MAX_BUNDLE_HEADER_SIZE = 100 * 1024 * 1024
+_EXACT_SOURCE_REVISION_LENGTH = 40
 
 
 @dataclass
@@ -70,6 +71,82 @@ class _FileBundleSection:
     name: str
     source_path: Path
     expected_sha256: str | None
+
+
+def read_bundle_section(path: str | Path, section_name: str) -> bytes:
+    """Read one named section from a TRTMC bundle."""
+    bundle_path = Path(path)
+    with bundle_path.open("rb") as bundle:
+        if bundle.read(8) != BUNDLE_MAGIC:
+            raise ValueError(f"{bundle_path} is not a TRTMC bundle")
+        raw_header_size = bundle.read(8)
+        if len(raw_header_size) != 8:
+            raise ValueError(f"{bundle_path} has a truncated header size")
+        header_size = struct.unpack("<Q", raw_header_size)[0]
+        if header_size > _MAX_BUNDLE_HEADER_SIZE:
+            raise ValueError(
+                f"{bundle_path} header exceeds {_MAX_BUNDLE_HEADER_SIZE} bytes"
+            )
+        raw_header = bundle.read(header_size)
+        if len(raw_header) != header_size:
+            raise ValueError(f"{bundle_path} has a truncated JSON header")
+        header = json.loads(raw_header)
+        sections = header.get("sections", {})
+        section = sections.get(section_name) if isinstance(sections, dict) else None
+        if not isinstance(section, dict):
+            raise ValueError(f"{bundle_path} has no {section_name!r} section")
+        offset = int(section.get("offset", -1))
+        size = int(section.get("size", -1))
+        data_start = 16 + header_size
+        if offset < 0 or size < 0 or data_start + offset + size > bundle_path.stat().st_size:
+            raise ValueError(f"{bundle_path} has an invalid {section_name!r} section range")
+        bundle.seek(data_start + offset)
+        data = bundle.read(size)
+        if len(data) != size:
+            raise ValueError(f"{bundle_path} has a truncated {section_name!r} section")
+        return data
+
+
+def bundle_source_revision(path: str | Path) -> str:
+    """Return the exact source revision embedded in a bundle, or an empty string."""
+    try:
+        config = json.loads(read_bundle_section(path, "config.json").decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(config, dict):
+        return ""
+    revision = str(config.get("source_revision", "") or "").strip().lower()
+    if len(revision) != _EXACT_SOURCE_REVISION_LENGTH:
+        return ""
+    return revision if all(character in "0123456789abcdef" for character in revision) else ""
+
+
+def _source_bound_sections(sections: list[BundleSection]) -> list[BundleSection]:
+    revision = os.environ.get("TRTMC_ENGINE_BUILD_REVISION", "").strip().lower()
+    if not revision:
+        return sections
+    if len(revision) != _EXACT_SOURCE_REVISION_LENGTH or any(
+        character not in "0123456789abcdef" for character in revision
+    ):
+        raise ValueError("TRTMC_ENGINE_BUILD_REVISION must be an exact Git SHA")
+    updated = list(sections)
+    for index, section in enumerate(updated):
+        if section.name != "config.json":
+            continue
+        raw = (
+            section.source_path.read_bytes()
+            if isinstance(section, _FileBundleSection)
+            else section.data
+        )
+        config = json.loads(raw)
+        if not isinstance(config, dict):
+            raise ValueError("Bundle config.json must contain an object")
+        config["source_revision"] = revision
+        updated[index] = BundleSection(
+            "config.json", json.dumps(config, indent=2).encode("utf-8")
+        )
+        return updated
+    raise ValueError("source-bound bundle requires a config.json section")
 
 
 def _bundle_section_from_file(
@@ -267,6 +344,7 @@ def write_bundle(
     sections: list[BundleSection],
 ) -> None:
     """Write a .bundle artifact file."""
+    sections = _source_bound_sections(sections)
     if any(isinstance(section, _FileBundleSection) for section in sections):
         _write_file_backed_bundle(path, info, sections)
         return

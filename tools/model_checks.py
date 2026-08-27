@@ -64,6 +64,7 @@ MANAGED_TASK_ENVIRONMENT_VARIABLES = frozenset(
         PROFILE_ROOT_ENV,
         PREBUILT_ONLY_ENV,
         "TRTMC_PERF_SOURCE_REVISION",
+        trtmc_validate.REFERENCE_SOURCES_PREBUILT_ONLY_ENV,
         "TRTMC_VALIDATION_SOURCE_REVISION",
     }
 )
@@ -107,6 +108,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--environment",
         help="execution environment ID or YAML; defaults to the platform ID",
+    )
+    run.add_argument(
+        "--debug",
+        action="store_true",
+        help="allow missing dependencies to be prepared during this non-qualification run",
     )
     run.add_argument("--run-id", help="stable output directory name")
     run.add_argument("--dry-run", action="store_true", help="write and print commands only")
@@ -418,11 +424,17 @@ def _task_environment(
     overrides: Mapping[str, str] | None = None,
     *,
     source_revision: str = "",
+    allow_dependency_creation: bool = True,
 ) -> dict[str, str]:
-    """Use a managed shared profile cache and create missing profiles on demand."""
+    """Build a child environment rooted in this worktree and its managed caches."""
     child = os.environ.copy()
     child[PROFILE_ROOT_ENV] = str(environment["storage"]["python_profiles_root"])
-    child.pop(PREBUILT_ONLY_ENV, None)
+    if allow_dependency_creation:
+        child.pop(PREBUILT_ONLY_ENV, None)
+        child.pop(trtmc_validate.REFERENCE_SOURCES_PREBUILT_ONLY_ENV, None)
+    else:
+        child[PREBUILT_ONLY_ENV] = "1"
+        child[trtmc_validate.REFERENCE_SOURCES_PREBUILT_ONLY_ENV] = "1"
     library_dirs = [str(path) for path in environment.get("library_dirs", [])]
     missing_library_dirs = [path for path in library_dirs if not Path(path).is_dir()]
     if missing_library_dirs:
@@ -446,17 +458,17 @@ def _task_environment(
         executable_dirs.append(inherited_path)
     if executable_dirs:
         child["PATH"] = os.pathsep.join(executable_dirs)
-    python_dirs = [str(path) for path in environment.get("python_dirs", [])]
-    missing_python_dirs = [path for path in python_dirs if not Path(path).is_dir()]
+    configured_python_dirs = [str(path) for path in environment.get("python_dirs", [])]
+    missing_python_dirs = [path for path in configured_python_dirs if not Path(path).is_dir()]
     if missing_python_dirs:
         raise ModelCheckError(
             "model-check Python runtime directory does not exist: " + ", ".join(missing_python_dirs)
         )
+    python_dirs = [str(PYTHON_SOURCE), str(REPOSITORY), *configured_python_dirs]
     inherited_python_path = child.get("PYTHONPATH", "")
     if inherited_python_path:
-        python_dirs.append(inherited_python_path)
-    if python_dirs:
-        child["PYTHONPATH"] = os.pathsep.join(python_dirs)
+        python_dirs.extend(inherited_python_path.split(os.pathsep))
+    child["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(filter(None, python_dirs)))
     child.update(
         {
             str(name): str(value)
@@ -467,6 +479,7 @@ def _task_environment(
         revision = source_revision.lower()
         child["TRTMC_VALIDATION_SOURCE_REVISION"] = revision
         child["TRTMC_PERF_SOURCE_REVISION"] = revision
+        child["TRTMC_ENGINE_BUILD_REVISION"] = revision
     child.update(overrides or {})
     return child
 
@@ -1179,6 +1192,7 @@ def _perf_command(
     resolved_environment: Path,
     *,
     bindings: Sequence[Mapping[str, Any]] | None = None,
+    require_prebuilt: bool = False,
 ) -> list[str] | None:
     bindings = list(bindings) if bindings is not None else _task_bindings(plan, "perf")
     if not bindings:
@@ -1194,12 +1208,43 @@ def _perf_command(
     ]
     for binding in bindings:
         command.extend(["--entry", str(binding["entry"])])
+    if require_prebuilt:
+        command.append("--no-build")
+    return command
+
+
+def _perf_prepare_command(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    resolved_environment: Path,
+    receipt: Path,
+    *,
+    bindings: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str] | None:
+    bindings = list(bindings) if bindings is not None else _task_bindings(plan, "perf")
+    if not bindings:
+        return None
+    config = environment["tasks"]["perf"]
+    command = [
+        str(config["runner_python"]),
+        str(REPOSITORY / "tools" / "perf_matrix.py"),
+        "prepare",
+        str(config["suite"]),
+        "--environment",
+        str(resolved_environment),
+        "--output",
+        str(receipt),
+    ]
+    for binding in bindings:
+        command.extend(["--entry", str(binding["entry"])])
     return command
 
 
 def _perf_resume_command(
     environment: Mapping[str, Any],
     results_root: Path,
+    *,
+    require_prebuilt: bool = False,
 ) -> list[str] | None:
     if not results_root.is_dir():
         return None
@@ -1213,12 +1258,15 @@ def _perf_resume_command(
             f"cannot identify one Perf run to resume below {results_root}: found {len(candidates)}"
         )
     config = environment["tasks"]["perf"]
-    return [
+    command = [
         str(config["runner_python"]),
         str(REPOSITORY / "tools" / "perf_matrix.py"),
         "resume",
         str(candidates[0]),
     ]
+    if require_prebuilt:
+        command.append("--no-build")
+    return command
 
 
 def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
@@ -1233,6 +1281,9 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
     for field in (
         "schema_version",
         "run_id",
+        "revision",
+        "intent",
+        "source_identity",
         "platform",
         "platform_source",
         "platform_config",
@@ -1244,10 +1295,8 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
     ):
         if previous.get(field) != request.get(field):
             raise ModelCheckError(f"cannot resume because the resolved {field} changed")
-    if request.get("shard") is not None:
-        for field in ("revision", "shard"):
-            if previous.get(field) != request.get(field):
-                raise ModelCheckError(f"cannot resume because the resolved {field} changed")
+    if previous.get("shard") != request.get("shard"):
+        raise ModelCheckError("cannot resume because the resolved shard changed")
 
 
 def _perf_shard_output(shard_root: Path) -> Path | None:
@@ -1410,12 +1459,186 @@ def _resolved_revision(revision: str) -> str:
     return value
 
 
+def _worktree_changes() -> tuple[str, ...]:
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=REPOSITORY,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode:
+        raise ModelCheckError("cannot inspect the active worktree state")
+    return tuple(line for line in status.stdout.splitlines() if line)
+
+
+def _source_identity(revision: str, *, require_clean: bool = False) -> dict[str, Any]:
+    modules = {
+        "model_checks": sys.modules[__name__],
+        "perf_matrix": perf_matrix,
+        "trtmc_validate": trtmc_validate,
+        "performance_catalog": performance_catalog,
+        "validation_catalog": validation_catalog,
+        "python_profiles": sys.modules["tensorrt_model_connect.python_profiles"],
+    }
+    imports: dict[str, str] = {}
+    for name, module in modules.items():
+        module_path = Path(str(module.__file__)).resolve()
+        try:
+            imports[name] = str(module_path.relative_to(REPOSITORY))
+        except ValueError as exc:
+            raise ModelCheckError(
+                f"{name} was imported from outside the active worktree: {module_path}"
+            ) from exc
+    head = _resolved_revision("HEAD")
+    if revision != head:
+        raise ModelCheckError(
+            "requested source revision does not match the active worktree HEAD: "
+            f"requested={revision}, HEAD={head}"
+        )
+    if require_clean:
+        changes = _worktree_changes()
+        if changes:
+            raise ModelCheckError(
+                "qualification requires a clean worktree; commit or remove local changes"
+            )
+    return {"revision": revision, "imports": imports}
+
+
+def _revalidate_qualification_source(
+    revision: str,
+    expected: Mapping[str, Any],
+) -> None:
+    current = _source_identity(revision, require_clean=True)
+    if current != expected:
+        raise ModelCheckError("qualification source identity changed during the run")
+
+
+def _prepare_accuracy_dependencies(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    arguments: argparse.Namespace,
+    *,
+    bindings: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
+    bindings = list(bindings) if bindings is not None else _task_bindings(plan, "accuracy")
+    if not bindings:
+        return
+    task_models = validation_catalog.load_manifest_records_by_name(arguments.models_dir)
+    suites = {suite["id"]: suite for suite in validation_catalog.load_suites(arguments.suites)}
+    profile_names: list[str] = []
+    for binding in bindings:
+        selected = trtmc_validate.Binding(
+            str(binding["model"]),
+            str(binding["workload"]),
+        )
+        profile_names.extend(
+            trtmc_validate.binding_profiles(
+                selected,
+                task_models=task_models,
+                suites=suites,
+            )
+        )
+
+    config = environment["tasks"]["accuracy"]
+    options = config.get("options", {})
+    profile_root = str(environment["storage"]["python_profiles_root"])
+    previous_profile_root = os.environ.get(PROFILE_ROOT_ENV)
+    previous_prebuilt = os.environ.get(PREBUILT_ONLY_ENV)
+    os.environ[PROFILE_ROOT_ENV] = profile_root
+    os.environ.pop(PREBUILT_ONLY_ENV, None)
+    try:
+        trtmc_validate.ensure_environments(
+            tuple(dict.fromkeys(profile_names)),
+            str(options.get("hf-python", config["runner_python"])),
+        )
+    finally:
+        if previous_profile_root is None:
+            os.environ.pop(PROFILE_ROOT_ENV, None)
+        else:
+            os.environ[PROFILE_ROOT_ENV] = previous_profile_root
+        if previous_prebuilt is None:
+            os.environ.pop(PREBUILT_ONLY_ENV, None)
+        else:
+            os.environ[PREBUILT_ONLY_ENV] = previous_prebuilt
+
+    prepared_models: set[str] = set()
+    for binding in bindings:
+        model = str(binding["model"])
+        if model in prepared_models:
+            continue
+        prepared_models.add(model)
+        record = task_models[model]
+        trtmc_validate.ensure_reference_sources(
+            str(record.get("family", "") or ""),
+            Path(str(options["reference-cache-dir"])),
+            record.get("model_reference_cache"),
+            source_cache_root=Path(str(environment["storage"]["model_reference_cache_root"])),
+            prebuilt_only=False,
+        )
+
+
+def _prepare_qualification_dependencies(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    arguments: argparse.Namespace,
+    *,
+    task_bindings: Mapping[str, Sequence[Mapping[str, Any]]],
+    perf_environment: Path | None,
+    perf_preparation_receipt: Path | None,
+    model_reference_cache_root: Path,
+) -> dict[str, str]:
+    print("\nPreparing qualification dependencies", flush=True)
+    _prepare_accuracy_dependencies(
+        plan,
+        environment,
+        arguments,
+        bindings=task_bindings.get("accuracy", ()),
+    )
+    contracts = _selected_perf_reference_contracts(
+        plan,
+        arguments.models_dir,
+        bindings=task_bindings.get("perf", ()),
+    )
+    reference_environment = _prepare_perf_reference_dependencies(
+        contracts,
+        model_reference_cache_root,
+    )
+    if perf_environment is not None and perf_preparation_receipt is not None:
+        command = _perf_prepare_command(
+            plan,
+            environment,
+            perf_environment,
+            perf_preparation_receipt,
+            bindings=task_bindings.get("perf", ()),
+        )
+        if command is not None:
+            completed = subprocess.run(
+                _detailed_command(command, verbose=arguments.verbose),
+                cwd=REPOSITORY,
+                check=False,
+                env=_task_environment(
+                    environment,
+                    reference_environment,
+                    source_revision=arguments.revision,
+                ),
+            )
+            if completed.returncode:
+                raise ModelCheckError("Perf bundle preparation failed")
+    print("Qualification dependencies prepared; starting frozen measurement", flush=True)
+    return reference_environment
+
+
 def _run(arguments: argparse.Namespace) -> int:
+    arguments.intent = "debug" if arguments.debug else "qualification"
     shard = campaign_shards.parse_shard(arguments.shard) if arguments.shard else None
-    if shard is not None:
-        if not arguments.run_id:
-            raise ModelCheckError("--shard requires an explicit shared --run-id")
-        arguments.revision = _resolved_revision(arguments.revision)
+    if shard is not None and not arguments.run_id:
+        raise ModelCheckError("--shard requires an explicit shared --run-id")
+    arguments.revision = _resolved_revision(arguments.revision)
+    source_identity = _source_identity(
+        arguments.revision,
+        require_clean=arguments.intent == "qualification",
+    )
     platform = load_platform(arguments.platform)
     environment = load_execution_environment(
         arguments.environment or str(platform["id"]),
@@ -1503,6 +1726,8 @@ def _run(arguments: argparse.Namespace) -> int:
                     "run_id": run_id,
                     "platform": platform["id"],
                     "revision": arguments.revision,
+                    "intent": arguments.intent,
+                    "source_identity": source_identity,
                     "shard_count": shard[1],
                     "selection": stable_selection,
                     "cases": campaign_cases,
@@ -1536,6 +1761,9 @@ def _run(arguments: argparse.Namespace) -> int:
             scratch_root=execution_root / "work" / "perf",
             bundle_cache=(execution_root / "cache" / "perf" if shard else None),
         )
+    perf_preparation_receipt = (
+        execution_root / "perf-bundle-preparation.json" if perf_environment is not None else None
+    )
     commands: list[tuple[str, list[str] | None]] = []
     for task in plan["execution"]["task_order"]:
         if task == "accuracy":
@@ -1553,6 +1781,7 @@ def _run(arguments: argparse.Namespace) -> int:
                     environment,
                     perf_environment,
                     bindings=task_bindings[task],
+                    require_prebuilt=arguments.intent == "qualification",
                 )
                 if perf_environment is not None
                 else None
@@ -1562,6 +1791,8 @@ def _run(arguments: argparse.Namespace) -> int:
         "schema_version": "trtmc.model-check-run/v1",
         "run_id": run_id,
         "revision": arguments.revision,
+        "intent": arguments.intent,
+        "source_identity": source_identity,
         "platform": platform["id"],
         "platform_source": platform["source"],
         "platform_config": platform,
@@ -1608,6 +1839,7 @@ def _run(arguments: argparse.Namespace) -> int:
                 resume_command = _perf_resume_command(
                     environment,
                     execution_root / "perf" / "results",
+                    require_prebuilt=arguments.intent == "qualification",
                 )
                 execution_commands.append((task, resume_command or command))
     print(_render_run_header(plan, run_id=run_id, run_root=execution_root))
@@ -1616,7 +1848,12 @@ def _run(arguments: argparse.Namespace) -> int:
             f"Shard: {shard[0]}/{shard[1]} · "
             f"{sum(len(bindings) for bindings in task_bindings.values())} bindings"
         )
-    print(f"Python profiles: {python_profiles_root} (shared; creates missing profiles)")
+    profile_policy = (
+        "shared; creates missing profiles"
+        if arguments.intent == "debug"
+        else "prepared before measurement; prebuilt during measurement"
+    )
+    print(f"Python profiles: {python_profiles_root} ({profile_policy})")
     if arguments.verbose or arguments.dry_run:
         print("\nCommands:")
         for task, command in execution_commands:
@@ -1629,24 +1866,33 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.dry_run:
         return 0
 
-    reference_environment: dict[str, str] = {}
-    reference_contracts = _selected_perf_reference_contracts(
-        plan,
-        arguments.models_dir,
-        bindings=task_bindings.get("perf", ()),
-    )
-    reference_environment.update(
-        _prepare_perf_reference_dependencies(
+    if arguments.intent == "qualification":
+        reference_environment = _prepare_qualification_dependencies(
+            plan,
+            environment,
+            arguments,
+            task_bindings=task_bindings,
+            perf_environment=perf_environment,
+            perf_preparation_receipt=perf_preparation_receipt,
+            model_reference_cache_root=model_reference_cache_root,
+        )
+        _revalidate_qualification_source(arguments.revision, source_identity)
+    else:
+        reference_contracts = _selected_perf_reference_contracts(
+            plan,
+            arguments.models_dir,
+            bindings=task_bindings.get("perf", ()),
+        )
+        reference_environment = _prepare_perf_reference_dependencies(
             reference_contracts,
             model_reference_cache_root,
         )
-    )
-    if reference_contracts:
-        print(
-            f"Prepared external model sources: {len(reference_contracts)} "
-            f"under {model_reference_cache_root}",
-            flush=True,
-        )
+        if reference_contracts:
+            print(
+                f"Prepared external model sources: {len(reference_contracts)} "
+                f"under {model_reference_cache_root}",
+                flush=True,
+            )
 
     task_results: dict[str, int] = {}
     runnable = [(task, command) for task, command in execution_commands if command is not None]
@@ -1655,6 +1901,8 @@ def _run(arguments: argparse.Namespace) -> int:
         print(f"\n[{index}/{len(runnable)}] {label}", flush=True)
         if command is None:
             continue
+        if arguments.intent == "qualification":
+            _revalidate_qualification_source(arguments.revision, source_identity)
         completed = subprocess.run(
             _detailed_command(command, verbose=arguments.verbose),
             cwd=REPOSITORY,
@@ -1663,8 +1911,27 @@ def _run(arguments: argparse.Namespace) -> int:
                 environment,
                 reference_environment,
                 source_revision=arguments.revision,
+                allow_dependency_creation=arguments.intent == "debug",
             ),
         )
+        if arguments.intent == "qualification":
+            _revalidate_qualification_source(arguments.revision, source_identity)
+        if (
+            task == "perf"
+            and completed.returncode == 0
+            and perf_preparation_receipt is not None
+            and perf_preparation_receipt.is_file()
+        ):
+            perf_output = _perf_shard_output(execution_root)
+            if perf_output is None:
+                raise ModelCheckError("cannot locate completed Perf output")
+            try:
+                perf_matrix.write_report(
+                    perf_output,
+                    preparation_receipt=perf_preparation_receipt,
+                )
+            except perf_matrix.PerfMatrixError as error:
+                raise ModelCheckError(str(error)) from error
         task_results[task] = completed.returncode
         status = "PASSED" if completed.returncode == 0 else "FAILED"
         print(f"[{index}/{len(runnable)}] {label}: {status}", flush=True)

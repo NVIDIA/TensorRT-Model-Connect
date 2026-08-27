@@ -26,9 +26,11 @@ from tensorrt_model_connect.benchmark.catalog import (
 from tensorrt_model_connect.benchmark.cli import main
 from tensorrt_model_connect.benchmark.metrics import reduce_metrics
 from tensorrt_model_connect.benchmark.operations import registered_operations
+from tensorrt_model_connect.benchmark.service import BenchmarkService
 from tensorrt_model_connect.benchmark.task_adapters import registered_task_adapters
 from tensorrt_model_connect.benchmark.types import BenchmarkError
 from tensorrt_model_connect.benchmark.worker import worker_backend_abi, worker_metadata
+from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
 
 
 pytestmark = pytest.mark.unit
@@ -818,6 +820,86 @@ def test_builder_source_digest_participates_in_bundle_cache_identity(
     second = builder._plan(model, (case,))
 
     assert first.cache_key != second.cache_key
+
+
+def test_source_revision_participates_in_bundle_cache_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = ManifestCatalog().resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "pending.bundle")
+    builder = BundleBuilder(tmp_path / "cache")
+
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "a" * 40)
+    first = builder._plan(model, (case,))
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "b" * 40)
+    second = builder._plan(model, (case,))
+
+    assert first.cache_key != second.cache_key
+
+
+def test_external_bundle_must_match_requested_source_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "a" * 40
+    bundle = tmp_path / "external.bundle"
+    write_bundle(
+        bundle,
+        BundleInfo(),
+        [BundleSection("config.json", json.dumps({"source_revision": "b" * 40}).encode())],
+    )
+    model = ManifestCatalog().resolve("distilgpt2")
+    case = resolve_case(model, bundle)
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
+
+    with pytest.raises(BenchmarkError, match="source revision"):
+        BundleBuilder(tmp_path / "cache").prepare(
+            (case,), allow_build=False, rebuild=False, dry_run=False
+        )
+
+
+def test_prepare_only_builds_bundle_without_starting_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    revision = "a" * 40
+    worker = _worker(tmp_path)
+    cache = tmp_path / "cache"
+
+    def fake_build(command, _environment, _timeout_s):
+        output = Path(command[command.index("-o") + 1])
+        write_bundle(
+            output,
+            BundleInfo(),
+            [BundleSection("config.json", json.dumps({"source_revision": revision}).encode())],
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
+    monkeypatch.setenv("TRTMC_BENCH_BUILD_PLATFORM", "test-sm80")
+    monkeypatch.setattr(BundleBuilder, "_execute", staticmethod(fake_build))
+    monkeypatch.setattr(
+        BenchmarkService,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("measurement must not start"),
+    )
+
+    assert (
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle-cache",
+                str(cache),
+                "--worker",
+                str(worker),
+                "--prepare-only",
+            ]
+        )
+        == 0
+    )
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["bundles"][0]["status"] == "built"
+    assert receipt["bundles"][0]["source_revision"] == revision
 
 
 def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
