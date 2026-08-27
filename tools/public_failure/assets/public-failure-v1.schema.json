@@ -34,6 +34,11 @@
     "base_sha": { "$ref": "#/$defs/sha" },
     "tested_revision": { "$ref": "#/$defs/sha" },
     "tested_revision_kind": { "enum": ["head", "merge"] },
+    "dispatch_nonce": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$"
+    },
     "run_attempt": { "type": "integer", "minimum": 1, "maximum": 1000 },
     "result": { "enum": ["failure", "error"] },
     "failures": {
@@ -113,6 +118,7 @@
           "enum": [
             "chronos_bolt",
             "codegen",
+            "fast_foundation_stereo",
             "llama",
             "patchtsmixer",
             "personaplex",

@@ -25,6 +25,7 @@ from tools.public_failure.__main__ import main as public_failure_main
 
 HEAD_SHA = "a" * 40
 BASE_SHA = "b" * 40
+DISPATCH_NONCE = "c" * 32
 
 
 def _context(*, result: str = "failure") -> ExportContext:
@@ -34,6 +35,7 @@ def _context(*, result: str = "failure") -> ExportContext:
         head_sha=HEAD_SHA,
         base_sha=BASE_SHA,
         tested_revision=HEAD_SHA,
+        dispatch_nonce=DISPATCH_NONCE,
         run_attempt=1,
         result=result,
         generated_at="2026-08-26T00:00:00Z",
@@ -114,6 +116,7 @@ def test_export_failure_rebuilds_a_public_result_from_approved_fields() -> None:
         "base_sha": BASE_SHA,
         "tested_revision": HEAD_SHA,
         "tested_revision_kind": "head",
+        "dispatch_nonce": DISPATCH_NONCE,
         "run_attempt": 1,
         "result": "failure",
         "failures": [
@@ -181,6 +184,7 @@ def test_public_contract_rejects_unknown_fields_at_every_level(level: str) -> No
     [
         (("result",), "success"),
         (("head_sha",), "A" * 40),
+        (("dispatch_nonce",), "not-a-nonce"),
         (("pr_number",), True),
         (("failures", 0, "failure_class"), "private_exception_name"),
         (("failures", 0, "test_id"), "../../internal/test.py::test_secret"),
@@ -541,12 +545,18 @@ def test_public_failure_relay_uses_the_existing_status_context() -> None:
 
 
 def test_internal_ci_bridge_publishes_the_private_sanitized_artifact() -> None:
-    workflow = (
-        Path(__file__).parents[2] / ".github/workflows/internal-ci-bridge.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (Path(__file__).parents[2] / ".github/workflows/internal-ci-bridge.yml").read_text(
+        encoding="utf-8"
+    )
 
     assert "--name public-failure-payload" in workflow
     assert "--log" not in workflow
+    assert "openssl rand -hex 16" in workflow
+    assert "dispatch_nonce: $dispatch_nonce" in workflow
+    assert (
+        'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"' in workflow
+    )
+    assert 'report.get("dispatch_nonce") != os.environ["EXPECTED_DISPATCH_NONCE"]' in workflow
     assert "validate_public_failure(report)" in workflow
     assert "assert_public_payload_safe(report, document)" in workflow
     assert "name: public-failure-log" in workflow
@@ -620,7 +630,5 @@ def test_local_cli_writes_preview_files_without_publishing(tmp_path: Path) -> No
 
     assert exit_code == 0
     assert json.loads((output_dir / "public-failure.json").read_text())["result"] == "failure"
-    assert "TRTMC Protected CI failure" in (
-        output_dir / "public-failure.log"
-    ).read_text()
+    assert "TRTMC Protected CI failure" in (output_dir / "public-failure.log").read_text()
     assert not (output_dir / "report.html").exists()

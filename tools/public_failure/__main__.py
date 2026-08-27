@@ -28,6 +28,7 @@ def _context_from_object(value: Mapping[str, object]) -> ExportContext:
         head_sha=value.get("head_sha"),
         base_sha=value.get("base_sha"),
         tested_revision=value.get("tested_revision"),
+        dispatch_nonce=value.get("dispatch_nonce"),
         run_attempt=value.get("run_attempt"),
         result=value.get("result"),
         generated_at=value.get("generated_at"),

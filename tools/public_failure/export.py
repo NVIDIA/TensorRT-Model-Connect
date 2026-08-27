@@ -38,6 +38,7 @@ class ExportContext:
     head_sha: str
     base_sha: str
     tested_revision: str
+    dispatch_nonce: str | None
     run_attempt: int
     result: str
     generated_at: str
@@ -131,7 +132,7 @@ def export_failure(
     failures = raw_failures if isinstance(raw_failures, list) else []
     approved_failures = [item for item in failures if isinstance(item, Mapping)]
     visible_failures = approved_failures[:MAX_PUBLIC_FAILURES]
-    return {
+    report = {
         "schema_version": 1,
         "policy_version": POLICY_VERSION,
         "report_id": (
@@ -149,3 +150,6 @@ def export_failure(
         "omitted_failure_count": len(approved_failures) - len(visible_failures),
         "generated_at": context.generated_at,
     }
+    if context.dispatch_nonce is not None:
+        report["dispatch_nonce"] = context.dispatch_nonce
+    return report

@@ -35,6 +35,7 @@ REPORT_FIELDS = frozenset(
         "base_sha",
         "tested_revision",
         "tested_revision_kind",
+        "dispatch_nonce",
         "run_attempt",
         "result",
         "failures",
@@ -42,6 +43,7 @@ REPORT_FIELDS = frozenset(
         "generated_at",
     }
 )
+REPORT_REQUIRED_FIELDS = REPORT_FIELDS - {"dispatch_nonce"}
 FAILURE_FIELDS = frozenset(
     {
         "public_stage",
@@ -60,6 +62,7 @@ FAILURE_FIELDS = frozenset(
 METRIC_FIELDS = frozenset({"name", "observed", "operator", "threshold"})
 FAILURE_REQUIRED_FIELDS = FAILURE_FIELDS - {"metric", "subject", "excerpt"}
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+DISPATCH_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 REPORT_ID_PATTERN = re.compile(r"trtmc-pr[1-9][0-9]*-[0-9a-f]{7}-attempt[1-9][0-9]*\Z")
 TIMESTAMP_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 TEST_ID_PATTERN = re.compile(r"[A-Za-z0-9_./:\[\],=+-]+\Z")
@@ -187,7 +190,7 @@ def validate_public_failure(report: Mapping[str, object]) -> None:
     if not isinstance(report, Mapping):
         raise PublicFailureValidationError("report must be an object")
     _reject_unknown_fields(report, REPORT_FIELDS, "report")
-    _require_fields(report, REPORT_FIELDS, "report")
+    _require_fields(report, REPORT_REQUIRED_FIELDS, "report")
     if report.get("schema_version") != 1 or isinstance(report.get("schema_version"), bool):
         raise PublicFailureValidationError("schema_version must be 1")
     if report.get("policy_version") != POLICY_VERSION:
@@ -210,6 +213,13 @@ def validate_public_failure(report: Mapping[str, object]) -> None:
     )
     for key in ("head_sha", "base_sha", "tested_revision"):
         _require_string(report.get(key), key, max_length=40, pattern=SHA_PATTERN)
+    if "dispatch_nonce" in report:
+        _require_string(
+            report.get("dispatch_nonce"),
+            "dispatch_nonce",
+            max_length=32,
+            pattern=DISPATCH_NONCE_PATTERN,
+        )
     _require_enum(report.get("tested_revision_kind"), {"head", "merge"}, "tested_revision_kind")
     _require_enum(report.get("result"), {"failure", "error"}, "result")
     _require_string(

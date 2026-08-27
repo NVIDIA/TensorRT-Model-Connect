@@ -155,24 +155,27 @@ jobs:
           [[ "$PRIVATE_CI_REPOSITORY" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$ ]]
 
           umask 077
-          dispatched_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          dispatch_nonce="$(openssl rand -hex 16)"
+          [[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]
           payload="$RUNNER_TEMP/internal-ci-dispatch.json"
           trap 'rm -f "$payload"' EXIT
           jq -n \
             --arg pr_number "$PR_NUMBER" \
             --arg head_sha "$HEAD_SHA" \
+            --arg dispatch_nonce "$dispatch_nonce" \
             '{
               ref: "main",
               inputs: {
                 pr_number: $pr_number,
-                head_sha: $head_sha
+                head_sha: $head_sha,
+                dispatch_nonce: $dispatch_nonce
               }
             }' > "$payload"
           gh api --silent --method POST \
             "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches" \
             --input "$payload"
 
-          expected_title="Source PR #$PR_NUMBER · $HEAD_SHA"
+          expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"
           run_id=""
           for _ in $(seq 1 20); do
             runs="$(
@@ -182,13 +185,9 @@ jobs:
             run_id="$(
               jq -r \
                 --arg title "$expected_title" \
-                --arg dispatched_at "$dispatched_at" \
                 '[
                   .workflow_runs[]
-                  | select(
-                      .display_title == $title and
-                      .created_at >= $dispatched_at
-                    )
+                  | select(.display_title == $title)
                 ]
                 | sort_by(.created_at)
                 | last
@@ -203,7 +202,10 @@ jobs:
             echo "::error::The exact dispatched Internal CI run was not found."
             exit 1
           fi
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          {
+            echo "run_id=$run_id"
+            echo "dispatch_nonce=$dispatch_nonce"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Wait for the exact Internal CI result
         id: private_result
@@ -260,6 +262,7 @@ jobs:
         env:
           PUBLIC_FAILURE_JSON: ${{ runner.temp }}/private-public-failure/public-failure.json
           PUBLIC_FAILURE_LOG: ${{ runner.temp }}/public-failure.log
+          EXPECTED_DISPATCH_NONCE: ${{ steps.private_run.outputs.dispatch_nonce }}
         run: |
           python3 - <<'PY'
           import json
@@ -274,6 +277,8 @@ jobs:
               Path(os.environ["PUBLIC_FAILURE_JSON"]).read_text(encoding="utf-8")
           )
           validate_public_failure(report)
+          if report.get("dispatch_nonce") != os.environ["EXPECTED_DISPATCH_NONCE"]:
+              raise SystemExit("The failure payload does not match this dispatch.")
           document = render_failure_report(report)
           assert_public_payload_safe(report, document)
           Path(os.environ["PUBLIC_FAILURE_LOG"]).write_bytes(document)

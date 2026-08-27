@@ -102,15 +102,11 @@ else:
 
 def _internal_ci_snapshot_script() -> str:
     workflow = yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
-            encoding="utf-8"
-        )
+        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(encoding="utf-8")
     )
     steps = workflow["jobs"]["authorize"]["steps"]
     return next(
-        step["run"]
-        for step in steps
-        if step["name"] == "Capture the exact pull-request head"
+        step["run"] for step in steps if step["name"] == "Capture the exact pull-request head"
     )
 
 
@@ -273,9 +269,7 @@ def test_only_pages_workflow_creates_deployment_objects() -> None:
 def test_community_docs_gate_matches_pages_predeploy_contract() -> None:
     workflows = REPO_ROOT / ".github" / "workflows"
     pages = yaml.safe_load((workflows / "pages.yml").read_text(encoding="utf-8"))
-    community = yaml.safe_load(
-        (workflows / "community-cpu.yml").read_text(encoding="utf-8")
-    )
+    community = yaml.safe_load((workflows / "community-cpu.yml").read_text(encoding="utf-8"))
 
     pages_build = pages["jobs"]["build"]
     pages_steps = {step["name"]: step for step in pages_build["steps"]}
@@ -303,17 +297,17 @@ def test_community_docs_gate_matches_pages_predeploy_contract() -> None:
 
 
 def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
-    workflow = (
-        REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
+        encoding="utf-8"
+    )
     workflow_config = yaml.safe_load(workflow)
-    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split(
-        "\n  dispatch:", maxsplit=1
-    )[0]
+    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split("\n  dispatch:", maxsplit=1)[
+        0
+    ]
     dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1]
-    authorize_permissions = authorize.split(
-        "    permissions:", maxsplit=1
-    )[1].split("\n    outputs:", maxsplit=1)[0]
+    authorize_permissions = authorize.split("    permissions:", maxsplit=1)[1].split(
+        "\n    outputs:", maxsplit=1
+    )[0]
     dispatch_permissions = dispatch.split("    permissions:", maxsplit=1)[1].split(
         "\n\n", maxsplit=1
     )[0]
@@ -373,9 +367,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         "EVENT_BASE_SHA",
     ):
         assert legacy not in workflow
-    assert (
-        "/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci"
-    ) in authorize
+    assert ("/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci") in authorize
     assert "gh api --silent --method DELETE" in authorize
     assert "success() && github.event_name == 'pull_request_target'" in authorize
 
@@ -397,10 +389,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
 
     assert "actions/create-github-app-token@" not in workflow
     assert "permission-checks:" not in workflow
-    assert (
-        "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
-        in workflow
-    )
+    assert "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" in workflow
     assert "persist-credentials: false" in dispatch
     assert "private_ci_bridge.py" not in workflow
     assert "self-hosted" not in workflow
@@ -409,8 +398,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert workflow.count("/statuses/") == 1
     assert "/comments" not in workflow
     assert (
-        "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/"
-        "actions/workflows/premerge.yml/dispatches"
+        "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches"
     ) in workflow
     assert re.search(r'"/repos/[A-Za-z0-9]', workflow) is None
     assert '[[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]' in workflow
@@ -421,17 +409,23 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") >= 1
 
     assert 'ref: "main"' in dispatch
-    for name in ("pr_number", "head_sha"):
+    for name in ("pr_number", "head_sha", "dispatch_nonce"):
         assert f"{name}: ${name}" in dispatch
     assert "umask 077" in dispatch
-    assert 'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA"' in dispatch
+    assert "openssl rand -hex 16" in dispatch
+    assert '[[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]' in dispatch
+    assert (
+        'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"' in dispatch
+    )
     assert ".display_title == $title" in dispatch
-    assert ".created_at >= $dispatched_at" in dispatch
+    assert ".created_at >= $dispatched_at" not in dispatch
     assert "actions/workflows/premerge.yml/runs?event=workflow_dispatch" in dispatch
     assert "actions/runs/$RUN_ID" in dispatch
     assert "--name public-failure-payload" in dispatch
     assert "--log" not in dispatch
     assert "validate_public_failure(report)" in dispatch
+    assert "EXPECTED_DISPATCH_NONCE" in dispatch
+    assert 'report.get("dispatch_nonce")' in dispatch
     assert "assert_public_payload_safe(report, document)" in dispatch
     assert "name: public-failure-log" in dispatch
     assert "Automated internal CI failed; open the public failure log" in dispatch
@@ -440,8 +434,8 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert dispatch.index("- name: Confirm the exact open pull-request head") < (
         dispatch.index("- name: Print public-failure.log")
     )
-    assert 'trap \'rm -f "$payload"\' EXIT' in dispatch
-    assert 'if: ${{ failure() }}' not in dispatch
+    assert "trap 'rm -f \"$payload\"' EXIT" in dispatch
+    assert "if: ${{ failure() }}" not in dispatch
 
 
 def test_internal_ci_bridge_rejects_a_new_push_after_label(
@@ -584,9 +578,7 @@ def test_internal_ci_bridge_tests_do_not_depend_on_host_jq(tmp_path: Path) -> No
 
 def test_internal_ci_trigger_label_is_consumed_only_after_authorization() -> None:
     workflow = yaml.safe_load(
-        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(
-            encoding="utf-8"
-        )
+        (REPO_ROOT / ".github" / "workflows" / "internal-ci-bridge.yml").read_text(encoding="utf-8")
     )
     step = next(
         item
@@ -594,9 +586,7 @@ def test_internal_ci_trigger_label_is_consumed_only_after_authorization() -> Non
         if item["name"] == "Consume the trusted trigger label"
     )
 
-    assert step["if"] == (
-        "${{ success() && github.event_name == 'pull_request_target' }}"
-    )
+    assert step["if"] == ("${{ success() && github.event_name == 'pull_request_target' }}")
     assert step["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}"
 
 
@@ -635,6 +625,7 @@ def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
         "ContainerStageRunner",
     ):
         assert f"class {class_name}" in source
+
 
 def test_ci_modules_have_minimal_role_comments_and_a_complete_tutorial() -> None:
     ci_directory = REPO_ROOT / "tools" / "ci"
@@ -684,14 +675,11 @@ def test_source_quality_pipeline_keeps_the_full_static_gate() -> None:
     assert '"Check model architecture contracts"' in source_quality
     assert "self.quality.architecture_contracts" in source_quality
 
-    architecture_contract = source.split(
-        "def architecture_contracts", maxsplit=1
-    )[1].split("def _changed_files", maxsplit=1)[0]
+    architecture_contract = source.split("def architecture_contracts", maxsplit=1)[1].split(
+        "def _changed_files", maxsplit=1
+    )[0]
     assert '"pytest"' in architecture_contract
-    assert (
-        "tests/tools/test_model_plugin_encapsulation_static.py"
-        in architecture_contract
-    )
+    assert "tests/tools/test_model_plugin_encapsulation_static.py" in architecture_contract
     assert '"-q"' in architecture_contract
     assert '"no:cacheprovider"' in architecture_contract
 
@@ -700,8 +688,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert (
         "ARG CUDA_IMAGE=nvidia/cuda:13.3.0-devel-ubuntu24.04"
-        "@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52"
-        in dockerfile
+        "@sha256:ef2203909e80b8b976cfc672f7e2ae2b00bc0e25c404ee86d89e10a3802f1c52" in dockerfile
     )
     assert dockerfile.count("ARG TENSORRT_VERSION=11.1.0.106") == 1
     assert dockerfile.count("ARG TENSORRT_APT_VERSION=11.1.0.106-1+cuda13.3") == 1
@@ -711,18 +698,13 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "--system-site-packages" not in dockerfile
     assert "ENV TRT_ROOT=" not in dockerfile
     assert "ENV PIP_FIND_LINKS=" not in dockerfile
-    assert (
-        "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs"
-        in dockerfile
-    )
+    assert "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs" in dockerfile
     assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
     assert "ghcr.io" not in dockerfile
     assert "TENSORRT_SDK_IMAGE" not in dockerfile
     assert "/opt/tensorrt/python" not in dockerfile
 
-    from_lines = [
-        line for line in dockerfile.splitlines() if line.startswith("FROM ")
-    ]
+    from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
     assert from_lines == [
         "FROM ${CUDA_IMAGE} AS ci-common-base",
         "FROM ci-common-base AS python-profile-builder",
@@ -774,12 +756,8 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "c++ -x c++" in overlay
 
     source_dockerfiles = {
-        "aarch64": (REPO_ROOT / "Dockerfile.dev.aarch64").read_text(
-            encoding="utf-8"
-        ),
-        "x86_64": (REPO_ROOT / "Dockerfile.dev.x86").read_text(
-            encoding="utf-8"
-        ),
+        "aarch64": (REPO_ROOT / "Dockerfile.dev.aarch64").read_text(encoding="utf-8"),
+        "x86_64": (REPO_ROOT / "Dockerfile.dev.x86").read_text(encoding="utf-8"),
     }
     assert (
         "@sha256:f794a79e8b996d16dbc2e5884e19d8e2269a51c960106c9b49b0061a6926c541"
@@ -791,14 +769,8 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     )
     for architecture, source_dockerfile in source_dockerfiles.items():
         assert "FROM ${TENSORRT_IMAGE}" in source_dockerfile
-        assert (
-            "COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt"
-            in source_dockerfile
-        )
-        assert (
-            "pip install --requirement /tmp/trtmc-community-ci.txt"
-            in source_dockerfile
-        )
+        assert "COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt" in source_dockerfile
+        assert "pip install --requirement /tmp/trtmc-community-ci.txt" in source_dockerfile
         assert "pre-commit>=" not in source_dockerfile
         assert "https://download.pytorch.org/whl/cpu" in source_dockerfile
         assert "torch.version.cuda is None" in source_dockerfile
@@ -807,19 +779,13 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
         assert "nemo_toolkit" not in source_dockerfile
         assert "ln -s /usr/bin/cmake ${VIRTUAL_ENV}/bin/cmake" in source_dockerfile
         assert "RUN cmake --version" in source_dockerfile
-        assert (
-            f"ENV TRT_LIB_DIR=/usr/lib/{architecture}-linux-gnu"
-            in source_dockerfile
-        )
-        assert (
-            f"ENV TRT_INC_DIR=/usr/include/{architecture}-linux-gnu"
-            in source_dockerfile
-        )
+        assert f"ENV TRT_LIB_DIR=/usr/lib/{architecture}-linux-gnu" in source_dockerfile
+        assert f"ENV TRT_INC_DIR=/usr/include/{architecture}-linux-gnu" in source_dockerfile
     assert "x86_64-linux-gnu" not in dockerfile
 
-    source_build = (
-        REPO_ROOT / "website/docs/getting-started/source-build.md"
-    ).read_text(encoding="utf-8")
+    source_build = (REPO_ROOT / "website/docs/getting-started/source-build.md").read_text(
+        encoding="utf-8"
+    )
     assert "Dockerfile.dev.aarch64" in source_build
     assert "Dockerfile.dev.x86" in source_build
     assert "trtmc_model_qwen" in source_build
@@ -827,9 +793,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF" in source_build
     assert "TRTMC_TORCH_CUDA_ARCH_LIST" not in source_build
 
-    ci_docker_build = (REPO_ROOT / "scripts/docker_build_gb300.sh").read_text(
-        encoding="utf-8"
-    )
+    ci_docker_build = (REPO_ROOT / "scripts/docker_build_gb300.sh").read_text(encoding="utf-8")
     assert '"$REPO_ROOT/Dockerfile"' in ci_docker_build
     assert "Dockerfile.dev.aarch64" not in ci_docker_build
     assert "Dockerfile.dev.x86" not in ci_docker_build
@@ -903,12 +867,7 @@ def test_hardened_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
     assert "HUGGING_FACE_HUB_TOKEN" not in common
 
     stage = _ci_source("stage.py")
-    assert (
-        "COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT"
-        in stage
-    )
-
-
+    assert "COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT" in stage
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
@@ -1061,9 +1020,7 @@ def test_github_container_only_exports_nonempty_tuning_controls(tmp_path: Path) 
                 env[name] = value
             arguments = CiContainer(env)._environment_arguments()
             forwarded = [
-                arguments[index + 1]
-                for index, item in enumerate(arguments[:-1])
-                if item == "-e"
+                arguments[index + 1] for index, item in enumerate(arguments[:-1]) if item == "-e"
             ]
             stage_command = ContainerStageRunner("package", env)._docker_command()
             if value == "3":
@@ -1171,12 +1128,8 @@ def test_diffusion_vlm_shared_ci_has_no_model_owned_default() -> None:
 
 def test_full_python_builder_preserves_parallel_and_allocator_coverage() -> None:
     text = _ci_source("coverage.py")
-    builder = text.split("def python_builder_tests", maxsplit=1)[1].split(
-        "def cpp", maxsplit=1
-    )[0]
-    builder_conftest = (
-        REPO_ROOT / "tests" / "builder" / "conftest.py"
-    ).read_text(encoding="utf-8")
+    builder = text.split("def python_builder_tests", maxsplit=1)[1].split("def cpp", maxsplit=1)[0]
+    builder_conftest = (REPO_ROOT / "tests" / "builder" / "conftest.py").read_text(encoding="utf-8")
 
     assert 'glob("test_*.py")' in builder
     assert "--ignore=tests/builder/test_cli.py" not in builder
@@ -1188,14 +1141,9 @@ def test_full_python_builder_preserves_parallel_and_allocator_coverage() -> None
     assert '"TRTMC_TEST_INSTALLED_WHEEL": "1"' in builder
     assert "source_pkgs =" in text
     assert "tensorrt_model_connect" in text
-    assert (
-        'os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"'
-        in builder_conftest
-    )
+    assert 'os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"' in builder_conftest
     assert "imported tensorrt_model_connect" in builder_conftest
-    assert builder.index('"-n", "auto"') < builder.index(
-        '"tests/tools/test_model_proof_runner.py"'
-    )
+    assert builder.index('"-n", "auto"') < builder.index('"tests/tools/test_model_proof_runner.py"')
 
 
 def test_selective_python_always_runs_static_ci_smoke_tests() -> None:
@@ -1246,8 +1194,6 @@ def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
 def test_source_quality_lint_uses_resolved_ci_base_ref() -> None:
     text = _ci_source("quality.py")
     assert "f\"origin/{self.context.env.get('GITHUB_REF_NAME', 'main')}\"" in text
-
-
 
 
 def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
@@ -1339,16 +1285,12 @@ def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> 
     UnitTestRunner(context).premerge()
 
     pytest_commands = [
-        command
-        for command in context.commands
-        if command[:3] == ["python", "-m", "pytest"]
+        command for command in context.commands if command[:3] == ["python", "-m", "pytest"]
     ]
     assert len(pytest_commands) == 1
     assert "tests/builder/" in pytest_commands[0]
     assert selected_test in pytest_commands[0]
-    assert not [
-        command for command in context.commands if command[0] in {"cmake", "ctest"}
-    ]
+    assert not [command for command in context.commands if command[0] in {"cmake", "ctest"}]
 
 
 @pytest.mark.parametrize(
@@ -1383,8 +1325,6 @@ def test_premerge_rejects_an_unsafe_selected_python_test(
         UnitTestRunner(RecordingContext()).premerge()
 
 
-
-
 def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
     stage = _ci_source("quality.py")
     for relative in (
@@ -1399,8 +1339,6 @@ def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
     ].split("class TestEngineBuilderKernelArtifacts:", maxsplit=1)[0]
     assert flashinfer_section.count("@pytest.mark.gpu") == 3
     assert flashinfer_section.count("@pytest.mark.trt") == 3
-
-
 
 
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
@@ -1421,9 +1359,7 @@ def test_package_reuses_conan_cmake_build_directory(tmp_path: Path) -> None:
     release.mkdir(parents=True)
     (release / "CMakeCache.txt").touch()
 
-    assert WheelPackageManager(object())._conan_cmake_build_dir(
-        tmp_path / "conan_out"
-    ) == release
+    assert WheelPackageManager(object())._conan_cmake_build_dir(tmp_path / "conan_out") == release
 
 
 def test_package_smoke_default_is_model_owned() -> None:
@@ -1780,9 +1716,11 @@ def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
     assert '"PATH"' not in smoke_block
     assert 'trtmc,\n                "build"' in smoke_block
     assert "InstalledWheelValidator.require_elf(trtmc)" in smoke_block
-    assert smoke_block.index("self._create_venv(venv, wheel)") < smoke_block.index(
-        "self._install_model_smoke_dependencies(python)"
-    ) < smoke_block.index('self.context.run([python, "-m", "pip", "check"])')
+    assert (
+        smoke_block.index("self._create_venv(venv, wheel)")
+        < smoke_block.index("self._install_model_smoke_dependencies(python)")
+        < smoke_block.index('self.context.run([python, "-m", "pip", "check"])')
+    )
 
 
 def test_wheel_model_smoke_installs_pinned_cpu_torch() -> None:
@@ -1843,9 +1781,7 @@ def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> Non
 
 def test_etth1_model_proofs_use_the_single_validation_engine_entry_point() -> None:
     stage = _ci_source("validation.py", "model_proof.py", "model_proof_inner.py")
-    validation_engine = (
-        REPO_ROOT / "tools" / "validation" / "engine.py"
-    ).read_text()
+    validation_engine = (REPO_ROOT / "tools" / "validation" / "engine.py").read_text()
 
     assert '"/src/tools/validation/engine.py"' in stage
     assert '"prepare-ci-dataset"' in stage
