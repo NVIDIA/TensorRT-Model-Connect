@@ -145,6 +145,18 @@ class InternVLPlugin:
             "image_token_str": "<IMG_CONTEXT>",
         }
 
+    def get_bundle_config_overrides(self, config: ModelConfig) -> dict[str, int]:
+        """Expose InternVL's nested text decoder contract at bundle scope."""
+        return {
+            "vocab_size": config.vocab_size,
+            "hidden_size": config.hidden_size,
+            "num_hidden_layers": config.num_hidden_layers,
+            "num_attention_heads": config.num_attention_heads,
+            "num_key_value_heads": config.num_key_value_heads,
+            "head_dim": config.head_dim,
+            "bos_token_id": config.bos_token_id,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Text decoder weight loading

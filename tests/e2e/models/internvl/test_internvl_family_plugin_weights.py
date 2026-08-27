@@ -231,6 +231,40 @@ class TestInternVLPlugin:
         assert "image_token_id" in vl_cfg
         assert "vl_prompt_template" in vl_cfg
 
+    def test_bundle_config_overrides_flatten_text_decoder(self, tmp_path):
+        """The native runtime receives InternVL's nested decoder geometry."""
+        from tensorrt_model_connect.families.internvl import plugin
+
+        config = {
+            "model_type": "internvl",
+            "text_config": {
+                "vocab_size": 151674,
+                "hidden_size": 1536,
+                "num_hidden_layers": 28,
+                "num_attention_heads": 12,
+                "num_key_value_heads": 2,
+                "head_dim": 128,
+                "bos_token_id": 151643,
+            },
+            "vision_config": {
+                "hidden_size": 1024,
+                "num_hidden_layers": 24,
+            },
+        }
+        _write_config(tmp_path, config)
+
+        cfg = ModelConfig.from_dir(tmp_path)
+
+        assert plugin.get_bundle_config_overrides(cfg) == {
+            "vocab_size": 151674,
+            "hidden_size": 1536,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 12,
+            "num_key_value_heads": 2,
+            "head_dim": 128,
+            "bos_token_id": 151643,
+        }
+
     def test_no_vl_config_without_vision(self, tmp_path):
         """get_vl_config returns None when no vision_config present."""
         from tensorrt_model_connect.families.internvl import plugin
