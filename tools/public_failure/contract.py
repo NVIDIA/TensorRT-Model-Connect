@@ -166,9 +166,15 @@ def _validate_failure(failure: Mapping[str, object], index: int) -> None:
     )
     if test_id.startswith("/") or ".." in test_id or "\\" in test_id:
         raise PublicFailureValidationError(f"{path}.test_id is not a safe relative test ID")
+    reason_code = failure.get("reason_code")
     metric = failure.get("metric")
-    if failure.get("reason_code") == "unknown" and failure.get("disclosure") == "full":
-        raise PublicFailureValidationError(f"{path} cannot fully disclose an unknown reason")
+    if reason_code == "metric_threshold_exceeded" and metric is None:
+        raise PublicFailureValidationError(f"{path} must include metric threshold evidence")
+    if reason_code == "unknown":
+        if failure.get("disclosure") != "withheld":
+            raise PublicFailureValidationError(f"{path} must withhold an unknown reason")
+        if "excerpt" in failure:
+            raise PublicFailureValidationError(f"{path} cannot excerpt an unknown reason")
     if metric is None:
         return
     if not isinstance(metric, Mapping):

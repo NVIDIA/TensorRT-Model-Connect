@@ -94,6 +94,12 @@ def _export_one_failure(value: Mapping[str, object]) -> dict[str, Any]:
     reason_code = public_reason_code(value.get("reason_code"))
     subject = public_subject(value.get("subject"))
     excerpt = _export_excerpt(value.get("excerpt"))
+    if reason_code == "metric_threshold_exceeded" and metric is None:
+        reason_code = "unknown"
+    if reason_code == "unknown":
+        metric = None
+        subject = None
+        excerpt = None
     public = {
         "public_stage": public_stage(value.get("stage")),
         "model": public_model(value.get("model")),
@@ -102,13 +108,11 @@ def _export_one_failure(value: Mapping[str, object]) -> dict[str, Any]:
         "test_id": _export_test_id(value.get("test_id")),
         "failure_class": public_failure_class(value.get("failure_type")),
         "reason_code": reason_code,
-        "disclosure": (
-            "truncated"
-            if excerpt is not None
-            else "full"
-            if reason_code != "unknown"
-            else "withheld"
-        ),
+        "disclosure": "withheld"
+        if reason_code == "unknown"
+        else "truncated"
+        if excerpt is not None
+        else "full",
     }
     if metric is not None:
         public["metric"] = metric

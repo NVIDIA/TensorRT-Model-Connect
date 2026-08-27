@@ -15,6 +15,11 @@ class PublicFailureSafetyError(ValueError):
     """Raised when an otherwise valid payload resembles protected data."""
 
 
+REGISTRY_IMAGE_REFERENCE_PATTERN = re.compile(
+    r"\b[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::[0-9]+)?/[A-Za-z0-9._/@:+-]+"
+)
+
+
 SENSITIVE_PATTERNS = (
     (
         "credential-like token",
@@ -35,13 +40,6 @@ SENSITIVE_PATTERNS = (
             re.I,
         ),
     ),
-    (
-        "registry image reference",
-        re.compile(
-            r"\b[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?::[0-9]+)?/"
-            r"[A-Za-z0-9._/@:+-]+"
-        ),
-    ),
     ("IP address", re.compile(r"(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])")),
     ("internal filesystem path", re.compile(r"/(?:home|workspace|mnt|var|tmp|builds|opt)/")),
     ("internal CI name", re.compile(r"\b(?:jenkins|slurm)\b", re.I)),
@@ -59,3 +57,16 @@ def assert_public_payload_safe(report: Mapping[str, object], document: bytes) ->
         for label, pattern in SENSITIVE_PATTERNS:
             if pattern.search(candidate):
                 raise PublicFailureSafetyError(f"public failure payload contains a {label}")
+    for failure in report.get("failures", ()):
+        if not isinstance(failure, Mapping):
+            continue
+        excerpt = failure.get("excerpt", ())
+        if not isinstance(excerpt, list):
+            continue
+        if any(
+            isinstance(line, str) and REGISTRY_IMAGE_REFERENCE_PATTERN.search(line)
+            for line in excerpt
+        ):
+            raise PublicFailureSafetyError(
+                "public failure payload contains a registry image reference"
+            )

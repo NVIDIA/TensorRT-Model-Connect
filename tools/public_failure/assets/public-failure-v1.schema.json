@@ -194,7 +194,26 @@
           }
         },
         "disclosure": { "enum": ["full", "truncated", "withheld"] }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "reason_code": { "const": "metric_threshold_exceeded" } },
+            "required": ["reason_code"]
+          },
+          "then": { "required": ["metric"] }
+        },
+        {
+          "if": {
+            "properties": { "reason_code": { "const": "unknown" } },
+            "required": ["reason_code"]
+          },
+          "then": {
+            "properties": { "disclosure": { "const": "withheld" } },
+            "not": { "required": ["excerpt"] }
+          }
+        }
+      ]
     }
   }
 }

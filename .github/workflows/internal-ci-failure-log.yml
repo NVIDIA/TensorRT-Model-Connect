@@ -62,7 +62,6 @@ jobs:
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
               output.write(f"head_sha={report['head_sha']}\n")
               output.write(f"pr_number={report['pr_number']}\n")
-          print(document.decode("utf-8"), end="")
           PY
 
       - name: Confirm the exact open pull-request head
@@ -77,6 +76,9 @@ jobs:
           test "$(jq -er '.base.repo.full_name' <<<"$pull")" = "$GITHUB_REPOSITORY"
           test "$(jq -er '.base.ref' <<<"$pull")" = "main"
           test "$(jq -er '.head.sha' <<<"$pull")" = "$HEAD_SHA"
+
+      - name: Print public-failure.log
+        run: cat "${{ runner.temp }}/public-failure.log"
 
       - name: Upload public-failure.log
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

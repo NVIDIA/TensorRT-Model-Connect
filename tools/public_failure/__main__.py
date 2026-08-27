@@ -51,6 +51,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     context = _context_from_object(_load_object(args.context))
     artifacts = build_failure_artifacts(internal, context)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "report.html").unlink(missing_ok=True)
     (args.output_dir / "public-failure.json").write_bytes(artifacts.json_bytes)
     (args.output_dir / "public-failure.log").write_bytes(artifacts.log_bytes)
     print(f"Local preview written to {args.output_dir}")

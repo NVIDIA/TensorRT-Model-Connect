@@ -223,6 +223,51 @@ def test_unknown_internal_values_become_fixed_placeholders_without_leaking() -> 
     assert private_test_id.encode() not in public_bytes
 
 
+def test_metric_failure_without_valid_metric_is_withheld_as_unknown() -> None:
+    failure = _comparison_failure()
+    failure["metric"] = {"name": "private_metric", "observed": "invalid"}
+    failure["excerpt"] = ["E   comparison failed"]
+
+    report = export_failure({"failures": [failure]}, _context())
+
+    validate_public_failure(report)
+    assert report["failures"][0]["reason_code"] == "unknown"
+    assert report["failures"][0]["disclosure"] == "withheld"
+    assert "metric" not in report["failures"][0]
+    assert "excerpt" not in report["failures"][0]
+
+
+def test_unknown_reason_never_exports_an_excerpt() -> None:
+    failure = _build_failure(test_id="tests/e2e/test_build.py::test_build")
+    failure["reason_code"] = "private_failure_reason"
+    failure["excerpt"] = ["E   safe-looking but unclassified failure detail"]
+
+    report = export_failure({"failures": [failure]}, _context())
+
+    validate_public_failure(report)
+    assert report["failures"][0]["reason_code"] == "unknown"
+    assert report["failures"][0]["disclosure"] == "withheld"
+    assert "excerpt" not in report["failures"][0]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda failure: failure.pop("metric"),
+        lambda failure: failure.update(reason_code="unknown", disclosure="truncated"),
+        lambda failure: failure.update(
+            reason_code="unknown", disclosure="withheld", excerpt=["E   detail"]
+        ),
+    ],
+)
+def test_public_contract_rejects_invalid_reason_disclosure_invariants(mutation) -> None:
+    report = _comparison_report()
+    mutation(report["failures"][0])
+
+    with pytest.raises(PublicFailureValidationError):
+        validate_public_failure(report)
+
+
 def test_json_schema_accepts_the_exported_report_and_is_itself_valid() -> None:
     schema_path = (
         Path(__file__).parents[2] / "tools/public_failure/assets/public-failure-v1.schema.json"
@@ -232,6 +277,27 @@ def test_json_schema_accepts_the_exported_report_and_is_itself_valid() -> None:
 
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(report)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda failure: failure.pop("metric"),
+        lambda failure: failure.update(reason_code="unknown", disclosure="truncated"),
+        lambda failure: failure.update(
+            reason_code="unknown", disclosure="withheld", excerpt=["E   detail"]
+        ),
+    ],
+)
+def test_json_schema_enforces_reason_disclosure_invariants(mutation) -> None:
+    schema_path = (
+        Path(__file__).parents[2] / "tools/public_failure/assets/public-failure-v1.schema.json"
+    )
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    report = _comparison_report()
+    mutation(report["failures"][0])
+
+    assert list(Draft202012Validator(schema).iter_errors(report))
 
 
 def test_renderer_produces_deterministic_plain_text() -> None:
@@ -308,6 +374,16 @@ def test_safety_scan_rejects_an_unredacted_registry_image_reference() -> None:
 
     with pytest.raises(PublicFailureSafetyError, match="registry image reference"):
         assert_public_payload_safe(report, document)
+
+
+def test_safety_scan_allows_a_dotted_relative_test_path() -> None:
+    report = export_failure(
+        {"failures": [_build_failure(test_id="docs/schema.json/examples")]},
+        _context(),
+    )
+    document = render_failure_report(report)
+
+    assert_public_payload_safe(report, document)
 
 
 @pytest.mark.parametrize(
@@ -438,6 +514,9 @@ def test_public_failure_relay_uses_the_existing_status_context() -> None:
     assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 1
     assert "actions/runs/$GITHUB_RUN_ID" in workflow
     assert "pulls/$PR_NUMBER" in workflow
+    assert workflow.index("- name: Confirm the exact open pull-request head") < workflow.index(
+        "- name: Print public-failure.log"
+    )
 
 
 def test_poison_scan_rejects_sensitive_text_even_when_schema_allows_the_characters() -> None:
@@ -487,6 +566,8 @@ def test_local_cli_writes_preview_files_without_publishing(tmp_path: Path) -> No
         encoding="utf-8",
     )
     context_path.write_text(json.dumps(asdict(_context())), encoding="utf-8")
+    output_dir.mkdir()
+    (output_dir / "report.html").write_text("stale legacy output", encoding="utf-8")
 
     exit_code = public_failure_main(
         [
