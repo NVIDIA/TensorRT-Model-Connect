@@ -424,13 +424,23 @@ def test_ref2va_validator_enforces_file_and_per_run_caps() -> None:
 
 
 class _FakeTensor:
-    def __init__(self, name: str, dtype: object, shape: tuple[int, ...]):
+    def __init__(
+        self,
+        name: str,
+        dtype: object,
+        shape: tuple[int, ...],
+        *,
+        is_network_input: bool = False,
+    ):
         self.name = name
         self.dtype = dtype
         self.shape = shape
+        self.is_network_input = is_network_input
         self.dimension_names = {}
 
     def set_dimension_name(self, axis: int, name: str) -> None:
+        if not self.is_network_input:
+            raise AssertionError("TensorRT only permits dimension names on network inputs")
         self.dimension_names[axis] = name
 
 
@@ -475,7 +485,7 @@ class _FakeNetwork:
         self.outputs = []
 
     def add_input(self, name, dtype, shape):
-        tensor = _FakeTensor(name, dtype, shape)
+        tensor = _FakeTensor(name, dtype, shape, is_network_input=True)
         self.inputs[name] = tensor
         return tensor
 

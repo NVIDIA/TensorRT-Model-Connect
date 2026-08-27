@@ -885,7 +885,6 @@ def _assemble_language_conditioner_graph(network, weights, spec, inputs, trt, op
             ).get_output(0)
     output = op.cast(network, hidden, trt.float32)
     output.name = "encoder_hidden_states"
-    _set_row_dimension(output, 0)
     network.mark_output(output)
     return output
 
