@@ -132,7 +132,8 @@ jobs:
     environment:
       name: ci-dispatch
       deployment: false
-    timeout-minutes: 60
+    # Cover protected runner queueing plus the longest 180-minute model proof.
+    timeout-minutes: 360
     permissions:
       contents: read
       pull-requests: read
@@ -217,7 +218,9 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          for _ in $(seq 1 220); do
+          # Leave ten minutes for artifact download, validation, and status
+          # publication before the six-hour job timeout.
+          for _ in $(seq 1 1400); do
             run="$(
               gh api --method GET \
                 "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/runs/$RUN_ID"

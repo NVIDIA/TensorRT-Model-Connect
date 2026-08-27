@@ -376,6 +376,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         "name": "ci-dispatch",
         "deployment": False,
     }
+    assert workflow_config["jobs"]["dispatch"]["timeout-minutes"] == 360
     secret_references = set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", workflow))
     assert secret_references == {
         "TRTMC_CI_DISPATCH_TOKEN",
@@ -421,6 +422,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert ".created_at >= $dispatched_at" not in dispatch
     assert "actions/workflows/premerge.yml/runs?event=workflow_dispatch" in dispatch
     assert "actions/runs/$RUN_ID" in dispatch
+    assert "for _ in $(seq 1 1400); do" in dispatch
     assert "--name public-failure-payload" in dispatch
     assert "--log" not in dispatch
     assert "validate_public_failure(report)" in dispatch
