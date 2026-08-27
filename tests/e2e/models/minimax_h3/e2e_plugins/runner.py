@@ -16,7 +16,7 @@ from . import (
     PROJECT_DIR,
     artifact_dir,
     bundle_path,
-    keyframe_inputs,
+    materialize_keyframe_inputs,
     materialize_reference_inputs,
     model_plugin_dir,
     reference_cli_args,
@@ -56,7 +56,7 @@ def build_native_command(
         "--source-revision",
         source_revision(case, ctx),
     ]
-    for _input_name, flag, path in keyframe_inputs(case):
+    for _input_name, flag, path in materialize_keyframe_inputs(case, output_dir):
         command.extend((flag, str(path)))
     command.extend(reference_cli_args(materialize_reference_inputs(case, output_dir)))
     return command

@@ -214,6 +214,24 @@ def write_deterministic_reference_wav(recipe_source: Path, output: Path) -> Path
     return output.resolve(strict=True)
 
 
+def _materialize_ppm_as_png(source: Path, output: Path) -> Path:
+    """Transcode a checked-in PPM fixture to a native-readable RGB PNG."""
+
+    source = source.resolve(strict=True)
+    if source.suffix.lower() != ".ppm":
+        return source
+
+    from PIL import Image
+
+    output = output.with_suffix(".png")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(source) as image:
+        if image.format != "PPM":
+            raise ValueError(f"MiniMax-H3 .ppm fixture is not a PPM image: {source}")
+        image.convert("RGB").save(output, format="PNG", optimize=False)
+    return output.resolve(strict=True)
+
+
 def _materialize_video_manifest(source: Path, output: Path) -> Path:
     manifest = json.loads(source.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not {"fps", "frames"} <= set(manifest):
@@ -225,6 +243,7 @@ def _materialize_video_manifest(source: Path, output: Path) -> Path:
         raise ValueError("MiniMax-H3 reference video manifest needs at least one frame")
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    materialized_frames: list[str] = []
     for relative_value in frames:
         if not isinstance(relative_value, str) or not relative_value:
             raise ValueError("MiniMax-H3 reference video frame paths must be non-empty strings")
@@ -232,9 +251,16 @@ def _materialize_video_manifest(source: Path, output: Path) -> Path:
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("MiniMax-H3 reference video frame paths must stay beside the manifest")
         source_frame = (source.parent / relative).resolve(strict=True)
-        target_frame = output.parent / relative
+        target_relative = (
+            relative.with_suffix(".png") if source_frame.suffix.lower() == ".ppm" else relative
+        )
+        target_frame = output.parent / target_relative
         target_frame.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_frame, target_frame)
+        if source_frame.suffix.lower() == ".ppm":
+            _materialize_ppm_as_png(source_frame, target_frame)
+        else:
+            shutil.copyfile(source_frame, target_frame)
+        materialized_frames.append(target_relative.as_posix())
 
     audio_value = manifest.get("audio")
     if audio_value is not None:
@@ -251,7 +277,8 @@ def _materialize_video_manifest(source: Path, output: Path) -> Path:
         else:
             write_deterministic_reference_wav(source_audio, target_audio)
 
-    output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    materialized_manifest = {**manifest, "frames": materialized_frames}
+    output.write_text(json.dumps(materialized_manifest, indent=2) + "\n", encoding="utf-8")
     return output.resolve(strict=True)
 
 
@@ -271,6 +298,11 @@ def materialize_reference_inputs(
             )
         elif descriptor.kind == "video":
             path = _materialize_video_manifest(
+                descriptor.path,
+                fixture_root / f"{index:02d}" / descriptor.path.name,
+            )
+        elif descriptor.kind == "image":
+            path = _materialize_ppm_as_png(
                 descriptor.path,
                 fixture_root / f"{index:02d}" / descriptor.path.name,
             )
@@ -347,6 +379,28 @@ def keyframe_inputs(case: E2ECase) -> tuple[tuple[str, str, Path], ...]:
             raise ValueError(f"MiniMax-H3 {input_name} must be a file path string")
         resolved.append((input_name, flag, resolve_owned_file(value)))
     return tuple(resolved)
+
+
+def materialize_keyframe_inputs(
+    case: E2ECase,
+    output_dir: Path,
+) -> tuple[tuple[str, str, Path], ...]:
+    """Make FL2VA keyframes concrete native/HF-readable image paths."""
+
+    result = []
+    fixture_root = output_dir / "keyframe_inputs"
+    for input_name, flag, path in keyframe_inputs(case):
+        result.append(
+            (
+                input_name,
+                flag,
+                _materialize_ppm_as_png(
+                    path,
+                    fixture_root / input_name / path.name,
+                ),
+            )
+        )
+    return tuple(result)
 
 
 def keyframe_mode(case: E2ECase) -> str:

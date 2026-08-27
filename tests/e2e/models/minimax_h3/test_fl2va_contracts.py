@@ -68,6 +68,22 @@ def test_fl2va_manifest_covers_all_four_modes_without_claiming_required_parity()
         assert case.threshold_overrides == qualified_thresholds
         assert (MODEL_DIR / "thresholds" / f"{case.name}.json").is_file()
         assert case.metadata["build_cli_args"] == manifest["build_cli_args"]
+        preflight_requirements = {
+            (requirement.kind, tuple(sorted(requirement.args.items())), requirement.gating)
+            for requirement in case.preflight
+        }
+        assert ("binary_exists", (), True) in preflight_requirements
+        assert ("gpu_count_min", (("count", 1),), True) in preflight_requirements
+        assert (
+            "python_module_available",
+            (("module", "diffusers"), ("phase", "reference")),
+            True,
+        ) in preflight_requirements
+        assert (
+            "python_module_available",
+            (("module", "huggingface_hub"), ("phase", "reference")),
+            True,
+        ) in preflight_requirements
         preflight_assets = {
             requirement.args["path"]
             for requirement in case.preflight
@@ -155,8 +171,14 @@ def test_native_and_hf_wrappers_forward_keyframes_in_first_then_last_order(
         ("--last-image", LAST_IMAGE),
     ):
         if flag in expected_flags:
-            assert Path(native[native.index(flag) + 1]) == expected.resolve()
-            assert Path(reference[reference.index(flag) + 1]) == expected.resolve()
+            native_path = Path(native[native.index(flag) + 1])
+            reference_path = Path(reference[reference.index(flag) + 1])
+            assert native_path.suffix == ".png"
+            assert reference_path.suffix == ".png"
+            assert native_path.read_bytes() == reference_path.read_bytes()
+            with Image.open(expected) as source, Image.open(native_path) as materialized:
+                assert materialized.format == "PNG"
+                assert materialized.convert("RGB").tobytes() == source.convert("RGB").tobytes()
 
 
 @pytest.mark.parametrize(

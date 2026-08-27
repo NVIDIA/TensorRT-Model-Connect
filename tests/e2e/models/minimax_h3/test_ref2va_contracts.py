@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import wave
 
+from PIL import Image
 import pytest
 
 from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
@@ -169,7 +170,17 @@ def test_native_and_hf_wrappers_preserve_mixed_reference_order(
     assert video_manifest["fps"] == 1
     assert len(video_manifest["frames"]) == 2
     assert len(video_manifest["frames"]) / video_manifest["fps"] == 2.0
+    assert all(Path(value).suffix == ".png" for value in video_manifest["frames"])
+    for value in video_manifest["frames"]:
+        with Image.open(video_path.parent / value) as frame:
+            assert frame.format == "PNG"
     assert (video_path.parent / video_manifest["audio"]).is_file()
+    for pairs in (native_pairs, reference_pairs):
+        for flag, path in pairs:
+            if flag == "--reference-image":
+                assert path.suffix == ".png"
+                with Image.open(path) as image:
+                    assert image.format == "PNG"
 
 
 def test_hf_helper_emits_official_reference_objects_and_references_kwarg(
@@ -194,16 +205,20 @@ def test_hf_helper_emits_official_reference_objects_and_references_kwarg(
     )
 
     assert [set(reference.kwargs) for reference in references] == [
-        {"audio"},
+        {"audio", "sample_rate"},
         {"image"},
-        {"video", "fps", "audio"},
+        {"video", "fps", "audio", "sample_rate"},
         {"image"},
     ]
+    assert references[0].kwargs["sample_rate"] == 32000
+    assert references[0].kwargs["audio"].shape == (2, 64000)
     assert references[2].kwargs["fps"] == 1.0
     assert references[2].kwargs["video"] == [
-        "loaded:ref2va-subject.ppm",
-        "loaded:ref2va-style.ppm",
+        "loaded:ref2va-subject.png",
+        "loaded:ref2va-style.png",
     ]
+    assert references[2].kwargs["sample_rate"] == 32000
+    assert references[2].kwargs["audio"].shape == (2, 64000)
     arguments = hf_reference.pipeline_arguments(
         prompt="prompt",
         generator=object(),

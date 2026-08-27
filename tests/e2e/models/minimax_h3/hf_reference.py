@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 import math
 import platform
@@ -14,6 +15,7 @@ import subprocess
 import time
 from pathlib import Path
 from types import MethodType
+import wave
 
 import numpy as np
 import torch
@@ -62,6 +64,17 @@ _REFERENCE_FLAGS = {
     "--reference-video": "video",
     "--reference-audio": "audio",
 }
+
+
+@dataclass(frozen=True)
+class _ResolvedVideoReference:
+    manifest_path: Path
+    fps: float
+    frames: tuple[tuple[str, Path], ...]
+    soundtrack: tuple[str, Path] | None
+
+
+_BoundFileIdentity = tuple[Path, dict[str, int], str]
 
 
 class _OrderedReferenceAction(argparse.Action):
@@ -270,6 +283,106 @@ def pipeline_arguments(
     return arguments
 
 
+def create_official_pipeline(
+    *,
+    workflow: str,
+    model_path: Path,
+    components_manager,
+    modular_pipeline_type,
+    ref2va_blocks_type,
+):
+    """Construct the pinned official pipeline for the requested H3 checkpoint partition."""
+
+    if workflow == "ref2va":
+        return ref2va_blocks_type().init_pipeline(
+            model_path,
+            components_manager=components_manager,
+        )
+    if workflow not in {"t2va", "fl2va"}:
+        raise ValueError(f"Unsupported MiniMax-H3 HF workflow: {workflow!r}")
+    return modular_pipeline_type.from_pretrained(
+        model_path,
+        components_manager=components_manager,
+    )
+
+
+def validate_official_pipeline_partition(pipe, workflow: str) -> dict:
+    """Fail closed if Diffusers selected the other H3 transformer partition."""
+
+    pipeline_class = type(pipe).__name__
+    blocks_class = type(pipe._blocks).__name__
+    component_names = sorted(pipe.component_names)
+    component_set = set(component_names)
+    expected = "transformer_ref" if workflow == "ref2va" else "transformer"
+    unexpected = "transformer" if workflow == "ref2va" else "transformer_ref"
+    if expected not in component_set or unexpected in component_set:
+        raise ValueError(
+            f"MiniMax-H3 {workflow} HF pipeline selected the wrong checkpoint partition: "
+            f"expected {expected} without {unexpected}, got {component_names}"
+        )
+    block_inputs = sorted(pipe._blocks.input_names)
+    if workflow == "ref2va" and "references" not in block_inputs:
+        raise ValueError("MiniMax-H3 Ref2VA HF pipeline does not consume references")
+    if workflow == "ref2va" and (
+        pipeline_class != "MiniMaxH3Ref2VAModularPipeline"
+        or blocks_class != "MiniMaxH3Ref2VABlocks"
+    ):
+        raise ValueError(
+            "MiniMax-H3 Ref2VA HF pipeline selected the wrong official pipeline types: "
+            f"got {pipeline_class}/{blocks_class}"
+        )
+    return {
+        "pipeline_class": pipeline_class,
+        "blocks_class": blocks_class,
+        "component_names": component_names,
+        "block_inputs": block_inputs,
+    }
+
+
+def _workflow_transformer_component(workflow: str) -> str:
+    if workflow == "ref2va":
+        return "transformer_ref"
+    if workflow in {"t2va", "fl2va"}:
+        return "transformer"
+    raise ValueError(f"Unsupported MiniMax-H3 HF workflow: {workflow!r}")
+
+
+def compile_official_transformer(
+    pipe,
+    workflow: str,
+    *,
+    mode: str,
+    compile_function,
+) -> str:
+    """Compile and replace exactly the transformer partition used by ``workflow``."""
+
+    component = _workflow_transformer_component(workflow)
+    unexpected = "transformer" if component == "transformer_ref" else "transformer_ref"
+    component_names = set(pipe.component_names)
+    if component not in component_names or unexpected in component_names:
+        raise ValueError(
+            f"MiniMax-H3 {workflow} HF compile selected the wrong checkpoint partition: "
+            f"expected {component} without {unexpected}, got {sorted(component_names)}"
+        )
+    transformer = getattr(pipe, component, None)
+    if transformer is None:
+        raise ValueError(f"MiniMax-H3 {workflow} HF compile component {component} is unavailable")
+    update_components = getattr(pipe, "update_components", None)
+    if not callable(update_components):
+        raise ValueError("MiniMax-H3 HF pipeline cannot update its compiled component")
+
+    compiled_transformer = compile_function(transformer, mode=mode, dynamic=False)
+    if compiled_transformer is None:
+        raise ValueError("MiniMax-H3 HF compile did not return a transformer")
+    update_components(**{component: compiled_transformer})
+    if (
+        component not in set(pipe.component_names)
+        or getattr(pipe, component, None) is not compiled_transformer
+    ):
+        raise ValueError(f"MiniMax-H3 HF pipeline did not install compiled component {component}")
+    return component
+
+
 def _keyframe_mode(image, last_image) -> str:
     if image is not None and last_image is not None:
         return "first_and_last"
@@ -280,7 +393,38 @@ def _keyframe_mode(image, last_image) -> str:
     return "zero"
 
 
-def _video_reference_arguments(path: Path, load_image) -> dict:
+def _decode_reference_wav(path: Path) -> tuple[torch.Tensor, int]:
+    """Decode the model-owned PCM fixture without Diffusers' optional PyAV path."""
+
+    path = path.resolve(strict=True)
+    with wave.open(str(path), "rb") as stream:
+        channels = stream.getnchannels()
+        sample_width = stream.getsampwidth()
+        sample_rate = stream.getframerate()
+        frame_count = stream.getnframes()
+        compression = stream.getcomptype()
+        payload = stream.readframes(frame_count)
+
+    if compression != "NONE" or sample_width != 2:
+        raise ValueError("MiniMax-H3 HF reference audio must be uncompressed 16-bit PCM WAV")
+    if channels not in (1, 2):
+        raise ValueError("MiniMax-H3 HF reference audio must be mono or stereo")
+    expected_bytes = frame_count * channels * sample_width
+    if len(payload) != expected_bytes:
+        raise ValueError(
+            "MiniMax-H3 HF reference WAV payload is truncated: "
+            f"expected {expected_bytes} bytes, got {len(payload)}"
+        )
+
+    interleaved = np.frombuffer(payload, dtype="<i2")
+    frames = interleaved.reshape(frame_count, channels).astype(np.float32)
+    frames *= np.float32(1.0 / 32768.0)
+    waveform = torch.from_numpy(np.ascontiguousarray(frames.T))
+    return waveform, sample_rate
+
+
+def _resolve_video_reference(path: Path) -> _ResolvedVideoReference:
+    path = path.resolve(strict=True)
     manifest = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or set(manifest) not in (
         {"fps", "frames"},
@@ -305,32 +449,123 @@ def _video_reference_arguments(path: Path, load_image) -> dict:
         relative = Path(value)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("MiniMax-H3 reference video frame paths must be relative")
-        frame_paths.append((path.parent / relative).resolve(strict=True))
-    arguments = {
-        "video": [load_image(str(frame_path)) for frame_path in frame_paths],
-        "fps": float(fps),
-    }
+        frame_paths.append((relative.as_posix(), (path.parent / relative).resolve(strict=True)))
     audio = manifest.get("audio")
+    soundtrack = None
     if audio is not None:
         if not isinstance(audio, str) or not audio:
             raise ValueError("MiniMax-H3 reference video audio must be a path string")
         relative = Path(audio)
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("MiniMax-H3 reference video audio must be relative")
-        arguments["audio"] = str((path.parent / relative).resolve(strict=True))
+        soundtrack = (relative.as_posix(), (path.parent / relative).resolve(strict=True))
+    return _ResolvedVideoReference(
+        manifest_path=path,
+        fps=float(fps),
+        frames=tuple(frame_paths),
+        soundtrack=soundtrack,
+    )
+
+
+def _video_reference_arguments(
+    path: Path,
+    load_image,
+    *,
+    resolved: _ResolvedVideoReference | None = None,
+) -> dict:
+    path = path.resolve(strict=True)
+    resolved = _resolve_video_reference(path) if resolved is None else resolved
+    if resolved.manifest_path != path:
+        raise ValueError("MiniMax-H3 resolved video does not match its reference manifest")
+    arguments = {
+        "video": [load_image(str(frame_path)) for _relative, frame_path in resolved.frames],
+        "fps": resolved.fps,
+    }
+    if resolved.soundtrack is not None:
+        _relative, soundtrack_path = resolved.soundtrack
+        waveform, sample_rate = _decode_reference_wav(soundtrack_path)
+        arguments["audio"] = waveform
+        arguments["sample_rate"] = sample_rate
     return arguments
 
 
-def build_official_references(reference_specs, reference_type, load_image) -> list:
+def bind_reference_input_records(
+    reference_specs: list[tuple[str, Path]],
+) -> tuple[
+    list[dict],
+    list[_BoundFileIdentity],
+    dict[int, _ResolvedVideoReference],
+]:
+    """Bind ordered reference receipts to every file the HF oracle will read."""
+
+    records = []
+    identities = []
+    resolved_videos = {}
+    for index, (kind, raw_path) in enumerate(reference_specs):
+        if kind not in {"image", "video", "audio"}:
+            raise ValueError(f"Unsupported MiniMax-H3 reference kind: {kind!r}")
+        path = Path(raw_path).resolve(strict=True)
+        label = f"reference {index} {kind}"
+        record, identity = stable_file_record(path, label)
+        receipt_record = {"kind": kind, **record}
+        identities.append((path, identity, label))
+        if kind == "video":
+            video = _resolve_video_reference(path)
+            resolved_videos[index] = video
+            frame_records = []
+            for frame_index, (relative, frame_path) in enumerate(video.frames):
+                frame_label = f"reference {index} video frame {frame_index}"
+                frame_record, frame_identity = stable_file_record(frame_path, frame_label)
+                frame_records.append({"path": relative, **frame_record})
+                identities.append((frame_path, frame_identity, frame_label))
+            receipt_record["frames"] = frame_records
+            if video.soundtrack is not None:
+                relative, soundtrack_path = video.soundtrack
+                soundtrack_label = f"reference {index} video soundtrack"
+                soundtrack_record, soundtrack_identity = stable_file_record(
+                    soundtrack_path,
+                    soundtrack_label,
+                )
+                receipt_record["soundtrack"] = {"path": relative, **soundtrack_record}
+                identities.append((soundtrack_path, soundtrack_identity, soundtrack_label))
+            validate_file_identity(path, identity, label)
+        records.append(receipt_record)
+    return records, identities, resolved_videos
+
+
+def validate_bound_reference_identities(identities: list[_BoundFileIdentity]) -> None:
+    """Revalidate all direct and manifest-nested reference files after generation."""
+
+    for path, identity, label in identities:
+        validate_file_identity(path, identity, label)
+
+
+def build_official_references(
+    reference_specs,
+    reference_type,
+    load_image,
+    *,
+    resolved_videos: dict[int, _ResolvedVideoReference] | None = None,
+) -> list:
     """Create official Diffusers references without regrouping their modalities."""
 
+    if resolved_videos is not None:
+        expected_video_indices = {
+            index for index, (kind, _raw_path) in enumerate(reference_specs) if kind == "video"
+        }
+        if set(resolved_videos) != expected_video_indices:
+            raise ValueError("MiniMax-H3 resolved videos do not match ordered references")
     references = []
-    for kind, raw_path in reference_specs:
+    for index, (kind, raw_path) in enumerate(reference_specs):
         path = Path(raw_path).resolve(strict=True)
         if kind == "video":
-            arguments = _video_reference_arguments(path, load_image)
-        elif kind in {"image", "audio"}:
-            arguments = {kind: str(path)}
+            resolved = None if resolved_videos is None else resolved_videos[index]
+            arguments = _video_reference_arguments(path, load_image, resolved=resolved)
+        elif kind == "image":
+            arguments = {"image": load_image(str(path))}
+        elif kind == "audio":
+            waveform, sample_rate = _decode_reference_wav(path)
+            arguments = {"audio": waveform, "sample_rate": sample_rate}
         else:
             raise ValueError(f"Unsupported MiniMax-H3 reference kind: {kind!r}")
         references.append(reference_type(**arguments))
@@ -408,15 +643,9 @@ def main() -> int:
             raise ValueError(f"MiniMax-H3 {name} changed while it was being read")
         keyframe_records[name] = record
         keyframe_identities[name] = hashed_identity
-    reference_records = []
-    reference_identities = []
-    for index, (kind, path) in enumerate(reference_paths):
-        identity = file_identity(path)
-        record, hashed_identity = stable_file_record(path, f"reference {index} {kind}")
-        if hashed_identity != identity:
-            raise ValueError(f"MiniMax-H3 reference {index} changed while it was being read")
-        reference_records.append({"kind": kind, **record})
-        reference_identities.append(hashed_identity)
+    reference_records, reference_identities, resolved_videos = bind_reference_input_records(
+        reference_paths
+    )
     input_records = {"prompt_file": prompt_record, **keyframe_records}
     if reference_records:
         input_records["references"] = reference_records
@@ -444,7 +673,10 @@ def main() -> int:
 
     import diffusers
     from diffusers import ComponentsManager, ModularPipeline
-    from diffusers.modular_pipelines.minimax_h3 import MiniMaxH3Reference
+    from diffusers.modular_pipelines.minimax_h3 import (
+        MiniMaxH3Ref2VABlocks,
+        MiniMaxH3Reference,
+    )
     from diffusers.utils import load_image
 
     output_dir = Path(args.output_dir)
@@ -468,14 +700,22 @@ def main() -> int:
         diffusers_evidence,
     )
     keyframe_images = {name: load_image(str(path)) for name, path in keyframe_paths.items()}
-    references = build_official_references(reference_paths, MiniMaxH3Reference, load_image)
+    references = build_official_references(
+        reference_paths,
+        MiniMaxH3Reference,
+        load_image,
+        resolved_videos=resolved_videos,
+    )
     manager = ComponentsManager()
     started = time.perf_counter()
-    pipe = ModularPipeline.from_pretrained(
-        args.model_path,
+    pipe = create_official_pipeline(
         workflow=args.workflow,
+        model_path=model_path,
         components_manager=manager,
+        modular_pipeline_type=ModularPipeline,
+        ref2va_blocks_type=MiniMaxH3Ref2VABlocks,
     )
+    pipeline_record = validate_official_pipeline_partition(pipe, args.workflow)
     # The published modular index records the Hub repo for each component. Override
     # that field so a pinned local snapshot remains fully offline and revision exact.
     pipe.load_components(dtype=torch.bfloat16, pretrained_model_name_or_path=args.model_path)
@@ -492,12 +732,15 @@ def main() -> int:
     torch.cuda.synchronize()
     load_s = time.perf_counter() - started
     phase = "compile"
+    compile_component = _workflow_transformer_component(args.workflow) if args.use_compile else None
     try:
         if args.use_compile:
-            compiled_transformer = torch.compile(
-                pipe.transformer, mode=args.compile_mode, dynamic=False
+            compile_official_transformer(
+                pipe,
+                args.workflow,
+                mode=args.compile_mode,
+                compile_function=torch.compile,
             )
-            pipe.update_components(transformer=compiled_transformer)
 
         def run():
             generator = torch.Generator().manual_seed(int(prompt_spec["seed"]))
@@ -544,9 +787,11 @@ def main() -> int:
             "diffusers_source": diffusers_source,
             "transformers_source": transformers_source,
             "compile_mode": args.compile_mode if args.use_compile else None,
+            "compile_component": compile_component,
             "load_s": load_s,
             "torch": torch.__version__,
             "processor_compat": processor_compat,
+            "pipeline": pipeline_record,
             "gpu": torch.cuda.get_device_name(0),
             "host": platform.node(),
         }
@@ -592,8 +837,7 @@ def main() -> int:
     validate_file_identity(prompt_path, prompt_hashed_identity, "prompt file")
     for name, path in keyframe_paths.items():
         validate_file_identity(path, keyframe_identities[name], name.replace("_", " "))
-    for index, ((_kind, path), identity) in enumerate(zip(reference_paths, reference_identities)):
-        validate_file_identity(path, identity, f"reference {index}")
+    validate_bound_reference_identities(reference_identities)
     validate_file_identity(script_path, script_identity, "HF reference helper")
     if diffusers_evidence is not None:
         validate_git_archive_source_unchanged(
@@ -626,6 +870,7 @@ def main() -> int:
         "diffusers_source": diffusers_source,
         "transformers_source": transformers_source,
         "compile_mode": args.compile_mode if args.use_compile else None,
+        "compile_component": compile_component,
         "status": "passed",
         "load_s": load_s,
         "request_s": timings,
@@ -633,6 +878,7 @@ def main() -> int:
         "peak_memory_mib": torch.cuda.max_memory_allocated() / 1024**2,
         "torch": torch.__version__,
         "processor_compat": processor_compat,
+        "pipeline": pipeline_record,
         "gpu": torch.cuda.get_device_name(0),
         "host": platform.node(),
         "shape": list(frames.shape),

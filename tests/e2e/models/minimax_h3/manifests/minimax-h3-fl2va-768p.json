@@ -41,6 +41,57 @@
       "input": "num_inference_steps"
     }
   ],
+  "preflight_requirements": [
+    {
+      "kind": "binary_exists",
+      "args": {},
+      "gating": true
+    },
+    {
+      "kind": "gpu_count_min",
+      "args": {
+        "count": 1
+      },
+      "gating": true
+    },
+    {
+      "kind": "asset_exists",
+      "args": {
+        "path": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json"
+      },
+      "gating": true
+    },
+    {
+      "kind": "asset_exists",
+      "args": {
+        "path": "tests/e2e/models/minimax_h3/data/fl2va-first.ppm"
+      },
+      "gating": true
+    },
+    {
+      "kind": "asset_exists",
+      "args": {
+        "path": "tests/e2e/models/minimax_h3/data/fl2va-last.ppm"
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "diffusers",
+        "phase": "reference"
+      },
+      "gating": true
+    },
+    {
+      "kind": "python_module_available",
+      "args": {
+        "module": "huggingface_hub",
+        "phase": "reference"
+      },
+      "gating": true
+    }
+  ],
   "preflight_asset_fields": [
     "prompt_file",
     "first_image",
