@@ -1120,15 +1120,44 @@ def test_performance_projection_rejects_receipt_classification_drift(tmp_path) -
         )
 
 
-def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
-    tmp_path, monkeypatch
-) -> None:
+def test_performance_ledger_contract_is_independent_of_execution_revision(tmp_path) -> None:
     case = next(
         row for row in performance_catalog.load_suite(SUITE).cases if row["id"] == "gpt2.generate"
     )
     results = {
         "run_id": "run-1",
-        "git_commit": "revision-1",
+        "git_commit": "a" * 40,
+        "suite_sha256": "suite-1",
+        "environment_config": {"sha256": "environment-1"},
+    }
+
+    perf_matrix._open_perf_ledger(tmp_path, [case], results)
+    perf_matrix._open_perf_ledger(
+        tmp_path,
+        [case],
+        {**results, "git_commit": "b" * 40},
+    )
+
+
+def test_performance_resume_accepts_model_invalidation() -> None:
+    arguments = perf_matrix.build_parser().parse_args(
+        ["resume", "run", "--invalidate-model", "model-a"]
+    )
+
+    assert arguments.invalidate_model == ["model-a"]
+
+
+def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
+    tmp_path, monkeypatch
+) -> None:
+    revision = "a" * 40
+    monkeypatch.setattr(perf_matrix, "_git_commit", lambda: revision)
+    case = next(
+        row for row in performance_catalog.load_suite(SUITE).cases if row["id"] == "gpt2.generate"
+    )
+    results = {
+        "run_id": "run-1",
+        "git_commit": revision,
         "suite_sha256": "suite-1",
         "environment_config": {"sha256": "environment-1"},
         "selected_entry_ids": [case["id"]],
@@ -2056,15 +2085,16 @@ def test_public_perf_progress_has_no_traffic_light(status: str) -> None:
 def test_run_consolidates_results_and_records_replayable_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    revision = "a" * 40
     fake_trtmc = tmp_path / "trtmc-bench"
     fake_worker = tmp_path / "trtmc_benchmark_worker"
     fake_baseline = tmp_path / "hf_transformers.py"
     results_root = tmp_path / "results"
     scratch_root = tmp_path / "scratch"
     environment = tmp_path / "gb300.yaml"
-    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
+    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", revision)
     _write_fake_trtmc(fake_trtmc)
-    _write_fake_worker(fake_worker, "tested-commit")
+    _write_fake_worker(fake_worker, revision)
     _write_fake_baseline(fake_baseline)
     _write_environment(
         environment,
@@ -2178,9 +2208,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert results["reference_preflight"]["entry_count"] == 1
     assert results["candidate_worker_preflight"]["build"] == {
         "configuration": "Release",
-        "source_revision": "tested-commit",
+        "source_revision": revision,
     }
-    assert results["candidate_worker_preflight"]["validated_against"] == "tested-commit"
+    assert results["candidate_worker_preflight"]["validated_against"] == revision
     assert rows["gpt2.generate"]["status"] == "green"
     assert rows["gpt2.generate"]["candidate"]["backend"] == "trtmc-bench"
     assert rows["gpt2.generate"]["candidate"]["preparation"] == {
@@ -2431,15 +2461,16 @@ def test_prepare_materializes_bundles_without_starting_campaign(
 def test_run_records_preflight_failure_and_finishes_campaign(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    revision = "a" * 40
     fake_trtmc = tmp_path / "trtmc-bench"
     fake_worker = tmp_path / "trtmc_benchmark_worker"
     fake_baseline = tmp_path / "hf_transformers.py"
     results_root = tmp_path / "results"
     scratch_root = tmp_path / "scratch"
     environment = tmp_path / "gb300.yaml"
-    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
+    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", revision)
     _write_fake_trtmc(fake_trtmc)
-    _write_fake_worker(fake_worker, "tested-commit")
+    _write_fake_worker(fake_worker, revision)
     _write_fake_baseline(fake_baseline)
     _write_environment(
         environment,

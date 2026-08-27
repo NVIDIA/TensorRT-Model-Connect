@@ -797,7 +797,11 @@ def test_binding_scoped_engines_are_isolated_across_suites_and_deleted_on_pass(
     monkeypatch.setattr(
         trtmc_validate,
         "write_report",
-        lambda output: (output / "report.json", output / "report.html", {}),
+        lambda output: (
+            output / "report.json",
+            output / "report.html",
+            {"model_source_identity": {"consistent": True}},
+        ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
 
@@ -1085,6 +1089,7 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     tmp_path,
     monkeypatch,
 ):
+    revision = "a" * 40
     output = tmp_path / "results"
     arguments = trtmc_validate.build_parser().parse_args(
         [
@@ -1107,7 +1112,7 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     (output / "run.json").write_text(
         json.dumps(
             {
-                "source_revision": "same-revision",
+                    "source_revision": revision,
                 "command": "tools/trtmc_validate.py --binding model-a=suite-a "
                 f"--output {output} --model-work-dir {tmp_path / 'work'} "
                 "--engine-retention delete_on_pass "
@@ -1119,8 +1124,9 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     (case_dir / "comparison.json").write_text(
         json.dumps(
             {
-                "model": "model-a",
-                "workload": "suite-a",
+                    "model": "model-a",
+                    "workload": "suite-a",
+                    "source_revision": revision,
                 "execution": {"status": "completed"},
                 "validation": {"status": "passed"},
             }
@@ -1128,7 +1134,7 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "same-revision")
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: revision)
     monkeypatch.setattr(
         trtmc_validate.sys,
         "argv",
@@ -1157,7 +1163,11 @@ def test_resume_existing_keeps_terminal_binding_without_rerunning_worker(
     monkeypatch.setattr(
         trtmc_validate,
         "write_report",
-        lambda output: (output / "report.json", output / "report.html", {}),
+        lambda output: (
+            output / "report.json",
+            output / "report.html",
+            {"model_source_identity": {"consistent": True}},
+        ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
 
@@ -1574,17 +1584,33 @@ def test_accuracy_adapter_records_each_worker_retry_and_reference_stage(
     assert report["results"][0]["issue"]["stage"] == "reference"
 
 
-def test_resume_existing_rejects_different_source_revision(tmp_path, monkeypatch):
+def test_resume_existing_allows_a_new_execution_revision(tmp_path, monkeypatch):
     output = tmp_path / "results"
     output.mkdir()
     (output / "run.json").write_text(
-        json.dumps({"source_revision": "old-revision"}),
+        json.dumps(
+            {
+                "source_revision": "a" * 40,
+                "command": "tools/trtmc_validate.py --model model-a",
+            }
+        ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "new-revision")
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "b" * 40)
+    monkeypatch.setattr(
+        trtmc_validate.sys,
+        "argv",
+        ["tools/trtmc_validate.py", "--model", "model-a", "--resume-existing"],
+    )
 
-    with pytest.raises(trtmc_validate.ValidationError, match="different source revision"):
-        trtmc_validate._validate_resume_request(output)
+    trtmc_validate._validate_resume_request(output)
+
+
+def test_resume_command_ignores_model_invalidation_control() -> None:
+    assert trtmc_validate._resume_command(
+        "tools/trtmc_validate.py --model model-a --resume-existing "
+        "--invalidate-model model-a --verbose"
+    ) == ["tools/trtmc_validate.py", "--model", "model-a"]
 
 
 def test_resume_existing_rejects_different_command(tmp_path, monkeypatch):
@@ -1976,7 +2002,7 @@ def test_all_supervisor_applies_model_failure_policy(
         lambda output: (
             output / "report.json",
             output / "report.html",
-            {},
+            {"model_source_identity": {"consistent": True}},
         ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)
@@ -2250,7 +2276,7 @@ def test_all_supervisor_records_not_compared_without_launching_worker(
         lambda output: (
             output / "report.json",
             output / "report.html",
-            {},
+            {"model_source_identity": {"consistent": True}},
         ),
     )
     monkeypatch.setattr(trtmc_validate, "_print_result", lambda *args: None)

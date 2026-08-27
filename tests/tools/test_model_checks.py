@@ -18,6 +18,10 @@ from tools.execution_ledger import ExecutionLedger
 PREPARE_QUALIFICATION_DEPENDENCIES = model_checks._prepare_qualification_dependencies
 
 
+def _consistent_source_identity(*_args, **_kwargs):
+    return {"consistent": True, "source_revisions": [], "models": {}}
+
+
 @pytest.fixture(autouse=True)
 def _clean_model_checks_worktree(monkeypatch):
     monkeypatch.setattr(model_checks, "_worktree_changes", lambda: ())
@@ -33,6 +37,95 @@ def test_model_checks_uses_public_qualification_interfaces() -> None:
 
     assert "perf_matrix._" not in source
     assert "trtmc_validate._" not in source
+
+
+def test_resume_prepares_only_retryable_or_invalidated_models(tmp_path) -> None:
+    output = tmp_path / "accuracy"
+    bindings = [
+        {"model": "model-a", "workload": "suite-a"},
+        {"model": "model-b", "workload": "suite-b"},
+    ]
+    ledger = ExecutionLedger.open(
+        output,
+        campaign_id="campaign",
+        task_kind="accuracy",
+        fingerprint="fixture",
+        cases=[
+            {"id": "model-a::suite-a", "report": {}},
+            {"id": "model-b::suite-b", "report": {}},
+        ],
+    )
+    ledger.begin("model-a::suite-a", stage="compare")
+    ledger.finish("model-a::suite-a", result="green", payload={"ok": True})
+    ledger.begin("model-b::suite-b", stage="compare")
+    ledger.finish(
+        "model-b::suite-b",
+        result="white",
+        payload={"ok": False},
+        attempt_outcome="failed",
+        evidence={"retryable": True},
+    )
+
+    retryable = model_checks._resume_preparation_bindings(
+        tmp_path, {"accuracy": bindings}, set()
+    )
+    invalidated = model_checks._resume_preparation_bindings(
+        tmp_path, {"accuracy": bindings}, {"model-a"}
+    )
+
+    assert [row["model"] for row in retryable["accuracy"]] == ["model-b"]
+    assert [row["model"] for row in invalidated["accuracy"]] == ["model-a", "model-b"]
+
+
+def test_model_source_identity_rejects_mixed_accuracy_and_perf_revisions(tmp_path) -> None:
+    accuracy = tmp_path / "accuracy"
+    perf = tmp_path / "perf/results/run-a"
+    accuracy.mkdir(parents=True)
+    perf.mkdir(parents=True)
+    (accuracy / "report.json").write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "id": "model-a::suite-a",
+                        "model": "model-a",
+                        "state": "terminal",
+                        "result": "green",
+                        "source_revision": "a" * 40,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    ExecutionLedger.open(
+        perf,
+        campaign_id="perf",
+        task_kind="performance",
+        fingerprint="fixture",
+        cases=[{"id": "model-a.perf", "report": {}}],
+    )
+    (perf / "report.json").write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "id": "model-a.perf",
+                        "model": "model-a",
+                        "state": "terminal",
+                        "result": "green",
+                        "source_revision": "b" * 40,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    identity = model_checks._model_source_identity(tmp_path, ["accuracy", "perf"])
+
+    assert identity["consistent"] is False
+    assert identity["models"]["model-a"]["status"] == "mixed"
 
 
 def _platform(*, serial: bool = True, excluded_models=()):
@@ -1027,6 +1120,7 @@ def test_shard_resume_reuses_the_same_member_directory(tmp_path, monkeypatch):
     monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
+    monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
     selection = [
         "run",
         "--platform",
@@ -1156,6 +1250,7 @@ def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch
     monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
+    monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
     commands = []
 
     def run(command, **_kwargs):
@@ -1195,6 +1290,7 @@ def test_run_forwards_exact_source_revision_to_accuracy_and_perf(tmp_path, monke
     monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: revision.lower())
+    monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
     child_environments = []
     identity_checks = []
 
@@ -1276,6 +1372,7 @@ def test_run_defaults_to_qualification_and_uses_only_prepared_dependencies(tmp_p
     monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda value: revision)
+    monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
     events = []
 
     def prepare(*_args, **_kwargs):
@@ -1504,12 +1601,39 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
 
     def run(command, **kwargs):
         commands.append(command)
+        report = storage / "results/resume-unit/accuracy/report.json"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {
+                            "id": "qwen25vl-3b::vlm_mmmu_pro_vision_fixed_mcq",
+                            "model": "qwen25vl-3b",
+                            "state": "terminal",
+                            "result": "green",
+                            "source_revision": "a" * 40,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(model_checks.subprocess, "run", run)
 
-    assert model_checks.main([*selection, "--resume"]) == 0
-    assert commands[-1][-1] == "--resume-existing"
+    assert (
+        model_checks.main(
+            [*selection, "--resume", "--invalidate-model", "qwen25vl-3b"]
+        )
+        == 0
+    )
+    assert commands[-1][-3:] == [
+        "--resume-existing",
+        "--invalidate-model",
+        "qwen25vl-3b",
+    ]
     result = json.loads((storage / "results/resume-unit/result.json").read_text(encoding="utf-8"))
     assert result["resumed"] is True
 
@@ -1533,11 +1657,11 @@ def test_unsharded_resume_rejects_request_without_the_frozen_revision(tmp_path):
     path = tmp_path / "request.json"
     path.write_text(json.dumps(previous), encoding="utf-8")
 
-    with pytest.raises(model_checks.ModelCheckError, match="resolved revision changed"):
+    with pytest.raises(model_checks.ModelCheckError, match="exact recorded execution revision"):
         model_checks._verify_resume_request(path, request)
 
 
-def test_unsharded_resume_rejects_a_different_frozen_revision(tmp_path):
+def test_unsharded_resume_allows_a_new_execution_revision(tmp_path):
     request = {
         "schema_version": "trtmc.model-check-run/v1",
         "run_id": "qualification",
@@ -1558,8 +1682,7 @@ def test_unsharded_resume_rejects_a_different_frozen_revision(tmp_path):
     path = tmp_path / "request.json"
     path.write_text(json.dumps(previous), encoding="utf-8")
 
-    with pytest.raises(model_checks.ModelCheckError, match="resolved revision changed"):
-        model_checks._verify_resume_request(path, request)
+    model_checks._verify_resume_request(path, request)
 
 
 def test_perf_resume_command_requires_one_existing_run(tmp_path):

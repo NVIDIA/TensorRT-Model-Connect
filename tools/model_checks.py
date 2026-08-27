@@ -29,11 +29,12 @@ for source_root in (REPOSITORY, PYTHON_SOURCE):
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from tools import campaign_shards  # noqa: E402
+from tools import campaign_shards, case_evidence  # noqa: E402
 from tools import model_ci  # noqa: E402
 from tools import model_selection  # noqa: E402
 from tools import perf_matrix  # noqa: E402
 from tools import trtmc_validate  # noqa: E402
+from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools.ci.context import CiContext  # noqa: E402
 from tools.ci.model_reference_cache import (  # noqa: E402
     ModelReferenceCacheWarmer,
@@ -125,6 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         action="store_true",
         help="resume the existing --run-id after verifying its request",
+    )
+    run.add_argument(
+        "--invalidate-model",
+        action="append",
+        default=[],
+        help=(
+            "with --resume, re-run every selected Accuracy and Perf case for this "
+            "model; repeatable"
+        ),
     )
     run.add_argument(
         "--hf-cache-seed-dir",
@@ -1269,7 +1279,7 @@ def _perf_resume_command(
     return command
 
 
-def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
+def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> dict[str, Any]:
     try:
         previous = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -1278,12 +1288,17 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
         raise ModelCheckError(f"cannot read resume request {path}: {exc}") from exc
     if not isinstance(previous, Mapping):
         raise ModelCheckError(f"resume request must contain a JSON object: {path}")
+    previous_revision = previous.get("revision")
+    try:
+        case_evidence.exact_source_revision(
+            previous_revision, label="exact recorded execution revision"
+        )
+    except case_evidence.CaseEvidenceError as error:
+        raise ModelCheckError(str(error)) from error
     for field in (
         "schema_version",
         "run_id",
-        "revision",
         "intent",
-        "source_identity",
         "platform",
         "platform_source",
         "platform_config",
@@ -1297,6 +1312,32 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
             raise ModelCheckError(f"cannot resume because the resolved {field} changed")
     if previous.get("shard") != request.get("shard"):
         raise ModelCheckError("cannot resume because the resolved shard changed")
+    return dict(previous)
+
+
+def _write_request(path: Path, request: Mapping[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _record_execution_attempt(
+    request: dict[str, Any],
+    *,
+    revision: str,
+    source_identity: Mapping[str, Any],
+) -> None:
+    attempts = request.setdefault("execution_attempts", [])
+    if not isinstance(attempts, list):
+        raise ModelCheckError("cannot resume with invalid execution attempt history")
+    attempts.append(
+        {
+            "revision": revision,
+            "source_identity": dict(source_identity),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "dry_run": bool(request.get("dry_run")),
+        }
+    )
 
 
 def _perf_shard_output(shard_root: Path) -> Path | None:
@@ -1307,6 +1348,85 @@ def _perf_shard_output(shard_root: Path) -> Path | None:
     if len(candidates) > 1:
         raise ModelCheckError(f"shard has multiple Performance runs: {shard_root}")
     return candidates[0] if candidates else None
+
+
+def _resume_preparation_bindings(
+    execution_root: Path,
+    task_bindings: Mapping[str, Sequence[Mapping[str, Any]]],
+    invalidated_models: set[str],
+) -> dict[str, list[Mapping[str, Any]]]:
+    active: dict[str, list[Mapping[str, Any]]] = {}
+    for task, bindings in task_bindings.items():
+        bindings = list(bindings)
+        output = (
+            execution_root / "accuracy"
+            if task == "accuracy"
+            else _perf_shard_output(execution_root)
+        )
+        if output is None or not (output / "ledger" / "campaign.json").is_file():
+            active[task] = bindings
+            continue
+        try:
+            ledger = ExecutionLedger.load(
+                output,
+                task_kind="performance" if task == "perf" else "accuracy",
+            )
+        except ExecutionLedgerError as error:
+            raise ModelCheckError(str(error)) from error
+        selected: list[Mapping[str, Any]] = []
+        for binding in bindings:
+            case_id = (
+                f"{binding['model']}::{binding['workload']}"
+                if task == "accuracy"
+                else str(binding["entry"])
+            )
+            receipt = ledger.receipt(case_id)
+            attempts = receipt.get("attempts", [])
+            evidence = attempts[-1].get("evidence", {}) if attempts else {}
+            retryable = (
+                receipt.get("result") == "white"
+                and isinstance(evidence, Mapping)
+                and evidence.get("retryable") is True
+            )
+            if (
+                str(binding["model"]) in invalidated_models
+                or receipt.get("state") != "terminal"
+                or retryable
+            ):
+                selected.append(binding)
+        active[task] = selected
+    return active
+
+
+def _model_source_identity(
+    execution_root: Path,
+    tasks: Iterable[str],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        output = (
+            execution_root / "accuracy"
+            if task == "accuracy"
+            else _perf_shard_output(execution_root)
+        )
+        report_path = output / "report.json" if output is not None else None
+        if report_path is None or not report_path.is_file():
+            raise ModelCheckError(f"completed {_task_label(task)} task has no report.json")
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ModelCheckError(f"cannot read {_task_label(task)} report: {error}") from error
+        report_rows = report.get("results") if isinstance(report, Mapping) else None
+        if not isinstance(report_rows, list):
+            raise ModelCheckError(f"{_task_label(task)} report has no result rows")
+        for row in report_rows:
+            if not isinstance(row, Mapping):
+                raise ModelCheckError(f"{_task_label(task)} report contains an invalid row")
+            rows.append({**dict(row), "task": task})
+    try:
+        return case_evidence.summarize_model_revisions(rows)
+    except case_evidence.CaseEvidenceError as error:
+        raise ModelCheckError(str(error)) from error
 
 
 def _refresh_shard_report(task: str, output: Path) -> None:
@@ -1355,7 +1475,6 @@ def _validate_shard_member(
     if (
         not isinstance(request, Mapping)
         or request.get("run_id") != campaign.get("run_id")
-        or request.get("revision") != campaign.get("revision")
         or request.get("platform") != campaign.get("platform")
         or request.get("shard") != expected_shard
         or stable_selection != campaign.get("selection")
@@ -1427,6 +1546,29 @@ def _consolidate_once(run_root: Path) -> bool:
             f"terminal · {run_root / task / 'report.json'}",
             flush=True,
         )
+    if all_terminal:
+        combined_rows: list[dict[str, Any]] = []
+        for task in TASKS:
+            report_path = run_root / task / "report.json"
+            if not report_path.is_file():
+                continue
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            for row in report.get("results", []):
+                if isinstance(row, Mapping):
+                    combined_rows.append({**dict(row), "task": task})
+        try:
+            source_identity = case_evidence.summarize_model_revisions(combined_rows)
+        except case_evidence.CaseEvidenceError as error:
+            raise ModelCheckError(str(error)) from error
+        _write_request(
+            run_root / "result.json",
+            {
+                "schema_version": "trtmc.model-check-run-result/v1",
+                "run_id": campaign.get("run_id"),
+                "model_source_identity": source_identity,
+                "status": "passed" if source_identity["consistent"] else "failed",
+            },
+        )
     return all_terminal
 
 
@@ -1439,7 +1581,12 @@ def _consolidate(arguments: argparse.Namespace) -> int:
             while True:
                 complete = _consolidate_once(run_root)
                 if complete or not arguments.watch:
-                    return 0
+                    if not complete:
+                        return 0
+                    result = json.loads(
+                        (run_root / "result.json").read_text(encoding="utf-8")
+                    )
+                    return 0 if result.get("status") == "passed" else 1
                 time.sleep(arguments.interval_seconds)
     except campaign_shards.CampaignShardError as error:
         raise ModelCheckError(str(error)) from error
@@ -1649,6 +1796,16 @@ def _run(arguments: argparse.Namespace) -> int:
     if plan["summary"]["blocker_count"]:
         print(_render(plan))
         raise ModelCheckError("selection has unconfigured task bindings")
+    invalidated_models = set(arguments.invalidate_model)
+    if invalidated_models and not arguments.resume:
+        raise ModelCheckError("--invalidate-model requires --resume")
+    selected_models = {str(model["model"]) for model in plan["models"]}
+    unknown_invalidations = sorted(invalidated_models - selected_models)
+    if unknown_invalidations:
+        raise ModelCheckError(
+            "cannot invalidate models outside this run: "
+            + ", ".join(unknown_invalidations)
+        )
 
     run_id = arguments.run_id or _default_run_id(str(platform["id"]))
     if not RUN_ID_PATTERN.fullmatch(run_id):
@@ -1725,9 +1882,7 @@ def _run(arguments: argparse.Namespace) -> int:
                 {
                     "run_id": run_id,
                     "platform": platform["id"],
-                    "revision": arguments.revision,
                     "intent": arguments.intent,
-                    "source_identity": source_identity,
                     "shard_count": shard[1],
                     "selection": stable_selection,
                     "cases": campaign_cases,
@@ -1818,14 +1973,19 @@ def _run(arguments: argparse.Namespace) -> int:
     }
     request_path = execution_root / "request.json"
     if arguments.resume:
-        _verify_resume_request(request_path, request)
+        previous_request = _verify_resume_request(request_path, request)
+        previous_attempts = previous_request.get("execution_attempts", [])
+        if not isinstance(previous_attempts, list):
+            raise ModelCheckError("cannot resume with invalid execution attempt history")
+        request["execution_attempts"] = list(previous_attempts)
     else:
-        temporary_request = request_path.with_name(f".{request_path.name}.{os.getpid()}.tmp")
-        temporary_request.write_text(
-            json.dumps(request, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temporary_request.replace(request_path)
+        request["execution_attempts"] = []
+    _record_execution_attempt(
+        request,
+        revision=arguments.revision,
+        source_identity=source_identity,
+    )
+    _write_request(request_path, request)
 
     execution_commands = list(commands)
     if arguments.resume:
@@ -1834,14 +1994,25 @@ def _run(arguments: argparse.Namespace) -> int:
             if command is None:
                 execution_commands.append((task, None))
             elif task == "accuracy":
-                execution_commands.append((task, [*command, "--resume-existing"]))
+                resumed = [*command, "--resume-existing"]
+                task_models = {str(binding["model"]) for binding in task_bindings[task]}
+                for model in sorted(invalidated_models & task_models):
+                    resumed.extend(["--invalidate-model", model])
+                execution_commands.append((task, resumed))
             else:
                 resume_command = _perf_resume_command(
                     environment,
                     execution_root / "perf" / "results",
                     require_prebuilt=arguments.intent == "qualification",
                 )
-                execution_commands.append((task, resume_command or command))
+                resumed = resume_command or command
+                if resume_command is not None:
+                    task_models = {
+                        str(binding["model"]) for binding in task_bindings[task]
+                    }
+                    for model in sorted(invalidated_models & task_models):
+                        resumed.extend(["--invalidate-model", model])
+                execution_commands.append((task, resumed))
     print(_render_run_header(plan, run_id=run_id, run_root=execution_root))
     if shard is not None:
         print(
@@ -1866,12 +2037,21 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.dry_run:
         return 0
 
+    preparation_bindings = (
+        _resume_preparation_bindings(
+            execution_root,
+            task_bindings,
+            invalidated_models,
+        )
+        if arguments.resume
+        else task_bindings
+    )
     if arguments.intent == "qualification":
         reference_environment = _prepare_qualification_dependencies(
             plan,
             environment,
             arguments,
-            task_bindings=task_bindings,
+            task_bindings=preparation_bindings,
             perf_environment=perf_environment,
             perf_preparation_receipt=perf_preparation_receipt,
             model_reference_cache_root=model_reference_cache_root,
@@ -1881,7 +2061,7 @@ def _run(arguments: argparse.Namespace) -> int:
         reference_contracts = _selected_perf_reference_contracts(
             plan,
             arguments.models_dir,
-            bindings=task_bindings.get("perf", ()),
+            bindings=preparation_bindings.get("perf", ()),
         )
         reference_environment = _prepare_perf_reference_dependencies(
             reference_contracts,
@@ -1919,6 +2099,7 @@ def _run(arguments: argparse.Namespace) -> int:
         if (
             task == "perf"
             and completed.returncode == 0
+            and preparation_bindings.get("perf")
             and perf_preparation_receipt is not None
             and perf_preparation_receipt.is_file()
         ):
@@ -1935,12 +2116,23 @@ def _run(arguments: argparse.Namespace) -> int:
         task_results[task] = completed.returncode
         status = "PASSED" if completed.returncode == 0 else "FAILED"
         print(f"[{index}/{len(runnable)}] {label}: {status}", flush=True)
+    tasks_passed = all(code == 0 for code in task_results.values())
+    model_source_identity = (
+        _model_source_identity(execution_root, task_results)
+        if tasks_passed and task_results
+        else None
+    )
+    identity_passed = (
+        model_source_identity is None or model_source_identity["consistent"]
+    )
     result = {
         "schema_version": "trtmc.model-check-run-result/v1",
         "run_id": run_id,
         "resumed": bool(arguments.resume),
+        "execution_revision": arguments.revision,
         "task_exit_codes": task_results,
-        "status": "passed" if all(code == 0 for code in task_results.values()) else "failed",
+        "model_source_identity": model_source_identity,
+        "status": "passed" if tasks_passed and identity_passed else "failed",
     }
     (execution_root / "result.json").write_text(
         json.dumps(result, indent=2) + "\n",
@@ -1950,6 +2142,13 @@ def _run(arguments: argparse.Namespace) -> int:
     for task, returncode in task_results.items():
         status = "PASSED" if returncode == 0 else "FAILED"
         print(f"  {_task_label(task)}: {status}")
+    if model_source_identity is not None and not identity_passed:
+        inconsistent = [
+            model
+            for model, evidence in model_source_identity["models"].items()
+            if evidence["status"] != "consistent"
+        ]
+        print("  Source identity: FAILED · " + ", ".join(inconsistent))
     print(f"Run root: {execution_root}")
     return 0 if result["status"] == "passed" else 1
 
@@ -1968,6 +2167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         ModelCheckError,
         campaign_shards.CampaignShardError,
+        case_evidence.CaseEvidenceError,
         model_ci.ModelCIError,
         model_selection.ModelSelectionError,
         perf_matrix.PerfMatrixError,

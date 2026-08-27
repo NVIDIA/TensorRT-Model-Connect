@@ -234,6 +234,47 @@ def test_explicit_resume_reopens_only_retryable_white_results(tmp_path) -> None:
     assert ledger.receipt("model-b::task-b")["state"] == "terminal"
 
 
+def test_selective_rerun_reopens_only_requested_terminal_cases(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+    for case_id in ("model-a::task-a", "model-b::task-b"):
+        ledger.begin(case_id, stage="compare")
+        ledger.finish(
+            case_id,
+            result="green",
+            payload={"status": "passed", "source_revision": "a" * 40},
+        )
+
+    assert ledger.reopen_cases(
+        ["model-a::task-a"],
+        reason="source_change",
+        evidence={"requested_revision": "b" * 40},
+    ) == ["model-a::task-a"]
+
+    reopened = ledger.receipt("model-a::task-a")
+    assert reopened["state"] == "pending"
+    assert reopened["result"] is None
+    assert reopened["previous_results"] == [
+        {
+            "attempt": 1,
+            "result": "green",
+            "payload": {"status": "passed", "source_revision": "a" * 40},
+            "finished_at": reopened["previous_results"][0]["finished_at"],
+            "reopen_reason": "source_change",
+            "reopen_evidence": {"requested_revision": "b" * 40},
+        }
+    ]
+    assert ledger.receipt("model-b::task-b")["state"] == "terminal"
+
+
+def test_selective_rerun_rejects_unknown_or_nonterminal_cases(tmp_path) -> None:
+    ledger = _ledger(tmp_path)
+
+    with pytest.raises(ExecutionLedgerError, match="unknown case"):
+        ledger.reopen_cases(["missing"], reason="source_change")
+    with pytest.raises(ExecutionLedgerError, match="not terminal"):
+        ledger.reopen_cases(["model-a::task-a"], reason="source_change")
+
+
 def test_load_rejects_conflicting_case_and_attempt_stage(tmp_path) -> None:
     ledger = _ledger(tmp_path)
     ledger.begin("model-a::task-a", stage="candidate")
