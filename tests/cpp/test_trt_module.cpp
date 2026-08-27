@@ -48,6 +48,18 @@
 #include <string>
 #include <vector>
 
+namespace trtmc {
+
+class TrtModuleImplTestPeer {
+  public:
+    static void set_enqueue_override(TrtModuleImpl& module,
+                                     bool (*enqueue)(nvinfer1::IExecutionContext&, cudaStream_t)) {
+        module.enqueue_override_for_testing_ = enqueue;
+    }
+};
+
+} // namespace trtmc
+
 static int failures = 0;
 
 static void check(bool condition, const char* test_name) {
@@ -59,6 +71,10 @@ static void check(bool condition, const char* test_name) {
 
 // Process-wide logger (TRT requires a single logger for all objects).
 static trtmc::TrtLogger g_logger;
+
+static bool fail_enqueue(nvinfer1::IExecutionContext&, cudaStream_t) {
+    return false;
+}
 
 // Build a tiny TRT engine: identity mapping input[4] → output[4] (float32)
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
@@ -580,14 +596,9 @@ static void test_enqueue_failure() {
 
     cudaStream_t stream;
     cudaStreamCreate(&stream);
-#if NV_TENSORRT_MAJOR >= 10
-    auto* ctx =
-        engine->createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED);
-#else
-    auto* ctx = engine->createExecutionContextWithoutDeviceMemory();
-#endif
+    auto* ctx = engine->createExecutionContext();
     trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
-    check(module.ok(), "enqueue failure: user-managed context created");
+    check(module.ok(), "enqueue failure: context created");
     if (!module.ok()) {
         cudaStreamDestroy(stream);
         return;
@@ -595,6 +606,7 @@ static void test_enqueue_failure() {
 
     float input_data[4] = {};
     trtmc::Tensor input{input_data, {4}, trtmc::DType::kFloat32};
+    trtmc::TrtModuleImplTestPeer::set_enqueue_override(module, fail_enqueue);
     module.enable_cuda_graph();
     for (int attempt = 0; attempt < 2; ++attempt) {
         bool rejected = false;

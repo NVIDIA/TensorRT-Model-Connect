@@ -713,6 +713,10 @@ void TrtModuleImpl::record_timed_enqueue() {
         if (!launched)
             throw_cuda_graph_launch_failure();
     };
+    auto enqueue = [&]() {
+        return enqueue_override_for_testing_ ? enqueue_override_for_testing_(*ctx_, stream_)
+                                             : ctx_->enqueueV3(stream_);
+    };
     if (use_cuda_graph_ && cuda_graph_->ready()) {
         launch_cuda_graph_or_throw();
         if (timing_ok)
@@ -723,10 +727,10 @@ void TrtModuleImpl::record_timed_enqueue() {
         if (!cuda_graph_->begin_capture(stream_)) {
             std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
             use_cuda_graph_ = false;
-            if (!ctx_->enqueueV3(stream_))
+            if (!enqueue())
                 throw_enqueue_failure();
         } else {
-            const bool enqueue_ok = ctx_->enqueueV3(stream_);
+            const bool enqueue_ok = enqueue();
             const bool capture_ok = cuda_graph_->end_capture(stream_);
             if (!enqueue_ok)
                 throw_enqueue_failure();
@@ -735,7 +739,7 @@ void TrtModuleImpl::record_timed_enqueue() {
             } else {
                 std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
                 use_cuda_graph_ = false;
-                if (!ctx_->enqueueV3(stream_))
+                if (!enqueue())
                     throw_enqueue_failure();
             }
         }
@@ -743,7 +747,7 @@ void TrtModuleImpl::record_timed_enqueue() {
             finish_timing_event(timing_event);
         return;
     }
-    if (!ctx_->enqueueV3(stream_))
+    if (!enqueue())
         throw_enqueue_failure();
     if (timing_ok)
         finish_timing_event(timing_event);

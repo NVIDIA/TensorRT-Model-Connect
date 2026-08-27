@@ -94,9 +94,11 @@ class TrtModuleImpl final : public ITrtModule {
     bool use_cuda_graph_{false};
     bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
-    // Internal test seam. Production leaves this null and calls CudaGraphExec directly.
+    // Internal test seams. Production leaves these null and calls TensorRT/CUDA directly.
     using CudaGraphLaunchOverride = bool (*)(const CudaGraphExec&, cudaStream_t);
+    using EnqueueOverride = bool (*)(nvinfer1::IExecutionContext&, cudaStream_t);
     CudaGraphLaunchOverride cuda_graph_launch_override_for_testing_{nullptr};
+    EnqueueOverride enqueue_override_for_testing_{nullptr};
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, void*> initial_external_bindings_;
     std::unordered_map<std::string, BufferEntry> buffers_;
