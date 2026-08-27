@@ -966,6 +966,29 @@ trtmc_add_test(test_trt_module REQUIRES_TRT REQUIRES_GPU)
 if(TARGET trtmc_backend_trt)
   target_link_libraries(test_trt_module PRIVATE trtmc_backend_trt)
 endif()
+if(TARGET trtmc_backend_rtx)
+  # Compile the same backend/module contract against TRT-RTX. In particular,
+  # test_backend_profile_option verifies that direct create_module calls honor
+  # and validate ModuleCreateOptions::optimization_profile in both DSOs.
+  add_executable(test_rtx_module EXCLUDE_FROM_ALL
+    "${PROJECT_SOURCE_DIR}/tests/cpp/test_trt_module.cpp"
+  )
+  add_dependencies(trtmc_cpp_tests test_rtx_module)
+  target_compile_definitions(test_rtx_module PRIVATE TRTMC_HAS_TRT=1)
+  target_include_directories(test_rtx_module PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_include_directories(test_rtx_module SYSTEM PRIVATE
+    ${TRT_RTX_INCLUDE_DIR}
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_rtx_module PRIVATE
+    trtmc_core
+    trtmc_backend_rtx
+    ${TENSORRT_RTX_LIB}
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  add_test(NAME test_rtx_module COMMAND test_rtx_module)
+  set_tests_properties(test_rtx_module PROPERTIES LABELS "gpu")
+endif()
 
 # CUDA / device
 trtmc_add_test(test_cuda_buffer REQUIRES_TRT REQUIRES_GPU)

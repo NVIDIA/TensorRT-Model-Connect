@@ -89,9 +89,23 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
             ctx_ = nullptr;
             return;
         }
-        cudaStreamSynchronize(stream_);
+        const cudaError_t status = cudaStreamSynchronize(stream_);
+        if (status != cudaSuccess) {
+            std::cerr << "[trt_module] Failed to synchronize optimization profile " << profile_idx_
+                      << ": " << cudaGetErrorString(status) << '\n';
+            delete ctx_;
+            ctx_ = nullptr;
+            return;
+        }
     }
-    allocate_buffers(engine);
+    try {
+        allocate_buffers(engine);
+    } catch (const std::exception& error) {
+        std::cerr << "[trt_module] Buffer initialization failed: " << error.what() << '\n';
+        free_buffers();
+        delete ctx_;
+        ctx_ = nullptr;
+    }
 }
 
 void TrtModuleImpl::discover_tensor_aliases(nvinfer1::ICudaEngine* engine) {
@@ -266,7 +280,9 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims)) {
+        throw std::runtime_error("TensorRT setInputShape failed for input '" + name + "'");
+    }
     entry.shape = new_shape;
 }
 
@@ -307,7 +323,9 @@ void TrtModuleImpl::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int3
             continue;
         if (dims_are_dynamic(engine->getTensorShape(name.c_str()))) {
             auto dims = engine->getProfileShape(name.c_str(), profile_idx_, selector);
-            ctx_->setInputShape(name.c_str(), dims);
+            if (!ctx_->setInputShape(name.c_str(), dims)) {
+                throw std::runtime_error("TensorRT setInputShape failed for input '" + name + "'");
+            }
         }
     }
 }
@@ -339,6 +357,10 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     entry.is_dynamic = is_dynamic;
     entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
 
+    if (is_dynamic && !ctx_->setInputShape(name.c_str(), init_dims)) {
+        throw std::runtime_error("TensorRT setInputShape failed for input '" + name + "'");
+    }
+
     const auto external = initial_external_bindings_.find(name);
     if (external != initial_external_bindings_.end()) {
         entry.d_ptr = external->second;
@@ -353,9 +375,6 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
 
     if (entry.d_ptr)
         bind_tensor_address(name, entry);
-
-    if (is_dynamic)
-        ctx_->setInputShape(name.c_str(), init_dims);
 
     buffers_[name] = std::move(entry);
 }
@@ -432,7 +451,7 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
     const int32_t num_profiles = engine->getNbOptimizationProfiles();
     detect_dynamic_shapes(engine, num_io);
 
-    // Pass 1: allocate input buffers (use profile-0 max shape for dynamic inputs).
+    // Pass 1: allocate input buffers (use the selected profile's max shape for dynamic inputs).
     allocate_input_buffers(engine, num_io, num_profiles);
 
     // Pass 2: allocate output buffers. For dynamic shapes, temporarily set
@@ -446,7 +465,7 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
         set_dynamic_input_shapes(engine, num_io, nvinfer1::OptProfileSelector::kOPT);
 
     initial_external_bindings_.clear();
-    cudaStreamSynchronize(stream_);
+    synchronize_stream_or_throw();
 }
 
 bool TrtModuleImpl::should_allocate_input(const std::string& name, std::size_t nbytes) const {
@@ -664,27 +683,68 @@ void TrtModuleImpl::finish_timing_event(TimingEvent event) {
 void TrtModuleImpl::record_timed_enqueue() {
     TimingEvent timing_event;
     const bool timing_ok = begin_timing_event(timing_event);
+    auto discard_timing_event = [&]() {
+        if (timing_event.start)
+            cudaEventDestroy(timing_event.start);
+        if (timing_event.stop)
+            cudaEventDestroy(timing_event.stop);
+        timing_event.start = nullptr;
+        timing_event.stop = nullptr;
+    };
+    auto throw_enqueue_failure = [&]() -> void {
+        // end_capture() may still have instantiated a graph around an enqueue
+        // that TensorRT rejected. Never let a retry replay that graph.
+        if (cuda_graph_)
+            cuda_graph_->reset();
+        use_cuda_graph_ = false;
+        discard_timing_event();
+        throw std::runtime_error("TensorRT enqueueV3 failed");
+    };
+    auto throw_cuda_graph_launch_failure = [&]() -> void {
+        cuda_graph_->reset();
+        use_cuda_graph_ = false;
+        discard_timing_event();
+        throw std::runtime_error("CUDA Graph launch failed");
+    };
+    auto launch_cuda_graph_or_throw = [&]() {
+        const bool launched = cuda_graph_launch_override_for_testing_
+                                  ? cuda_graph_launch_override_for_testing_(*cuda_graph_, stream_)
+                                  : cuda_graph_->launch(stream_);
+        if (!launched)
+            throw_cuda_graph_launch_failure();
+    };
     if (use_cuda_graph_ && cuda_graph_->ready()) {
-        cuda_graph_->launch(stream_);
+        launch_cuda_graph_or_throw();
         if (timing_ok)
             finish_timing_event(timing_event);
         return;
     }
     if (use_cuda_graph_) {
-        cuda_graph_->begin_capture(stream_);
-        ctx_->enqueueV3(stream_);
-        if (!cuda_graph_->end_capture(stream_)) {
+        if (!cuda_graph_->begin_capture(stream_)) {
             std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
             use_cuda_graph_ = false;
-            ctx_->enqueueV3(stream_);
+            if (!ctx_->enqueueV3(stream_))
+                throw_enqueue_failure();
         } else {
-            cuda_graph_->launch(stream_);
+            const bool enqueue_ok = ctx_->enqueueV3(stream_);
+            const bool capture_ok = cuda_graph_->end_capture(stream_);
+            if (!enqueue_ok)
+                throw_enqueue_failure();
+            if (capture_ok) {
+                launch_cuda_graph_or_throw();
+            } else {
+                std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
+                use_cuda_graph_ = false;
+                if (!ctx_->enqueueV3(stream_))
+                    throw_enqueue_failure();
+            }
         }
         if (timing_ok)
             finish_timing_event(timing_event);
         return;
     }
-    ctx_->enqueueV3(stream_);
+    if (!ctx_->enqueueV3(stream_))
+        throw_enqueue_failure();
     if (timing_ok)
         finish_timing_event(timing_event);
 }
@@ -716,8 +776,16 @@ void TrtModuleImpl::flush_timing_events() {
     std::cerr << line.str() << '\n';
 }
 
+void TrtModuleImpl::synchronize_stream_or_throw() const {
+    const cudaError_t status = cudaStreamSynchronize(stream_);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA stream synchronization failed: ") +
+                                 cudaGetErrorString(status));
+    }
+}
+
 void TrtModuleImpl::sync() {
-    cudaStreamSynchronize(stream_);
+    synchronize_stream_or_throw();
 }
 
 // --- Forward device async (GPU → GPU, no sync) ---
@@ -752,7 +820,7 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
 
 DeviceTensorMap TrtModuleImpl::forward_device(const DeviceTensorMap& inputs) {
     forward_device_async(inputs);
-    cudaStreamSynchronize(stream_);
+    synchronize_stream_or_throw();
 
     // Return non-owning DeviceTensor* pointers to our internal output buffers.
     // The output_device_tensors_ map is lazily populated on first call.

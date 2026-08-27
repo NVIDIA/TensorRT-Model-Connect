@@ -38,7 +38,22 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <vector>
+
+namespace trtmc {
+
+class TrtModuleImplTestPeer {
+  public:
+    static void execute_enqueue(TrtModuleImpl& module) { module.execute_enqueue(); }
+    static void set_cuda_graph_launch_override(TrtModuleImpl& module,
+                                               bool (*launch)(const CudaGraphExec&, cudaStream_t)) {
+        module.cuda_graph_launch_override_for_testing_ = launch;
+    }
+};
+
+} // namespace trtmc
 
 static int failures = 0;
 
@@ -50,6 +65,10 @@ static void check(bool condition, const char* test_name) {
 }
 
 static trtmc::TrtLogger g_logger;
+
+static bool fail_cuda_graph_launch(const trtmc::CudaGraphExec&, cudaStream_t) {
+    return false;
+}
 
 // Build a tiny TRT engine: y = x (identity), fixed shape [4] float32
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
@@ -325,6 +344,72 @@ static void test_module_enable_after_normal_run() {
     cudaStreamDestroy(stream);
 }
 
+static void test_module_cuda_graph_launch_failure() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+
+    // Initial launch after a successful capture.
+    {
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
+        auto module = make_module(engine.get(), stream);
+        module->enable_cuda_graph();
+        trtmc::TrtModuleImplTestPeer::set_cuda_graph_launch_override(*module,
+                                                                     fail_cuda_graph_launch);
+
+        bool rejected = false;
+        try {
+            module->forward_async({{"x", trtmc::Tensor{input, {4}, trtmc::DType::kFloat32}}});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("CUDA Graph launch") != std::string::npos;
+        }
+        check(rejected, "graph_launch_failure: initial launch rejected");
+        check(!module->cuda_graph_active(), "graph_launch_failure: initial graph disabled");
+        check(!module->cuda_graph_captured(), "graph_launch_failure: initial graph reset");
+
+        float output[4] = {0};
+        run_and_read(*module, input, output);
+        check(output[0] == input[0] && output[3] == input[3],
+              "graph_launch_failure: initial-launch retry succeeds");
+        module.reset();
+        cudaStreamDestroy(stream);
+    }
+
+    // Replay of an already captured graph.
+    {
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
+        auto module = make_module(engine.get(), stream);
+        module->enable_cuda_graph();
+
+        float output[4] = {0};
+        run_and_read(*module, input, output);
+        check(module->cuda_graph_captured(), "graph_launch_failure: replay graph captured");
+        trtmc::TrtModuleImplTestPeer::set_cuda_graph_launch_override(*module,
+                                                                     fail_cuda_graph_launch);
+
+        bool rejected = false;
+        try {
+            trtmc::TrtModuleImplTestPeer::execute_enqueue(*module);
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("CUDA Graph launch") != std::string::npos;
+        }
+        check(rejected, "graph_launch_failure: replay rejected");
+        check(!module->cuda_graph_active(), "graph_launch_failure: replay graph disabled");
+        check(!module->cuda_graph_captured(), "graph_launch_failure: replay graph reset");
+
+        std::memset(output, 0, sizeof(output));
+        run_and_read(*module, input, output);
+        check(output[0] == input[0] && output[3] == input[3],
+              "graph_launch_failure: replay retry succeeds");
+        module.reset();
+        cudaStreamDestroy(stream);
+    }
+}
+
 int main() {
     // CudaGraphExec unit tests
     test_default_state();
@@ -338,6 +423,7 @@ int main() {
     test_module_cuda_graph_correctness();
     test_module_cuda_graph_multiple_runs();
     test_module_enable_after_normal_run();
+    test_module_cuda_graph_launch_failure();
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;

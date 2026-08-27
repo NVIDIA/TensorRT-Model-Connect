@@ -63,6 +63,12 @@ class RtxBackend final : public IBackend {
         if (!engine)
             throw std::runtime_error("[trtmc] Failed to deserialize engine (RTX)");
 
+        const int32_t profile_idx = options.optimization_profile;
+        if (profile_idx < 0 || profile_idx >= engine->getNbOptimizationProfiles()) {
+            delete engine;
+            throw std::invalid_argument("[trtmc] Invalid optimization profile index");
+        }
+
         // Create IRuntimeConfig with RTX-specific features
         auto* rt_config = engine->createRuntimeConfig();
         if (!rt_config) {
@@ -97,7 +103,8 @@ class RtxBackend final : public IBackend {
             throw;
         }
 
-        auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream_setup.stream);
+        auto module =
+            std::make_unique<TrtModuleImpl>(engine, ctx, stream_setup.stream, profile_idx);
         if (!module->ok()) {
             delete engine;
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed (RTX)");

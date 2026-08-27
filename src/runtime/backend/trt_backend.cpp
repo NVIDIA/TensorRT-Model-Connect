@@ -219,6 +219,12 @@ class TrtBackend final : public IBackend, public IPreboundBackend {
         if (!engine)
             throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
 
+        const int32_t profile_idx = options.optimization_profile;
+        if (profile_idx < 0 || profile_idx >= engine->getNbOptimizationProfiles()) {
+            delete engine;
+            throw std::invalid_argument("[trtmc] Invalid optimization profile index");
+        }
+
         auto* ctx = engine->createExecutionContext();
         if (!ctx) {
             delete engine;
@@ -239,7 +245,7 @@ class TrtBackend final : public IBackend, public IPreboundBackend {
         }
 
         auto module = std::make_unique<TrtModuleImpl>(
-            engine, ctx, stream, 0, options.distributed_communicator, external_bindings);
+            engine, ctx, stream, profile_idx, options.distributed_communicator, external_bindings);
         if (!module->ok()) {
             delete engine;
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");

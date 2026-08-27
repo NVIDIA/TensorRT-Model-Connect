@@ -35,6 +35,7 @@
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 #include "trtmc/runtime/tensor.h"
+#include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <NvInfer.h>
@@ -42,6 +43,9 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 static int failures = 0;
@@ -136,6 +140,49 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_dynamic_identity_engine(
 
     return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
+static trtmc::TrtUniquePtr<nvinfer1::IHostMemory> build_multi_profile_identity_plan() {
+    auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    if (!builder)
+        return nullptr;
+
+    uint32_t flags = 0;
+#if NV_TENSORRT_MAJOR < 10
+    flags = 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
+#endif
+    auto network =
+        trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(flags));
+    auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
+    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* input = network->addInput("x", nvinfer1::DataType::kFLOAT, nvinfer1::Dims2{-1, 4});
+    if (!input)
+        return nullptr;
+
+    auto add_profile = [&](int32_t minimum, int32_t optimum, int32_t maximum) {
+        auto* profile = builder->createOptimizationProfile();
+        return profile != nullptr &&
+               profile->setDimensions("x", nvinfer1::OptProfileSelector::kMIN,
+                                      nvinfer1::Dims2{minimum, 4}) &&
+               profile->setDimensions("x", nvinfer1::OptProfileSelector::kOPT,
+                                      nvinfer1::Dims2{optimum, 4}) &&
+               profile->setDimensions("x", nvinfer1::OptProfileSelector::kMAX,
+                                      nvinfer1::Dims2{maximum, 4}) &&
+               config->addOptimizationProfile(profile) >= 0;
+    };
+    if (!add_profile(1, 2, 3) || !add_profile(4, 5, 6))
+        return nullptr;
+
+    auto* identity = network->addIdentity(*input);
+    if (!identity)
+        return nullptr;
+    auto* output = identity->getOutput(0);
+    output->setName("y");
+    network->markOutput(*output);
+
+    return trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
+        builder->buildSerializedNetwork(*network, *config));
 }
 
 static void test_forward_cpu() {
@@ -449,6 +496,122 @@ static void test_profile_idx_invalid() {
     cudaStreamDestroy(stream);
 }
 
+static void test_backend_profile_option() {
+    auto plan = build_multi_profile_identity_plan();
+    check(plan != nullptr, "backend profile option: plan built");
+    if (!plan)
+        return;
+
+    std::unique_ptr<trtmc::IBackend, decltype(&trtmc_destroy_backend)> backend(
+        trtmc_create_backend(), trtmc_destroy_backend);
+    check(backend != nullptr, "backend profile option: backend created");
+    if (!backend)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtmc::ModuleCreateOptions options;
+    options.stream = stream;
+    options.optimization_profile = 1;
+    auto module = backend->create_module(plan->data(), plan->size(), options);
+    check(module != nullptr, "backend profile option: module created");
+    if (module) {
+        check(module->profile_idx() == 1, "backend profile option: profile 1 propagated");
+        check(module->tensor_shape("x") == std::vector<int64_t>({5, 4}),
+              "backend profile option: profile 1 opt shape selected");
+
+        std::vector<float> input_data(20);
+        for (std::size_t index = 0; index < input_data.size(); ++index)
+            input_data[index] = static_cast<float>(index + 1);
+        trtmc::Tensor input{input_data.data(), {5, 4}, trtmc::DType::kFloat32};
+        const auto outputs = module->forward({{"x", input}});
+        const auto output = outputs.find("y");
+        check(output != outputs.end(), "backend profile option: inference output exists");
+        if (output != outputs.end()) {
+            check(output->second.shape == std::vector<int64_t>({5, 4}),
+                  "backend profile option: inference output shape");
+            const auto* output_data = static_cast<const float*>(output->second.data);
+            check(output_data != nullptr && output_data[0] == 1.0F && output_data[19] == 20.0F,
+                  "backend profile option: profile 1 inference values");
+        }
+    }
+
+    module.reset();
+    options.optimization_profile = 2;
+    bool rejected = false;
+    try {
+        backend->create_module(plan->data(), plan->size(), options);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "backend profile option: out-of-range profile rejected");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_set_input_shape_failure() {
+    auto engine = build_dynamic_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    auto* ctx = engine->createExecutionContext();
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+
+    float input_data[4] = {};
+    trtmc::Tensor input{input_data, {1, 4, 1}, trtmc::DType::kFloat32};
+    bool rejected = false;
+    try {
+        module.forward_async({{"x", input}});
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("setInputShape") != std::string::npos;
+    }
+    check(rejected, "setInputShape failure: forward rejected before enqueue");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_enqueue_failure() {
+    auto engine = build_identity_engine();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+#if NV_TENSORRT_MAJOR >= 10
+    auto* ctx =
+        engine->createExecutionContext(nvinfer1::ExecutionContextAllocationStrategy::kUSER_MANAGED);
+#else
+    auto* ctx = engine->createExecutionContextWithoutDeviceMemory();
+#endif
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+    check(module.ok(), "enqueue failure: user-managed context created");
+    if (!module.ok()) {
+        cudaStreamDestroy(stream);
+        return;
+    }
+
+    float input_data[4] = {};
+    trtmc::Tensor input{input_data, {4}, trtmc::DType::kFloat32};
+    module.enable_cuda_graph();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool rejected = false;
+        try {
+            module.forward_async({{"x", input}});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("enqueueV3") != std::string::npos;
+        }
+        check(rejected, attempt == 0 ? "enqueue failure: captured enqueue rejected"
+                                     : "enqueue failure: retry rejected");
+        check(!module.cuda_graph_active(), "enqueue failure: CUDA Graph disabled");
+        check(!module.cuda_graph_captured(), "enqueue failure: captured graph reset");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_forward_device_with_input() {
     // Covers TrtModule::forward_device_async() body — D2D copy from DeviceTensor
     auto engine = build_identity_engine();
@@ -494,6 +657,9 @@ int main() {
     test_forward_device_with_input();
     test_profile_idx_default();
     test_profile_idx_invalid();
+    test_backend_profile_option();
+    test_set_input_shape_failure();
+    test_enqueue_failure();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

@@ -94,6 +94,9 @@ class TrtModuleImpl final : public ITrtModule {
     bool use_cuda_graph_{false};
     bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
+    // Internal test seam. Production leaves this null and calls CudaGraphExec directly.
+    using CudaGraphLaunchOverride = bool (*)(const CudaGraphExec&, cudaStream_t);
+    CudaGraphLaunchOverride cuda_graph_launch_override_for_testing_{nullptr};
     std::vector<std::shared_ptr<void>> keep_alive_;
     std::unordered_map<std::string, void*> initial_external_bindings_;
     std::unordered_map<std::string, BufferEntry> buffers_;
@@ -128,6 +131,7 @@ class TrtModuleImpl final : public ITrtModule {
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();
     void flush_timing_events();
+    void synchronize_stream_or_throw() const;
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);
     void record_timed_enqueue();
