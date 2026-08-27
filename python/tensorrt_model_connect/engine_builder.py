@@ -1659,23 +1659,15 @@ def build_bundle(
             lora_cfg = get_lora_config(config)
             if lora_cfg is not None:
                 cfg_dict.update(lora_cfg)
-        # Inject generic config overrides from plugin.
-        # Build the final dict so overrides appear FIRST in the
-        # serialized JSON.  The C++ fast_path_config parser uses
-        # flat text search (text.find) which picks up the first
-        # occurrence of a key.  For models with nested configs, a nested
-        # copy of "hidden_size" etc. would otherwise shadow the
-        # top-level value.
+        # Inject generic config overrides from the owning plugin. Composite
+        # model families use this hook to materialize their runtime fields at
+        # the top level consumed by the strict C++ JSON parser.
         get_overrides = getattr(plugin, 'get_bundle_config_overrides', None)
         if get_overrides is not None:
             overrides = get_overrides(config)
             if overrides is not None:
-                # Put overrides first, then original dict.  Dict
-                # union preserves insertion order; overrides keys
-                # appear before any nested dicts.
                 merged = dict(overrides)
                 merged.update(cfg_dict)
-                # Ensure overrides win for top-level keys.
                 merged.update(overrides)
                 cfg_dict = merged
         return json.dumps(cfg_dict, indent=2).encode("utf-8")

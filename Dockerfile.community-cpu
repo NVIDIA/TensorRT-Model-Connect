@@ -30,6 +30,7 @@ RUN apt-get update && \
       python3.12-dev \
       python3.12-venv \
       libcublas-dev-13-3 \
+      libcurand-dev-13-3 \
       "libnvinfer-dev=${TENSORRT_APT_VERSION}" \
       "libnvinfer-headers-dev=${TENSORRT_APT_VERSION}" \
       "libnvinfer-headers-plugin-dev=${TENSORRT_APT_VERSION}" \

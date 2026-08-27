@@ -191,7 +191,18 @@ class UnitTestRunner:
         )
         scope = self.context.env.get("TRTMC_PREMERGE_UNIT_SCOPE", "all")
         python_tests, native_targets, ctest_selector = self._premerge_scope(scope)
-        python_tests.extend(self._selected_python_test_targets(python_tests))
+        if scope in {"all", "community-all"}:
+            self._selected_python_test_targets(
+                [
+                    *python_tests,
+                    "tests/e2e/models/",
+                    "python/tensorrt_model_connect/families/",
+                    "tests/test_e2e_selection.py",
+                    "tests/e2e/test_diffusion_image_parity_inputs.py",
+                ]
+            )
+        else:
+            python_tests.extend(self._selected_python_test_targets(python_tests))
         print(f"Premerge unit scope: {scope}")
 
         selected_wheel = SelectedWheelRuntime.prepare(
@@ -222,6 +233,7 @@ class UnitTestRunner:
             "-n",
             str(test_jobs),
             "--dist=worksteal",
+            "--import-mode=importlib",
             "-p",
             "no:cacheprovider",
             "-m",
@@ -236,13 +248,36 @@ class UnitTestRunner:
                 "--deselect=tests/tools/test_model_proof_runner.py::"
                 "test_distinct_explicit_hf_cache_paths_reach_both_containers"
             )
-        if selected_wheel:
-            pytest.append("--import-mode=importlib")
         self.context.run(
             pytest,
             limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
             updates=python_environment,
         )
+        if scope in {"all", "community-all"}:
+            self.context.run(
+                [
+                    python,
+                    "-m",
+                    "pytest",
+                    "tests/e2e/models/",
+                    "python/tensorrt_model_connect/families/",
+                    "tests/test_e2e_selection.py",
+                    "tests/e2e/test_diffusion_image_parity_inputs.py",
+                    "-q",
+                    "-x",
+                    "-n",
+                    str(test_jobs),
+                    "--dist=worksteal",
+                    "--import-mode=importlib",
+                    "-p",
+                    "no:cacheprovider",
+                    "-m",
+                    "not gpu and not trt and not e2e and not model_proof_allocator",
+                    "--ignore-glob=*_e2e.py",
+                ],
+                limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
+                updates=python_environment,
+            )
         if scope in {"all", "community-all"}:
             allocator = [
                 python,
@@ -299,9 +334,6 @@ class UnitTestRunner:
             if scope == "cli":
                 self.context.run([build / "trtmc", "version"], limit="1m")
                 self.context.run([build / "trtmc", "--help"], limit="1m")
-            leaked = next(build.rglob("libtrtmc_model_*.so*"), None)
-            if leaked:
-                raise CiError(f"source-only unit build produced a model plugin: {leaked}")
             self.context.run(
                 [
                     "ctest",
@@ -315,6 +347,26 @@ class UnitTestRunner:
                 ],
                 limit=self.context.env.get("CPP_UNIT_TIMEOUT", "20m"),
             )
+            if scope in {"all", "community-all"}:
+                self.context.run(
+                    [
+                        python,
+                        "-m",
+                        "pytest",
+                        "tests/e2e/test_error_handling.py",
+                        "-q",
+                        "-x",
+                        "-p",
+                        "no:cacheprovider",
+                        "--import-mode=importlib",
+                        "-m",
+                        "not gpu and not trt and not e2e",
+                        "--trtmc-binary",
+                        build / "trtmc",
+                    ],
+                    limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
+                    updates=python_environment,
+                )
 
     def _premerge_scope(self, scope: str) -> tuple[list[str], list[str], list[str]]:
         if scope == "builder":
@@ -333,16 +385,10 @@ class UnitTestRunner:
                 ["-R", "^(test_cli_args|test_config_cli_support)$"],
             )
         if scope in {"all", "community-all"}:
-            harness_tests = [
-                str(path.relative_to(self.context.repository))
-                for path in sorted(
-                    (self.context.repository / "tests/e2e_harness").glob("test_*.py")
-                )
-            ]
             return (
-                ["tests/builder/", "tests/tools/", *harness_tests],
-                ["trtmc", "trtmc_platform_cpp_tests"],
-                ["-L", "platform"],
+                ["tests/builder/", "tests/tools/", "tests/e2e_harness/"],
+                ["trtmc", "trtmc_cpu_cpp_tests"],
+                ["-L", "cpu"],
             )
         raise CiError(
             "TRTMC_PREMERGE_UNIT_SCOPE must be builder, cli, all, or community-all"

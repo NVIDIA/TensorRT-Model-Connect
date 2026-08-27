@@ -1055,6 +1055,10 @@ def calculate_impact(
             }
         )
     direct_affected = set(affected)
+    # CPU unit tests are intentionally not selective. Impact analysis still
+    # owns the model-proof matrix, but every non-empty PR diff frontloads the
+    # complete source-only CPU suite before any selective GPU proof starts.
+    frontload_cpu_units = bool(serialized_changes)
     if (
         affected - set(head_catalog.models)
         or affected.intersection(base_catalog.legacy_shared_runtime)
@@ -1104,8 +1108,8 @@ def calculate_impact(
         matrix_models=matrix_models,
         direct_models=direct_affected,
         fallback_models=fallback_selected,
-        run_unit_tests=unit_scope != "none" or broad_change,
-        unit_scope="all" if broad_change else unit_scope,
+        run_unit_tests=frontload_cpu_units,
+        unit_scope="all" if frontload_cpu_units else "none",
     )
     result["base_revision"] = base_catalog.revision
     result["head_revision"] = head_catalog.revision

@@ -423,7 +423,7 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     assert result["fallback_models"] == []
     assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "direct"}]}
     assert result["run_unit_tests"] is True
-    assert result["unit_scope"] == "builder"
+    assert result["unit_scope"] == "all"
 
 
 @pytest.mark.parametrize(
@@ -437,7 +437,7 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
         "src/runtime/models/model_a/model_a.cpp",
     ),
 )
-def test_model_owned_change_runs_builder_units(
+def test_model_owned_change_runs_all_cpu_units(
     tmp_path: Path,
     path: str,
 ) -> None:
@@ -451,10 +451,10 @@ def test_model_owned_change_runs_builder_units(
     assert result["affected_models"] == ["model_a"]
     assert result["direct_models"] == ["model_a"]
     assert result["run_unit_tests"] is True
-    assert result["unit_scope"] == "builder"
+    assert result["unit_scope"] == "all"
 
 
-def test_model_owned_deletion_runs_builder_units(tmp_path: Path) -> None:
+def test_model_owned_deletion_runs_all_cpu_units(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
     path = "python/tensorrt_model_connect/families/model_a/graph_ops.py"
     _write(repo, path, "# graph implementation\n")
@@ -467,7 +467,7 @@ def test_model_owned_deletion_runs_builder_units(tmp_path: Path) -> None:
     assert result["mode"] == "models"
     assert result["affected_models"] == ["model_a"]
     assert result["run_unit_tests"] is True
-    assert result["unit_scope"] == "builder"
+    assert result["unit_scope"] == "all"
 
 
 def test_mixed_model_and_cli_change_runs_all_units(tmp_path: Path) -> None:
@@ -597,8 +597,8 @@ def test_impact_treats_legal_and_docs_as_no_model_change(tmp_path: Path) -> None
     assert result["mode"] == "none"
     assert result["has_models"] is False
     assert result["matrix"] == {"include": []}
-    assert result["run_unit_tests"] is False
-    assert result["unit_scope"] == "none"
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
 
 
 @pytest.mark.parametrize(
@@ -606,7 +606,7 @@ def test_impact_treats_legal_and_docs_as_no_model_change(tmp_path: Path) -> None
     (
         (
             "website/docs/wiki/Agentic-Quantization-Core-Minimal-Plan.md",
-            "builder",
+            "all",
             "unit_builder",
         ),
         ("tools/ci/README.md", "all", "unit_tests"),
@@ -801,10 +801,10 @@ def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "path, expected_scope",
     (
-        ("src/runtime/config/cli_support.cpp", "cli"),
-        ("include/trtmc/config/cli_support.h", "cli"),
-        ("python/tensorrt_model_connect/build_cli.py", "cli"),
-        ("python/tensorrt_model_connect/runtime_config/cli_support.py", "cli"),
+        ("src/runtime/config/cli_support.cpp", "all"),
+        ("include/trtmc/config/cli_support.h", "all"),
+        ("python/tensorrt_model_connect/build_cli.py", "all"),
+        ("python/tensorrt_model_connect/runtime_config/cli_support.py", "all"),
         ("tests/builder/test_cli.py", "all"),
         ("tests/cpp/test_cli_args.cpp", "all"),
         ("tests/tools/test_cli_contract.py", "all"),

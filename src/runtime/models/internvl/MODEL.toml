@@ -6,5 +6,6 @@ runtime_library = "libtrtmc_model_internvl.so"
 runtime_plugins = ["plugin.cpp|register_internvl_plugin"]
 runtime_strategies = ["internvl_vision_language"]
 runtime_tests = [
-  "test_internvl_vl_pipeline|test_internvl_vl_pipeline.cpp|trtmc_model_internvl,trtmc_backend_trt|_|REQUIRES_TRT",
+  "test_internvl_runtime_config_contract|test_internvl_runtime_config_contract.cpp|_|_|_",
+  "test_internvl_vl_pipeline|test_internvl_vl_pipeline.cpp|trtmc_model_internvl,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

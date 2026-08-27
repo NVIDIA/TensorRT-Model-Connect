@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytest.mark.gpu, pytest.mark.trt, pytest.mark.e2e]
+
 PROJECT_DIR = Path(__file__).resolve().parents[4]
 DEFAULT_ENGINE_DIR = Path("/mnt/storage/tensorrt-model-connect/engines")
 DEFAULT_BINARY = PROJECT_DIR / "build" / "trtmc"

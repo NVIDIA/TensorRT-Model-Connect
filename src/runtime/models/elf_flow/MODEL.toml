@@ -7,6 +7,6 @@ runtime_plugins = ["plugin.cpp|register_elf_flow_plugin"]
 runtime_strategies = ["elf_flow"]
 runtime_tests = [
   "test_elf_flow_pipeline|test_elf_flow_pipeline.cpp|trtmc_model_elf_flow|_|_",
-  "test_elf_flow_sampling_kernels|test_elf_flow_sampling_kernels.cpp|trtmc_model_elf_flow|_|REQUIRES_TRT",
+  "test_elf_flow_sampling_kernels|test_elf_flow_sampling_kernels.cpp|trtmc_model_elf_flow|_|REQUIRES_TRT,REQUIRES_GPU",
 ]
 task_strategy = "diffusion_text_generation"

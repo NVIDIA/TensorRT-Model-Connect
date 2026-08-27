@@ -10,6 +10,8 @@ Shared test code is limited to filesystem and serialization helpers.
 from __future__ import annotations
 
 import importlib
+import json
+from unittest.mock import patch
 
 from tests.builder.family_plugin_test_support import (
     ModelConfig,
@@ -82,6 +84,8 @@ class TestLocateAnythingPlugin:
                 "num_hidden_layers": self.LAYERS,
                 "num_attention_heads": self.HEADS,
                 "num_key_value_heads": self.KV_HEADS,
+                "bos_token_id": 151643,
+                "eos_token_id": 151645,
                 "rms_norm_eps": 1e-6,
                 "rope_theta": 1000000.0,
                 "max_position_embeddings": 32768,
@@ -162,3 +166,81 @@ class TestLocateAnythingPlugin:
         assert vl_cfg["box_start_token_id"] == 151668
         assert "{image_pads}" in vl_cfg["vl_prompt_template"]
         assert "{prompt}" in vl_cfg["vl_prompt_template"]
+
+    def test_mock_bundle_serializes_decoder_geometry_at_top_level(self, tmp_path):
+        """Mock engines while exercising the real LocateAnything bundle boundary."""
+        from tensorrt_model_connect.engine_builder import build_bundle
+        from tensorrt_model_connect.families.locateanything.plugin import (
+            plugin as production_plugin,
+        )
+
+        self._write_locateanything_config(tmp_path)
+        source_config = json.loads(
+            (tmp_path / "config.json").read_text(encoding="utf-8")
+        )
+
+        class MockLocateAnythingPlugin:
+            name = "locateanything"
+            runtime_strategy = "locateanything_vision_language"
+            embed_input = True
+            requires_tokenizer = False
+
+            @staticmethod
+            def load_weights(_model_dir, _config):
+                return {}
+
+            @staticmethod
+            def build_engine(_config, _weights, _max_cache_length, **_kwargs):
+                return b"MOCK_DECODER_PLAN"
+
+            @staticmethod
+            def build_vision_engine(_model_dir, _config, _weights, **_kwargs):
+                return b"MOCK_VISION_PLAN"
+
+            @staticmethod
+            def get_vl_config(config):
+                return production_plugin.get_vl_config(config)
+
+            @staticmethod
+            def get_bundle_config_overrides(config):
+                return production_plugin.get_bundle_config_overrides(config)
+
+        with (
+            patch(
+                "tensorrt_model_connect.engine_builder.find_plugin",
+                return_value=MockLocateAnythingPlugin(),
+            ),
+            patch(
+                "tensorrt_model_connect.engine_builder._get_trt_version",
+                return_value="11.1.0",
+            ),
+            patch(
+                "tensorrt_model_connect.engine_builder._get_gpu_name",
+                return_value="CPU unit mock",
+            ),
+            patch("tensorrt_model_connect.engine_builder.write_bundle") as write_bundle,
+        ):
+            build_bundle(
+                str(tmp_path),
+                str(tmp_path / "locateanything.bundle"),
+                max_cache_length=384,
+            )
+
+        sections = {
+            section.name: section.data for section in write_bundle.call_args.args[2]
+        }
+        runtime_config = json.loads(sections["config.json"])
+        decoder_config = source_config["text_config"]
+        assert runtime_config["text_config"] == decoder_config
+        decoder_contract = {
+            "vocab_size": self.VOCAB,
+            "hidden_size": self.HIDDEN,
+            "num_hidden_layers": self.LAYERS,
+            "num_attention_heads": self.HEADS,
+            "num_key_value_heads": self.KV_HEADS,
+            "head_dim": self.HIDDEN // self.HEADS,
+            "bos_token_id": 151643,
+            "eos_token_id": 151645,
+        }
+        assert all(key not in source_config for key in decoder_contract)
+        assert {key: runtime_config[key] for key in decoder_contract} == decoder_contract

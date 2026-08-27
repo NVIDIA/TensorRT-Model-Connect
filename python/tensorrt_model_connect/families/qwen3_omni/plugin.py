@@ -942,13 +942,9 @@ class Qwen3OmniPlugin:
         All fields must be flat (no nested dicts) since the C++ parser
         uses extract_json_int/string on the top-level config.json.
 
-        IMPORTANT: The C++ fast_path_config parser does flat text search
-        (``extract_json_int(text, "hidden_size", 0)``) which finds the
-        FIRST occurrence of the key in the JSON text.  For Qwen3-Omni the
-        original HF config.json has these critical fields nested inside
-        ``thinker_config.text_config``, so they must be injected as
-        top-level overrides and placed before any nested dicts in the
-        serialized JSON (engine_builder.py handles this).
+        The C++ parser resolves these keys only from the top-level JSON object.
+        Qwen3-Omni stores them under ``thinker_config.text_config``, so this
+        family must materialize them as top-level bundle overrides.
         """
         overrides = {}
 

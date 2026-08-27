@@ -19,12 +19,10 @@
 // =============================================================================
 //
 // Purpose:
-//   Validates the lightweight, regex-free JSON extraction functions used
-//   throughout the codebase to parse HuggingFace config.json and
-//   generation_config.json files. These extractors operate on raw JSON strings
-//   (no DOM parser) and must correctly handle common JSON patterns including
-//   nested objects, arrays, negative integers, scientific-notation floats,
-//   and missing keys (fallback values).
+//   Validates the strict JSON extraction functions used throughout the
+//   codebase to parse HuggingFace config.json and generation_config.json.
+//   Ordinary field lookup is deliberately scoped to the top-level object;
+//   callers must explicitly extract an object before reading nested fields.
 //
 // Dependencies:
 //   - utils/json_helpers.h (extract_json_string, extract_json_int,
@@ -156,6 +154,20 @@ bool test_extract_json_int_missing() {
         return false;
     }
     return true;
+}
+
+// Intention: Lock strict top-level lookup so nested model fields cannot be
+//            consumed accidentally as if they were bundle runtime fields.
+bool test_extract_json_int_nested_only_uses_fallback() {
+    const std::string json = R"({"text_config": {"hidden_size": 1536}})";
+    return trtmc::extract_json_int(json, "hidden_size", -99) == -99;
+}
+
+// Intention: When a composite config contains both nested source metadata and
+//            a materialized runtime field, the top-level field is authoritative.
+bool test_extract_json_int_top_level_wins_over_nested() {
+    const std::string json = R"({"text_config": {"hidden_size": 4096}, "hidden_size": 1536})";
+    return trtmc::extract_json_int(json, "hidden_size", -99) == 1536;
 }
 
 // Intention: Verify the behavior of extract_json_int when the value is a
@@ -516,6 +528,8 @@ int main() {
     run("extract_json_int_positive", test_extract_json_int_positive);
     run("extract_json_int_negative", test_extract_json_int_negative);
     run("extract_json_int_missing", test_extract_json_int_missing);
+    run("extract_json_int_nested_only", test_extract_json_int_nested_only_uses_fallback);
+    run("extract_json_int_top_level_wins", test_extract_json_int_top_level_wins_over_nested);
     run("extract_json_int_float_value", test_extract_json_int_float_value);
     run("int_or_first_array_scalar", test_extract_json_int_or_first_array_scalar);
     run("int_or_first_array_array", test_extract_json_int_or_first_array_array);

@@ -17,6 +17,11 @@ import json
 import re
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 uses the declared tomli dependency.
+    import tomli as tomllib
+
 from tests.e2e_harness.threshold_policy import requires_threshold_sidecar
 
 
@@ -1138,6 +1143,28 @@ def test_top_level_cmake_does_not_hardcode_model_owned_cpp_tests() -> None:
         manifest = RUNTIME_MODELS / model / "MODEL.toml"
         if entry not in manifest.read_text(encoding="utf-8"):
             violations.append((manifest, 0, f"missing model-owned C++ test {entry}"))
+
+    assert not violations, _format_violations(violations)
+
+
+def test_runtime_tests_are_top_level_toml_contracts() -> None:
+    """Keep CMake discovery and selective model-proof discovery identical."""
+    violations = []
+    for manifest in sorted(RUNTIME_MODELS.glob("*/MODEL.toml")):
+        text = manifest.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
+        if re.search(r"(?m)^runtime_tests\s*=", text) and "runtime_tests" not in data:
+            violations.append(
+                (
+                    manifest,
+                    0,
+                    "runtime_tests must be top-level, not nested under a preceding TOML table",
+                )
+            )
+            continue
+        entries = data.get("runtime_tests", [])
+        if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+            violations.append((manifest, 0, "runtime_tests must be a top-level string array"))
 
     assert not violations, _format_violations(violations)
 

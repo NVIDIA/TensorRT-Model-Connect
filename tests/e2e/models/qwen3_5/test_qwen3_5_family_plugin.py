@@ -11,6 +11,9 @@ Postconditions: Layer type aliases are normalized correctly and branch-specific 
 
 from __future__ import annotations
 
+import json
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -291,3 +294,124 @@ def test_get_bundle_config_overrides_normalizes_hybrid_fields():
     assert overrides["mamba_nheads"] == 3
     assert overrides["mamba_head_dim"] == 4
     assert overrides["conv_dim"] == 20
+    assert overrides["vocab_size"] == 5
+    assert overrides["hidden_size"] == 12
+    assert overrides["num_hidden_layers"] == 3
+    assert overrides["num_attention_heads"] == 3
+    assert overrides["num_key_value_heads"] == 1
+    assert overrides["head_dim"] == 4
+    assert overrides["bos_token_id"] == -1
+    assert overrides["eos_token_id"] == -1
+
+
+def test_mock_bundle_serializes_pinned_decoder_and_hybrid_config(tmp_path):
+    """Exercise Qwen3.5's pinned producer contract with mocked engines."""
+    from tensorrt_model_connect.engine_builder import build_bundle
+
+    layer_types = [
+        "full_attention" if (index + 1) % 4 == 0 else "linear_attention"
+        for index in range(32)
+    ]
+    # Qwen/Qwen3.5-9B at c202236235762e1c871ad0ccb60c8ee5ba337b9a.
+    source_config = {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "image_token_id": 248056,
+        "model_type": "qwen3_5",
+        "text_config": {
+            "eos_token_id": 248044,
+            "head_dim": 256,
+            "hidden_size": 4096,
+            "intermediate_size": 12288,
+            "layer_types": layer_types,
+            "linear_conv_kernel_dim": 4,
+            "linear_key_head_dim": 128,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 32,
+            "linear_value_head_dim": 128,
+            "max_position_embeddings": 262144,
+            "model_type": "qwen3_5_text",
+            "num_attention_heads": 16,
+            "num_hidden_layers": 32,
+            "num_key_value_heads": 4,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+                "partial_rotary_factor": 0.25,
+                "rope_theta": 10000000,
+            },
+            "vocab_size": 248320,
+        },
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps(source_config),
+        encoding="utf-8",
+    )
+
+    class MockQwen35Plugin:
+        name = "qwen3_5"
+        runtime_strategy = "qwen3_5_hybrid_mamba_attention"
+        requires_tokenizer = False
+
+        @staticmethod
+        def load_weights(_model_dir, _config):
+            return {}
+
+        @staticmethod
+        def build_engine(_config, _weights, _max_cache_length, **_kwargs):
+            return b"MOCK_HYBRID_PLAN"
+
+        @staticmethod
+        def get_bundle_config_overrides(config):
+            return qwen3_5.plugin.get_bundle_config_overrides(config)
+
+    with (
+        patch(
+            "tensorrt_model_connect.engine_builder.find_plugin",
+            return_value=MockQwen35Plugin(),
+        ),
+        patch(
+            "tensorrt_model_connect.engine_builder._get_trt_version",
+            return_value="11.1.0",
+        ),
+        patch(
+            "tensorrt_model_connect.engine_builder._get_gpu_name",
+            return_value="CPU unit mock",
+        ),
+        patch("tensorrt_model_connect.engine_builder.write_bundle") as write_bundle,
+    ):
+        build_bundle(
+            str(tmp_path),
+            str(tmp_path / "qwen35-9b.bundle"),
+            max_cache_length=256,
+        )
+
+    sections = {
+        section.name: section.data for section in write_bundle.call_args.args[2]
+    }
+    runtime_config = json.loads(sections["config.json"])
+    decoder_config = source_config["text_config"]
+    assert "bos_token_id" not in decoder_config
+    assert runtime_config["text_config"] == decoder_config
+    decoder_contract = {
+        "vocab_size": 248320,
+        "hidden_size": 4096,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+        "bos_token_id": -1,
+        "eos_token_id": 248044,
+    }
+    assert all(key not in source_config for key in decoder_contract)
+    assert {key: runtime_config[key] for key in decoder_contract} == decoder_contract
+    assert runtime_config["layer_types"] == [
+        "attention" if layer_type == "full_attention" else "deltanet"
+        for layer_type in layer_types
+    ]
+    assert runtime_config["num_mamba_layers"] == 24
+    assert runtime_config["num_attention_layers"] == 8
+    assert runtime_config["d_inner"] == 4096
+    assert runtime_config["mamba_d_state"] == 128
+    assert runtime_config["mamba_d_conv"] == 4
+    assert runtime_config["mamba_nheads"] == 32
+    assert runtime_config["mamba_head_dim"] == 128
+    assert runtime_config["conv_dim"] == 8192

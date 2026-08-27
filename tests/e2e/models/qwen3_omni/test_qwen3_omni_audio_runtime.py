@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import io
 import importlib
+import io
+import json
 import struct
 
 import numpy as np
@@ -181,6 +182,38 @@ def test_bundle_config_persists_portable_talker_locator() -> None:
 
     assert overrides["omni_talker_model_id"] == "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     assert overrides["omni_talker_model_revision"] == "abc123"
+
+
+def test_bundle_config_materializes_nested_thinker_decoder_contract() -> None:
+    source_config = {
+        "model_type": "qwen3_omni",
+        "thinker_config": {
+            "text_config": {
+                "vocab_size": 32,
+                "hidden_size": 16,
+                "intermediate_size": 32,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "head_dim": 4,
+            }
+        },
+    }
+    config = ModelConfig.from_json(json.dumps(source_config))
+
+    overrides = Qwen3OmniPlugin().get_bundle_config_overrides(config)
+    decoder_contract = {
+        "vocab_size": 32,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 4,
+    }
+
+    assert all(key not in source_config for key in decoder_contract)
+    assert {key: overrides[key] for key in decoder_contract} == decoder_contract
 
 
 def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> None:

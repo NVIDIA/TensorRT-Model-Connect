@@ -1227,7 +1227,7 @@ def test_source_quality_lint_uses_resolved_ci_base_ref() -> None:
 
 
 
-def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
+def test_premerge_unit_stage_runs_all_cpu_tests_without_native_wheel() -> None:
     script = _ci_source("quality.py")
     stage = script.split("def premerge", maxsplit=1)[1].split("def _premerge_scope", maxsplit=1)[0]
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
@@ -1240,15 +1240,22 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '"not gpu and not trt and not e2e and not model_proof_allocator"' in stage
     assert "tests/builder/" in stage
     assert "tests/tools/" in stage
-    assert 'glob("test_*.py")' in script
+    assert "tests/e2e/models" in script
+    assert "python/tensorrt_model_connect/families" in script
+    assert "tests/test_e2e_selection.py" in script
+    assert "tests/e2e/test_diffusion_image_parity_inputs.py" in script
+    assert "tests/e2e/test_error_handling.py" in stage
+    assert '"--ignore-glob=*_e2e.py"' in stage
     assert '"-q"' in stage and '"-x"' in stage
     assert '"--dist=worksteal"' in stage
+    assert '"--import-mode=importlib"' in stage
     assert 'if scope == "community-all"' in stage
     assert "test_distinct_explicit_hf_cache_paths_reach_both_containers" in stage
     assert 'not model_proof_allocator"' in stage
     assert '"-m"' in stage and '"model_proof_allocator"' in stage
     assert '["trtmc", "test_cli_args", "test_config_cli_support"]' in script
-    assert '["trtmc", "trtmc_platform_cpp_tests"]' in script
+    assert '["trtmc", "trtmc_cpu_cpp_tests"]' in script
+    assert '["-L", "cpu"]' in script
     assert '"TRTMC_PREMERGE_UNIT_SCOPE", "all"' in stage
     assert "tests/builder/test_cli.py" in script
     assert 'if scope == "builder"' in script
@@ -1257,7 +1264,6 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '[build / "trtmc", "version"]' in stage
     assert '[build / "trtmc", "--help"]' in stage
     assert "--stop-on-failure" in stage
-    assert "libtrtmc_model_*.so*" in stage
     assert "-DTRTMC_ENABLE_TRT=OFF" not in stage
     assert "-DTRTMC_BUILD_BACKEND_TRT=OFF" not in stage
     assert "-DTRTMC_ENABLE_TVM_FFI=OFF" not in stage
@@ -1265,10 +1271,13 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert "build_pip_package" not in stage
     assert "trtmc_model_plugins" not in stage
     assert "add_custom_target(trtmc_platform_cpp_tests)" in cmake
+    assert "add_custom_target(trtmc_cpu_cpp_tests)" in cmake
+    assert '"${_trtmc_test_owner_label};${_trtmc_test_resource_label}"' in cmake
     assert "trtmc_add_test(test_model_plugin_loader MODEL_OWNED)" in cmake
     assert "test_c_abi_runtime_regression" not in cmake
     assert (
-        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|trtmc_model_qwen|_|_"
+        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|"
+        "trtmc_model_qwen|_|REQUIRES_GPU"
         in qwen_manifest
     )
     assert "MODEL_OWNED\n        ${_trtmc_test_options}" in cmake
@@ -1326,6 +1335,70 @@ def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> 
     assert not [
         command for command in context.commands if command[0] in {"cmake", "ctest"}
     ]
+
+
+def test_all_unit_scope_isolates_shared_and_family_python_suites(tmp_path: Path) -> None:
+    class RecordingContext:
+        repository = tmp_path
+        env = {
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "TRTMC_PREMERGE_UNIT_SCOPE": "community-all",
+            "TRTMC_UNIT_BUILD_JOBS": "8",
+            "TRTMC_UNIT_TEST_JOBS": "8",
+        }
+
+        def __init__(self) -> None:
+            self.commands: list[list[object]] = []
+
+        def positive_integer(self, value: str, _name: str) -> int:
+            return int(value)
+
+        def run(self, command: list[object], **_kwargs: object) -> subprocess.CompletedProcess:
+            self.commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    context = RecordingContext()
+    UnitTestRunner(context).premerge()
+
+    pytest_commands = [
+        command
+        for command in context.commands
+        if command[:3] == ["python", "-m", "pytest"]
+    ]
+    source_commands = [
+        command
+        for command in pytest_commands
+        if "model_proof_allocator" not in command
+        and "tests/e2e/test_error_handling.py" not in command
+    ]
+    assert len(source_commands) == 2
+    shared, family = source_commands
+    assert all(
+        target in shared for target in ("tests/builder/", "tests/tools/", "tests/e2e_harness/")
+    )
+    assert "tests/e2e/models/" not in shared
+    assert "--ignore-glob=*_e2e.py" not in shared
+    assert all(
+        target in family
+        for target in (
+            "tests/e2e/models/",
+            "python/tensorrt_model_connect/families/",
+            "tests/test_e2e_selection.py",
+            "tests/e2e/test_diffusion_image_parity_inputs.py",
+        )
+    )
+    assert "--ignore-glob=*_e2e.py" in family
+    for command in source_commands:
+        assert "--import-mode=importlib" in command
+        assert "not gpu and not trt and not e2e and not model_proof_allocator" in command
+
+    build_command = next(
+        command for command in context.commands if command[:2] == ["cmake", "--build"]
+    )
+    assert "trtmc_cpu_cpp_tests" in build_command
+    ctest_command = next(command for command in context.commands if command[0] == "ctest")
+    label_index = ctest_command.index("-L")
+    assert ctest_command[label_index : label_index + 2] == ["-L", "cpu"]
 
 
 @pytest.mark.parametrize(

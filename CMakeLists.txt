@@ -722,6 +722,7 @@ if(TRTMC_BUILD_TESTS)
 enable_testing()
 add_custom_target(trtmc_cpp_tests)
 add_custom_target(trtmc_platform_cpp_tests)
+add_custom_target(trtmc_cpu_cpp_tests)
 
 # Generic capsule test doubles. The good and wrong-identity DSOs intentionally
 # have the same filename in different directories so tests can prove that the
@@ -784,8 +785,8 @@ set_target_properties(trtmc_test_optimized_embedding PROPERTIES
 # Usage:
 #   trtmc_add_test(test_name)               -- links trtmc_core, adds src/ include
 #   trtmc_add_test(test_name REQUIRES_TRT)  -- also links TensorRT test deps
-#   trtmc_add_test(test_name MODEL_OWNED)    -- excludes it from platform units
-#   trtmc_add_test(test_name REQUIRES_GPU)   -- excludes it from CPU platform units
+#   trtmc_add_test(test_name MODEL_OWNED)    -- labels model ownership independently
+#   trtmc_add_test(test_name REQUIRES_GPU)   -- excludes it from all CPU unit targets
 function(trtmc_add_test TEST_NAME)
   cmake_parse_arguments(
     ARG
@@ -830,13 +831,23 @@ function(trtmc_add_test TEST_NAME)
   endif()
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
   if(ARG_MODEL_OWNED)
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS "model")
-  elseif(ARG_REQUIRES_GPU)
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS "gpu")
+    set(_trtmc_test_owner_label "model")
   else()
-    add_dependencies(trtmc_platform_cpp_tests ${TEST_NAME})
-    set_tests_properties(${TEST_NAME} PROPERTIES LABELS "platform")
+    set(_trtmc_test_owner_label "platform")
   endif()
+  if(ARG_REQUIRES_GPU)
+    set(_trtmc_test_resource_label "gpu")
+  else()
+    set(_trtmc_test_resource_label "cpu")
+    add_dependencies(trtmc_cpu_cpp_tests ${TEST_NAME})
+  endif()
+  if(NOT ARG_MODEL_OWNED AND NOT ARG_REQUIRES_GPU)
+    add_dependencies(trtmc_platform_cpp_tests ${TEST_NAME})
+  endif()
+  set_tests_properties(
+    ${TEST_NAME}
+    PROPERTIES LABELS "${_trtmc_test_owner_label};${_trtmc_test_resource_label}"
+  )
 endfunction()
 
 function(_trtmc_manifest_csv_to_list VALUE OUTPUT_VAR)
@@ -931,7 +942,10 @@ if(_trtmc_python)
   )
   add_custom_target(test_optimized_runtime_bundle_contract
     DEPENDS test_optimized_runtime_host trtmc_test_optimized_runtime)
-  set_tests_properties(test_optimized_runtime_bundle_contract PROPERTIES LABELS "platform")
+  set_tests_properties(
+    test_optimized_runtime_bundle_contract
+    PROPERTIES LABELS "platform;cpu"
+  )
 endif()
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
