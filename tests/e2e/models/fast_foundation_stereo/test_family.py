@@ -94,7 +94,13 @@ def test_official_io_import_shims_cover_only_missing_optional_modules(
     try:
         install_official_io_import_shims()
         assert sys.modules["cv2"].COLORMAP_TURBO == 20
+        assert sys.modules["cv2"].__spec__ is not None
+        assert sys.modules["cv2"].__spec__.name == "cv2"
+        assert real_find_spec("cv2") is sys.modules["cv2"].__spec__
         assert sys.modules["imageio"].__name__ == "imageio"
+        assert sys.modules["imageio"].__spec__ is not None
+        assert sys.modules["imageio"].__spec__.name == "imageio"
+        assert real_find_spec("imageio") is sys.modules["imageio"].__spec__
     finally:
         for name, module in previous.items():
             if module is sentinel:
