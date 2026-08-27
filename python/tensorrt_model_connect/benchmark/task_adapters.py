@@ -691,30 +691,54 @@ def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> CaseRe
 
 
 def _stereo_disparity_request(
-    testcase: Mapping[str, Any], _model_root: Path
+    testcase: Mapping[str, Any], model_root: Path
 ) -> CaseResolution:
+    inputs = testcase.get("inputs", {})
+    if not isinstance(inputs, Mapping):
+        raise BenchmarkError("disparity testcase inputs must be an object")
+    fixture = inputs.get("fixture")
+    if fixture != "generated-office-v1":
+        raise BenchmarkError(
+            "disparity testcase requires the repo-owned generated-office-v1 fixture"
+        )
     height, height_source = _testcase_value(testcase, "stereo_height", 700)
     width, width_source = _testcase_value(testcase, "stereo_width", 700)
-    pixel_shift, shift_source = _testcase_value(testcase, "stereo_pixel_shift", 12)
+    max_disp, max_disp_source = _testcase_value(testcase, "stereo_max_disp", 192)
+    valid_iters, valid_iters_source = _testcase_value(testcase, "stereo_valid_iters", 8)
     height = int(height)
     width = int(width)
-    pixel_shift = int(pixel_shift)
+    max_disp = int(max_disp)
+    valid_iters = int(valid_iters)
     if height <= 0 or width <= 0:
         raise BenchmarkError("disparity testcase dimensions must be positive")
-    if pixel_shift < 0 or pixel_shift >= width:
-        raise BenchmarkError("disparity testcase pixel shift must be in [0, width)")
+    if max_disp != 192 or valid_iters != 8:
+        raise BenchmarkError(
+            "Fast Foundation Stereo benchmark requires max_disp=192 and valid_iters=8"
+        )
+    left_path, _ = _model_asset(
+        "data/office_left.png", model_root, "disparity"
+    )
+    right_path, _ = _model_asset(
+        "data/office_right.png", model_root, "disparity"
+    )
     return _resolution(
         {
             "batch_size": 1,
             "height": height,
             "width": width,
-            "pixel_shift": pixel_shift,
+            "max_disp": max_disp,
+            "valid_iters": valid_iters,
+            "left_image_path": str(left_path),
+            "right_image_path": str(right_path),
         },
         {
             "batch_size": _TASK_DEFAULT,
             "height": height_source,
             "width": width_source,
-            "pixel_shift": shift_source,
+            "max_disp": max_disp_source,
+            "valid_iters": valid_iters_source,
+            "left_image_path": _MODEL_TESTCASE,
+            "right_image_path": _MODEL_TESTCASE,
         },
         testcase=testcase,
     )

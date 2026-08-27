@@ -11019,6 +11019,7 @@ def compare_model_plugin_prediction_sets(
     passed_count = 0
     skipped_count = 0
     execution_errors: list[dict[str, Any]] = []
+    aggregate_comparator: Any = None
 
     for index, (request, hf_row, trt_row) in enumerate(
         zip(requests, hf_rows, trt_rows, strict=True)
@@ -11065,6 +11066,7 @@ def compare_model_plugin_prediction_sets(
             raise RuntimeError(
                 f"No comparator plugin {case.task_strategy!r} for {case.family}"
             )
+        aggregate_comparator = comparator
         hf_payload = hf_row.get("stage_output")
         trt_payload = trt_row.get("stage_output")
         if not isinstance(hf_payload, Mapping) or not isinstance(
@@ -11168,10 +11170,19 @@ def compare_model_plugin_prediction_sets(
         )
 
     sample_pass_rate = passed_count / valid_count if valid_count else 0.0
+    plugin_aggregate: dict[str, Any] = {}
+    aggregate_hook = getattr(aggregate_comparator, "aggregate", None)
+    if callable(aggregate_hook):
+        raw_aggregate = aggregate_hook(cases, dict(gates))
+        if not isinstance(raw_aggregate, Mapping):
+            raise TypeError("model-plugin comparator aggregate() must return a mapping")
+        plugin_aggregate = dict(raw_aggregate)
+    aggregate_passed = bool(plugin_aggregate.get("passed", True))
     status = (
         "passed"
         if valid_count == len(cases)
         and sample_pass_rate >= min_sample_pass_rate
+        and aggregate_passed
         else "failed"
     )
     metrics_summary = {
@@ -11184,7 +11195,7 @@ def compare_model_plugin_prediction_sets(
         for name, values in sorted(metric_values.items())
         if values
     }
-    return {
+    summary = {
         "status": status,
         "sample_count": len(cases),
         "valid_count": valid_count,
@@ -11192,10 +11203,19 @@ def compare_model_plugin_prediction_sets(
         "skipped_count": skipped_count,
         "sample_pass_rate": sample_pass_rate,
         "metrics": metrics_summary,
-        "gates": {"min_sample_pass_rate": min_sample_pass_rate},
+        "gates": {
+            "min_sample_pass_rate": min_sample_pass_rate,
+            **dict(plugin_aggregate.get("gates", {})),
+        },
         "cases": cases,
         "execution_errors": execution_errors,
+        "gate_failures": list(plugin_aggregate.get("gate_failures", [])),
     }
+    if plugin_aggregate:
+        summary["plugin_aggregate"] = plugin_aggregate
+    if isinstance(plugin_aggregate.get("task_accuracy"), Mapping):
+        summary["task_accuracy"] = dict(plugin_aggregate["task_accuracy"])
+    return summary
 
 
 def run_full_duplex_bench_comparison(
@@ -11616,7 +11636,11 @@ def eval_one_model(
             "sample_pass_rate": summary["sample_pass_rate"],
             "skipped_count": summary["skipped_count"],
             "metrics": summary["metrics"],
+            "gates": summary.get("gates", {}),
+            "gate_failures": summary.get("gate_failures", []),
         }
+        if "task_accuracy" in summary:
+            result["task_accuracy"] = summary["task_accuracy"]
         if summary["execution_errors"]:
             result["error_type"] = "ModelPluginExecutionError"
             result["error"] = (

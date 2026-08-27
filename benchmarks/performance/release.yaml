@@ -18,11 +18,6 @@ defaults:
     asset_loading_included: false
 
 excluded_profiles:
-  - model: fast-foundation-stereo
-    reason: >-
-      The exact baseline is owned by the supplied rectified-stereo fixture
-      archive and model-local L4 harness; the public release runner does not
-      yet provide an equivalent redistributable stereo reference workload.
   - model: lfm2-1.2b
     reason: &lfm2_performance_exclusion >-
       Dense LFM2 functional and reference-parity qualification is present, but
@@ -274,6 +269,32 @@ entries:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
+  - id: fast_foundation_stereo.disparity
+    family: fast_foundation_stereo
+    operation: disparity
+    model: fast-foundation-stereo
+    workload:
+      testcase: fast-foundation-stereo
+      request:
+        batch_size: 1
+        height: 700
+        width: 700
+        max_disp: 192
+        valid_iters: 8
+      runtime:
+        cuda_graphs: true
+    baseline:
+      runner: task-reference
+      adapter: upstream-fast-foundation-stereo
+      mode: pytorch-eager
+      reference_backend: official_pytorch
+      timing_scope: task-pipeline-call-wall
+      input_preparation_included: true
+      asset_loading_included: false
+      output_contract: disparity-parity
+      min_disparity_cosine: 0.999
+      max_disparity_mean_abs_error: 0.5
+      max_disparity_bad_2px_fraction: 0.03
   - id: flux.generate_image
     family: flux
     operation: generate_image

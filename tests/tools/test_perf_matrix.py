@@ -42,11 +42,6 @@ MINIMAX_H3_EXCLUSION_REASON = (
     "The pinned Diffusers reference for MiniMax-H3 has not yet been integrated "
     "into the release performance runner."
 )
-FAST_FOUNDATION_STEREO_EXCLUSION_REASON = (
-    "The exact baseline is owned by the supplied rectified-stereo fixture "
-    "archive and model-local L4 harness; the public release runner does not "
-    "yet provide an equivalent redistributable stereo reference workload."
-)
 LFM2_EXCLUSION_REASON = (
     "Dense LFM2 functional and reference-parity qualification is present, but "
     "this change does not add a matching release-performance workload or receipt."
@@ -59,6 +54,7 @@ TASK_ADAPTERS = {
     "dinov3.extract_features": "hf-transformers-vision",
     "eagle_vlm.embed": "hf-transformers-embedding",
     "eagle_vlm.rerank": "hf-transformers-reranking",
+    "fast_foundation_stereo.disparity": "upstream-fast-foundation-stereo",
     "flux.generate_image": "hf-diffusers",
     "internvl.generate": "hf-transformers-vlm",
     "lance.generate": "upstream-lance",
@@ -273,11 +269,10 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 107
-    assert len(raw_entries) == 78
+    assert len(cases) == 108
+    assert len(raw_entries) == 79
     assert len(raw_additional) == 29
     assert excluded_profiles == {
-        "fast-foundation-stereo": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
         "lfm2-1.2b": LFM2_EXCLUSION_REASON,
         "lfm2-2.6b": LFM2_EXCLUSION_REASON,
         "lfm2-350m-bf16-model-card": LFM2_EXCLUSION_REASON,
@@ -293,15 +288,15 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(performance_catalog.is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 78
-    assert len({case["family"] for case in cases}) == 77
+    assert len({(case["family"], case["operation"]) for case in cases}) == 79
+    assert len({case["family"] for case in cases}) == 78
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
         "model_call_wall": 24,
-        "public_pipeline_call_wall": 83,
+        "public_pipeline_call_wall": 84,
     }
     assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
         "canary.transcribe",
@@ -1463,6 +1458,50 @@ def test_audio_contract_rejects_different_generated_sample_counts() -> None:
     assert perf_matrix._output_contract(case, candidate, reference) == (True, "")
 
 
+def test_disparity_contract_compares_every_fp32_pixel(tmp_path: Path) -> None:
+    candidate_path = tmp_path / "candidate.f32"
+    reference_path = tmp_path / "reference.f32"
+    reference = np.full((700, 700), 10.0, dtype=np.float32)
+    candidate = reference.copy()
+    candidate.reshape(-1)[:100] += np.float32(2.1)
+    candidate.tofile(candidate_path)
+    reference.tofile(reference_path)
+    case = {
+        "operation": "disparity",
+        "baseline": {
+            "output_contract": "disparity-parity",
+            "min_disparity_cosine": 0.999,
+            "max_disparity_mean_abs_error": 0.5,
+            "max_disparity_bad_2px_fraction": 0.03,
+        },
+    }
+    candidate_result = {
+        "output_summary": {
+            "height": 700,
+            "width": 700,
+            "element_count": 490_000,
+            "disparity_artifact": str(candidate_path),
+        }
+    }
+    reference_result = {
+        "output_summary": {
+            "height": 700,
+            "width": 700,
+            "element_count": 490_000,
+            "disparity_artifact": str(reference_path),
+        }
+    }
+
+    assert perf_matrix._output_contract(case, candidate_result, reference_result) == (True, "")
+
+    candidate.reshape(-1)[:20_000] += np.float32(2.1)
+    candidate.tofile(candidate_path)
+    assert perf_matrix._output_contract(case, candidate_result, reference_result) == (
+        False,
+        "disparity output parity is outside the configured contract",
+    )
+
+
 def test_media_contract_compares_materialized_frame_geometry() -> None:
     case = {
         "operation": "generate_image",
@@ -2118,7 +2157,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 107
+    assert len(rows) == 108
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())
@@ -2131,13 +2170,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     expected_catalog_coverage = {
         "total_profiles": len(catalog_entries),
         "ready_profiles": catalog_counts["ready"],
-        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 7,
-        "explicitly_excluded_profiles": 7,
+        "release_profiles": catalog_counts["ready"] - excluded_l0_profiles - 6,
+        "explicitly_excluded_profiles": 6,
         "explicit_exclusions": [
-            {
-                "model": "fast-foundation-stereo",
-                "reason": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
-            },
             {
                 "model": "lfm2-1.2b",
                 "reason": LFM2_EXCLUSION_REASON,

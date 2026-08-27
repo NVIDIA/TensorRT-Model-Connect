@@ -1773,6 +1773,38 @@ suites:
         Single-GPU native-reference consistency. The model-owned threshold
         sidecar supplies the 0.999 cosine gate without workload overrides.
 
+  - id: fast_foundation_stereo_middlebury_q_task_accuracy
+    description: >
+      Profile-specific task accuracy on all 15 official Middlebury-v3
+      quarter-resolution training pairs. Inputs are never resized: widths
+      above 700 are center-cropped, smaller dimensions are symmetrically
+      edge-padded, and padded pixels are excluded from non-occluded scoring.
+      This is not an official full-resolution leaderboard reproduction.
+    user_contract: stereo_disparity
+    default_model_names: [fast-foundation-stereo]
+    dataset:
+      kind: model_plugin_json
+      default_path: /mnt/data/Middlebury-v3-trainingQ-profile-700x700/dataset.json
+    selectors:
+      model_names: [fast-foundation-stereo]
+      task_strategies: [stereo_disparity]
+      runtime_strategies: [fast_foundation_stereo_disparity]
+      user_contracts: [stereo_disparity]
+      families: [fast_foundation_stereo]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+      candidate_nonocc_epe_max_reference_plus_px: 0.5
+      candidate_nonocc_bp2_max_reference_plus_fraction: 0.03
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Single-GPU task accuracy plus pinned official-reference parity. Prepare
+        the immutable archives with
+        tests/e2e/models/fast_foundation_stereo/prepare_middlebury_q.py.
+
   - id: mmmu_pro_vision_square_plugin_parity
     description: >
       Image-question output consistency on the same five distinct-subject

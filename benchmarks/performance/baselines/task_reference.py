@@ -67,6 +67,7 @@ ADAPTERS = (
     "pytorch-personaplex",
     "pytorch-timeseries",
     "upstream-elf",
+    "upstream-fast-foundation-stereo",
     "upstream-lance",
     "upstream-sana-wm",
 )
@@ -76,6 +77,7 @@ PYTORCH_ADAPTERS = {
     "pytorch-personaplex",
     "pytorch-timeseries",
     "upstream-elf",
+    "upstream-fast-foundation-stereo",
     "upstream-lance",
     "upstream-sana-wm",
 }
@@ -2164,6 +2166,115 @@ def _load_personaplex(
     )
 
 
+def _load_fast_foundation_stereo(
+    arguments: argparse.Namespace,
+    request: Mapping[str, Any],
+    _options: Mapping[str, Any],
+) -> Session:
+    import numpy as np
+    import torch
+    from huggingface_hub import snapshot_download
+    from PIL import Image
+
+    from tensorrt_model_connect.families.fast_foundation_stereo.prepare_model import (
+        configure_official_model_args,
+        install_official_io_import_shims,
+        resolve_model_dir,
+    )
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for the Fast Foundation Stereo reference")
+    max_disp = int(request.get("max_disp", 192))
+    valid_iters = int(request.get("valid_iters", 8))
+    height = int(request.get("height", 700))
+    width = int(request.get("width", 700))
+    if (height, width, max_disp, valid_iters) != (700, 700, 192, 8):
+        raise ValueError(
+            "Fast Foundation Stereo performance requires 700x700, max_disp=192, "
+            "and valid_iters=8"
+        )
+    snapshot = Path(
+        snapshot_download(
+            repo_id=arguments.model,
+            revision=arguments.revision,
+            allow_patterns=("cfg.yaml", "model_best_bp2_serialize.pth"),
+            local_files_only=arguments.local_files_only,
+        )
+    ).resolve()
+    model_root = resolve_model_dir(snapshot, local_files_only=arguments.local_files_only)
+    if model_root is None:
+        model_root = snapshot
+    model_root = model_root.resolve()
+    previous_cwd = Path.cwd()
+    try:
+        os.chdir(model_root)
+        sys.path.insert(0, str(model_root))
+        install_official_io_import_shims()
+        from core.utils.utils import InputPadder
+        from Utils import AMP_DTYPE
+
+        checkpoint = model_root / "weights/23-36-37/model_best_bp2_serialize.pth"
+        model = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    finally:
+        os.chdir(previous_cwd)
+    configure_official_model_args(
+        model,
+        max_disparity=max_disp,
+        valid_iters=valid_iters,
+    )
+    model = model.cuda().eval()
+
+    def load_image(key: str) -> np.ndarray:
+        with Image.open(_asset_path(arguments, request, key)) as image:
+            pixels = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        if pixels.shape != (height, width, 3):
+            raise ValueError(f"{key} must be 700x700 RGB, got {pixels.shape}")
+        return pixels
+
+    left = load_image("left_image_path")
+    right = load_image("right_image_path")
+
+    def invoke() -> Mapping[str, Any]:
+        left_tensor = torch.as_tensor(left).cuda().float()[None].permute(0, 3, 1, 2)
+        right_tensor = torch.as_tensor(right).cuda().float()[None].permute(0, 3, 1, 2)
+        padder = InputPadder(left_tensor.shape, divis_by=32, force_square=False)
+        left_tensor, right_tensor = padder.pad(left_tensor, right_tensor)
+        with (
+            torch.inference_mode(),
+            torch.amp.autocast("cuda", enabled=True, dtype=AMP_DTYPE),
+        ):
+            disparity = model.forward(
+                left_tensor,
+                right_tensor,
+                iters=valid_iters,
+                test_mode=True,
+                optimize_build_volume="pytorch1",
+            )
+        output = padder.unpad(disparity.float()).cpu().numpy().reshape(height, width)
+        output = np.clip(output, 0, None).astype(np.float32, copy=False)
+        return {
+            "height": height,
+            "width": width,
+            "element_count": int(output.size),
+            "finite_fraction": float(np.isfinite(output).mean()),
+            "nonnegative_fraction": float((output >= 0).mean()),
+            "_disparity_f32": output,
+        }
+
+    return Session(
+        invoke,
+        _snapshot_revision(snapshot) or arguments.revision or "unresolved",
+        f"torch-{torch.__version__}",
+        timing_scope="task-pipeline-call-wall",
+        input_preparation_included=True,
+        asset_loading_included=False,
+        reference_source={
+            "repository": "https://github.com/NVlabs/Fast-FoundationStereo",
+            "revision": "a290ba04c1b3ad1ec41a33974a157b2917b624d4",
+        },
+    )
+
+
 LOADERS: dict[
     str, Callable[[argparse.Namespace, Mapping[str, Any], Mapping[str, Any]], Session]
 ] = {
@@ -2179,6 +2290,7 @@ LOADERS: dict[
     "nemo-tts": _load_tts,
     "pytorch-personaplex": _load_personaplex,
     "pytorch-timeseries": _load_timeseries,
+    "upstream-fast-foundation-stereo": _load_fast_foundation_stereo,
 }
 
 
@@ -2654,6 +2766,12 @@ def run(arguments: argparse.Namespace) -> int:
                 f"actual={actual_timing}, declared={expected_timing}"
             )
         samples, output_summary = _measure(session, arguments.warmup, arguments.iterations)
+        disparity = output_summary.pop("_disparity_f32", None)
+        if disparity is not None:
+            artifact_path = arguments.output.with_suffix(".disparity.f32").resolve()
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            disparity.tofile(artifact_path)
+            output_summary["disparity_artifact"] = str(artifact_path)
     if arguments.adapter in {"upstream-elf", "upstream-lance", "upstream-sana-wm"}:
         asset_included = bool(expected_timing["asset_loading_included"])
         actual_timing = {

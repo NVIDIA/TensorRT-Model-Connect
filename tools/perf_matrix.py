@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+from array import array
 from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1608,6 +1609,9 @@ def _output_contract(
     right = baseline.get("output_summary", {})
     operation = str(case["operation"])
     contract = _effective_output_contract(case, request)
+    if contract == "disparity-parity":
+        evidence = _disparity_contract_evidence(case, left, right)
+        return bool(evidence["passed"]), str(evidence.get("reason", ""))
     if contract == "segmentation-shape":
         left_shape = tuple(left.get(name) for name in ("num_masks", "height", "width"))
         right_shape = tuple(right.get(name) for name in ("num_masks", "height", "width"))
@@ -1787,6 +1791,94 @@ def _output_contract(
     return True, ""
 
 
+def _disparity_values(summary: Mapping[str, Any]) -> tuple[array[float], Path]:
+    raw_path = summary.get("disparity_artifact")
+    count = summary.get("element_count")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise PerfMatrixError("disparity output is missing its FP32 artifact")
+    if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+        raise PerfMatrixError("disparity output has an invalid element count")
+    path = Path(raw_path)
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise PerfMatrixError(f"cannot read disparity artifact {path}: {exc}") from exc
+    if len(payload) != count * 4:
+        raise PerfMatrixError(
+            f"disparity artifact {path} has {len(payload)} bytes, expected {count * 4}"
+        )
+    values = array("f")
+    values.frombytes(payload)
+    return values, path
+
+
+def _disparity_contract_evidence(
+    case: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    reference: Mapping[str, Any],
+) -> dict[str, Any]:
+    left_shape = tuple(candidate.get(name) for name in ("height", "width", "element_count"))
+    right_shape = tuple(reference.get(name) for name in ("height", "width", "element_count"))
+    expected_shape = (700, 700, 700 * 700)
+    if left_shape != expected_shape or right_shape != expected_shape:
+        return {
+            "passed": False,
+            "reason": "disparity outputs do not both have the required 700x700 shape",
+            "candidate_shape": list(left_shape),
+            "reference_shape": list(right_shape),
+        }
+    left, left_path = _disparity_values(candidate)
+    right, right_path = _disparity_values(reference)
+    finite_fraction = sum(math.isfinite(value) for value in left) / len(left)
+    nonnegative_fraction = sum(math.isfinite(value) and value >= 0.0 for value in left) / len(left)
+    reference_finite_fraction = sum(math.isfinite(value) for value in right) / len(right)
+    reference_nonnegative_fraction = (
+        sum(math.isfinite(value) and value >= 0.0 for value in right) / len(right)
+    )
+    dot = math.fsum(float(a) * float(b) for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(math.fsum(float(value) ** 2 for value in left))
+    right_norm = math.sqrt(math.fsum(float(value) ** 2 for value in right))
+    cosine = dot / (left_norm * right_norm) if left_norm and right_norm else 0.0
+    differences = [abs(float(a) - float(b)) for a, b in zip(left, right, strict=True)]
+    mean_abs_error = math.fsum(differences) / len(differences)
+    bad_2px_fraction = sum(value > 2.0 for value in differences) / len(differences)
+    thresholds = {
+        "finite_fraction": 1.0,
+        "nonnegative_fraction": 1.0,
+        "global_cosine": float(case["baseline"]["min_disparity_cosine"]),
+        "mean_abs_error": float(case["baseline"]["max_disparity_mean_abs_error"]),
+        "bad_2px_fraction": float(case["baseline"]["max_disparity_bad_2px_fraction"]),
+    }
+    metrics = {
+        "finite_fraction": finite_fraction,
+        "nonnegative_fraction": nonnegative_fraction,
+        "reference_finite_fraction": reference_finite_fraction,
+        "reference_nonnegative_fraction": reference_nonnegative_fraction,
+        "global_cosine": cosine,
+        "mean_abs_error": mean_abs_error,
+        "bad_2px_fraction": bad_2px_fraction,
+    }
+    passed = (
+        finite_fraction == thresholds["finite_fraction"]
+        and nonnegative_fraction == thresholds["nonnegative_fraction"]
+        and reference_finite_fraction == 1.0
+        and reference_nonnegative_fraction == 1.0
+        and cosine >= thresholds["global_cosine"]
+        and mean_abs_error <= thresholds["mean_abs_error"]
+        and bad_2px_fraction <= thresholds["bad_2px_fraction"]
+    )
+    return {
+        "passed": passed,
+        "reason": "" if passed else "disparity output parity is outside the configured contract",
+        "metrics": metrics,
+        "thresholds": thresholds,
+        "candidate_artifact": str(left_path),
+        "reference_artifact": str(right_path),
+        "candidate_sha256": hashlib.sha256(left_path.read_bytes()).hexdigest(),
+        "reference_sha256": hashlib.sha256(right_path.read_bytes()).hexdigest(),
+    }
+
+
 def _effective_output_contract(
     case: Mapping[str, Any],
     request: Mapping[str, Any] | None = None,
@@ -1825,17 +1917,30 @@ def _classify(
         baseline,
         request=request,
     )
+    output_evidence = None
+    if _effective_output_contract(case, request) == "disparity-parity":
+        output_evidence = _disparity_contract_evidence(
+            case,
+            candidate.get("output_summary", {}),
+            baseline.get("output_summary", {}),
+        )
     if not outputs_match:
-        return "contract-mismatch", {"reason": reason}
+        comparison = {"reason": reason}
+        if output_evidence is not None:
+            comparison["output_contract"] = output_evidence
+        return "contract-mismatch", comparison
     candidate_p50 = _median(candidate)
     baseline_p50 = _median(baseline)
     ratio = baseline_p50 / candidate_p50
     margin = float(case.get("equivalence_margin_percent", 5.0)) / 100.0
     status = _comparison_status(ratio, margin)
-    return status, {
+    comparison = {
         "baseline_over_trtmc_p50": ratio,
         "equivalence_margin_percent": margin * 100.0,
     }
+    if output_evidence is not None:
+        comparison["output_contract"] = output_evidence
+    return status, comparison
 
 
 def _baseline_contract_mismatch(
@@ -1984,6 +2089,38 @@ def _case_row(
     return row
 
 
+def _materialize_disparity_artifacts(
+    case: Mapping[str, Any],
+    candidate: MutableMapping[str, Any],
+    baseline: MutableMapping[str, Any],
+    output: Path,
+    *,
+    case_attempt: int,
+    measurement_attempt: int,
+) -> None:
+    configured_baseline = case.get("baseline", {})
+    if (
+        not isinstance(configured_baseline, Mapping)
+        or configured_baseline.get("output_contract") != "disparity-parity"
+    ):
+        return
+    directory = output / "artifacts" / _slug(str(case["id"])) / "disparity"
+    directory.mkdir(parents=True, exist_ok=True)
+    for side, result in (("trtmc", candidate), ("reference", baseline)):
+        summary = result.get("output_summary")
+        if not isinstance(summary, MutableMapping):
+            raise PerfMatrixError(f"{side} disparity output summary is invalid")
+        source = Path(str(summary.get("disparity_artifact", "")))
+        if not source.is_file():
+            raise PerfMatrixError(f"{side} disparity artifact does not exist: {source}")
+        destination = directory / (
+            f"{side}.case-attempt-{case_attempt}.measurement-{measurement_attempt}.f32"
+        )
+        shutil.copyfile(source, destination)
+        summary["disparity_artifact"] = str(destination.resolve())
+        summary["disparity_artifact_href"] = destination.relative_to(output).as_posix()
+
+
 def _run_measurement(
     case: Mapping[str, Any],
     resolved: Mapping[str, Any],
@@ -2077,6 +2214,14 @@ def _run_measurement(
     candidate = _candidate_result(candidate_dir, digest)
     candidate["precision"] = str(resolved["model"]["precision"])
     baseline = _read_baseline(baseline_path)
+    _materialize_disparity_artifacts(
+        case,
+        candidate,
+        baseline,
+        getattr(options, "output", case_work),
+        case_attempt=case_attempt,
+        measurement_attempt=measurement_attempt,
+    )
     status, comparison = _classify(
         case,
         candidate,

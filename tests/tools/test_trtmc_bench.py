@@ -171,6 +171,23 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
         assert (case.operation, case.measurement.warmup, case.measurement.iterations) == expected
 
 
+def test_stereo_benchmark_uses_the_repo_owned_office_pair(tmp_path: Path) -> None:
+    model = ManifestCatalog().resolve("fast-foundation-stereo")
+    case = resolve_case(model, _bundle(tmp_path, model.name))
+
+    assert case.request == {
+        "batch_size": 1,
+        "height": 700,
+        "width": 700,
+        "max_disp": 192,
+        "valid_iters": 8,
+        "left_image_path": "data/office_left.png",
+        "right_image_path": "data/office_right.png",
+        "left_image_sha256": "73cc585a0e38493a5588137fea302b8472f63e76443759bd8ba0a19ce8be76a6",
+        "right_image_sha256": "6c56733d64567e198fa75375ab7042bd26a8aa1fdd8f8fb4908186ca7f2f51c5",
+    }
+
+
 def test_benchmark_uses_qualified_minitron_width_precision(tmp_path: Path) -> None:
     model = ManifestCatalog().resolve("minitron-4b-width")
     case = resolve_case(model, _bundle(tmp_path, model.bundle_name))

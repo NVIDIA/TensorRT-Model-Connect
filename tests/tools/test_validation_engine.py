@@ -2374,6 +2374,17 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
                 },
             )
 
+        def aggregate(self, cases, gates):
+            assert cases[0]["metrics"]["score"]["value"] == 1.0
+            assert gates == {"min_sample_pass_rate": 1.0}
+            return {
+                "evaluated": True,
+                "passed": True,
+                "task_accuracy": {"weighted_score": 1.0},
+                "gates": {"weighted_score_min": 0.9},
+                "gate_failures": [],
+            }
+
     monkeypatch.setattr(
         validation_engine,
         "get_comparator",
@@ -2413,6 +2424,45 @@ def test_compare_model_plugin_prediction_sets_uses_model_comparator(
     assert summary["sample_pass_rate"] == 1.0
     assert summary["metrics"]["score"]["mean"] == 1.0
     assert summary["cases"][0]["passed"] is True
+    assert summary["task_accuracy"] == {"weighted_score": 1.0}
+    assert summary["gates"] == {
+        "min_sample_pass_rate": 1.0,
+        "weighted_score_min": 0.9,
+    }
+
+    class FailingAggregateComparator(Comparator):
+        def aggregate(self, cases, gates):
+            result = super().aggregate(cases, gates)
+            result.update(
+                passed=False,
+                gate_failures=["pixel-weighted task gate failed"],
+            )
+            return result
+
+    monkeypatch.setattr(
+        validation_engine,
+        "get_comparator",
+        lambda _strategy: FailingAggregateComparator(),
+    )
+    failed = validation_engine.compare_model_plugin_prediction_sets(
+        {"responses": [response]},
+        {"responses": [response]},
+        {
+            "requests": [
+                {
+                    "sample_id": "sample-1",
+                    "testcase": "custom-case",
+                    "stage": "full_generation",
+                    "inputs": {},
+                }
+            ]
+        },
+        work_dir=work_dir,
+        gates={"min_sample_pass_rate": 1.0},
+    )
+    assert failed["status"] == "failed"
+    assert failed["sample_pass_rate"] == 1.0
+    assert failed["gate_failures"] == ["pixel-weighted task gate failed"]
 
 
 def test_compare_model_plugin_marks_native_returncode_as_execution_error(
