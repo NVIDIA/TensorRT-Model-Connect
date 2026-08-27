@@ -22,14 +22,15 @@ void check(bool condition, const char* message) {
 }
 
 trtmc::Lfm2MoeSampleResult sample_once(const std::vector<float>& logits,
-                                    const trtmc::Lfm2MoeSamplingParams& params) {
+                                       const trtmc::Lfm2MoeSamplingParams& params) {
     auto sampler = trtmc::create_lfm2_moe_sampler(params);
     return sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params, {});
 }
 
 void test_hf_repetition_penalty() {
     const float logits[] = {0.5F, 4.0F, -1.0F, 3.5F};
-    const auto adjusted = trtmc::lfm2_moe_apply_repetition_penalty(logits, 4, 2.0F, {1, 2, 1, -1, 99});
+    const auto adjusted =
+        trtmc::lfm2_moe_apply_repetition_penalty(logits, 4, 2.0F, {1, 2, 1, -1, 99});
     check(adjusted.size() == 4, "penalty preserves vocabulary");
     check(std::abs(adjusted[0] - 0.5F) < 1.0e-6F, "unseen token unchanged");
     check(std::abs(adjusted[1] - 2.0F) < 1.0e-6F, "positive seen score divided once");
@@ -53,7 +54,8 @@ void test_lfm2_moe_top_k_default_resolution() {
 
     request.top_k = 0;
     const auto full_vocab = trtmc::lfm2_moe_sampling_params_from_config(request, {7});
-    check(trtmc::lfm2_moe_resolve_top_k(full_vocab) == 0, "explicit top_k zero keeps full vocabulary");
+    check(trtmc::lfm2_moe_resolve_top_k(full_vocab) == 0,
+          "explicit top_k zero keeps full vocabulary");
 
     request.top_k = -1;
     const auto negative_full_vocab = trtmc::lfm2_moe_sampling_params_from_config(request, {7});
@@ -62,7 +64,8 @@ void test_lfm2_moe_top_k_default_resolution() {
 
     request.top_k = 17;
     const auto explicit_k = trtmc::lfm2_moe_sampling_params_from_config(request, {7});
-    check(trtmc::lfm2_moe_resolve_top_k(explicit_k) == 17, "explicit positive top_k is authoritative");
+    check(trtmc::lfm2_moe_resolve_top_k(explicit_k) == 17,
+          "explicit positive top_k is authoritative");
 
     request.top_k = 50;
     const auto model_card_k = trtmc::lfm2_moe_sampling_params_from_config(request, {7});

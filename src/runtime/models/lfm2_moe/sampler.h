@@ -33,22 +33,22 @@ class Lfm2MoeISampler {
   public:
     virtual ~Lfm2MoeISampler() = default;
     virtual Lfm2MoeSampleResult sample(const float* logits, int32_t vocab_size,
-                                    const Lfm2MoeSamplingParams& params,
-                                    const std::vector<int32_t>& token_history) = 0;
+                                       const Lfm2MoeSamplingParams& params,
+                                       const std::vector<int32_t>& token_history) = 0;
     virtual const char* sampler_type() const = 0;
     virtual void reset() {}
 };
 
 Lfm2MoeSamplingParams
 lfm2_moe_sampling_params_from_config(const GenerateConfig& cfg,
-                                 const std::vector<int32_t>& default_eos_token_ids);
+                                     const std::vector<int32_t>& default_eos_token_ids);
 
 // HF repetition penalty is sign-aware and is applied once per unique token in
 // the complete prompt+generated history, before temperature or probability
 // filtering.
 std::vector<float> lfm2_moe_apply_repetition_penalty(const float* logits, int32_t vocab_size,
-                                                 float penalty,
-                                                 const std::vector<int32_t>& token_history);
+                                                     float penalty,
+                                                     const std::vector<int32_t>& token_history);
 
 int32_t lfm2_moe_resolve_top_k(const Lfm2MoeSamplingParams& params);
 bool lfm2_moe_is_eos_token(const Lfm2MoeSamplingParams& params, int32_t token_id);

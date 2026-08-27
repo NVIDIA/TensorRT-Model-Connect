@@ -31,10 +31,11 @@ struct Lfm2MoeTextGenConfig {
 class Lfm2MoeTextGenerationPipeline final : public IPipeline {
   public:
     Lfm2MoeTextGenerationPipeline(std::unique_ptr<TrtModule> decoder,
-                               std::unique_ptr<Lfm2MoeInferenceState> state, Lfm2MoeTextGenConfig config,
-                               cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer = nullptr,
-                               std::string model_id = "",
-                               std::unique_ptr<Lfm2MoeISampler> sampler = nullptr);
+                                  std::unique_ptr<Lfm2MoeInferenceState> state,
+                                  Lfm2MoeTextGenConfig config, cudaStream_t stream,
+                                  std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                                  std::string model_id = "",
+                                  std::unique_ptr<Lfm2MoeISampler> sampler = nullptr);
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }

@@ -181,7 +181,8 @@ std::string lfm2_moe_decode_gpt2_byte_level(std::string_view encoded) {
     return decoded;
 }
 
-std::unique_ptr<ITokenizer> lfm2_moe_wrap_byte_level_decoder(std::unique_ptr<ITokenizer> tokenizer) {
+std::unique_ptr<ITokenizer>
+lfm2_moe_wrap_byte_level_decoder(std::unique_ptr<ITokenizer> tokenizer) {
     return std::make_unique<Lfm2MoeByteLevelDecoderTokenizer>(std::move(tokenizer));
 }
 

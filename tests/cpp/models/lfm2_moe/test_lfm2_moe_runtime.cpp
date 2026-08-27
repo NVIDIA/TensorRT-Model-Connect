@@ -250,7 +250,8 @@ void test_native_contract_rejection_and_capacity(cudaStream_t stream) {
 
     {
         FakeLfm2MoeModule module(stream, trtmc::DType::kBFloat16);
-        auto kv = std::make_unique<trtmc::Lfm2MoeKvCache>(1, 8, 2, 4, stream, trtmc::DType::kBFloat16);
+        auto kv =
+            std::make_unique<trtmc::Lfm2MoeKvCache>(1, 8, 2, 4, stream, trtmc::DType::kBFloat16);
         auto conv =
             std::make_unique<trtmc::Lfm2MoeConvState>(1, 4, 3, stream, trtmc::DType::kBFloat16);
         trtmc::Lfm2MoeHybridState state(std::move(kv), std::move(conv));
@@ -271,7 +272,8 @@ void test_pipeline_uses_safe_one_token_progression(cudaStream_t stream) {
     config.vocab_size = 6;
     config.id_eos = 5;
     config.id_eos_ids = {5};
-    trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), std::move(state), config, stream);
+    trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), std::move(state), config,
+                                                  stream);
 
     trtmc::GenerateConfig request;
     request.max_new_tokens = 2;
@@ -305,8 +307,8 @@ void test_pipeline_chat_and_raw_bos_dedup(cudaStream_t stream) {
     config.id_eos = 5;
     config.id_eos_ids = {5};
     config.chat_template_format = "chatml";
-    trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), std::move(state), config, stream,
-                                               tokenizer);
+    trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), std::move(state), config,
+                                                  stream, tokenizer);
 
     trtmc::GenerateConfig request;
     request.max_new_tokens = 1;
@@ -327,8 +329,10 @@ void test_pipeline_chat_and_raw_bos_dedup(cudaStream_t stream) {
 
 void test_pipeline_rejects_logits_contract_mismatch(cudaStream_t stream) {
     const auto make_state = [&] {
-        auto kv = std::make_unique<trtmc::Lfm2MoeKvCache>(1, 8, 2, 4, stream, trtmc::DType::kFloat16);
-        auto conv = std::make_unique<trtmc::Lfm2MoeConvState>(1, 4, 3, stream, trtmc::DType::kFloat16);
+        auto kv =
+            std::make_unique<trtmc::Lfm2MoeKvCache>(1, 8, 2, 4, stream, trtmc::DType::kFloat16);
+        auto conv =
+            std::make_unique<trtmc::Lfm2MoeConvState>(1, 4, 3, stream, trtmc::DType::kFloat16);
         return std::make_unique<trtmc::Lfm2MoeHybridState>(std::move(kv), std::move(conv));
     };
     const auto make_config = [] {
@@ -345,8 +349,8 @@ void test_pipeline_rejects_logits_contract_mismatch(cudaStream_t stream) {
     {
         auto module = std::make_unique<FakeLfm2MoeModule>(stream, trtmc::DType::kFloat16);
         module->set_tensor("logits", {5}, trtmc::DType::kFloat32);
-        trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), make_state(), make_config(),
-                                                   stream);
+        trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), make_state(),
+                                                      make_config(), stream);
         bool rejected = false;
         try {
             (void)pipeline.generate_ids({1}, request);
@@ -359,8 +363,8 @@ void test_pipeline_rejects_logits_contract_mismatch(cudaStream_t stream) {
     {
         auto module = std::make_unique<FakeLfm2MoeModule>(stream, trtmc::DType::kFloat16);
         module->set_tensor("logits", {6}, trtmc::DType::kFloat16);
-        trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), make_state(), make_config(),
-                                                   stream);
+        trtmc::Lfm2MoeTextGenerationPipeline pipeline(std::move(module), make_state(),
+                                                      make_config(), stream);
         bool rejected = false;
         try {
             (void)pipeline.generate_ids({1}, request);

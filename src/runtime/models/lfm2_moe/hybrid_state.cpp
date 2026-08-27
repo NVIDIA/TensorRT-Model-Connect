@@ -11,7 +11,7 @@
 namespace trtmc {
 
 Lfm2MoeHybridState::Lfm2MoeHybridState(std::unique_ptr<Lfm2MoeKvCache> kv,
-                                 std::unique_ptr<Lfm2MoeConvState> conv)
+                                       std::unique_ptr<Lfm2MoeConvState> conv)
     : kv_(std::move(kv)), conv_(std::move(conv)) {
     if (!kv_ || !conv_)
         throw std::invalid_argument("Lfm2MoeHybridState requires KV and convolution state");

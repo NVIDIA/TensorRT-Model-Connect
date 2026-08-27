@@ -42,8 +42,8 @@ void bind_conv_state_pair(TrtModule& module, const std::string& input, const std
 } // namespace
 
 Lfm2MoeConvState::Lfm2MoeConvState(int32_t num_layers, int32_t state_dim, int32_t cache_length,
-                             cudaStream_t stream, DType dtype, std::string input_prefix,
-                             std::string output_prefix)
+                                   cudaStream_t stream, DType dtype, std::string input_prefix,
+                                   std::string output_prefix)
     : num_layers_(num_layers), state_dim_(state_dim), cache_length_(cache_length), stream_(stream),
       dtype_(dtype), input_prefix_(std::move(input_prefix)),
       output_prefix_(std::move(output_prefix)) {

@@ -160,10 +160,10 @@ FilteredDistribution make_distribution(const std::vector<float>& logits,
 class Lfm2MoeGreedySampler final : public Lfm2MoeISampler {
   public:
     Lfm2MoeSampleResult sample(const float* logits, int32_t vocab_size,
-                            const Lfm2MoeSamplingParams& params,
-                            const std::vector<int32_t>& token_history) override {
-        return argmax(lfm2_moe_apply_repetition_penalty(logits, vocab_size, params.repetition_penalty,
-                                                    token_history),
+                               const Lfm2MoeSamplingParams& params,
+                               const std::vector<int32_t>& token_history) override {
+        return argmax(lfm2_moe_apply_repetition_penalty(logits, vocab_size,
+                                                        params.repetition_penalty, token_history),
                       params);
     }
     const char* sampler_type() const override { return "lfm2_moe_greedy"; }
@@ -175,10 +175,10 @@ class Lfm2MoeDistributionSampler final : public Lfm2MoeISampler {
         : initial_state_(seed == 0 ? 1 : seed), state_(initial_state_) {}
 
     Lfm2MoeSampleResult sample(const float* logits, int32_t vocab_size,
-                            const Lfm2MoeSamplingParams& params,
-                            const std::vector<int32_t>& token_history) override {
-        auto adjusted = lfm2_moe_apply_repetition_penalty(logits, vocab_size, params.repetition_penalty,
-                                                      token_history);
+                               const Lfm2MoeSamplingParams& params,
+                               const std::vector<int32_t>& token_history) override {
+        auto adjusted = lfm2_moe_apply_repetition_penalty(logits, vocab_size,
+                                                          params.repetition_penalty, token_history);
         if (adjusted.empty())
             return argmax(adjusted, params);
         if (sanitize_temperature(params.temperature) < kSamplingEpsilon)
@@ -238,8 +238,8 @@ bool lfm2_moe_is_eos_token(const Lfm2MoeSamplingParams& params, int32_t token_id
 }
 
 std::vector<float> lfm2_moe_apply_repetition_penalty(const float* logits, int32_t vocab_size,
-                                                 float penalty,
-                                                 const std::vector<int32_t>& token_history) {
+                                                     float penalty,
+                                                     const std::vector<int32_t>& token_history) {
     if (vocab_size <= 0 || logits == nullptr)
         return {};
     if (!std::isfinite(penalty) || penalty <= 0.0F)
@@ -261,7 +261,7 @@ int32_t lfm2_moe_resolve_top_k(const Lfm2MoeSamplingParams& params) {
 
 Lfm2MoeSamplingParams
 lfm2_moe_sampling_params_from_config(const GenerateConfig& cfg,
-                                 const std::vector<int32_t>& default_eos_token_ids) {
+                                     const std::vector<int32_t>& default_eos_token_ids) {
     Lfm2MoeSamplingParams params;
     params.temperature = cfg.temperature;
     params.top_k = cfg.top_k;

@@ -79,8 +79,8 @@ const std::vector<char>& require_lfm2_moe_tokenizer_section(const BundleFile& bu
 }
 
 std::unique_ptr<ITokenizer> create_lfm2_moe_native_bpe(const std::vector<char>& section,
-                                                   bool add_special, bool has_explicit_frame,
-                                                   bool use_pinned_pretokenizer) {
+                                                       bool add_special, bool has_explicit_frame,
+                                                       bool use_pinned_pretokenizer) {
     auto tokenizer =
         CreateBpeTokenizer(section.data(), section.size(),
                            add_special && !has_explicit_frame && !use_pinned_pretokenizer);
@@ -90,11 +90,11 @@ std::unique_ptr<ITokenizer> create_lfm2_moe_native_bpe(const std::vector<char>& 
 }
 
 std::unique_ptr<ITokenizer> apply_lfm2_moe_tokenizer_wrappers(std::unique_ptr<ITokenizer> tokenizer,
-                                                          const std::vector<char>& section,
-                                                          bool use_pinned_pretokenizer,
-                                                          bool add_special,
-                                                          bool& has_explicit_frame,
-                                                          std::vector<int32_t>& prefix) {
+                                                              const std::vector<char>& section,
+                                                              bool use_pinned_pretokenizer,
+                                                              bool add_special,
+                                                              bool& has_explicit_frame,
+                                                              std::vector<int32_t>& prefix) {
     if (lfm2_moe_uses_sequence_byte_level_decoder(section.data(), section.size()))
         tokenizer = lfm2_moe_wrap_byte_level_decoder(std::move(tokenizer));
     if (!use_pinned_pretokenizer)
@@ -113,9 +113,9 @@ std::unique_ptr<ITokenizer> apply_lfm2_moe_tokenizer_wrappers(std::unique_ptr<IT
 }
 
 std::shared_ptr<ITokenizer> finalize_lfm2_moe_tokenizer(std::unique_ptr<ITokenizer> tokenizer,
-                                                    bool add_special, bool has_explicit_frame,
-                                                    std::vector<int32_t> prefix,
-                                                    std::vector<int32_t> suffix) {
+                                                        bool add_special, bool has_explicit_frame,
+                                                        std::vector<int32_t> prefix,
+                                                        std::vector<int32_t> suffix) {
     if (add_special && has_explicit_frame) {
         return std::make_shared<SpecialFrameTokenizer>(std::move(tokenizer), std::move(prefix),
                                                        std::move(suffix));
@@ -126,7 +126,7 @@ std::shared_ptr<ITokenizer> finalize_lfm2_moe_tokenizer(std::unique_ptr<ITokeniz
 } // namespace
 
 std::unique_ptr<ITrtModule> load_lfm2_moe_module(IBackend* backend, const std::vector<char>* plan,
-                                             const ModuleCreateOptions& options) {
+                                                 const ModuleCreateOptions& options) {
     if (backend == nullptr)
         throw std::runtime_error("LFM2 runtime has no TensorRT backend");
     if (plan == nullptr || plan->empty())
@@ -152,13 +152,13 @@ std::shared_ptr<ITokenizer> create_lfm2_moe_tokenizer(const BundleFile& bundle) 
         lfm2_moe_uses_pinned_split_byte_level_pretokenizer(section.data(), section.size());
     try {
         auto tokenizer = create_lfm2_moe_native_bpe(section, add_special, has_explicit_frame,
-                                                use_pinned_pretokenizer);
-        tokenizer =
-            apply_lfm2_moe_tokenizer_wrappers(std::move(tokenizer), section, use_pinned_pretokenizer,
-                                          add_special, has_explicit_frame, prefix);
+                                                    use_pinned_pretokenizer);
+        tokenizer = apply_lfm2_moe_tokenizer_wrappers(std::move(tokenizer), section,
+                                                      use_pinned_pretokenizer, add_special,
+                                                      has_explicit_frame, prefix);
         std::cerr << "[trtmc] Using native LFM2 BPE tokenizer\n";
         return finalize_lfm2_moe_tokenizer(std::move(tokenizer), add_special, has_explicit_frame,
-                                       std::move(prefix), std::move(suffix));
+                                           std::move(prefix), std::move(suffix));
     } catch (const std::exception& error) {
         throw std::runtime_error(std::string("LFM2 native BPE tokenizer failed: ") + error.what());
     }
@@ -190,8 +190,10 @@ Lfm2MoeKvCacheNames lfm2_moe_kv_names(const BaseConfig& config, int32_t num_atte
     for (int32_t layer = 0; layer < num_attention_layers; ++layer) {
         names.cache_k.push_back(lfm2_moe_expand_layer_name(config.io_map.cache_k_pattern, layer));
         names.cache_v.push_back(lfm2_moe_expand_layer_name(config.io_map.cache_v_pattern, layer));
-        names.present_k.push_back(lfm2_moe_expand_layer_name(config.io_map.present_k_pattern, layer));
-        names.present_v.push_back(lfm2_moe_expand_layer_name(config.io_map.present_v_pattern, layer));
+        names.present_k.push_back(
+            lfm2_moe_expand_layer_name(config.io_map.present_k_pattern, layer));
+        names.present_v.push_back(
+            lfm2_moe_expand_layer_name(config.io_map.present_v_pattern, layer));
     }
     return names;
 }

@@ -273,7 +273,8 @@ std::size_t next_pretoken_end(std::string_view text, std::size_t offset) {
 
 class Lfm2MoePinnedPretokenizer final : public ITokenizer {
   public:
-    Lfm2MoePinnedPretokenizer(std::unique_ptr<ITokenizer> inner, std::vector<std::string> added_tokens)
+    Lfm2MoePinnedPretokenizer(std::unique_ptr<ITokenizer> inner,
+                              std::vector<std::string> added_tokens)
         : inner_(std::move(inner)), added_tokens_(std::move(added_tokens)) {
         if (!inner_)
             throw std::invalid_argument("LFM2 pretokenizer requires an inner tokenizer");
@@ -389,7 +390,8 @@ bool is_pinned_pretokenizer(const nlohmann::json& pretokenizer) {
 
 } // namespace
 
-bool lfm2_moe_uses_pinned_split_byte_level_pretokenizer(const char* tokenizer_json, std::size_t size) {
+bool lfm2_moe_uses_pinned_split_byte_level_pretokenizer(const char* tokenizer_json,
+                                                        std::size_t size) {
     if (tokenizer_json == nullptr || size == 0)
         return false;
     try {
@@ -401,7 +403,8 @@ bool lfm2_moe_uses_pinned_split_byte_level_pretokenizer(const char* tokenizer_js
     }
 }
 
-std::vector<std::string> lfm2_moe_tokenizer_added_tokens(const char* tokenizer_json, std::size_t size) {
+std::vector<std::string> lfm2_moe_tokenizer_added_tokens(const char* tokenizer_json,
+                                                         std::size_t size) {
     std::vector<std::string> tokens;
     if (tokenizer_json == nullptr || size == 0)
         return tokens;
@@ -430,9 +433,11 @@ std::vector<std::string> lfm2_moe_split_pretokens(std::string_view text) {
     return pieces;
 }
 
-std::unique_ptr<ITokenizer> lfm2_moe_wrap_pinned_pretokenizer(std::unique_ptr<ITokenizer> tokenizer,
-                                                          std::vector<std::string> added_tokens) {
-    return std::make_unique<Lfm2MoePinnedPretokenizer>(std::move(tokenizer), std::move(added_tokens));
+std::unique_ptr<ITokenizer>
+lfm2_moe_wrap_pinned_pretokenizer(std::unique_ptr<ITokenizer> tokenizer,
+                                  std::vector<std::string> added_tokens) {
+    return std::make_unique<Lfm2MoePinnedPretokenizer>(std::move(tokenizer),
+                                                       std::move(added_tokens));
 }
 
 } // namespace trtmc

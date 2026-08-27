@@ -18,7 +18,7 @@
 namespace trtmc {
 
 std::unique_ptr<ITrtModule> load_lfm2_moe_module(IBackend* backend, const std::vector<char>* plan,
-                                             const ModuleCreateOptions& options = {});
+                                                 const ModuleCreateOptions& options = {});
 
 std::shared_ptr<ITokenizer> create_lfm2_moe_tokenizer(const BundleFile& bundle);
 DType lfm2_moe_state_dtype(const std::string& precision);

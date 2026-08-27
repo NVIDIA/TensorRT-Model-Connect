@@ -30,7 +30,7 @@ struct Lfm2MoeKvCacheNames {
 class Lfm2MoeKvCache : public Lfm2MoeInferenceState {
   public:
     Lfm2MoeKvCache(int32_t num_layers, int32_t max_length, int32_t num_kv_heads, int32_t head_dim,
-                cudaStream_t stream, DType dtype, Lfm2MoeKvCacheNames names = {});
+                   cudaStream_t stream, DType dtype, Lfm2MoeKvCacheNames names = {});
 
     void reset() override;
     void bind_to(TrtModule& module) override;

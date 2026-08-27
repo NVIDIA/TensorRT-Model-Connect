@@ -53,7 +53,7 @@ Lfm2MoeTextGenerationPipeline::Lfm2MoeTextGenerationPipeline(
 }
 
 std::vector<int32_t> Lfm2MoeTextGenerationPipeline::encode_prompt(const std::string& prompt,
-                                                               const GenerateConfig& cfg) const {
+                                                                  const GenerateConfig& cfg) const {
     if (!tokenizer_)
         throw std::runtime_error("Lfm2MoeTextGenerationPipeline: no native tokenizer configured");
     std::string effective = prompt;
@@ -75,7 +75,7 @@ std::vector<int32_t> Lfm2MoeTextGenerationPipeline::encode_prompt(const std::str
 }
 
 TextResult Lfm2MoeTextGenerationPipeline::generate(const std::string& prompt,
-                                                const GenerateConfig& cfg) {
+                                                   const GenerateConfig& cfg) {
     const auto input_ids = encode_prompt(prompt, cfg);
     const int32_t max_new_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 128;
     const auto params = lfm2_moe_sampling_params_from_config(cfg, config_.id_eos_ids);
@@ -92,15 +92,15 @@ TextResult Lfm2MoeTextGenerationPipeline::generate(const std::string& prompt,
 
 Lfm2MoeTextGenerationPipeline::GenerationResult
 Lfm2MoeTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
-                                         const GenerateConfig& cfg) {
+                                            const GenerateConfig& cfg) {
     const auto params = lfm2_moe_sampling_params_from_config(cfg, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, cfg.max_new_tokens, params).token_ids};
 }
 
 Lfm2MoeTextGenerationPipeline::TimedGenerationResult
 Lfm2MoeTextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
-                                              int32_t max_new_tokens,
-                                              const Lfm2MoeSamplingParams& params) {
+                                                 int32_t max_new_tokens,
+                                                 const Lfm2MoeSamplingParams& params) {
     if (input_ids.empty() || max_new_tokens <= 0)
         return TimedGenerationResult{input_ids};
     const auto capacity = static_cast<std::size_t>(state_->max_length());
@@ -164,7 +164,8 @@ void Lfm2MoeTextGenerationPipeline::run_step(int32_t token_id, std::vector<float
     if (logits_device_ptr_ == nullptr) {
         if (!decoder_->has_output(config_.logits_output_name) ||
             decoder_->tensor_dtype(config_.logits_output_name) != DType::kFloat32) {
-            throw std::runtime_error("Lfm2MoeTextGenerationPipeline: FP32 logits output is missing");
+            throw std::runtime_error(
+                "Lfm2MoeTextGenerationPipeline: FP32 logits output is missing");
         }
         const auto shape = decoder_->tensor_shape(config_.logits_output_name);
         const std::vector<int64_t> vector_shape{config_.vocab_size};
@@ -176,7 +177,8 @@ void Lfm2MoeTextGenerationPipeline::run_step(int32_t token_id, std::vector<float
         logits_device_ptr_ =
             static_cast<const float*>(decoder_->device_ptr(config_.logits_output_name));
         if (logits_device_ptr_ == nullptr)
-            throw std::runtime_error("Lfm2MoeTextGenerationPipeline: logits device buffer is missing");
+            throw std::runtime_error(
+                "Lfm2MoeTextGenerationPipeline: logits device buffer is missing");
     }
     logits.resize(static_cast<std::size_t>(config_.vocab_size));
     if (cudaMemcpy(logits.data(), logits_device_ptr_, logits.size() * sizeof(float),

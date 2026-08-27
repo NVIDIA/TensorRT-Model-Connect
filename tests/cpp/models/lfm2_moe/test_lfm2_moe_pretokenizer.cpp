@@ -226,8 +226,9 @@ void test_pinned_metadata_detection() {
     std::string changed = pinned;
     const auto position = changed.find("\"use_regex\":false");
     changed.replace(position, std::string("\"use_regex\":false").size(), "\"use_regex\":true");
-    check(!trtmc::lfm2_moe_uses_pinned_split_byte_level_pretokenizer(changed.data(), changed.size()),
-          "fail closed for a different pretokenizer contract");
+    check(
+        !trtmc::lfm2_moe_uses_pinned_split_byte_level_pretokenizer(changed.data(), changed.size()),
+        "fail closed for a different pretokenizer contract");
 }
 
 void test_supported_language_piece_and_id_parity() {
@@ -236,8 +237,8 @@ void test_supported_language_piece_and_id_parity() {
     for (const auto& fixture : supported_language_fixtures()) {
         check(trtmc::lfm2_moe_split_pretokens(fixture.text) == fixture.pieces,
               std::string(fixture.name) + " pinned Split pieces");
-        auto tokenizer =
-            trtmc::lfm2_moe_wrap_pinned_pretokenizer(std::make_unique<PinnedPieceTokenizer>(), added);
+        auto tokenizer = trtmc::lfm2_moe_wrap_pinned_pretokenizer(
+            std::make_unique<PinnedPieceTokenizer>(), added);
         check(tokenizer->encode(fixture.text) == fixture.ids,
               std::string(fixture.name) + " pinned token ids");
     }
@@ -249,8 +250,8 @@ void test_whitespace_run_piece_and_id_parity() {
     for (const auto& fixture : whitespace_run_fixtures()) {
         check(trtmc::lfm2_moe_split_pretokens(fixture.text) == fixture.pieces,
               std::string(fixture.name) + " pinned Split pieces");
-        auto tokenizer =
-            trtmc::lfm2_moe_wrap_pinned_pretokenizer(std::make_unique<PinnedPieceTokenizer>(), added);
+        auto tokenizer = trtmc::lfm2_moe_wrap_pinned_pretokenizer(
+            std::make_unique<PinnedPieceTokenizer>(), added);
         check(tokenizer->encode(fixture.text) == fixture.ids,
               std::string(fixture.name) + " pinned token ids");
     }

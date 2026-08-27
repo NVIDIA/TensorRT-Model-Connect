@@ -57,14 +57,15 @@ void validate_lfm2_moe_attention_geometry(const BaseConfig& config) {
 }
 
 std::unique_ptr<Lfm2MoeHybridState> create_lfm2_moe_state(const PipelineContext& ctx,
-                                                   const Lfm2MoeGeometry& geometry,
-                                                   cudaStream_t stream, DType state_dtype) {
+                                                          const Lfm2MoeGeometry& geometry,
+                                                          cudaStream_t stream, DType state_dtype) {
     auto kv = std::make_unique<Lfm2MoeKvCache>(
         geometry.num_attention_layers, ctx.config.max_cache_length, ctx.config.num_kv_heads,
         ctx.config.head_dim, stream, state_dtype,
         lfm2_moe_kv_names(ctx.config, geometry.num_attention_layers));
-    auto conv = std::make_unique<Lfm2MoeConvState>(geometry.num_conv_layers, geometry.conv_state_dim,
-                                                geometry.conv_cache_length, stream, state_dtype);
+    auto conv =
+        std::make_unique<Lfm2MoeConvState>(geometry.num_conv_layers, geometry.conv_state_dim,
+                                           geometry.conv_cache_length, stream, state_dtype);
     auto state = std::make_unique<Lfm2MoeHybridState>(std::move(kv), std::move(conv));
     if (!state->ok())
         throw std::runtime_error("Failed to allocate LFM2 hybrid inference state");

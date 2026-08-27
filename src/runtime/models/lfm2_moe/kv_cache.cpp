@@ -63,7 +63,8 @@ void validate_name_counts(const Lfm2MoeKvCacheNames& names, std::size_t expected
 } // namespace
 
 Lfm2MoeKvCache::Lfm2MoeKvCache(int32_t num_layers, int32_t max_length, int32_t num_kv_heads,
-                         int32_t head_dim, cudaStream_t stream, DType dtype, Lfm2MoeKvCacheNames names)
+                               int32_t head_dim, cudaStream_t stream, DType dtype,
+                               Lfm2MoeKvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), num_kv_heads_(num_kv_heads),
       head_dim_(head_dim), stream_(stream), dtype_(dtype), names_(std::move(names)) {
     validate_geometry(num_layers_, max_length_, num_kv_heads_, head_dim_);

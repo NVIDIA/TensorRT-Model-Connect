@@ -16,9 +16,9 @@ namespace trtmc {
 
 class Lfm2MoeConvState final : public Lfm2MoeInferenceState {
   public:
-    Lfm2MoeConvState(int32_t num_layers, int32_t state_dim, int32_t cache_length, cudaStream_t stream,
-                  DType dtype, std::string input_prefix = "conv_state",
-                  std::string output_prefix = "present_conv");
+    Lfm2MoeConvState(int32_t num_layers, int32_t state_dim, int32_t cache_length,
+                     cudaStream_t stream, DType dtype, std::string input_prefix = "conv_state",
+                     std::string output_prefix = "present_conv");
 
     void reset() override;
     void bind_to(TrtModule& module) override;
