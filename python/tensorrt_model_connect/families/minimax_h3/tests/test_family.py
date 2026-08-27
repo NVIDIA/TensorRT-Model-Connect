@@ -779,6 +779,9 @@ def test_audio_vae_decoder_onnx_contract_and_workspace_are_fail_closed(monkeypat
             assert pool == "workspace"
             return observed["workspace"]
 
+        def clear_flag(self, flag):
+            observed.setdefault("cleared_flags", []).append(flag)
+
     class Builder:
         def __init__(self, logger):
             del logger
@@ -805,6 +808,7 @@ def test_audio_vae_decoder_onnx_contract_and_workspace_are_fail_closed(monkeypat
         Logger=Logger,
         Builder=Builder,
         OnnxParser=Parser,
+        BuilderFlag=SimpleNamespace(TF32="tf32"),
         MemoryPoolType=SimpleNamespace(WORKSPACE="workspace"),
         float32=fp32,
     )

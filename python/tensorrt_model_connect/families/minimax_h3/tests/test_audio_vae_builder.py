@@ -280,7 +280,7 @@ def test_encoder_builder_exports_then_builds_dynamic_plan(tmp_path: Path, monkey
     assert observed["workspace_bytes"] == 8 << 30
 
 
-def test_encoder_trt_contract_adds_exact_dynamic_profile(monkeypatch) -> None:
+def test_encoder_trt_contract_clears_tf32_and_adds_exact_dynamic_profile(monkeypatch) -> None:
     observed = {}
     fp32 = object()
 
@@ -325,6 +325,9 @@ def test_encoder_trt_contract_adds_exact_dynamic_profile(monkeypatch) -> None:
             assert pool == "workspace"
             return observed["workspace"]
 
+        def clear_flag(self, flag):
+            observed.setdefault("cleared_flags", []).append(flag)
+
         def add_optimization_profile(self, profile):
             observed["added_profile"] = profile
             return 0
@@ -357,6 +360,7 @@ def test_encoder_trt_contract_adds_exact_dynamic_profile(monkeypatch) -> None:
         Logger=Logger,
         Builder=Builder,
         OnnxParser=Parser,
+        BuilderFlag=SimpleNamespace(TF32="tf32"),
         MemoryPoolType=SimpleNamespace(WORKSPACE="workspace"),
         float32=fp32,
     )
@@ -374,6 +378,7 @@ def test_encoder_trt_contract_adds_exact_dynamic_profile(monkeypatch) -> None:
         (2, 1, AUDIO_REFERENCE_MAX_SAMPLES),
     )
     assert observed["workspace"] == AUDIO_VAE_ENCODER_DEFAULT_WORKSPACE_BYTES
+    assert observed["cleared_flags"] == ["tf32"]
     assert observed["added_profile"].__class__ is Profile
     assert observed["onnx"] == b"onnx"
     assert observed["flags"] == 9

@@ -866,6 +866,8 @@ def _build_serialized_encoder_engine(
     build_config.set_memory_pool_limit(pool, resolved_workspace)
     if int(build_config.get_memory_pool_limit(pool)) != resolved_workspace:
         raise RuntimeError("TensorRT did not apply the requested MiniMax-H3 audio workspace limit")
+    # Hugging Face keeps the Ref2VA audio encoder on the full-FP32 path.
+    build_config.clear_flag(trt.BuilderFlag.TF32)
 
     profile = builder.create_optimization_profile()
     profile_shapes = (
