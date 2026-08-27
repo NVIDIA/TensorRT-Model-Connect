@@ -1709,6 +1709,8 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
         "self.request.revision",
         'self.artifacts / "engine-build-verification.json"',
         '"--build-verification-report"',
+        '"--result-case"',
+        "self.selection.e2e_cases",
         'self.status.step("engine_build_budget", "passed")',
         '"engine_builds_per_model": verification["builds_per_model"]',
         '"engine_build_count": len(verification["records"])',

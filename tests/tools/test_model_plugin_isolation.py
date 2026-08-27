@@ -1123,6 +1123,144 @@ def test_verify_results_uses_first_testcase_when_model_has_no_same_named_case(
     assert "PASS decoder-bundle" in result.stdout
 
 
+def test_verify_results_verifies_every_explicit_noncanonical_case(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    manifest_path = (
+        repo_root
+        / "tests"
+        / "e2e"
+        / "models"
+        / "decoder_family"
+        / "manifests"
+        / "decoder-small.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [
+        {"name": "decoder-small"},
+        {"name": "decoder-small-parity-fp16"},
+        {"name": "decoder-small-parity-bf16"},
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts_dir = tmp_path / "artifacts"
+    build_record = _recovered_build_record("decoder-small")
+    build_record["attempt_count"] = 1
+    build_record["recovery_attempts"] = []
+    for case_name in (
+        "decoder-small-parity-fp16",
+        "decoder-small-parity-bf16",
+    ):
+        result_payload = _passing_result(case_name)
+        if case_name == "decoder-small-parity-fp16":
+            result_payload["commands"].insert(
+                0,
+                {
+                    "label": "build",
+                    "command": build_record["command"],
+                    "returncode": 0,
+                },
+            )
+        _write_result(artifacts_dir, case_name, result_payload)
+    build_report = tmp_path / "engine-build-verification.json"
+    build_report.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "records": [
+                    {
+                        "identity": "decoder-small",
+                        "passed": True,
+                        "record": build_record,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    report_path = tmp_path / "verification.json"
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--result-case",
+        "decoder-small-parity-bf16",
+        "--result-case",
+        "decoder-small-parity-fp16",
+        "--artifacts-dir",
+        str(artifacts_dir),
+        "--build-verification-report",
+        str(build_report),
+        "--report",
+        str(report_path),
+    )
+
+    assert "PASS decoder-small [decoder-small-parity-fp16]" in result.stdout
+    assert "PASS decoder-small [decoder-small-parity-bf16]" in result.stdout
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["passed"] is True
+    assert report["selected_result_cases"] == [
+        {"model": "decoder-small", "case": "decoder-small-parity-bf16"},
+        {"model": "decoder-small", "case": "decoder-small-parity-fp16"},
+    ]
+
+
+def test_verify_results_rejects_unowned_explicit_case(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "verify-results",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--result-case",
+            "another-model-case",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "does not belong to any selected E2E model" in result.stderr
+
+
+def test_verify_result_rejects_build_evidence_on_a_sibling_case(
+    tmp_path: Path,
+) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    case_name = "decoder-small-parity-bf16"
+    result_payload = _passing_result(case_name)
+    result_payload["commands"].insert(
+        0,
+        {
+            "label": "build",
+            "command": ["python", "-m", "builder", "decoder-small"],
+            "returncode": 0,
+        },
+    )
+    _write_result(artifacts_dir, case_name, result_payload)
+
+    verified = model_plugin_isolation._verify_model_result(
+        "decoder-small",
+        case_name,
+        artifacts_dir,
+        forbid_build_evidence=True,
+    )
+
+    assert verified["passed"] is False
+    assert "reserved for verified build evidence" in verified["errors"][0]
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_error"),
     [

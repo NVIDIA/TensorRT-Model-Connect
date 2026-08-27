@@ -33,6 +33,7 @@ class E2EManifest:
     path: Path
     bundle: str = ""
     result_case: str = ""
+    testcases: tuple[str, ...] = ()
     ci_tier: str = ""
 
 
@@ -148,6 +149,7 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
             if testcase_names
             else name
         )
+        manifest_testcases = tuple(testcase_names) or (result_case,)
         result_testcase = next(
             (
                 testcase
@@ -165,6 +167,7 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
                 path=path,
                 bundle=str(raw.get("bundle") or f"{name}.bundle"),
                 result_case=result_case,
+                testcases=manifest_testcases,
                 ci_tier=str(
                     result_testcase.get("ci_tier") or raw.get("ci_tier") or ""
                 ),
@@ -742,6 +745,8 @@ def _load_verified_build_records(
 def _command_verification_errors(
     commands: object,
     build_record: dict[str, object] | None,
+    *,
+    forbid_build_evidence: bool = False,
 ) -> list[str]:
     if commands is None and build_record is None:
         return []
@@ -797,7 +802,9 @@ def _command_verification_errors(
         if not isinstance(command, dict):
             errors.append(f"commands[{index}] is not an object")
             continue
-        if build_record is not None and command.get("label") in {
+        if (build_record is not None or forbid_build_evidence) and command.get(
+            "label"
+        ) in {
             "build",
             "build_recovery_attempt_1",
         }:
@@ -817,12 +824,15 @@ def _verify_model_result(
     result_case: str,
     artifacts_dir: Path,
     build_record: dict[str, object] | None = None,
+    *,
+    forbid_build_evidence: bool = False,
 ) -> dict[str, object]:
     result_path = artifacts_dir / result_case / "result.json"
     errors: list[str] = []
     if not result_path.is_file():
         return {
             "model": model_name,
+            "case": result_case,
             "result_path": str(result_path),
             "proof_kind": "invalid",
             "passed": False,
@@ -833,6 +843,7 @@ def _verify_model_result(
     except (OSError, json.JSONDecodeError) as exc:
         return {
             "model": model_name,
+            "case": result_case,
             "result_path": str(result_path),
             "proof_kind": "invalid",
             "passed": False,
@@ -882,13 +893,18 @@ def _verify_model_result(
                 errors.append(f"stage {stage_name!r} metrics is not an object")
 
     errors.extend(
-        _command_verification_errors(result.get("commands"), build_record)
+        _command_verification_errors(
+            result.get("commands"),
+            build_record,
+            forbid_build_evidence=forbid_build_evidence,
+        )
     )
 
     errors.extend(_returncode_failures(result.get("stage_outputs", {}), "stage_outputs"))
     errors = list(dict.fromkeys(errors))
     return {
         "model": model_name,
+        "case": result_case,
         "result_path": str(result_path),
         "proof_kind": proof_kind,
         "passed": not errors,
@@ -896,8 +912,72 @@ def _verify_model_result(
     }
 
 
+def _selected_result_cases(
+    requested_cases: list[str],
+    model_names: set[str],
+    manifests: dict[str, E2EManifest],
+) -> list[tuple[str, str]]:
+    if not requested_cases:
+        return [
+            (model_name, manifests[model_name].result_case)
+            for model_name in sorted(model_names)
+        ]
+
+    duplicate_cases = sorted(
+        case for case in set(requested_cases) if requested_cases.count(case) > 1
+    )
+    if duplicate_cases:
+        raise SystemExit(
+            "Duplicate result case selection(s): " + ", ".join(duplicate_cases)
+        )
+
+    selected: list[tuple[str, str]] = []
+    for result_case in requested_cases:
+        owners = sorted(
+            model_name
+            for model_name in model_names
+            if result_case in manifests[model_name].testcases
+        )
+        if not owners:
+            raise SystemExit(
+                f"Selected result case {result_case!r} does not belong to any "
+                "selected E2E model"
+            )
+        if len(owners) > 1:
+            raise SystemExit(
+                f"Selected result case {result_case!r} is ambiguous across E2E "
+                f"models: {', '.join(owners)}"
+            )
+        selected.append((owners[0], result_case))
+
+    models_with_results = {model_name for model_name, _ in selected}
+    missing_models = sorted(model_names - models_with_results)
+    if missing_models:
+        raise SystemExit(
+            "No result case selected for E2E model(s): " + ", ".join(missing_models)
+        )
+    return sorted(selected)
+
+
+def _build_evidence_cases(
+    selected_result_cases: list[tuple[str, str]],
+    manifests: dict[str, E2EManifest],
+) -> dict[str, str]:
+    selected_by_model: dict[str, set[str]] = {}
+    for model_name, result_case in selected_result_cases:
+        selected_by_model.setdefault(model_name, set()).add(result_case)
+    return {
+        model_name: next(
+            result_case
+            for result_case in manifests[model_name].testcases
+            if result_case in selected_cases
+        )
+        for model_name, selected_cases in selected_by_model.items()
+    }
+
+
 def command_verify_results(args: argparse.Namespace) -> int:
-    """Require a complete passing E2E artifact for every selected model."""
+    """Require a complete passing E2E artifact for every selected result case."""
     repo_root = args.repo_root.resolve()
     artifacts_dir = args.artifacts_dir.resolve()
     manifests = discover_e2e_manifests(repo_root)
@@ -918,19 +998,41 @@ def command_verify_results(args: argparse.Namespace) -> int:
         else {}
     )
 
+    selected_result_cases = _selected_result_cases(
+        args.result_case,
+        model_names,
+        manifests,
+    )
+    build_evidence_cases = (
+        _build_evidence_cases(selected_result_cases, manifests)
+        if build_records
+        else {}
+    )
     results = [
         _verify_model_result(
             model_name,
-            manifests[model_name].result_case,
+            result_case,
             artifacts_dir,
-            build_records.get(model_name),
+            (
+                build_records.get(model_name)
+                if build_evidence_cases.get(model_name) == result_case
+                else None
+            ),
+            forbid_build_evidence=(
+                model_name in build_evidence_cases
+                and build_evidence_cases[model_name] != result_case
+            ),
         )
-        for model_name in sorted(model_names)
+        for model_name, result_case in selected_result_cases
     ]
     report = {
         "schema_version": 1,
         "artifacts_dir": str(artifacts_dir),
         "selected_models": sorted(model_names),
+        "selected_result_cases": [
+            {"model": model_name, "case": result_case}
+            for model_name, result_case in selected_result_cases
+        ],
         "passed": all(bool(result["passed"]) for result in results),
         "results": results,
     }
@@ -942,7 +1044,7 @@ def command_verify_results(args: argparse.Namespace) -> int:
 
     for result in results:
         status = "PASS" if result["passed"] else "FAIL"
-        print(f"{status} {result['model']}")
+        print(f"{status} {result['model']} [{result['case']}]")
         for error in result["errors"]:
             print(f"  {error}", file=sys.stderr)
     return 0 if report["passed"] else 1
@@ -1244,10 +1346,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify_results = subparsers.add_parser(
         "verify-results",
-        help="Require complete passing E2E artifacts for every selected model",
+        help="Require complete passing E2E artifacts for every selected result case",
     )
     add_selection_options(verify_results)
     verify_results.add_argument("--artifacts-dir", type=Path, required=True)
+    verify_results.add_argument(
+        "--result-case",
+        action="append",
+        default=[],
+        help="Verify this exact selected E2E testcase (repeatable)",
+    )
     verify_results.add_argument("--build-verification-report", type=Path)
     verify_results.add_argument("--report", type=Path)
     verify_results.set_defaults(func=command_verify_results)
