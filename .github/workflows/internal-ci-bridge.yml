@@ -193,6 +193,8 @@ jobs:
           PRIVATE_CI_REPOSITORY: ${{ secrets.TRTMC_PRIVATE_CI_REPOSITORY }}
           PR_NUMBER: ${{ needs.authorize.outputs.pr_number }}
           HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          BASE_SHA: ${{ needs.authorize.outputs.base_sha }}
+          POLICY_SHA: ${{ needs.authorize.outputs.policy_sha }}
         run: |
           set -euo pipefail
           [[ "$PRIVATE_CI_OWNER" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$ ]]
@@ -207,12 +209,16 @@ jobs:
           jq -n \
             --arg pr_number "$PR_NUMBER" \
             --arg head_sha "$HEAD_SHA" \
+            --arg base_sha "$BASE_SHA" \
+            --arg policy_sha "$POLICY_SHA" \
             --arg dispatch_nonce "$dispatch_nonce" \
             '{
               ref: "main",
               inputs: {
                 pr_number: $pr_number,
                 head_sha: $head_sha,
+                base_sha: $base_sha,
+                policy_sha: $policy_sha,
                 dispatch_nonce: $dispatch_nonce
               }
             }' > "$payload"
