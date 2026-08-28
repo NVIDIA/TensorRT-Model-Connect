@@ -904,6 +904,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "nvidia/Cosmos3-Nano",
+      "revision": "411f42a8fdfb8c5b2583cb8786e0938f49796eaa",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "Cosmos3OmniDiffusersPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
       "hf_id": "nvidia/Llama-3.1-Minitron-4B-Depth-Base",
       "revision": "47f17b2c73bbd07a4b643a0382970704d389f737",
       "revision_source": "resolved",

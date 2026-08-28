@@ -808,6 +808,8 @@ def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> Non
         ("tests/builder/test_cli.py", "all"),
         ("tests/cpp/test_cli_args.cpp", "all"),
         ("tests/tools/test_cli_contract.py", "all"),
+        ("examples/models/cosmos3/dual_spark/run_dual_spark.py", "all"),
+        ("examples/models/cosmos3/dual_spark/Dockerfile", "all"),
         ("examples/models/nemotron_voicechat/full_duplex/main.cpp", "all"),
         ("examples/models/nemotron_voicechat/full_duplex/Dockerfile", "all"),
         ("examples/models/nemotron_voicechat/full_duplex/CMakeLists.txt", "all"),

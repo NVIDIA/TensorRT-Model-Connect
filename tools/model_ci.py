@@ -189,6 +189,7 @@ FULL_UNIT_TEST_ONLY_EXACT = frozenset(
     }
 )
 UNIT_TEST_ONLY_PREFIXES = (
+    "examples/models/cosmos3/dual_spark/",
     "examples/models/nemotron_voicechat/full_duplex/",
     "tests/builder/",
     "tests/cpp/",
