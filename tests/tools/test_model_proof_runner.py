@@ -1872,7 +1872,7 @@ def test_profile_preparation_uses_a_minimal_online_boundary(
     assert "/opt/trtmc-profile-downloader.py" in download
     assert "demo-package==1.0.0" in download
     assert f"src={packages},dst={PROFILE_PACKAGES_ROOT}" in download
-    assert "src={projection}" not in download
+    assert f"src={projection}" not in download
     assert "NVIDIA_VISIBLE_DEVICES=void" in download
     assert "CUDA_VISIBLE_DEVICES=" in download
 
@@ -1883,7 +1883,7 @@ def test_profile_preparation_uses_a_minimal_online_boundary(
     assert "--security-opt no-new-privileges" in install
     assert "--ipc private" in install
     assert "PIP_CONFIG_FILE=/dev/null" in install
-    assert "PIP_FIND_LINKS=/opt/trtmc-python-profile-packages" in install
+    assert f"PIP_FIND_LINKS={PROFILE_PACKAGES_ROOT}" in install
     assert "PIP_NO_INDEX=1" in install
     assert f"src={projection},dst=/src,readonly" in install
     assert f"src={profiles},dst={PREPARED_PROFILE_ROOT}" in install
@@ -2099,7 +2099,8 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
         "discarded-prefix\n" + ("x" * 20_000) + "\nbounded-tail\n",
         encoding="utf-8",
     )
-    (artifacts / "build.log").symlink_to("/dev/zero")
+    (artifacts / "configure.log").symlink_to("/dev/zero")
+    os.mkfifo(artifacts / "build.log")
 
     result = subprocess.run(
         [
@@ -2123,6 +2124,7 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=5,
     )
 
     assert result.returncode == 0, result.stderr

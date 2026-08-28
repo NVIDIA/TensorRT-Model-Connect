@@ -491,7 +491,7 @@ class ModelProofRunner:
             "-e",
             "PIP_CONFIG_FILE=/dev/null",
             "-e",
-            "PIP_FIND_LINKS=/opt/trtmc-python-profile-packages",
+            f"PIP_FIND_LINKS={PROFILE_PACKAGES_ROOT}",
             "-e",
             "PIP_NO_CACHE_DIR=1",
             "-e",

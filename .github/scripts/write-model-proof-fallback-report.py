@@ -43,7 +43,12 @@ def _diagnostics(root: Path) -> list[tuple[str, str]]:
     for filename in _DIAGNOSTIC_FILES:
         path = root / filename
         try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | getattr(os, "O_NONBLOCK", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+            )
         except OSError:
             continue
         try:
