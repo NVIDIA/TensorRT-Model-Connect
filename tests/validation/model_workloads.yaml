@@ -255,6 +255,8 @@ models:
     workloads: [vlm_mmmu_pro_vision_fixed_mcq]
   qwen35-9b:
     workloads: [mmlu_five_shot_mcq]
+  qwen38-27b:
+    workloads: [mmlu_five_shot_mcq]
   riva-translate-4b:
     workloads: [flores200_en_fr_riva_translation_parity]
   roberta-base:

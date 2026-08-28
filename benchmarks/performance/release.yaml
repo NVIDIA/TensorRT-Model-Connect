@@ -758,6 +758,16 @@ entries:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
+  - id: qwen3_8.generate
+    family: qwen3_8
+    operation: generate
+    model: qwen38-27b
+    workload:
+      testcase: qwen38-27b
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
   - id: qwen3_omni.generate_audio
     family: qwen3_omni
     operation: generate_audio

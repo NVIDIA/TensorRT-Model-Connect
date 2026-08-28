@@ -26,6 +26,7 @@ suites:
       - qwen3-0.6b-topp
       - qwen3-4b-instruct-2507
       - qwen35-9b
+      - qwen38-27b
       - qwen3-moe-30b-a3b
     dataset:
       kind: mmlu_five_shot_json

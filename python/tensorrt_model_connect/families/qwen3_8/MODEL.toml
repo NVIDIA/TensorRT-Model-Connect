@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "qwen3_8"
+plugin = "qwen3_8"
+module = "plugin"
+aliases = [
+  "qwen38",
+  "qwen3.8",
+  "qwen3_8",
+]
+prefixes = [
+  "qwen3_8",
+]
+# Qwen3.8 checkpoints reuse the Qwen3.5 `model_type`/`architectures` strings, so
+# alias matching alone cannot separate the two families. Declaring the shared
+# architecture pattern routes config-shaped lookups through this family first;
+# `Qwen38Plugin.matches_config` then claims only genuine Qwen3.8 checkpoints and
+# leaves Qwen3.5 to fall through to its own family.
+architecture_patterns = [
+  "qwen3_5forconditionalgeneration",
+]
+debug_runner = "debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "qwen3_8_hybrid_mamba_attention",
+]

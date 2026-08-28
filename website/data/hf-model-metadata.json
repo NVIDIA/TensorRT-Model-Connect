@@ -301,6 +301,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "qwen3_5",
+      "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "RWKV/rwkv-4-169m-pile",
       "revision": "46bdc280eb97b6141d5d51a935e0c4870ecaefcc",
       "revision_source": "resolved",

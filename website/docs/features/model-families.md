@@ -33,7 +33,7 @@ Common native TensorRT groups:
 
 - Decoder-only: Qwen, LLaMA, Mistral, GPT, OPT, Bloom, Gemma, Falcon, Granite, OLMo.
 - MoE: Mixtral, Phi-MoE, Qwen-MoE, GPT-OSS, DeepSeek-V2.
-- Recurrent and hybrid: Mamba, RWKV, Nemotron-H, Qwen3.5 hybrid.
+- Recurrent and hybrid: Mamba, RWKV, Nemotron-H, Qwen3.5 hybrid, Qwen3.8 hybrid.
 - Encoder-only: BERT, RoBERTa, DeBERTa, ModernBERT, DistilBERT, ConvBERT, FNet, XLNet, MPNet, DPR.
 - Seq2seq: T5, Marian, BART, M2M-100.
 - Vision-language: Qwen-VL, InternVL, Lance, LocateAnything, Phi4 multimodal,
