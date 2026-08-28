@@ -592,7 +592,7 @@ def test_native_linear_serializes_checkpoint_bf16_without_fp32_constant() -> Non
 
 
 @pytest.mark.gpu
-def test_native_attention_preserves_checkpoint_bf16_at_iattention_boundary() -> None:
+def test_native_attention_fixed_topology_uses_fp16_and_publishes_bf16() -> None:
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -611,6 +611,59 @@ def test_native_attention_preserves_checkpoint_bf16_at_iattention_boundary() -> 
         rows=rows,
         heads=heads,
         head_dim=head_dim,
+        attention_dtype=trt.float16,
+        name="test.native_fp16_attention",
+    )
+    output.name = "output"
+    network.mark_output(output)
+
+    attention_inputs = [
+        network.get_layer(index)
+        for index in range(network.num_layers)
+        if network.get_layer(index).type == trt.LayerType.ATTENTION_INPUT
+    ]
+    attention_outputs = [
+        network.get_layer(index)
+        for index in range(network.num_layers)
+        if network.get_layer(index).type == trt.LayerType.ATTENTION_OUTPUT
+    ]
+    assert len(attention_inputs) == len(attention_outputs) == 1
+    assert [attention_inputs[0].get_input(index).dtype for index in range(3)] == [
+        trt.float16,
+        trt.float16,
+        trt.float16,
+    ]
+    assert attention_outputs[0].get_input(0).dtype == trt.float16
+    assert attention_outputs[0].get_output(0).dtype == trt.float16
+    assert output.dtype == trt.bfloat16
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+    assert plan
+
+
+@pytest.mark.gpu
+def test_native_attention_dynamic_topology_preserves_checkpoint_bf16() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    rows, heads, head_dim = -1, 2, 64
+    width = heads * head_dim
+    query = network.add_input("query", trt.bfloat16, (rows, width))
+    key = network.add_input("key", trt.bfloat16, (rows, width))
+    value = network.add_input("value", trt.bfloat16, (rows, width))
+
+    output = op.native_attention(
+        network,
+        query,
+        key,
+        value,
+        rows=rows,
+        heads=heads,
+        head_dim=head_dim,
+        attention_dtype=trt.bfloat16,
         name="test.native_bf16_attention",
     )
     output.name = "output"
@@ -635,6 +688,10 @@ def test_native_attention_preserves_checkpoint_bf16_at_iattention_boundary() -> 
     assert attention_outputs[0].get_input(0).dtype == trt.bfloat16
     assert attention_outputs[0].get_output(0).dtype == trt.bfloat16
     assert output.dtype == trt.bfloat16
+    profile = builder.create_optimization_profile()
+    for name in ("query", "key", "value"):
+        profile.set_shape(name, (8, width), (64, width), (128, width))
+    assert config.add_optimization_profile(profile) >= 0
     try:
         plan = builder.build_serialized_network(network, config)
     finally:

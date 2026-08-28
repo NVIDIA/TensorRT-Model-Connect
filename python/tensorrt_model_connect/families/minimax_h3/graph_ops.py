@@ -339,15 +339,34 @@ def partial_rope(
     return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
 
 
-def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
-    """Full-sequence single-device fused TensorRT attention."""
+def native_attention(
+    network,
+    q,
+    k,
+    v,
+    *,
+    rows: int,
+    heads: int,
+    head_dim: int,
+    attention_dtype,
+    name: str,
+):
+    """Full-sequence single-device fused TensorRT attention.
+
+    ``attention_dtype`` is an explicit workflow-owned policy. Fixed-row T2VA
+    uses its qualified FP16 IAttention kernel while dynamic FL2VA/Ref2VA keeps
+    the checkpoint-native BF16 path. In either case, publish the context in the
+    source residual dtype so the precision choice cannot leak beyond this
+    boundary.
+    """
 
     q = rows_to_heads(network, q, rows, heads, head_dim)
     k = rows_to_heads(network, k, rows, heads, head_dim)
     v = rows_to_heads(network, v, rows, heads, head_dim)
-    # Preserve the checkpoint-native BF16 attention path. Narrowing Q/K/V to
-    # FP16 changes the recurrent denoising trajectory even when the surrounding
-    # residual stream remains BF16.
+    source_dtype = q.dtype
+    q = cast(network, q, attention_dtype)
+    k = cast(network, k, attention_dtype)
+    v = cast(network, v, attention_dtype)
     scale = constant(
         network,
         np.full((1, 1, 1, 1), 1.0 / math.sqrt(head_dim), dtype=np.float32),
@@ -361,4 +380,5 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     layer.metadata = f"trtmc.native_op=IAttention;source={name}"
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
-    return heads_to_rows(network, layer.get_output(0), rows, heads * head_dim)
+    context = cast(network, layer.get_output(0), source_dtype)
+    return heads_to_rows(network, context, rows, heads * head_dim)

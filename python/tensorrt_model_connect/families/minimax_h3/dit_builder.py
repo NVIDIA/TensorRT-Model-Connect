@@ -392,6 +392,7 @@ def _attention_block(
             rows=rows,
             heads=profile.num_heads,
             head_dim=profile.head_dim,
+            attention_dtype=trt.bfloat16 if rows < 0 else trt.float16,
             name=f"{prefix}.attn.native_attention",
         )
     else:

@@ -1133,3 +1133,24 @@ def test_fixed_and_dynamic_language_rmsnorm_routes_are_explicit() -> None:
 
     assert norm_calls("text_encoder_builder.py") == ["rms_norm"] * 3
     assert norm_calls("language_conditioner_builder.py") == ["qwen_rms_norm"] * 3
+
+
+def test_fixed_and_dynamic_dit_attention_precision_routes_are_explicit() -> None:
+    tree = ast.parse((FAMILY_ROOT / "dit_builder.py").read_text(), filename="dit_builder.py")
+    attention_block = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_attention_block"
+    )
+    native_calls = [
+        node
+        for node in ast.walk(attention_block)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "op"
+        and node.func.attr == "native_attention"
+    ]
+    assert len(native_calls) == 1
+    keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in native_calls[0].keywords}
+    assert keywords["attention_dtype"] == "trt.bfloat16 if rows < 0 else trt.float16"
