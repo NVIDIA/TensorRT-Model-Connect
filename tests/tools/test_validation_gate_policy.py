@@ -144,6 +144,54 @@ def test_unknown_gate_is_an_invalid_shadow_policy() -> None:
     ]
 
 
+def test_reference_plus_gate_uses_the_reference_metric_for_its_limit() -> None:
+    evaluation = evaluate_shadow_gates(
+        metrics={
+            "candidate_nonocc_epe_px": 0.81,
+            "reference_nonocc_epe_px": 0.30,
+        },
+        configured_gates={"candidate_nonocc_epe_max_reference_plus_px": 0.5},
+        sample_count=15,
+    )
+
+    assert evaluation["status"] == "fail"
+    assert evaluation["checks"] == [
+        {
+            "gate": "candidate_nonocc_epe_max_reference_plus_px",
+            "metric": "candidate_nonocc_epe_px",
+            "reference_metric": "reference_nonocc_epe_px",
+            "operator": "<=",
+            "actual": 0.81,
+            "reference": 0.30,
+            "allowance": 0.5,
+            "required": 0.8,
+            "verdict": "fail",
+            "effective": {"kind": "continuous", "sample_count": 15},
+        }
+    ]
+    assert evaluation["issues"] == []
+
+
+def test_reference_plus_gate_requires_the_reference_metric() -> None:
+    evaluation = evaluate_shadow_gates(
+        metrics={"candidate_nonocc_bp2_fraction": 0.02},
+        configured_gates={
+            "candidate_nonocc_bp2_max_reference_plus_fraction": 0.03
+        },
+        sample_count=15,
+    )
+
+    assert evaluation["status"] == "invalid"
+    assert evaluation["checks"] == []
+    assert evaluation["issues"] == [
+        {
+            "code": "metric_unavailable",
+            "gate": "candidate_nonocc_bp2_max_reference_plus_fraction",
+            "metric": "reference_nonocc_bp2_fraction",
+        }
+    ]
+
+
 def test_missing_metric_is_an_invalid_shadow_policy() -> None:
     evaluation = evaluate_shadow_gates(
         metrics={},

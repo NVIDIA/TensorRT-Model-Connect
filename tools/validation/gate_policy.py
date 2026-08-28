@@ -45,6 +45,16 @@ _DIRECT_GATE_SPECS = {
     "ssim": ("min_ssim", ">="),
     "temporal_consistency": ("min_temporal_consistency", ">="),
 }
+_REFERENCE_PLUS_GATE_SPECS = {
+    "candidate_nonocc_epe_max_reference_plus_px": (
+        "candidate_nonocc_epe_px",
+        "reference_nonocc_epe_px",
+    ),
+    "candidate_nonocc_bp2_max_reference_plus_fraction": (
+        "candidate_nonocc_bp2_fraction",
+        "reference_nonocc_bp2_fraction",
+    ),
+}
 
 _METRIC_KINDS = {"continuous", "proportion", "proportion_drop"}
 
@@ -54,6 +64,8 @@ def _gate_spec(gate: str) -> tuple[str, str] | None:
         return gate.removeprefix("min_"), ">="
     if gate.startswith("max_"):
         return gate.removeprefix("max_"), "<="
+    if gate in _REFERENCE_PLUS_GATE_SPECS:
+        return _REFERENCE_PLUS_GATE_SPECS[gate][0], "<="
     return _DIRECT_GATE_SPECS.get(gate)
 
 
@@ -356,15 +368,22 @@ def describe_shadow_gate_policy(
                 required=required,
                 sample_count=sample_count,
             )
-        gates.append(
-            {
-                "gate": gate_name,
-                "metric": metric_name,
-                "operator": operator,
-                "required": required,
-                "effective": effective,
-            }
-        )
+        gate_description = {
+            "gate": gate_name,
+            "metric": metric_name,
+            "operator": operator,
+            "required": required,
+            "effective": effective,
+        }
+        reference_plus = _REFERENCE_PLUS_GATE_SPECS.get(gate_name)
+        if reference_plus:
+            gate_description.update(
+                {
+                    "reference_metric": reference_plus[1],
+                    "allowance": required,
+                }
+            )
+        gates.append(gate_description)
     return {
         "schema_version": "trtmc.validation-gate-policy-description/v1",
         "policy_mode": policy_mode,
@@ -434,6 +453,17 @@ def evaluate_shadow_gates(
             if exact_check:
                 checks.append(exact_check)
                 continue
+        reference_plus = _REFERENCE_PLUS_GATE_SPECS.get(gate_name)
+        reference_metric = reference_plus[1] if reference_plus else ""
+        if reference_metric and metrics.get(reference_metric) is None:
+            issues.append(
+                {
+                    "code": "metric_unavailable",
+                    "gate": gate_name,
+                    "metric": reference_metric,
+                }
+            )
+            continue
         if metrics.get(actual_metric) is None:
             issues.append(
                 {
@@ -455,6 +485,23 @@ def evaluate_shadow_gates(
                 }
             )
             continue
+        reference = None
+        allowance = None
+        if reference_metric:
+            try:
+                reference = _finite_number(metrics[reference_metric])
+            except (TypeError, ValueError):
+                issues.append(
+                    {
+                        "code": "invalid_metric",
+                        "gate": gate_name,
+                        "metric": reference_metric,
+                        "value": _issue_value(metrics[reference_metric]),
+                    }
+                )
+                continue
+            allowance = required
+            required = reference + allowance
         configured_kind = str(resolved_metric_kinds.get(gate_name, "") or "")
         if configured_kind and configured_kind not in _METRIC_KINDS:
             issues.append(
@@ -471,17 +518,24 @@ def evaluate_shadow_gates(
             required=required,
             sample_count=sample_count,
         )
-        checks.append(
-            {
-                "gate": gate_name,
-                "metric": actual_metric,
-                "operator": operator,
-                "actual": actual,
-                "required": required,
-                "verdict": "pass" if _passed(actual, operator, required) else "fail",
-                "effective": effective,
-            }
-        )
+        check = {
+            "gate": gate_name,
+            "metric": actual_metric,
+            "operator": operator,
+            "actual": actual,
+            "required": required,
+            "verdict": "pass" if _passed(actual, operator, required) else "fail",
+            "effective": effective,
+        }
+        if reference_metric:
+            check.update(
+                {
+                    "reference_metric": reference_metric,
+                    "reference": reference,
+                    "allowance": allowance,
+                }
+            )
+        checks.append(check)
     return {
         "schema_version": "trtmc.validation-gate-evaluation/v1",
         "status": (

@@ -3159,6 +3159,15 @@ def _shadow_gate_metrics(
                 if isinstance(metric, (int, float)) and not isinstance(metric, bool):
                     key = str(name) if statistic == "mean" else f"{statistic}_{name}"
                     metrics[key] = metric
+    task_accuracy = raw_result.get("task_accuracy", {})
+    if isinstance(task_accuracy, Mapping):
+        metrics.update(
+            {
+                str(name): metric
+                for name, metric in task_accuracy.items()
+                if isinstance(metric, (int, float)) and not isinstance(metric, bool)
+            }
+        )
     return metrics
 
 
