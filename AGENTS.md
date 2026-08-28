@@ -17,6 +17,11 @@
   `main`.
 - Wait for GitHub CI before merging.
 - Merge with squash or rebase, matching the repository ruleset.
+- Sign off every commit introduced by a pull request with DCO using
+  `git commit --signoff`; ensure the `Signed-off-by` email matches the commit
+  author.
+- Preserve or re-add valid sign-offs when amending, rebasing, or cherry-picking
+  commits, and never sign off on another author's behalf.
 - Avoid commit messages containing `Claude`; the GitHub ruleset rejects them.
 
 ## GitHub Pages
