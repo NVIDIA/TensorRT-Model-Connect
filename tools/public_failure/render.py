@@ -52,7 +52,7 @@ def _failure_lines(failure: Mapping[str, object], index: int) -> list[str]:
         f"  Stage: {failure['public_stage']}",
         f"  Model: {failure['model']}",
         f"  Backend: {failure['backend']}",
-        f"  GPU: {failure['gpu_type']}",
+        "  GPU: protected-gpu",
         f"  Test: {failure['test_id']}",
     ]
     if "subject" in failure:
@@ -71,10 +71,6 @@ def _failure_lines(failure: Mapping[str, object], index: int) -> list[str]:
         )
     elif failure["disclosure"] == "withheld":
         lines.append("  Evidence: details withheld")
-    excerpt = failure.get("excerpt")
-    if isinstance(excerpt, list):
-        lines.append("  Sanitized failed-step excerpt (tail):")
-        lines.extend(f"    {line}" for line in excerpt)
     return lines
 
 
@@ -86,10 +82,7 @@ def render_failure_report(report: Mapping[str, object]) -> bytes:
         "TRTMC Protected CI failure",
         "==========================",
         "",
-        (
-            "This log contains approved structured fields and, when safe, a "
-            "bounded sanitized excerpt from the failed step."
-        ),
+        "This log contains only approved structured failure fields.",
         "",
         f"Status: {status}",
         f"Repository: {report['repository']}",

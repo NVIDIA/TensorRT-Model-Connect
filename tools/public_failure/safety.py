@@ -47,16 +47,21 @@ SENSITIVE_PATTERNS = (
 )
 
 
+def assert_public_text_safe(document: bytes) -> None:
+    """Scan exact contributor-visible bytes without echoing matched content."""
+    candidate = document.decode("utf-8")
+    for label, pattern in SENSITIVE_PATTERNS:
+        if pattern.search(candidate):
+            raise PublicFailureSafetyError(f"public failure text contains a {label}")
+
+
 def assert_public_payload_safe(report: Mapping[str, object], document: bytes) -> None:
     """Scan canonical JSON and rendered text without echoing a matched secret."""
-    candidates = (
-        serialize_public_failure(report).decode("utf-8"),
-        document.decode("utf-8"),
-    )
-    for candidate in candidates:
-        for label, pattern in SENSITIVE_PATTERNS:
-            if pattern.search(candidate):
-                raise PublicFailureSafetyError(f"public failure payload contains a {label}")
+    serialized = serialize_public_failure(report).decode("utf-8")
+    for label, pattern in SENSITIVE_PATTERNS:
+        if pattern.search(serialized):
+            raise PublicFailureSafetyError(f"public failure payload contains a {label}")
+    assert_public_text_safe(document)
     for failure in report.get("failures", ()):
         if not isinstance(failure, Mapping):
             continue

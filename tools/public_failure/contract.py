@@ -12,7 +12,6 @@ from typing import Collection, Mapping
 
 from .policy import (
     FAILURE_CLASS_BY_INTERNAL_TYPE,
-    POLICY_VERSION,
     PUBLIC_BACKENDS,
     PUBLIC_GPU_TYPES,
     PUBLIC_METRIC_NAMES,
@@ -21,6 +20,8 @@ from .policy import (
     PUBLIC_REASON_CODES,
     PUBLIC_SUBJECTS,
     PUBLIC_STAGE_BY_INTERNAL_STAGE,
+    SUPPORTED_POLICY_VERSIONS,
+    SUPPORTED_SCHEMA_VERSIONS,
 )
 
 
@@ -191,9 +192,12 @@ def validate_public_failure(report: Mapping[str, object]) -> None:
         raise PublicFailureValidationError("report must be an object")
     _reject_unknown_fields(report, REPORT_FIELDS, "report")
     _require_fields(report, REPORT_REQUIRED_FIELDS, "report")
-    if report.get("schema_version") != 1 or isinstance(report.get("schema_version"), bool):
-        raise PublicFailureValidationError("schema_version must be 1")
-    if report.get("policy_version") != POLICY_VERSION:
+    if (
+        isinstance(report.get("schema_version"), bool)
+        or report.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS
+    ):
+        raise PublicFailureValidationError("schema_version is not supported")
+    if report.get("policy_version") not in SUPPORTED_POLICY_VERSIONS:
         raise PublicFailureValidationError("policy_version is not supported")
     if report.get("repository") != "NVIDIA/TensorRT-Model-Connect":
         raise PublicFailureValidationError("repository is not supported")

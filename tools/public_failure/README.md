@@ -16,6 +16,14 @@ Unknown input fields are ignored. Unknown names and unsafe test IDs become
 fixed placeholders. Raw logs, commands, stack traces, environment data, paths,
 URLs, and arbitrary messages are not part of the contract.
 
+For compatibility, the v1 validator can still accept the former bounded
+`excerpt` field while older protected runs drain. The exporter never copies it
+and the renderer never publishes it. A future contract revision will remove
+the accepted field after every v1 producer has migrated.
+
+The v1 validator likewise accepts its former public GPU enum during migration,
+but the exporter and renderer disclose only the fixed `protected-gpu` value.
+
 ## Local preview
 
 Generate the synthetic review sample:

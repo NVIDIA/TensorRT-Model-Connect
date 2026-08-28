@@ -106,7 +106,7 @@ def _internal_ci_snapshot_script() -> str:
     )
     steps = workflow["jobs"]["authorize"]["steps"]
     return next(
-        step["run"] for step in steps if step["name"] == "Capture the exact pull-request head"
+        step["run"] for step in steps if step["name"] == "Capture the exact pull-request snapshot"
     )
 
 
@@ -166,6 +166,7 @@ else:
         "state": "open",
         "base": {
             "ref": "main",
+            "sha": "d" * 40,
             "repo": {"full_name": "NVIDIA/TensorRT-Model-Connect"},
         },
         "head": {"sha": pr_head_sha},
@@ -186,6 +187,7 @@ else:
             "GITHUB_OUTPUT": str(output),
             "GITHUB_REPOSITORY": "NVIDIA/TensorRT-Model-Connect",
             "PATH": f"{fake_bin}:{system_path or environment['PATH']}",
+            "POLICY_SHA": "e" * 40,
             "PR_NUMBER": "715",
         }
     )
@@ -227,7 +229,6 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
     assert sorted(path.name for path in workflow_files) == [
         "community-cpu.yml",
         "internal-ci-bridge.yml",
-        "internal-ci-failure-log.yml",
         "pages.yml",
         "pr-metadata.yml",
     ]
@@ -301,16 +302,10 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         encoding="utf-8"
     )
     workflow_config = yaml.safe_load(workflow)
-    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split("\n  dispatch:", maxsplit=1)[
-        0
-    ]
-    dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1]
-    authorize_permissions = authorize.split("    permissions:", maxsplit=1)[1].split(
-        "\n    outputs:", maxsplit=1
-    )[0]
-    dispatch_permissions = dispatch.split("    permissions:", maxsplit=1)[1].split(
-        "\n\n", maxsplit=1
-    )[0]
+    authorize = workflow.split("\n  authorize:", maxsplit=1)[1].split("\n  announce:", maxsplit=1)[0]
+    announce = workflow.split("\n  announce:", maxsplit=1)[1].split("\n  dispatch:", maxsplit=1)[0]
+    dispatch = workflow.split("\n  dispatch:", maxsplit=1)[1].split("\n  publish:", maxsplit=1)[0]
+    publish = workflow.split("\n  publish:", maxsplit=1)[1]
 
     assert "pull_request_target:" in workflow
     assert "name: TensorRT-Model-Connect Internal CI Bridge" in workflow
@@ -323,12 +318,22 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "github.event_name == 'pull_request_target'" in workflow
     assert "github.ref == 'refs/heads/main'" in workflow
     assert "permissions: {}" in workflow
-    assert authorize_permissions.strip() == (
-        "actions: read\n      contents: read\n      pull-requests: write"
-    )
-    assert dispatch_permissions.strip() == (
-        "contents: read\n      pull-requests: read\n      statuses: write"
-    )
+    assert workflow_config["jobs"]["authorize"]["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "write",
+    }
+    assert workflow_config["jobs"]["announce"]["permissions"] == {
+        "pull-requests": "write",
+        "statuses": "write",
+    }
+    assert workflow_config["jobs"]["dispatch"]["permissions"] == {"contents": "read"}
+    assert workflow_config["jobs"]["publish"]["permissions"] == {
+        "actions": "read",
+        "contents": "read",
+        "pull-requests": "write",
+        "statuses": "write",
+    }
 
     assert "collaborators/$ACTOR/permission" in authorize
     assert "--jq '.role_name'" in authorize
@@ -359,19 +364,13 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert 'if ! [[ "$community_cpu_run" =~ ^[1-9][0-9]*$ ]]; then' in authorize
     assert 'echo "head_sha=$head_sha"' in authorize
     assert "pr_number=$PR_NUMBER" in authorize
-    for legacy in (
-        "base_sha",
-        "BASE_SHA",
-        "merge_sha",
-        "MERGE_SHA",
-        "EVENT_BASE_SHA",
-    ):
-        assert legacy not in workflow
+    assert 'echo "base_sha=$base_sha"' in authorize
+    assert 'echo "policy_sha=$POLICY_SHA"' in authorize
     assert ("/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-internal-ci") in authorize
     assert "gh api --silent --method DELETE" in authorize
     assert "success() && github.event_name == 'pull_request_target'" in authorize
 
-    assert "needs: authorize" in dispatch
+    assert "needs:" in dispatch
     assert workflow_config["jobs"]["dispatch"]["environment"] == {
         "name": "ci-dispatch",
         "deployment": False,
@@ -385,6 +384,8 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     for secret in secret_references:
         assert secret not in authorize
         assert secret in dispatch
+        assert secret not in announce
+        assert secret not in publish
     assert workflow.count("${{ secrets.TRTMC_CI_DISPATCH_TOKEN }}") == 3
 
     assert "actions/create-github-app-token@" not in workflow
@@ -395,8 +396,8 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "self-hosted" not in workflow
     assert "secrets: inherit" not in workflow
     assert "report-guard-failure" not in workflow
-    assert workflow.count("/statuses/") == 1
-    assert "/comments" not in workflow
+    assert workflow.count("/statuses/") == 2
+    assert "/comments" in workflow
     assert (
         "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/workflows/premerge.yml/dispatches"
     ) in workflow
@@ -425,17 +426,22 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "--log" not in dispatch
     assert "validate_public_failure(report)" in dispatch
     assert "EXPECTED_DISPATCH_NONCE" in dispatch
-    assert 'report.get("dispatch_nonce")' in dispatch
+    assert '"dispatch_nonce": os.environ["EXPECTED_DISPATCH_NONCE"]' in dispatch
     assert "assert_public_payload_safe(report, document)" in dispatch
     assert "name: public-failure-log" in dispatch
-    assert "Automated internal CI failed; open the public failure log" in dispatch
-    assert "TRTMC Internal CI / Automated premerge gate" in dispatch
-    assert "actions/runs/$GITHUB_RUN_ID" in dispatch
-    assert dispatch.index("- name: Confirm the exact open pull-request head") < (
-        dispatch.index("- name: Print public-failure.log")
+    assert "Automated internal CI failed; open the public failure log" in publish
+    assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 2
+    assert "always() && needs.authorize.result == 'success'" in workflow
+    assert "cancelled|timed_out|skipped|neutral|action_required" in workflow
+    assert 'payload_size" -gt 65536' in dispatch
+    assert '"base_sha": os.environ["EXPECTED_BASE_SHA"]' in dispatch
+    assert publish.index("- name: Publish the terminal automated status") < publish.index(
+        "- name: Print public-failure.log"
     )
+    assert "github-actions[bot]" in publish
+    assert "<!-- trtmc-internal-ci-result -->" in publish
     assert "trap 'rm -f \"$payload\"' EXIT" in dispatch
-    assert "if: ${{ failure() }}" not in dispatch
+    assert "if: ${{ failure() }}" not in workflow
 
 
 def test_internal_ci_bridge_rejects_a_new_push_after_label(

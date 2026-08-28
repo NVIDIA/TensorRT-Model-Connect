@@ -64,7 +64,7 @@ def test_contributor_guides_match_the_live_ci_flow(path: Path) -> None:
         "git push --set-upstream origin",
         "Community CPU / Required",
         "run-internal-ci",
-        "trtmc/premerge/required",
+        "TRTMC Internal CI / Automated premerge gate",
     ]
 
     positions = [source.index(marker) for marker in ordered_markers]

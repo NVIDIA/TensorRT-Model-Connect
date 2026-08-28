@@ -124,7 +124,7 @@ def test_export_failure_rebuilds_a_public_result_from_approved_fields() -> None:
                 "public_stage": "model-proof",
                 "model": "patchtsmixer",
                 "backend": "native",
-                "gpu_type": "H100",
+                "gpu_type": "protected-gpu",
                 "test_id": "tests/e2e/models/patchtsmixer/test_e2e.py::test_forecast",
                 "failure_class": "accuracy_regression",
                 "reason_code": "metric_threshold_exceeded",
@@ -346,7 +346,7 @@ def test_renderer_produces_deterministic_plain_text() -> None:
     assert "https://" not in lowered
 
 
-def test_renderer_includes_a_bounded_sanitized_failed_step_tail() -> None:
+def test_exporter_and_renderer_drop_a_legacy_failed_step_excerpt() -> None:
     failure = _comparison_failure()
     failure["excerpt"] = [
         "E   AssertionError: output mismatch",
@@ -357,10 +357,25 @@ def test_renderer_includes_a_bounded_sanitized_failed_step_tail() -> None:
     validate_public_failure(report)
     document = render_failure_report(report).decode("utf-8")
 
-    assert report["failures"][0]["disclosure"] == "truncated"
-    assert "Sanitized failed-step excerpt (tail):" in document
-    assert "E   AssertionError: output mismatch" in document
-    assert "FAILED tests/e2e/models/patchtsmixer/test_e2e.py::test_forecast" in document
+    assert report["failures"][0]["disclosure"] == "full"
+    assert "excerpt" not in report["failures"][0]
+    assert "Sanitized failed-step excerpt" not in document
+    assert "AssertionError" not in document
+
+
+def test_renderer_ignores_a_schema_valid_legacy_excerpt() -> None:
+    report = _comparison_report()
+    report["failures"][0]["excerpt"] = ["E   legacy diagnostic text"]
+    report["failures"][0]["disclosure"] = "truncated"
+    report["failures"][0]["gpu_type"] = "H100"
+
+    validate_public_failure(report)
+    document = render_failure_report(report).decode("utf-8")
+
+    assert "legacy diagnostic text" not in document
+    assert "Sanitized failed-step excerpt" not in document
+    assert "GPU: H100" not in document
+    assert "GPU: protected-gpu" in document
 
 
 @pytest.mark.parametrize(
@@ -385,6 +400,8 @@ def test_safety_scan_rejects_a_sensitive_excerpt() -> None:
     failure = _comparison_failure()
     failure["excerpt"] = ["request failed at https://runner.internal/log"]
     report = export_failure({"failures": [failure]}, _context())
+    report["failures"][0]["excerpt"] = failure["excerpt"]
+    report["failures"][0]["disclosure"] = "truncated"
     document = render_failure_report(report)
 
     with pytest.raises(PublicFailureSafetyError, match="URL"):
@@ -395,6 +412,8 @@ def test_safety_scan_rejects_an_unredacted_registry_image_reference() -> None:
     failure = _comparison_failure()
     failure["excerpt"] = ["pull nvcr.io/private/image:build failed"]
     report = export_failure({"failures": [failure]}, _context())
+    report["failures"][0]["excerpt"] = failure["excerpt"]
+    report["failures"][0]["disclosure"] = "truncated"
     document = render_failure_report(report)
 
     with pytest.raises(PublicFailureSafetyError, match="registry image reference"):
@@ -526,22 +545,15 @@ def test_real_internal_ci_failure_classes_render_actionable_text(
         assert line in document
 
 
-def test_public_failure_relay_uses_the_existing_status_context() -> None:
-    workflow = (
-        Path(__file__).parents[2] / ".github/workflows/internal-ci-failure-log.yml"
-    ).read_text(encoding="utf-8")
+def test_public_failure_relay_has_one_authorized_publication_path() -> None:
+    workflows = Path(__file__).parents[2] / ".github/workflows"
+    assert not (workflows / "internal-ci-failure-log.yml").exists()
+    workflow = (workflows / "internal-ci-bridge.yml").read_text(encoding="utf-8")
 
-    assert "repository_dispatch:" in workflow
-    assert "types: [trtmc-public-failure-v1]" in workflow
-    assert "Publish public-failure.log" in workflow
-    assert "validate_public_failure(report)" in workflow
-    assert "assert_public_payload_safe(report, document)" in workflow
-    assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 1
-    assert "actions/runs/$GITHUB_RUN_ID" in workflow
-    assert "pulls/$PR_NUMBER" in workflow
-    assert workflow.index("- name: Confirm the exact open pull-request head") < workflow.index(
-        "- name: Print public-failure.log"
-    )
+    assert "repository_dispatch:" not in workflow
+    assert "Publish automated result" in workflow
+    assert "always() && needs.authorize.result == 'success'" in workflow
+    assert "<!-- trtmc-internal-ci-result -->" in workflow
 
 
 def test_internal_ci_bridge_publishes_the_private_sanitized_artifact() -> None:
@@ -556,13 +568,13 @@ def test_internal_ci_bridge_publishes_the_private_sanitized_artifact() -> None:
     assert (
         'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"' in workflow
     )
-    assert 'report.get("dispatch_nonce") != os.environ["EXPECTED_DISPATCH_NONCE"]' in workflow
+    assert '"dispatch_nonce": os.environ["EXPECTED_DISPATCH_NONCE"]' in workflow
     assert "validate_public_failure(report)" in workflow
     assert "assert_public_payload_safe(report, document)" in workflow
     assert "name: public-failure-log" in workflow
-    assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 1
+    assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 2
     assert "actions/runs/$GITHUB_RUN_ID" in workflow
-    assert workflow.index("- name: Confirm the exact open pull-request head") < workflow.index(
+    assert workflow.index("- name: Publish the terminal automated status") < workflow.index(
         "- name: Print public-failure.log"
     )
 
@@ -611,7 +623,7 @@ def test_build_failure_artifacts_runs_the_complete_local_pipeline() -> None:
 
     assert json.loads(artifacts.json_bytes) == artifacts.report
     assert b"TRTMC Protected CI failure" in artifacts.log_bytes
-    assert b"approved structured fields" in artifacts.log_bytes
+    assert b"approved structured failure fields" in artifacts.log_bytes
 
 
 def test_local_cli_writes_preview_files_without_publishing(tmp_path: Path) -> None:

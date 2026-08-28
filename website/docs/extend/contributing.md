@@ -186,7 +186,7 @@ premerge validation for that exact revision. The public result is contributor
 feedback, not an authorization token; `run-internal-ci` remains the
 protected-resource security boundary.
 
-Wait for the `trtmc/premerge/required` status on the same head SHA to complete
+Wait for the `TRTMC Internal CI / Automated premerge gate` status on the same head SHA to complete
 successfully. If the head changes intentionally, finish the update and local
 validation before mentioning `@yifeif-nv` once to request a new run. Only a
 maintainer with repository `maintain` or `admin` permission can authorize the

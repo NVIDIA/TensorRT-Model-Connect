@@ -93,7 +93,7 @@ When reporting validation:
   evidence for the current diff.
 - Distinguish a skipped check from a passing check and a dry run from execution.
 - In this repository, say premerge passed only when the current head has
-  `trtmc/premerge/required=PASS`. A successful Internal CI Bridge dispatch or
+  `TRTMC Internal CI / Automated premerge gate=PASS`. A successful Internal CI Bridge dispatch or
   Source workflow is not the premerge result.
 - Do not quote or link private Internal CI logs, artifacts, runner details,
   package coordinates, or internal URLs in Source PR text. Use the sanitized

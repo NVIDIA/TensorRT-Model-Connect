@@ -35,7 +35,7 @@ flowchart LR
 Each model box is a separate isolated job. Source contains the test
 implementation, but raw logs, artifacts, package coordinates, runner details,
 and the complete report remain in Internal CI. Source receives only
-`trtmc/premerge/required` on the tested PR head.
+`TRTMC Internal CI / Automated premerge gate` on the tested PR head.
 
 ## Try the interface
 
@@ -137,7 +137,8 @@ starts a clean, hardened, GPU-free container with a read-only source mount.
 actual unit work to `UnitTestRunner` and `CoverageRunner`.
 
 The unit gate admits the model matrix. Internal finalization includes Source
-Quality before publishing the sanitized `trtmc/premerge/required` status.
+Quality before publishing the automated
+`TRTMC Internal CI / Automated premerge gate` status.
 
 ### 4. Prove each affected model in isolation
 

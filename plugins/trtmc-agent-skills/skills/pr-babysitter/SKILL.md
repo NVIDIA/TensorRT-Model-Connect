@@ -51,7 +51,7 @@ PR_HEAD_SHA=$(jq -er '.head.sha' <<<"$pull")
 gh api \
   "repos/$REPOSITORY/commits/$PR_HEAD_SHA/status" \
   --jq '[.statuses[] |
-    select(.context == "trtmc/premerge/required")][0]'
+    select(.context == "TRTMC Internal CI / Automated premerge gate")][0]'
 
 gh pr edit "$PR_NUMBER" \
   --repo "$REPOSITORY" \
@@ -76,7 +76,7 @@ is the current `main` revision and whose second parent is the authorized PR
 head. It publishes the sanitized result on that exact head SHA.
 
 The Source-visible premerge result is only the sanitized
-`trtmc/premerge/required` status on that exact head: `PENDING`, then `PASS` or
+`TRTMC Internal CI / Automated premerge gate` status on that exact head: `PENDING`, then `PASS` or
 `FAIL`, with a target URL on the pull request's checks page. A successful
 bridge dispatch is not a successful premerge result.
 
@@ -177,7 +177,7 @@ Before merging, verify all of the following against the latest PR head:
   or failing as a merge blocker.
 - The same completed successful check set belongs to the current `headRefOid`.
   If a new commit lands after checks pass, restart the wait.
-- The current head has a successful `trtmc/premerge/required` commit status.
+- The current head has a successful `TRTMC Internal CI / Automated premerge gate` commit status.
   A green bridge run, a result on an older head, or a ruleset without required
   status checks does not satisfy this gate.
 
@@ -255,7 +255,7 @@ Inspect failed retained-Source logs:
 gh run view <run-id> --repo NVIDIA/TensorRT-Model-Connect --log-failed
 ```
 
-For a failed `trtmc/premerge/required` status, inspect Internal CI only when
+For a failed `TRTMC Internal CI / Automated premerge gate` status, inspect Internal CI only when
 authorized. If private evidence is unavailable, report the exact head,
 sanitized status, and a human blocker; do not guess or disclose private URLs.
 

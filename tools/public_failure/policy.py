@@ -9,6 +9,8 @@ from typing import Final
 
 
 POLICY_VERSION: Final = "2026-08-27"
+SUPPORTED_POLICY_VERSIONS: Final = frozenset({POLICY_VERSION})
+SUPPORTED_SCHEMA_VERSIONS: Final = frozenset({1})
 
 FAILURE_CLASS_BY_INTERNAL_TYPE: Final = {
     "compare_fail": "accuracy_regression",
@@ -123,8 +125,8 @@ def public_backend(value: object) -> str:
 
 
 def public_gpu_type(value: object) -> str:
-    candidate = str(value)
-    return candidate if candidate in PUBLIC_GPU_TYPES else "protected-gpu"
+    del value
+    return "protected-gpu"
 
 
 def public_reason_code(value: object) -> str:
