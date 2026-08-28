@@ -775,7 +775,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     )
     for architecture, source_dockerfile in source_dockerfiles.items():
         assert "FROM ${TENSORRT_IMAGE}" in source_dockerfile
-        assert "COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt" in source_dockerfile
+        assert "COPY community-ci.txt /tmp/trtmc-community-ci.txt" in source_dockerfile
         assert "pip install --requirement /tmp/trtmc-community-ci.txt" in source_dockerfile
         assert "pre-commit>=" not in source_dockerfile
         assert "https://download.pytorch.org/whl/cpu" in source_dockerfile
