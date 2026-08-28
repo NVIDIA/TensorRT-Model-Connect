@@ -1116,3 +1116,20 @@ def test_sol_lossless_optimizations_are_structural() -> None:
     assert "build_dit_finish_engine" in dit
     assert "cache_metric" in dit
     assert "FirstBlockCacheConfig" not in "\n".join((adaln, dit, ops))
+
+
+def test_fixed_and_dynamic_language_rmsnorm_routes_are_explicit() -> None:
+    def norm_calls(filename: str) -> list[str]:
+        tree = ast.parse((FAMILY_ROOT / filename).read_text(), filename=filename)
+        return [
+            node.func.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "op"
+            and node.func.attr in {"rms_norm", "qwen_rms_norm"}
+        ]
+
+    assert norm_calls("text_encoder_builder.py") == ["rms_norm"] * 3
+    assert norm_calls("language_conditioner_builder.py") == ["qwen_rms_norm"] * 3
