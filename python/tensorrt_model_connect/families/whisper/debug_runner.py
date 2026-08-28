@@ -317,17 +317,22 @@ class WhisperTrtRunner:
     def __del__(self):
         if cudart is None:
             return
-        if not hasattr(self, "_d_token_id"):
-            return
-        bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits,
-                self._d_mel, self._d_enc_out]
-        bufs.extend(self._d_cache_k)
-        bufs.extend(self._d_cache_v)
-        bufs.extend(self._d_present_k)
-        bufs.extend(self._d_present_v)
-        bufs.extend(self._d_cross_k)
-        bufs.extend(self._d_cross_v)
-        for d_ptr in bufs:
-            cudart.cudaFree(d_ptr)
-        if hasattr(self, "stream"):
-            cudart.cudaStreamDestroy(self.stream)
+        scalar_buffers = (
+            "_d_token_id", "_d_position_id", "_d_mask", "_d_logits", "_d_mel", "_d_enc_out",
+        )
+        list_buffers = (
+            "_d_cache_k", "_d_cache_v", "_d_present_k", "_d_present_v", "_d_cross_k", "_d_cross_v",
+        )
+        for name in scalar_buffers:
+            d_ptr = getattr(self, name, None)
+            if d_ptr is not None:
+                cudart.cudaFree(d_ptr)
+                setattr(self, name, None)
+        for name in list_buffers:
+            for d_ptr in getattr(self, name, ()):
+                cudart.cudaFree(d_ptr)
+            setattr(self, name, [])
+        stream = getattr(self, "stream", None)
+        if stream is not None:
+            cudart.cudaStreamDestroy(stream)
+            self.stream = None

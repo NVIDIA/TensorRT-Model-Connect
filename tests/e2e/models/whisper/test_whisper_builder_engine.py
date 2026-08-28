@@ -34,6 +34,8 @@ Postconditions: All encoder (enc_layer.*), decoder (layer.*), and cross-attentio
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -118,9 +120,8 @@ def _make_whisper_tp_weights(
 
 
 def _whisper_tp_builder_module():
-    return pytest.importorskip(
-        "tensorrt_model_connect.families.whisper.decoder_tp_builder",
-        reason="TensorRT is required for Whisper TP builder tests",
+    return importlib.import_module(
+        "tensorrt_model_connect.families.whisper.decoder_tp_builder"
     )
 
 
