@@ -11,6 +11,9 @@ Postconditions: Layer type aliases are normalized correctly and branch-specific 
 
 from __future__ import annotations
 
+import json
+from unittest.mock import patch
+
 import numpy as np
 import pytest
 
@@ -397,3 +400,135 @@ def test_bundle_overrides_publish_flat_decoder_dims():
     # eos_token_id stays with the builder, which sources the full stop-id list
     # from generation_config.json rather than the single text_config value.
     assert "eos_token_id" not in overrides
+
+
+def test_mock_bundle_serializes_decoder_and_hybrid_config(tmp_path):
+    """Exercise Qwen3.8's nested producer contract with mocked engines."""
+    from tensorrt_model_connect.engine_builder import build_bundle
+
+    layer_types = [
+        "full_attention" if (index + 1) % 4 == 0 else "linear_attention"
+        for index in range(64)
+    ]
+    # Qwen/Qwen3.8-27B at 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.
+    source_config = {
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "image_token_id": 248056,
+        "model_type": "qwen3_5",
+        "text_config": {
+            "bos_token_id": 248044,
+            "eos_token_id": 248044,
+            "head_dim": 256,
+            "hidden_size": 5120,
+            "intermediate_size": 17408,
+            "layer_types": layer_types,
+            "linear_conv_kernel_dim": 4,
+            "linear_key_head_dim": 128,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 48,
+            "linear_value_head_dim": 128,
+            "max_position_embeddings": 262144,
+            "model_type": "qwen3_5_text",
+            "num_attention_heads": 24,
+            "num_hidden_layers": 64,
+            "num_key_value_heads": 4,
+            "output_gate_type": "swish",
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": {
+                "partial_rotary_factor": 0.25,
+                "rope_theta": 10000000,
+            },
+            "vocab_size": 248320,
+        },
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps(source_config),
+        encoding="utf-8",
+    )
+    # Qwen3.8 terminates on 248046, which appears only here; text_config carries
+    # the single id 248044.
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps({"bos_token_id": 248044, "eos_token_id": [248046, 248044]}),
+        encoding="utf-8",
+    )
+
+    class MockQwen38Plugin:
+        name = "qwen3_8"
+        runtime_strategy = "qwen3_8_hybrid_mamba_attention"
+        requires_tokenizer = False
+
+        @staticmethod
+        def load_weights(_model_dir, _config):
+            return {}
+
+        @staticmethod
+        def build_engine(_config, _weights, _max_cache_length, **_kwargs):
+            return b"MOCK_HYBRID_PLAN"
+
+        @staticmethod
+        def get_bundle_config_overrides(config):
+            return qwen3_8.plugin.get_bundle_config_overrides(config)
+
+    with (
+        patch(
+            "tensorrt_model_connect.engine_builder.find_plugin",
+            return_value=MockQwen38Plugin(),
+        ),
+        patch(
+            "tensorrt_model_connect.engine_builder._get_trt_version",
+            return_value="11.1.0",
+        ),
+        patch(
+            "tensorrt_model_connect.engine_builder._get_gpu_name",
+            return_value="CPU unit mock",
+        ),
+        patch("tensorrt_model_connect.engine_builder.write_bundle") as write_bundle,
+    ):
+        build_bundle(
+            str(tmp_path),
+            str(tmp_path / "qwen38-27b.bundle"),
+            max_cache_length=256,
+        )
+
+    sections = {
+        section.name: section.data for section in write_bundle.call_args.args[2]
+    }
+    runtime_config = json.loads(sections["config.json"])
+
+    # text_config survives untouched for the Python side.
+    assert runtime_config["text_config"] == source_config["text_config"]
+
+    # The flat decoder contract the strict C++ parser reads. None of these keys
+    # exist at the top level of the source config.
+    decoder_contract = {
+        "vocab_size": 248320,
+        "hidden_size": 5120,
+        "num_hidden_layers": 64,
+        "num_attention_heads": 24,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+        "bos_token_id": 248044,
+    }
+    assert all(key not in source_config for key in decoder_contract)
+    assert {key: runtime_config[key] for key in decoder_contract} == decoder_contract
+    # compute_kv_dim() reads these two; zero here means a zero-sized KV cache.
+    assert runtime_config["num_key_value_heads"] * runtime_config["head_dim"] == 1024
+
+    # The divergence from qwen3_5: eos_token_id must NOT be republished as an
+    # override. Overrides are merged last, so doing so would collapse the
+    # generation_config list to the single text_config id and leave 248046
+    # unmatched, running generation to max_new_tokens.
+    assert runtime_config["eos_token_id"] == [248046, 248044]
+
+    assert runtime_config["layer_types"] == [
+        "attention" if layer_type == "full_attention" else "deltanet"
+        for layer_type in layer_types
+    ]
+    assert runtime_config["num_mamba_layers"] == 48
+    assert runtime_config["num_attention_layers"] == 16
+    assert runtime_config["d_inner"] == 6144
+    assert runtime_config["mamba_d_state"] == 128
+    assert runtime_config["mamba_d_conv"] == 4
+    assert runtime_config["mamba_nheads"] == 48
+    assert runtime_config["mamba_head_dim"] == 128
+    assert runtime_config["conv_dim"] == 10240

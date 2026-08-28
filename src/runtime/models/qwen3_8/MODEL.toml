@@ -5,10 +5,11 @@ id = "qwen3_8"
 runtime_library = "libtrtmc_model_qwen3_8.so"
 runtime_plugins = ["plugin.cpp|register_qwen3_8_plugin"]
 runtime_strategies = ["qwen3_8_hybrid_mamba_attention"]
+runtime_tests = [
+  "test_qwen3_8_runtime_config_contract|test_qwen3_8_runtime_config_contract.cpp|_|_|_",
+  "test_qwen3_8_recurrent_output_initializers|test_qwen3_8_recurrent_output_initializers.cpp|_|_|_",
+  "test_qwen3_8_recurrent_pipeline|test_qwen3_8_recurrent_pipeline.cpp|trtmc_model_qwen3_8,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
+]
+
 [validation_profiles]
 decoder_debug = ["qwen3_8_hybrid_mamba_attention"]
-
-runtime_tests = [
-  "test_qwen3_8_recurrent_output_initializers|test_qwen3_8_recurrent_output_initializers.cpp|_|_|_",
-  "test_qwen3_8_recurrent_pipeline|test_qwen3_8_recurrent_pipeline.cpp|trtmc_model_qwen3_8,trtmc_backend_trt|_|REQUIRES_TRT",
-]
