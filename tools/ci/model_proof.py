@@ -429,13 +429,14 @@ class ModelProofRunner:
         """Materialize projected profiles online for one later offline proof."""
         assert self.artifacts_dir is not None
         packages = self._projected_profile_packages(projection)
-        if not packages:
+        if packages is None:
             return
-        self._download_python_profile_packages(
-            package_dir,
-            image,
-            packages,
-        )
+        if packages:
+            self._download_python_profile_packages(
+                package_dir,
+                image,
+                packages,
+            )
         name = self._base_container_name() + "-python-profiles"
         self.container_name = name
         self.context.run(["docker", "rm", "-f", name], check=False, capture_output=True)
@@ -516,12 +517,12 @@ class ModelProofRunner:
                 f"Python profile preparation failed for {self.request.model} (exit {result})"
             )
 
-    def _projected_profile_packages(self, projection: Path) -> tuple[str, ...]:
-        """Return safe exact pins needed by the projected family's offline profiles."""
+    def _projected_profile_packages(self, projection: Path) -> tuple[str, ...] | None:
+        """Return exact pins, or None when the projection has no prebuilt profile."""
         package_root = projection / "python/tensorrt_model_connect"
         manifests = sorted((package_root / "families").glob("*/MODEL.toml"))
         if not manifests:
-            return ()
+            return None
         family = tomllib.loads(manifests[0].read_text(encoding="utf-8"))
         family_requirements: list[str] = []
         for raw_spec in family.get("python_profile_specs", []):
@@ -540,7 +541,7 @@ class ModelProofRunner:
             if prebuild:
                 family_requirements.append(parts[1])
         if not family_requirements:
-            return ()
+            return None
 
         requirements = list(family_requirements)
         registry_path = package_root / "python_profiles.toml"

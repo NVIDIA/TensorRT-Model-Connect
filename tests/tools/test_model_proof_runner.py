@@ -1929,6 +1929,67 @@ def test_profile_owning_family_runs_download_prepare_then_offline_proof(
     assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in runs[proof_index]
 
 
+def test_empty_profile_lock_still_runs_offline_preparation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection = tmp_path / "projection"
+    family = projection / "python/tensorrt_model_connect/families/demo"
+    family.mkdir(parents=True)
+    (family / "MODEL.toml").write_text(
+        'id = "demo"\n'
+        'python_profile_specs = ['
+        '"demo|families/demo/requirements.lock.txt|families/demo/verify.py|true"'
+        "]\n",
+        encoding="utf-8",
+    )
+    (family / "requirements.lock.txt").write_text(
+        "# no additional packages\n",
+        encoding="utf-8",
+    )
+    (family / "verify.py").write_text("assert True\n", encoding="utf-8")
+    package_root = projection / "python/tensorrt_model_connect"
+    (package_root / "python_profiles.toml").write_text(
+        'version = 1\n[profiles.base]\nkind = "passthrough"\n',
+        encoding="utf-8",
+    )
+    profiles = tmp_path / "python-profiles"
+    profiles.mkdir()
+    packages = tmp_path / "python-profile-packages"
+    packages.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    runner = ModelProofRunner(
+        CiContext(REPO_ROOT, {}),
+        ModelProofRequest(model="demo"),
+    )
+    runner.artifacts_dir = artifacts
+    monkeypatch.setattr(
+        runner.context,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    commands: list[list[object]] = []
+    monkeypatch.setattr(
+        runner,
+        "_run_logged",
+        lambda command, _log, **_kwargs: commands.append(command) or 0,
+    )
+
+    runner._prepare_python_profiles(
+        projection,
+        profiles,
+        packages,
+        "qualified-base@sha256:test",
+    )
+
+    assert len(commands) == 1
+    preparation = " ".join(map(str, commands[0]))
+    assert "--network none" in preparation
+    assert "/src/.github/scripts/build-python-profiles.py" in preparation
+    assert "/opt/trtmc-profile-downloader.py" not in preparation
+
+
 def test_offline_proof_consumes_prepared_profiles_read_only() -> None:
     source = RUNNER.read_text(encoding="utf-8")
     proof = source.split("def _run_proof_container(", maxsplit=1)[1].split(
