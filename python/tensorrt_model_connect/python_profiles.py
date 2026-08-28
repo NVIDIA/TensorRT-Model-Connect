@@ -45,6 +45,25 @@ _EXACT_VERSION_RE = re.compile(
     re.IGNORECASE,
 )
 _PROFILE_NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
+_BUILD_ENVIRONMENT_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+_FORBIDDEN_BUILD_ENVIRONMENT_NAMES = {
+    "HOME",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+}
+_FORBIDDEN_BUILD_ENVIRONMENT_PREFIXES = (
+    "AWS_",
+    "AZURE_",
+    "GIT_",
+    "GOOGLE_",
+    "NVIDIA_",
+    "PIP_",
+    "SSH_",
+    "TRTMC_",
+)
 _REGISTRY_KEYS = {
     "version",
     "profiles",
@@ -55,6 +74,7 @@ _PASSTHROUGH_PROFILE_KEYS = {"kind"}
 _VENV_PROFILE_KEYS = {
     "kind",
     "prebuild",
+    "build_environment",
     "requirements",
     "system_site_packages",
     "verification_script",
@@ -153,6 +173,7 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
         with manifest.open("rb") as stream:
             raw = tomllib.load(stream)
         family_id = raw.get("id") or raw.get("plugin") or manifest.parent.name
+        family_profile_names: set[str] = set()
         raw_specs = raw.get("python_profile_specs", [])
         if not isinstance(raw_specs, list):
             raise ValueError(
@@ -192,6 +213,49 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
                 "system_site_packages": system_site_packages,
                 "prebuild": prebuild,
             }
+            family_profile_names.add(name)
+        raw_build_environment = raw.get("python_profile_build_environment", [])
+        if not isinstance(raw_build_environment, list):
+            raise ValueError(
+                f"python_profile_build_environment for family {family_id} must be a list"
+            )
+        for entry in raw_build_environment:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"python_profile_build_environment for family {family_id} "
+                    "must contain strings"
+                )
+            parts = [part.strip() for part in entry.split("|", 2)]
+            if len(parts) != 3 or any(not part for part in parts):
+                raise ValueError(
+                    f"Invalid python_profile_build_environment entry {entry!r} "
+                    f"for family {family_id}; expected 'profile|NAME|value'"
+                )
+            profile, name, value = parts
+            if profile not in family_profile_names:
+                raise ValueError(
+                    f"python_profile_build_environment selects undeclared profile "
+                    f"{profile!r} for family {family_id}"
+                )
+            if (
+                _BUILD_ENVIRONMENT_NAME_RE.fullmatch(name) is None
+                or name in _FORBIDDEN_BUILD_ENVIRONMENT_NAMES
+                or name.startswith(_FORBIDDEN_BUILD_ENVIRONMENT_PREFIXES)
+            ):
+                raise ValueError(
+                    f"Python profile {profile!r} has unsafe build environment name {name!r}"
+                )
+            if len(value) > 1024 or "\x00" in value or "\n" in value or "\r" in value:
+                raise ValueError(
+                    f"Python profile {profile!r} has an unsafe build environment value"
+                )
+            build_environment = dict(profiles[profile].get("build_environment", {}))
+            if name in build_environment:
+                raise ValueError(
+                    f"Python profile {profile!r} declares build environment {name!r} twice"
+                )
+            build_environment[name] = value
+            profiles[profile]["build_environment"] = build_environment
     return profiles
 
 
@@ -260,6 +324,23 @@ def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
                 raise ValueError(
                     f"Execution profile {name!r} field {field} must be a bool"
                 )
+        build_environment = raw_spec.get("build_environment", {})
+        if not isinstance(build_environment, Mapping) or any(
+            not isinstance(name, str)
+            or _BUILD_ENVIRONMENT_NAME_RE.fullmatch(name) is None
+            or name in _FORBIDDEN_BUILD_ENVIRONMENT_NAMES
+            or name.startswith(_FORBIDDEN_BUILD_ENVIRONMENT_PREFIXES)
+            or not isinstance(value, str)
+            or not value
+            or len(value) > 1024
+            or "\x00" in value
+            or "\n" in value
+            or "\r" in value
+            for name, value in build_environment.items()
+        ):
+            raise ValueError(
+                f"Execution profile {name!r} build_environment must contain safe strings"
+            )
         requirements = raw_spec.get("requirements")
         if type(requirements) is not str:
             raise ValueError(
@@ -334,7 +415,7 @@ def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
 def prebuilt_python_profile_names(
     registry: Mapping[str, Any] | None = None,
 ) -> tuple[str, ...]:
-    """Return non-default profiles that belong in the shared CI image."""
+    """Return non-default profiles prepared before network-disabled execution."""
     selected = (
         registry if registry is not None else load_python_profile_registry()
     )
@@ -669,6 +750,10 @@ def _materialize_venv_profile(
             )
         verification_script = _read_package_text(verification_script_file).strip()
     system_site_packages = bool(spec.get("system_site_packages", True))
+    build_environment = {
+        str(name): str(value)
+        for name, value in dict(spec.get("build_environment", {})).items()
+    }
 
     hash_input = "\n".join(
         [
@@ -678,6 +763,7 @@ def _materialize_venv_profile(
             requirements_text,
             verification_script,
             f"system_site_packages={int(system_site_packages)}",
+            json.dumps(build_environment, separators=(",", ":"), sort_keys=True),
         ]
     ).encode("utf-8")
     profile_hash = hashlib.sha256(hash_input).hexdigest()[:12]
@@ -688,15 +774,14 @@ def _materialize_venv_profile(
     ready_path = env_dir / ".ready"
     lock_path = root / f"{profile_name}-{profile_hash}.lock"
 
-    # Model-proof containers mount the source read-only and disable networking.
-    # A matching image-baked profile therefore needs no writable lock or cache.
+    # Network-disabled proofs mount a separately prepared profile root read-only.
     if ready_path.is_file() and python_path.is_file():
         return str(python_path.absolute())
     if _prebuilt_only():
         raise RuntimeError(
             f"Execution profile {profile_name!r} is not prebuilt for this source "
-            f"at {env_dir}. The CI image is stale or incomplete; rebuild it from "
-            "the current Dockerfile and declarative profile locks."
+            f"at {env_dir}. Prepare the declared profiles before entering the "
+            "network-disabled execution lane."
         )
 
     root.mkdir(parents=True, exist_ok=True)
@@ -726,6 +811,8 @@ def _materialize_venv_profile(
                 _write_base_site_packages_overlay(base_python, str(tmp_python))
 
             if requirements_text.strip():
+                install_environment = _profile_install_environment()
+                install_environment.update(build_environment)
                 _run_profile_command(
                     [
                         str(tmp_python),
@@ -741,7 +828,7 @@ def _materialize_venv_profile(
                     ],
                     description=f"install Python profile {profile_name!r}",
                     timeout=_PROFILE_INSTALL_TIMEOUT_SECONDS,
-                    env=_profile_install_environment(),
+                    env=install_environment,
                 )
 
             _verify_exact_requirements(

@@ -140,6 +140,11 @@ def _make_repo(
         _write(repo, f"tools/ci/{source.name}", f"# projected CI module: {source.name}\n")
     _write(
         repo,
+        ".github/scripts/build-python-profiles.py",
+        "#!/usr/bin/env python3\n",
+    )
+    _write(
+        repo,
         ".github/scripts/write-model-proof-fallback-report.py",
         "#!/usr/bin/env python3\n",
     )
@@ -1228,6 +1233,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert fallback.is_file()
     assert not os.access(fallback, os.X_OK)
     for report_path in (
+        ".github/scripts/build-python-profiles.py",
         "scripts/generate_e2e_report.py",
         "scripts/generate_e2e_report_assets/e2e_report.css",
         "scripts/generate_e2e_report_assets/e2e_report.js",
@@ -1304,6 +1310,8 @@ def test_projection_includes_only_the_selected_family_adapter_subtrees(
 ) -> None:
     repo, _ = _make_repo(tmp_path)
     selected_paths = (
+        "python/tensorrt_model_connect/families/model_b/python_profile_requirements/reference.lock.txt",
+        "python/tensorrt_model_connect/families/model_b/python_profile_verify.py",
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/dependency.lock",
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/profiles/example.toml",
@@ -1315,6 +1323,18 @@ def test_projection_includes_only_the_selected_family_adapter_subtrees(
         _write(repo, path, "# selected model adapter\n")
     for path in sibling_paths:
         _write(repo, path, "# sibling model adapter\n")
+    for model in ("model_a", "model_b"):
+        manifest = repo / f"python/tensorrt_model_connect/families/{model}/MODEL.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + "python_profile_specs = [\n"
+            + (
+                f'  "{model}_reference|families/{model}/python_profile_requirements/'
+                f'reference.lock.txt|families/{model}/python_profile_verify.py|true",\n'
+            )
+            + "]\n",
+            encoding="utf-8",
+        )
     generic_host = "src/runtime/providers/optimized_runtime_host.cpp"
     _write(repo, generic_host, "// shared provider host\n")
     revision = _commit(repo, "add model-owned adapters")

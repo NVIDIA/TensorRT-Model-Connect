@@ -49,6 +49,7 @@ MODEL_ROOT_PLATFORM_FILES = frozenset(
 PLATFORM_PROJECTION_EXACT = frozenset(
     {
         ".clang-format",
+        ".github/scripts/build-python-profiles.py",
         ".github/scripts/write-model-proof-fallback-report.py",
         "ASSET_LICENSES.md",
         "CMakeLists.txt",

@@ -158,12 +158,20 @@ The host half, `ModelProofRunner`, performs trusted setup:
    platform files, but no peer model source.
 3. Select the model-owned runtime, Python tests, E2E cases, resource class, and
    optional reference checkout.
-4. Prepare only the selected Hugging Face repositories and reflink them into a
+4. In a restricted networked `runc` container, use the downloader embedded in
+   the reviewed base image to fetch only the selected family's exact-pinned
+   package artifacts. This step executes no contributor builder, verifier, or
+   package source code.
+5. In a second `--network none`, no-GPU `runc` container, install those local
+   artifacts, execute the projected profile verifier, and publish the
+   proof-private virtual environments.
+6. Prepare only the selected Hugging Face repositories and reflink them into a
    proof-private cache view. Premerge downloads a missing snapshot into the
    current host cache; nightly model proofs reuse the cache prepared by the
    separate Nightly cache-warm job.
-5. Acquire either shared GPU slots or a whole GPU through `GpuLease`.
-6. Start a read-only, network-disabled proof container.
+7. Acquire either shared GPU slots or a whole GPU through `GpuLease`.
+8. Start a read-only, network-disabled proof container with the prepared
+   profile directory mounted read-only.
 
 The container half, `ModelProofInnerPipeline`, then runs linearly:
 
@@ -334,18 +342,15 @@ the producing class remains the source of truth for optional evidence fields.
 
 ### `docker_image.py`
 
-- **Functionality / units:** `DockerImageManager` fingerprints image inputs,
+- **Functionality / units:** `DockerImageManager` fingerprints stable base-image inputs,
   serializes concurrent builds with `WorkflowImageLock`, verifies dependency
-  versions, exposes Runtime Contract v2, and reuses only a matching local image.
+  versions, exposes Runtime Contract v3, and reuses only a matching local image.
 - **Inputs:** The common fingerprint includes the Dockerfile, `.dockerignore`,
-  profile builder and registry implementations, the normalized declarations of
-  every prebuilt Python profile, and their referenced lock and verification
-  files. The overlay fingerprint adds the exact TensorRT Python and APT
-  versions. Family metadata remains family-owned; comments, ownership fields,
-  lazy profiles, the general family loader, and package `__init__.py` metadata
-  are deliberately excluded because they do not change the baked environment.
-  The profile builder loads its narrow API through a synthetic package, so
-  package initialization is also absent from the actual image-build path.
+  and the model-agnostic PyPI artifact downloader copied into the image. The
+  overlay fingerprint adds the exact TensorRT Python and APT versions.
+  Family profile declarations, locks, verifiers, and preparation code are
+  deliberately excluded because their environments are not baked into the
+  base image.
   Contract-producer and CLI control-plane files are reviewed separately and do
   not perturb the semantic runtime fingerprint when their output is unchanged.
 - **Outputs:** Returns an immutable Docker ID shaped as
@@ -354,12 +359,27 @@ the producing class remains the source of truth for optional evidence fields.
   `image_ref=sha256:...` through `GITHUB_OUTPUT`, and maintains a local
   verification stamp. `python3 -m tools.ci image contract` prints the complete
   canonical contract JSON, including the full common and overlay fingerprints
-  and `environment_contract_version=2`; callers may select an exact overlay
+  and `environment_contract_version=3`; callers may select an exact overlay
   with `--tensorrt-version` and `--tensorrt-apt-version`.
 - **Boundary:** It proves image identity and contents. It neither starts a
   container nor chooses a CI stage. Local image verification is serialized by
   a six-hour default lock budget, overridable with
   `TRTMC_CI_IMAGE_LOCK_TIMEOUT`.
+
+### `profile_downloader.py`
+
+- **Functionality / units:** Downloads compatible wheels for exact public PyPI
+  pins and falls back to the release's unique source archive when no wheel is
+  available, without importing or building downloaded package code.
+- **Inputs:** A proof-private destination plus validated `name==version` pins.
+  Network access is fixed to public PyPI and its package CDN; redirects and
+  source-archive SHA-256 digests are checked before publication.
+- **Outputs:** A bounded directory of wheel and source-distribution artifacts
+  consumed later through `PIP_NO_INDEX=1` and `PIP_FIND_LINKS`.
+- **Boundary:** This is the only online Python-profile operation. The downloader
+  is copied into and fingerprinted with the reviewed base image; installation,
+  source builds, and contributor verifiers run only in the separate offline
+  preparation container.
 
 ### `container.py`
 
@@ -634,26 +654,33 @@ the producing class remains the source of truth for optional evidence fields.
 
 ### `model_proof.py`
 
-- **Functionality / units:** `ModelProofRunner` performs trusted host setup;
+- **Functionality / units:** `ModelProofRunner` performs trusted host setup,
+  prepares projected family Python profiles in a restricted networked container;
   `ModelReferenceCache` first ensures the selected pinned checkout is present,
   then copies only that model-owned reference checkout;
   `ModelProofContainerCleaner` removes containers matching exact run labels.
 - **Inputs:** `ModelProofRequest {model, suite, revision, output_dir}`, full
   repository checkout, CI image, shared HF/reference cache roots, workflow
   identity, and model-proof GPU settings.
-- **Outputs:** A positive `projection/`, proof-private `work/`, and
+- **Outputs:** A positive `projection/`, proof-private `python-profiles/` when
+  the family declares profiles, `work/`, and
   `artifacts/` containing at least `selection.json`, `gpu-lease.json`,
   cache/reference evidence, `console.log`, `proof.json`, and
   `model-proof-report.html`. Host failures still attempt a fallback report.
 - **Boundary:** This is the trusted host/security boundary. It may read shared
-  caches and Docker state, but model build and inference occur only in the
-  network-disabled inner container.
+  caches and Docker state. The reviewed online profile downloader receives no
+  source, GPU, secrets, or shared cache and only fetches exact public PyPI artifacts.
+  Package installation, source builds, and the projected verifier run in a
+  separate network-disabled `runc` container with read-only source. Model build
+  and inference occur only in the network-disabled inner container, which
+  consumes the profile directory read-only.
 
 ### `model_proof_inner.py`
 
 - **Functionality / units:** `ModelProofInnerPipeline` runs the linear proof;
   `ProofStatus` records every phase so report generation can fail closed.
-- **Inputs:** Read-only projected source at `/src`, writable `/work`, output
+- **Inputs:** Read-only projected source at `/src`, prepared Python profiles
+  mounted read-only at `/opt/trtmc-python-profiles`, writable `/work`, output
   mount `/artifacts`, selected offline HF cache, optional private reference
   tree, one visible GPU, lease environment fields, and `ModelProofRequest`.
 - **Outputs:** Build/test/reference evidence plus these certification records:

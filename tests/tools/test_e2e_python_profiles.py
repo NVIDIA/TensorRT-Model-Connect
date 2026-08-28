@@ -151,6 +151,9 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
         == python
     )
     assert created == ["custom"]
+    monkeypatch.setenv(shared_profiles.PREBUILT_ONLY_ENV, "1")
+    assert shared_profiles.resolve_profile_python("custom", sys.executable) == python
+    assert created == ["custom"]
 
 
 def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_path):
@@ -183,12 +186,14 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
             "requirements": str(requirements),
             "system_site_packages": False,
             "verification_script": "print('verified')",
+            "build_environment": {"DEMO_FORCE_BUILD": "TRUE"},
         },
         sys.executable,
     )
 
     install = next(call for call in commands if call[1].startswith("install "))
     assert install[3]["env"]["MAX_JOBS"] == "4"
+    assert install[3]["env"]["DEMO_FORCE_BUILD"] == "TRUE"
     assert "PYTHONPATH" not in install[3]["env"]
     assert install[2] == 7200
     verify = next(call for call in commands if call[1].startswith("verify "))
@@ -269,6 +274,28 @@ def test_family_profile_registry_is_fully_exact_pinned():
         )
         pins = shared_profiles._exact_pinned_requirements(requirements)
         assert pins, name
+    assert profiles["nemotron_h_reference"]["build_environment"] == {
+        "CAUSAL_CONV1D_FORCE_BUILD": "TRUE",
+        "MAMBA_FORCE_BUILD": "TRUE",
+    }
+
+
+def test_profile_build_environment_rejects_package_source_overrides() -> None:
+    with pytest.raises(ValueError, match="safe strings"):
+        shared_profiles._validate_python_profile_registry(
+            {
+                "version": 1,
+                "profiles": {
+                    "base": {"kind": "passthrough"},
+                    "unsafe": {
+                        "kind": "venv",
+                        "requirements": "python_profile_requirements/reference_common.lock.txt",
+                        "verification_script": "pass",
+                        "build_environment": {"PIP_INDEX_URL": "https://example.invalid"},
+                    },
+                }
+            }
+        )
 
 
 def test_profile_contract_has_one_family_owned_source_of_truth() -> None:
@@ -287,12 +314,13 @@ def test_profile_contract_has_one_family_owned_source_of_truth() -> None:
     assert merged_names == shared_names | family_names
 
 
-def test_lazy_profiles_are_excluded_from_the_shared_ci_image() -> None:
+def test_lazy_profiles_are_excluded_from_offline_preparation() -> None:
     registry = shared_profiles.load_python_profile_registry()
     prebuilt = shared_profiles.prebuilt_python_profile_names(registry)
 
     assert "personaplex_full_duplex_evaluator" not in prebuilt
     assert "reference_common" in prebuilt
+
 
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
     with pytest.raises(ValueError, match="exact name==version pins"):
@@ -450,7 +478,7 @@ def test_prebuilt_only_profile_fails_before_creating_a_runtime_cache(
         },
     )
 
-    with pytest.raises(RuntimeError, match="CI image is stale or incomplete"):
+    with pytest.raises(RuntimeError, match="Prepare the declared profiles"):
         shared_profiles.resolve_profile_python("custom", sys.executable)
 
     assert not profile_root.exists()

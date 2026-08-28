@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 import fcntl
+import hashlib
+import io
 import json
 import os
 import re
@@ -23,10 +25,17 @@ from types import SimpleNamespace
 import pytest
 
 from tools.ci import gpu_lease as gpu_lease_module
+from tools.ci import profile_downloader
 from tools.ci.context import CiContext
 from tools.ci.gpu_lease import GpuLease
 from tools.ci.model_reference_cache import ModelReferenceCacheWarmer
-from tools.ci.model_proof import ModelProofRequest, ModelProofRunner, ModelReferenceCache
+from tools.ci.model_proof import (
+    PREPARED_PROFILE_ROOT,
+    PROFILE_PACKAGES_ROOT,
+    ModelProofRequest,
+    ModelProofRunner,
+    ModelReferenceCache,
+)
 from tools.ci.model_proof_inner import (
     ModelProofInnerPipeline,
     _classify_e2e_proof_kinds,
@@ -111,6 +120,27 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "    exit 0\n"
         "    ;;\n"
         "  run)\n"
+        '    if [[ " $* " == *" /opt/trtmc-profile-downloader.py "* ]]; then\n'
+        "      exit 0\n"
+        "    fi\n"
+        '    if [[ " $* " == *" /src/.github/scripts/build-python-profiles.py "* ]]; then\n'
+        '      profile_root=""\n'
+        '      for argument in "$@"; do\n'
+        '        case "$argument" in\n'
+        '          type=bind,src=*,dst=/opt/trtmc-python-profiles)\n'
+        '            profile_root="${argument#type=bind,src=}"\n'
+        '            profile_root="${profile_root%,dst=/opt/trtmc-python-profiles}"\n'
+        "            ;;\n"
+        "        esac\n"
+        "      done\n"
+        '      [ -n "$profile_root" ] || exit 95\n'
+        '      profile="$profile_root/reference_common-fake"\n'
+        '      mkdir -p "$profile/bin"\n'
+        '      ln -s /opt/venv/bin/python "$profile/bin/python"\n'
+        '      printf \'%s\\n\' \'profile=reference_common\' > "$profile/.ready"\n'
+        '      printf \'%s\\n\' \'{"schema_version":1,"profiles":{"reference_common":{"python":"/opt/trtmc-python-profiles/reference_common-fake/bin/python","ready":"/opt/trtmc-python-profiles/reference_common-fake/.ready"}}}\' > "$profile_root/.prepared-profiles.json"\n'
+        "      exit 0\n"
+        "    fi\n"
         '    if [[ " $* " == *" /src/scripts/warm_hf_cache.py "* ]]; then\n'
         '      mkdir -p "$FAKE_ARTIFACTS"\n'
         '      if [ "${FAKE_CACHE_EVIDENCE_MODE:-valid}" = escape ]; then\n'
@@ -274,12 +304,17 @@ def _fake_proof_environment(
     return env
 
 
-def _run_fake_proof(env: dict[str, str], output: Path) -> subprocess.CompletedProcess[str]:
+def _run_fake_proof(
+    env: dict[str, str],
+    output: Path,
+    *,
+    model: str = "convbert",
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             *RUNNER_COMMAND,
             "--model",
-            "convbert",
+            model,
             "--revision",
             "HEAD",
             "--output-dir",
@@ -1774,6 +1809,281 @@ def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:
         assert path.is_file(), path
 
 
+def test_profile_preparation_uses_a_minimal_online_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection = tmp_path / "projection"
+    family = projection / "python/tensorrt_model_connect/families/demo"
+    family.mkdir(parents=True)
+    (family / "MODEL.toml").write_text(
+        'id = "demo"\n'
+        'python_profile_specs = ['
+        '"demo|families/demo/requirements.lock.txt|families/demo/verify.py|true"'
+        "]\n",
+        encoding="utf-8",
+    )
+    (family / "requirements.lock.txt").write_text(
+        "demo-package==1.0.0\n",
+        encoding="utf-8",
+    )
+    (family / "verify.py").write_text("import demo_package\n", encoding="utf-8")
+    package_root = projection / "python/tensorrt_model_connect"
+    (package_root / "python_profiles.toml").write_text(
+        'version = 1\n[profiles.base]\nkind = "passthrough"\n',
+        encoding="utf-8",
+    )
+    profiles = tmp_path / "python-profiles"
+    profiles.mkdir()
+    packages = tmp_path / "python-profile-packages"
+    packages.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    runner = ModelProofRunner(
+        CiContext(REPO_ROOT, {}),
+        ModelProofRequest(model="demo"),
+    )
+    runner.artifacts_dir = artifacts
+    monkeypatch.setattr(
+        runner.context,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0),
+    )
+    commands: list[list[object]] = []
+
+    def prepare(command: list[object], _log: Path, **_kwargs) -> int:
+        commands.append(command)
+        return 0
+
+    monkeypatch.setattr(runner, "_run_logged", prepare)
+
+    runner._prepare_python_profiles(
+        projection,
+        profiles,
+        packages,
+        "qualified-base@sha256:test",
+    )
+
+    assert len(commands) == 2
+    download = " ".join(map(str, commands[0]))
+    install = " ".join(map(str, commands[1]))
+    assert "--network bridge" in download
+    assert "--runtime runc" in download
+    assert "/opt/trtmc-profile-downloader.py" in download
+    assert "demo-package==1.0.0" in download
+    assert f"src={packages},dst={PROFILE_PACKAGES_ROOT}" in download
+    assert "src={projection}" not in download
+    assert "NVIDIA_VISIBLE_DEVICES=void" in download
+    assert "CUDA_VISIBLE_DEVICES=" in download
+
+    assert "--network none" in install
+    assert "--runtime runc" in install
+    assert "--read-only" in install
+    assert "--cap-drop ALL" in install
+    assert "--security-opt no-new-privileges" in install
+    assert "--ipc private" in install
+    assert "PIP_CONFIG_FILE=/dev/null" in install
+    assert "PIP_FIND_LINKS=/opt/trtmc-python-profile-packages" in install
+    assert "PIP_NO_INDEX=1" in install
+    assert f"src={projection},dst=/src,readonly" in install
+    assert f"src={profiles},dst={PREPARED_PROFILE_ROOT}" in install
+    assert f"src={packages},dst={PROFILE_PACKAGES_ROOT},readonly" in install
+    assert f"dst={PREPARED_PROFILE_ROOT},readonly" not in install
+    for command in (download, install):
+        assert "--gpus" not in command
+        assert "HF_TOKEN" not in command
+        assert "/var/run/docker.sock" not in command
+        assert "dst=/work" not in command
+        assert "dst=/artifacts" not in command
+
+
+def test_profile_owning_family_runs_download_prepare_then_offline_proof(
+    tmp_path: Path,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    environment = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+
+    result = _run_fake_proof(environment, output, model="chronos_bolt")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    runs = [
+        line
+        for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    download_index = next(
+        index for index, command in enumerate(runs) if "/opt/trtmc-profile-downloader.py" in command
+    )
+    prepare_index = next(
+        index
+        for index, command in enumerate(runs)
+        if "/src/.github/scripts/build-python-profiles.py" in command
+    )
+    proof_index = next(index for index, command in enumerate(runs) if " --inner " in command)
+    assert download_index < prepare_index < proof_index
+    assert "--network bridge" in runs[download_index]
+    assert "--network none" in runs[prepare_index]
+    assert "--network none" in runs[proof_index]
+    assert f"dst={PREPARED_PROFILE_ROOT},readonly" in runs[proof_index]
+    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in runs[proof_index]
+
+
+def test_offline_proof_consumes_prepared_profiles_read_only() -> None:
+    source = RUNNER.read_text(encoding="utf-8")
+    proof = source.split("def _run_proof_container(", maxsplit=1)[1].split(
+        "def _proof_environment", maxsplit=1
+    )[0]
+    environment = source.split("def _proof_environment(", maxsplit=1)[1].split(
+        "def _reclaim_orphans", maxsplit=1
+    )[0]
+
+    assert "dst={PREPARED_PROFILE_ROOT},\"" in proof
+    assert '"readonly"' in proof
+    assert '"--network"' in proof and '"none"' in proof
+    assert '"TRTMC_PYTHON_PROFILE_PREBUILT_ONLY": "1"' in environment
+    assert '"TRTMC_PYTHON_PROFILE_ROOT": PREPARED_PROFILE_ROOT' in environment
+    assert '"PIP_NO_INDEX": "1"' in environment
+    assert source.index("self._prepare_python_profiles(") < source.index("self.lease = GpuLease(")
+
+
+def test_profile_download_program_fetches_a_digest_verified_sdist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = b"source archive"
+    digest = hashlib.sha256(artifact).hexdigest()
+    metadata = json.dumps(
+        {
+            "urls": [
+                {
+                    "packagetype": "sdist",
+                    "filename": "demo-1.0.0.tar.gz",
+                    "url": "https://files.pythonhosted.org/packages/demo-1.0.0.tar.gz",
+                    "digests": {"sha256": digest},
+                }
+            ]
+        }
+    ).encode()
+
+    class Response(io.BytesIO):
+        def __init__(self, payload: bytes, url: str):
+            super().__init__(payload)
+            self.url = url
+
+        def geturl(self) -> str:
+            return self.url
+
+    def urlopen(request, timeout):
+        del timeout
+        url = str(request.full_url)
+        return Response(
+            metadata if url.endswith("/demo/1.0.0/json") else artifact,
+            url,
+        )
+
+    monkeypatch.setattr(profile_downloader.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        profile_downloader.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+
+    profile_downloader.main([str(tmp_path), "demo==1.0.0"])
+
+    assert (tmp_path / "demo-1.0.0.tar.gz").read_bytes() == artifact
+
+
+@pytest.mark.parametrize(
+    ("artifact_url", "expected_digest", "message"),
+    (
+        (
+            "https://example.invalid/demo-1.0.0.tar.gz",
+            hashlib.sha256(b"source archive").hexdigest(),
+            "untrusted source URL",
+        ),
+        (
+            "https://files.pythonhosted.org/packages/demo-1.0.0.tar.gz",
+            "0" * 64,
+            "digest mismatch",
+        ),
+    ),
+)
+def test_profile_download_program_rejects_untrusted_sdist_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_url: str,
+    expected_digest: str,
+    message: str,
+) -> None:
+    artifact = b"source archive"
+    metadata = json.dumps(
+        {
+            "urls": [
+                {
+                    "packagetype": "sdist",
+                    "filename": "demo-1.0.0.tar.gz",
+                    "url": artifact_url,
+                    "digests": {"sha256": expected_digest},
+                }
+            ]
+        }
+    ).encode()
+
+    class Response(io.BytesIO):
+        def __init__(self, payload: bytes, url: str):
+            super().__init__(payload)
+            self.url = url
+
+        def geturl(self) -> str:
+            return self.url
+
+    def urlopen(request, timeout):
+        del timeout
+        url = str(request.full_url)
+        return Response(metadata if url.endswith("/demo/1.0.0/json") else artifact, url)
+
+    monkeypatch.setattr(profile_downloader.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(
+        profile_downloader.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        profile_downloader.main([str(tmp_path), "demo==1.0.0"])
+
+    assert not (tmp_path / "demo-1.0.0.tar.gz").exists()
+
+
+def test_projected_profile_packages_include_source_only_nemotron_dependencies(
+    tmp_path: Path,
+) -> None:
+    projection = tmp_path / "projection"
+    package = projection / "python/tensorrt_model_connect"
+    family = package / "families/nemotron_h"
+    family.mkdir(parents=True)
+    shutil.copy2(
+        REPO_ROOT / "python/tensorrt_model_connect/families/nemotron_h/MODEL.toml",
+        family / "MODEL.toml",
+    )
+    shutil.copytree(
+        REPO_ROOT
+        / "python/tensorrt_model_connect/families/nemotron_h/python_profile_requirements",
+        family / "python_profile_requirements",
+    )
+    (package / "python_profiles.toml").write_text(
+        'version = 1\n[profiles.base]\nkind = "passthrough"\n',
+        encoding="utf-8",
+    )
+    runner = ModelProofRunner(CiContext(REPO_ROOT, {}), ModelProofRequest("nemotron_h"))
+
+    packages = runner._projected_profile_packages(projection)
+
+    assert "mamba-ssm==2.3.2.post1" in packages
+    assert "causal-conv1d==1.6.2.post1" in packages
+
+
 def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -1781,6 +2091,15 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
         "model-ci: error: unknown model <unsafe>\n",
         encoding="utf-8",
     )
+    (artifacts / "python-profiles-prepare.log").write_text(
+        "profile install failed\n",
+        encoding="utf-8",
+    )
+    (artifacts / "console.log").write_text(
+        "discarded-prefix\n" + ("x" * 20_000) + "\nbounded-tail\n",
+        encoding="utf-8",
+    )
+    (artifacts / "build.log").symlink_to("/dev/zero")
 
     result = subprocess.run(
         [
@@ -1811,6 +2130,10 @@ def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
     status = json.loads((artifacts / "model-proof-status.json").read_text(encoding="utf-8"))
     assert "host-error.log" in report
     assert "unknown model &lt;unsafe&gt;" in report
+    assert "python-profiles-prepare.log" in report
+    assert "profile install failed" in report
+    assert "bounded-tail" in report
+    assert "discarded-prefix" not in report
     assert status["outcome"] == "failed"
     assert status["exit_code"] == 2
 

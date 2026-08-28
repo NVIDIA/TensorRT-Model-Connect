@@ -709,11 +709,11 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     assert "ghcr.io" not in dockerfile
     assert "TENSORRT_SDK_IMAGE" not in dockerfile
     assert "/opt/tensorrt/python" not in dockerfile
+    assert "COPY tools/ci/profile_downloader.py /opt/trtmc-profile-downloader.py" in dockerfile
 
     from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
     assert from_lines == [
         "FROM ${CUDA_IMAGE} AS ci-common-base",
-        "FROM ci-common-base AS python-profile-builder",
         "FROM ci-common-base AS ci-common",
         "FROM ci-common AS ci-runtime",
     ]
@@ -721,8 +721,9 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     common = dockerfile.split("FROM ci-common-base AS ci-common", maxsplit=1)[1].split(
         "FROM ci-common AS ci-runtime", maxsplit=1
     )[0]
-    assert "COPY --from=python-profile-builder" in common
-    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in common
+    assert "COPY --from=python-profile-builder" not in common
+    assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY" not in dockerfile
+    assert "/opt/trtmc-python-profiles" not in dockerfile
     assert 'find_spec("tensorrt") is None' in common
     assert "NvInferVersion.h" in common
     assert "NvOnnxParser.h" in common

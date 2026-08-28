@@ -266,6 +266,7 @@ def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     shutil.copytree(REPO_ROOT / ".github" / "scripts", repo_root / ".github" / "scripts")
     shutil.copytree(REPO_ROOT / "tools" / "ci", repo_root / "tools" / "ci")
     shutil.copy2(REPO_ROOT / "tools" / "__init__.py", repo_root / "tools" / "__init__.py")
+    shutil.copy2(REPO_ROOT / ".dockerignore", repo_root / ".dockerignore")
 
     package_root = repo_root / "python" / "tensorrt_model_connect"
     families_root = package_root / "families"
@@ -464,7 +465,7 @@ def test_matching_image_is_fully_validated_once_per_workflow_run(tmp_path: Path)
     assert "reused from this workflow run's verified image" in result.stdout
 
 
-def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:
+def test_base_image_ignores_family_profile_inventory(tmp_path: Path) -> None:
     bootstrap_result, bootstrap_env, bootstrap_log = _run_ensure_script(
         tmp_path / "bootstrap",
         existing_images={},
@@ -483,8 +484,8 @@ def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert f"-t {resolved_image}" in docker_log
-    assert "prebuilt Python profiles differ" in result.stdout
+    assert f"-t {resolved_image}" not in docker_log
+    assert f"CI Docker image '{resolved_image}' already matches" in result.stdout
 
 
 def test_tensorrt_overlay_contract_reports_each_mismatch(tmp_path: Path) -> None:
@@ -537,13 +538,13 @@ def test_source_contract_describes_parameterized_tensorrt_overlay(tmp_path: Path
         tensorrt_apt_version="11.2.1.2-1+cuda13.3",
     )
     assert selected_contract["schema_version"] == 1
-    assert selected_contract["environment_contract_version"] == 2
+    assert selected_contract["environment_contract_version"] == 3
     assert (
         selected_contract["common_input_fingerprint"]
         == default_contract["common_input_fingerprint"]
     )
     assert selected_contract["input_fingerprint"] != default_contract["input_fingerprint"]
-    assert selected_contract["python_profiles"] == ["demo", "reference_common"]
+    assert selected_contract["python_profiles"] == []
     assert selected_contract["tensorrt"] == {
         "version": "11.2.1.2",
         "apt_version": "11.2.1.2-1+cuda13.3",
@@ -563,7 +564,7 @@ def test_source_contract_describes_parameterized_tensorrt_overlay(tmp_path: Path
     }
 
 
-def test_source_contract_loads_profiles_without_ambient_pythonpath(tmp_path: Path) -> None:
+def test_source_contract_ignores_profiles_without_ambient_pythonpath(tmp_path: Path) -> None:
     repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
@@ -585,7 +586,7 @@ def test_source_contract_loads_profiles_without_ambient_pythonpath(tmp_path: Pat
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "demo,reference_common"
+    assert result.stdout.strip() == ""
 
 
 def test_image_contract_cli_emits_canonical_contract_json(tmp_path: Path) -> None:
@@ -611,7 +612,8 @@ def test_image_contract_cli_emits_canonical_contract_json(tmp_path: Path) -> Non
 
     assert result.returncode == 0, result.stderr
     contract = json.loads(result.stdout)
-    assert contract["environment_contract_version"] == 2
+    assert contract["environment_contract_version"] == 3
+    assert contract["python_profiles"] == []
     assert contract["tensorrt"]["version"] == "11.2.1.2"
     assert contract["tensorrt"]["apt_version"] == "11.2.1.2-1+cuda13.3"
 
@@ -636,7 +638,6 @@ def test_validate_image_contract_returns_the_verified_source_contract(
         "MODELOPT_VERSION": expected.modelopt,
         "NLOHMANN_JSON_HEADER": "present",
         "NEMO_PROMPT_RNNT": "available",
-        "PYTHON_PROFILES": expected.python_profiles,
     }
     monkeypatch.setattr(manager, "_query_fingerprint", lambda _: expected.fingerprint)
     monkeypatch.setattr(manager, "_query_versions", lambda _: actual)
@@ -696,48 +697,20 @@ def test_source_contract_rejects_mixed_tensorrt_overlay_versions(tmp_path: Path)
         )
 
 
-def test_source_contract_rechecks_profile_asset_containment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
-    outside = tmp_path / "outside.lock.txt"
-    outside.write_text("demo==1.0\n", encoding="utf-8")
-    manager = DockerImageManager(repo_root)
-    monkeypatch.setattr(
-        manager,
-        "_load_profile_registry",
-        lambda: (
-            {
-                "version": 1,
-                "profiles": {
-                    "demo": {
-                        "kind": "venv",
-                        "prebuild": True,
-                        "requirements": str(outside),
-                    }
-                },
-            },
-            ("demo",),
-        ),
-    )
-
-    with pytest.raises(CiError, match="unsafe requirements path"):
-        manager.source_contract()
-
-
-def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
+def test_only_base_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 
     assert "class DockerImageManager" in script
     assert "semantic_fingerprint" in script
-    assert 'b"python-profile-registry\\0"' in script
-    assert "assets: set[Path]" in script
+    assert 'b"ci-base-runtime\\0"' in script
+    assert "assets: set[Path]" not in script
     assert 'Path("tools/ci/process.py")' not in script
-    assert 'package_root / "python_profiles.py"' in script
+    assert 'Path("tools/ci/profile_downloader.py")' in script
+    assert 'package_root / "python_profiles.py"' not in script
     assert '"-f"' in script
     assert "str(self.config.dockerfile)" in script
     assert '"."' in script
-    assert "profile builder source leaked into the runtime image" in script
+    assert "profile builder source leaked into the runtime image" not in script
     assert '"--user"' in script
     assert '"65534:65534"' in script
     assert '"--read-only"' in script
@@ -747,7 +720,7 @@ def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> No
     assert "source_contract_json" in script
 
 
-def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(
+def test_base_fingerprint_ignores_manifest_comments_and_ownership_fields(
     tmp_path: Path,
 ) -> None:
     repo_root, manifest, _ = _write_profile_fingerprint_repo(tmp_path)
@@ -774,7 +747,7 @@ def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(
     assert ownership_changed == baseline
 
 
-def test_profile_fingerprint_ignores_unrelated_family_loader_changes(
+def test_base_fingerprint_ignores_unrelated_family_loader_changes(
     tmp_path: Path,
 ) -> None:
     repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
@@ -860,7 +833,7 @@ def test_source_contract_does_not_execute_or_fingerprint_family_loader(
     assert changed["input_fingerprint"] == baseline["input_fingerprint"]
 
 
-def test_profile_fingerprint_ignores_registry_comments(tmp_path: Path) -> None:
+def test_base_fingerprint_ignores_profile_registry_comments(tmp_path: Path) -> None:
     repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
     baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
 
@@ -874,7 +847,7 @@ def test_profile_fingerprint_ignores_registry_comments(tmp_path: Path) -> None:
     assert changed == baseline
 
 
-def test_profile_fingerprint_ignores_lazy_profile_declarations(tmp_path: Path) -> None:
+def test_base_fingerprint_ignores_lazy_profile_declarations(tmp_path: Path) -> None:
     repo_root, manifest, _ = _write_profile_fingerprint_repo(tmp_path)
     baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
 
@@ -890,7 +863,7 @@ def test_profile_fingerprint_ignores_lazy_profile_declarations(tmp_path: Path) -
     assert changed == baseline
 
 
-def test_profile_fingerprint_changes_for_semantic_profile_declaration(
+def test_base_fingerprint_ignores_semantic_profile_declaration(
     tmp_path: Path,
 ) -> None:
     repo_root, manifest, _ = _write_profile_fingerprint_repo(tmp_path)
@@ -906,10 +879,21 @@ def test_profile_fingerprint_changes_for_semantic_profile_declaration(
     )
 
     changed = _resolved_image_for_repo(tmp_path / "profile-change", repo_root)
-    assert changed != baseline
+    assert changed == baseline
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + 'python_profile_build_environment = ["demo|DEMO_FORCE_BUILD|TRUE"]\n',
+        encoding="utf-8",
+    )
+    environment_changed = _resolved_image_for_repo(
+        tmp_path / "profile-environment-change",
+        repo_root,
+    )
+    assert environment_changed == baseline
 
 
-def test_profile_fingerprint_changes_for_referenced_profile_asset_content(
+def test_base_fingerprint_ignores_referenced_profile_asset_content(
     tmp_path: Path,
 ) -> None:
     repo_root, _, requirements = _write_profile_fingerprint_repo(tmp_path)
@@ -918,19 +902,19 @@ def test_profile_fingerprint_changes_for_referenced_profile_asset_content(
     requirements.write_text("demo-package==1.0.1\n", encoding="utf-8")
 
     changed = _resolved_image_for_repo(tmp_path / "asset-change", repo_root)
-    assert changed != baseline
+    assert changed == baseline
 
 
 @pytest.mark.parametrize(
     "relative_path",
     (
-        Path("Dockerfile"),
         Path(".github/scripts/build-python-profiles.py"),
         Path("python/tensorrt_model_connect/python_profiles.py"),
+        Path("python/tensorrt_model_connect/python_profiles.toml"),
         Path("python/tensorrt_model_connect/families/demo/verify.py"),
     ),
 )
-def test_profile_fingerprint_changes_for_every_baked_recipe_input(
+def test_base_fingerprint_ignores_profile_preparation_inputs(
     tmp_path: Path,
     relative_path: Path,
 ) -> None:
@@ -943,6 +927,31 @@ def test_profile_fingerprint_changes_for_every_baked_recipe_input(
     )
 
     changed = _resolved_image_for_repo(tmp_path / "recipe-change", repo_root)
+
+    assert changed == baseline
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        Path("Dockerfile"),
+        Path(".dockerignore"),
+        Path("tools/ci/profile_downloader.py"),
+    ),
+)
+def test_base_fingerprint_changes_for_base_recipe_inputs(
+    tmp_path: Path,
+    relative_path: Path,
+) -> None:
+    repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+    target = repo_root / relative_path
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n# Base environment change.\n",
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "base-change", repo_root)
 
     assert changed != baseline
 

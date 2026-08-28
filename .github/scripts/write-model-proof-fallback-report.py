@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Sequence
 
@@ -16,6 +18,8 @@ from typing import Sequence
 _DIAGNOSTIC_FILES = (
     "host-error.log",
     "ci-image.log",
+    "python-profiles-prepare.log",
+    "python-profile-download.log",
     "console.log",
     "projection.stderr.log",
     "projection.json",
@@ -23,6 +27,7 @@ _DIAGNOSTIC_FILES = (
     "build.log",
 )
 _MAX_DIAGNOSTIC_CHARS = 16_000
+_MAX_DIAGNOSTIC_BYTES = _MAX_DIAGNOSTIC_CHARS * 4
 
 
 def _load_json(path: Path) -> dict[str, object]:
@@ -37,14 +42,24 @@ def _diagnostics(root: Path) -> list[tuple[str, str]]:
     excerpts: list[tuple[str, str]] = []
     for filename in _DIAGNOSTIC_FILES:
         path = root / filename
-        if not path.is_file():
-            continue
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         except OSError:
             continue
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            offset = max(0, metadata.st_size - _MAX_DIAGNOSTIC_BYTES)
+            os.lseek(descriptor, offset, os.SEEK_SET)
+            payload = os.read(descriptor, _MAX_DIAGNOSTIC_BYTES)
+        except OSError:
+            continue
+        finally:
+            os.close(descriptor)
+        text = payload.decode("utf-8", errors="replace")[-_MAX_DIAGNOSTIC_CHARS:]
         if text.strip():
-            excerpts.append((filename, text[-_MAX_DIAGNOSTIC_CHARS:]))
+            excerpts.append((filename, text))
     return excerpts
 
 
