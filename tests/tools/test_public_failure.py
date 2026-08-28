@@ -567,6 +567,23 @@ def test_internal_ci_bridge_publishes_the_private_sanitized_artifact() -> None:
     )
 
 
+def test_internal_ci_bridge_masks_private_correlation_identifiers() -> None:
+    workflow = (Path(__file__).parents[2] / ".github/workflows/internal-ci-bridge.yml").read_text(
+        encoding="utf-8"
+    )
+
+    nonce_mask = 'echo "::add-mask::$dispatch_nonce"'
+    run_id_mask = 'echo "::add-mask::$run_id"'
+
+    assert nonce_mask in workflow
+    assert workflow.index('[[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]') < workflow.index(nonce_mask)
+    assert workflow.index(nonce_mask) < workflow.index('--arg dispatch_nonce "$dispatch_nonce"')
+
+    assert run_id_mask in workflow
+    assert workflow.index('if ! [[ "$run_id" =~ ^[1-9][0-9]*$ ]]') < workflow.index(run_id_mask)
+    assert workflow.index(run_id_mask) < workflow.index('echo "run_id=$run_id"')
+
+
 def test_poison_scan_rejects_sensitive_text_even_when_schema_allows_the_characters() -> None:
     report = export_failure(
         {

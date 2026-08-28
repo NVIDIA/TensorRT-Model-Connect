@@ -157,6 +157,7 @@ jobs:
           umask 077
           dispatch_nonce="$(openssl rand -hex 16)"
           [[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]
+          echo "::add-mask::$dispatch_nonce"
           payload="$RUNNER_TEMP/internal-ci-dispatch.json"
           trap 'rm -f "$payload"' EXIT
           jq -n \
@@ -202,6 +203,7 @@ jobs:
             echo "::error::The exact dispatched Internal CI run was not found."
             exit 1
           fi
+          echo "::add-mask::$run_id"
           {
             echo "run_id=$run_id"
             echo "dispatch_nonce=$dispatch_nonce"
