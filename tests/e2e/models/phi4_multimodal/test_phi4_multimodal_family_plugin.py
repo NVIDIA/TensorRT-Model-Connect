@@ -519,6 +519,8 @@ class TestPhi4MultimodalPlugin:
         w_out = weights["w_out"]
         np.testing.assert_allclose(w_out, embedding.T, atol=1e-6)
 
+    @pytest.mark.gpu
+    @pytest.mark.trt
     def test_selected_fp32_decoder_layer_builds_in_fp16_engine(self, tmp_path):
         from tensorrt_model_connect.families.phi4_multimodal import plugin
 

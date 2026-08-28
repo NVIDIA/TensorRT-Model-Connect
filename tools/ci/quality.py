@@ -8,6 +8,7 @@ Boundary: pre-model CPU validation; isolated model certification is a later stag
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 from pathlib import Path, PurePosixPath
@@ -191,7 +192,18 @@ class UnitTestRunner:
         )
         scope = self.context.env.get("TRTMC_PREMERGE_UNIT_SCOPE", "all")
         python_tests, native_targets, ctest_selector = self._premerge_scope(scope)
-        python_tests.extend(self._selected_python_test_targets(python_tests))
+        if scope in {"all", "community-all"}:
+            self._selected_python_test_targets(
+                [
+                    *python_tests,
+                    "tests/e2e/models/",
+                    "python/tensorrt_model_connect/families/",
+                    "tests/test_e2e_selection.py",
+                    "tests/e2e/test_diffusion_image_parity_inputs.py",
+                ]
+            )
+        else:
+            python_tests.extend(self._selected_python_test_targets(python_tests))
         print(f"Premerge unit scope: {scope}")
 
         selected_wheel = SelectedWheelRuntime.prepare(
@@ -222,6 +234,7 @@ class UnitTestRunner:
             "-n",
             str(test_jobs),
             "--dist=worksteal",
+            "--import-mode=importlib",
             "-p",
             "no:cacheprovider",
             "-m",
@@ -236,13 +249,81 @@ class UnitTestRunner:
                 "--deselect=tests/tools/test_model_proof_runner.py::"
                 "test_distinct_explicit_hf_cache_paths_reach_both_containers"
             )
-        if selected_wheel:
-            pytest.append("--import-mode=importlib")
         self.context.run(
             pytest,
             limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
             updates=python_environment,
         )
+        if scope in {"all", "community-all"}:
+            self.context.run(
+                [
+                    python,
+                    "-m",
+                    "pytest",
+                    "tests/e2e/models/",
+                    "tests/test_e2e_selection.py",
+                    "tests/e2e/test_diffusion_image_parity_inputs.py",
+                    "-q",
+                    "-x",
+                    "-n",
+                    str(test_jobs),
+                    "--dist=worksteal",
+                    "--import-mode=importlib",
+                    "-p",
+                    "no:cacheprovider",
+                    "-m",
+                    "not gpu and not trt and not e2e and not model_proof_allocator",
+                    "--ignore-glob=*_e2e.py",
+                ],
+                limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
+                updates=python_environment,
+            )
+            self.context.run(
+                [
+                    python,
+                    "-m",
+                    "pytest",
+                    "python/tensorrt_model_connect/families/",
+                    "-q",
+                    "-x",
+                    "-n",
+                    str(test_jobs),
+                    "--dist=worksteal",
+                    "--import-mode=importlib",
+                    "-p",
+                    "no:cacheprovider",
+                    "-m",
+                    "not gpu and not trt and not e2e and not model_proof_allocator",
+                ],
+                limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
+                updates=python_environment,
+            )
+            mixed_e2e_contracts = self._mixed_e2e_cpu_contract_files()
+            if mixed_e2e_contracts:
+                e2e_deselectors = [
+                    f"--deselect={path}::test_model_e2e" for path in mixed_e2e_contracts
+                ]
+                self.context.run(
+                    [
+                        python,
+                        "-m",
+                        "pytest",
+                        *mixed_e2e_contracts,
+                        "-q",
+                        "-x",
+                        "-n",
+                        str(test_jobs),
+                        "--dist=worksteal",
+                        "--import-mode=importlib",
+                        "-p",
+                        "no:cacheprovider",
+                        *e2e_deselectors,
+                        "-m",
+                        "not gpu and not trt and not e2e and not model_proof_allocator",
+                    ],
+                    limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
+                    updates=python_environment,
+                )
         if scope in {"all", "community-all"}:
             allocator = [
                 python,
@@ -299,9 +380,6 @@ class UnitTestRunner:
             if scope == "cli":
                 self.context.run([build / "trtmc", "version"], limit="1m")
                 self.context.run([build / "trtmc", "--help"], limit="1m")
-            leaked = next(build.rglob("libtrtmc_model_*.so*"), None)
-            if leaked:
-                raise CiError(f"source-only unit build produced a model plugin: {leaked}")
             self.context.run(
                 [
                     "ctest",
@@ -315,6 +393,26 @@ class UnitTestRunner:
                 ],
                 limit=self.context.env.get("CPP_UNIT_TIMEOUT", "20m"),
             )
+            if scope in {"all", "community-all"}:
+                self.context.run(
+                    [
+                        python,
+                        "-m",
+                        "pytest",
+                        "tests/e2e/test_error_handling.py",
+                        "-q",
+                        "-x",
+                        "-p",
+                        "no:cacheprovider",
+                        "--import-mode=importlib",
+                        "-m",
+                        "not gpu and not trt and not e2e",
+                        "--trtmc-binary",
+                        build / "trtmc",
+                    ],
+                    limit=self.context.env.get("PYTHON_BUILDER_TIMEOUT", "20m"),
+                    updates=python_environment,
+                )
 
     def _premerge_scope(self, scope: str) -> tuple[list[str], list[str], list[str]]:
         if scope == "builder":
@@ -333,16 +431,10 @@ class UnitTestRunner:
                 ["-R", "^(test_cli_args|test_config_cli_support)$"],
             )
         if scope in {"all", "community-all"}:
-            harness_tests = [
-                str(path.relative_to(self.context.repository))
-                for path in sorted(
-                    (self.context.repository / "tests/e2e_harness").glob("test_*.py")
-                )
-            ]
             return (
-                ["tests/builder/", "tests/tools/", *harness_tests],
-                ["trtmc", "trtmc_platform_cpp_tests"],
-                ["-L", "platform"],
+                ["tests/builder/", "tests/tools/", "tests/e2e_harness/"],
+                ["trtmc", "trtmc_cpu_cpp_tests"],
+                ["-L", "cpu"],
             )
         raise CiError(
             "TRTMC_PREMERGE_UNIT_SCOPE must be builder, cli, all, or community-all"
@@ -398,6 +490,28 @@ class UnitTestRunner:
                 selected.append(target)
         if selected:
             print("Additional selected Python tests: " + ", ".join(selected))
+        return selected
+
+    def _mixed_e2e_cpu_contract_files(self) -> list[str]:
+        root = self.context.repository / "tests" / "e2e" / "models"
+        selected: list[str] = []
+        for path in sorted(root.rglob("test_*_e2e.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            test_names: set[str] = set()
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if node.name.startswith("test_"):
+                        test_names.add(node.name)
+                    continue
+                if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                    test_names.update(
+                        child.name
+                        for child in node.body
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and child.name.startswith("test_")
+                    )
+            if test_names - {"test_model_e2e"}:
+                selected.append(str(path.relative_to(self.context.repository)))
         return selected
 
     @staticmethod

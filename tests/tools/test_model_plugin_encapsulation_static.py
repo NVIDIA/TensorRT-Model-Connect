@@ -17,6 +17,11 @@ import json
 import re
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 uses the declared tomli dependency.
+    import tomli as tomllib
+
 from tests.e2e_harness.threshold_policy import requires_threshold_sidecar
 
 
@@ -1138,6 +1143,52 @@ def test_top_level_cmake_does_not_hardcode_model_owned_cpp_tests() -> None:
         manifest = RUNTIME_MODELS / model / "MODEL.toml"
         if entry not in manifest.read_text(encoding="utf-8"):
             violations.append((manifest, 0, f"missing model-owned C++ test {entry}"))
+
+    assert not violations, _format_violations(violations)
+
+
+def _toml_key_paths(
+    value: object,
+    key: str,
+    path: tuple[str, ...] = (),
+) -> list[tuple[str, ...]]:
+    paths: list[tuple[str, ...]] = []
+    if isinstance(value, dict):
+        for item_key, item in value.items():
+            item_path = (*path, item_key)
+            if item_key == key:
+                paths.append(item_path)
+            paths.extend(_toml_key_paths(item, key, item_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            paths.extend(_toml_key_paths(item, key, (*path, str(index))))
+    return paths
+
+
+def test_runtime_tests_nested_key_detection_handles_quoted_toml() -> None:
+    data = tomllib.loads('[model]\n"runtime_tests" = ["test|source|links|extra|options"]\n')
+
+    assert _toml_key_paths(data, "runtime_tests") == [("model", "runtime_tests")]
+
+
+def test_runtime_tests_are_top_level_toml_contracts() -> None:
+    """Keep CMake discovery and selective model-proof discovery identical."""
+    violations = []
+    for manifest in sorted(RUNTIME_MODELS.glob("*/MODEL.toml")):
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        runtime_test_paths = _toml_key_paths(data, "runtime_tests")
+        if any(path != ("runtime_tests",) for path in runtime_test_paths):
+            violations.append(
+                (
+                    manifest,
+                    0,
+                    "runtime_tests must be top-level, not nested under a preceding TOML table",
+                )
+            )
+            continue
+        entries = data.get("runtime_tests", [])
+        if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+            violations.append((manifest, 0, "runtime_tests must be a top-level string array"))
 
     assert not violations, _format_violations(violations)
 

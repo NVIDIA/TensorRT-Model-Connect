@@ -6,5 +6,5 @@ runtime_library = "libtrtmc_model_convbert.so"
 runtime_plugins = ["plugin.cpp|register_convbert_plugin"]
 runtime_strategies = ["convbert_encoder_only"]
 runtime_tests = [
-  "test_convbert_encoder_pipeline|test_convbert_encoder_pipeline.cpp|trtmc_model_convbert,trtmc_backend_trt|_|REQUIRES_TRT",
+  "test_convbert_encoder_pipeline|test_convbert_encoder_pipeline.cpp|trtmc_model_convbert,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

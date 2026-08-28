@@ -5,10 +5,10 @@ id = "rwkv"
 runtime_library = "libtrtmc_model_rwkv.so"
 runtime_plugins = ["plugin.cpp|register_rwkv_plugin"]
 runtime_strategies = ["rwkv_recurrent"]
-[validation_profiles]
-decoder_debug = ["rwkv_recurrent"]
-
 runtime_tests = [
   "test_rwkv_recurrent_output_initializers|test_rwkv_recurrent_output_initializers.cpp|_|_|_",
-  "test_rwkv_recurrent_pipeline|test_rwkv_recurrent_pipeline.cpp|trtmc_model_rwkv,trtmc_backend_trt|_|REQUIRES_TRT",
+  "test_rwkv_recurrent_pipeline|test_rwkv_recurrent_pipeline.cpp|trtmc_model_rwkv,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]
+
+[validation_profiles]
+decoder_debug = ["rwkv_recurrent"]

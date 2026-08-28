@@ -90,6 +90,8 @@ def test_eagle_vlm_prefers_rope_parameters_over_legacy_alias() -> None:
     assert plugin_module._resolve_rope_scaling(Config())["factor"] == 8.0
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_eagle_vlm_fp16_reranker_keeps_residual_and_norms_in_fp32(
     monkeypatch,
 ) -> None:
@@ -223,6 +225,8 @@ def test_eagle_vlm_fp16_reranker_keeps_residual_and_norms_in_fp32(
     assert mlp_fp32_down_projection == expected_fp32_down
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_eagle_vlm_reranker_executes_actual_sequence_length() -> None:
     import tensorrt as trt
 
