@@ -282,8 +282,8 @@ def test_fl2va_build_receipt_binds_workflow_partition_plans_and_assets(
     )
     validate_component_build_receipt(
         receipt,
-        component="vae_encoder.plan",
-        artifact=plans / "vae_encoder.plan",
+        component="vae_encoder_tile_t1.plan",
+        artifact=plans / "vae_encoder_tile_t1.plan",
         build_helper=BUILD_HELPER,
         source_revision=SOURCE_REVISION,
         profile=SOL_ENGINE_1344X768_124F,
@@ -667,6 +667,9 @@ def test_fl2va_snapshot_and_bundle_provenance_cover_every_plan_and_asset(
         "max_text_rows": 4096,
         "fl2va_keyframe_counts": [0, 1, 2],
         "fl2va_keyframe_rows": 1008,
+        "fl2va_vae_tile_size": 256,
+        "fl2va_vae_tile_min_overlap": 64,
+        "fl2va_vae_temporal_frames": [1],
         "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
         "bundle_loading": {
             "mode": "staged",

@@ -251,6 +251,14 @@ def test_fl2va_bundle_source_revision_binds_workflow_partition_plans_and_assets(
         "vae_tile_batch": 28,
         "first_block_cache": False,
         "denoiser_cache_mode": "monolithic",
+        "min_text_rows": 1,
+        "max_text_rows": 4096,
+        "fl2va_keyframe_counts": [0, 1, 2],
+        "fl2va_keyframe_rows": 1008,
+        "fl2va_vae_tile_size": 256,
+        "fl2va_vae_tile_min_overlap": 64,
+        "fl2va_vae_temporal_frames": [1],
+        "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
         "plan_sha256": {filename: "d" * 64 for filename in FL2VA_PLAN_FILENAMES},
         "asset_sha256": {
             name: "e" * 64 for name in ("tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS)
@@ -265,6 +273,16 @@ def test_fl2va_bundle_source_revision_binds_workflow_partition_plans_and_assets(
 
     assert e2e_plugins.source_revision(case, ctx) == "a" * 40
 
+    config["fl2va_vae_temporal_frames"] = [1, 17]
+    write_bundle(
+        engine_dir / case.bundle,
+        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+        [BundleSection("config.json", json.dumps(config).encode())],
+    )
+    with pytest.raises(ValueError, match="FL2VA bundle profile"):
+        e2e_plugins.source_revision(case, ctx)
+
+    config["fl2va_vae_temporal_frames"] = [1]
     config["checkpoint_partition"] = "transformer_ref"
     write_bundle(
         engine_dir / case.bundle,

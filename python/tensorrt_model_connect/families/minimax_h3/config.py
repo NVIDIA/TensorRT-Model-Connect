@@ -76,7 +76,7 @@ DEFAULT_WORKSPACE_LIMIT_BYTES = {
 FL2VA_PLAN_FILENAMES = (
     "language_conditioner.plan",
     "vision_conditioner.plan",
-    "vae_encoder.plan",
+    "vae_encoder_tile_t1.plan",
     "adaln_precompute.plan",
     "fl2va_denoiser.plan",
     "vae_tile_decoder.plan",
@@ -86,7 +86,7 @@ FL2VA_PLAN_FILENAMES = (
 FL2VA_DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "language_conditioner.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "vision_conditioner.plan": VISION_CONDITIONER_DEFAULT_WORKSPACE_BYTES,
-    "vae_encoder.plan": VAE_ENCODER_DEFAULT_WORKSPACE_BYTES,
+    "vae_encoder_tile_t1.plan": VAE_ENCODER_DEFAULT_WORKSPACE_BYTES,
     "adaln_precompute.plan": ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES,
     "fl2va_denoiser.plan": DENOISER_DEFAULT_WORKSPACE_BYTES,
     "vae_tile_decoder.plan": VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,

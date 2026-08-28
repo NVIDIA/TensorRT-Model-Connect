@@ -433,21 +433,24 @@ def main() -> int:
             del weights, plan
             gc.collect()
 
-    if workflow == "fl2va" and should_build("vae_encoder", "vae_encoder.plan"):
+    if workflow == "fl2va" and should_build("vae_encoder", "vae_encoder_tile_t1.plan"):
         from tensorrt_model_connect.families.minimax_h3.vae_encoder_builder import (
-            build_vae_encoder_engine,
+            build_vae_encoder_tile_engine,
         )
 
         started = time.perf_counter()
-        plan = build_vae_encoder_engine(
+        plan = build_vae_encoder_tile_engine(
             model / "vae",
-            batch_size=1,
             num_frames=1,
-            height=768,
-            width=1344,
-            workspace_bytes=workspace_limit_bytes["vae_encoder.plan"],
+            workspace_bytes=workspace_limit_bytes["vae_encoder_tile_t1.plan"],
         )
-        _write(output, "vae_encoder.plan", plan, time.perf_counter() - started, receipt)
+        _write(
+            output,
+            "vae_encoder_tile_t1.plan",
+            plan,
+            time.perf_counter() - started,
+            receipt,
+        )
         checkpoint_receipt()
         del plan
         gc.collect()

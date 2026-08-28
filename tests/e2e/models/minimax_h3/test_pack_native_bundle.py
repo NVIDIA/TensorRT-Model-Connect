@@ -303,6 +303,9 @@ def test_fl2va_packer_binds_seven_plans_processor_assets_and_workflow(
     assert config["processor_asset_sections"] == list(FL2VA_PROCESSOR_ASSET_SECTIONS)
     assert config["fl2va_keyframe_counts"] == [0, 1, 2]
     assert config["fl2va_keyframe_rows"] == 1008
+    assert config["fl2va_vae_tile_size"] == 256
+    assert config["fl2va_vae_tile_min_overlap"] == 64
+    assert config["fl2va_vae_temporal_frames"] == [1]
     assert config["bundle_loading"] == pack_native_bundle._bundle_loading_policy(
         pack_native_bundle.FL2VA_PLAN_SECTIONS,
         processor_sections=FL2VA_PROCESSOR_ASSET_SECTIONS,

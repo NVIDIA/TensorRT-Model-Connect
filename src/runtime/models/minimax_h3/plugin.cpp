@@ -61,7 +61,7 @@ SectionMap index_sections(const BundleInfo& info, bool first_block_cache,
         sections.emplace(name, *it);
     };
     constexpr std::array<const char*, 7> fl2va_names = {
-        "language_conditioner_plan", "vision_conditioner_plan", "vae_encoder_plan",
+        "language_conditioner_plan", "vision_conditioner_plan", "vae_encoder_tile_t1_plan",
         "adaln_precompute_plan",     "fl2va_denoiser_plan",     "vae_tile_decoder_plan",
         "audio_vae_decoder_plan"};
     if (workflow == MiniMaxH3Workflow::kFl2va) {
@@ -104,7 +104,9 @@ void validate_audio_profile(const PipelineContext& ctx) {
 void validate_fl2va_profile(const PipelineContext& ctx) {
     if (extract_json_int(ctx.config_json, "min_text_rows", 1) != 1 ||
         extract_json_int(ctx.config_json, "max_text_rows", 4096) != 4096 ||
-        extract_json_int(ctx.config_json, "fl2va_keyframe_rows", 1008) != 1008)
+        extract_json_int(ctx.config_json, "fl2va_keyframe_rows", 1008) != 1008 ||
+        extract_json_int(ctx.config_json, "fl2va_vae_tile_size", 256) != 256 ||
+        extract_json_int(ctx.config_json, "fl2va_vae_tile_min_overlap", 64) != 64)
         throw std::runtime_error("MiniMax-H3 FL2VA bundle has an incompatible dynamic profile");
     for (const char* name :
          {"processor/preprocessor_config.json", "processor/video_preprocessor_config.json"}) {

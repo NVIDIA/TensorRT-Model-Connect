@@ -1142,18 +1142,53 @@ std::vector<float> normalize_keyframe_for_vae(const MediaImageInput& keyframe) {
     return result;
 }
 
-std::vector<float> sample_keyframe_posterior(const Tensor& moments) {
+std::vector<float> encode_visual_moments(const std::vector<float>& normalized,
+                                         int32_t source_frames, int32_t height, int32_t width,
+                                         ITrtModule& module) {
+    const auto spatial = make_minimax_h3_vae_spatial_tile_plan(height, width);
+    const auto temporal = make_minimax_h3_vae_temporal_chunk_plan(source_frames);
+    std::vector<std::vector<float>> stitched_chunks;
+    stitched_chunks.reserve(temporal.chunks.size());
+    for (const auto& chunk : temporal.chunks) {
+        std::vector<std::vector<float>> raw_tiles;
+        raw_tiles.reserve(spatial.rows.size() * spatial.columns.size());
+        for (const auto& row : spatial.rows) {
+            for (const auto& column : spatial.columns) {
+                auto tile = minimax_h3_extract_vae_encoder_tile(normalized, source_frames, height,
+                                                                width, chunk, row, column);
+                TensorMap inputs;
+                inputs.emplace("normalized_rgb",
+                               Tensor{tile.data(),
+                                      {1, 3, chunk.engine_num_frames, kMiniMaxH3VaeEncoderTileSize,
+                                       kMiniMaxH3VaeEncoderTileSize},
+                                      DType::kFloat32});
+                const auto outputs = module.forward(inputs);
+                const std::size_t expected = static_cast<std::size_t>(kMiniMaxH3VaeMomentChannels) *
+                                             chunk.raw_moment_frames * 16 * 16;
+                raw_tiles.push_back(copy_float(require_output(outputs, "posterior_moments"),
+                                               expected, "VAE encoder tile"));
+            }
+        }
+        stitched_chunks.push_back(
+            minimax_h3_stitch_vae_encoder_tiles(raw_tiles, spatial, chunk.raw_moment_frames));
+    }
+    module.sync();
+    return minimax_h3_assemble_vae_temporal_moments(
+        stitched_chunks, height / kMiniMaxH3VaeSpatialCompression,
+        width / kMiniMaxH3VaeSpatialCompression, temporal);
+}
+
+std::vector<float> sample_keyframe_posterior(const std::vector<float>& moments) {
     constexpr std::size_t latent_count =
         static_cast<std::size_t>(kLatentChannels) * kLatentHeight * kLatentWidth;
-    if (moments.dtype != DType::kFloat32 || moments.numel() != 2 * latent_count)
+    if (moments.size() != 2 * latent_count)
         throw std::runtime_error("MiniMax-H3 visual VAE returned invalid posterior moments");
-    const auto* values = static_cast<const float*>(moments.data);
     const auto noise = minimax_h3::torch_cuda_normal(latent_count, 42);
     std::vector<float> result(latent_count);
     const std::size_t plane = static_cast<std::size_t>(kLatentHeight) * kLatentWidth;
     for (std::size_t index = 0; index < latent_count; ++index) {
-        const float log_variance = std::clamp(values[latent_count + index], -30.0F, 20.0F);
-        const float sampled = values[index] + std::exp(0.5F * log_variance) * noise[index];
+        const float log_variance = std::clamp(moments[latent_count + index], -30.0F, 20.0F);
+        const float sampled = moments[index] + std::exp(0.5F * log_variance) * noise[index];
         const float rounded = __half2float(__float2half_rn(sampled));
         const int32_t channel = static_cast<int32_t>(index / plane);
         result[index] = (rounded - kLatentMean[channel]) / kLatentStd[channel];
@@ -1173,18 +1208,14 @@ Fl2vaVideoConditioning encode_fl2va_keyframe_latents(const std::vector<MediaImag
     Fl2vaVideoConditioning result;
     if (keyframes.empty())
         return result;
-    auto module = loader("vae_encoder_plan", stream);
-    module->set_timing_label("vae_encoder_plan");
+    auto module = loader("vae_encoder_tile_t1_plan", stream);
+    module->set_timing_label("vae_encoder_tile_t1_plan");
     constexpr std::size_t latent_count =
         static_cast<std::size_t>(kLatentChannels) * kLatentHeight * kLatentWidth;
     for (const auto& keyframe : keyframes) {
         auto pixels = normalize_keyframe_for_vae(keyframe);
-        TensorMap inputs;
-        inputs.emplace(
-            "normalized_rgb",
-            Tensor{pixels.data(), {1, 3, 1, kOutputHeight, kOutputWidth}, DType::kFloat32});
-        const auto outputs = module->forward(inputs);
-        auto latent = sample_keyframe_posterior(require_output(outputs, "posterior_moments"));
+        auto moments = encode_visual_moments(pixels, 1, kOutputHeight, kOutputWidth, *module);
+        auto latent = sample_keyframe_posterior(moments);
         auto latent_rows = patchify_video_shape(latent, 1, kLatentHeight, kLatentWidth);
         auto noise = minimax_h3::torch_cuda_normal(
             latent_count, static_cast<uint64_t>(request_seed), result.request_rng_offset);
@@ -1196,7 +1227,6 @@ Fl2vaVideoConditioning encode_fl2va_keyframe_latents(const std::vector<MediaImag
                 timestep * latent_rows[index] + (1.0F - timestep) * noise_rows[index];
         result.rows.insert(result.rows.end(), latent_rows.begin(), latent_rows.end());
     }
-    module->sync();
     return result;
 }
 
@@ -1385,38 +1415,8 @@ std::vector<float> encode_ref2va_visual_moments(const MiniMaxH3PreparedReference
         image ? 1 : minimax_h3_trim_reference_num_frames(reference.video.num_frames);
     const int32_t height = image ? reference.image.height : reference.video.height;
     const int32_t width = image ? reference.image.width : reference.video.width;
-    const auto spatial = make_minimax_h3_vae_spatial_tile_plan(height, width);
-    const auto temporal = make_minimax_h3_vae_temporal_chunk_plan(source_frames);
     const auto normalized = normalize_ref2va_visual(reference, source_frames);
-    std::vector<std::vector<float>> stitched_chunks;
-    stitched_chunks.reserve(temporal.chunks.size());
-    for (const auto& chunk : temporal.chunks) {
-        std::vector<std::vector<float>> raw_tiles;
-        raw_tiles.reserve(spatial.rows.size() * spatial.columns.size());
-        for (const auto& row : spatial.rows) {
-            for (const auto& column : spatial.columns) {
-                auto tile = minimax_h3_extract_vae_encoder_tile(normalized, source_frames, height,
-                                                                width, chunk, row, column);
-                TensorMap inputs;
-                inputs.emplace("normalized_rgb",
-                               Tensor{tile.data(),
-                                      {1, 3, chunk.engine_num_frames, kMiniMaxH3VaeEncoderTileSize,
-                                       kMiniMaxH3VaeEncoderTileSize},
-                                      DType::kFloat32});
-                const auto outputs = module.forward(inputs);
-                const std::size_t expected = static_cast<std::size_t>(kMiniMaxH3VaeMomentChannels) *
-                                             chunk.raw_moment_frames * 16 * 16;
-                raw_tiles.push_back(copy_float(require_output(outputs, "posterior_moments"),
-                                               expected, "Ref2VA VAE encoder tile"));
-            }
-        }
-        stitched_chunks.push_back(
-            minimax_h3_stitch_vae_encoder_tiles(raw_tiles, spatial, chunk.raw_moment_frames));
-    }
-    module.sync();
-    return minimax_h3_assemble_vae_temporal_moments(
-        stitched_chunks, height / kMiniMaxH3VaeSpatialCompression,
-        width / kMiniMaxH3VaeSpatialCompression, temporal);
+    return encode_visual_moments(normalized, source_frames, height, width, module);
 }
 
 std::vector<float> sample_ref2va_posterior(const std::vector<float>& moments, int32_t frames,

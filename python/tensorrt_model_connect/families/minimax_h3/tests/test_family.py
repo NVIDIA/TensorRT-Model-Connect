@@ -432,7 +432,7 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
     monkeypatch.setitem(
         sys.modules,
         f"{module_prefix}.vae_encoder_builder",
-        SimpleNamespace(build_vae_encoder_engine=payload("vae_encoder")),
+        SimpleNamespace(build_vae_encoder_tile_engine=payload("vae_encoder_tile_t1")),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -482,19 +482,16 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
     assert components["checkpoint_partition"] == "transformer"
     assert components["language_conditioner"] == b"language_conditioner"
     assert components["vision_conditioner"] == b"vision_conditioner"
-    assert components["vae_encoder"] == b"vae_encoder"
+    assert components["vae_encoder_tile_t1"] == b"vae_encoder_tile_t1"
     assert components["fl2va_denoiser"] == b"fl2va_denoiser"
     assert snapshot_calls == [(model_dir, {"workflow": "fl2va"})]
     assert partition_calls[0][0] == str(paths["transformer"])
     assert calls["language_conditioner"]["kwargs"]["workflow"] == "fl2va"
     assert calls["fl2va_denoiser"]["kwargs"]["checkpoint_subfolder"] == "transformer"
-    assert calls["vae_encoder"]["kwargs"] == {
-        "batch_size": 1,
+    assert calls["vae_encoder_tile_t1"]["kwargs"] == {
         "num_frames": 1,
-        "height": 768,
-        "width": 1344,
         "verbose": True,
-        "workspace_bytes": FL2VA_DEFAULT_WORKSPACE_LIMIT_BYTES["vae_encoder.plan"],
+        "workspace_bytes": FL2VA_DEFAULT_WORKSPACE_LIMIT_BYTES["vae_encoder_tile_t1.plan"],
     }
     provenance = components["provenance"]
     assert provenance["workflow"] == "fl2va"
@@ -510,7 +507,7 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
     assert tuple(sections) == (
         "language_conditioner_plan",
         "vision_conditioner_plan",
-        "vae_encoder_plan",
+        "vae_encoder_tile_t1_plan",
         "adaln_precompute_plan",
         "fl2va_denoiser_plan",
         "vae_tile_decoder_plan",
@@ -524,6 +521,9 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
     )
     assert bundle_config["workflow"] == "fl2va"
     assert bundle_config["checkpoint_partition"] == "transformer"
+    assert bundle_config["fl2va_vae_tile_size"] == 256
+    assert bundle_config["fl2va_vae_tile_min_overlap"] == 64
+    assert bundle_config["fl2va_vae_temporal_frames"] == [1]
     assert bundle_config["bundle_loading"] == {
         "mode": "staged",
         "eager_sections": [
@@ -534,7 +534,7 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
         "lazy_sections": [
             "language_conditioner_plan",
             "vision_conditioner_plan",
-            "vae_encoder_plan",
+            "vae_encoder_tile_t1_plan",
             "adaln_precompute_plan",
             "fl2va_denoiser_plan",
             "vae_tile_decoder_plan",

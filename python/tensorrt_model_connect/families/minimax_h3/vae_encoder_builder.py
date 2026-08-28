@@ -157,7 +157,7 @@ class VideoVaeEncoderShape:
 
 @dataclass(frozen=True)
 class VideoVaeEncoderTileShape:
-    """One reusable raw encoder tile plan used by Ref2VA.
+    """One reusable raw encoder tile plan used by conditioned workflows.
 
     The released encoder has two genuinely different temporal paths: a still
     image is encoded at ``T=1``, while videos are split into ``T=17`` clips.
@@ -1232,11 +1232,13 @@ def build_vae_encoder_engine(
     verbose: bool = False,
     workspace_bytes: int | None = None,
 ) -> bytes:
-    """Build normalized RGB -> posterior moments for one explicit static shape.
+    """Build a legacy full-canvas encoder for diagnostics and API compatibility.
 
-    This does not sample or normalize the posterior.  In particular, callers
-    implementing visual conditioning must still use the released seed-42
-    posterior sample and FP16-rounding recipe before latent normalization.
+    Production FL2VA and Ref2VA bundles use the static raw-tile builders below
+    and stitch their outputs in the native runtime.  Keeping this entry point
+    avoids breaking direct builder callers, but its in-graph multi-tile export
+    is not a production conditioning boundary.  It does not sample or
+    normalize the posterior.
     """
 
     shape = VideoVaeEncoderShape(batch_size, num_frames, height, width)
@@ -1263,7 +1265,7 @@ def build_vae_encoder_tile_engine(
     verbose: bool = False,
     workspace_bytes: int | None = None,
 ) -> bytes:
-    """Build one raw 256x256 Ref2VA tile plan for exactly T=1 or T=17.
+    """Build one raw 256x256 conditioned-media tile plan for exactly T=1 or T=17.
 
     The returned plan performs no spatial stitching, temporal padding, or
     token dropping.  Callers must use :func:`make_spatial_tile_plan` and
@@ -1293,7 +1295,7 @@ def build_vae_encoder_tile_engines(
     verbose: bool = False,
     workspace_bytes: int | None = None,
 ) -> dict[int, bytes]:
-    """Build the complete reusable Ref2VA tile-plan set, keyed by T."""
+    """Build the complete reusable conditioned-media tile-plan set, keyed by T."""
 
     return {
         num_frames: build_vae_encoder_tile_engine(

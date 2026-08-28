@@ -163,10 +163,7 @@ def test_main_passes_cli_workspace_to_every_builder(
         "vision_conditioner_builder": (
             ("build_vision_conditioner_engine", "vision_conditioner.plan"),
         ),
-        "vae_encoder_builder": (
-            ("build_vae_encoder_engine", "vae_encoder.plan"),
-            ("build_vae_encoder_tile_engine", "vae_encoder_tile.plan"),
-        ),
+        "vae_encoder_builder": (("build_vae_encoder_tile_engine", "vae_encoder_tile.plan"),),
     }
     package = "tensorrt_model_connect.families.minimax_h3"
     for module_name, builders in module_specs.items():
@@ -268,11 +265,8 @@ def test_main_passes_cli_workspace_to_every_builder(
         assert observed["vision_conditioner.plan"]["kwargs"]["workflow"] == workflow
     if workflow == "fl2va":
         assert observed["fl2va_denoiser.plan"]["kwargs"]["checkpoint_subfolder"] == "transformer"
-        assert observed["vae_encoder.plan"]["kwargs"] == {
-            "batch_size": 1,
+        assert observed["vae_encoder_tile_t1.plan"]["kwargs"] == {
             "num_frames": 1,
-            "height": 768,
-            "width": 1344,
         }
     if workflow == "ref2va":
         assert observed["ref2va_denoiser.plan"]["kwargs"]["checkpoint_subfolder"] == (

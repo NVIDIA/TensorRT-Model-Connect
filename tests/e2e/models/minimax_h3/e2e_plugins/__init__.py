@@ -487,7 +487,25 @@ def source_revision(case: E2ECase, ctx: RunContext) -> str:
             raise ValueError(
                 f"MiniMax-H3 {selected_workflow.upper()} bundle contains an invalid asset SHA256"
             )
-    if selected_workflow == "ref2va":
+    if selected_workflow == "fl2va":
+        expected_fl2va = {
+            "min_text_rows": 1,
+            "max_text_rows": 4096,
+            "fl2va_keyframe_counts": [0, 1, 2],
+            "fl2va_keyframe_rows": 1008,
+            "fl2va_vae_tile_size": 256,
+            "fl2va_vae_tile_min_overlap": 64,
+            "fl2va_vae_temporal_frames": [1],
+            "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
+        }
+        mismatches = {
+            name: (config.get(name), value)
+            for name, value in expected_fl2va.items()
+            if config.get(name) != value
+        }
+        if mismatches:
+            raise ValueError(f"MiniMax-H3 FL2VA bundle profile is invalid: {mismatches}")
+    elif selected_workflow == "ref2va":
         expected_ref2va = {
             "min_text_rows": 1,
             "opt_text_rows": 8192,

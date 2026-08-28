@@ -488,19 +488,18 @@ class MiniMaxH3Plugin:
 
         vae_encoder_components = {}
         if workflow == "fl2va":
-            from .vae_encoder_builder import build_vae_encoder_engine
+            from .vae_encoder_builder import build_vae_encoder_tile_engine
 
-            vae_encoder_plan = build_vae_encoder_engine(
+            vae_encoder_tile_plan = build_vae_encoder_tile_engine(
                 weights["_vae_dir"],
-                batch_size=1,
                 num_frames=1,
-                height=768,
-                width=1344,
                 verbose=verbose,
-                workspace_bytes=workspace_limits["vae_encoder.plan"],
+                workspace_bytes=workspace_limits["vae_encoder_tile_t1.plan"],
             )
-            vae_encoder_components["vae_encoder"] = vae_encoder_plan
-            plan_sha256["vae_encoder.plan"] = hashlib.sha256(vae_encoder_plan).hexdigest()
+            vae_encoder_components["vae_encoder_tile_t1"] = vae_encoder_tile_plan
+            plan_sha256["vae_encoder_tile_t1.plan"] = hashlib.sha256(
+                vae_encoder_tile_plan
+            ).hexdigest()
         elif workflow == "ref2va":
             from .vae_encoder_builder import build_vae_encoder_tile_engine
 
@@ -623,7 +622,7 @@ class MiniMaxH3Plugin:
             return [
                 ("language_conditioner_plan", components["language_conditioner"]),
                 ("vision_conditioner_plan", components["vision_conditioner"]),
-                ("vae_encoder_plan", components["vae_encoder"]),
+                ("vae_encoder_tile_t1_plan", components["vae_encoder_tile_t1"]),
                 ("adaln_precompute_plan", components["adaln_precompute"]),
                 ("fl2va_denoiser_plan", components["fl2va_denoiser"]),
                 ("vae_tile_decoder_plan", components["vae_decoder"]),
@@ -737,7 +736,7 @@ class MiniMaxH3Plugin:
             conditioner_sections = [
                 "language_conditioner_plan",
                 "vision_conditioner_plan",
-                "vae_encoder_plan",
+                "vae_encoder_tile_t1_plan",
             ]
         elif workflow == "ref2va":
             expected_assets = ("tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS)
@@ -812,6 +811,9 @@ class MiniMaxH3Plugin:
                     "max_text_rows": profile.max_text_rows,
                     "fl2va_keyframe_counts": list(FL2VA_KEYFRAME_COUNTS),
                     "fl2va_keyframe_rows": FL2VA_KEYFRAME_ROWS_1344X768,
+                    "fl2va_vae_tile_size": 256,
+                    "fl2va_vae_tile_min_overlap": 64,
+                    "fl2va_vae_temporal_frames": [1],
                     "processor_asset_sections": list(FL2VA_PROCESSOR_ASSET_SECTIONS),
                 }
             )

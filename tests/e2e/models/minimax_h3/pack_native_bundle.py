@@ -210,6 +210,9 @@ def main() -> int:
                 "max_text_rows": profile.max_text_rows,
                 "fl2va_keyframe_counts": [0, 1, 2],
                 "fl2va_keyframe_rows": 1008,
+                "fl2va_vae_tile_size": 256,
+                "fl2va_vae_tile_min_overlap": 64,
+                "fl2va_vae_temporal_frames": [1],
                 "processor_asset_sections": list(processor_sections),
                 "asset_sha256": {
                     name: receipt["assets"][name]["sha256"]
