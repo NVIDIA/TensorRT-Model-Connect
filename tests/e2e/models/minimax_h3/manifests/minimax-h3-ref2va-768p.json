@@ -6,7 +6,15 @@
   "family": "minimax_h3",
   "runtime_strategy": "diffusion_minimax_h3",
   "task_strategy": "diffusion_media_generation",
-  "benchmark_exclusion_reason": "Optional conditioned plumbing profile; weight-backed HF/native parity and release-performance qualification have not been recorded.",
+  "benchmark_exclusion_reason": "Required input/audio parity profile; release-performance qualification is tracked separately and has not been recorded.",
+  "official_input_specification": {
+    "repository": "MiniMaxAI/MiniMax-H3",
+    "path": "README.md",
+    "current_revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+    "sha256": "f0116a90332496bdfcc827320c603a26b849c73bf804f2674d03682fbbd2334a",
+    "audio_only_semantics_revision": "939557dc319dd91227e30195a763f272ba7f8765",
+    "semantics": "Ref2VA accepts one or more audio references without image or video"
+  },
   "precision": "bf16",
   "reference_precision": "bf16",
   "workflow": "ref2va",
@@ -113,7 +121,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional Ref2VA image-reference plumbing probe",
+      "description": "Required Ref2VA image-only audio-video parity gate",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "references": [
@@ -134,10 +142,10 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "Plumbing-only optional coverage. It makes no Ref2VA quality or parity claim until an authorized weights run records actual HF/native visual and stereo-audio evidence."
+      "notes": "Required release-parity gate for the official Ref2VA image-only mode, comparing native video and original joint soundtrack output against the pinned HF implementation."
     },
     {
       "name": "minimax-h3-ref2va-video-with-soundtrack",
@@ -145,7 +153,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional Ref2VA video-with-soundtrack plumbing probe",
+      "description": "Required Ref2VA video-with-soundtrack audio-video parity gate",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "references": [
@@ -166,10 +174,10 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "Plumbing-only optional coverage. The tiny textual video manifest and generated two-second WAV are synthetic and are not quality fixtures; authorized weights are required before claiming parity."
+      "notes": "Required release-parity gate for the official Ref2VA video-with-soundtrack mode, comparing native video and original joint soundtrack output against the pinned HF implementation."
     },
     {
       "name": "minimax-h3-ref2va-image-and-audio",
@@ -177,7 +185,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional Ref2VA image-plus-audio plumbing probe",
+      "description": "Required Ref2VA image-plus-audio parity gate",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "references": [
@@ -202,10 +210,10 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "Plumbing-only optional coverage. The deterministic generated WAV proves audio routing and the visual-reference gate without claiming conditioned quality absent an authorized weights run."
+      "notes": "Required release-parity gate for the official Ref2VA image-plus-audio mode, comparing native video and original joint soundtrack output against the pinned HF implementation."
     },
     {
       "name": "minimax-h3-ref2va-mixed-ordered",
@@ -213,7 +221,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional Ref2VA mixed-modality encounter-order plumbing probe",
+      "description": "Required Ref2VA mixed-modality encounter-order parity gate",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "references": [
@@ -246,10 +254,42 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "Plumbing-only optional coverage. Reordering these same synthetic media is a different Ref2VA request; no parity claim is made until authorized weights produce reviewed HF/native visual and stereo-audio evidence."
+      "notes": "Required release-parity gate for the official Ref2VA mixed ordered mode; reference encounter order is semantic and both native video and original joint soundtrack are compared against the pinned HF implementation."
+    },
+    {
+      "name": "minimax-h3-ref2va-audio-only",
+      "trace_id": "IT-E2E-MINIMAX-H3-REF2VA-AUDIO-ONLY-01",
+      "runtime_timeout_s": 7200,
+      "reference_family": "diffusers_video_gen",
+      "user_contract": "diffusion_video",
+      "description": "Required Ref2VA audio-only audio-video parity gate",
+      "test_type": "diffusion",
+      "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
+      "references": [
+        {
+          "kind": "audio",
+          "path": "tests/e2e/models/minimax_h3/data/ref2va-reference.wav"
+        }
+      ],
+      "video_num_frames": 124,
+      "video_height": 768,
+      "video_width": 1344,
+      "num_inference_steps": 50,
+      "fps": 24,
+      "audio_channels": 2,
+      "audio_sample_rate_hz": 32000,
+      "audio_num_samples_per_channel": 165600,
+      "seed": 0,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "notes": "Required release-parity gate for the official Ref2VA audio-only mode introduced by model-card revision 939557dc319dd91227e30195a763f272ba7f8765, comparing native video and original joint soundtrack output against the pinned HF implementation."
     }
   ]
 }

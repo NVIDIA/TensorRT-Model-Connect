@@ -6,7 +6,7 @@
   "family": "minimax_h3",
   "runtime_strategy": "diffusion_minimax_h3",
   "task_strategy": "diffusion_media_generation",
-  "benchmark_exclusion_reason": "Optional conditioned plumbing profile; weight-backed HF/native parity and release-performance qualification have not been recorded.",
+  "benchmark_exclusion_reason": "Required input/audio parity profile; release-performance qualification is tracked separately and has not been recorded.",
   "precision": "bf16",
   "reference_precision": "bf16",
   "workflow": "fl2va",
@@ -104,7 +104,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional FL2VA-workflow zero-keyframe audio-video parity probe",
+      "description": "Required FL2VA-workflow zero-keyframe audio-video parity gate",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "video_num_frames": 124,
@@ -119,10 +119,10 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "This is an optional workflow-routing probe. It is not a conditioned quality qualification and does not replace the required T2VA gate."
+      "notes": "Required release-parity gate for the official FL2VA zero-keyframe mode, comparing native video and original joint soundtrack output against the pinned HF implementation."
     },
     {
       "name": "minimax-h3-fl2va-first-keyframe",
@@ -130,7 +130,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional first-keyframe FL2VA audio-video parity probe using a repository-owned synthetic image",
+      "description": "Required first-keyframe FL2VA audio-video parity gate using a repository-owned deterministic image",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "first_image": "tests/e2e/models/minimax_h3/data/fl2va-first.ppm",
@@ -146,10 +146,10 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "The synthetic image proves input plumbing only. This stage remains optional until an authorized run uses the exact conditioned reference asset and records real HF/native visual and stereo-audio parity."
+      "notes": "Required release-parity gate for the official FL2VA first-keyframe mode, comparing native video and original joint soundtrack output against the pinned HF implementation."
     },
     {
       "name": "minimax-h3-fl2va-last-keyframe",
@@ -157,7 +157,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional last-keyframe FL2VA audio-video parity probe using a repository-owned synthetic image",
+      "description": "Required last-keyframe FL2VA audio-video parity gate using a repository-owned deterministic image",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "last_image": "tests/e2e/models/minimax_h3/data/fl2va-last.ppm",
@@ -173,10 +173,10 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "The synthetic image proves input plumbing only. This stage remains optional until an authorized run uses an exact reference asset and records real HF/native visual and stereo-audio parity."
+      "notes": "Required release-parity gate for the official FL2VA last-keyframe mode, comparing native video and original joint soundtrack output against the pinned HF implementation."
     },
     {
       "name": "minimax-h3-fl2va-first-and-last-keyframes",
@@ -184,7 +184,7 @@
       "runtime_timeout_s": 7200,
       "reference_family": "diffusers_video_gen",
       "user_contract": "diffusion_video",
-      "description": "Optional two-keyframe FL2VA audio-video parity probe using repository-owned synthetic images",
+      "description": "Required two-keyframe FL2VA audio-video parity gate using repository-owned deterministic images",
       "test_type": "diffusion",
       "prompt_file": "tests/e2e/models/minimax_h3/prompts/t2va-example-1.json",
       "first_image": "tests/e2e/models/minimax_h3/data/fl2va-first.ppm",
@@ -201,10 +201,10 @@
       "stages": [
         {
           "name": "end_to_end",
-          "required": false
+          "required": true
         }
       ],
-      "notes": "The synthetic images prove ordered first/last plumbing only. This stage remains optional until an authorized run uses exact reference assets and records real HF/native visual and stereo-audio parity."
+      "notes": "Required release-parity gate for the official FL2VA first-and-last-keyframe mode, comparing native video and original joint soundtrack output against the pinned HF implementation."
     }
   ]
 }

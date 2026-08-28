@@ -28,6 +28,7 @@ from tensorrt_model_connect.families.minimax_h3.config import (  # noqa: E402
     REF2VA_MAX_TEXT_ROWS,
     REF2VA_MAX_VIDEO_CONDITION_VIDEO_ROWS,
     REF2VA_MAX_VIDEO_SOUNDTRACK_ROWS,
+    REF2VA_MIN_CONDITION_VIDEO_ROWS,
     SOL_ENGINE_1344X768_124F,
     TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
     VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
@@ -293,6 +294,7 @@ def test_ref2va_profile_covers_model_card_maxima_without_padding() -> None:
     profile = SOL_ENGINE_1344X768_124F
     shapes = ref2va_optimization_profile_shapes(profile)
     assert profile.ref2va_max_text_rows == REF2VA_MAX_TEXT_ROWS == 262144
+    assert profile.ref2va_min_condition_video_rows == REF2VA_MIN_CONDITION_VIDEO_ROWS == 0
     assert profile.ref2va_max_condition_video_rows == REF2VA_MAX_CONDITION_VIDEO_ROWS == 258120
     assert REF2VA_MAX_CONDITION_VIDEO_ROWS == (
         REF2VA_MAX_IMAGE_CONDITION_VIDEO_ROWS + REF2VA_MAX_VIDEO_CONDITION_VIDEO_ROWS
@@ -303,14 +305,14 @@ def test_ref2va_profile_covers_model_card_maxima_without_padding() -> None:
     )
     assert REF2VA_MAX_STANDALONE_AUDIO_ROWS == REF2VA_MAX_VIDEO_SOUNDTRACK_ROWS == 1204
     assert shapes == {
-        "video_hidden_states": ((41392, 96), (41392, 96), (295416, 96)),
+        "video_hidden_states": ((37296, 96), (41392, 96), (295416, 96)),
         "audio_hidden_states": ((414, 32), (414, 32), (2822, 32)),
         "encoder_hidden_states": ((1, 5120), (8192, 5120), (262144, 5120)),
-        "video_indices": ((41392,), (41392,), (295416,)),
+        "video_indices": ((37296,), (41392,), (295416,)),
         "audio_indices": ((414,), (414,), (2822,)),
-        "position_ids": ((41807, 3), (49998, 3), (560382, 3)),
-        "token_tags": ((41807,), (49998,), (560382,)),
-        "timestep_indices": ((41807,), (49998,), (560382,)),
+        "position_ids": ((37711, 3), (49998, 3), (560382, 3)),
+        "token_tags": ((37711,), (49998,), (560382,)),
+        "timestep_indices": ((37711,), (49998,), (560382,)),
     }
     # The maximum is intentionally visible to native attention, not represented
     # by a smaller live sequence plus capacity padding.

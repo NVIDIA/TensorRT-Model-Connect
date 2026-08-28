@@ -48,7 +48,9 @@ FL2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER = "transformer"
 # per channel, not the unpadded 600; both groups need 2,408 rows.
 REF2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER = "transformer_ref"
 REF2VA_MAX_TEXT_ROWS = 262144
-REF2VA_MIN_CONDITION_VIDEO_ROWS = 4096
+# The official Ref2VA input specification permits audio-only references, so
+# the denoiser profile must accept target video rows with no condition video.
+REF2VA_MIN_CONDITION_VIDEO_ROWS = 0
 REF2VA_OPT_CONDITION_VIDEO_ROWS = 4096
 REF2VA_MAX_IMAGE_CONDITION_VIDEO_ROWS = 147456
 REF2VA_MAX_VIDEO_LATENT_FRAMES = 106
@@ -355,7 +357,7 @@ class MiniMaxH3Config:
                 self.ref2va_min_condition_video_rows,
                 self.ref2va_opt_condition_video_rows,
                 self.ref2va_max_condition_video_rows,
-                1,
+                0,
             ),
             (
                 "condition audio",

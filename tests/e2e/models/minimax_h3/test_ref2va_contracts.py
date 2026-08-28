@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import hashlib
+import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import wave
 
 from PIL import Image
@@ -20,11 +23,17 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_MAX_TEXT_ROWS,
+    REF2VA_MIN_CONDITION_VIDEO_ROWS,
+    REF2VA_OPT_CONDITION_VIDEO_ROWS,
     REF2VA_PLAN_FILENAMES,
+)
+from tensorrt_model_connect.families.minimax_h3.provenance import (
+    ref2va_input_specification_record,
 )
 from tests.e2e.models.minimax_h3 import e2e_plugins, hf_reference, native_reference
 from tests.e2e.models.minimax_h3.e2e_plugins import reference as reference_plugin
 from tests.e2e.models.minimax_h3.e2e_plugins import runner as native_runner
+from tests.e2e.models.minimax_h3.receipt_contracts import validate_ref2va_receipt_contract
 from tests.e2e_harness.contracts import RunContext
 from tests.e2e_harness.manifest_loader import load_model_manifest
 
@@ -35,8 +44,8 @@ T2VA_MANIFEST = MODEL_DIR / "manifests" / "minimax-h3-768p.json"
 FL2VA_MANIFEST = MODEL_DIR / "manifests" / "minimax-h3-fl2va-768p.json"
 REFERENCE_FLAGS = {"--reference-image", "--reference-video", "--reference-audio"}
 BENCHMARK_EXCLUSION_REASON = (
-    "Optional conditioned plumbing profile; weight-backed HF/native parity and "
-    "release-performance qualification have not been recorded."
+    "Required input/audio parity profile; release-performance qualification is tracked "
+    "separately and has not been recorded."
 )
 
 
@@ -52,7 +61,7 @@ def _reference_flag_pairs(command: list[str]) -> list[tuple[str, Path]]:
     ]
 
 
-def test_ref2va_manifest_is_optional_plumbing_with_visual_and_audio_gates() -> None:
+def test_ref2va_manifest_covers_all_five_required_parity_modes() -> None:
     manifest = json.loads(REF2VA_MANIFEST.read_text(encoding="utf-8"))
     qualified_thresholds = json.loads(
         (MODEL_DIR / "thresholds" / "minimax-h3-768p.json").read_text()
@@ -61,11 +70,13 @@ def test_ref2va_manifest_is_optional_plumbing_with_visual_and_audio_gates() -> N
 
     assert model.bundle == "minimax-h3-ref2va-768p.bundle"
     assert manifest["benchmark_exclusion_reason"] == BENCHMARK_EXCLUSION_REASON
+    assert manifest["official_input_specification"] == ref2va_input_specification_record()
     assert [case.name for case in model.testcases] == [
         "minimax-h3-ref2va-image-only",
         "minimax-h3-ref2va-video-with-soundtrack",
         "minimax-h3-ref2va-image-and-audio",
         "minimax-h3-ref2va-mixed-ordered",
+        "minimax-h3-ref2va-audio-only",
     ]
     assert [
         [descriptor.kind for descriptor in e2e_plugins.reference_descriptors(case)]
@@ -75,13 +86,16 @@ def test_ref2va_manifest_is_optional_plumbing_with_visual_and_audio_gates() -> N
         ["video"],
         ["image", "audio"],
         ["audio", "image", "video", "image"],
+        ["audio"],
     ]
     for case in model.testcases:
         assert case.inputs["workflow"] == "ref2va"
         assert case.stages[0].name == "end_to_end"
-        assert case.stages[0].required is False
-        assert "Plumbing-only" in case.metadata["notes"]
-        assert "authorized" in case.metadata["notes"]
+        assert case.stages[0].required is True
+        assert "Required release-parity gate" in case.metadata["notes"]
+        assert case.metadata["official_input_specification"] == (
+            ref2va_input_specification_record()
+        )
         assert case.threshold_overrides == qualified_thresholds
         assert (MODEL_DIR / "thresholds" / f"{case.name}.json").is_file()
         e2e_plugins.validate_fixed_profile(case)
@@ -96,7 +110,7 @@ def test_ref2va_manifest_is_optional_plumbing_with_visual_and_audio_gates() -> N
     )
     assert load_model_manifest(T2VA_MANIFEST).testcases[0].stages[0].required is True
     assert all(
-        case.stages[0].required is False for case in load_model_manifest(FL2VA_MANIFEST).testcases
+        case.stages[0].required is True for case in load_model_manifest(FL2VA_MANIFEST).testcases
     )
 
 
@@ -183,6 +197,45 @@ def test_native_and_hf_wrappers_preserve_mixed_reference_order(
                     assert image.format == "PNG"
 
 
+def test_native_and_hf_wrappers_forward_audio_only_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _ref2va_cases()[4]
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    (plugin_dir / "libtrtmc_model_minimax_h3.so").write_bytes(b"plugin")
+    ctx = RunContext(
+        case=case,
+        binary_path=str(tmp_path / "trtmc"),
+        model_plugin_dir=str(plugin_dir),
+    )
+    monkeypatch.setattr(native_runner, "source_revision", lambda *_args: "a" * 40)
+
+    native = native_runner.build_native_command(
+        case,
+        ctx,
+        tmp_path / "native-output",
+        resolved_bundle=tmp_path / "ref2va.bundle",
+    )
+    reference = reference_plugin.build_hf_command(
+        case,
+        ctx,
+        tmp_path / "hf-output",
+        resolved_model=tmp_path / "snapshot",
+        revision="a" * 40,
+    )
+
+    for command in (native, reference):
+        pairs = _reference_flag_pairs(command)
+        assert [flag for flag, _path in pairs] == ["--reference-audio"]
+        assert pairs[0][1].is_file()
+        with wave.open(str(pairs[0][1]), "rb") as stream:
+            assert stream.getnchannels() == 2
+            assert stream.getframerate() == 32000
+            assert stream.getnframes() == 64000
+
+
 def test_hf_helper_emits_official_reference_objects_and_references_kwarg(
     tmp_path: Path,
 ) -> None:
@@ -231,6 +284,158 @@ def test_hf_helper_emits_official_reference_objects_and_references_kwarg(
     assert "last_image" not in arguments
 
 
+def test_hf_audio_only_compatibility_runs_upstream_and_suppresses_only_exact_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSetupStep:
+        @staticmethod
+        def _check_inputs(_components, block_state) -> None:
+            if block_state.invalid:
+                raise ValueError("another upstream validation failure")
+            if {reference.kind for reference in block_state.references} == {"audio"}:
+                raise ValueError(hf_reference._REF2VA_AUDIO_ONLY_GATE_ERROR)
+
+    original_descriptor = inspect.getattr_static(FakeSetupStep, "_check_inputs")
+    source = inspect.getsource(FakeSetupStep._check_inputs)
+    monkeypatch.setattr(
+        hf_reference,
+        "_REF2VA_CHECK_INPUTS_SOURCE_SHA256",
+        hashlib.sha256(source.encode("utf-8")).hexdigest(),
+    )
+    state = SimpleNamespace(
+        invalid=False,
+        references=[SimpleNamespace(kind="audio")],
+    )
+
+    with hf_reference.ref2va_audio_only_compatibility(
+        [("audio", Path("reference.wav"))], FakeSetupStep
+    ) as record:
+        assert FakeSetupStep._check_inputs(None, state) is None
+        assert record["suppressed_calls"] == 1
+        assert record["official_input_specification"] == ref2va_input_specification_record()
+        state.invalid = True
+        with pytest.raises(ValueError, match="another upstream validation failure"):
+            FakeSetupStep._check_inputs(None, state)
+
+    assert inspect.getattr_static(FakeSetupStep, "_check_inputs") is original_descriptor
+
+
+def test_hf_audio_only_compatibility_rejects_source_drift_and_wrong_runtime_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSetupStep:
+        @staticmethod
+        def _check_inputs(_components, _block_state) -> None:
+            raise ValueError(hf_reference._REF2VA_AUDIO_ONLY_GATE_ERROR)
+
+    monkeypatch.setattr(hf_reference, "_REF2VA_CHECK_INPUTS_SOURCE_SHA256", "0" * 64)
+    with pytest.raises(ValueError, match="input validator changed"):
+        with hf_reference.ref2va_audio_only_compatibility(
+            [("audio", Path("reference.wav"))], FakeSetupStep
+        ):
+            pass
+
+    source = inspect.getsource(FakeSetupStep._check_inputs)
+    monkeypatch.setattr(
+        hf_reference,
+        "_REF2VA_CHECK_INPUTS_SOURCE_SHA256",
+        hashlib.sha256(source.encode("utf-8")).hexdigest(),
+    )
+    wrong_state = SimpleNamespace(references=[SimpleNamespace(kind="image")])
+    with hf_reference.ref2va_audio_only_compatibility(
+        [("audio", Path("reference.wav"))], FakeSetupStep
+    ):
+        with pytest.raises(ValueError, match="cannot be used on its own"):
+            FakeSetupStep._check_inputs(None, wrong_state)
+
+
+def _audio_only_receipts(reference_count: int = 1) -> tuple[dict, dict]:
+    specification = ref2va_input_specification_record()
+    workload = {
+        "workflow": "ref2va",
+        "reference_kinds": ["audio"] * reference_count,
+    }
+    trt_receipt = {
+        "workload": workload,
+        "official_input_specification": specification,
+        "runtime": {
+            "references": reference_count,
+            "condition_video_rows": 0,
+            "condition_audio_rows": 160,
+        },
+        "engine_execute": {
+            "language_conditioner_plan_ms": 1.0,
+            "audio_vae_encoder_plan_ms": 1.0,
+            "ref2va_denoiser_plan_ms": 1.0,
+        },
+    }
+    ref_receipt = {
+        "request": {**workload, "warmup": 0, "measure": 1},
+        "official_input_specification": specification,
+        "ref2va_audio_only_compatibility": {
+            "name": "pinned-diffusers-ref2va-audio-only-input-gate",
+            "diffusers_revision": hf_reference.DIFFUSERS_REVISION,
+            "upstream_method": (
+                "diffusers.modular_pipelines.minimax_h3.before_encoder."
+                "MiniMaxH3Ref2VASetupStep._check_inputs"
+            ),
+            "upstream_method_source_sha256": (hf_reference._REF2VA_CHECK_INPUTS_SOURCE_SHA256),
+            "suppressed_error": hf_reference._REF2VA_AUDIO_ONLY_GATE_ERROR,
+            "suppressed_calls": 1,
+            "scope": "audio-only Ref2VA requests",
+            "official_input_specification": specification,
+        },
+    }
+    return trt_receipt, ref_receipt
+
+
+def test_audio_only_receipts_bind_shim_and_zero_visual_engine_routing() -> None:
+    trt_receipt, ref_receipt = _audio_only_receipts()
+    validate_ref2va_receipt_contract(trt_receipt, ref_receipt)
+
+    trt_receipt, ref_receipt = _audio_only_receipts(reference_count=2)
+    validate_ref2va_receipt_contract(trt_receipt, ref_receipt)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("vision_rows", "engine routing"),
+        ("vision_engine", "engine routing"),
+        ("visual_vae_t1", "engine routing"),
+        ("visual_vae_t17", "engine routing"),
+        ("missing_audio_encoder", "engine routing"),
+        ("wrong_shim_calls", "compatibility evidence"),
+        ("missing_spec", "official input specification"),
+        ("mismatched_kinds", "different Ref2VA inputs"),
+    ],
+)
+def test_audio_only_receipts_reject_incomplete_runtime_evidence(
+    mutation: str,
+    message: str,
+) -> None:
+    trt_receipt, ref_receipt = _audio_only_receipts()
+    if mutation == "vision_rows":
+        trt_receipt["runtime"]["condition_video_rows"] = 1
+    elif mutation == "vision_engine":
+        trt_receipt["engine_execute"]["vision_conditioner_plan_ms"] = 1.0
+    elif mutation == "visual_vae_t1":
+        trt_receipt["engine_execute"]["vae_encoder_tile_t1_plan_ms"] = 1.0
+    elif mutation == "visual_vae_t17":
+        trt_receipt["engine_execute"]["vae_encoder_tile_t17_plan_ms"] = 1.0
+    elif mutation == "missing_audio_encoder":
+        del trt_receipt["engine_execute"]["audio_vae_encoder_plan_ms"]
+    elif mutation == "wrong_shim_calls":
+        ref_receipt["ref2va_audio_only_compatibility"]["suppressed_calls"] = 0
+    elif mutation == "missing_spec":
+        del trt_receipt["official_input_specification"]
+    else:
+        ref_receipt["request"]["reference_kinds"] = ["image", "audio"]
+
+    with pytest.raises(ValueError, match=message):
+        validate_ref2va_receipt_contract(trt_receipt, ref_receipt)
+
+
 @pytest.mark.parametrize("module", [hf_reference, native_reference])
 def test_reference_flag_parsers_preserve_heterogeneous_encounter_order(module) -> None:
     parser = argparse.ArgumentParser()
@@ -274,7 +479,7 @@ def test_native_ref2va_perf_pattern_captures_condition_rows_and_reference_count(
     assert match.groupdict()["condition_audio_rows"] == "160"
 
 
-def test_ref2va_requires_visual_media_and_rejects_fl2va_keyframes() -> None:
+def test_ref2va_accepts_audio_only_and_still_rejects_missing_references_or_keyframes() -> None:
     image_audio = _ref2va_cases()[2]
     audio_only = replace(
         image_audio,
@@ -283,8 +488,10 @@ def test_ref2va_requires_visual_media_and_rejects_fl2va_keyframes() -> None:
             "references": [image_audio.inputs["references"][1]],
         },
     )
-    with pytest.raises(ValueError, match="at least one image or video"):
-        e2e_plugins.validate_fixed_profile(audio_only)
+    e2e_plugins.validate_fixed_profile(audio_only)
+    assert [descriptor.kind for descriptor in e2e_plugins.reference_descriptors(audio_only)] == [
+        "audio"
+    ]
 
     without_references = replace(
         image_audio,
@@ -330,6 +537,10 @@ def test_ref2va_bundle_source_revision_binds_partition_plans_assets_and_profile(
         "min_text_rows": 1,
         "opt_text_rows": 8192,
         "max_text_rows": REF2VA_MAX_TEXT_ROWS,
+        "ref2va_min_condition_video_rows": REF2VA_MIN_CONDITION_VIDEO_ROWS,
+        "ref2va_opt_condition_video_rows": REF2VA_OPT_CONDITION_VIDEO_ROWS,
+        "ref2va_min_condition_audio_rows": 0,
+        "ref2va_opt_condition_audio_rows": 0,
         "ref2va_max_condition_video_rows": REF2VA_MAX_CONDITION_VIDEO_ROWS,
         "ref2va_max_condition_audio_rows": REF2VA_MAX_CONDITION_AUDIO_ROWS,
         "ref2va_max_images": 9,

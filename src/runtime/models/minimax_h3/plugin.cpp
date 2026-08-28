@@ -117,10 +117,14 @@ void validate_fl2va_profile(const PipelineContext& ctx) {
 }
 
 void validate_ref2va_profile(const PipelineContext& ctx) {
-    constexpr std::array<std::pair<const char*, int32_t>, 13> expected = {{
+    constexpr std::array<std::pair<const char*, int32_t>, 17> expected = {{
         {"min_text_rows", 1},
         {"opt_text_rows", 8192},
         {"max_text_rows", 262144},
+        {"ref2va_min_condition_video_rows", 0},
+        {"ref2va_opt_condition_video_rows", 4096},
+        {"ref2va_min_condition_audio_rows", 0},
+        {"ref2va_opt_condition_audio_rows", 0},
         {"ref2va_max_condition_video_rows", 258120},
         {"ref2va_max_condition_audio_rows", 2408},
         {"ref2va_max_images", 9},
@@ -133,7 +137,11 @@ void validate_ref2va_profile(const PipelineContext& ctx) {
         {"ref2va_vae_tile_min_overlap", 64},
     }};
     for (const auto& [name, value] : expected) {
-        if (extract_json_int(ctx.config_json, name, value) != value)
+        // These values describe the serialized TensorRT optimization-profile
+        // ABI. Missing fields must not inherit runtime defaults: an older
+        // Ref2VA plan can otherwise claim audio-only support while retaining
+        // a 4,096-row minimum visual condition.
+        if (extract_json_int(ctx.config_json, name, -1) != value)
             throw std::runtime_error(
                 "MiniMax-H3 Ref2VA bundle has an incompatible dynamic profile");
     }

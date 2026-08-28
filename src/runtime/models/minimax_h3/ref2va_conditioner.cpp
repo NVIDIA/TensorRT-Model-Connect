@@ -538,9 +538,6 @@ MiniMaxH3Ref2VAConditionerPresentation minimax_h3_build_ref2va_conditioner_prese
     ModalityCounts counts;
     for (const auto& reference : prepared_references)
         append_reference(result, reference, counts, tokenize, token_ids);
-    if (result.vision_inputs.empty())
-        throw std::invalid_argument(
-            "MiniMax-H3 Ref2VA conditioner requires at least one image or video reference");
     append_text(result, prompt, tokenize, token_ids);
     if (result.input_ids.empty())
         throw std::invalid_argument("MiniMax-H3 Ref2VA presentation must not be empty");

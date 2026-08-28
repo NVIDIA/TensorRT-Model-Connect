@@ -710,6 +710,10 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
     )
     assert bundle_config["checkpoint_partition"] == "transformer_ref"
     assert bundle_config["max_text_rows"] == 262144
+    assert bundle_config["ref2va_min_condition_video_rows"] == 0
+    assert bundle_config["ref2va_opt_condition_video_rows"] == 4096
+    assert bundle_config["ref2va_min_condition_audio_rows"] == 0
+    assert bundle_config["ref2va_opt_condition_audio_rows"] == 0
     assert bundle_config["ref2va_max_images"] == 9
     assert bundle_config["ref2va_max_videos"] == 3
     assert bundle_config["ref2va_max_audios"] == 3

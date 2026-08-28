@@ -164,10 +164,10 @@ models:
     workloads: [minimax_h3_official_profile_parity]
   minimax-h3-fl2va-768p:
     not_compared_reason: >-
-      Optional FL2VA plumbing profile; conditioned HF/native parity is not yet qualified.
+      Conditioned media and joint soundtrack parity are enforced by the model-owned required E2E cases; the generic validation catalog has no first/last/ordered-reference request adapter.
   minimax-h3-ref2va-768p:
     not_compared_reason: >-
-      Optional Ref2VA plumbing profile; conditioned HF/native parity is not yet qualified.
+      Conditioned media and joint soundtrack parity are enforced by the model-owned required E2E cases; the generic validation catalog has no first/last/ordered-reference request adapter.
   minitron-4b-depth:
     workloads: [mmlu_continuation_parity]
   minitron-4b-width:

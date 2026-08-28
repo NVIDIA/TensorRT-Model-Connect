@@ -153,7 +153,31 @@ void test_model_card_input_validation() {
 
     auto audio_only = t2va;
     audio_only.references = {audio};
-    check(request_rejected(audio_only), "H3 rejects audio-only Ref2VA input");
+    check(!request_rejected(audio_only), "H3 accepts an audio-only Ref2VA input");
+
+    auto three_audio_clips = t2va;
+    audio.audio = reference_audio(5, 1);
+    three_audio_clips.references = {audio, audio, audio};
+    check(!request_rejected(three_audio_clips),
+          "H3 accepts three audio-only references totaling fifteen seconds");
+
+    auto too_many_audio_clips = t2va;
+    audio.audio = reference_audio(2, 1);
+    too_many_audio_clips.references = {audio, audio, audio, audio};
+    check(request_rejected(too_many_audio_clips),
+          "H3 rejects more than three audio-only references");
+
+    auto too_much_audio = t2va;
+    audio.audio = reference_audio(6, 1);
+    too_much_audio.references = {audio, audio, audio};
+    check(request_rejected(too_much_audio),
+          "H3 rejects audio-only references totaling more than fifteen seconds");
+
+    auto too_short_audio = t2va;
+    audio.audio = reference_audio(1, 1);
+    too_short_audio.references = {audio};
+    check(request_rejected(too_short_audio),
+          "H3 rejects an audio-only reference shorter than two seconds");
 
     auto too_many_images = t2va;
     too_many_images.references.assign(10, image);
@@ -277,6 +301,50 @@ void test_ref2va_packed_layout_preserves_ordered_reference_clock() {
           "H3 reference order is a semantic input, not regrouped by modality");
 }
 
+void test_ref2va_audio_only_layout_has_no_visual_condition_rows() {
+    const trtmc::MiniMaxH3PreparedReferenceLayout first{trtmc::AudioVideoReferenceKind::kAudio, 0,
+                                                        0, 0, 2};
+    const trtmc::MiniMaxH3PreparedReferenceLayout second{trtmc::AudioVideoReferenceKind::kAudio, 0,
+                                                         0, 0, 3};
+    const auto layout = trtmc::make_minimax_h3_ref2va_layout({1, 1}, {first, second}, 2, 2, 4, 3);
+
+    check(layout.sequence_rows == 22,
+          "H3 audio-only Ref2VA packs text, reference audio, and target media rows");
+    check(layout.num_condition_video_rows == 0,
+          "H3 audio-only Ref2VA does not claim synthetic visual condition rows");
+    check(layout.num_condition_audio_rows == 10,
+          "H3 audio-only Ref2VA counts both stereo reference blocks");
+    check(layout.video_indices == std::vector<int32_t>({18, 19, 20, 21}),
+          "H3 audio-only Ref2VA video indices contain only generated video rows");
+    check(layout.audio_indices ==
+              std::vector<int32_t>({2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}),
+          "H3 audio-only Ref2VA preserves reference-audio order before target audio");
+
+    const auto timestep_indices =
+        trtmc::make_minimax_h3_conditioned_timestep_indices(layout, 0, 1, 2, 3);
+    for (int32_t row = 2; row < 12; ++row)
+        check(timestep_indices[static_cast<std::size_t>(row)] == 3,
+              "H3 audio-only reference rows use the clean condition timestep");
+    for (int32_t row = 12; row < 18; ++row)
+        check(timestep_indices[static_cast<std::size_t>(row)] == 1,
+              "H3 audio-only target audio rows use the live timestep");
+
+    const auto position = [&](int32_t row, int32_t axis) {
+        return layout.position_ids[static_cast<std::size_t>(row) * 3 + axis];
+    };
+    check_near(position(2, 0), 2.0F, 1.0e-6F, "H3 first audio-only reference starts after text");
+    check_near(position(6, 0), 4.0F, 1.0e-6F,
+               "H3 second audio-only reference follows the first block");
+    check_near(position(12, 0), 7.0F, 1.0e-6F,
+               "H3 target media follows both audio-only reference clocks");
+
+    const auto reversed = trtmc::make_minimax_h3_ref2va_layout({1, 1}, {second, first}, 2, 2, 4, 3);
+    check_near(reversed.position_ids[6 * 3], 3.0F, 1.0e-6F,
+               "H3 audio-only reference order controls block boundaries");
+    check(position(6, 0) != reversed.position_ids[6 * 3],
+          "H3 audio-only references are not regrouped or reordered");
+}
+
 } // namespace
 
 int main() {
@@ -286,5 +354,6 @@ int main() {
     test_model_card_input_validation();
     test_fl2va_packed_layout_preserves_keyframe_and_media_clock();
     test_ref2va_packed_layout_preserves_ordered_reference_clock();
+    test_ref2va_audio_only_layout_has_no_visual_condition_rows();
     return failures == 0 ? 0 : 1;
 }

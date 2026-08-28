@@ -30,8 +30,8 @@ T2VA_MANIFEST = MODEL_DIR / "manifests" / "minimax-h3-768p.json"
 FIRST_IMAGE = MODEL_DIR / "data" / "fl2va-first.ppm"
 LAST_IMAGE = MODEL_DIR / "data" / "fl2va-last.ppm"
 BENCHMARK_EXCLUSION_REASON = (
-    "Optional conditioned plumbing profile; weight-backed HF/native parity and "
-    "release-performance qualification have not been recorded."
+    "Required input/audio parity profile; release-performance qualification is tracked "
+    "separately and has not been recorded."
 )
 
 
@@ -39,7 +39,7 @@ def _fl2va_cases():
     return load_model_manifest(FL2VA_MANIFEST).testcases
 
 
-def test_fl2va_manifest_covers_all_four_modes_without_claiming_required_parity() -> None:
+def test_fl2va_manifest_covers_all_four_required_parity_modes() -> None:
     manifest = json.loads(FL2VA_MANIFEST.read_text())
     qualified_thresholds = json.loads(
         (MODEL_DIR / "thresholds" / "minimax-h3-768p.json").read_text()
@@ -64,7 +64,8 @@ def test_fl2va_manifest_covers_all_four_modes_without_claiming_required_parity()
         assert case.inputs["workflow"] == "fl2va"
         assert len(case.stages) == 1
         assert case.stages[0].name == "end_to_end"
-        assert case.stages[0].required is False
+        assert case.stages[0].required is True
+        assert "Required release-parity gate" in case.metadata["notes"]
         assert case.threshold_overrides == qualified_thresholds
         assert (MODEL_DIR / "thresholds" / f"{case.name}.json").is_file()
         assert case.metadata["build_cli_args"] == manifest["build_cli_args"]

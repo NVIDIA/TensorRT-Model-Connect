@@ -23,6 +23,8 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_MAX_TEXT_ROWS,
+    REF2VA_MIN_CONDITION_VIDEO_ROWS,
+    REF2VA_OPT_CONDITION_VIDEO_ROWS,
     REF2VA_PLAN_FILENAMES,
     SOL_ENGINE_1344X768_124F,
     default_workspace_limit_bytes,
@@ -745,6 +747,10 @@ def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_an
         "min_text_rows": 1,
         "opt_text_rows": 8192,
         "max_text_rows": REF2VA_MAX_TEXT_ROWS,
+        "ref2va_min_condition_video_rows": REF2VA_MIN_CONDITION_VIDEO_ROWS,
+        "ref2va_opt_condition_video_rows": REF2VA_OPT_CONDITION_VIDEO_ROWS,
+        "ref2va_min_condition_audio_rows": 0,
+        "ref2va_opt_condition_audio_rows": 0,
         "ref2va_max_condition_video_rows": REF2VA_MAX_CONDITION_VIDEO_ROWS,
         "ref2va_max_condition_audio_rows": REF2VA_MAX_CONDITION_AUDIO_ROWS,
         "ref2va_max_images": 9,
@@ -880,6 +886,27 @@ def test_diffusers_git_archive_contract_is_exact() -> None:
         == "372c820aece801258bd4cea2458a2b85ad536e9262d7b0bbcdd450eda2d664a9"
     )
     assert provenance.DIFFUSERS_REFERENCE_CONTAINER_ROOT == "/work/reference-private"
+
+
+def test_ref2va_audio_only_model_card_provenance_is_exact() -> None:
+    assert provenance.MODEL_CARD_PATH == "README.md"
+    assert provenance.MODEL_CARD_REVISION == "42ed227ee7df40d41602854ae760620d6eb651fe"
+    assert (
+        provenance.MODEL_CARD_SHA256
+        == "f0116a90332496bdfcc827320c603a26b849c73bf804f2674d03682fbbd2334a"
+    )
+    assert (
+        provenance.REF2VA_AUDIO_ONLY_SEMANTICS_REVISION
+        == "939557dc319dd91227e30195a763f272ba7f8765"
+    )
+    assert provenance.ref2va_input_specification_record() == {
+        "repository": "MiniMaxAI/MiniMax-H3",
+        "path": "README.md",
+        "current_revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+        "sha256": "f0116a90332496bdfcc827320c603a26b849c73bf804f2674d03682fbbd2334a",
+        "audio_only_semantics_revision": "939557dc319dd91227e30195a763f272ba7f8765",
+        "semantics": "Ref2VA accepts one or more audio references without image or video",
+    }
 
 
 def test_git_archive_source_record_accepts_exact_private_copy(tmp_path: Path, monkeypatch) -> None:

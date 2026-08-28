@@ -52,10 +52,14 @@ def test_model_workload_catalog_covers_every_ready_model():
         if "not_compared_reason" in spec
     } == {
         "minimax-h3-fl2va-768p": (
-            "Optional FL2VA plumbing profile; conditioned HF/native parity is not yet qualified."
+            "Conditioned media and joint soundtrack parity are enforced by the model-owned "
+            "required E2E cases; the generic validation catalog has no "
+            "first/last/ordered-reference request adapter."
         ),
         "minimax-h3-ref2va-768p": (
-            "Optional Ref2VA plumbing profile; conditioned HF/native parity is not yet qualified."
+            "Conditioned media and joint soundtrack parity are enforced by the model-owned "
+            "required E2E cases; the generic validation catalog has no "
+            "first/last/ordered-reference request adapter."
         ),
     }
     assert all("e2e" not in spec.get("workloads", []) for spec in catalog["models"].values())

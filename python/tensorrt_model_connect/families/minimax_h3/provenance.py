@@ -21,12 +21,18 @@ from .config import (
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_MAX_TEXT_ROWS,
+    REF2VA_MIN_CONDITION_VIDEO_ROWS,
+    REF2VA_OPT_CONDITION_VIDEO_ROWS,
     native_plan_filenames,
 )
 
 CHECKPOINT_REVISION = "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
 CHECKPOINT_REPOSITORY = "MiniMaxAI/MiniMax-H3"
 HF_CACHE_REPOSITORY = "models--MiniMaxAI--MiniMax-H3"
+MODEL_CARD_PATH = "README.md"
+MODEL_CARD_REVISION = "42ed227ee7df40d41602854ae760620d6eb651fe"
+MODEL_CARD_SHA256 = "f0116a90332496bdfcc827320c603a26b849c73bf804f2674d03682fbbd2334a"
+REF2VA_AUDIO_ONLY_SEMANTICS_REVISION = "939557dc319dd91227e30195a763f272ba7f8765"
 DIFFUSERS_REFERENCE_REPOSITORY = "https://github.com/huggingface/diffusers.git"
 DIFFUSERS_REFERENCE_REVISION = "abc5e9bf71fd38f53cd471bc3acaa84bc5ecbfdc"
 DIFFUSERS_REFERENCE_TREE = "a9aeec5268dd9661565a3e0af9b298744eb416b2"
@@ -71,6 +77,19 @@ _BUNDLE_MAGIC = b"BUNDLE\x01\x00"
 _MAX_BUNDLE_HEADER_BYTES = 100 << 20
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def ref2va_input_specification_record() -> dict[str, str]:
+    """Return the official model-card provenance for Ref2VA audio-only input."""
+
+    return {
+        "repository": CHECKPOINT_REPOSITORY,
+        "path": MODEL_CARD_PATH,
+        "current_revision": MODEL_CARD_REVISION,
+        "sha256": MODEL_CARD_SHA256,
+        "audio_only_semantics_revision": REF2VA_AUDIO_ONLY_SEMANTICS_REVISION,
+        "semantics": "Ref2VA accepts one or more audio references without image or video",
+    }
 
 
 def sha256_file(path: Path, *, chunk_bytes: int = 16 << 20) -> str:
@@ -872,6 +891,10 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
             "min_text_rows": 1,
             "opt_text_rows": 8192,
             "max_text_rows": REF2VA_MAX_TEXT_ROWS,
+            "ref2va_min_condition_video_rows": REF2VA_MIN_CONDITION_VIDEO_ROWS,
+            "ref2va_opt_condition_video_rows": REF2VA_OPT_CONDITION_VIDEO_ROWS,
+            "ref2va_min_condition_audio_rows": 0,
+            "ref2va_opt_condition_audio_rows": 0,
             "ref2va_max_condition_video_rows": REF2VA_MAX_CONDITION_VIDEO_ROWS,
             "ref2va_max_condition_audio_rows": REF2VA_MAX_CONDITION_AUDIO_ROWS,
             "ref2va_max_images": 9,

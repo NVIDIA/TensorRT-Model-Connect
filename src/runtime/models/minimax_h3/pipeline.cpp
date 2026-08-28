@@ -705,9 +705,8 @@ void validate_reference(const AudioVideoReference& reference, std::size_t index,
 void validate_reference_summary(const ReferenceSummary& summary, std::size_t total) {
     if (summary.images > 9 || summary.videos > 3 || summary.audios > 3 || total > 12)
         throw std::invalid_argument("MiniMax-H3 reference count exceeds the model-card limits");
-    if (summary.images + summary.videos == 0)
-        throw std::invalid_argument(
-            "MiniMax-H3 audio references require at least one image or video reference");
+    // The current model card admits audio-only Ref2VA. Do not synthesize a visual reference:
+    // audio rows advance the packed reference clock directly before the generated media rows.
     if (summary.video_duration > kMaxReferenceDurationSeconds ||
         summary.audio_duration > kMaxReferenceDurationSeconds ||
         summary.soundtrack_duration > kMaxReferenceDurationSeconds)
@@ -1264,6 +1263,10 @@ CompactVisionFeatures
 encode_ref2va_vision(const MiniMaxH3Ref2VAConditionerPresentation& presentation,
                      const MiniMaxH3ModuleLoader& loader, cudaStream_t stream) {
     CompactVisionFeatures result;
+    // An audio-only Ref2VA presentation has labels and prompt text but no
+    // Qwen vision blocks. Do not synthesize visual input or load its engine.
+    if (presentation.vision_inputs.empty())
+        return result;
     auto module = loader("vision_conditioner_plan", stream);
     module->set_timing_label("vision_conditioner_plan");
     module->reset_execution_context();
@@ -1555,7 +1558,7 @@ void validate_ref2va_runtime_rows(int32_t text_rows, const MiniMaxH3PackedLayout
     constexpr int32_t max_text_rows = 262144;
     constexpr int32_t max_condition_video_rows = 258120;
     constexpr int32_t max_condition_audio_rows = 2408;
-    if (text_rows < 1 || text_rows > max_text_rows || layout.num_condition_video_rows < 4096 ||
+    if (text_rows < 1 || text_rows > max_text_rows || layout.num_condition_video_rows < 0 ||
         layout.num_condition_video_rows > max_condition_video_rows ||
         layout.num_condition_audio_rows < 0 ||
         layout.num_condition_audio_rows > max_condition_audio_rows)

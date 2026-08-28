@@ -367,6 +367,20 @@ def test_ref2va_validator_accepts_ordered_variable_image_and_video_runs() -> Non
     assert language.validate_presentation_bindings(spec=spec, **bindings) == 10
 
 
+def test_ref2va_validator_accepts_audio_only_text_presentation() -> None:
+    spec = _toy_ref2va_spec()
+    bindings = _ref2va_presentation(spec, [])
+
+    assert bindings["vision_run_lengths"] == []
+    assert bindings["vision_run_reference_ids"] == []
+    assert language.validate_presentation_bindings(spec=spec, **bindings) == 0
+
+    mismatched = dict(bindings)
+    mismatched["vision_run_reference_ids"] = [0]
+    with pytest.raises(ValueError, match="must align with vision_run_lengths"):
+        language.validate_presentation_bindings(spec=spec, **mismatched)
+
+
 def test_ref2va_validator_requires_exact_runtime_run_metadata() -> None:
     spec = _toy_ref2va_spec()
     bindings = _ref2va_presentation(spec, [("image", 3, 0), ("video", 2, 1)])

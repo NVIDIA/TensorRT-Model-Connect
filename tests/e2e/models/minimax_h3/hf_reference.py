@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
+import hashlib
+import inspect
 import json
 import math
 import platform
@@ -40,6 +43,7 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
     atomic_write_json,
     checkpoint_snapshot_record,
     file_identity,
+    ref2va_input_specification_record,
     stable_file_record,
     validate_file_identity,
     validate_git_archive_source_unchanged,
@@ -64,6 +68,13 @@ _REFERENCE_FLAGS = {
     "--reference-video": "video",
     "--reference-audio": "audio",
 }
+_REF2VA_AUDIO_ONLY_GATE_ERROR = (
+    "An audio reference has to be paired with at least one image or video reference and "
+    "cannot be used on its own."
+)
+_REF2VA_CHECK_INPUTS_SOURCE_SHA256 = (
+    "fd232215f0ceb47b463e2d29a52307faabe25d06db56f16f35d278d528b58df3"
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +96,66 @@ class _OrderedReferenceAction(argparse.Action):
         references = list(getattr(namespace, self.dest, None) or [])
         references.append((_REFERENCE_FLAGS[str(option_string)], str(values)))
         setattr(namespace, self.dest, references)
+
+
+@contextmanager
+def ref2va_audio_only_compatibility(reference_specs, setup_step_type):
+    """Suppress only the stale pinned-Diffusers audio-only setup gate."""
+
+    kinds = [kind for kind, _path in reference_specs]
+    if not kinds or set(kinds) != {"audio"}:
+        yield None
+        return
+
+    original_descriptor = inspect.getattr_static(setup_step_type, "_check_inputs")
+    if not isinstance(original_descriptor, staticmethod):
+        raise ValueError("MiniMax-H3 pinned Diffusers Ref2VA input validator is not static")
+    original = setup_step_type._check_inputs
+    method_source = inspect.getsource(original)
+    method_sha256 = hashlib.sha256(method_source.encode("utf-8")).hexdigest()
+    if method_sha256 != _REF2VA_CHECK_INPUTS_SOURCE_SHA256:
+        raise ValueError(
+            "MiniMax-H3 pinned Diffusers Ref2VA input validator changed; refusing the "
+            "audio-only compatibility shim"
+        )
+
+    record = {
+        "name": "pinned-diffusers-ref2va-audio-only-input-gate",
+        "diffusers_revision": DIFFUSERS_REVISION,
+        "upstream_method": (
+            "diffusers.modular_pipelines.minimax_h3.before_encoder."
+            "MiniMaxH3Ref2VASetupStep._check_inputs"
+        ),
+        "upstream_method_source_sha256": method_sha256,
+        "suppressed_error": _REF2VA_AUDIO_ONLY_GATE_ERROR,
+        "suppressed_calls": 0,
+        "scope": "audio-only Ref2VA requests",
+        "official_input_specification": ref2va_input_specification_record(),
+    }
+
+    def checked_inputs(components, block_state):
+        try:
+            return original(components, block_state)
+        except ValueError as error:
+            if str(error) != _REF2VA_AUDIO_ONLY_GATE_ERROR:
+                raise
+            references = list(getattr(block_state, "references", None) or [])
+            if len(references) != len(reference_specs) or any(
+                getattr(reference, "kind", None) != "audio" for reference in references
+            ):
+                raise
+            record["suppressed_calls"] += 1
+            return None
+
+    patched_descriptor = staticmethod(checked_inputs)
+    setup_step_type._check_inputs = patched_descriptor
+    try:
+        yield record
+    finally:
+        current_descriptor = inspect.getattr_static(setup_step_type, "_check_inputs")
+        if current_descriptor is not patched_descriptor:
+            raise ValueError("MiniMax-H3 Ref2VA audio-only compatibility shim changed in flight")
+        setup_step_type._check_inputs = original_descriptor
 
 
 def _write_report_frames(frames: np.ndarray, frames_dir: Path) -> list[Path]:
@@ -623,11 +694,6 @@ def main() -> int:
             raise ValueError("MiniMax-H3 Ref2VA reference does not accept FL2VA keyframes")
         if not reference_paths:
             raise ValueError("MiniMax-H3 Ref2VA reference requires ordered references")
-        kinds = [kind for kind, _path in reference_paths]
-        if not ({"image", "video"} & set(kinds)):
-            raise ValueError(
-                "MiniMax-H3 audio references require at least one image or video reference"
-            )
     elif reference_paths:
         raise ValueError(
             f"MiniMax-H3 {args.workflow.upper()} reference does not accept omni-references"
@@ -676,6 +742,9 @@ def main() -> int:
     from diffusers.modular_pipelines.minimax_h3 import (
         MiniMaxH3Ref2VABlocks,
         MiniMaxH3Reference,
+    )
+    from diffusers.modular_pipelines.minimax_h3.before_encoder import (
+        MiniMaxH3Ref2VASetupStep,
     )
     from diffusers.utils import load_image
 
@@ -733,42 +802,55 @@ def main() -> int:
     load_s = time.perf_counter() - started
     phase = "compile"
     compile_component = _workflow_transformer_component(args.workflow) if args.use_compile else None
+    ref2va_audio_only_compat = None
     try:
-        if args.use_compile:
-            compile_official_transformer(
-                pipe,
-                args.workflow,
-                mode=args.compile_mode,
-                compile_function=torch.compile,
-            )
-
-        def run():
-            generator = torch.Generator().manual_seed(int(prompt_spec["seed"]))
-            torch.cuda.synchronize()
-            begin = time.perf_counter()
-            state = pipe(
-                **pipeline_arguments(
-                    prompt=prompt_spec["prompt"],
-                    generator=generator,
-                    steps=args.steps,
-                    output_type=args.output_type,
-                    image=keyframe_images.get("first_image"),
-                    last_image=keyframe_images.get("last_image"),
-                    references=references if args.workflow == "ref2va" else None,
+        with ref2va_audio_only_compatibility(
+            reference_paths,
+            MiniMaxH3Ref2VASetupStep,
+        ) as ref2va_audio_only_compat:
+            if args.use_compile:
+                compile_official_transformer(
+                    pipe,
+                    args.workflow,
+                    mode=args.compile_mode,
+                    compile_function=torch.compile,
                 )
-            )
-            torch.cuda.synchronize()
-            return state, time.perf_counter() - begin
 
-        phase = "warmup"
-        for _ in range(args.warmup):
-            run()
-        phase = "measure"
-        timings, state = [], None
-        torch.cuda.reset_peak_memory_stats()
-        for _ in range(args.measure):
-            state, elapsed = run()
-            timings.append(elapsed)
+            def run():
+                generator = torch.Generator().manual_seed(int(prompt_spec["seed"]))
+                torch.cuda.synchronize()
+                begin = time.perf_counter()
+                state = pipe(
+                    **pipeline_arguments(
+                        prompt=prompt_spec["prompt"],
+                        generator=generator,
+                        steps=args.steps,
+                        output_type=args.output_type,
+                        image=keyframe_images.get("first_image"),
+                        last_image=keyframe_images.get("last_image"),
+                        references=references if args.workflow == "ref2va" else None,
+                    )
+                )
+                torch.cuda.synchronize()
+                return state, time.perf_counter() - begin
+
+            phase = "warmup"
+            for _ in range(args.warmup):
+                run()
+            phase = "measure"
+            timings, state = [], None
+            torch.cuda.reset_peak_memory_stats()
+            for _ in range(args.measure):
+                state, elapsed = run()
+                timings.append(elapsed)
+            if (
+                ref2va_audio_only_compat is not None
+                and ref2va_audio_only_compat["suppressed_calls"] != args.warmup + args.measure
+            ):
+                raise ValueError(
+                    "MiniMax-H3 Ref2VA audio-only compatibility shim did not cover every "
+                    "pipeline invocation"
+                )
     except Exception as error:
         failure_receipt = {
             "backend": "hf_diffusers_torch_compile" if args.use_compile else "hf_diffusers_eager",
@@ -792,9 +874,12 @@ def main() -> int:
             "torch": torch.__version__,
             "processor_compat": processor_compat,
             "pipeline": pipeline_record,
+            "ref2va_audio_only_compatibility": ref2va_audio_only_compat,
             "gpu": torch.cuda.get_device_name(0),
             "host": platform.node(),
         }
+        if args.workflow == "ref2va":
+            failure_receipt["official_input_specification"] = ref2va_input_specification_record()
         atomic_write_json(output_dir / "hf_receipt.json", failure_receipt)
         print(json.dumps(failure_receipt, indent=2))
         raise
@@ -879,11 +964,14 @@ def main() -> int:
         "torch": torch.__version__,
         "processor_compat": processor_compat,
         "pipeline": pipeline_record,
+        "ref2va_audio_only_compatibility": ref2va_audio_only_compat,
         "gpu": torch.cuda.get_device_name(0),
         "host": platform.node(),
         "shape": list(frames.shape),
         "frames": frames_record,
     }
+    if args.workflow == "ref2va":
+        receipt["official_input_specification"] = ref2va_input_specification_record()
     if audio_evidence is not None:
         receipt.update(
             {

@@ -283,6 +283,54 @@ void test_image_then_audio_preserves_reference_order() {
           "Ref2VA image plus audio emits no fake audio vision run");
 }
 
+void test_audio_only_presentation_skips_vision_without_losing_order() {
+    std::vector<std::string> calls;
+    std::vector<trtmc::AudioVideoReference> sources = {
+        source_reference(trtmc::AudioVideoReferenceKind::kAudio),
+        source_reference(trtmc::AudioVideoReferenceKind::kAudio),
+    };
+    std::vector<trtmc::MiniMaxH3PreparedReference> prepared;
+    prepared.push_back(audio_reference(0));
+    prepared.push_back(audio_reference(1));
+    const auto presentation = trtmc::minimax_h3_build_ref2va_conditioner_presentation(
+        "prompt", sources, prepared, make_tokenizer(calls), {900, 901, 902, 903});
+
+    check(calls == std::vector<std::string>({"<Audio 1>: ", "<Audio 2>: ", "prompt"}),
+          "Ref2VA audio-only presentation preserves reference labels then prompt");
+    check(presentation.input_ids == std::vector<int32_t>({1001, 1002, 1003}),
+          "Ref2VA audio-only presentation contains text tokens only");
+    check(presentation.sequence_rows == 3 && presentation.next_mrope_position == 3,
+          "Ref2VA audio-only text presentation uses a contiguous rotary clock");
+    check(presentation.mrope_position_delta == 0 && mrope_at(presentation, 0, 0) == 0 &&
+              mrope_at(presentation, 0, 2) == 2,
+          "Ref2VA audio-only MRoPE matches a pure text presentation");
+    check(range_is(presentation.h3_token_tags, 0, 3, 1) &&
+              range_is(presentation.qwen_mm_token_type_ids, 0, 3, 0) &&
+              range_is(presentation.vision_selector, 0, 3, 0),
+          "Ref2VA audio-only presentation makes no visual selector claim");
+    check(presentation.vision_inputs.empty() && presentation.vision_scatter.empty() &&
+              presentation.vision_scatter_indices.empty() &&
+              presentation.vision_run_lengths.empty() &&
+              presentation.vision_run_reference_ids.empty(),
+          "Ref2VA audio-only presentation emits no dummy vision run");
+    check(presentation.audio_labels.size() == 2 &&
+              presentation.audio_labels[0].reference_index == 0 &&
+              presentation.audio_labels[0].audio_index == 1 &&
+              presentation.audio_labels[1].reference_index == 1 &&
+              presentation.audio_labels[1].audio_index == 2,
+          "Ref2VA audio-only metadata preserves request order and numbering");
+
+    std::swap(prepared[0], prepared[1]);
+    bool rejected = false;
+    try {
+        (void)trtmc::minimax_h3_build_ref2va_conditioner_presentation(
+            "prompt", sources, prepared, make_tokenizer(calls), {900, 901, 902, 903});
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "Ref2VA audio-only preparation fails closed when reference order drifts");
+}
+
 void test_mixed_reordered_references_keep_semantic_order() {
     std::vector<std::string> calls;
     std::vector<trtmc::AudioVideoReference> sources = {
@@ -337,6 +385,7 @@ int main() {
     test_image_reference_builds_dynamic_qwen_run();
     test_video_soundtrack_precedes_timestamped_video_pair();
     test_image_then_audio_preserves_reference_order();
+    test_audio_only_presentation_skips_vision_without_losing_order();
     test_mixed_reordered_references_keep_semantic_order();
     if (failures != 0)
         return 1;

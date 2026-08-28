@@ -30,6 +30,9 @@ from tests.e2e.models.minimax_h3.audio_metrics import (
     evaluate_audio_quality,
     read_float32_wav,
 )
+from tests.e2e.models.minimax_h3.receipt_contracts import (
+    validate_ref2va_receipt_contract,
+)
 from tensorrt_model_connect.families.minimax_h3.provenance import stable_file_record
 
 
@@ -154,6 +157,15 @@ class MiniMaxH3DecodedVideoComparator:
                 stage_name=stage.name,
                 status=StageStatus.ERROR.value,
                 message="TRT and HF run receipts identify different checkpoints",
+            )
+
+        try:
+            validate_ref2va_receipt_contract(trt_receipt, ref_receipt)
+        except (TypeError, ValueError) as error:
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.ERROR.value,
+                message=str(error),
             )
 
         reference_path = Path(str(ref.data.get("frames_path", "")))

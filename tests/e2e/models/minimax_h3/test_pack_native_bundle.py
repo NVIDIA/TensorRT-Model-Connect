@@ -17,6 +17,8 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_MAX_TEXT_ROWS,
+    REF2VA_MIN_CONDITION_VIDEO_ROWS,
+    REF2VA_OPT_CONDITION_VIDEO_ROWS,
     REF2VA_PLAN_FILENAMES,
 )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
@@ -421,6 +423,10 @@ def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
     assert config["opt_text_rows"] == 8192
     assert config["max_text_rows"] == REF2VA_MAX_TEXT_ROWS
     assert config["ref2va_max_condition_video_rows"] == REF2VA_MAX_CONDITION_VIDEO_ROWS
+    assert config["ref2va_min_condition_video_rows"] == REF2VA_MIN_CONDITION_VIDEO_ROWS == 0
+    assert config["ref2va_opt_condition_video_rows"] == REF2VA_OPT_CONDITION_VIDEO_ROWS == 4096
+    assert config["ref2va_min_condition_audio_rows"] == 0
+    assert config["ref2va_opt_condition_audio_rows"] == 0
     assert config["ref2va_max_condition_audio_rows"] == REF2VA_MAX_CONDITION_AUDIO_ROWS
     assert config["ref2va_max_images"] == 9
     assert config["ref2va_max_videos"] == 3

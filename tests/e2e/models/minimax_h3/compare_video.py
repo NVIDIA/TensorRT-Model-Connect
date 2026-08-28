@@ -30,6 +30,7 @@ from audio_metrics import (
     evaluate_audio_quality,
     read_float32_wav,
 )
+from receipt_contracts import validate_ref2va_receipt_contract
 
 
 def main() -> int:
@@ -134,6 +135,7 @@ def main() -> int:
             raise ValueError(f"MiniMax-H3 {label} receipt has no valid checkpoint inventory")
     if reference_inventory != candidate_inventory:
         raise ValueError("MiniMax-H3 comparison receipts use different checkpoint inventories")
+    validate_ref2va_receipt_contract(candidate_receipt, reference_receipt)
     if "plan_sha256" in candidate_receipt:
         if candidate_receipt.get("backend") != "tensorrt_native_single_device":
             raise ValueError(

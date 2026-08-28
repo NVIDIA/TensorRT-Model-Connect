@@ -37,6 +37,7 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
     CHECKPOINT_REVISION,
     atomic_write_json,
     file_identity,
+    ref2va_input_specification_record,
     stable_file_record,
     validate_file_identity,
     validate_native_bundle_config,
@@ -233,10 +234,6 @@ def main() -> int:
             raise ValueError("MiniMax-H3 Ref2VA bundle does not accept FL2VA keyframes")
         if not references:
             raise ValueError("MiniMax-H3 Ref2VA bundle requires ordered references")
-        if not ({"image", "video"} & {kind for kind, _path in references}):
-            raise ValueError(
-                "MiniMax-H3 audio references require at least one image or video reference"
-            )
     elif references:
         raise ValueError(f"MiniMax-H3 {workflow.upper()} bundle does not accept omni-references")
     elif workflow == "t2va" and (first_image is not None or last_image is not None):
@@ -478,6 +475,8 @@ def main() -> int:
         "host": platform.node(),
         "command": command,
     }
+    if workflow == "ref2va":
+        receipt["official_input_specification"] = ref2va_input_specification_record()
     atomic_write_json(output / "trt_receipt.json", receipt)
     print(json.dumps(receipt, indent=2))
     return 0

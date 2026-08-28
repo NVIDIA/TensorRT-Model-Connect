@@ -424,8 +424,6 @@ def _validate_ref2va_runs(
 ) -> None:
     declared_lengths = _runtime_int_tuple(supplied_lengths, name="vision_run_lengths")
     reference_ids = _runtime_int_tuple(supplied_reference_ids, name="vision_run_reference_ids")
-    if not declared_lengths:
-        raise ValueError("MiniMax-H3 Ref2VA requires at least one image or video vision run")
     if any(length <= 0 for length in declared_lengths):
         raise ValueError("MiniMax-H3 Ref2VA vision_run_lengths must be positive")
     if declared_lengths != tuple(int(length) for length in run_lengths):

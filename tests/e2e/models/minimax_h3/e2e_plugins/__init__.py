@@ -21,6 +21,8 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_MAX_TEXT_ROWS,
+    REF2VA_MIN_CONDITION_VIDEO_ROWS,
+    REF2VA_OPT_CONDITION_VIDEO_ROWS,
     REF2VA_PLAN_FILENAMES,
 )
 from tests.e2e_harness.contracts import E2ECase, RunContext
@@ -131,10 +133,6 @@ def reference_descriptors(case: E2ECase) -> tuple[ReferenceDescriptor, ...]:
                 f"MiniMax-H3 accepts at most {_REFERENCE_LIMITS[str(kind)]} {kind} references"
             )
         resolved.append(ReferenceDescriptor(str(kind), _resolve_reference_path(str(kind), path)))
-    if not counts["image"] and not counts["video"]:
-        raise ValueError(
-            "MiniMax-H3 audio references require at least one image or video reference"
-        )
     return tuple(resolved)
 
 
@@ -510,6 +508,10 @@ def source_revision(case: E2ECase, ctx: RunContext) -> str:
             "min_text_rows": 1,
             "opt_text_rows": 8192,
             "max_text_rows": REF2VA_MAX_TEXT_ROWS,
+            "ref2va_min_condition_video_rows": REF2VA_MIN_CONDITION_VIDEO_ROWS,
+            "ref2va_opt_condition_video_rows": REF2VA_OPT_CONDITION_VIDEO_ROWS,
+            "ref2va_min_condition_audio_rows": 0,
+            "ref2va_opt_condition_audio_rows": 0,
             "ref2va_max_condition_video_rows": REF2VA_MAX_CONDITION_VIDEO_ROWS,
             "ref2va_max_condition_audio_rows": REF2VA_MAX_CONDITION_AUDIO_ROWS,
             "ref2va_max_images": 9,
