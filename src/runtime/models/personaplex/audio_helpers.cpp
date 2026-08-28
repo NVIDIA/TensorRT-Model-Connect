@@ -6,41 +6,10 @@
 #include "audio_helpers.h"
 
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
 
 namespace trtmc {
-
-namespace {
-
-// Parse speech_text_prompt_ids from JSON (array of ints).
-// Mirrors the logic from fast_path_config.cpp's parse_speech_text_prompt_ids.
-std::vector<int32_t> parse_speech_text_prompt_ids(const std::string& config_text) {
-    std::vector<int32_t> prompt_ids;
-    const std::size_t pos = config_text.find("\"speech_text_prompt_ids\"");
-    if (pos == std::string::npos)
-        return prompt_ids;
-
-    const std::size_t bracket = config_text.find('[', pos);
-    const std::size_t end_bracket = config_text.find(']', bracket);
-    if (bracket == std::string::npos || end_bracket == std::string::npos)
-        return prompt_ids;
-
-    std::string arr = config_text.substr(bracket + 1, end_bracket - bracket - 1);
-    std::size_t p = 0;
-    while (p < arr.size()) {
-        const std::size_t num_start = arr.find_first_of("0123456789", p);
-        if (num_start == std::string::npos)
-            break;
-        prompt_ids.push_back(std::stoi(arr.substr(num_start)));
-        p = arr.find_first_of(",]", num_start);
-        if (p == std::string::npos)
-            break;
-        ++p;
-    }
-    return prompt_ids;
-}
-
-} // namespace
 
 std::unique_ptr<PersonaplexKvCache> make_coarse_kv_cache(const std::string& json,
                                                          const BaseConfig& base,
@@ -104,7 +73,7 @@ find_depth_engine_plans_in_codebook_order(const BundleFile& bundle) {
 }
 
 SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std::string& json,
-                                             const BaseConfig& base, const std::string& hf_python) {
+                                             const BaseConfig& base) {
     SpeechConfig sc;
     sc.sample_rate = extract_json_int(json, "sample_rate", 24000);
     sc.temporal_hidden_size = base.hidden_size;
@@ -127,9 +96,13 @@ SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std
     sc.depth_temperature = extract_json_float(json, "speech_depth_temperature", 0.0F);
     sc.depth_top_k = extract_json_int(json, "speech_depth_top_k", 0);
     sc.text_eos_token_id = base.id_eos;
-    sc.system_prompt = extract_json_string(json, "speech_system_prompt", "");
-    sc.text_prompt_ids = parse_speech_text_prompt_ids(json);
-    sc.hf_python = hf_python;
+    sc.text_prompt_ids = extract_json_int_array(json, "speech_text_prompt_ids",
+                                                std::numeric_limits<std::size_t>::max());
+    if (!extract_json_string(json, "speech_system_prompt", "").empty() &&
+        sc.text_prompt_ids.empty()) {
+        throw std::runtime_error("PersonaPlex native runtime requires speech_text_prompt_ids when "
+                                 "speech_system_prompt is configured");
+    }
     sc.audio_embeddings = section_to_floats(find_section(bundle, "audio_embeddings"));
     sc.temporal_text_embedding = section_to_floats(find_section(bundle, "temporal_text_embedding"));
     sc.depth_text_embedding = section_to_floats(find_section(bundle, "depth_text_embedding"));

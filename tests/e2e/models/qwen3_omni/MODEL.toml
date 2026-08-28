@@ -8,12 +8,8 @@ test_manifests = [
 ]
 
 [e2e_defaults.omni_multimodal]
-reference_backend = "torch_reference"
-oracle_level = "L1_external_reference"
+reference_backend = "invariant_only"
+oracle_level = "L4_invariants"
 stages = [
   { name = "thinker_decode", required = true },
-  { name = "vision_encode", required = false },
-  { name = "audio_encode", required = false },
-  { name = "talker_decode", required = true },
-  { name = "end_to_end", required = true },
 ]

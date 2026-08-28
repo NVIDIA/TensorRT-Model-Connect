@@ -352,10 +352,14 @@ def test_model_proof_python_and_e2e_route_only_through_selected_wheel(
     assert not any(str(tmp_path) in str(value) for value in proof.values())
 
 
-def test_model_proof_stages_wheel_model_dso_but_keeps_source_cpp_tests(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def _readelf_output(*dependencies: str) -> str:
+    return "\n".join(
+        f" 0x0000000000000001 (NEEDED) Shared library: [{dependency}]"
+        for dependency in dependencies
+    )
+
+
+def _selected_wheel_dso_fixture(tmp_path: Path, monkeypatch) -> SimpleNamespace:
     source = tmp_path / "source"
     source.mkdir()
     work = tmp_path / "work"
@@ -365,25 +369,50 @@ def test_model_proof_stages_wheel_model_dso_but_keeps_source_cpp_tests(
     scratch = work / "build/models/fixture" / runtime_library
     scratch.parent.mkdir(parents=True)
     scratch.write_bytes(b"\x7fELFsource")
+    for path in (
+        work / "build/libtrtmc_core.so",
+        work / "build/libtrtmc_backend_trt.so",
+        work / "build/trtmc",
+    ):
+        path.write_bytes(b"\x7fELFsource-runtime")
     target = work / "selected-wheel-runtime/site-packages"
-    packaged = target / "tensorrt_model_connect/bin" / runtime_library
+    native_dir = target / "tensorrt_model_connect/bin"
+    packaged = native_dir / runtime_library
     packaged.parent.mkdir(parents=True)
     packaged.write_bytes(b"\x7fELFwheel")
     packaged_core = packaged.parent / "libtrtmc_core.so"
     packaged_core.write_bytes(b"\x7fELFwheel-core")
+    packaged_trtmc = native_dir / "trtmc"
+    packaged_trtmc.write_bytes(b"\x7fELFwheel-cli")
+    packaged_benchmark_worker = native_dir / "trtmc_benchmark_worker"
+    packaged_benchmark_worker.write_bytes(b"\x7fELFwheel-benchmark-worker")
+    packaged_backend = native_dir / "libtrtmc_backend_trt.so"
+    packaged_backend.write_bytes(b"\x7fELFwheel-backend")
+    packaged_versioned_backend = native_dir / "libtrtmc_backend_trt_11_2.so"
+    packaged_versioned_backend.write_bytes(b"\x7fELFwheel-backend")
     runtime = SelectedWheelRuntime(
         wheel=tmp_path / "wheel.whl",
         site_packages=target,
         python=Path("/opt/venv/bin/python"),
-        trtmc=target / "tensorrt_model_connect/bin/trtmc",
+        trtmc=packaged_trtmc,
         python_tag=PYTHON_TAG,
         tensorrt_version=TENSORRT_VERSION,
         package_version=PACKAGE_VERSION,
         provenance=artifacts / "selected-wheel.json",
     )
     context = CiContext(source, {})
-    monkeypatch.setattr(context, "output", lambda *_args, **_kwargs: "")
+    dynamic_by_path: dict[Path, str] = {}
+    readelf_calls: list[Path] = []
+
+    def output(command: list[object], **_kwargs: object) -> str:
+        assert command[:2] == ["readelf", "-d"]
+        elf = Path(command[2])
+        readelf_calls.append(elf)
+        return dynamic_by_path.get(elf, _readelf_output("libc.so.6"))
+
+    monkeypatch.setattr(context, "output", output)
     facts: dict[str, object] = {}
+    steps: list[tuple[object, ...]] = []
     pipeline = ModelProofInnerPipeline(
         context,
         ModelProofRequest("fixture", revision="a" * 40),
@@ -393,44 +422,150 @@ def test_model_proof_stages_wheel_model_dso_but_keeps_source_cpp_tests(
     pipeline.artifacts = artifacts
     pipeline.selected_wheel = runtime
     pipeline.status = SimpleNamespace(
-        step=lambda *_args: None,
+        step=lambda *args: steps.append(args),
         fact=lambda key, value: facts.__setitem__(key, value),
     )
-
-    staged, scratch_digest, runtime_source = pipeline._validate_dso(
-        "fixture", runtime_library
+    return SimpleNamespace(
+        pipeline=pipeline,
+        runtime_library=runtime_library,
+        scratch=scratch,
+        packaged=packaged,
+        packaged_core=packaged_core,
+        packaged_trtmc=packaged_trtmc,
+        packaged_benchmark_worker=packaged_benchmark_worker,
+        packaged_backend=packaged_backend,
+        packaged_versioned_backend=packaged_versioned_backend,
+        staged_model=work / "model-plugins/fixture" / runtime_library,
+        staged_core=work / "model-plugins/fixture/libtrtmc_core.so",
+        dynamic_by_path=dynamic_by_path,
+        readelf_calls=readelf_calls,
+        facts=facts,
+        steps=steps,
+        artifacts=artifacts,
+        work=work,
     )
 
-    assert staged.read_bytes() == packaged.read_bytes()
-    assert staged.read_bytes() != scratch.read_bytes()
-    assert scratch_digest == hashlib.sha256(scratch.read_bytes()).hexdigest()
+
+def test_model_proof_stages_and_audits_selected_wheel_native_elfs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    case = _selected_wheel_dso_fixture(tmp_path, monkeypatch)
+
+    staged, scratch_digest, runtime_source = case.pipeline._validate_dso(
+        "fixture", case.runtime_library
+    )
+
+    assert staged.read_bytes() == case.packaged.read_bytes()
+    assert staged.read_bytes() != case.scratch.read_bytes()
+    assert scratch_digest == hashlib.sha256(case.scratch.read_bytes()).hexdigest()
     assert runtime_source == "selected-wheel"
-    assert facts["runtime_library_source"] == "selected-wheel"
-    assert facts["runtime_library_sha256"] == hashlib.sha256(
-        packaged.read_bytes()
+    assert case.facts["runtime_library_source"] == "selected-wheel"
+    assert case.facts["runtime_library_sha256"] == hashlib.sha256(
+        case.packaged.read_bytes()
     ).hexdigest()
-    staged_core = staged.parent / packaged_core.name
-    core_digest = hashlib.sha256(packaged_core.read_bytes()).hexdigest()
+    staged_core = staged.parent / case.packaged_core.name
+    core_digest = hashlib.sha256(case.packaged_core.read_bytes()).hexdigest()
     assert staged_core.is_file() and not staged_core.is_symlink()
-    assert staged_core.read_bytes() == packaged_core.read_bytes()
+    assert staged_core.read_bytes() == case.packaged_core.read_bytes()
     assert staged_core.resolve().is_relative_to(staged.parent.resolve())
-    assert facts["runtime_core_library"] == packaged_core.name
-    assert facts["runtime_core_library_source"] == "selected-wheel"
-    assert facts["runtime_core_library_sha256"] == core_digest
-    assert facts["staged_runtime_core_library_sha256"] == core_digest
+    assert case.facts["runtime_core_library"] == case.packaged_core.name
+    assert case.facts["runtime_core_library_source"] == "selected-wheel"
+    assert case.facts["runtime_core_library_sha256"] == core_digest
+    assert case.facts["staged_runtime_core_library_sha256"] == core_digest
+    assert case.facts["selected_wheel_native_elf_dependency_audit"] == "direct-dt-needed"
+    assert case.facts["selected_wheel_native_elf_dependency_scan_count"] == 6
+    assert case.facts["selected_wheel_backend_elf_dependency_scan_count"] == 2
+    assert case.facts["selected_wheel_python_runtime_dt_needed_count"] == 0
+    assert case.readelf_calls[-6:] == [
+        case.staged_model,
+        case.staged_core,
+        case.packaged_trtmc,
+        case.packaged_benchmark_worker,
+        case.packaged_backend,
+        case.packaged_versioned_backend,
+    ]
+    inventory = (case.artifacts / "selected-wheel-native-elfs.txt").read_text(
+        encoding="utf-8"
+    )
+    assert inventory.count("\n") == 6
+    assert "staged-model-dso\t" in inventory
+    assert "staged-core-dso\t" in inventory
+    assert "wheel-trtmc-cli\t" in inventory
+    assert "wheel-benchmark-worker\t" in inventory
+    assert inventory.count("wheel-trt-backend\t") == 2
+    assert case.steps[-1] == (
+        "dso_isolation",
+        "passed",
+        "model-dsos.txt, model-dso.dynamic.txt, core-dso.dynamic.txt, "
+        "trt-backend-dso.dynamic.txt, trtmc.dynamic.txt, "
+        "selected-wheel-native-elfs.txt, selected-wheel-*.dynamic.txt",
+    )
 
     outside_core = tmp_path / "outside-libtrtmc_core.so"
     outside_core.write_bytes(b"\x7fELFoutside")
-    packaged_core.unlink()
-    packaged_core.symlink_to(outside_core)
+    case.packaged_core.unlink()
+    case.packaged_core.symlink_to(outside_core)
     with pytest.raises(CiError, match="selected wheel core DSO is missing or unsafe"):
-        pipeline._validate_dso("fixture", runtime_library)
+        case.pipeline._validate_dso("fixture", case.runtime_library)
 
     calls: list[tuple[list[object], dict[str, str]]] = []
     monkeypatch.setattr(
-        pipeline,
+        case.pipeline,
         "_run_logged",
         lambda command, _path, **kwargs: calls.append((command, kwargs["updates"])),
     )
-    pipeline._run_cpp_tests(["test_fixture"])
-    assert calls[0][1]["TRTMC_MODEL_PLUGIN_DIR"] == str(work / "build/models")
+    case.pipeline._run_cpp_tests(["test_fixture"])
+    assert calls[0][1]["TRTMC_MODEL_PLUGIN_DIR"] == str(case.work / "build/models")
+
+
+@pytest.mark.parametrize(
+    "elf_name",
+    [
+        "staged_model",
+        "staged_core",
+        "packaged_trtmc",
+        "packaged_benchmark_worker",
+        "packaged_backend",
+        "packaged_versioned_backend",
+    ],
+)
+def test_model_proof_rejects_selected_wheel_python_runtime_dt_needed(
+    tmp_path: Path,
+    monkeypatch,
+    elf_name: str,
+) -> None:
+    case = _selected_wheel_dso_fixture(tmp_path, monkeypatch)
+    case.dynamic_by_path[getattr(case, elf_name)] = _readelf_output(
+        "libpython3.12.so.1.0"
+    )
+
+    with pytest.raises(CiError, match="forbidden Python runtime via DT_NEEDED"):
+        case.pipeline._validate_dso("fixture", case.runtime_library)
+
+
+@pytest.mark.parametrize(
+    ("elf_name", "message"),
+    [
+        ("packaged", "selected wheel model DSO is missing or unsafe"),
+        ("packaged_core", "selected wheel core DSO is missing or unsafe"),
+        ("packaged_trtmc", "selected wheel native ELF is missing or unsafe"),
+        (
+            "packaged_benchmark_worker",
+            "selected wheel native ELF is missing or unsafe",
+        ),
+        ("packaged_backend", "missing required TensorRT backend ELF files"),
+        ("packaged_versioned_backend", "missing required TensorRT backend ELF files"),
+    ],
+)
+def test_model_proof_requires_selected_wheel_runtime_elfs(
+    tmp_path: Path,
+    monkeypatch,
+    elf_name: str,
+    message: str,
+) -> None:
+    case = _selected_wheel_dso_fixture(tmp_path, monkeypatch)
+    getattr(case, elf_name).unlink()
+
+    with pytest.raises(CiError, match=message):
+        case.pipeline._validate_dso("fixture", case.runtime_library)

@@ -382,7 +382,6 @@ class MagpieTTSPlugin:
         )
         asr_python = (
             (runtime_context.reference_python if runtime_context else "")
-            or (runtime_context.hf_python if runtime_context else "")
             or (runtime_context.runtime_python if runtime_context else "")
             or sys.executable
         )

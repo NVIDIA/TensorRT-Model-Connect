@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -66,7 +65,6 @@ class TestContext:
     runtime_strategy: str
     bundle_path: str | None = None
     binary_path: str | None = None
-    hf_python: str | None = None
     image_path: str | None = None
     max_cache_length: int = 256
     max_new_tokens: int = 20

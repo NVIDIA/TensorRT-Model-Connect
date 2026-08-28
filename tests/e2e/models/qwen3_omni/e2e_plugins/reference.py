@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from .references.invariant_only import InvariantOnlyReference
 from .references.torch_reference import TorchReference
 
 
@@ -12,4 +13,8 @@ class Qwen3OmniTorchReference(TorchReference):
     """Pinned official HF WAV evidence with an invariant-only gate."""
 
 
-reference = Qwen3OmniTorchReference()
+class Qwen3OmniInvariantOnlyReference(InvariantOnlyReference):
+    """Native Thinker output is checked without an external model."""
+
+
+reference = [Qwen3OmniTorchReference(), Qwen3OmniInvariantOnlyReference()]

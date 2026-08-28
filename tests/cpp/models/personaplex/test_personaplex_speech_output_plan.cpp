@@ -9,19 +9,14 @@
 // Trace ID:       UT-AUD-CPP-15
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-AUD-01
-// Intent:         Speech subprocess seam: output plan resample, frame rate clamping, token parsing
-// Preconditions:  Output plan with various target/max output configurations
-// Postconditions: Resample path correct, frame rate clamped, tokens parsed from subprocess output
+// Intent:         Speech output planning for resampling, clamping, and partial frames
+// Preconditions:  Output plans with varied rates, frame limits, and tail lengths
+// Postconditions:  Derived frame counts remain bounded and preserve partial codec frames
 // =============================================================================
 
 #include "runtime/models/personaplex/speech_generation_policy.h"
-#include "runtime/models/personaplex/subprocess_runner.h"
 
-#include <cstdint>
-#include <cstring>
 #include <iostream>
-#include <string>
-#include <vector>
 
 namespace {
 
@@ -32,10 +27,6 @@ void check(bool condition, const char* test_name) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++failures;
     }
-}
-
-void check_contains(const std::string& text, const std::string& needle, const char* test_name) {
-    check(text.find(needle) != std::string::npos, test_name);
 }
 
 void test_output_plan_resample_path() {
@@ -129,83 +120,6 @@ void test_output_plan_keeps_the_final_partial_codec_frame() {
     check(plan.output_frames == 343, "output plan: partial frame matches official output length");
 }
 
-class FakeSubprocessRunner final : public trtmc::ISubprocessRunner {
-  public:
-    int rc{0};
-    std::vector<char> stdout_data;
-    std::string stderr_data;
-    std::vector<std::string> last_argv;
-    int call_count{0};
-
-    int run(const std::vector<std::string>& argv, const void*, std::size_t,
-            std::vector<char>& out_stdout, std::string& out_stderr) override {
-        ++call_count;
-        last_argv = argv;
-        out_stdout = stdout_data;
-        out_stderr = stderr_data;
-        return rc;
-    }
-};
-
-std::vector<char> make_token_bytes(std::initializer_list<int32_t> tokens) {
-    std::vector<char> bytes(tokens.size() * sizeof(int32_t));
-    std::size_t index = 0;
-    for (int32_t token : tokens) {
-        std::memcpy(bytes.data() + index * sizeof(int32_t), &token, sizeof(int32_t));
-        ++index;
-    }
-    return bytes;
-}
-
-void test_tokenize_runtime_success_parses_tokens() {
-    FakeSubprocessRunner runner;
-    runner.stdout_data = make_token_bytes({11, 22, 33});
-
-    const auto result =
-        trtmc::TokenizeSpeechPromptRuntime("/usr/bin/python3", "hello world", runner);
-
-    check(runner.call_count == 1, "success: runner called once");
-    check(runner.last_argv.size() == 3, "success: argv size");
-    if (runner.last_argv.size() == 3) {
-        check(runner.last_argv[0] == "/bin/sh", "success: argv[0]");
-        check(runner.last_argv[1] == "-c", "success: argv[1]");
-        check_contains(runner.last_argv[2],
-                       "/usr/bin/python3 -c \"from transformers import AutoTokenizer; ",
-                       "success: command prefix");
-        check_contains(runner.last_argv[2],
-                       "ids = tok.encode('hello world', add_special_tokens=False); ",
-                       "success: prompt embedded in command");
-    }
-    check(result.rc == 0, "success: rc");
-    check(result.tokens == std::vector<int32_t>({11, 22, 33}), "success: token parse");
-    check(result.stderr_data.empty(), "success: stderr empty");
-}
-
-void test_tokenize_runtime_failure_propagates_rc_and_stderr() {
-    FakeSubprocessRunner runner;
-    runner.rc = 17;
-    runner.stderr_data = "subprocess failed";
-    runner.stdout_data = make_token_bytes({101, 202});
-
-    const auto result = trtmc::TokenizeSpeechPromptRuntime("/usr/bin/python3", "ignored", runner);
-
-    check(result.rc == 17, "failure: rc propagated");
-    check(result.tokens.empty(), "failure: tokens empty");
-    check(result.stderr_data == "subprocess failed", "failure: stderr propagated");
-}
-
-void test_tokenize_runtime_empty_stdout_stays_empty() {
-    FakeSubprocessRunner runner;
-    runner.rc = 0;
-    runner.stderr_data = "warnings only";
-
-    const auto result = trtmc::TokenizeSpeechPromptRuntime("/usr/bin/python3", "ignored", runner);
-
-    check(result.rc == 0, "empty stdout: rc preserved");
-    check(result.tokens.empty(), "empty stdout: tokens empty");
-    check(result.stderr_data == "warnings only", "empty stdout: stderr preserved");
-}
-
 } // namespace
 
 int main() {
@@ -215,12 +129,10 @@ int main() {
     test_output_plan_large_target_clamps_to_max_output();
     test_output_plan_keeps_the_final_partial_codec_frame();
 
-    test_tokenize_runtime_success_parses_tokens();
-    test_tokenize_runtime_failure_propagates_rc_and_stderr();
-    test_tokenize_runtime_empty_stdout_stays_empty();
-
-    if (failures != 0)
+    if (failures > 0) {
+        std::cerr << failures << " test(s) FAILED\n";
         return 1;
-    std::cout << "test_speech_subprocess_seam: PASS\n";
+    }
+    std::cout << "All PersonaPlex speech output plan tests passed\n";
     return 0;
 }

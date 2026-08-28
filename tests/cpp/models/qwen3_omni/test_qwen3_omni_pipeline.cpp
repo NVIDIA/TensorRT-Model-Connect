@@ -7,6 +7,7 @@
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/models/qwen3_omni/kv_cache.h"
 #include "runtime/models/qwen3_omni/omni_config.h"
+#include "runtime/models/qwen3_omni/omni_thinker_plan.h"
 #include "runtime/models/qwen3_omni/pipeline.h"
 #include "trtmc/tokenizer.h"
 
@@ -14,6 +15,7 @@
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -32,10 +34,19 @@ void check(bool condition, const char* name) {
 
 class OmniFixedTokenizer : public trtmc::ITokenizer {
   public:
-    std::vector<int32_t> encode(const std::string&) const override { return {1, 2}; }
-    std::string decode(const std::vector<int32_t>&) const override { return ""; }
+    std::vector<int32_t> encode(const std::string& text) const override {
+        encoded_text = text;
+        return {1, 2};
+    }
+    std::string decode(const std::vector<int32_t>& ids) const override {
+        decoded_ids = ids;
+        return ids.empty() ? "" : "native thinker response";
+    }
     int32_t id_for_token(std::string_view) const override { return 0; }
     std::string token_for_id(int32_t) const override { return ""; }
+
+    mutable std::string encoded_text;
+    mutable std::vector<int32_t> decoded_ids;
 };
 
 struct CountingOmniStats {
@@ -66,8 +77,7 @@ class CountingOmniModule final : public trtmc::ITrtModule {
     std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
     std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string& name) const override {
-        return name == "token_id" || name == "position_id" || name == "attention_mask" ||
-               name == "input_embed" || name == "use_input_embed";
+        return name == "token_id" || name == "position_id" || name == "attention_mask";
     }
     bool has_output(const std::string& name) const override { return name == "logits"; }
     trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
@@ -128,10 +138,20 @@ void test_omni_pipeline_construction() {
     check(std::string(pipeline.pipeline_type()) == "OmniPipeline", "OmniPipeline: pipeline_type");
     check(std::string(pipeline.model_id()) == "test-omni", "OmniPipeline: model_id");
 
+    bool missing_tokenizer_failed_closed = false;
+    try {
+        (void)pipeline.generate("hello");
+    } catch (const std::runtime_error& error) {
+        missing_tokenizer_failed_closed =
+            std::string(error.what()).find("native tokenizer is required") != std::string::npos;
+    }
+    check(missing_tokenizer_failed_closed,
+          "omni text generation fails closed without a native tokenizer");
+
     cudaStreamDestroy(stream);
 }
 
-void test_omni_generate_audio() {
+void test_omni_generate_audio_fails_without_native_talker() {
     const std::vector<float> thinker_logits = {0.1F, 0.1F, 0.1F, 1.0F};
     auto thinker_engine = trtmc::test::build_mock_step_engine(9, 4, thinker_logits);
     if (!thinker_engine) {
@@ -154,10 +174,130 @@ void test_omni_generate_audio() {
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
 
-    auto result = pipeline.generate_audio("hello", gen_cfg);
-    check(result.num_samples == 0,
-          "omni generate_audio: no audio when thinker returns empty text tokens");
-    check(result.sample_rate == 24000, "omni generate_audio: sample_rate = 24000");
+    bool threw = false;
+    try {
+        (void)pipeline.generate_audio("hello", gen_cfg);
+    } catch (const std::runtime_error& error) {
+        threw = std::string(error.what()).find("native Qwen3-Omni Talker is unavailable") !=
+                std::string::npos;
+    }
+    check(threw, "omni generate_audio fails closed without a native Talker");
+
+    cudaStreamDestroy(stream);
+}
+
+void test_omni_generate_text_uses_native_thinker_and_tokenizer() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingOmniStats>();
+    auto thinker = std::make_unique<CountingOmniModule>(decode_stats, false, stream);
+    if (!thinker->ok()) {
+        std::cerr << "WARNING: Could not allocate Omni test buffers, skipping\n";
+        cudaStreamDestroy(stream);
+        return;
+    }
+
+    auto thinker_cache = std::make_unique<trtmc::Qwen3OmniKvCache>(0, 8, 0, stream);
+    auto tokenizer = std::make_shared<OmniFixedTokenizer>();
+    trtmc::OmniConfig cfg;
+    cfg.thinker_vocab_size = 4;
+    cfg.thinker_eos_token_id = 99;
+    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, cfg, stream,
+                                 tokenizer, "test-omni-text");
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    const auto result = pipeline.generate("Reply briefly.", gen_cfg);
+
+    check(result.text == "native thinker response", "omni text generation decodes Thinker IDs");
+    check(result.token_ids == std::vector<int32_t>({1, 1}),
+          "omni text generation returns generated Thinker IDs");
+    check(tokenizer->decoded_ids == result.token_ids,
+          "omni text generation decodes only generated IDs");
+    check(tokenizer->encoded_text == trtmc::format_omni_chat_prompt("Reply briefly."),
+          "omni text generation applies the official chat prompt");
+    check(decode_stats->launches == 3,
+          "omni text generation runs two prompt steps and one decode step");
+
+    cudaStreamDestroy(stream);
+}
+
+void test_omni_generate_text_honors_request_and_configured_eos() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingOmniStats>();
+    auto thinker = std::make_unique<CountingOmniModule>(decode_stats, false, stream);
+    if (!thinker->ok()) {
+        std::cerr << "WARNING: Could not allocate Omni test buffers, skipping\n";
+        cudaStreamDestroy(stream);
+        return;
+    }
+
+    auto thinker_cache = std::make_unique<trtmc::Qwen3OmniKvCache>(0, 8, 0, stream);
+    auto tokenizer = std::make_shared<OmniFixedTokenizer>();
+    trtmc::OmniConfig cfg;
+    cfg.thinker_vocab_size = 4;
+    cfg.thinker_eos_token_id = 1;
+    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, cfg, stream,
+                                 tokenizer, "test-omni-eos");
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    gen_cfg.eos_token_id = 99;
+    const auto overridden = pipeline.generate("Use the request EOS.", gen_cfg);
+
+    check(overridden.token_ids == std::vector<int32_t>({1, 1}),
+          "omni text generation lets request EOS override the configured EOS");
+
+    decode_stats->launches = 0;
+    gen_cfg.eos_token_id = -1;
+    const auto configured = pipeline.generate("Use the configured EOS.", gen_cfg);
+
+    check(configured.text.empty(),
+          "omni text generation excludes configured EOS from decoded text");
+    check(configured.token_ids.empty(),
+          "omni text generation excludes configured EOS from token IDs");
+    check(tokenizer->decoded_ids.empty(), "omni text generation decodes no EOS token");
+    check(decode_stats->launches == 2,
+          "omni text generation stops after prompt when its first output is configured EOS");
+
+    cudaStreamDestroy(stream);
+}
+
+void test_omni_generate_text_rejects_cache_overflow_before_launch() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingOmniStats>();
+    auto thinker = std::make_unique<CountingOmniModule>(decode_stats, false, stream);
+    if (!thinker->ok()) {
+        std::cerr << "WARNING: Could not allocate Omni test buffers, skipping\n";
+        cudaStreamDestroy(stream);
+        return;
+    }
+
+    auto thinker_cache = std::make_unique<trtmc::Qwen3OmniKvCache>(0, 3, 0, stream);
+    auto tokenizer = std::make_shared<OmniFixedTokenizer>();
+    trtmc::OmniConfig cfg;
+    cfg.thinker_vocab_size = 4;
+    cfg.thinker_eos_token_id = 99;
+    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, cfg, stream,
+                                 tokenizer, "test-omni-capacity");
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 2;
+    bool threw = false;
+    try {
+        (void)pipeline.generate("Too long.", gen_cfg);
+    } catch (const std::runtime_error& error) {
+        threw = std::string(error.what()).find("KV cache capacity") != std::string::npos;
+    }
+
+    check(threw, "omni text generation rejects prompt plus output beyond cache capacity");
+    check(decode_stats->launches == 0,
+          "omni text generation rejects cache overflow before a Thinker launch");
 
     cudaStreamDestroy(stream);
 }
@@ -211,10 +351,10 @@ void test_omni_batched_prefill_and_device_argmax() {
               "omni prefill: token shape");
         check(prefill_stats->shapes["attention_mask"] == std::vector<int64_t>({3, 11}),
               "omni prefill: causal mask shape");
-        check(prefill_stats->shapes["input_embed"] == std::vector<int64_t>({3, 4}),
-              "omni prefill: embedding shape");
-        check(prefill_stats->shapes["use_input_embed"] == std::vector<int64_t>({3, 1}),
-              "omni prefill: selector shape");
+        check(prefill_stats->shapes.count("input_embed") == 0,
+              "omni prefill: text-only contract has no external embedding input");
+        check(prefill_stats->shapes.count("use_input_embed") == 0,
+              "omni prefill: text-only contract has no embedding selector input");
         check(stats.prompt_tokens == 3 && stats.prefill_launches == 1 && stats.decode_launches == 1,
               "omni prefill: deterministic launch counters");
         check(stats.full_logits_d2h == 0, "omni prefill: no full-logits D2H");
@@ -227,7 +367,10 @@ void test_omni_batched_prefill_and_device_argmax() {
 
 int main() {
     test_omni_pipeline_construction();
-    test_omni_generate_audio();
+    test_omni_generate_text_uses_native_thinker_and_tokenizer();
+    test_omni_generate_text_honors_request_and_configured_eos();
+    test_omni_generate_text_rejects_cache_overflow_before_launch();
+    test_omni_generate_audio_fails_without_native_talker();
     test_omni_validates_thinker();
     test_omni_batched_prefill_and_device_argmax();
     if (failures > 0) {

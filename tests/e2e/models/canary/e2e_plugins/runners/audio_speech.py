@@ -188,9 +188,6 @@ class SpeechToTextRunner:
             "--audio", audio_input,
             "--max-new-tokens", str(max_new_tokens),
         ]
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            cmd.extend(["--hf-python", runtime_cli_python])
 
         env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
         cmd = _wrap_distributed_command(cmd, case)

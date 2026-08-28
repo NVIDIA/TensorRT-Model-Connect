@@ -201,9 +201,6 @@ class DiffusionMediaRunner:
             if "seed" in case.inputs:
                 cmd.extend(["--seed", str(case.inputs["seed"])])
 
-            runtime_cli_python = ctx.runtime_cli_hf_python()
-            if runtime_cli_python:
-                cmd.extend(["--hf-python", runtime_cli_python])
 
             cmd.extend(["--output", frame_dir])
             env = {**os.environ, "LD_LIBRARY_PATH": _build_ld_library_path(ctx)}

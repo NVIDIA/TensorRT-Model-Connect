@@ -21,7 +21,6 @@
 #include "trtmc/runtime/pipeline_pool.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
-#include "utils/data_dir.h"
 #include "utils/json_helpers.h"
 
 #include <algorithm>
@@ -153,13 +152,10 @@ IPipelinePlugin* lookup_plugin_or_throw(const std::string& strategy,
 }
 
 // Apply platform.* values to their process-wide sinks. Replaces the old
-// TRTMC_DATA_DIR and TRTMC_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
+// TRTMC_TRT_LOG_{STDERR,MIN_SEVERITY} env-var reads.
 // Called once a bundle's layered runtime config has resolved.
 void apply_platform_config(const config::ConfigBundle& bundle) {
     try {
-        const std::string source = bundle.get<std::string>("platform", "source_dir");
-        if (!source.empty())
-            set_source_dir(source);
         const bool verbose_stderr = bundle.get<bool>("platform", "trt_log_stderr");
         const std::string severity = bundle.get<std::string>("platform", "trt_log_min_severity");
         configure_trt_logger(verbose_stderr, severity);
@@ -333,12 +329,10 @@ detail::resolve_runtime_config(const std::string& config_text, const std::string
     }
 }
 
-std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
-                                                        const std::string& hf_python,
-                                                        const std::string& runtime_cache_path,
-                                                        bool cuda_graphs) {
+std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path) {
+    const std::string runtime_cache_path;
+    constexpr bool cuda_graphs = false;
     LoadOptions optimized_options;
-    optimized_options.hf_python = hf_python;
     optimized_options.runtime_cache_path = runtime_cache_path;
     optimized_options.cuda_graphs = cuda_graphs;
     const BundleInfo header = ReadBundleHeader(bundle_path);
@@ -387,7 +381,6 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     PipelineContext ctx{bundle,
                         base_cfg,
                         config_text,
-                        hf_python,
                         bundle_path,
                         backend,
                         runtime_cache_path,
@@ -454,7 +447,6 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     PipelineContext ctx{bundle,
                         base_cfg,
                         config_text,
-                        options.hf_python,
                         bundle_path,
                         backend,
                         options.runtime_cache_path,
@@ -524,7 +516,6 @@ PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t po
     PipelineContext ctx{bundle,
                         base_cfg,
                         config_text,
-                        options.hf_python,
                         bundle_path,
                         backend,
                         options.runtime_cache_path,
@@ -550,9 +541,8 @@ PipelineFactory::from_bundle_pool(const std::string& bundle_path, std::size_t po
     return pool;
 }
 
-std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python,
-                                const std::string& runtime_cache_path, bool cuda_graphs) {
-    return PipelineFactory::from_bundle(bundle_path, hf_python, runtime_cache_path, cuda_graphs);
+std::unique_ptr<IPipeline> load(const std::string& bundle_path) {
+    return PipelineFactory::from_bundle(bundle_path);
 }
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const LoadOptions& options) {

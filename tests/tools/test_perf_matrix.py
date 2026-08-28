@@ -70,7 +70,6 @@ TASK_ADAPTERS = {
     "personaplex.speak": "pytorch-personaplex",
     "phi4_multimodal.generate": "hf-transformers-vlm",
     "pixart.generate_image": "hf-diffusers",
-    "qwen3_omni.generate_audio": "hf-qwen3-omni",
     "qwen_image.generate_image": "hf-diffusers",
     "qwen_vl.generate": "hf-transformers-vlm",
     "sam.segment_prompted": "hf-transformers-vision",
@@ -273,8 +272,8 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 107
-    assert len(raw_entries) == 78
+    assert len(cases) == 106
+    assert len(raw_entries) == 77
     assert len(raw_additional) == 29
     assert excluded_profiles == {
         "fast-foundation-stereo": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
@@ -293,14 +292,14 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(performance_catalog.is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 78
-    assert len({case["family"] for case in cases}) == 77
+    assert len({(case["family"], case["operation"]) for case in cases}) == 77
+    assert len({case["family"] for case in cases}) == 76
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 24,
+        "model_call_wall": 23,
         "public_pipeline_call_wall": 83,
     }
     assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
@@ -360,7 +359,6 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "bark.generate_audio",
         "magpie_tts.generate_audio",
         "personaplex.speak",
-        "qwen3_omni.generate_audio",
     ):
         assert by_id[case_id]["baseline"]["output_contract"] == "audio-shape"
     assert by_id["personaplex.speak"]["baseline"]["adapter_options"] == {
@@ -2118,7 +2116,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 107
+    assert len(rows) == 106
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())
@@ -4212,9 +4210,11 @@ def test_qwen3_omni_uses_visible_single_gpu_placement(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
 
-    cases = performance_catalog.load_suite(SUITE).cases
-    case = next(case for case in cases if case["id"] == "qwen3_omni.generate_audio")
-    options = case["baseline"]["adapter_options"]
+    options = {
+        "device_map": "cuda:0",
+        "speaker": "Ethan",
+        "talker_max_new_tokens": 32,
+    }
     runner["_load_qwen3_omni"](
         Namespace(
             local_files_only=True,

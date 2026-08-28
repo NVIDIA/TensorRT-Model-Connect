@@ -56,9 +56,9 @@ text = pipe("The capital of France is", max_new_tokens=20, timeout=120)
 metadata = pipe.inspect()
 ```
 
-The constructor also accepts explicit `binary` and `hf_python` paths. Without
-`binary`, it first asks the installed package resources for a packaged `trtmc`
-executable, then checks a source checkout's `build/trtmc`, then `PATH`.
+The constructor also accepts an explicit `binary` path. Without `binary`, it
+first asks the installed package resources for a packaged `trtmc` executable,
+then checks a source checkout's `build/trtmc`, then `PATH`.
 Construction raises `FileNotFoundError` when none is executable.
 
 Calling the wrapper forwards `prompt`, optional `image`, optional

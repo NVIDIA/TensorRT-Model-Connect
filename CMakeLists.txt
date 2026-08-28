@@ -232,7 +232,6 @@ add_library(trtmc_core SHARED
   src/tokenizer/wordpiece_tokenizer.cpp
   src/tokenizer/unigram_tokenizer.cpp
   # Utilities
-  src/utils/data_dir.cpp
   src/utils/text_parsers.cpp
   src/utils/json_helpers.cpp
   src/cli/jsonl_io.cpp
@@ -780,6 +779,34 @@ set_target_properties(trtmc_test_optimized_embedding PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/embedding"
 )
 
+add_library(trtmc_test_model_plugin_missing_abi SHARED EXCLUDE_FROM_ALL
+  tests/cpp/fakes/fake_model_plugin_abi.cpp
+)
+target_include_directories(trtmc_test_model_plugin_missing_abi PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_compile_definitions(trtmc_test_model_plugin_missing_abi PRIVATE
+  TRTMC_FAKE_MODEL_PLUGIN_OMIT_ABI=1
+)
+set_target_properties(trtmc_test_model_plugin_missing_abi PROPERTIES
+  OUTPUT_NAME trtmc_test_model_plugin_abi
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/model-plugin-abi/missing"
+)
+
+add_library(trtmc_test_model_plugin_wrong_abi SHARED EXCLUDE_FROM_ALL
+  tests/cpp/fakes/fake_model_plugin_abi.cpp
+)
+target_include_directories(trtmc_test_model_plugin_wrong_abi PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_compile_definitions(trtmc_test_model_plugin_wrong_abi PRIVATE
+  TRTMC_FAKE_MODEL_PLUGIN_ABI_VERSION=1
+)
+set_target_properties(trtmc_test_model_plugin_wrong_abi PROPERTIES
+  OUTPUT_NAME trtmc_test_model_plugin_abi
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/model-plugin-abi/wrong"
+)
+
 # --- Test helper function ---
 # Usage:
 #   trtmc_add_test(test_name)               -- links trtmc_core, adds src/ include
@@ -902,6 +929,15 @@ trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
+trtmc_add_test(test_model_plugin_abi)
+add_dependencies(test_model_plugin_abi
+  trtmc_test_model_plugin_missing_abi
+  trtmc_test_model_plugin_wrong_abi
+)
+target_compile_definitions(test_model_plugin_abi PRIVATE
+  TRTMC_TEST_MODEL_PLUGIN_MISSING_ABI_DSO="$<TARGET_FILE:trtmc_test_model_plugin_missing_abi>"
+  TRTMC_TEST_MODEL_PLUGIN_WRONG_ABI_DSO="$<TARGET_FILE:trtmc_test_model_plugin_wrong_abi>"
+)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
 trtmc_add_test(test_runtime_measurement)
@@ -940,7 +976,6 @@ trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
 # Config / parsing
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
-trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
 trtmc_add_test(test_jsonl_dataset_and_output

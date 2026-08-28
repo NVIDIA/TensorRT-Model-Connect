@@ -37,17 +37,6 @@ class TestPipelineInit:
         pipe = Pipeline("/tmp/model.bundle", binary="/usr/bin/trtmc")
         assert pipe.binary == "/usr/bin/trtmc"
         assert pipe.bundle_path == "/tmp/model.bundle"
-        assert pipe.hf_python is None
-
-    def test_explicit_binary_and_hf_python(self):
-        """Both binary and hf_python are stored when provided."""
-        pipe = Pipeline(
-            "/tmp/model.bundle",
-            binary="/usr/bin/trtmc",
-            hf_python="/opt/venv/bin/python",
-        )
-        assert pipe.binary == "/usr/bin/trtmc"
-        assert pipe.hf_python == "/opt/venv/bin/python"
 
     def test_auto_detect_calls_find_binary(self):
         """When binary is None, _find_binary is called."""
@@ -82,9 +71,8 @@ class TestPipelineInit:
 
 
 class TestPipelineCall:
-    def _make_pipeline(self, hf_python=None):
-        return Pipeline(
-            "/tmp/model.bundle", binary="/usr/bin/trtmc", hf_python=hf_python)
+    def _make_pipeline(self):
+        return Pipeline("/tmp/model.bundle", binary="/usr/bin/trtmc")
 
     def test_basic_prompt(self):
         """Basic text prompt constructs correct command."""
@@ -165,34 +153,6 @@ class TestPipelineCall:
             pipe("Hello")
             cmd = mock_run.call_args[0][0]
             assert "--image" not in cmd
-
-    def test_hf_python_appended(self):
-        """When hf_python is set, --hf-python is in the command."""
-        pipe = self._make_pipeline(hf_python="/opt/venv/bin/python")
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "output"
-
-        with patch("tensorrt_model_connect.pipeline.subprocess.run",
-                    return_value=mock_result) as mock_run:
-            pipe("Hello")
-            cmd = mock_run.call_args[0][0]
-            assert "--hf-python" in cmd
-            idx = cmd.index("--hf-python")
-            assert cmd[idx + 1] == "/opt/venv/bin/python"
-
-    def test_hf_python_not_appended_when_none(self):
-        """When hf_python is None, --hf-python is not in the command."""
-        pipe = self._make_pipeline(hf_python=None)
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "output"
-
-        with patch("tensorrt_model_connect.pipeline.subprocess.run",
-                    return_value=mock_result) as mock_run:
-            pipe("Hello")
-            cmd = mock_run.call_args[0][0]
-            assert "--hf-python" not in cmd
 
     def test_nonzero_returncode_raises(self):
         """Non-zero exit code raises RuntimeError with stderr."""

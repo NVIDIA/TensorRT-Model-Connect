@@ -724,24 +724,6 @@ entries:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
-  - id: qwen3_omni.generate_audio
-    family: qwen3_omni
-    operation: generate_audio
-    model: qwen3-omni-30b-a3b-instruct
-    workload:
-      testcase: qwen3-omni-30b-a3b-instruct
-    baseline:
-      runner: task-reference
-      adapter: hf-qwen3-omni
-      mode: hf-eager
-      reference_backend: hf_transformers
-      timing_scope: task-model-call-wall
-      input_preparation_included: false
-      output_contract: audio-shape
-      adapter_options:
-        device_map: cuda:0
-        speaker: Ethan
-        talker_max_new_tokens: 32
   - id: qwen_image.generate_image
     family: qwen_image
     operation: generate_image

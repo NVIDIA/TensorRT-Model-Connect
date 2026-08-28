@@ -13,7 +13,7 @@
 //                        [--guidance-scale S] [--cfg-scale S] [--sde-gamma S]
 //                        [--initial-latents-raw PATH] [--condition-latents-raw PATH]
 //                        [--condition-mask-raw PATH] [--sampling-steps-raw PATH]
-//                        [--sde-noise-raw PATH] [--output samples.jsonl] [--hf-python PATH]
+//                        [--sde-noise-raw PATH] [--output samples.jsonl]
 //                        Image-generation extras:
 //                        [--negative-prompt "text"] [--num-inference-steps N]
 //                        [--height N] [--width N]
@@ -144,7 +144,6 @@ normalize_explicit_image_batch_seeds(const std::vector<std::uint64_t>& explicit_
 
 trtmc::LoadOptions make_load_options(const CliArgs& args) {
     trtmc::LoadOptions options;
-    options.hf_python = args.hf_python;
     options.runtime_cache_path = args.runtime_cache;
     options.cuda_graphs = args.cuda_graphs;
     options.kv_cache_size_bytes = args.kv_cache_size_bytes;

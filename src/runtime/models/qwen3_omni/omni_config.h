@@ -36,10 +36,6 @@ struct OmniConfig {
     int32_t code2wav_output_delay{555};
     int32_t code2wav_max_frames{32};
 
-    std::string hf_python;
-    std::string talker_model_id;
-    std::string talker_model_revision;
-
     bool greedy{false};
     float temperature{0.7F};
     int32_t top_k{50};

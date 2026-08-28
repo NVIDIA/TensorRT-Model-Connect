@@ -152,6 +152,7 @@ class SourceQualityChecks:
                 "-m",
                 "pytest",
                 "tests/tools/test_model_plugin_encapsulation_static.py",
+                "tests/tools/test_native_runtime_python_free.py",
                 "-q",
                 "-p",
                 "no:cacheprovider",

@@ -107,6 +107,30 @@ void test_thinker_stops_only_on_configured_eos() {
           "omni thinker stops on configured im_end token");
 }
 
+void test_thinker_text_prompt_uses_official_chat_template() {
+    const auto formatted = trtmc::format_omni_chat_prompt("Reply briefly.");
+    check(formatted ==
+              "<|im_start|>system\n"
+              "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable "
+              "of perceiving auditory and visual inputs, as well as generating text and speech."
+              "<|im_end|>\n<|im_start|>user\n"
+              "Reply briefly.<|im_end|>\n<|im_start|>assistant\n",
+          "omni thinker text prompt uses the official system/user template");
+}
+
+void test_thinker_cache_capacity_is_fail_closed() {
+    check(trtmc::omni_thinker_request_fits_cache(8, 4, -1),
+          "omni thinker accepts an explicitly unbounded cache");
+    check(trtmc::omni_thinker_request_fits_cache(8, 4, 12),
+          "omni thinker accepts a request that exactly fills the cache");
+    check(!trtmc::omni_thinker_request_fits_cache(13, 0, 12),
+          "omni thinker rejects a prompt beyond cache capacity");
+    check(!trtmc::omni_thinker_request_fits_cache(8, 5, 12),
+          "omni thinker rejects generation beyond remaining cache capacity");
+    check(!trtmc::omni_thinker_request_fits_cache(8, -1, 12),
+          "omni thinker rejects a negative generation budget");
+}
+
 } // namespace
 
 int main() {
@@ -116,6 +140,8 @@ int main() {
     test_code2wav_input_builder_transposes_frame_major_tokens();
     test_code2wav_output_uses_official_stride_and_causal_delay();
     test_thinker_stops_only_on_configured_eos();
+    test_thinker_text_prompt_uses_official_chat_template();
+    test_thinker_cache_capacity_is_fail_closed();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " omni audio plan test(s) failed\n";

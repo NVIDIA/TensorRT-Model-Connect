@@ -25,7 +25,6 @@ namespace {
 thread_local std::string g_last_error;
 
 struct PipelineCreateArgs {
-    std::string hf_python;
     std::string runtime_cache;
     bool cuda_graphs{false};
 };
@@ -40,8 +39,6 @@ void clear_last_error() {
 
 PipelineCreateArgs parse_pipeline_options(const TrtmcPipelineOptions* options) {
     PipelineCreateArgs args;
-    if (options != nullptr && options->hf_python != nullptr)
-        args.hf_python = options->hf_python;
     if (options != nullptr && options->runtime_cache != nullptr)
         args.runtime_cache = options->runtime_cache;
     args.cuda_graphs = (options != nullptr && options->cuda_graphs != 0);
@@ -86,7 +83,6 @@ trtmc::IPipeline* trtmc_create_pipeline(const char* bundle_path, int flags) {
     (void)flags;
     TrtmcPipelineOptions opts{};
     opts.max_new_tokens = 0;
-    opts.hf_python = nullptr;
     opts.image_path = nullptr;
     opts.runtime_cache = nullptr;
     opts.cuda_graphs = 0;
@@ -113,8 +109,10 @@ trtmc::IPipeline* trtmc_create_pipeline_ex(const char* bundle_path,
 
         auto t0 = std::chrono::steady_clock::now();
 
-        auto pipeline = trtmc::PipelineFactory::from_bundle(path, args.hf_python,
-                                                            args.runtime_cache, args.cuda_graphs);
+        trtmc::LoadOptions load_options;
+        load_options.runtime_cache_path = args.runtime_cache;
+        load_options.cuda_graphs = args.cuda_graphs;
+        auto pipeline = trtmc::PipelineFactory::from_bundle(path, load_options);
 
         auto t1 = std::chrono::steady_clock::now();
         std::cerr << "[trtmc] Runtime ready (strategy=" << pipeline->pipeline_type() << ") ["

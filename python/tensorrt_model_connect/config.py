@@ -24,9 +24,9 @@ class ModelConfig:
     num_key_value_heads: int = 1
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
-    bos_token_id: int = -1
-    eos_token_id: int = -1
-    pad_token_id: int = -1
+    bos_token_id: int | list[int] = -1
+    eos_token_id: int | list[int] = -1
+    pad_token_id: int | list[int] = -1
     tie_word_embeddings: bool = False
     max_position_embeddings: int = 8192
     hidden_act: str = ""
@@ -173,6 +173,10 @@ class ModelConfig:
         if not architectures and architecture:
             architectures = [architecture]
 
+        def token_id(key: str) -> int | list[int]:
+            value = d.get(key)
+            return -1 if value is None else value
+
         return ModelConfig(
             model_type=d.get("model_type", "") or architecture,
             architectures=architectures,
@@ -184,9 +188,9 @@ class ModelConfig:
             num_key_value_heads=d.get("num_key_value_heads", num_heads),
             rms_norm_eps=eps,
             rope_theta=rope_theta,
-            bos_token_id=d.get("bos_token_id", -1) or -1,
-            eos_token_id=d.get("eos_token_id", -1) or -1,
-            pad_token_id=d.get("pad_token_id", -1) or -1,
+            bos_token_id=token_id("bos_token_id"),
+            eos_token_id=token_id("eos_token_id"),
+            pad_token_id=token_id("pad_token_id"),
             tie_word_embeddings=d.get("tie_word_embeddings", False),
             max_position_embeddings=d.get("max_position_embeddings",
                                           d.get("n_positions", 8192)),

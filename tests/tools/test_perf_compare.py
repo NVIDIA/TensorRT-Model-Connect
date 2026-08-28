@@ -119,7 +119,7 @@ def test_bench_trtmc_cpp_parses_actual_mean_token_count(monkeypatch):
     monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: completed)
 
     result = mod.bench_trtmc_cpp(
-        "trtmc", "model.bundle", "prompt", 64, 3, 10, None, False
+        "trtmc", "model.bundle", "prompt", 64, 3, 10, False
     )
 
     assert result == {

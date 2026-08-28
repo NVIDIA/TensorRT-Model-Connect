@@ -396,7 +396,6 @@ def test_native_kv_regression_prompt_repeat_resolves_deterministically(
         ("magpie-tts-357m", "generate_audio"),
         ("personaplex-7b-l0", "speak"),
         ("phi4-multimodal", "generate"),
-        ("qwen3-omni-30b-a3b-instruct", "generate_audio"),
         ("qwen3-vl-2b", "generate"),
         ("sam-vit-base", "segment_prompted"),
         ("sam3", "segment_prompted"),
@@ -519,6 +518,22 @@ def test_catalog_rejects_distributed_profiles_not_supported_by_worker() -> None:
         match=r"requires distributed execution \(mpirun, world_size=4\).+single-process",
     ):
         ManifestCatalog().resolve("chronos-bolt-tiny-official-tp4")
+
+
+def test_catalog_marks_qwen3_omni_audio_benchmark_e2e_only() -> None:
+    entry = next(
+        entry
+        for entry in ManifestCatalog().entries()
+        if entry.name == "qwen3-omni-30b-a3b-instruct"
+    )
+
+    assert entry.status == "e2e_only"
+    assert "audio remains unavailable" in entry.reason
+    with pytest.raises(
+        BenchmarkError,
+        match=r"is E2E-only: .*audio remains unavailable",
+    ):
+        ManifestCatalog().resolve("qwen3-omni-30b-a3b-instruct")
 
 
 def test_model_identity_does_not_depend_on_catalog_install_path(tmp_path: Path) -> None:
@@ -909,7 +924,7 @@ def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: 
     assert speech.operation == "speak"
     assert speech.request["max_new_tokens"] == 100
     assert Path(speech.worker_request()["request"]["audio_path"]).is_file()
-    assert Path(speech.runtime["hf_python"]).is_file()
+    assert "hf_python" not in speech.runtime
 
     magpie = resolve_case(
         ManifestCatalog().resolve("magpie-tts-357m"),
@@ -928,13 +943,6 @@ def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: 
     )
     assert bark.request["seed"] == 0
     assert bark.sources["request.seed"] == "model testcase"
-
-    qwen3_omni = resolve_case(
-        ManifestCatalog().resolve("qwen3-omni-30b-a3b-instruct"),
-        tmp_path / "qwen3-omni.bundle",
-    )
-    assert qwen3_omni.request["seed"] == 42
-    assert qwen3_omni.sources["request.seed"] == "model testcase"
 
 
 def test_seeded_ready_profiles_preserve_seed_in_public_request(tmp_path: Path) -> None:

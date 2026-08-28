@@ -152,7 +152,6 @@ std::vector<float> optional_float32_values(const Json& request, const std::strin
 
 trtmc::LoadOptions load_options(const Json& runtime) {
     trtmc::LoadOptions options;
-    options.hf_python = optional_value<std::string>(runtime, "hf_python", "");
     options.runtime_cache_path = optional_value<std::string>(runtime, "runtime_cache_path", "");
     options.cuda_graphs = optional_value<bool>(runtime, "cuda_graphs", false);
     options.kv_cache_size_bytes = optional_value<std::uint64_t>(runtime, "kv_cache_size_bytes", 0);

@@ -102,6 +102,13 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "    fi\n"
         '    if [[ " $* " == *" -a "* ]]; then\n'
         '      record="${FAKE_ORPHAN_CONFIRM_RECORD:-}"\n'
+        '      if [ -n "${FAKE_ORPHAN_CONFIRM_ONCE_FILE:-}" ]; then\n'
+        '        if [ -e "$FAKE_ORPHAN_CONFIRM_ONCE_FILE" ]; then\n'
+        '          record=""\n'
+        '        else\n'
+        '          : > "$FAKE_ORPHAN_CONFIRM_ONCE_FILE"\n'
+        '        fi\n'
+        '      fi\n'
         "    else\n"
         '      record="${FAKE_ORPHAN_CONTAINER_RECORD:-}"\n'
         "    fi\n"
@@ -265,6 +272,8 @@ def _fake_proof_environment(
             "TRTMC_HF_CACHE": str(tmp_path / "hf-cache"),
             "TRTMC_MODEL_PROOF_GPU_LOCK_DIR": str(tmp_path / "gpu-locks"),
             "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "5",
+            "TRTMC_MODEL_PROOF_ORPHAN_REMOVAL_TIMEOUT_MS": "100",
+            "TRTMC_MODEL_PROOF_ORPHAN_REMOVAL_POLL_MS": "10",
             # Fast state transitions keep the multi-process coordination tests
             # deterministic without widening their assertion windows.
             "TRTMC_MODEL_PROOF_POLL_INTERVAL": "0.05",
@@ -906,11 +915,18 @@ def test_whisper_nightly_selection_leases_one_complete_gpu(
 
 
 def test_qwen3_omni_selection_requires_clean_gpu_capacity(tmp_path: Path) -> None:
-    selection = _run_test_selection(tmp_path, "qwen3_omni", "nightly")
+    premerge = _run_test_selection(tmp_path, "qwen3_omni", "premerge")
+    nightly = _run_test_selection(tmp_path, "qwen3_omni", "nightly")
 
-    assert selection["resource_class"] == "exclusive_gpu"
-    assert selection["min_free_gpu_memory_mib"] == 280000
-    assert {case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]} == {280000}
+    expected_case = ["qwen3-omni-30b-a3b-instruct"]
+    assert [case["name"] for case in premerge["e2e_cases"]] == expected_case
+    assert [case["name"] for case in nightly["e2e_cases"]] == expected_case
+    for selection in (premerge, nightly):
+        assert selection["resource_class"] == "exclusive_gpu"
+        assert selection["min_free_gpu_memory_mib"] == 280000
+        assert {case["min_free_gpu_memory_mib"] for case in selection["e2e_cases"]} == {
+            280000
+        }
 
 
 def test_qwen_moe_selection_requires_clean_gpu_capacity(tmp_path: Path) -> None:
@@ -1670,6 +1686,35 @@ def test_orphan_reclamation_accepts_only_the_auto_remove_race(tmp_path: Path) ->
         line.startswith("ps -a --no-trunc ") and f"--filter id={orphan_id}" in line
         for line in docker_lines
     )
+
+
+def test_orphan_reclamation_waits_for_concurrent_removal_to_finish(
+    tmp_path: Path,
+) -> None:
+    orphan_id = "d" * 64
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_ID": orphan_id,
+            "FAKE_ORPHAN_CONTAINER_RECORD": f"{orphan_id} 0",
+            "FAKE_ORPHAN_CONFIRM_RECORD": orphan_id,
+            "FAKE_ORPHAN_CONFIRM_ONCE_FILE": str(tmp_path / "confirm-once"),
+            "FAKE_ORPHAN_RM_EXIT_CODE": "1",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    confirmations = [
+        line
+        for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("ps -a --no-trunc ") and f"--filter id={orphan_id}" in line
+    ]
+    assert len(confirmations) == 2
 
 
 def test_orphan_reclamation_rejects_a_failed_remove_when_full_id_remains(

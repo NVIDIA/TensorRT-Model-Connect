@@ -831,17 +831,13 @@
     "qwen3_omni_multimodal": {
       "task_strategy": "omni_multimodal",
       "cli_commands": [
-        "run",
-        "embed",
-        "transcribe",
-        "generate-audio",
-        "speak"
+        "run"
       ],
-      "runner_class": "omni.OmniMultimodalRunner",
+      "runner_class": "runner.Qwen3OmniMultimodalRunner",
       "comparator_class": "omni.OmniComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['qwen3_omni_multimodal'].",
-      "performance_mode": "multi_stage"
+      "performance_mode": "decode"
     },
     "sam_prompted_segmentation": {
       "task_strategy": "prompted_segmentation",

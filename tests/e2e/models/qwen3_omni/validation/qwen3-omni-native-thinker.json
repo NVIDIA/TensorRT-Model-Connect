@@ -1,0 +1,16 @@
+{
+  "schema_version": "trtmc.model-plugin-validation/v1",
+  "dataset": "Qwen3-Omni native Thinker runtime invariant",
+  "version": "1",
+  "requests": [
+    {
+      "sample_id": "qwen3-omni-native-thinker-greeting",
+      "testcase": "qwen3-omni-30b-a3b-instruct",
+      "stage": "thinker_decode",
+      "category": "runtime-invariant",
+      "inputs": {
+        "prompt": "Reply with a short greeting."
+      }
+    }
+  ]
+}

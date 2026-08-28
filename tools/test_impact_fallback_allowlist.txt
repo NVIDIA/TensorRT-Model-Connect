@@ -69,7 +69,6 @@ no_impact scripts/eval_mmlu.py # developer utility script; no CI test impact is 
 no_impact scripts/generate_model_proof_report.py # offline model-proof report composer; no runtime, build, or test-selection impact is intentional
 no_impact scripts/generate_perf_report.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_generate.py # developer utility script; no CI test impact is intentional
-no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact is intentional
 no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional

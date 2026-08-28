@@ -42,9 +42,6 @@ class LocateAnythingReproCommandProvider:
             "--max-new-tokens",
             str(case.inputs.get("max_new_tokens", 30)),
         ]
-        runtime_cli_python = ctx.runtime_cli_hf_python()
-        if runtime_cli_python:
-            infer_parts.extend(["--hf-python", runtime_cli_python])
         contract_config = case.metadata.get("contract_config", {})
         if isinstance(contract_config, dict) and contract_config.get("use_chat_template"):
             infer_parts.append("--chat-template")

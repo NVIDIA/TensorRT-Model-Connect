@@ -8,7 +8,7 @@
         "label": "encode",
         "gpu_argmax_label": "encode",
         "metric": "pipeline_ms",
-        "command": ["{binary}", "encode", "{bundle}", "--prompt", "{prompt}", "{hf_python_args}"]
+        "command": ["{binary}", "encode", "{bundle}", "--prompt", "{prompt}"]
       }
     },
     {
@@ -19,7 +19,7 @@
         "label": "encode",
         "gpu_argmax_label": "encode",
         "metric": "pipeline_ms",
-        "command": ["{binary}", "encode", "{bundle}", "--prompt", "{prompt}", "{hf_python_args}"]
+        "command": ["{binary}", "encode", "{bundle}", "--prompt", "{prompt}"]
       }
     }
   ]

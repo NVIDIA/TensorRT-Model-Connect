@@ -155,7 +155,7 @@ class TestEmptyPrompt:
 
     @pytest.mark.e2e
     def test_empty_prompt_string(self, model_entry, trtmc_binary,
-                                 hf_python, ld_library_path):
+                                 ld_library_path):
         """Empty prompt string -> should either produce output or fail cleanly."""
         # Skip non-text models
         if model_entry.get("test_type") in ("diffusion", "segmentation", "audio"):
@@ -173,8 +173,7 @@ class TestEmptyPrompt:
         result = subprocess.run(
             [str(trtmc_binary), "run", model_entry["bundle_path"],
              "--prompt", "",
-             "--max-new-tokens", "5",
-             "--hf-python", str(hf_python)],
+             "--max-new-tokens", "5"],
             capture_output=True, text=True, timeout=120, env=env)
 
         # Must not crash (signal -11 = segfault)

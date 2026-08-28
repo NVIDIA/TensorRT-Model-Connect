@@ -320,9 +320,6 @@ class DiffusionMediaRunner:
             if initial_latents is not None:
                 cmd.extend(["--initial-latents-raw", str(initial_latents.path)])
             output_target = frame_dir
-            runtime_cli_python = ctx.runtime_cli_hf_python()
-            if runtime_cli_python:
-                cmd.extend(["--hf-python", runtime_cli_python])
 
             env = {**os.environ, "LD_LIBRARY_PATH": ld_path}
             distributed_runtime = _distributed_runtime_config(case)

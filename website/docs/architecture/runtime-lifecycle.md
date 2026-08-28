@@ -82,7 +82,7 @@ libraries.
 - the materialized bundle and parsed base config;
 - original config text and bundle path;
 - the selected `IBackend`;
-- Python helper and runtime-cache paths;
+- the runtime-cache path;
 - CUDA-graph and KV-cache load options;
 - a resolved `ConfigBundle` when resolution succeeded.
 

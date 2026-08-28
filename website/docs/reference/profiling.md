@@ -51,9 +51,9 @@ therefore does not reproduce `trtmc build` family defaults. In particular, an
 eligible dense Qwen3 or Llama `trtmc build` bundle uses split prefill/decode
 plans and does not satisfy the profiler's current `--bundle` loader.
 
-Use `--hf-python /path/to/python` only when the native runtime needs a Python
-helper. Add `--trust-remote-code` only after reviewing the checkpoint
-repository. `--no-compile` skips the `torch.compile` comparison, and
+Native profiling runs do not accept a Python interpreter. Add
+`--trust-remote-code` only after reviewing the checkpoint repository.
+`--no-compile` skips the `torch.compile` comparison, and
 `--no-layer-profile` skips the TensorRT `IProfiler` pass.
 
 For an optimized-runtime bundle, use its family-owned qualification workflow

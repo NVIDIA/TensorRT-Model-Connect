@@ -148,7 +148,6 @@ void parse_image(const std::string& obj, QwenImageImageConfig& ic) {
 void parse_tokenizer(const std::string& obj, QwenImageTokenizerConfig& tk) {
     if (obj.empty())
         return;
-    tk.kind = extract_json_string(obj, "kind", tk.kind);
     tk.class_name = extract_json_string(obj, "class", tk.class_name);
     tk.prompt_template_kind =
         extract_json_string(obj, "prompt_template_kind", tk.prompt_template_kind);

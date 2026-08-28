@@ -114,27 +114,13 @@ def _write_sources(
     ):
         for index in range(count):
             _write_wav(full_duplex / category / f"case-{index}" / "input.wav")
-    seedtts = tmp_path / "seedtts.json"
-    seedtts.write_text(
-        json.dumps(
-            {
-                "requests": [
-                    {
-                        "id": "seedtts-000",
-                        "reference": "A public English speech evaluation sentence.",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    return flores, full_duplex, mmlu, mmmu, seedtts
+    return flores, full_duplex, mmlu, mmmu
 
 
 def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
     tmp_path: Path,
 ) -> None:
-    flores, full_duplex, mmlu, mmmu, seedtts = _write_sources(tmp_path)
+    flores, full_duplex, mmlu, mmmu = _write_sources(tmp_path)
     output_root = tmp_path / "output"
     unrelated = output_root / "OtherDataset" / "dataset.json"
     unrelated.parent.mkdir(parents=True)
@@ -146,10 +132,9 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
         full_duplex_source=full_duplex,
         mmlu_source=mmlu,
         mmmu_source=mmmu,
-        seedtts_source=seedtts,
     )
 
-    assert len(outputs) == 7
+    assert len(outputs) == 6
     root = output_root
     assert not (root / "TRTMCValidation").exists()
     counts = {
@@ -166,7 +151,6 @@ def test_prepare_all_writes_task_owned_public_datasets_and_hashes(
         "mmlu-generation-modes": 8,
         "mmmu-pro-vision": 5,
         "mmmu-pro-vision-square-448": 5,
-        "seedtts-en-omni-audio": 1,
     }
     manifest = json.loads(
         (root / prepare.DATASET_MANIFEST_NAME).read_text(encoding="utf-8")
@@ -273,9 +257,6 @@ def test_model_plugin_validation_workloads_use_root_level_dataset_paths() -> Non
         ),
         "full_duplex_bench_speech_parity": (
             "/mnt/data/full-duplex-bench/dataset.json"
-        ),
-        "seedtts_en_omni_audio_parity": (
-            "/mnt/data/seedtts-en-omni-audio/dataset.json"
         ),
     }
 

@@ -1993,20 +1993,25 @@ suites:
         Large-memory-GPU native reference consistency; numerical and semantic
         gates remain owned by the VoiceChat comparator and threshold sidecar.
 
-  - id: seedtts_en_omni_audio_parity
+  - id: qwen3_omni_native_thinker_invariants
     description: >
-      Qwen3-Omni text-to-audio consistency on a public Seed-TTS-Eval English
-      utterance. The official HF and TRTMC paths share prompt, speaker, seed,
-      token budgets, and deterministic decoding settings. This workload uses
-      the public target text as a parity input; it is not a paper-comparable
-      Seed-TTS zero-shot WER or speaker-similarity evaluation.
-    user_contract: tts_audio
+      Native Qwen3-Omni Thinker text-generation smoke on a pinned prompt. The
+      model-owned invariant reference carries no external-model output; the
+      comparator requires the TensorRT runtime to succeed and return non-empty
+      decoded text. This is L4 runtime evidence, not HF parity, semantic
+      correctness, audio evidence, or a performance claim.
+    user_contract: runtime_invariants
+    task_type: Text → Text
     default_model_names: [qwen3-omni-30b-a3b-instruct]
     dataset:
       kind: model_plugin_json
-      default_path: /mnt/data/seedtts-en-omni-audio/dataset.json
+      default_path: tests/e2e/models/qwen3_omni/validation/qwen3-omni-native-thinker.json
     selectors:
       model_names: [qwen3-omni-30b-a3b-instruct]
+      task_strategies: [omni_multimodal]
+      runtime_strategies: [qwen3_omni_multimodal]
+      user_contracts: [runtime_invariants]
+      families: [qwen3_omni]
     scoring:
       scorer: model_plugin_parity
     gates:
@@ -2014,7 +2019,9 @@ suites:
     ci:
       eligible: false
       lane: local_only
-      notes: GB300-only 280 GB native-reference consistency.
+      notes: >
+        GB300-only 280 GB native Thinker invariant; the reference side is an
+        invariant marker and does not execute a Python model.
 
   - id: vbench_ti2v_official_profile_parity
     description: >

@@ -8,15 +8,12 @@
 #include "runtime/models/qwen3_omni/argmax_kernel.h"
 #include "runtime/models/qwen3_omni/omni_audio_plan.h"
 #include "runtime/models/qwen3_omni/omni_thinker_plan.h"
-#include "runtime/models/qwen3_omni/talker_runtime.h"
 #include "trtmc/tokenizer.h"
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 
 namespace trtmc {
@@ -25,46 +22,8 @@ namespace {
 
 using OmniClock = std::chrono::steady_clock;
 
-struct OmniStageTotals {
-    double input_preparation_ms{0.0};
-    double thinker_and_transfer_ms{0.0};
-    double worker_start_ms{0.0};
-    double talker_ms{0.0};
-    double ipc_ms{0.0};
-    double code2wav_and_transfer_ms{0.0};
-    double output_materialization_ms{0.0};
-};
-
 double elapsed_ms(OmniClock::time_point start, OmniClock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-bool omni_stage_timing_enabled() {
-    const char* value = std::getenv("TRTMC_QWEN3_OMNI_STAGE_TIMING");
-    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-}
-
-void report_omni_stage_timing(const OmniStageTotals& stages, double total_ms) {
-    if (!omni_stage_timing_enabled())
-        return;
-    std::ostringstream timing;
-    timing << "[trtmc.qwen3_omni_timing.json] {\"input_preparation_ms\":"
-           << stages.input_preparation_ms
-           << ",\"thinker_and_transfer_ms\":" << stages.thinker_and_transfer_ms
-           << ",\"worker_start_ms\":" << stages.worker_start_ms
-           << ",\"talker_ms\":" << stages.talker_ms << ",\"ipc_ms\":" << stages.ipc_ms
-           << ",\"code2wav_and_transfer_ms\":" << stages.code2wav_and_transfer_ms
-           << ",\"output_materialization_ms\":" << stages.output_materialization_ms
-           << ",\"total_ms\":" << total_ms << '}';
-    std::cerr << timing.str() << std::endl;
-}
-
-std::string format_omni_chat_prompt(const std::string& prompt) {
-    return "<|im_start|>system\n"
-           "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of "
-           "perceiving auditory and visual inputs, as well as generating text and speech."
-           "<|im_end|>\n<|im_start|>user\n" +
-           prompt + "<|im_end|>\n<|im_start|>assistant\n";
 }
 
 } // namespace
@@ -85,9 +44,6 @@ OmniPipeline::OmniPipeline(std::unique_ptr<TrtModule> thinker,
         throw std::runtime_error("OmniPipeline: invalid thinker module");
     if (!thinker_state_ || !thinker_state_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker cache");
-    talker_runtime_ = std::make_unique<Qwen3OmniTalkerRuntime>(
-        config_->hf_python, config_->talker_model_id, config_->talker_model_revision,
-        config_->talker_n_codebooks, config_->code2wav_max_frames);
 }
 
 OmniPipeline::~OmniPipeline() = default;
@@ -122,11 +78,10 @@ bool gather_prefill_kv(TrtModule& prefill, int32_t num_layers, std::vector<const
 }
 
 Qwen3OmniKvCache* eligible_prefill_cache(TrtModule* prefill, Qwen3OmniInferenceState* state,
-                                         const OmniConfig& config, int32_t sequence_length) {
+                                         int32_t sequence_length) {
     auto* cache = dynamic_cast<Qwen3OmniKvCache*>(state);
     if (prefill == nullptr || cache == nullptr || sequence_length <= 0 ||
-        sequence_length > cache->max_length() || config.thinker_hidden_size <= 0 ||
-        config.thinker_vocab_size <= 0 || !prefill->has_input("input_embed"))
+        sequence_length > cache->max_length())
         return nullptr;
     return cache;
 }
@@ -171,8 +126,8 @@ int32_t OmniPipeline::run_thinker_step(int32_t token_id) {
 
 bool OmniPipeline::run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token) {
     const auto sequence_length = static_cast<int32_t>(input_ids.size());
-    auto* cache = eligible_prefill_cache(thinker_prefill_.get(), thinker_state_.get(), *config_,
-                                         sequence_length);
+    auto* cache =
+        eligible_prefill_cache(thinker_prefill_.get(), thinker_state_.get(), sequence_length);
     if (cache == nullptr)
         return false;
 
@@ -181,16 +136,9 @@ bool OmniPipeline::run_thinker_prefill(const std::vector<int32_t>& input_ids, in
     if (!gather_prefill_kv(*thinker_prefill_, cache->num_layers(), present_k, present_v))
         return false;
 
-    std::vector<float> input_embed(
-        static_cast<std::size_t>(sequence_length) * config_->thinker_hidden_size, 0.0F);
-    std::vector<float> use_input_embed(static_cast<std::size_t>(sequence_length), 0.0F);
     TensorMap inputs;
     inputs["token_id"] =
         Tensor{const_cast<int32_t*>(input_ids.data()), {sequence_length}, DType::kInt32};
-    inputs["input_embed"] = Tensor{
-        input_embed.data(), {sequence_length, config_->thinker_hidden_size}, DType::kFloat32};
-    inputs["use_input_embed"] =
-        Tensor{use_input_embed.data(), {sequence_length, 1}, DType::kFloat32};
     cache->bind_cache_inputs(*thinker_prefill_);
     thinker_state_->prepare_step(inputs, sequence_length);
 
@@ -217,11 +165,17 @@ bool OmniPipeline::run_thinker_prefill(const std::vector<int32_t>& input_ids, in
 }
 
 std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input_ids,
-                                               int32_t max_tokens) {
+                                               int32_t max_tokens, int32_t eos_token_id) {
     thinker_stats_ = {};
     thinker_stats_.prompt_tokens = static_cast<int32_t>(input_ids.size());
     if (input_ids.empty() || max_tokens <= 0)
         return {};
+
+    const int32_t cache_capacity = thinker_state_->max_length();
+    if (!omni_thinker_request_fits_cache(input_ids.size(), max_tokens, cache_capacity)) {
+        throw std::runtime_error(
+            "OmniPipeline: prompt and generation exceed the native Thinker KV cache capacity");
+    }
 
     thinker_state_->reset();
     thinker_state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
@@ -239,7 +193,7 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
 
     for (int32_t step = 0; step < max_tokens; ++step) {
         const int32_t token = next_token;
-        if (omni_thinker_should_stop(token, config_->thinker_eos_token_id))
+        if (omni_thinker_should_stop(token, eos_token_id))
             break;
         output_ids.push_back(token);
         if (step + 1 < max_tokens)
@@ -253,7 +207,20 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
 
 std::vector<int32_t> OmniPipeline::generate_thinker_ids(const std::vector<int32_t>& input_ids,
                                                         int32_t max_tokens) {
-    return run_thinker(input_ids, max_tokens);
+    return run_thinker(input_ids, max_tokens, config_->thinker_eos_token_id);
+}
+
+TextResult OmniPipeline::generate(const std::string& prompt, const GenerateConfig& cfg) {
+    if (!tokenizer_)
+        throw std::runtime_error("OmniPipeline: native tokenizer is required for text generation");
+
+    const auto input_ids = tokenizer_->encode(format_omni_chat_prompt(prompt));
+    const int32_t max_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 128;
+    const int32_t eos_token_id =
+        cfg.eos_token_id >= 0 ? cfg.eos_token_id : config_->thinker_eos_token_id;
+    auto output_ids = run_thinker(input_ids, max_tokens, eos_token_id);
+    auto text = tokenizer_->decode(output_ids);
+    return TextResult{std::move(text), std::move(output_ids)};
 }
 
 std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_tokens,
@@ -304,73 +271,10 @@ std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_
 }
 
 AudioResult OmniPipeline::generate_audio(const std::string& prompt, const GenerateConfig& cfg) {
-    const auto total_start = OmniClock::now();
-    OmniStageTotals stages;
-    const auto input_start = OmniClock::now();
-    std::vector<int32_t> input_ids;
-    if (tokenizer_)
-        input_ids = tokenizer_->encode(format_omni_chat_prompt(prompt));
-    stages.input_preparation_ms = elapsed_ms(input_start, OmniClock::now());
-
-    int32_t max_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 768;
-
-    AudioResult result;
-    result.sample_rate = config_->sample_rate;
-
-    std::cerr << "[trtmc] Omni: starting pipeline with " << input_ids.size() << " input tokens"
-              << std::endl;
-
-    const auto thinker_start = OmniClock::now();
-    auto text_tokens = run_thinker(input_ids, max_tokens);
-    stages.thinker_and_transfer_ms = elapsed_ms(thinker_start, OmniClock::now());
-    if (text_tokens.empty()) {
-        std::cerr << "[trtmc] Omni: Thinker produced no tokens" << std::endl;
-        report_omni_stage_timing(stages, elapsed_ms(total_start, OmniClock::now()));
-        return result;
-    }
-
-    if (!tokenizer_)
-        throw std::runtime_error("OmniPipeline: tokenizer is required for official Talker input");
-    const auto text_start = OmniClock::now();
-    const std::string assistant_text = tokenizer_->decode(text_tokens);
-    stages.output_materialization_ms += elapsed_ms(text_start, OmniClock::now());
-    std::cerr << "[trtmc] Omni Thinker text: " << assistant_text << std::endl;
-
-    auto talker_result = talker_runtime_->run(prompt, assistant_text);
-    stages.worker_start_ms = talker_result.worker_start_ms;
-    stages.talker_ms = talker_result.talker_ms;
-    stages.ipc_ms = talker_result.ipc_ms;
-    stages.output_materialization_ms += talker_result.output_materialization_ms;
-    if (talker_result.exit_code != 0) {
-        report_omni_stage_timing(stages, elapsed_ms(total_start, OmniClock::now()));
-        throw std::runtime_error("OmniPipeline: official Talker failed: " +
-                                 talker_result.stderr_data);
-    }
-
-    const OmniCodecPlan codec_plan =
-        make_omni_codec_plan(*config_, talker_result.frame_major_codes.size());
-    if (!codec_plan.should_run_codec)
-        throw std::runtime_error("OmniPipeline: official Talker produced no codec frames");
-    std::cerr << "[trtmc] Omni official Talker: " << codec_plan.n_frames << " frames x "
-              << codec_plan.n_codebooks << " codebooks" << std::endl;
-    double waveform_materialization_ms = 0.0;
-    auto waveform =
-        run_code2wav(talker_result.frame_major_codes, codec_plan.n_codebooks, codec_plan.n_frames,
-                     stages.code2wav_and_transfer_ms, waveform_materialization_ms);
-    stages.output_materialization_ms += waveform_materialization_ms;
-    if (!waveform.empty()) {
-        result.samples = std::move(waveform);
-        result.num_samples = static_cast<int32_t>(result.samples.size());
-    }
-
-    std::cerr << "[trtmc] Omni: generated " << result.num_samples << " samples ("
-              << (result.num_samples > 0
-                      ? static_cast<float>(result.num_samples) / result.sample_rate
-                      : 0.0F)
-              << "s @ " << result.sample_rate << " Hz)" << std::endl;
-
-    report_omni_stage_timing(stages, elapsed_ms(total_start, OmniClock::now()));
-    return result;
+    (void)prompt;
+    (void)cfg;
+    throw std::runtime_error(
+        "OmniPipeline: native Qwen3-Omni Talker is unavailable; audio generation is disabled");
 }
 
 } // namespace trtmc

@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from tests.e2e.models.qwen3_omni import official_hf_audio
-from tests.e2e.models.qwen3_omni.e2e_plugins.references import torch_reference
+from tests.e2e.models.qwen3_omni.e2e_plugins.references import invariant_only, torch_reference
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 from tests.e2e_harness.manifest_loader import get_case_by_name
 
@@ -49,22 +49,33 @@ def _write_pcm16(path: Path, *, frames: int = 2400) -> None:
         output.writeframes(b"\0\0" * frames)
 
 
-def test_manifest_uses_live_official_hf_reference() -> None:
+def test_manifest_uses_native_thinker_invariant_contract() -> None:
     case = get_case_by_name("qwen3-omni-30b-a3b-instruct", MODEL_DIR)
 
     assert case is not None
-    assert case.reference_backend == "torch_reference"
-    assert case.oracle_level == "L1_external_reference"
-    assert case.inputs["prompt"] == OFFICIAL_PROMPT
-    assert case.inputs["seed"] == 42
-    assert case.metadata["reference_speaker"] == "Ethan"
-    assert case.metadata["reference_talker_max_new_tokens"] == 32
+    assert case.reference_backend == "invariant_only"
+    assert case.oracle_level == "L4_invariants"
+    assert case.user_contract == "runtime_invariants"
+    assert case.inputs["prompt"] == "Reply with a short greeting."
+    assert [stage.name for stage in case.stages] == ["thinker_decode"]
     assert "golden_snapshot_path" not in case.metadata
     assert not any(
         requirement.kind == "asset_exists"
         and "qwen3_omni_hf_reference" in str(requirement.args.get("path", ""))
         for requirement in case.preflight
     )
+
+
+def test_invariant_reference_marks_thinker_output_for_native_checks(tmp_path: Path) -> None:
+    case = _case()
+    output = invariant_only.InvariantOnlyReference().run_stage(
+        case,
+        StageSpec(name="thinker_decode"),
+        RunContext(case=case, artifacts_dir=str(tmp_path / "artifacts")),
+    )
+
+    assert output.data == {"_invariant_only": True}
+    assert output.metadata["source"] == "invariant_only"
 
 
 def test_reference_runs_direct_official_hf_command_and_materializes_audio(

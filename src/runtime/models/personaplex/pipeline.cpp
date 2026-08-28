@@ -17,138 +17,18 @@
 #include "runtime/models/personaplex/speech_runtime_plan.h"
 #include "runtime/models/personaplex/speech_temporal_embed_plan.h"
 #include "runtime/models/personaplex/speech_waveform_postprocess.h"
-#include "runtime/models/personaplex/subprocess_runner.h"
 #include "utils/wav_reader.h"
 
 #include <algorithm>
-#include <array>
-#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <unordered_map>
 
 namespace trtmc {
-
-// ─── PosixSubprocessRunner (moved from speech_backend.cpp) ───
-
-namespace {
-
-// ---------------------------------------------------------------------------
-// Subprocess pipe helpers (extracted from PosixSubprocessRunner::run)
-// ---------------------------------------------------------------------------
-
-bool create_subprocess_pipes(int (&stdin_pipe)[2], int (&stdout_pipe)[2], int (&stderr_pipe)[2]) {
-    return pipe(stdin_pipe) == 0 && pipe(stdout_pipe) == 0 && pipe(stderr_pipe) == 0;
-}
-
-void write_all_to_fd(int fd, const void* data, std::size_t size) {
-    const auto* p = static_cast<const char*>(data);
-    std::size_t remaining = size;
-    while (remaining > 0) {
-        auto written = write(fd, p, remaining);
-        if (written <= 0)
-            break;
-        p += written;
-        remaining -= static_cast<std::size_t>(written);
-    }
-}
-
-void read_all_from_fd(int fd, std::vector<char>& out) {
-    out.clear();
-    char buf[65536];
-    for (;;) {
-        auto n = read(fd, buf, sizeof(buf));
-        if (n <= 0)
-            break;
-        out.insert(out.end(), buf, buf + n);
-    }
-}
-
-void read_all_string_from_fd(int fd, std::string& out) {
-    out.clear();
-    char buf[65536];
-    for (;;) {
-        auto n = read(fd, buf, sizeof(buf));
-        if (n <= 0)
-            break;
-        out.append(buf, static_cast<std::size_t>(n));
-    }
-}
-
-void exec_child_process(int (&stdin_pipe)[2], int (&stdout_pipe)[2], int (&stderr_pipe)[2],
-                        const std::vector<const char*>& c_argv) {
-    dup2(stdin_pipe[0], STDIN_FILENO);
-    dup2(stdout_pipe[1], STDOUT_FILENO);
-    dup2(stderr_pipe[1], STDERR_FILENO);
-    close(stdin_pipe[0]);
-    close(stdin_pipe[1]);
-    close(stdout_pipe[0]);
-    close(stdout_pipe[1]);
-    close(stderr_pipe[0]);
-    close(stderr_pipe[1]);
-    execvp(c_argv[0], const_cast<char* const*>(c_argv.data()));
-    _exit(127);
-}
-
-class PosixSubprocessRunner final : public ISubprocessRunner {
-  public:
-    int run(const std::vector<std::string>& argv, const void* input_data, std::size_t input_size,
-            std::vector<char>& out_stdout, std::string& out_stderr) override {
-        std::vector<const char*> c_argv;
-        for (const auto& arg : argv)
-            c_argv.push_back(arg.c_str());
-        c_argv.push_back(nullptr);
-
-        int stdin_pipe[2] = {-1, -1};
-        int stdout_pipe[2] = {-1, -1};
-        int stderr_pipe[2] = {-1, -1};
-
-        if (!create_subprocess_pipes(stdin_pipe, stdout_pipe, stderr_pipe)) {
-            out_stderr = "pipe() failed";
-            return -1;
-        }
-
-        pid_t pid = fork();
-        if (pid < 0) {
-            out_stderr = "fork() failed";
-            return -1;
-        }
-
-        if (pid == 0)
-            exec_child_process(stdin_pipe, stdout_pipe, stderr_pipe, c_argv);
-
-        close(stdin_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[1]);
-
-        if (input_data && input_size > 0)
-            write_all_to_fd(stdin_pipe[1], input_data, input_size);
-        close(stdin_pipe[1]);
-
-        read_all_from_fd(stdout_pipe[0], out_stdout);
-        close(stdout_pipe[0]);
-
-        read_all_string_from_fd(stderr_pipe[0], out_stderr);
-        close(stderr_pipe[0]);
-
-        int status = 0;
-        waitpid(pid, &status, 0);
-        return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-    }
-};
-
-} // namespace
-
-std::shared_ptr<ISubprocessRunner> CreateDefaultSubprocessRunner() {
-    static std::shared_ptr<ISubprocessRunner> runner = std::make_shared<PosixSubprocessRunner>();
-    return runner;
-}
 
 // ─── SpeechPipeline (TrtModule-based) ───
 
@@ -215,21 +95,15 @@ SpeechPipeline::SpeechPipeline(std::unique_ptr<TrtModule> mimi_encoder,
                                std::vector<std::unique_ptr<TrtModule>> depth_engines,
                                std::unique_ptr<PersonaplexInferenceState> depth_state,
                                std::unique_ptr<TrtModule> mimi_decoder, SpeechConfig config,
-                               cudaStream_t stream,
-                               std::shared_ptr<ISubprocessRunner> subprocess_runner,
-                               std::string model_id_str)
+                               cudaStream_t stream, std::string model_id_str)
     : temporal_(std::move(temporal)), mimi_encoder_(std::move(mimi_encoder)),
       temporal_state_(std::move(temporal_state)), depth_engines_(std::move(depth_engines)),
       depth_state_(std::move(depth_state)), mimi_decoder_(std::move(mimi_decoder)), stream_(stream),
-      config_(std::move(config)), subprocess_runner_(std::move(subprocess_runner)),
-      model_id_(std::move(model_id_str)) {
+      config_(std::move(config)), model_id_(std::move(model_id_str)) {
     if (!temporal_ || !temporal_->ok())
         throw std::runtime_error("SpeechPipeline: invalid temporal module");
     if (!temporal_state_ || !temporal_state_->ok())
         throw std::runtime_error("SpeechPipeline: invalid temporal cache");
-
-    if (!subprocess_runner_)
-        subprocess_runner_ = CreateDefaultSubprocessRunner();
 
     device_workspace_ = std::make_unique<SpeechDeviceWorkspace>(config_, stream_);
     temporal_->bind_external("token_id", device_workspace_->dummy_token.data());
@@ -662,27 +536,13 @@ std::vector<float> SpeechPipeline::run_mimi_decode(const std::vector<int32_t>& c
 
 namespace {
 
-// Resolve text prompt tokens: use pre-tokenized, runtime-tokenize, or empty.
+// Resolve pre-tokenized text prompt tokens.
 // Returns true if tokens were resolved; false means skip text prompt.
-bool resolve_text_prompt_tokens(const SpeechConfig& cfg, ISubprocessRunner& subprocess_runner,
-                                std::vector<int32_t>& text_tokens) {
+bool resolve_text_prompt_tokens(const SpeechConfig& cfg, std::vector<int32_t>& text_tokens) {
     text_tokens = cfg.text_prompt_ids;
     if (!text_tokens.empty()) {
         std::cerr << "[speech] Injecting pre-tokenized text prompt (" << text_tokens.size()
                   << " tokens)" << std::endl;
-        return true;
-    }
-    if (!cfg.system_prompt.empty() && !cfg.hf_python.empty()) {
-        auto tokenization =
-            TokenizeSpeechPromptRuntime(cfg.hf_python, cfg.system_prompt, subprocess_runner);
-        if (tokenization.rc != 0 || tokenization.tokens.empty()) {
-            std::cerr << "[speech] Text prompt tokenization failed (rc=" << tokenization.rc
-                      << "): " << tokenization.stderr_data << std::endl;
-            return false;
-        }
-        text_tokens = std::move(tokenization.tokens);
-        std::cerr << "[speech] Injecting runtime-tokenized text prompt: \"" << cfg.system_prompt
-                  << "\" (" << text_tokens.size() << " tokens)" << std::endl;
         return true;
     }
     return false;
@@ -718,7 +578,7 @@ void SpeechPipeline::run_text_prompt() {
     }
 
     std::vector<int32_t> text_tokens;
-    if (!resolve_text_prompt_tokens(cfg, *subprocess_runner_, text_tokens))
+    if (!resolve_text_prompt_tokens(cfg, text_tokens))
         return;
 
     std::vector<float> prompt_embeddings(text_tokens.size() * static_cast<std::size_t>(hidden));

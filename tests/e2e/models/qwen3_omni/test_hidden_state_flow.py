@@ -14,14 +14,13 @@ def test_qwen3_omni_thinker_marks_hidden_state_output() -> None:
     assert "network.mark_output(hidden_out)" in source
 
 
-def test_qwen3_omni_runtime_feeds_generated_text_to_official_talker() -> None:
+def test_qwen3_omni_audio_generation_fails_closed_without_native_talker() -> None:
     source = (ROOT / "src/runtime/models/qwen3_omni/pipeline.cpp").read_text()
 
-    assert "tokenizer_->decode(text_tokens)" in source
-    assert "talker_runtime_->run(prompt, assistant_text)" in source
-    assert "format_omni_chat_prompt(prompt)" in source
-    assert "omni_thinker_should_stop(token, config_->thinker_eos_token_id)" in source
-    assert 'outputs.find("hidden_state")' not in source
+    assert "native Qwen3-Omni Talker is unavailable" in source
+    assert "audio generation is disabled" in source
+    assert "Qwen3OmniTalkerRuntime" not in source
+    assert "talker_runtime_->run" not in source
 
 
 def test_qwen3_omni_detects_real_talker_checkpoint_keys() -> None:
@@ -38,19 +37,44 @@ def test_qwen3_omni_does_not_build_incomplete_talker_projection() -> None:
     assert "def _build_talker_engine" not in source
     assert 'result["talker_engine_plan"]' not in source
     assert "def _build_code2wav_engine" in source
+    assert "def build_extra_engines(" not in source
 
 
-def test_qwen3_omni_runtime_requires_official_code2wav_and_python_talker() -> None:
+def test_qwen3_omni_runtime_does_not_load_code2wav_for_native_text() -> None:
     source = (ROOT / "src/runtime/models/qwen3_omni/plugin.cpp").read_text()
     builder = (ROOT / "python/tensorrt_model_connect/families/qwen3_omni/plugin.py").read_text()
 
-    assert "required official Code2Wav engine is missing" in source
-    assert "omni_cfg.hf_python = ctx.hf_python" in source
+    assert "code2wav_engine_plan" not in source
+    assert "code2wav_module" not in source
+    assert "required official Code2Wav engine is missing" not in source
+    assert "ctx.hf_python" not in source
     assert 'tensor_dtype("cache_k_0")' in source
-    assert '"omni_talker_model_id"' in source
-    assert 'overrides["omni_talker_model_id"] = self._talker_model_id' in builder
-    assert 'overrides["omni_talker_model_revision"]' in builder
+    assert '"omni_talker_model_id"' not in source
+    assert 'overrides["omni_talker_model_id"]' not in builder
+    assert 'overrides["omni_talker_model_revision"]' not in builder
     assert 'find_section(ctx.bundle, "talker_engine_plan")' not in source
+
+
+def test_qwen3_omni_builder_exposes_only_the_thinker_contract() -> None:
+    source = (ROOT / "python/tensorrt_model_connect/families/qwen3_omni/plugin.py").read_text()
+    load_weights = source.split("def load_weights(", 1)[1].split(
+        "def _detect_audio_encoder(", 1
+    )[0]
+    build_engine = source.split("def build_engine(", 1)[1].split(
+        "def _build_vision_engine(", 1
+    )[0]
+
+    assert "self._detect_audio_encoder" not in load_weights
+    assert "self._detect_talker" not in load_weights
+    assert "self._detect_code2wav" not in load_weights
+    assert 'weights[f"audio.' not in load_weights
+    assert 'weights[f"vision.' not in load_weights
+    assert 'weights[f"code2wav.' not in load_weights
+    assert '"input_embed"' not in build_engine
+    assert '"use_input_embed"' not in build_engine
+    assert "def build_vision_engine(" not in source
+    assert "def get_vl_config(" not in source
+    assert "def build_extra_engines(" not in source
 
 
 def test_qwen3_omni_runtime_has_no_retired_talker_recurrent_state() -> None:

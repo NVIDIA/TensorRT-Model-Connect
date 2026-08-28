@@ -294,8 +294,9 @@ pytest tests/test_e2e.py \
 ```
 
 Add `--rebuild-engines` only when the harness should build the bundle itself.
-The exact environment may also require `--hf-python` and model-specific gated
-assets. A skipped preflight is not a passing model result.
+The harness may also need a model-specific Python profile for build/reference
+helpers and gated assets. Native runtime ranks do not accept a Python
+interpreter. A skipped preflight is not a passing model result.
 
 ## Troubleshooting checklist
 

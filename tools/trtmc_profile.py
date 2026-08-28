@@ -367,9 +367,6 @@ def main():
     parser.add_argument("--trtmc-binary",
                         help="Path to compiled trtmc binary for C++ benchmark pass "
                              "(e.g. ./build/trtmc).  Skipped when not provided.")
-    parser.add_argument("--hf-python",
-                        help="Python interpreter path passed to trtmc binary "
-                             "(only used with --trtmc-binary)")
     parser.add_argument("--no-layer-profile", action="store_true",
                         help="Skip per-layer IProfiler pass (faster)")
     parser.add_argument("--cpu-profile", action="store_true",
@@ -436,7 +433,6 @@ def main():
             max_new_tokens=args.max_new_tokens,
             warmup=args.warmup,
             iterations=args.iterations,
-            hf_python=getattr(args, "hf_python", None),
             verbose=args.verbose,
         )
         if cpp_res is None:
@@ -594,8 +590,6 @@ def main():
             "--top-n", "15",
             "--json", nsight_json,
         ]
-        if getattr(args, "hf_python", None):
-            nsight_cmd += ["--hf-python", args.hf_python]
         try:
             env = {**os.environ}
             result = _sp.run(nsight_cmd, capture_output=False, env=env)

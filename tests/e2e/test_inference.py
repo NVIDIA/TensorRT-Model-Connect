@@ -16,7 +16,7 @@ _SPEECH_RUNTIME_STRATEGIES = {
 
 
 @pytest.mark.e2e
-def test_inference_produces_text(model_entry, trtmc_binary, hf_python, ld_library_path):
+def test_inference_produces_text(model_entry, trtmc_binary, ld_library_path):
     """trtmc run <bundle> should generate non-empty text."""
     if model_entry.get("test_type") == "diffusion":
         pytest.skip("Diffusion model — no text inference")
@@ -36,8 +36,7 @@ def test_inference_produces_text(model_entry, trtmc_binary, hf_python, ld_librar
     result = subprocess.run(
         [str(trtmc_binary), "run", model_entry["bundle_path"],
          "--prompt", prompt,
-         "--max-new-tokens", str(max_new),
-         "--hf-python", str(hf_python)],
+         "--max-new-tokens", str(max_new)],
         capture_output=True, text=True, timeout=120, env=env)
 
     assert result.returncode == 0, f"Inference failed: {result.stderr}"
@@ -46,7 +45,7 @@ def test_inference_produces_text(model_entry, trtmc_binary, hf_python, ld_librar
 
 
 @pytest.mark.e2e
-def test_inference_deterministic(model_entry, trtmc_binary, hf_python, ld_library_path):
+def test_inference_deterministic(model_entry, trtmc_binary, ld_library_path):
     """Two runs with the same prompt should produce identical output."""
     if model_entry.get("test_type") == "diffusion":
         pytest.skip("Diffusion model — no text inference")
@@ -65,8 +64,7 @@ def test_inference_deterministic(model_entry, trtmc_binary, hf_python, ld_librar
     env = {"LD_LIBRARY_PATH": ld_library_path}
     cmd = [str(trtmc_binary), "run", model_entry["bundle_path"],
            "--prompt", prompt,
-           "--max-new-tokens", str(max_new),
-           "--hf-python", str(hf_python)]
+           "--max-new-tokens", str(max_new)]
 
     r1 = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
     r2 = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)

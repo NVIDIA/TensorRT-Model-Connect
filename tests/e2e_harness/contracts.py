@@ -588,12 +588,6 @@ class RunContext:
         """Interpreter for reference backend subprocesses."""
         return self.reference_python or self.hf_python
 
-    def runtime_cli_hf_python(self) -> str:
-        """Optional --hf-python value for the C++ CLI."""
-        if not bool(self.case.metadata.get("runtime_cli_requires_hf_python")):
-            return ""
-        return self.runtime_python_path()
-
 
 @dataclass(frozen=True)
 class PluginRuntimeContext:
@@ -606,8 +600,6 @@ class PluginRuntimeContext:
     Attributes:
         engine_dir: Directory containing resolved TensorRT engine bundles.
         binary_path: Path to the TensorRT-Model-Connect CLI binary.
-        hf_python: Optional Python interpreter value passed as ``--hf-python``
-            to compatible runtime commands.
         runtime_python: Python interpreter for TRT-side helper subprocesses.
         reference_python: Python interpreter for reference/validation tools.
         artifacts_dir: Directory where this case writes E2E artifacts.
@@ -616,7 +608,6 @@ class PluginRuntimeContext:
 
     engine_dir: str = ""
     binary_path: str = ""
-    hf_python: str = ""
     runtime_python: str = ""
     reference_python: str = ""
     artifacts_dir: str = ""

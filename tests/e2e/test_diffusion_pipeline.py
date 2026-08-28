@@ -115,7 +115,7 @@ def _run_debug_pipeline(bundle_path, model_id, num_steps):
 
 
 def _run_cpp_generate_video(binary, bundle_path, prompt, output_dir,
-                             num_steps, hf_python, ld_library_path):
+                             num_steps, ld_library_path):
     """Run C++ generate-video command. Returns (num_frames, time_s, stderr)."""
     cmd = [
         str(binary), "generate-video", str(bundle_path),
@@ -123,8 +123,6 @@ def _run_cpp_generate_video(binary, bundle_path, prompt, output_dir,
         "--output", str(output_dir),
         "--num-steps", str(num_steps),
     ]
-    if hf_python:
-        cmd.extend(["--hf-python", str(hf_python)])
 
     env = {"LD_LIBRARY_PATH": ld_library_path}
 
@@ -309,7 +307,7 @@ def test_diffusion_debug_pipeline(diffusion_entry):
 
 
 @pytest.mark.e2e
-def test_diffusion_cpp_generate(diffusion_entry, trtmc_binary, hf_python,
+def test_diffusion_cpp_generate(diffusion_entry, trtmc_binary,
                                  ld_library_path, engine_dir):
     """Run C++ generate-video and verify correct frame count."""
     bundle_path = diffusion_entry["bundle_path"]
@@ -320,7 +318,7 @@ def test_diffusion_cpp_generate(diffusion_entry, trtmc_binary, hf_python,
     with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
         result = _run_cpp_generate_video(
             trtmc_binary, bundle_path, prompt, frame_dir,
-            num_steps, hf_python, ld_library_path)
+            num_steps, ld_library_path)
 
         assert result["returncode"] == 0, (
             f"C++ generate-video failed (rc={result['returncode']}):\n"
@@ -338,7 +336,7 @@ def test_diffusion_cpp_generate(diffusion_entry, trtmc_binary, hf_python,
 
 
 @pytest.mark.e2e
-def test_diffusion_frame_quality(diffusion_entry, trtmc_binary, hf_python,
+def test_diffusion_frame_quality(diffusion_entry, trtmc_binary,
                                   ld_library_path, engine_dir):
     """Generate frames and check pixel statistics for visual quality.
 
@@ -355,7 +353,7 @@ def test_diffusion_frame_quality(diffusion_entry, trtmc_binary, hf_python,
     with tempfile.TemporaryDirectory(prefix="trtmc_quality_") as frame_dir:
         result = _run_cpp_generate_video(
             trtmc_binary, bundle_path, prompt, frame_dir,
-            num_steps, hf_python, ld_library_path)
+            num_steps, ld_library_path)
 
         if result["returncode"] != 0:
             pytest.fail(

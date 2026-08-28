@@ -13,6 +13,7 @@
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,29 @@ void check(bool condition, const char* name) {
         std::cerr << "FAIL: " << name << '\n';
         ++failures;
     }
+}
+
+void test_speech_config_accepts_pretokenized_system_prompt() {
+    trtmc::BundleFile bundle;
+    trtmc::BaseConfig base;
+    const auto config = trtmc::build_speech_config_from_bundle(
+        bundle, R"({"speech_system_prompt":"hello","speech_text_prompt_ids":[11,22,33]})", base);
+
+    check(config.text_prompt_ids == std::vector<int32_t>({11, 22, 33}),
+          "speech config preserves pretokenized system prompt ids");
+}
+
+void test_speech_config_rejects_unencoded_system_prompt() {
+    trtmc::BundleFile bundle;
+    trtmc::BaseConfig base;
+    bool threw = false;
+    try {
+        (void)trtmc::build_speech_config_from_bundle(
+            bundle, R"({"speech_system_prompt":"hello","speech_text_prompt_ids":[]})", base);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "speech config rejects system prompt without pretokenized ids");
 }
 
 void test_speech_pipeline_construction() {
@@ -47,7 +71,7 @@ void test_speech_pipeline_construction() {
 
     trtmc::SpeechConfig cfg;
     trtmc::SpeechPipeline pipeline(nullptr, std::move(temporal), std::move(temporal_cache), {},
-                                   nullptr, nullptr, cfg, stream, nullptr, "test-speech");
+                                   nullptr, nullptr, cfg, stream, "test-speech");
 
     check(std::string(pipeline.pipeline_type()) == "SpeechPipeline",
           "SpeechPipeline: pipeline_type");
@@ -62,8 +86,7 @@ void test_speech_validates_temporal() {
         cudaStream_t stream;
         cudaStreamCreate(&stream);
         trtmc::SpeechConfig cfg;
-        trtmc::SpeechPipeline p(nullptr, nullptr, nullptr, {}, nullptr, nullptr, cfg, stream,
-                                nullptr, "x");
+        trtmc::SpeechPipeline p(nullptr, nullptr, nullptr, {}, nullptr, nullptr, cfg, stream, "x");
         check(false, "null temporal should throw");
         cudaStreamDestroy(stream);
     } catch (const std::exception&) {
@@ -95,6 +118,8 @@ void test_depth_engines_are_ordered_by_numeric_codebook() {
 } // namespace
 
 int main() {
+    test_speech_config_accepts_pretokenized_system_prompt();
+    test_speech_config_rejects_unencoded_system_prompt();
     test_speech_pipeline_construction();
     test_speech_validates_temporal();
     test_depth_engines_are_ordered_by_numeric_codebook();
