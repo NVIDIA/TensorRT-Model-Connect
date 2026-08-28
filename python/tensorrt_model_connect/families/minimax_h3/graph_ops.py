@@ -166,9 +166,7 @@ def silu(network, tensor):
     return cast(network, activated, source_dtype)
 
 
-def rms_norm(network, tensor, weight, width: int, eps: float):
-    """PyTorch RMSNorm using native reduce, unary and elementwise layers."""
-
+def _normalized_rms(network, tensor, eps: float):
     source_dtype = tensor.dtype
     value = cast(network, tensor, trt.float32)
     square = network.add_elementwise(value, value, trt.ElementWiseOperation.PROD).get_output(0)
@@ -182,6 +180,13 @@ def rms_norm(network, tensor, weight, width: int, eps: float):
     normalized = network.add_elementwise(value, inverse, trt.ElementWiseOperation.PROD).get_output(
         0
     )
+    return source_dtype, value, normalized
+
+
+def rms_norm(network, tensor, weight, width: int, eps: float):
+    """``torch.nn.RMSNorm`` with FP32 affine math before publication."""
+
+    source_dtype, value, normalized = _normalized_rms(network, tensor, eps)
     gamma_shape = (1,) * (len(tuple(value.shape)) - 1) + (width,)
     gamma = weight_constant(network, np.asarray(weight).reshape(gamma_shape))
     gamma = cast(network, gamma, value.dtype)
@@ -189,6 +194,17 @@ def rms_norm(network, tensor, weight, width: int, eps: float):
         normalized, gamma, trt.ElementWiseOperation.PROD
     ).get_output(0)
     return cast(network, normalized, source_dtype)
+
+
+def qwen_rms_norm(network, tensor, weight, width: int, eps: float):
+    """Qwen3-VL RMSNorm with its BF16 hidden-state publication before gamma."""
+
+    source_dtype, value, normalized = _normalized_rms(network, tensor, eps)
+    normalized = cast(network, normalized, source_dtype)
+    gamma_shape = (1,) * (len(tuple(value.shape)) - 1) + (width,)
+    gamma = weight_constant(network, np.asarray(weight).reshape(gamma_shape))
+    gamma = cast(network, gamma, source_dtype)
+    return network.add_elementwise(normalized, gamma, trt.ElementWiseOperation.PROD).get_output(0)
 
 
 def gather_rows(network, table, indices):

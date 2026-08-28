@@ -60,7 +60,7 @@ def checkpoint_keys() -> tuple[str, ...]:
 def _per_head_norm(network, tensor, weight, rows: int, heads: int):
     reshape = network.add_shuffle(tensor)
     reshape.reshape_dims = (rows, heads, HEAD_DIM)
-    normalized = op.rms_norm(network, reshape.get_output(0), weight, HEAD_DIM, NORM_EPS)
+    normalized = op.qwen_rms_norm(network, reshape.get_output(0), weight, HEAD_DIM, NORM_EPS)
     flatten = network.add_shuffle(normalized)
     flatten.reshape_dims = (rows, heads * HEAD_DIM)
     return flatten.get_output(0)
@@ -117,7 +117,7 @@ def build_text_encoder_engine(
 
     for index in range(NUM_LAYERS):
         prefix = f"model.language_model.layers.{index}"
-        normalized = op.rms_norm(
+        normalized = op.qwen_rms_norm(
             network, hidden, weights[f"{prefix}.input_layernorm.weight"], HIDDEN_SIZE, NORM_EPS
         )
         q = _linear(network, normalized, weights, f"{prefix}.self_attn.q_proj")
@@ -173,7 +173,7 @@ def build_text_encoder_engine(
         update = _linear(network, update, weights, f"{prefix}.self_attn.o_proj")
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
-        normalized = op.rms_norm(
+        normalized = op.qwen_rms_norm(
             network,
             hidden,
             weights[f"{prefix}.post_attention_layernorm.weight"],

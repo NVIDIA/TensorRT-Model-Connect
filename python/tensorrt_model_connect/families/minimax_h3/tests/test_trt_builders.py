@@ -521,6 +521,46 @@ def test_native_linear_broadcasts_over_vae_batch() -> None:
 
 
 @pytest.mark.gpu
+def test_rms_norm_multiplies_gamma_in_fp32_before_bf16_publication() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    value = network.add_input("value", trt.bfloat16, (2, 4))
+    weight = np.asarray([0.75, 1.0, 1.25, 1.5], dtype=ml_dtypes.bfloat16)
+
+    output = op.rms_norm(network, value, weight, width=4, eps=1.0e-6)
+    product = network.get_layer(network.num_layers - 2)
+    publication = network.get_layer(network.num_layers - 1)
+
+    assert product.type == trt.LayerType.ELEMENTWISE
+    assert product.get_input(0).dtype == trt.float32
+    assert product.get_input(1).dtype == trt.float32
+    assert publication.type == trt.LayerType.CAST
+    assert output is publication.get_output(0)
+    assert output.dtype == trt.bfloat16
+    op.release_weight_buffers(network)
+
+
+@pytest.mark.gpu
+def test_qwen_rms_norm_rounds_normalized_hidden_before_bf16_gamma() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    value = network.add_input("value", trt.bfloat16, (2, 4))
+    weight = np.asarray([0.75, 1.0, 1.25, 1.5], dtype=ml_dtypes.bfloat16)
+
+    output = op.qwen_rms_norm(network, value, weight, width=4, eps=1.0e-6)
+    product = network.get_layer(network.num_layers - 1)
+
+    assert product.type == trt.LayerType.ELEMENTWISE
+    assert product.get_input(0).dtype == trt.bfloat16
+    assert product.get_input(1).dtype == trt.bfloat16
+    assert output is product.get_output(0)
+    assert output.dtype == trt.bfloat16
+    op.release_weight_buffers(network)
+
+
+@pytest.mark.gpu
 def test_native_linear_serializes_checkpoint_bf16_without_fp32_constant() -> None:
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)

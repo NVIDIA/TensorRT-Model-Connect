@@ -742,7 +742,9 @@ def _heads_to_rows(network, tensor, width: int, trt):
 def _per_head_norm(network, tensor, weight, heads: int, spec, trt, op):
     reshape = network.add_shuffle(tensor)
     reshape.reshape_dims = (-1, heads, spec.head_dim)
-    normalized = op.rms_norm(network, reshape.get_output(0), weight, spec.head_dim, spec.norm_eps)
+    normalized = op.qwen_rms_norm(
+        network, reshape.get_output(0), weight, spec.head_dim, spec.norm_eps
+    )
     flatten = network.add_shuffle(normalized)
     flatten.reshape_dims = (-1, heads * spec.head_dim)
     return flatten.get_output(0)
@@ -784,7 +786,7 @@ def _apply_mrope(network, tensor, cache, position_ids, heads: int, spec, trt, op
 
 def _language_layer(network, hidden, weights, index, rope_cache, position_ids, spec, trt, op):
     prefix = f"{_LANGUAGE_PREFIX}.layers.{index}"
-    normalized = op.rms_norm(
+    normalized = op.qwen_rms_norm(
         network,
         hidden,
         weights[f"{prefix}.input_layernorm.weight"],
@@ -834,7 +836,7 @@ def _language_layer(network, hidden, weights, index, rope_cache, position_ids, s
     update = op.linear(network, update, weights[f"{prefix}.self_attn.o_proj.weight"])
     hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
-    normalized = op.rms_norm(
+    normalized = op.qwen_rms_norm(
         network,
         hidden,
         weights[f"{prefix}.post_attention_layernorm.weight"],
