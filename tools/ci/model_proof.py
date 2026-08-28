@@ -540,19 +540,33 @@ class ModelProofRunner:
                     raise CiError(f"invalid projected profile prebuild flag: {parts[4]!r}")
             if prebuild:
                 family_requirements.append(parts[1])
-        if not family_requirements:
-            return None
 
-        requirements = list(family_requirements)
         registry_path = package_root / "python_profiles.toml"
         registry = tomllib.loads(registry_path.read_text(encoding="utf-8"))
+        selected_profiles = self._projected_selected_profile_names(
+            projection,
+            family,
+            registry,
+        )
+        generic_requirements: list[tuple[str, str]] = []
         for profile, spec in registry.get("profiles", {}).items():
             if profile == "base" or not isinstance(spec, dict):
                 continue
             if spec.get("kind") == "venv" and bool(spec.get("prebuild", True)):
                 value = spec.get("requirements")
-                if isinstance(value, str) and value.strip():
-                    requirements.append(value.strip())
+                if not isinstance(value, str) or not value.strip():
+                    raise CiError(
+                        f"projected Python profile {profile!r} has no requirements"
+                    )
+                generic_requirements.append((str(profile), value.strip()))
+        if not family_requirements and not any(
+            profile in selected_profiles for profile, _requirements in generic_requirements
+        ):
+            return None
+        requirements = [
+            *family_requirements,
+            *(value for _profile, value in generic_requirements),
+        ]
 
         result: set[str] = set()
         for value in requirements:
@@ -578,6 +592,69 @@ class ModelProofRunner:
         if len(result) > 256:
             raise CiError("projected Python profiles declare more than 256 packages")
         return tuple(sorted(result))
+
+    @staticmethod
+    def _projected_selected_profile_names(
+        projection: Path,
+        family: dict[str, object],
+        registry: dict[str, object],
+    ) -> set[str]:
+        """Return profiles selected by projected family and E2E metadata."""
+        selected: set[str] = set()
+
+        raw_defaults = family.get("default_execution_profiles", [])
+        if not isinstance(raw_defaults, list):
+            raise CiError("projected default_execution_profiles must be a list")
+        for raw_default in raw_defaults:
+            if not isinstance(raw_default, str):
+                raise CiError("projected default_execution_profiles must contain strings")
+            parts = [part.strip() for part in raw_default.split("|")]
+            if len(parts) != 2 or any(not part for part in parts):
+                raise CiError(
+                    f"invalid projected default_execution_profiles entry: {raw_default!r}"
+                )
+            selected.add(parts[1])
+
+        def add_profiles(value: object, label: str) -> None:
+            if value is None:
+                return
+            if not isinstance(value, dict):
+                raise CiError(f"projected {label} must be an object")
+            for profile in value.values():
+                if not isinstance(profile, str) or not profile.strip():
+                    raise CiError(f"projected {label} must select non-empty profiles")
+                selected.add(profile.strip())
+
+        e2e_root = projection / "tests/e2e/models"
+        for manifest_path in sorted(e2e_root.glob("*/manifests/*.json")):
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise CiError(f"projected E2E manifest must be an object: {manifest_path}")
+            testcases = manifest.get("testcases", [])
+            if not isinstance(testcases, list):
+                raise CiError(f"projected E2E testcases must be a list: {manifest_path}")
+            cases = [manifest]
+            for testcase in testcases:
+                if not isinstance(testcase, dict):
+                    raise CiError(f"projected E2E testcase must be an object: {manifest_path}")
+                cases.append({**manifest, **testcase})
+            for case in cases:
+                add_profiles(case.get("execution_profiles"), "execution_profiles")
+                for section_name, selector_field in (
+                    ("runtime_strategy_defaults", "runtime_strategy"),
+                    ("reference_backend_defaults", "reference_backend"),
+                ):
+                    selector = case.get(selector_field)
+                    if not isinstance(selector, str) or not selector.strip():
+                        continue
+                    section = registry.get(section_name, {})
+                    if not isinstance(section, dict):
+                        raise CiError(f"projected {section_name} must be an object")
+                    add_profiles(
+                        section.get(selector.strip()),
+                        f"{section_name}.{selector.strip()}",
+                    )
+        return selected
 
     def _download_python_profile_packages(
         self,

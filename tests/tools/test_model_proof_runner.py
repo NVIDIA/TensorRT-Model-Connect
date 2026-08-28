@@ -1929,30 +1929,49 @@ def test_profile_owning_family_runs_download_prepare_then_offline_proof(
     assert "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1" in runs[proof_index]
 
 
+@pytest.mark.parametrize("profile_owner", ("family", "generic"))
 def test_empty_profile_lock_still_runs_offline_preparation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    profile_owner: str,
 ) -> None:
     projection = tmp_path / "projection"
     family = projection / "python/tensorrt_model_connect/families/demo"
     family.mkdir(parents=True)
-    (family / "MODEL.toml").write_text(
-        'id = "demo"\n'
-        'python_profile_specs = ['
-        '"demo|families/demo/requirements.lock.txt|families/demo/verify.py|true"'
-        "]\n",
-        encoding="utf-8",
-    )
-    (family / "requirements.lock.txt").write_text(
-        "# no additional packages\n",
-        encoding="utf-8",
-    )
-    (family / "verify.py").write_text("assert True\n", encoding="utf-8")
     package_root = projection / "python/tensorrt_model_connect"
-    (package_root / "python_profiles.toml").write_text(
-        'version = 1\n[profiles.base]\nkind = "passthrough"\n',
-        encoding="utf-8",
-    )
+    if profile_owner == "family":
+        (family / "MODEL.toml").write_text(
+            'id = "demo"\n'
+            'python_profile_specs = ['
+            '"demo|families/demo/requirements.lock.txt|families/demo/verify.py|true"'
+            "]\n",
+            encoding="utf-8",
+        )
+        (family / "requirements.lock.txt").write_text(
+            "# no additional packages\n",
+            encoding="utf-8",
+        )
+        (family / "verify.py").write_text("assert True\n", encoding="utf-8")
+        registry = 'version = 1\n[profiles.base]\nkind = "passthrough"\n'
+    else:
+        (family / "MODEL.toml").write_text(
+            'id = "demo"\n'
+            'default_execution_profiles = ["reference|generic"]\n',
+            encoding="utf-8",
+        )
+        requirements = package_root / "python_profile_requirements"
+        requirements.mkdir()
+        (requirements / "generic.lock.txt").write_text(
+            "# no additional packages\n",
+            encoding="utf-8",
+        )
+        registry = (
+            'version = 1\n[profiles.base]\nkind = "passthrough"\n'
+            '[profiles.generic]\nkind = "venv"\n'
+            'requirements = "python_profile_requirements/generic.lock.txt"\n'
+            'verification_script = "assert True"\n'
+        )
+    (package_root / "python_profiles.toml").write_text(registry, encoding="utf-8")
     profiles = tmp_path / "python-profiles"
     profiles.mkdir()
     packages = tmp_path / "python-profile-packages"
