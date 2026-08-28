@@ -64,38 +64,43 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
                              void* distributed_communicator,
                              const std::vector<ModuleExternalBinding>& external_bindings)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
-      distributed_communicator_(distributed_communicator),
-      cuda_graph_(std::make_unique<CudaGraphExec>()) {
+      distributed_communicator_(distributed_communicator) {
     if (!ctx_)
         return;
     try {
+        cuda_graph_ = std::make_unique<CudaGraphExec>();
         discover_tensor_aliases(engine);
         validate_initial_external_bindings(engine, external_bindings);
-    } catch (const std::exception& error) {
-        std::cerr << "[trt_module] Invalid external binding: " << error.what() << '\n';
-        delete ctx_;
-        ctx_ = nullptr;
-        return;
-    }
-    if (!attach_distributed_communicator()) {
-        delete ctx_;
-        ctx_ = nullptr;
-        return;
-    }
-    if (profile_idx_ > 0) {
-        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
-            std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_ << "\n";
-            delete ctx_;
-            ctx_ = nullptr;
-            return;
+        if (!attach_distributed_communicator())
+            throw std::runtime_error("failed to attach the distributed communicator");
+        if (profile_idx_ > 0) {
+            if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_))
+                throw std::runtime_error("failed to select the optimization profile");
+            cudaStreamSynchronize(stream_);
         }
-        cudaStreamSynchronize(stream_);
+        allocate_buffers(engine);
+    } catch (const std::exception& error) {
+        std::cerr << "[trt_module] Module initialization failed: " << error.what() << '\n';
+        try {
+            free_buffers();
+        } catch (...) {
+        }
+        delete ctx_;
+        ctx_ = nullptr;
+    } catch (...) {
+        std::cerr << "[trt_module] Module initialization failed\n";
+        try {
+            free_buffers();
+        } catch (...) {
+        }
+        delete ctx_;
+        ctx_ = nullptr;
     }
-    allocate_buffers(engine);
 }
 
 void TrtModuleImpl::discover_tensor_aliases(nvinfer1::ICudaEngine* engine) {
-#if NV_TENSORRT_MAJOR >= 11
+#if (defined(TRTMC_TRT_HAS_TENSOR_ALIAS_API) && TRTMC_TRT_HAS_TENSOR_ALIAS_API) ||                 \
+    NV_TENSORRT_MAJOR >= 11
     for (int32_t index = 0; index < engine->getNbIOTensors(); ++index) {
         const char* raw_output_name = engine->getIOTensorName(index);
         if (raw_output_name == nullptr ||
@@ -184,7 +189,8 @@ bool TrtModuleImpl::input_is_dynamic(const std::string& name) const {
 bool TrtModuleImpl::attach_distributed_communicator() {
     if (distributed_communicator_ == nullptr || ctx_ == nullptr)
         return true;
-#if NV_TENSORRT_MAJOR >= 11
+#if (defined(TRTMC_TRT_HAS_COMMUNICATOR_API) && TRTMC_TRT_HAS_COMMUNICATOR_API) ||                 \
+    NV_TENSORRT_MAJOR >= 11
     if (ctx_->setCommunicator(distributed_communicator_))
         return true;
     std::cerr << "[trt_module] Failed to set TRT distributed communicator\n";

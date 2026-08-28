@@ -28,7 +28,7 @@ struct TrtDeleter {
     void operator()(T* ptr) const noexcept {
         if (ptr == nullptr)
             return;
-#if NV_TENSORRT_MAJOR >= 10
+#if (defined(TRTMC_TRT_DELETE_OBJECTS) && TRTMC_TRT_DELETE_OBJECTS) || NV_TENSORRT_MAJOR >= 10
         delete ptr;
 #else
         ptr->destroy();

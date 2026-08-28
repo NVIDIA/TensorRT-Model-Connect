@@ -10,6 +10,8 @@ graph uses fused ``IAttention`` and contains no plugin or distributed layer.
 from __future__ import annotations
 
 from collections import Counter
+from contextvars import ContextVar
+from functools import wraps
 import math
 
 import ml_dtypes
@@ -27,12 +29,48 @@ trt = trt_compat.get_trt()
 # than owning its input.  Retain every backing array until the associated
 # network has finished building, including temporary packed QKV buffers.
 _WEIGHT_BUFFER_KEEPALIVE: dict[int, list[np.ndarray]] = {}
+_ACTIVE_BUILD_NETWORKS: ContextVar[set[int] | None] = ContextVar(
+    "minimax_h3_active_build_networks", default=None
+)
 
 
-def configure_builder(config) -> None:
-    """Retain enough engine metadata to audit native TensorRT lowering."""
+def cleanup_failed_build(function):
+    """Release retained arrays and consumed weights after graph-build failures."""
+
+    @wraps(function)
+    def wrapped(weights, *args, **kwargs):
+        network_ids: set[int] = set()
+        token = _ACTIVE_BUILD_NETWORKS.set(network_ids)
+        try:
+            return function(weights, *args, **kwargs)
+        except BaseException:
+            for network_id in network_ids:
+                _WEIGHT_BUFFER_KEEPALIVE.pop(network_id, None)
+            if kwargs.get("consume_weights", False):
+                weights.clear()
+            raise
+        finally:
+            _ACTIVE_BUILD_NETWORKS.reset(token)
+
+    return wrapped
+
+
+def configure_builder(config, *, weight_streaming: bool = False) -> None:
+    """Retain graph metadata and enable RTX weight streaming when requested."""
 
     config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if not isinstance(weight_streaming, bool):
+        raise ValueError("MiniMax-H3 weight_streaming must be a boolean")
+    if not weight_streaming:
+        return
+    flag = getattr(trt.BuilderFlag, "WEIGHT_STREAMING", None)
+    if flag is None:
+        raise RuntimeError(
+            "Selected TensorRT-RTX bindings do not expose BuilderFlag.WEIGHT_STREAMING"
+        )
+    config.set_flag(flag)
+    if not config.get_flag(flag):
+        raise RuntimeError("TensorRT-RTX did not enable MiniMax-H3 weight streaming")
 
 
 def configure_workspace(config, workspace_bytes: int | None, *, default_bytes: int) -> int:
@@ -82,7 +120,11 @@ def validate_native_network(network, *, expected_attentions: int, label: str) ->
 
 def _add_constant(network, array: np.ndarray):
     array = np.ascontiguousarray(array)
-    _WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).append(array)
+    network_id = id(network)
+    _WEIGHT_BUFFER_KEEPALIVE.setdefault(network_id, []).append(array)
+    active_networks = _ACTIVE_BUILD_NETWORKS.get()
+    if active_networks is not None:
+        active_networks.add(network_id)
     if array.dtype == np.dtype(ml_dtypes.bfloat16):
         weights = trt.Weights(trt.bfloat16, array.ctypes.data, array.size)
     else:
@@ -236,13 +278,24 @@ def swiglu(network, tensor, weight_in, weight_out, ffn_dim: int):
     return linear(network, hidden, weight_out)
 
 
-def fused_qkv(network, tensor, weights: dict, prefix: str):
+def fused_qkv(
+    network,
+    tensor,
+    weights: dict,
+    prefix: str,
+    *,
+    consume_weights: bool = False,
+):
     """Pack Q/K/V into one TensorRT GEMM, matching Sol-Engine's lossless path."""
 
-    packed_weight = np.concatenate(
-        [weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0
-    )
+    keys = tuple(f"{prefix}.to_{name}.weight" for name in ("q", "k", "v"))
+    packed_weight = np.concatenate([weights[key] for key in keys], axis=0)
     packed = linear(network, tensor, packed_weight)
+    if consume_weights:
+        # The packed array is retained by the network. Its three sources are
+        # no longer referenced and can be released before serialization.
+        for key in keys:
+            weights.pop(key)
     rows = int(packed.shape[0])
     width = int(packed.shape[1]) // 3
     return tuple(
@@ -329,12 +382,8 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     q = rows_to_heads(network, q, rows, heads, head_dim)
     k = rows_to_heads(network, k, rows, heads, head_dim)
     v = rows_to_heads(network, v, rows, heads, head_dim)
-    # TensorRT's fused FP16 attention has three additional mantissa bits over
-    # BF16. Keep the surrounding block in checkpoint-native BF16 while
-    # reducing recurrent numerical drift across 49 denoising evaluations.
-    q = cast(network, q, trt.float16)
-    k = cast(network, k, trt.float16)
-    v = cast(network, v, trt.float16)
+    # Preserve BF16's exponent range. H3 residuals can exceed FP16's finite
+    # limit before a later block normalizes them.
     scale = constant(
         network,
         np.full((1, 1, 1, 1), 1.0 / math.sqrt(head_dim), dtype=np.float32),
@@ -348,5 +397,4 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     layer.metadata = f"trtmc.native_op=IAttention;source={name}"
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
-    context = cast(network, layer.get_output(0), trt.bfloat16)
-    return heads_to_rows(network, context, rows, heads * head_dim)
+    return heads_to_rows(network, layer.get_output(0), rows, heads * head_dim)

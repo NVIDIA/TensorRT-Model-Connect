@@ -13,6 +13,7 @@ from __future__ import annotations
 import gc
 import math
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -91,6 +92,7 @@ def _linear(network, hidden, weights, name: str):
     return op.linear(network, hidden, weights[f"{name}.weight"])
 
 
+@op.cleanup_failed_build
 def build_text_encoder_engine(
     weights: dict[str, np.ndarray],
     *,
@@ -98,12 +100,14 @@ def build_text_encoder_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
-    op.configure_builder(config)
+    op.configure_builder(config, weight_streaming=weight_streaming)
     op.configure_workspace(
         config,
         workspace_bytes,
@@ -196,14 +200,21 @@ def build_text_encoder_engine(
         f"sequence={sequence_length}",
         file=sys.stderr,
     )
+    plan = None
+    record = None
     try:
-        plan = builder.build_serialized_network(network, config)
+        if output_path is None:
+            plan = builder.build_serialized_network(network, config)
+        else:
+            record = trt_compat.build_serialized_network_to_file(
+                builder, network, config, output_path
+            )
     finally:
         op.release_weight_buffers(network)
         if consume_weights:
             weights.clear()
-    if plan is None:
+    if output_path is None and plan is None:
         raise RuntimeError("TensorRT failed to build MiniMax-H3 text encoder")
     del network, config, builder
     gc.collect()
-    return bytes(plan)
+    return record if record is not None else bytes(plan)

@@ -340,6 +340,32 @@ static void test_copy_section_streams_in_bounded_chunks() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+static void test_section_file_range_is_bounded() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "range.bundle").string();
+    const std::vector<char> payload = {'P', 'L', 'A', 'N'};
+    const std::string header =
+        R"({"model_id":"range","sections":{"engine_plan":{"offset":0,"size":4}}})";
+    write_bundle_with_sections(path, header, {payload});
+
+    const auto info = trtmc::ReadBundleHeader(path);
+    const auto range = trtmc::ResolveBundleSectionFileRange(path, info.sections.front());
+    check(range.offset == trtmc::kBundleHeaderOffset + header.size(),
+          "section range resolves absolute payload offset");
+    check(range.size == payload.size(), "section range preserves payload size");
+
+    bool rejected = false;
+    try {
+        auto invalid = info.sections.front();
+        ++invalid.size;
+        (void)trtmc::ResolveBundleSectionFileRange(path, invalid);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "section range rejects truncated payloads");
+    trtmc_test::remove_all_safe(tmp);
+}
+
 #if defined(__linux__)
 static std::filesystem::path make_cache_test_temp_dir() {
     const auto pattern_path = std::filesystem::current_path() / "bundle_cache_test_XXXXXX";
@@ -523,6 +549,7 @@ int main() {
     test_truncated_bundle_throws();
     test_max_batch_size_parse_and_back_compat();
     test_copy_section_streams_in_bounded_chunks();
+    test_section_file_range_is_bounded();
 #if defined(__linux__)
     test_read_bundle_file_drops_payload_cache();
 #endif

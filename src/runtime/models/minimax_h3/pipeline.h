@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "runtime/backend/prebound_backend.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
@@ -18,8 +19,8 @@
 
 namespace trtmc {
 
-using MiniMaxH3ModuleLoader =
-    std::function<std::unique_ptr<ITrtModule>(const std::string&, cudaStream_t)>;
+using MiniMaxH3ModuleLoader = std::function<std::unique_ptr<ITrtModule>(
+    const std::string&, cudaStream_t, const std::vector<ModuleExternalBinding>&)>;
 
 struct MiniMaxH3Schedule {
     std::vector<float> sigmas;

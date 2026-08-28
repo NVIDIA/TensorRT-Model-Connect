@@ -6,8 +6,8 @@
 #pragma once
 
 // TensorRT version helpers used by the TensorRT-free core runtime.
-// This file must not include TensorRT headers; runtime probing is done
-// through dlopen/dlsym in trt_version.cpp.
+// This file must not include TensorRT headers; runtime probing is done through
+// the platform shared-library boundary in trt_version.cpp.
 
 #include <optional>
 #include <string>

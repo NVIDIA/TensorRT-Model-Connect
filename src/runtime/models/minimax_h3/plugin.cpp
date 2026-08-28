@@ -5,6 +5,7 @@
 
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
+#include "runtime/backend/prebound_backend.h"
 #include "runtime/models/minimax_h3/pipeline.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/pipeline_registry.h"
@@ -15,9 +16,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -25,6 +30,112 @@ namespace trtmc {
 namespace {
 
 using SectionMap = std::unordered_map<std::string, BundleSectionInfo>;
+using PlanSha256Map = std::unordered_map<std::string, std::string>;
+
+const char* plan_filename(std::string_view section) {
+    if (section == "text_encoder_plan")
+        return "text_encoder.plan";
+    if (section == "adaln_precompute_plan")
+        return "adaln_precompute.plan";
+    if (section == "denoiser_plan")
+        return "denoiser.plan";
+    if (section == "denoiser_head_plan")
+        return "denoiser_head.plan";
+    if (section == "denoiser_tail_plan")
+        return "denoiser_tail.plan";
+    if (section == "denoiser_finish_plan")
+        return "denoiser_finish.plan";
+    if (section == "vae_tile_decoder_plan")
+        return "vae_tile_decoder.plan";
+    throw std::runtime_error("Unknown MiniMax-H3 plan section: " + std::string(section));
+}
+
+bool is_sha256(std::string_view value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+           });
+}
+
+struct RuntimeMemoryConfig {
+    bool staged{false};
+    std::int64_t weight_streaming_budget_bytes{-1};
+};
+
+void validate_rtx_runtime_context(const PipelineContext& ctx, std::string_view recorded_backend) {
+    if (ctx.backend == nullptr || std::string_view(ctx.backend->name()) != recorded_backend)
+        throw std::runtime_error(
+            "MiniMax-H3 bundle backend does not match the loaded runtime backend");
+    if (ctx.cuda_graphs)
+        throw std::runtime_error(
+            "MiniMax-H3 TensorRT-RTX weight streaming does not support CUDA graphs");
+}
+
+const nlohmann::json& require_runtime_memory_object(const nlohmann::json& root) {
+    if (!root.is_object() || root.value("engine_backend", std::string{}) != "trt_rtx" ||
+        !root.contains("runtime_memory") || !root.at("runtime_memory").is_object()) {
+        throw std::runtime_error(
+            "MiniMax-H3 TensorRT-RTX bundle is missing staged runtime metadata");
+    }
+    return root.at("runtime_memory");
+}
+
+std::int64_t parse_weight_streaming_budget(const nlohmann::json& memory) {
+    if (memory.value("mode", std::string{}) != "staged" ||
+        !memory.contains("weight_streaming_budget_bytes") ||
+        !memory.at("weight_streaming_budget_bytes").is_number_integer()) {
+        throw std::runtime_error(
+            "MiniMax-H3 TensorRT-RTX bundle has invalid staged runtime metadata");
+    }
+    const auto budget = memory.at("weight_streaming_budget_bytes").get<std::int64_t>();
+    if (budget < 0)
+        throw std::runtime_error(
+            "MiniMax-H3 TensorRT-RTX weight-streaming budget must be nonnegative");
+    return budget;
+}
+
+RuntimeMemoryConfig load_runtime_memory_config(const PipelineContext& ctx) {
+    const std::string recorded_backend =
+        extract_json_string(ctx.config_json, "engine_backend", "trt");
+    if (recorded_backend != "trt_rtx")
+        return {};
+    validate_rtx_runtime_context(ctx, recorded_backend);
+    try {
+        const auto root = nlohmann::json::parse(ctx.config_json);
+        return RuntimeMemoryConfig{
+            true, parse_weight_streaming_budget(require_runtime_memory_object(root))};
+    } catch (const nlohmann::json::exception& error) {
+        throw std::runtime_error(std::string("MiniMax-H3 invalid runtime-memory JSON: ") +
+                                 error.what());
+    }
+}
+
+PlanSha256Map load_plan_sha256(const std::string& config_json, const SectionMap& sections) {
+    try {
+        const auto root = nlohmann::json::parse(config_json);
+        if (!root.is_object() || !root.contains("plan_sha256") ||
+            !root.at("plan_sha256").is_object()) {
+            throw std::runtime_error("MiniMax-H3 bundle is missing plan SHA-256 records");
+        }
+        const auto& records = root.at("plan_sha256");
+        PlanSha256Map result;
+        for (const auto& [section, _] : sections) {
+            const char* filename = plan_filename(section);
+            if (!records.contains(filename) || !records.at(filename).is_string())
+                throw std::runtime_error("MiniMax-H3 bundle is missing plan SHA-256 for " +
+                                         section);
+            const std::string digest = records.at(filename).get<std::string>();
+            if (!is_sha256(digest))
+                throw std::runtime_error("MiniMax-H3 bundle has invalid plan SHA-256 for " +
+                                         section);
+            result.emplace(section, digest);
+        }
+        return result;
+    } catch (const nlohmann::json::exception& error) {
+        throw std::runtime_error(std::string("MiniMax-H3 invalid plan SHA-256 JSON: ") +
+                                 error.what());
+    }
+}
 
 struct CacheConfig {
     bool enabled{false};
@@ -100,22 +211,94 @@ CacheConfig load_cache_config(const PipelineContext& ctx) {
     return result;
 }
 
-MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap sections) {
+const BundleSectionInfo& require_plan_section(const SectionMap& sections, const std::string& name) {
+    const auto it = sections.find(name);
+    if (it == sections.end())
+        throw std::runtime_error("Unknown MiniMax-H3 plan section: " + name);
+    return it->second;
+}
+
+ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runtime_cache,
+                                   bool cuda_graphs) {
+    ModuleCreateOptions options;
+    options.stream = stream;
+    options.runtime_cache_path = runtime_cache.c_str();
+    options.cuda_graphs = cuda_graphs;
+    return options;
+}
+
+std::int64_t staged_plan_budget(const std::string& name, const RuntimeMemoryConfig& memory) {
+    return (name == "denoiser_head_plan" || name == "denoiser_finish_plan")
+               ? 0
+               : memory.weight_streaming_budget_bytes;
+}
+
+std::unique_ptr<ITrtModule>
+load_staged_module(const std::string& name, const BundleSectionInfo& section,
+                   const std::string& bundle_path, const PlanSha256Map& plan_sha256,
+                   IPreboundBackend* prebound_backend, const ModuleCreateOptions& options,
+                   const std::vector<ModuleExternalBinding>& external_bindings,
+                   const RuntimeMemoryConfig& memory) {
+    if (prebound_backend == nullptr)
+        throw std::runtime_error("MiniMax-H3 TensorRT-RTX backend lacks file-backed plan support");
+    const auto digest = plan_sha256.find(name);
+    if (digest == plan_sha256.end())
+        throw std::runtime_error("MiniMax-H3 plan SHA-256 is missing: " + name);
+    const auto range = ResolveBundleSectionFileRange(bundle_path, section);
+    auto module = prebound_backend->create_module_from_file(
+        bundle_path.c_str(), range.offset, range.size, digest->second.c_str(), options,
+        external_bindings, staged_plan_budget(name, memory));
+    if (!module)
+        throw std::runtime_error("MiniMax-H3 backend rejected file-backed plan deserialization");
+    return module;
+}
+
+std::unique_ptr<ITrtModule>
+load_in_memory_module(const BundleSectionInfo& section, const std::string& bundle_path,
+                      IBackend* backend, IPreboundBackend* prebound_backend,
+                      const ModuleCreateOptions& options,
+                      const std::vector<ModuleExternalBinding>& external_bindings) {
+    auto plan = ReadBundleSection(bundle_path, section);
+    if (external_bindings.empty())
+        return backend->create_module(plan.data(), plan.size(), options);
+    if (prebound_backend == nullptr)
+        throw std::runtime_error("MiniMax-H3 backend lacks external I/O prebinding support");
+    return prebound_backend->create_module_prebound(plan.data(), plan.size(), options,
+                                                    external_bindings);
+}
+
+std::unique_ptr<ITrtModule> load_module(const std::string& name, cudaStream_t stream,
+                                        const std::vector<ModuleExternalBinding>& external_bindings,
+                                        const SectionMap& sections, const std::string& bundle_path,
+                                        const std::string& runtime_cache, IBackend* backend,
+                                        bool cuda_graphs, const RuntimeMemoryConfig& memory,
+                                        const PlanSha256Map& plan_sha256) {
+    const auto& section = require_plan_section(sections, name);
+    const auto options = module_options(stream, runtime_cache, cuda_graphs);
+    auto* prebound_backend = dynamic_cast<IPreboundBackend*>(backend);
+    if (memory.staged) {
+        return load_staged_module(name, section, bundle_path, plan_sha256, prebound_backend,
+                                  options, external_bindings, memory);
+    }
+    return load_in_memory_module(section, bundle_path, backend, prebound_backend, options,
+                                 external_bindings);
+}
+
+MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap sections,
+                                         RuntimeMemoryConfig memory) {
     const std::string bundle_path = ctx.bundle_path;
     const std::string runtime_cache = ctx.runtime_cache_path;
     IBackend* const backend = ctx.backend;
     const bool cuda_graphs = ctx.cuda_graphs;
-    return [sections = std::move(sections), bundle_path, runtime_cache, backend,
-            cuda_graphs](const std::string& name, cudaStream_t stream) {
-        const auto it = sections.find(name);
-        if (it == sections.end())
-            throw std::runtime_error("Unknown MiniMax-H3 plan section: " + name);
-        auto plan = ReadBundleSection(bundle_path, it->second);
-        ModuleCreateOptions options;
-        options.stream = stream;
-        options.runtime_cache_path = runtime_cache.c_str();
-        options.cuda_graphs = cuda_graphs;
-        return backend->create_module(plan.data(), plan.size(), options);
+    PlanSha256Map plan_sha256;
+    if (memory.staged)
+        plan_sha256 = load_plan_sha256(ctx.config_json, sections);
+    return [sections = std::move(sections), bundle_path, runtime_cache, backend, cuda_graphs,
+            memory, plan_sha256 = std::move(plan_sha256)](
+               const std::string& name, cudaStream_t stream,
+               const std::vector<ModuleExternalBinding>& external_bindings) {
+        return load_module(name, stream, external_bindings, sections, bundle_path, runtime_cache,
+                           backend, cuda_graphs, memory, plan_sha256);
     };
 }
 
@@ -126,7 +309,8 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         validate_profile(ctx);
         const CacheConfig cache = load_cache_config(ctx);
-        auto loader = make_module_loader(ctx, index_sections(ctx.bundle.info, cache.enabled));
+        auto sections = index_sections(ctx.bundle.info, cache.enabled);
+        auto loader = make_module_loader(ctx, std::move(sections), load_runtime_memory_config(ctx));
         return std::make_unique<MiniMaxH3Pipeline>(std::move(loader), load_tokenizer(ctx.bundle),
                                                    ctx.bundle.info.model_id, cache.enabled,
                                                    cache.threshold);

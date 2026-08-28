@@ -5,17 +5,16 @@
 
 #include "runtime/backend/trt_version.h"
 
+#include "runtime/platform/dynamic_library.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <filesystem>
-#include <link.h>
 #include <sstream>
 #include <string>
-#include <unistd.h>
 #include <unordered_set>
 #include <utility>
 
@@ -75,25 +74,16 @@ bool consume_dot_separator(const std::string& text, std::size_t* pos) {
 }
 
 std::string exe_dir() {
-    char buf[4096];
-    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (len <= 0)
-        return "";
-    buf[len] = '\0';
-    std::string path(buf);
-    auto pos = path.rfind('/');
-    return (pos != std::string::npos) ? path.substr(0, pos) : "";
+    return internal::current_executable_path().parent_path().string();
 }
 
 std::string join_path(const std::string& dir, const std::string& filename) {
     if (dir.empty())
         return filename;
-    if (dir.back() == '/')
-        return dir + filename;
-    return dir + "/" + filename;
+    return (fs::path(dir) / filename).string();
 }
 
-std::vector<std::string> split_colon_list(const char* value) {
+std::vector<std::string> split_path_list(const char* value) {
     std::vector<std::string> out;
     if (value == nullptr || value[0] == '\0')
         return out;
@@ -101,7 +91,7 @@ std::vector<std::string> split_colon_list(const char* value) {
     std::string text(value);
     std::size_t start = 0;
     while (start <= text.size()) {
-        const std::size_t end = text.find(':', start);
+        const std::size_t end = text.find(internal::path_list_separator(), start);
         std::string item =
             text.substr(start, end == std::string::npos ? std::string::npos : end - start);
         if (!item.empty())
@@ -125,28 +115,45 @@ std::vector<std::string> unique_preserving_order(std::vector<std::string> values
     return out;
 }
 
+std::optional<fs::path> python_tensorrt_lib_dir(const fs::directory_entry& entry,
+                                                std::error_code& ec) {
+    if (!entry.is_directory(ec))
+        return std::nullopt;
+    const std::string name = entry.path().filename().string();
+    if (name.rfind("python", 0) != 0)
+        return std::nullopt;
+    const fs::path candidate = entry.path() / "site-packages" / "tensorrt_libs";
+    if (!fs::is_directory(candidate, ec))
+        return std::nullopt;
+    return candidate;
+}
+
+void append_python_lib_tensorrt_dirs(const fs::path& lib_dir, std::vector<std::string>& dirs,
+                                     std::error_code& ec) {
+    if (!fs::is_directory(lib_dir, ec))
+        return;
+    for (const auto& entry : fs::directory_iterator(lib_dir, ec)) {
+        if (ec)
+            break;
+        if (auto candidate = python_tensorrt_lib_dir(entry, ec))
+            dirs.push_back(candidate->string());
+    }
+}
+
 void append_python_tensorrt_lib_dirs(const char* root_env, std::vector<std::string>& dirs) {
     if (root_env == nullptr || root_env[0] == '\0')
         return;
 
     std::error_code ec;
     const fs::path root(root_env);
-    for (const auto& lib_dir : {root / "lib", root / "lib64"}) {
-        if (!fs::is_directory(lib_dir, ec))
-            continue;
-        for (const auto& entry : fs::directory_iterator(lib_dir, ec)) {
-            if (ec)
-                break;
-            if (!entry.is_directory(ec))
-                continue;
-            const std::string name = entry.path().filename().string();
-            if (name.rfind("python", 0) != 0)
-                continue;
-            const fs::path candidate = entry.path() / "site-packages" / "tensorrt_libs";
-            if (fs::is_directory(candidate, ec))
-                dirs.push_back(candidate.string());
-        }
-    }
+#if defined(_WIN32)
+    const fs::path windows_candidate = root / "Lib" / "site-packages" / "tensorrt_libs";
+    if (fs::is_directory(windows_candidate, ec))
+        dirs.push_back(windows_candidate.string());
+    ec.clear();
+#endif
+    append_python_lib_tensorrt_dirs(root / "lib", dirs, ec);
+    append_python_lib_tensorrt_dirs(root / "lib64", dirs, ec);
 }
 
 void append_packaged_tensorrt_lib_dir(std::vector<std::string>& dirs) {
@@ -175,11 +182,14 @@ void append_installed_prefix_tensorrt_lib_dirs(std::vector<std::string>& dirs) {
 }
 
 std::optional<TrtVersion> version_from_symbol_scope(void* handle, const std::string& source) {
-    dlerror();
-    auto major_fn = reinterpret_cast<VersionFn>(dlsym(handle, "getInferLibMajorVersion"));
-    auto minor_fn = reinterpret_cast<VersionFn>(dlsym(handle, "getInferLibMinorVersion"));
-    auto patch_fn = reinterpret_cast<VersionFn>(dlsym(handle, "getInferLibPatchVersion"));
-    auto build_fn = reinterpret_cast<VersionFn>(dlsym(handle, "getInferLibBuildVersion"));
+    auto major_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol(handle, "getInferLibMajorVersion"));
+    auto minor_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol(handle, "getInferLibMinorVersion"));
+    auto patch_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol(handle, "getInferLibPatchVersion"));
+    auto build_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol(handle, "getInferLibBuildVersion"));
     if (major_fn == nullptr || minor_fn == nullptr) {
         return std::nullopt;
     }
@@ -193,45 +203,51 @@ std::optional<TrtVersion> version_from_symbol_scope(void* handle, const std::str
     return version;
 }
 
-bool is_nvinfer_library_name(const char* raw_path) {
-    if (raw_path == nullptr || raw_path[0] == '\0')
+bool is_nvinfer_library_name(const fs::path& path) {
+    if (path.empty())
         return false;
 
-    const std::string path(raw_path);
-    const std::size_t pos = path.rfind('/');
-    const std::string name = pos == std::string::npos ? path : path.substr(pos + 1);
+    std::string name = path.filename().string();
+#if defined(_WIN32)
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char value) { return static_cast<char>(std::tolower(value)); });
+    return name == "nvinfer.dll" || (name.rfind("nvinfer_", 0) == 0 && name.size() > 12 &&
+                                     name.substr(name.size() - 4) == ".dll");
+#else
     return name == "libnvinfer.so" || name.rfind("libnvinfer.so.", 0) == 0;
-}
-
-int collect_loaded_nvinfer(dl_phdr_info* info, std::size_t /*size*/, void* data) {
-    if (!is_nvinfer_library_name(info->dlpi_name))
-        return 0;
-
-    auto* loaded = static_cast<std::vector<LoadedNvinfer>*>(data);
-    dlerror();
-    void* handle = dlopen(info->dlpi_name, RTLD_NOW | RTLD_NOLOAD);
-    if (!handle)
-        return 0;
-
-    auto version = version_from_symbol_scope(handle, info->dlpi_name);
-    dlclose(handle);
-    if (version)
-        loaded->push_back(LoadedNvinfer{info->dlpi_name, *version});
-    return 0;
+#endif
 }
 
 std::vector<LoadedNvinfer> loaded_nvinfer_versions() {
     std::vector<LoadedNvinfer> loaded;
-    dl_iterate_phdr(collect_loaded_nvinfer, &loaded);
+    for (const fs::path& path : internal::loaded_dynamic_library_paths()) {
+        if (!is_nvinfer_library_name(path))
+            continue;
+        auto handle = internal::open_dynamic_library(path);
+        if (handle == nullptr)
+            continue;
+        auto version = version_from_symbol_scope(handle, path.string());
+        internal::close_dynamic_library(handle);
+        if (version)
+            loaded.push_back(LoadedNvinfer{path.string(), *version});
+    }
     return loaded;
 }
 
 std::vector<std::string> nvinfer_candidates(const std::vector<std::string>& search_dirs) {
+#if defined(_WIN32)
+    const std::vector<std::string> names = {
+        "nvinfer.dll",
+        "nvinfer_11.dll",
+        "nvinfer_10.dll",
+    };
+#else
     const std::vector<std::string> names = {
         "libnvinfer.so",
         "libnvinfer.so.11",
         "libnvinfer.so.10",
     };
+#endif
 
     std::vector<std::string> dirs;
     const std::string bin_dir = exe_dir();
@@ -244,8 +260,9 @@ std::vector<std::string> nvinfer_candidates(const std::vector<std::string>& sear
         dirs.push_back(trt_dir);
     append_python_tensorrt_lib_dirs(std::getenv("VIRTUAL_ENV"), dirs);
     append_python_tensorrt_lib_dirs(std::getenv("CONDA_PREFIX"), dirs);
-    auto ld_dirs = split_colon_list(std::getenv("LD_LIBRARY_PATH"));
-    dirs.insert(dirs.end(), ld_dirs.begin(), ld_dirs.end());
+    auto loader_dirs =
+        split_path_list(std::getenv(internal::dynamic_library_search_path_environment()));
+    dirs.insert(dirs.end(), loader_dirs.begin(), loader_dirs.end());
     dirs = unique_preserving_order(std::move(dirs));
 
     std::vector<std::string> candidates;
@@ -280,9 +297,10 @@ void append_diagnostic(std::string* diagnostics, std::string message) {
     *diagnostics += "  " + std::move(message) + "\n";
 }
 
-void append_dlopen_error(std::string* diagnostics, const std::string& candidate) {
-    const char* error = dlerror();
-    append_diagnostic(diagnostics, candidate + ": " + (error ? error : "unknown dlopen error"));
+void append_dynamic_load_error(std::string* diagnostics, const std::string& candidate,
+                               const std::string& error) {
+    append_diagnostic(diagnostics,
+                      candidate + ": " + (error.empty() ? "unknown dynamic-loader error" : error));
 }
 
 TrtLibrarySearchStep match_loaded_trt_library(const TrtVersion& required_version,
@@ -309,15 +327,35 @@ TrtLibrarySearchStep match_loaded_trt_library(const TrtVersion& required_version
     return {all_match ? match : std::nullopt, true};
 }
 
-TrtLibrarySearchStep match_rtld_default_trt_library(const TrtVersion& required_version,
-                                                    std::string* diagnostics) {
-    auto default_version = version_from_symbol_scope(RTLD_DEFAULT, "RTLD_DEFAULT");
+std::optional<TrtVersion> version_from_process_symbol_scope() {
+    auto major_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol_in_process("getInferLibMajorVersion"));
+    auto minor_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol_in_process("getInferLibMinorVersion"));
+    auto patch_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol_in_process("getInferLibPatchVersion"));
+    auto build_fn = reinterpret_cast<VersionFn>(
+        internal::dynamic_library_symbol_in_process("getInferLibBuildVersion"));
+    if (major_fn == nullptr || minor_fn == nullptr)
+        return std::nullopt;
+    TrtVersion version;
+    version.major = major_fn();
+    version.minor = minor_fn();
+    version.patch = patch_fn ? patch_fn() : -1;
+    version.build = build_fn ? build_fn() : -1;
+    version.source = "process symbol scope";
+    return version;
+}
+
+TrtLibrarySearchStep match_process_scope_trt_library(const TrtVersion& required_version,
+                                                     std::string* diagnostics) {
+    auto default_version = version_from_process_symbol_scope();
     if (!default_version)
         return {};
     if (trt_abi_matches(required_version, *default_version))
         return {TrtLibraryMatch{*default_version, "", true}, true};
 
-    append_diagnostic(diagnostics, "RTLD_DEFAULT: already loaded TensorRT " +
+    append_diagnostic(diagnostics, "process symbol scope: already loaded TensorRT " +
                                        format_trt_version(*default_version) + " (ABI " +
                                        trt_abi_string(*default_version) +
                                        ") does not match required ABI " +
@@ -330,15 +368,16 @@ match_candidate_trt_libraries(const TrtVersion& required_version,
                               const std::vector<std::string>& search_dirs,
                               std::string* diagnostics) {
     for (const auto& candidate : nvinfer_candidates(search_dirs)) {
-        dlerror();
-        void* handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
+        std::string error;
+        void* handle = internal::open_dynamic_library(
+            fs::path(candidate), internal::DynamicLibraryVisibility::local, &error);
         if (!handle) {
-            append_dlopen_error(diagnostics, candidate);
+            append_dynamic_load_error(diagnostics, candidate, error);
             continue;
         }
 
         auto version = version_from_symbol_scope(handle, candidate);
-        dlclose(handle);
+        internal::close_dynamic_library(handle);
         if (!version) {
             append_diagnostic(diagnostics, candidate + ": missing TensorRT version symbols");
             continue;
@@ -452,23 +491,20 @@ std::optional<TrtVersion> detect_installed_trt_version(const std::vector<std::st
     if (!loaded.empty())
         return loaded.front().version;
 
-    if (auto loaded = version_from_symbol_scope(RTLD_DEFAULT, "RTLD_DEFAULT"))
+    if (auto loaded = version_from_process_symbol_scope())
         return loaded;
 
     for (const auto& candidate : nvinfer_candidates(search_dirs)) {
-        dlerror();
-        void* handle = dlopen(candidate.c_str(), RTLD_NOW | RTLD_LOCAL);
+        std::string error;
+        void* handle = internal::open_dynamic_library(
+            fs::path(candidate), internal::DynamicLibraryVisibility::local, &error);
         if (!handle) {
-            if (diagnostics) {
-                const char* error = dlerror();
-                *diagnostics +=
-                    "  " + candidate + ": " + (error ? error : "unknown dlopen error") + "\n";
-            }
+            append_dynamic_load_error(diagnostics, candidate, error);
             continue;
         }
 
         auto version = version_from_symbol_scope(handle, candidate);
-        dlclose(handle);
+        internal::close_dynamic_library(handle);
         if (version)
             return version;
 
@@ -490,7 +526,7 @@ find_trt_library_for_version(const TrtVersion& required_version,
     if (loaded.definitive)
         return loaded.match;
 
-    const auto default_scope = match_rtld_default_trt_library(required_version, diagnostics);
+    const auto default_scope = match_process_scope_trt_library(required_version, diagnostics);
     if (default_scope.definitive)
         return default_scope.match;
 

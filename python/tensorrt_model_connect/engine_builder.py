@@ -1809,6 +1809,35 @@ def _build_diffusion_bundle(
     if "_transformer_config" in weights:
         config.raw["_transformer_config"] = weights["_transformer_config"]
 
+    # A model may require isolated component processes and file-backed bundle
+    # sections when built for RTX. Keep that policy model-owned; ordinary TRT
+    # diffusion builds continue through build_components() below.
+    build_staged_bundle = getattr(plugin, "build_staged_bundle", None)
+    if rtx and callable(build_staged_bundle):
+        if fp8_scales or save_fp8_scales:
+            raise ValueError("Staged TensorRT-RTX builds do not support FP8 calibration")
+        staged_t0 = time.monotonic()
+        build_staged_bundle(
+            str(model_dir_path),
+            output_path,
+            config,
+            weights,
+            precision=precision,
+            verbose=verbose,
+            parallel_config=parallel,
+            max_batch_size=max_batch_size,
+        )
+        staged_elapsed = time.monotonic() - staged_t0
+        _add_build_timing(build_timing, "trt_compile_diffusion_components_s", staged_elapsed)
+        build_timing["total_s"] = time.monotonic() - t0
+        _write_build_timing(build_timing)
+        print(
+            f"[trtmc build] Staged RTX bundle saved: {output_path} "
+            f"[{staged_elapsed:.1f}s]",
+            file=sys.stderr,
+        )
+        return
+
     # Prefer a family-provided scale asset before running live calibration.
     if fp8_scales == "auto":
         precomputed_fn = getattr(plugin, "fp8_precomputed_scales", None)

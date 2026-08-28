@@ -401,11 +401,20 @@ std::vector<char> ReadBundleSection(const std::string& path, const BundleSection
     return data;
 }
 
+BundleSectionFileRange ResolveBundleSectionFileRange(const std::string& path,
+                                                     const BundleSectionInfo& section) {
+    std::uint64_t file_offset = 0;
+    auto input = open_bundle_section(path, section, file_offset);
+    input.close();
+    return BundleSectionFileRange{file_offset, section.size};
+}
+
 void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,
                        std::ostream& output) {
     std::uint64_t file_offset = 0;
     std::ifstream in = open_bundle_section(path, section, file_offset);
-    std::array<char, 1024 * 1024> buffer{};
+    // Keep this buffer off the default Windows thread stack.
+    std::vector<char> buffer(1024 * 1024);
     std::uint64_t remaining = section.size;
     while (remaining != 0) {
         const auto chunk_size =

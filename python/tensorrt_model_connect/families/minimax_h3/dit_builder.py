@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import math
 import sys
+from pathlib import Path
 
 import numpy as np
 
@@ -184,8 +185,15 @@ def _attention_block(
     *,
     cos=None,
     sin=None,
+    consume_weights: bool = False,
 ):
-    q, k, v = op.fused_qkv(network, hidden, weights, f"{prefix}.attn")
+    q, k, v = op.fused_qkv(
+        network,
+        hidden,
+        weights,
+        f"{prefix}.attn",
+        consume_weights=consume_weights,
+    )
     q = _per_head_norm(network, q, weights[f"{prefix}.attn.norm_q.weight"], profile, rows)
     k = _per_head_norm(network, k, weights[f"{prefix}.attn.norm_k.weight"], profile, rows)
     if cos is not None:
@@ -233,7 +241,14 @@ def _attention_block(
     return op.linear(network, attended, weights[f"{prefix}.attn.to_out.0.weight"])
 
 
-def _refine_text(network, text, weights, profile: MiniMaxH3Config):
+def _refine_text(
+    network,
+    text,
+    weights,
+    profile: MiniMaxH3Config,
+    *,
+    consume_weights: bool = False,
+):
     hidden = op.linear(
         network, text, weights["context_embedder.weight"], weights["context_embedder.bias"]
     )
@@ -247,7 +262,15 @@ def _refine_text(network, text, weights, profile: MiniMaxH3Config):
             profile.hidden_size,
             profile.norm_eps,
         )
-        update = _attention_block(network, normalized, weights, prefix, profile, rows)
+        update = _attention_block(
+            network,
+            normalized,
+            weights,
+            prefix,
+            profile,
+            rows,
+            consume_weights=consume_weights,
+        )
         hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
         normalized = op.rms_norm(
             network,
@@ -273,10 +296,25 @@ def _refine_text(network, text, weights, profile: MiniMaxH3Config):
     )
 
 
-def _packed_hidden(network, video, audio, text, weights, profile: MiniMaxH3Config):
+def _packed_hidden(
+    network,
+    video,
+    audio,
+    text,
+    weights,
+    profile: MiniMaxH3Config,
+    *,
+    consume_weights: bool = False,
+):
     """Project and pack text | audio | video exactly like the Diffusers model."""
 
-    text_hidden = _refine_text(network, text, weights, profile)
+    text_hidden = _refine_text(
+        network,
+        text,
+        weights,
+        profile,
+        consume_weights=consume_weights,
+    )
     audio_hidden = op.linear(
         network, audio, weights["audio_proj_in.weight"], weights["audio_proj_in.bias"], bf16=False
     )
@@ -300,6 +338,8 @@ def _transformer_block(
     weights,
     profile: MiniMaxH3Config,
     index: int,
+    *,
+    consume_weights: bool = False,
 ):
     """Add one native H3 transformer block and return its residual stream."""
 
@@ -326,6 +366,7 @@ def _transformer_block(
         rows,
         cos=cos,
         sin=sin,
+        consume_weights=consume_weights,
     )
     hidden = op.gated_residual(network, hidden, update, gate_msa)
 
@@ -413,12 +454,17 @@ def _mark_sliced_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Co
     network.mark_output(audio)
 
 
-def _native_builder(verbose: bool, workspace_bytes: int | None):
+def _native_builder(
+    verbose: bool,
+    workspace_bytes: int | None,
+    *,
+    weight_streaming: bool = False,
+):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
-    op.configure_builder(config)
+    op.configure_builder(config, weight_streaming=weight_streaming)
     op.configure_workspace(
         config,
         workspace_bytes,
@@ -438,20 +484,29 @@ def _serialize(
     weights: dict,
     consume_weights: bool,
     label: str,
-) -> bytes:
+    output_path: str | Path | None,
+) -> bytes | dict[str, int | str]:
+    plan = None
+    record = None
     try:
-        plan = builder.build_serialized_network(network, config)
+        if output_path is None:
+            plan = builder.build_serialized_network(network, config)
+        else:
+            record = trt_compat.build_serialized_network_to_file(
+                builder, network, config, output_path
+            )
     finally:
         op.release_weight_buffers(network)
         if consume_weights:
             weights.clear()
-    if plan is None:
+    if output_path is None and plan is None:
         raise RuntimeError(f"TensorRT failed to build MiniMax-H3 {label} engine")
     del network, config, builder, logger
     gc.collect()
-    return bytes(plan)
+    return record if record is not None else bytes(plan)
 
 
+@op.cleanup_failed_build
 def build_dit_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -459,14 +514,18 @@ def build_dit_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     """Build the full-sequence single-device H3 TensorRT plan."""
 
     profile.validate()
     if profile.first_block_cache:
         raise ValueError("MiniMax-H3 first_block_cache profile requires the split DiT builders")
     rows = profile.sequence_length
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
 
     video = network.add_input(
         "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)
@@ -494,7 +553,15 @@ def build_dit_engine(
     # The public single-device FL2VA profile is packed as text | audio | video.
     # Projection, text refinement, packing, and full-sequence attention all
     # remain native TensorRT operations on one device.
-    hidden = _packed_hidden(network, video, audio, text, weights, profile)
+    hidden = _packed_hidden(
+        network,
+        video,
+        audio,
+        text,
+        weights,
+        profile,
+        consume_weights=consume_weights,
+    )
 
     cos, sin = _rope_tables(network, positions, profile, rows)
     # Pristine Diffusers packs exactly 38,247 rows on one device, so its
@@ -510,6 +577,7 @@ def build_dit_engine(
             weights,
             profile,
             index,
+            consume_weights=consume_weights,
         )
 
     hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
@@ -534,6 +602,7 @@ def build_dit_engine(
         weights=weights,
         consume_weights=consume_weights,
         label="DiT",
+        output_path=output_path,
     )
 
 
@@ -543,6 +612,7 @@ def _require_first_block_cache_profile(profile: MiniMaxH3Config) -> None:
         raise ValueError("MiniMax-H3 split DiT plans require profile.first_block_cache=True")
 
 
+@op.cleanup_failed_build
 def build_dit_head_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -550,12 +620,16 @@ def build_dit_head_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     """Build packing, text refinement, block zero, and the native cache metric."""
 
     _require_first_block_cache_profile(profile)
     rows = profile.sequence_length
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
     video = network.add_input(
         "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)
     )
@@ -576,7 +650,15 @@ def build_dit_head_engine(
         "previous_head_residual", trt.bfloat16, (rows, profile.hidden_size)
     )
 
-    pre_block_hidden = _packed_hidden(network, video, audio, text, weights, profile)
+    pre_block_hidden = _packed_hidden(
+        network,
+        video,
+        audio,
+        text,
+        weights,
+        profile,
+        consume_weights=consume_weights,
+    )
     cos, sin = _rope_tables(network, positions, profile, rows)
     head_hidden = _transformer_block(
         network,
@@ -588,6 +670,7 @@ def build_dit_head_engine(
         weights,
         profile,
         0,
+        consume_weights=consume_weights,
     )
     head_residual = network.add_elementwise(
         head_hidden, pre_block_hidden, trt.ElementWiseOperation.SUB
@@ -644,9 +727,11 @@ def build_dit_head_engine(
         weights=weights,
         consume_weights=consume_weights,
         label="DiT FirstBlockCache head",
+        output_path=output_path,
     )
 
 
+@op.cleanup_failed_build
 def build_dit_tail_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -654,12 +739,16 @@ def build_dit_tail_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     """Build blocks one through 49 and expose their reusable total residual."""
 
     _require_first_block_cache_profile(profile)
     rows = profile.sequence_length
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (rows, profile.hidden_size))
     positions = network.add_input("position_ids", trt.float32, (rows, 3))
     adaln_indices = network.add_input("adaln_indices", trt.int32, (rows,))
@@ -684,6 +773,7 @@ def build_dit_tail_engine(
             weights,
             profile,
             index,
+            consume_weights=consume_weights,
         )
     tail_residual = network.add_elementwise(
         hidden, head_hidden, trt.ElementWiseOperation.SUB
@@ -708,9 +798,11 @@ def build_dit_tail_engine(
         weights=weights,
         consume_weights=consume_weights,
         label="DiT FirstBlockCache tail",
+        output_path=output_path,
     )
 
 
+@op.cleanup_failed_build
 def build_dit_finish_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -718,12 +810,16 @@ def build_dit_finish_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
+    weight_streaming: bool = False,
+    output_path: str | Path | None = None,
+) -> bytes | dict[str, int | str]:
     """Apply a selected tail residual, final norm, and consumed-row projections."""
 
     _require_first_block_cache_profile(profile)
     rows = profile.sequence_length
-    logger, builder, network, config = _native_builder(verbose, workspace_bytes)
+    logger, builder, network, config = _native_builder(
+        verbose, workspace_bytes, weight_streaming=weight_streaming
+    )
     head_hidden = network.add_input("head_hidden", trt.bfloat16, (rows, profile.hidden_size))
     tail_residual = network.add_input("tail_residual", trt.bfloat16, (rows, profile.hidden_size))
     timestep_indices = network.add_input("timestep_indices", trt.int32, (rows,))
@@ -752,4 +848,5 @@ def build_dit_finish_engine(
         weights=weights,
         consume_weights=consume_weights,
         label="DiT FirstBlockCache finish",
+        output_path=output_path,
     )

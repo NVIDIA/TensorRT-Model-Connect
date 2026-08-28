@@ -76,6 +76,7 @@ STYLE_BY_SUFFIX: Mapping[str, HeaderStyle] = {
     ".sh": HASH_STYLE,
     ".bash": HASH_STYLE,
     ".zsh": HASH_STYLE,
+    ".ps1": HASH_STYLE,
     ".cmake": HASH_STYLE,
     ".mk": HASH_STYLE,
     ".mak": HASH_STYLE,

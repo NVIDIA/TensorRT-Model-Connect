@@ -241,15 +241,15 @@ void print_usage() {
            "  trtmc version\n"
            "\n"
            "Options:\n"
-           "  --backend-dir PATH    Extra directory to search for libtrtmc_backend_*.so\n"
+           "  --backend-dir PATH    Extra directory to search for backend shared libraries\n"
            "  --model-plugin-dir PATH\n"
-           "                        Extra directory to search for libtrtmc_model_*.so\n"
+           "                        Extra directory to search for model-plugin shared libraries\n"
            "  --runtime-cache PATH   TRT-RTX JIT kernel cache file (speeds up repeat runs)\n"
            "  --kernel-bindings PATH Bind slot-ready engines to TVM-FFI kernels at load time\n"
            "  --cuda-graphs          Enable TRT-RTX CUDA graph capture (reduces launch overhead)\n"
            "\n"
-           "Build uses a sibling python3/python when installed in an environment bin "
-           "directory, otherwise python3 from PATH.\n";
+           "Build uses a sibling Python interpreter when installed in an environment bin "
+           "directory, otherwise Python from PATH.\n";
 }
 
 CliArgs parse_args(int argc, char** argv) {

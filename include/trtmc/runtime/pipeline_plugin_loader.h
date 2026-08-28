@@ -37,8 +37,9 @@ std::optional<std::string> legacy_runtime_strategy_alias_target(const std::strin
                                                                 const std::string& config_text);
 
 // Load the model plugin that owns strategy. Search paths are directories that
-// contain libtrtmc_model_<model>.so; TRTMC_MODEL_PLUGIN_DIR and build/install
-// defaults are consulted after these explicit paths. When
+// contain the platform-native trtmc_model_<model> shared library;
+// TRTMC_MODEL_PLUGIN_DIR and build/install defaults are consulted after these
+// explicit paths. When
 // TRTMC_MODEL_PLUGIN_STRICT=1, only explicit paths and TRTMC_MODEL_PLUGIN_DIR
 // are used, so an installed or stale build-tree DSO cannot satisfy a CI proof.
 void load_model_plugin_for_strategy(const std::string& strategy,

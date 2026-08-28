@@ -207,14 +207,29 @@ void enforce_trt_compatibility(const std::string& bundle_path,
         throw_trt_mismatch(bundle_path, *required, *actual, actual_label);
 }
 
-IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& config_text,
-                                  const std::string& bundle_path, const std::string& backend_name,
-                                  const std::vector<std::string>& backend_search_paths) {
-    const std::string logical_backend = backend_name.empty() ? "trt" : backend_name;
-    if (!is_standard_trt_backend_name(logical_backend)) {
-        return BackendLoader::load(logical_backend, backend_search_paths);
-    }
+IBackend* load_rtx_backend_for_bundle(const BundleFile& bundle, const std::string& config_text,
+                                      const std::string& bundle_path,
+                                      const std::string& logical_backend,
+                                      const std::vector<std::string>& backend_search_paths) {
+    const auto required = required_trt_version_for_bundle(bundle, config_text, logical_backend);
+    std::string loaded_backend_name;
+    BackendLoadMetadata metadata;
+    IBackend* backend = BackendLoader::load_first_available({logical_backend}, backend_search_paths,
+                                                            &loaded_backend_name, &metadata);
+    const auto backend_abi = parse_trt_abi_tag(metadata.trt_abi);
+    const auto runtime_version = parse_trt_version(metadata.trt_runtime_version);
+    if (!backend_abi || !runtime_version)
+        throw std::runtime_error("TensorRT-RTX backend did not report its ABI and runtime version");
+    enforce_trt_compatibility(bundle_path, required, backend_abi,
+                              "selected TensorRT-RTX backend ABI");
+    enforce_trt_compatibility(bundle_path, required, runtime_version,
+                              "selected TensorRT-RTX runtime");
+    return backend;
+}
 
+IBackend* load_standard_trt_backend_for_bundle(
+    const BundleFile& bundle, const std::string& config_text, const std::string& bundle_path,
+    const std::string& logical_backend, const std::vector<std::string>& backend_search_paths) {
     const auto required = required_trt_version_for_bundle(bundle, config_text, logical_backend);
     std::string detection_diagnostics;
     std::optional<TrtVersion> installed;
@@ -240,13 +255,11 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
     BackendLoadMetadata metadata;
     IBackend* backend = BackendLoader::load_first_available(candidates, backend_search_paths,
                                                             &loaded_backend_name, &metadata);
-
     enforce_trt_compatibility(bundle_path, required, parse_trt_abi_tag(metadata.trt_abi),
                               "selected backend DSO ABI");
     enforce_trt_compatibility(bundle_path, required,
                               parse_trt_version(metadata.trt_runtime_version),
                               "selected backend TensorRT runtime");
-
     if (required) {
         std::cerr << "[trtmc] TensorRT ABI resolved: bundle=" << trt_abi_string(*required)
                   << ", backend=" << loaded_backend_name;
@@ -255,6 +268,19 @@ IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& c
         std::cerr << std::endl;
     }
     return backend;
+}
+
+IBackend* load_backend_for_bundle(const BundleFile& bundle, const std::string& config_text,
+                                  const std::string& bundle_path, const std::string& backend_name,
+                                  const std::vector<std::string>& backend_search_paths) {
+    const std::string logical_backend = backend_name.empty() ? "trt" : backend_name;
+    if (logical_backend == "trt_rtx")
+        return load_rtx_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
+                                           backend_search_paths);
+    if (!is_standard_trt_backend_name(logical_backend))
+        return BackendLoader::load(logical_backend, backend_search_paths);
+    return load_standard_trt_backend_for_bundle(bundle, config_text, bundle_path, logical_backend,
+                                                backend_search_paths);
 }
 
 const BundleSectionInfo* find_kernel_slots_section(const BundleInfo& info) {

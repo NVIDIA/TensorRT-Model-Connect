@@ -151,6 +151,57 @@ class MiniMaxH3Plugin:
     def build_engine(self, *_args, **_kwargs) -> bytes:
         raise NotImplementedError("MiniMax-H3 uses build_components(), not build_engine()")
 
+    def build_staged_bundle(
+        self,
+        model_dir: str,
+        output_path: str,
+        config,
+        weights: dict,
+        *,
+        precision: str,
+        verbose: bool = False,
+        parallel_config=None,
+        max_batch_size: int = 1,
+    ) -> Path:
+        """Build the fixed six-plan RTX bundle without retaining plans in RAM."""
+
+        if precision.lower() != "bf16":
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds require BF16")
+        if max_batch_size != 1:
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds require max_batch_size=1")
+        mode = str(getattr(parallel_config, "mode", "single"))
+        if mode != "single":
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds require one GPU")
+
+        raw = _effective_build_config(getattr(config, "raw", {}))
+        if raw.get("_fp32_layers"):
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds do not support FP32 layers")
+        staged_raw = dict(raw)
+        staged_raw.setdefault("first_block_cache", True)
+        staged_raw.setdefault("denoiser_cache_mode", "first_block")
+        profile = _fixed_profile(staged_raw)
+        if not profile.first_block_cache:
+            raise ValueError("MiniMax-H3 TensorRT-RTX staged builds require first_block_cache")
+        expected_request = {
+            "video_height": 768,
+            "video_width": 1344,
+            "video_num_frames": 124,
+            "num_inference_steps": 50,
+            "seed": 0,
+        }
+        mismatches = {
+            name: (raw[name], value)
+            for name, value in expected_request.items()
+            if name in raw and int(raw[name]) != value
+        }
+        if mismatches:
+            raise ValueError(f"Unsupported MiniMax-H3 staged profile: {mismatches}")
+
+        from .staged_build import build_staged_bundle
+
+        root = Path(weights.get("_model_dir", model_dir))
+        return build_staged_bundle(root, output_path, verbose=verbose)
+
     def build_components(
         self,
         model_dir: str,

@@ -323,3 +323,54 @@ def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
     }
     with pytest.raises(RuntimeError, match="native layer contract failed"):
         op.validate_native_network(network, expected_attentions=2, label="test network")
+
+
+def test_native_attention_preserves_checkpoint_bfloat16_range() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    q = network.add_input("q", trt.bfloat16, (4, 16))
+    k = network.add_input("k", trt.bfloat16, (4, 16))
+    v = network.add_input("v", trt.bfloat16, (4, 16))
+
+    output = op.native_attention(
+        network,
+        q,
+        k,
+        v,
+        rows=4,
+        heads=2,
+        head_dim=8,
+        name="bf16_attention",
+    )
+
+    assert output.dtype == trt.bfloat16
+    assert all(
+        network.get_layer(index).get_output(0).dtype != trt.float16
+        for index in range(network.num_layers)
+    )
+
+
+def test_fused_qkv_releases_consumed_source_arrays(monkeypatch) -> None:
+    class Tensor:
+        shape = (2, 6)
+
+    class Layer:
+        def get_output(self, _index):
+            return object()
+
+    class Network:
+        def add_slice(self, *_args):
+            return Layer()
+
+    prefix = "transformer_blocks.0.attn"
+    keys = [f"{prefix}.to_{name}.weight" for name in ("q", "k", "v")]
+    weights = {key: np.ones((2, 2), dtype=np.float32) for key in keys}
+    monkeypatch.setattr(op, "linear", lambda *_args, **_kwargs: Tensor())
+
+    outputs = op.fused_qkv(
+        Network(), object(), weights, prefix, consume_weights=True
+    )
+
+    assert len(outputs) == 3
+    assert not any(key in weights for key in keys)
