@@ -74,6 +74,16 @@ _EXACT_PROFILE_VERSION_RE = re.compile(
     r"(?:\+[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)?",
     re.IGNORECASE,
 )
+
+
+@dataclass(frozen=True)
+class _PythonProfilePlan:
+    """Exact projected profiles and packages prepared before offline proof."""
+
+    names: tuple[str, ...]
+    packages: tuple[str, ...]
+
+
 @dataclass(frozen=True)
 class ModelProofRequest:
     """Validated command-line request for one projected model."""
@@ -428,14 +438,14 @@ class ModelProofRunner:
     ) -> None:
         """Materialize projected profiles online for one later offline proof."""
         assert self.artifacts_dir is not None
-        packages = self._projected_profile_packages(projection)
-        if packages is None:
+        plan = self._projected_python_profile_plan(projection)
+        if plan is None:
             return
-        if packages:
+        if plan.packages:
             self._download_python_profile_packages(
                 package_dir,
                 image,
-                packages,
+                plan.packages,
             )
         name = self._base_container_name() + "-python-profiles"
         self.container_name = name
@@ -506,6 +516,7 @@ class ModelProofRunner:
             image,
             "/opt/venv/bin/python",
             "/src/.github/scripts/build-python-profiles.py",
+            *(item for name in plan.names for item in ("--profile", name)),
         ]
         result = self._run_logged(
             command,
@@ -517,14 +528,21 @@ class ModelProofRunner:
                 f"Python profile preparation failed for {self.request.model} (exit {result})"
             )
 
-    def _projected_profile_packages(self, projection: Path) -> tuple[str, ...] | None:
-        """Return exact pins, or None when the projection has no prebuilt profile."""
+    def _projected_python_profile_plan(
+        self,
+        projection: Path,
+    ) -> _PythonProfilePlan | None:
+        """Return selected profiles and pins, or None when none need preparation."""
         package_root = projection / "python/tensorrt_model_connect"
         manifests = sorted((package_root / "families").glob("*/MODEL.toml"))
-        if not manifests:
-            return None
-        family = tomllib.loads(manifests[0].read_text(encoding="utf-8"))
-        family_requirements: list[str] = []
+        if len(manifests) > 1:
+            raise CiError("projected Python ownership contains multiple families")
+        family = (
+            tomllib.loads(manifests[0].read_text(encoding="utf-8"))
+            if manifests
+            else {}
+        )
+        family_profiles: list[tuple[str, str]] = []
         for raw_spec in family.get("python_profile_specs", []):
             if not isinstance(raw_spec, str):
                 raise CiError("projected python_profile_specs must contain strings")
@@ -539,7 +557,7 @@ class ModelProofRunner:
                 elif value not in {"1", "true", "yes", "on"}:
                     raise CiError(f"invalid projected profile prebuild flag: {parts[4]!r}")
             if prebuild:
-                family_requirements.append(parts[1])
+                family_profiles.append((parts[0], parts[1]))
 
         registry_path = package_root / "python_profiles.toml"
         registry = tomllib.loads(registry_path.read_text(encoding="utf-8"))
@@ -559,17 +577,15 @@ class ModelProofRunner:
                         f"projected Python profile {profile!r} has no requirements"
                     )
                 generic_requirements.append((str(profile), value.strip()))
-        if not family_requirements and not any(
-            profile in selected_profiles for profile, _requirements in generic_requirements
-        ):
-            return None
-        requirements = [
-            *family_requirements,
-            *(value for _profile, value in generic_requirements),
+        selected_generic = [
+            item for item in generic_requirements if item[0] in selected_profiles
         ]
+        profiles = [*family_profiles, *selected_generic]
+        if not profiles:
+            return None
 
         result: set[str] = set()
-        for value in requirements:
+        for _profile, value in profiles:
             relative = Path(value)
             if relative.is_absolute() or ".." in relative.parts:
                 raise CiError(f"projected Python profile has an unsafe requirements path: {value!r}")
@@ -591,7 +607,10 @@ class ModelProofRunner:
                 result.add(line)
         if len(result) > 256:
             raise CiError("projected Python profiles declare more than 256 packages")
-        return tuple(sorted(result))
+        return _PythonProfilePlan(
+            names=tuple(sorted(profile for profile, _requirements in profiles)),
+            packages=tuple(sorted(result)),
+        )
 
     @staticmethod
     def _projected_selected_profile_names(
@@ -630,6 +649,15 @@ class ModelProofRunner:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if not isinstance(manifest, dict):
                 raise CiError(f"projected E2E manifest must be an object: {manifest_path}")
+            index_path = manifest_path.parent.parent / "MODEL.toml"
+            e2e_index = (
+                tomllib.loads(index_path.read_text(encoding="utf-8"))
+                if index_path.is_file()
+                else {}
+            )
+            e2e_defaults = e2e_index.get("e2e_defaults", {})
+            if not isinstance(e2e_defaults, dict):
+                raise CiError(f"projected E2E defaults must be an object: {index_path}")
             testcases = manifest.get("testcases", [])
             if not isinstance(testcases, list):
                 raise CiError(f"projected E2E testcases must be a list: {manifest_path}")
@@ -640,11 +668,21 @@ class ModelProofRunner:
                 cases.append({**manifest, **testcase})
             for case in cases:
                 add_profiles(case.get("execution_profiles"), "execution_profiles")
+                task_strategy = case.get("task_strategy")
+                task_defaults = (
+                    e2e_defaults.get(task_strategy, {})
+                    if isinstance(task_strategy, str)
+                    else {}
+                )
+                if not isinstance(task_defaults, dict):
+                    raise CiError(
+                        f"projected E2E defaults for {task_strategy!r} must be an object"
+                    )
                 for section_name, selector_field in (
                     ("runtime_strategy_defaults", "runtime_strategy"),
                     ("reference_backend_defaults", "reference_backend"),
                 ):
-                    selector = case.get(selector_field)
+                    selector = case.get(selector_field, task_defaults.get(selector_field))
                     if not isinstance(selector, str) or not selector.strip():
                         continue
                     section = registry.get(section_name, {})

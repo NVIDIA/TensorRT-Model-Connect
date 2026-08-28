@@ -1965,10 +1965,17 @@ def test_empty_profile_lock_still_runs_offline_preparation(
             "# no additional packages\n",
             encoding="utf-8",
         )
+        (requirements / "unselected.lock.txt").write_text(
+            "unselected-package==1.0.0\n",
+            encoding="utf-8",
+        )
         registry = (
             'version = 1\n[profiles.base]\nkind = "passthrough"\n'
             '[profiles.generic]\nkind = "venv"\n'
             'requirements = "python_profile_requirements/generic.lock.txt"\n'
+            'verification_script = "assert True"\n'
+            '[profiles.unselected]\nkind = "venv"\n'
+            'requirements = "python_profile_requirements/unselected.lock.txt"\n'
             'verification_script = "assert True"\n'
         )
     (package_root / "python_profiles.toml").write_text(registry, encoding="utf-8")
@@ -2007,6 +2014,47 @@ def test_empty_profile_lock_still_runs_offline_preparation(
     assert "--network none" in preparation
     assert "/src/.github/scripts/build-python-profiles.py" in preparation
     assert "/opt/trtmc-profile-downloader.py" not in preparation
+    assert f"--profile {'demo' if profile_owner == 'family' else 'generic'}" in preparation
+
+
+def test_e2e_defaults_select_a_generic_profile_for_preparation(tmp_path: Path) -> None:
+    projection = tmp_path / "projection"
+    package_root = projection / "python/tensorrt_model_connect"
+    requirements = package_root / "python_profile_requirements"
+    requirements.mkdir(parents=True)
+    (requirements / "generic.lock.txt").write_text(
+        "generic-package==1.2.3\n",
+        encoding="utf-8",
+    )
+    (package_root / "python_profiles.toml").write_text(
+        'version = 1\n[profiles.base]\nkind = "passthrough"\n'
+        '[profiles.generic]\nkind = "venv"\n'
+        'requirements = "python_profile_requirements/generic.lock.txt"\n'
+        'verification_script = "assert True"\n'
+        '[reference_backend_defaults.hf_transformers]\nreference = "generic"\n',
+        encoding="utf-8",
+    )
+    e2e = projection / "tests/e2e/models/demo"
+    (e2e / "manifests").mkdir(parents=True)
+    (e2e / "MODEL.toml").write_text(
+        '[e2e_defaults.demo_task]\nreference_backend = "hf_transformers"\n',
+        encoding="utf-8",
+    )
+    (e2e / "manifests/demo.json").write_text(
+        json.dumps({
+            "name": "demo",
+            "task_strategy": "demo_task",
+            "testcases": [{"name": "demo"}],
+        }),
+        encoding="utf-8",
+    )
+    runner = ModelProofRunner(CiContext(REPO_ROOT, {}), ModelProofRequest("demo"))
+
+    plan = runner._projected_python_profile_plan(projection)
+
+    assert plan is not None
+    assert plan.names == ("generic",)
+    assert plan.packages == ("generic-package==1.2.3",)
 
 
 def test_offline_proof_consumes_prepared_profiles_read_only() -> None:
@@ -2158,10 +2206,11 @@ def test_projected_profile_packages_include_source_only_nemotron_dependencies(
     )
     runner = ModelProofRunner(CiContext(REPO_ROOT, {}), ModelProofRequest("nemotron_h"))
 
-    packages = runner._projected_profile_packages(projection)
+    plan = runner._projected_python_profile_plan(projection)
 
-    assert "mamba-ssm==2.3.2.post1" in packages
-    assert "causal-conv1d==1.6.2.post1" in packages
+    assert plan is not None
+    assert "mamba-ssm==2.3.2.post1" in plan.packages
+    assert "causal-conv1d==1.6.2.post1" in plan.packages
 
 
 def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:

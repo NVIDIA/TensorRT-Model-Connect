@@ -814,6 +814,48 @@ def test_profile_builder_does_not_execute_package_init(tmp_path: Path) -> None:
     assert "package init must not execute" not in result.stderr
 
 
+def test_profile_builder_materializes_only_requested_profiles(tmp_path: Path) -> None:
+    package_root = tmp_path / "tensorrt_model_connect"
+    package_root.mkdir()
+    profile_pythons: dict[str, Path] = {}
+    for name in ("selected", "unselected"):
+        profile = tmp_path / name
+        (profile / "bin").mkdir(parents=True)
+        (profile / ".ready").touch()
+        profile_pythons[name] = profile / "bin/python"
+    serialized_pythons = {name: str(path) for name, path in profile_pythons.items()}
+    (package_root / "python_profiles.py").write_text(
+        "def load_python_profile_registry(): return {}\n"
+        "def prebuilt_python_profile_names(registry): "
+        "return ('selected', 'unselected')\n"
+        f"PROFILE_PYTHONS = {serialized_pythons!r}\n"
+        "def resolve_profile_python(name, base_python):\n"
+        "    print('resolved_profile=' + name)\n"
+        "    return str(PROFILE_PYTHONS[name])\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["TRTMC_PYTHON_PROFILE_SOURCE"] = str(package_root)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / ".github/scripts/build-python-profiles.py"),
+            "--profile",
+            "selected",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "resolved_profile=selected" in result.stdout
+    assert "resolved_profile=unselected" not in result.stdout
+    assert "prepared_python_profiles=selected" in result.stdout
+
+
 def test_source_contract_does_not_execute_or_fingerprint_family_loader(
     tmp_path: Path,
 ) -> None:

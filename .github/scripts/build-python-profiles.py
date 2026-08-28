@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import os
 import sys
@@ -38,13 +39,26 @@ def _load_profile_api():
     return module
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", action="append", default=[])
+    args = parser.parse_args(argv)
     profile_api = _load_profile_api()
-    names = profile_api.prebuilt_python_profile_names(
+    available = profile_api.prebuilt_python_profile_names(
         profile_api.load_python_profile_registry()
     )
-    if not names:
+    if not available:
         raise SystemExit("no prebuilt Python profiles were declared")
+    requested = tuple(args.profile)
+    if requested:
+        if len(set(requested)) != len(requested):
+            raise SystemExit("requested Python profiles must be unique")
+        unknown = sorted(set(requested) - set(available))
+        if unknown:
+            raise SystemExit("requested Python profiles are not prebuilt: " + ",".join(unknown))
+        names = tuple(sorted(requested))
+    else:
+        names = available
 
     base_python = os.environ.get("TRTMC_BASE_PYTHON", "/opt/venv/bin/python")
     for name in names:
