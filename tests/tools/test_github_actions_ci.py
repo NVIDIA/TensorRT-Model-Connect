@@ -328,6 +328,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         "statuses": "write",
     }
     assert workflow_config["jobs"]["dispatch"]["permissions"] == {"contents": "read"}
+    assert workflow_config["jobs"]["dispatch"]["timeout-minutes"] == 360
     assert workflow_config["jobs"]["publish"]["permissions"] == {
         "actions": "read",
         "contents": "read",
@@ -422,6 +423,8 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert ".created_at >= $dispatched_at" not in dispatch
     assert "actions/workflows/premerge.yml/runs?event=workflow_dispatch" in dispatch
     assert "actions/runs/$RUN_ID" in dispatch
+    assert "while true; do" in dispatch
+    assert "seq 1 220" not in dispatch
     assert "--name public-failure-payload" in dispatch
     assert "--log" not in dispatch
     assert "validate_public_failure(report)" in dispatch
