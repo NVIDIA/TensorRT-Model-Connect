@@ -7395,6 +7395,7 @@ def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> N
 def test_eval_one_model_diffusion_uses_clip_parity_summary(
     tmp_path: Path, monkeypatch
 ) -> None:
+    revision = "a" * 40
     dataset = tmp_path / "dpg_bench.json"
     dataset.write_text(json.dumps({"dataset": "DPG-Bench", "requests": [{
         "sample_id": "dpg_bench_000000",
@@ -7417,6 +7418,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
         }])
 
     def fake_bundle(*_args, **kwargs):
+        assert kwargs["expected_source_revision"] == revision
         return kwargs["bundle_path"], True
 
     def fake_trt(args):
@@ -7444,6 +7446,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_bundle)
     monkeypatch.setattr(validation_engine, "run_bundle", fake_trt)
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
     monkeypatch.setattr(validation_engine, "compare_diffusion_image_predictions", fake_compare)
     monkeypatch.setattr(
         validation_engine,

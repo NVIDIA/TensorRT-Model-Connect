@@ -1453,10 +1453,10 @@ def _validate_shard_member(
     label: str,
     index: int,
     campaign: Mapping[str, Any],
-) -> bool:
+) -> dict[str, Any] | None:
     request_path = shard_root / "request.json"
     if not request_path.is_file():
-        return False
+        return None
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -1480,7 +1480,30 @@ def _validate_shard_member(
         or stable_selection != campaign.get("selection")
     ):
         raise ModelCheckError(f"shard {label} does not belong to this campaign")
-    return True
+    return dict(request)
+
+
+def _shard_result_status(
+    shard_root: Path,
+    request: Mapping[str, Any],
+) -> str | None:
+    result_path = shard_root / "result.json"
+    if not result_path.is_file():
+        return None
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ModelCheckError(f"cannot read shard result {result_path}: {error}") from error
+    if not isinstance(result, Mapping) or result.get("run_id") != request.get("run_id"):
+        raise ModelCheckError(f"shard result does not belong to its request: {result_path}")
+    if result.get("execution_revision") != request.get("revision"):
+        return None
+    status = result.get("status")
+    if status == "running":
+        return None
+    if status not in {"passed", "failed"}:
+        raise ModelCheckError(f"shard result has invalid status: {result_path}")
+    return str(status)
 
 
 def _consolidate_once(run_root: Path) -> bool:
@@ -1493,18 +1516,23 @@ def _consolidate_once(run_root: Path) -> bool:
     if not isinstance(cases, list) or not isinstance(shard_count, int) or shard_count < 1:
         raise ModelCheckError("sharded campaign inventory is invalid")
     shards = []
+    shard_results_complete = True
+    shards_passed = True
     for index in range(shard_count):
         label = campaign_shards.shard_name(index, shard_count)
         shard_root = run_root / "shards" / label
-        ready = False
+        request = None
         if shard_root.exists():
-            ready = _validate_shard_member(
+            request = _validate_shard_member(
                 shard_root,
                 label=label,
                 index=index,
                 campaign=campaign,
             )
-        shards.append((index, label, shard_root, ready))
+        status = _shard_result_status(shard_root, request) if request is not None else None
+        shard_results_complete = shard_results_complete and status is not None
+        shards_passed = shards_passed and status == "passed"
+        shards.append((index, label, shard_root, request is not None))
 
     all_terminal = True
     for task, report_kind in (
@@ -1546,6 +1574,7 @@ def _consolidate_once(run_root: Path) -> bool:
             f"terminal · {run_root / task / 'report.json'}",
             flush=True,
         )
+    all_terminal = all_terminal and shard_results_complete
     if all_terminal:
         combined_rows: list[dict[str, Any]] = []
         for task in TASKS:
@@ -1566,7 +1595,11 @@ def _consolidate_once(run_root: Path) -> bool:
                 "schema_version": "trtmc.model-check-run-result/v1",
                 "run_id": campaign.get("run_id"),
                 "model_source_identity": source_identity,
-                "status": "passed" if source_identity["consistent"] else "failed",
+                "status": (
+                    "passed"
+                    if shards_passed and source_identity["consistent"]
+                    else "failed"
+                ),
             },
         )
     return all_terminal
@@ -2037,6 +2070,17 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.dry_run:
         return 0
 
+    if shard is not None:
+        _write_request(
+            execution_root / "result.json",
+            {
+                "schema_version": "trtmc.model-check-run-result/v1",
+                "run_id": run_id,
+                "execution_revision": arguments.revision,
+                "status": "running",
+            },
+        )
+
     preparation_bindings = (
         _resume_preparation_bindings(
             execution_root,
@@ -2134,10 +2178,7 @@ def _run(arguments: argparse.Namespace) -> int:
         "model_source_identity": model_source_identity,
         "status": "passed" if tasks_passed and identity_passed else "failed",
     }
-    (execution_root / "result.json").write_text(
-        json.dumps(result, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_request(execution_root / "result.json", result)
     print(f"\nOverall: {result['status'].upper()}")
     for task, returncode in task_results.items():
         status = "PASSED" if returncode == 0 else "FAILED"

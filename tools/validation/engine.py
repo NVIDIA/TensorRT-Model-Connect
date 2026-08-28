@@ -11460,7 +11460,9 @@ def eval_one_model(
         log_path=work_dir / "build.log",
         cuda_visible_devices=args.cuda_visible_devices,
         expected_source_revision=str(
-            validation_config.get("reference_source_revision", "") or ""
+            os.environ.get("TRTMC_ENGINE_BUILD_REVISION", "").strip()
+            or validation_config.get("reference_source_revision", "")
+            or ""
         ),
     )
 

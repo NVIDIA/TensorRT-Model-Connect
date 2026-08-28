@@ -1057,6 +1057,7 @@ def test_consolidator_preserves_campaign_order_and_receipt_results(tmp_path, mon
         label = campaign_shards.shard_name(index, 2)
         shard_root = run_root / "shards" / label
         output = shard_root / "accuracy"
+        result = "green" if index == 0 else "red"
         shard_root.mkdir(parents=True)
         (shard_root / "request.json").write_text(
             json.dumps(
@@ -1070,6 +1071,17 @@ def test_consolidator_preserves_campaign_order_and_receipt_results(tmp_path, mon
             ),
             encoding="utf-8",
         )
+        (shard_root / "result.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "trtmc.model-check-run-result/v1",
+                    "run_id": "campaign",
+                    "execution_revision": "a" * 40,
+                    "status": "passed" if result == "green" else "failed",
+                }
+            ),
+            encoding="utf-8",
+        )
         ledger = ExecutionLedger.open(
             output,
             campaign_id=label,
@@ -1077,7 +1089,6 @@ def test_consolidator_preserves_campaign_order_and_receipt_results(tmp_path, mon
             fingerprint="fixture",
             cases=[{"id": case["id"], "report": case["report"]}],
         )
-        result = "green" if index == 0 else "red"
         ledger.begin(case["id"], stage="compare")
         ledger.finish(case["id"], result=result, payload={"fixture": True})
         qualification_report.materialize_report(
@@ -1092,6 +1103,7 @@ def test_consolidator_preserves_campaign_order_and_receipt_results(tmp_path, mon
                     "id": case["id"],
                     "state": "terminal",
                     "result": result,
+                    "source_revision": "a" * 40,
                     "precision": {"reference": "fp16", "candidate": "fp16"},
                     "debug": {"logs": [], "command_artifacts": []},
                 }
@@ -1110,6 +1122,14 @@ def test_consolidator_preserves_campaign_order_and_receipt_results(tmp_path, mon
         "yellow": 0,
     }
     assert set(report["receipt_sources"]) == {case["id"] for case in cases}
+    result = json.loads((run_root / "result.json").read_text(encoding="utf-8"))
+    assert result["status"] == "failed"
+    assert (
+        model_checks._consolidate(
+            SimpleNamespace(run_root=run_root, interval_seconds=1, watch=False)
+        )
+        == 1
+    )
     assert campaign["schema_version"] == campaign_shards.CAMPAIGN_SCHEMA
 
 
