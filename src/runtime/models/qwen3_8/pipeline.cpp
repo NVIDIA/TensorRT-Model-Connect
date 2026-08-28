@@ -121,6 +121,7 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     auto t_decode_start = SteadyClock::now();
     for (int32_t step = 0; step < max_new_tokens; ++step) {
+        qwen38_apply_repetition_penalty(logits, params.repetition_penalty, output);
         Qwen38SampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos)

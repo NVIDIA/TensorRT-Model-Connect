@@ -20,6 +20,10 @@ except ImportError:
     except ImportError:  # pragma: no cover - exercised in TRT-free test envs
         cudart = None  # type: ignore[assignment]
 
+# Mirrors kMaskedScore in src/runtime/models/qwen3_8/kv_cache.cpp.
+_MASKED_SCORE = -1.0e4
+
+
 def _trt_nptype_safe(dtype: trt.DataType):
     """Resolve TRT dtype to a NumPy dtype, including BF16 fallback."""
     try:
@@ -270,9 +274,13 @@ class HybridTrtRunner:
         stream = self.stream
         attention_window = self.max_cache_length + 1
 
-        # Build attention mask (matches C++ build_attention_mask)
+        # Build attention mask (matches C++ build_attention_mask).
+        # Must equal kMaskedScore in src/runtime/models/qwen3_8/kv_cache.cpp.
+        # -1e9 would differ from the native runtime, and is outside the FP16
+        # range: an FP16 engine turns it into -inf, which yields NaN after a
+        # softmax over a fully masked row.
         position_id = min(self.cache_length, self.max_cache_length)
-        self._h_mask[:] = -1e9
+        self._h_mask[:] = _MASKED_SCORE
         valid = min(self.cache_length, self.max_cache_length)
         self._h_mask[0, :valid] = 0.0
         self._h_mask[0, -1] = 0.0

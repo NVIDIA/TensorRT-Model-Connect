@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <unordered_set>
 #include <vector>
 
 namespace trtmc {
@@ -238,9 +239,27 @@ Qwen38SamplingParams qwen38_sampling_params_from_config(const GenerateConfig& cf
     p.top_k = cfg.top_k;
     p.top_p = cfg.top_p;
     p.min_p = cfg.min_p;
+    p.repetition_penalty = cfg.repetition_penalty;
     p.seed = cfg.seed;
     p.eos_token_id = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : default_eos;
     return p;
+}
+
+void qwen38_apply_repetition_penalty(std::vector<float>& logits, float penalty,
+                                     const std::vector<int32_t>& token_history) {
+    if (penalty <= 0.0F || std::fabs(penalty - 1.0F) < kSamplingEpsilon || logits.empty())
+        return;
+    const auto vocab_size = static_cast<int32_t>(logits.size());
+    std::unordered_set<int32_t> seen;
+    seen.reserve(token_history.size());
+    for (int32_t token : token_history) {
+        if (token < 0 || token >= vocab_size)
+            continue;
+        if (!seen.insert(token).second)
+            continue;
+        float& score = logits[static_cast<std::size_t>(token)];
+        score = score < 0.0F ? score * penalty : score / penalty;
+    }
 }
 
 std::unique_ptr<Qwen38ISampler> create_qwen38_sampler(const Qwen38SamplingParams& params) {

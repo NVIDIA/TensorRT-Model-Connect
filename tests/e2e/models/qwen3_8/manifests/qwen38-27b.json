@@ -1,6 +1,7 @@
 {
   "name": "qwen38-27b",
   "hf_id": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
   "bundle": "qwen38-27b.bundle",
   "family": "qwen3_8",
   "runtime_strategy": "qwen3_8_hybrid_mamba_attention",

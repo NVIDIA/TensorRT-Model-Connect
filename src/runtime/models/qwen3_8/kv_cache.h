@@ -95,16 +95,22 @@ class Qwen38KvCache : public Qwen38InferenceState {
 
   private:
     void rebind_cache_rows(int32_t cache_rows);
-    std::vector<int64_t> mask_shape_for_engine(int32_t mask_width, std::size_t mask_buf_size) const;
+    std::vector<int64_t> mask_shape_for_engine(int32_t mask_width) const;
     void write_position_input(TensorMap& inputs, int32_t seq_len);
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
 
+    // Scratch for the cache-full row shift. cudaMemcpyAsync has undefined
+    // behavior on overlapping ranges, so the shift stages through this buffer.
+    // Allocated on first overflow, so a cache that never fills never pays for it.
+    DeviceTensor& shift_scratch();
+
     std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
     std::vector<DeviceTensor> present_k_; // [num_layers], shape [1, kv_dim] (single step output)
     std::vector<DeviceTensor> present_v_; // [num_layers]
+    DeviceTensor shift_scratch_;          // lazily sized [max_length - 1, kv_dim]
     int32_t num_layers_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};

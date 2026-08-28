@@ -11,6 +11,10 @@
 
 #include <chrono>
 #include <cstring>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -423,10 +427,52 @@ std::string write_kernel_so_to_temp(const std::string& global_name, const char* 
         if (c == '.')
             c = '_';
     }
-    std::string tmp_path = "/tmp/trtmc_kernel_" + safe_name + ".so";
-    std::ofstream ofs(tmp_path, std::ios::binary);
-    ofs.write(data, static_cast<std::streamsize>(size));
+    // mkstemp in a private 0700 directory, not a predictable /tmp path: the
+    // old name was world-writable and could be pre-created as a symlink or
+    // swapped between the write and the dlopen, which would hand this process
+    // attacker-controlled code. The write status is checked so a short write
+    // never reaches the loader.
+    std::string dir_template = "/tmp/trtmc_kernels_XXXXXX";
+    std::vector<char> dir_buf(dir_template.begin(), dir_template.end());
+    dir_buf.push_back('\0');
+    if (mkdtemp(dir_buf.data()) == nullptr)
+        return {};
+
+    std::string tmp_path = std::string(dir_buf.data()) + "/" + safe_name + ".so";
+    const int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        ::rmdir(dir_buf.data());
+        return {};
+    }
+
+    std::size_t written = 0;
+    bool write_ok = true;
+    while (written < size) {
+        const ssize_t n = ::write(fd, data + written, size - written);
+        if (n <= 0) {
+            write_ok = false;
+            break;
+        }
+        written += static_cast<std::size_t>(n);
+    }
+    if (::close(fd) != 0)
+        write_ok = false;
+    if (!write_ok) {
+        ::unlink(tmp_path.c_str());
+        ::rmdir(dir_buf.data());
+        return {};
+    }
     return tmp_path;
+}
+
+// Remove the staged .so and its private directory once the loader is done.
+void remove_kernel_so_temp(const std::string& tmp_path) {
+    if (tmp_path.empty())
+        return;
+    ::unlink(tmp_path.c_str());
+    const auto slash = tmp_path.find_last_of('/');
+    if (slash != std::string::npos)
+        ::rmdir(tmp_path.substr(0, slash).c_str());
 }
 
 // Load a single kernel entry from the manifest and register it via TVM-FFI.
@@ -445,12 +491,17 @@ void load_single_kernel(const BundleFile& bundle, const std::string& obj) {
     }
 
     std::string tmp_path = write_kernel_so_to_temp(global_name, so_sec->data(), so_sec->size());
+    if (tmp_path.empty()) {
+        std::cerr << "[ffi] Failed to stage kernel .so for: " << global_name << '\n';
+        return;
+    }
     if (load_tvm_ffi_module_func(tmp_path, func_name, global_name)) {
         std::cerr << "[ffi] Loaded kernel: " << global_name << '\n';
     } else {
         std::cerr << "[ffi] Failed to load kernel: " << global_name << " from " << section_name
                   << '\n';
     }
+    remove_kernel_so_temp(tmp_path);
 }
 
 // Find the "kernels" JSON array bounds within the manifest string.

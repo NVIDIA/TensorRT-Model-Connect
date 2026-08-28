@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace trtmc {
 
@@ -45,6 +46,12 @@ class Qwen38ISampler {
 
 Qwen38SamplingParams qwen38_sampling_params_from_config(const GenerateConfig& cfg,
                                                         int32_t default_eos = -1);
+
+// Scale down logits for tokens already present in token_history. Applied to the
+// logits before sampling, so both samplers honor it without either needing to
+// know the history. A penalty of 1.0 (the default) leaves logits untouched.
+void qwen38_apply_repetition_penalty(std::vector<float>& logits, float penalty,
+                                     const std::vector<int32_t>& token_history);
 
 std::unique_ptr<Qwen38ISampler> create_qwen38_sampler(const Qwen38SamplingParams& params);
 

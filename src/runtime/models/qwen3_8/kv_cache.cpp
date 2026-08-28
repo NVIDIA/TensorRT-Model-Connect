@@ -104,15 +104,16 @@ void Qwen38KvCache::rebind_cache_rows(int32_t cache_rows) {
 //   * 3-D decoder mask with query dim:                 [1, 1, mask_width]
 // The tensor content is identical (width = current mask_width); only the
 // leading broadcast dimensions change.
-std::vector<int64_t> Qwen38KvCache::mask_shape_for_engine(int32_t mask_width,
-                                                          std::size_t mask_buf_size) const {
+std::vector<int64_t> Qwen38KvCache::mask_shape_for_engine(int32_t mask_width) const {
     const int32_t mask_rank =
         bound_module_ != nullptr ? bound_module_->input_rank(names_.attention_mask) : 0;
     if (mask_rank == 3)
         return {1, 1, mask_width};
     if (mask_rank == 2 || (mask_rank == 0 && dynamic_binding_enabled_))
         return {1, mask_width};
-    return {static_cast<int64_t>(mask_buf_size)};
+    // Logical width, not mask_buf_.size(): the buffer is grown by a batched
+    // prefill and never shrunk, so its size overstates a later decode mask.
+    return {static_cast<int64_t>(mask_width)};
 }
 
 void Qwen38KvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
@@ -190,7 +191,7 @@ void Qwen38KvCache::write_decode_mask(TensorMap& inputs) {
 
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
-    mask_t.shape = mask_shape_for_engine(mask_width, mask_buf_.size());
+    mask_t.shape = mask_shape_for_engine(mask_width);
     mask_t.dtype = DType::kFloat32;
     inputs[names_.attention_mask] = mask_t;
 }
@@ -325,12 +326,20 @@ void Qwen38KvCache::advance(int32_t n_tokens) {
         // Cache full: shift [1..max) → [0..max-1), then write at tail
         auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
         auto tail_offset = shift_bytes;
+        // src and dst overlap inside the same allocation, and cudaMemcpyAsync
+        // is undefined for overlapping ranges, so stage through scratch. One
+        // buffer serves every layer because all copies are ordered on stream_.
+        auto* scratch = static_cast<uint8_t*>(shift_scratch().data());
         for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
             auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
             auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(scratch, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
+                            stream_);
+            cudaMemcpyAsync(ck, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(scratch, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
+                            stream_);
+            cudaMemcpyAsync(cv, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
                             cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
@@ -359,14 +368,27 @@ std::size_t Qwen38KvCache::device_memory_bytes() const {
     return total;
 }
 
+DeviceTensor& Qwen38KvCache::shift_scratch() {
+    if (!shift_scratch_.ok() && max_length_ > 1)
+        shift_scratch_ = DeviceTensor({max_length_ - 1, kv_dim_}, cache_dtype_, stream_);
+    return shift_scratch_;
+}
+
 bool Qwen38KvCache::ok() const {
-    if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
-        return false;
-    for (const auto& t : cache_k_) {
-        if (!t.ok())
+    // Every group is checked: Qwen38Plugin::create relies on ok() to reject a
+    // state whose device allocations failed, so a partial check would report a
+    // broken cache as healthy and defer the failure to bind or execute time.
+    const auto group_ok = [this](const std::vector<DeviceTensor>& group) {
+        if (group.size() != static_cast<std::size_t>(num_layers_))
             return false;
-    }
-    return true;
+        for (const auto& t : group) {
+            if (!t.ok())
+                return false;
+        }
+        return true;
+    };
+    return group_ok(cache_k_) && group_ok(cache_v_) && group_ok(present_k_) &&
+           group_ok(present_v_);
 }
 
 } // namespace trtmc

@@ -10,6 +10,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _token_id(value: object) -> int:
+    """Normalize a config token id to an int, using -1 for "unset".
+
+    A plain ``value or -1`` would map a declared id of ``0`` to ``-1``, because
+    ``0`` is falsy, silently dropping EOS detection or padding for checkpoints
+    that use token 0. Lists (multiple stop ids) take the first entry, matching
+    the runtime's own first-of-array behavior.
+    """
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return -1
+    return value
+
+
 @dataclass
 class ModelConfig:
     """Parsed model architecture from HF config.json."""
@@ -184,9 +199,9 @@ class ModelConfig:
             num_key_value_heads=d.get("num_key_value_heads", num_heads),
             rms_norm_eps=eps,
             rope_theta=rope_theta,
-            bos_token_id=d.get("bos_token_id", -1) or -1,
-            eos_token_id=d.get("eos_token_id", -1) or -1,
-            pad_token_id=d.get("pad_token_id", -1) or -1,
+            bos_token_id=_token_id(d.get("bos_token_id")),
+            eos_token_id=_token_id(d.get("eos_token_id")),
+            pad_token_id=_token_id(d.get("pad_token_id")),
             tie_word_embeddings=d.get("tie_word_embeddings", False),
             max_position_embeddings=d.get("max_position_embeddings",
                                           d.get("n_positions", 8192)),

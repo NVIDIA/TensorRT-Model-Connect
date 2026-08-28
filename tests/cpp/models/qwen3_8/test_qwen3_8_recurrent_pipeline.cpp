@@ -226,6 +226,7 @@ static void test_hybrid_pipeline() {
     auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(
         builder->buildSerializedNetwork(*network, *bconfig));
     if (!plan) {
+        std::cerr << "SKIP: can't build engine\n";
         cudaStreamDestroy(stream);
         return;
     }
@@ -233,6 +234,7 @@ static void test_hybrid_pipeline() {
     auto hybrid_engine = trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
     if (!hybrid_engine) {
+        std::cerr << "SKIP: can't build engine\n";
         cudaStreamDestroy(stream);
         return;
     }

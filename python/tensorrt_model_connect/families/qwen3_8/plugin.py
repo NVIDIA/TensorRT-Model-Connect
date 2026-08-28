@@ -488,6 +488,14 @@ class Qwen38Plugin:
         debug_layer_outputs: bool = False,
     ) -> bytes:
         """Build hybrid TRT engine with DeltaNet + attention layers."""
+        if quant_ctx is not None:
+            # This graph emits plain matmuls; it never threads a quantization
+            # context into its projections. Accepting quant_ctx silently would
+            # return an unquantized engine for a build the caller asked to
+            # quantize, so fail loudly instead.
+            raise NotImplementedError(
+                "Qwen3.8 does not support quantized builds; "
+                "build without --quantize/--fp8")
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers

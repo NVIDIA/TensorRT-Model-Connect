@@ -102,7 +102,14 @@ def _read_text_generation_sample(path: Path) -> dict:
             line = line.strip()
             if not line:
                 continue
-            sample = json.loads(line)
+            try:
+                sample = json.loads(line)
+            except json.JSONDecodeError:
+                # A truncated or non-JSON first line means the runner produced
+                # no usable sample. Returning {} lets the caller fall back to
+                # stdout and report a failed case with captured stderr, instead
+                # of aborting the whole stage on an unhandled exception.
+                return {}
             if not isinstance(sample, dict):
                 return {}
             token_ids = sample.get("token_ids")
@@ -659,6 +666,9 @@ class TextGenerationCausalRunner:
         logits_path = str(
             Path(model_dir) / f"trt_{phase}_logits.npy"
         )
+        # Fixed path per case and phase: drop any file from an earlier run so a
+        # subprocess that exits 0 without writing cannot pass on stale logits.
+        Path(logits_path).unlink(missing_ok=True)
 
         script = textwrap.dedent(f"""\
             import sys, json, numpy as np

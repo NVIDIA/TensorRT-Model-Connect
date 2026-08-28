@@ -84,6 +84,25 @@ class Qwen38Plugin final : public IPipelinePlugin {
         int32_t mamba_head_dim = extract_json_int(ctx.config_json, "mamba_head_dim", 0);
         int32_t conv_dim = extract_json_int(ctx.config_json, "conv_dim", d_inner);
 
+        // Every value above defaults to 0 when the bundle omits its key, and a
+        // zero silently produces a degenerate state rather than an error: no
+        // attention layers means an empty KV cache whose ok() is trivially
+        // true, and zero mamba heads means zero-element SSM tensors bound to an
+        // engine that expects real state. Reject them at load time instead.
+        const auto require_positive = [](int32_t value, const char* key) {
+            if (value <= 0)
+                throw std::runtime_error(std::string("Qwen3.8 bundle config is missing or has a "
+                                                     "non-positive value for '") +
+                                         key + "'");
+        };
+        require_positive(num_attention_layers, "num_attention_layers");
+        require_positive(num_mamba_layers, "num_mamba_layers");
+        require_positive(mamba_nheads, "mamba_nheads");
+        require_positive(mamba_head_dim, "mamba_head_dim");
+        require_positive(mamba_d_state, "mamba_d_state");
+        require_positive(mamba_d_conv, "mamba_d_conv");
+        require_positive(kv_dim, "num_key_value_heads * head_dim");
+
         // Qwen38KvCache for the attention layers
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         auto cache = std::make_unique<Qwen38KvCache>(
@@ -104,7 +123,12 @@ class Qwen38Plugin final : public IPipelinePlugin {
                                                        {"ssm_state", {ssm_elems}, "present_ssm"}},
                                                    stream);
 
+        if (!ssm->ok())
+            throw std::runtime_error("Failed to create Qwen38RecurrentState for hybrid model");
+
         auto hybrid = std::make_unique<Qwen38HybridState>(std::move(cache), std::move(ssm));
+        if (!hybrid->ok())
+            throw std::runtime_error("Failed to create Qwen38HybridState for hybrid model");
         auto rgc = make_recurrent_gen_config(ctx.config);
         rgc.has_position_input = loaded.module->has_input("position_id");
         apply_recurrent_chat_template_format(ctx.bundle, rgc);

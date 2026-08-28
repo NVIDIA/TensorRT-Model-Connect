@@ -261,8 +261,22 @@ class TextComparator:
                 message=f"Logits must be 2-D [steps, vocab]: TRT={trt_logits.shape}, HF={ref_logits.shape}",
             )
 
-        # Truncate to common step count
-        n_steps = min(trt_logits.shape[0], ref_logits.shape[0])
+        # Step counts must agree. Silently truncating to the shorter side
+        # discards every unmatched decode step, so an early EOS or a dropped
+        # step would be scored only on the shared prefix and could pass.
+        if trt_logits.shape[0] != ref_logits.shape[0]:
+            return CompareResult(
+                stage_name=stage.name,
+                status=StageStatus.FAILED.value,
+                metrics=metrics,
+                message=(
+                    "Generation length mismatch: "
+                    f"TRT produced {trt_logits.shape[0]} decode steps, "
+                    f"reference produced {ref_logits.shape[0]}"
+                ),
+            )
+
+        n_steps = trt_logits.shape[0]
         if n_steps == 0:
             return CompareResult(
                 stage_name=stage.name,
@@ -411,11 +425,12 @@ class TextComparator:
             # metrics already agree, compare on the common prefix to avoid
             # false NED hard-fails caused purely by suffix length mismatch.
             ta_thresh = thresh.get("token_agreement_rate", 0.8)
-            if token_agreement_rate >= ta_thresh:
-                if len(trt_text_for_ned) <= len(ref_text_for_ned):
-                    short, long = trt_text_for_ned, ref_text_for_ned
-                else:
-                    short, long = ref_text_for_ned, trt_text_for_ned
+            # Only the documented direction is forgiven: TRT stopping early on
+            # EOS while the reference keeps emitting. A reference shorter than
+            # the TRT output is not that case and must not be excused.
+            if (token_agreement_rate >= ta_thresh
+                    and len(trt_text_for_ned) <= len(ref_text_for_ned)):
+                short, long = trt_text_for_ned, ref_text_for_ned
                 if len(short) >= _MIN_PREFIX_FALLBACK_CHARS and long.startswith(short):
                     prefix_ned = normalized_edit_distance(short, long[:len(short)])
                     if prefix_ned < ned:

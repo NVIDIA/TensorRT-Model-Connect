@@ -66,9 +66,9 @@ void test_qwen3_8_recurrent_contracts() {
         std::array<const std::vector<std::vector<float>>*, 2>{&a, &bad_layers};
 
     check(under_test::validate_state_layer_count(ok_states, 2),
-          "qwen3.5 contract accepts matching layer count");
+          "qwen3.8 contract accepts matching layer count");
     check(!under_test::validate_state_layer_count(bad_layer_states, 2),
-          "qwen3.5 contract rejects layer count mismatch");
+          "qwen3.8 contract rejects layer count mismatch");
 
     const auto ok_specs = std::array<under_test::StateTensorView, 2>{
         under_test::StateTensorView{&a, 4}, under_test::StateTensorView{&b, 4}};
@@ -76,15 +76,15 @@ void test_qwen3_8_recurrent_contracts() {
         under_test::StateTensorView{&a, 4}, under_test::StateTensorView{&bad_sizes, 4}};
 
     check(under_test::validate_state_tensor_sizes(ok_specs, 2),
-          "qwen3.5 contract accepts matching tensor sizes");
+          "qwen3.8 contract accepts matching tensor sizes");
     check(!under_test::validate_state_tensor_sizes(bad_specs, 2),
-          "qwen3.5 contract rejects tensor size mismatch");
+          "qwen3.8 contract rejects tensor size mismatch");
 
     std::vector<std::vector<float>> outputs;
     under_test::initialize_layer_outputs(3, 2, outputs);
-    check(outputs.size() == 3, "qwen3.5 contract allocates layer outputs");
+    check(outputs.size() == 3, "qwen3.8 contract allocates layer outputs");
     check(outputs[0] == std::vector<float>({0.0F, 0.0F}),
-          "qwen3.5 contract initializes outputs to zero");
+          "qwen3.8 contract initializes outputs to zero");
 }
 
 } // namespace

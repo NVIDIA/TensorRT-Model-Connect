@@ -82,13 +82,20 @@ std::size_t Qwen38RecurrentState::device_memory_bytes() const {
 }
 
 bool Qwen38RecurrentState::ok() const {
-    for (std::size_t si = 0; si < specs_.size(); ++si) {
-        if (state_[si].size() != static_cast<std::size_t>(num_layers_))
+    // Both groups are checked: a present_ allocation failure is just as fatal
+    // as a state_ one, and Qwen38Plugin::create rejects the pipeline on ok().
+    const auto group_ok = [this](const std::vector<DeviceTensor>& group) {
+        if (group.size() != static_cast<std::size_t>(num_layers_))
             return false;
-        for (const auto& t : state_[si]) {
+        for (const auto& t : group) {
             if (!t.ok())
                 return false;
         }
+        return true;
+    };
+    for (std::size_t si = 0; si < specs_.size(); ++si) {
+        if (!group_ok(state_[si]) || !group_ok(present_[si]))
+            return false;
     }
     return true;
 }

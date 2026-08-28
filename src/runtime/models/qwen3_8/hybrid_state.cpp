@@ -5,13 +5,20 @@
 
 #include "runtime/models/qwen3_8/hybrid_state.h"
 
+#include <stdexcept>
 #include <utility>
 
 namespace trtmc {
 
+// Every method below delegates to both members unconditionally, so null is
+// rejected here rather than tolerated. That keeps ok() a health check on the
+// device allocations instead of a null test callers may or may not have run.
 Qwen38HybridState::Qwen38HybridState(std::unique_ptr<Qwen38KvCache> kv,
                                      std::unique_ptr<Qwen38RecurrentState> ssm)
-    : kv_(std::move(kv)), ssm_(std::move(ssm)) {}
+    : kv_(std::move(kv)), ssm_(std::move(ssm)) {
+    if (!kv_ || !ssm_)
+        throw std::invalid_argument("Qwen38HybridState requires non-null KV and recurrent state");
+}
 
 void Qwen38HybridState::reset() {
     kv_->reset();
@@ -49,7 +56,7 @@ std::size_t Qwen38HybridState::device_memory_bytes() const {
 }
 
 bool Qwen38HybridState::ok() const {
-    return kv_ && kv_->ok() && ssm_ && ssm_->ok();
+    return kv_->ok() && ssm_->ok();
 }
 
 } // namespace trtmc

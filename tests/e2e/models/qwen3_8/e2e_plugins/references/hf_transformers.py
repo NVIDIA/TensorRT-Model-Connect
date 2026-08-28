@@ -204,6 +204,15 @@ def _reference_env(ctx: RunContext) -> dict[str, str]:
     env = dict(os.environ)
     if ctx.ld_library_path:
         env["LD_LIBRARY_PATH"] = ctx.ld_library_path
+    # The child imports tests.e2e.models.qwen3_8.e2e_plugins.references, so the
+    # repository root has to be importable even when the parent process runs
+    # from another directory. Existing entries are preserved.
+    project_dir = str(PROJECT_DIR)
+    existing = env.get("PYTHONPATH", "")
+    parts = [p for p in existing.split(os.pathsep) if p]
+    if project_dir not in parts:
+        parts.insert(0, project_dir)
+    env["PYTHONPATH"] = os.pathsep.join(parts)
     return env
 
 
