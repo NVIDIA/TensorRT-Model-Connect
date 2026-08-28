@@ -591,6 +591,57 @@ def test_native_linear_serializes_checkpoint_bf16_without_fp32_constant() -> Non
     assert plan
 
 
+@pytest.mark.gpu
+def test_native_attention_preserves_checkpoint_bf16_at_iattention_boundary() -> None:
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    rows, heads, head_dim = 64, 2, 64
+    width = heads * head_dim
+    query = network.add_input("query", trt.bfloat16, (rows, width))
+    key = network.add_input("key", trt.bfloat16, (rows, width))
+    value = network.add_input("value", trt.bfloat16, (rows, width))
+
+    output = op.native_attention(
+        network,
+        query,
+        key,
+        value,
+        rows=rows,
+        heads=heads,
+        head_dim=head_dim,
+        name="test.native_bf16_attention",
+    )
+    output.name = "output"
+    network.mark_output(output)
+
+    attention_inputs = [
+        network.get_layer(index)
+        for index in range(network.num_layers)
+        if network.get_layer(index).type == trt.LayerType.ATTENTION_INPUT
+    ]
+    attention_outputs = [
+        network.get_layer(index)
+        for index in range(network.num_layers)
+        if network.get_layer(index).type == trt.LayerType.ATTENTION_OUTPUT
+    ]
+    assert len(attention_inputs) == len(attention_outputs) == 1
+    assert [attention_inputs[0].get_input(index).dtype for index in range(3)] == [
+        trt.bfloat16,
+        trt.bfloat16,
+        trt.bfloat16,
+    ]
+    assert attention_outputs[0].get_input(0).dtype == trt.bfloat16
+    assert attention_outputs[0].get_output(0).dtype == trt.bfloat16
+    assert output.dtype == trt.bfloat16
+    try:
+        plan = builder.build_serialized_network(network, config)
+    finally:
+        op.release_weight_buffers(network)
+    assert plan
+
+
 def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)

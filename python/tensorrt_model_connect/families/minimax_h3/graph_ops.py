@@ -345,12 +345,9 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     q = rows_to_heads(network, q, rows, heads, head_dim)
     k = rows_to_heads(network, k, rows, heads, head_dim)
     v = rows_to_heads(network, v, rows, heads, head_dim)
-    # TensorRT's fused FP16 attention has three additional mantissa bits over
-    # BF16. Keep the surrounding block in checkpoint-native BF16 while
-    # reducing recurrent numerical drift across 49 denoising evaluations.
-    q = cast(network, q, trt.float16)
-    k = cast(network, k, trt.float16)
-    v = cast(network, v, trt.float16)
+    # Preserve the checkpoint-native BF16 attention path. Narrowing Q/K/V to
+    # FP16 changes the recurrent denoising trajectory even when the surrounding
+    # residual stream remains BF16.
     scale = constant(
         network,
         np.full((1, 1, 1, 1), 1.0 / math.sqrt(head_dim), dtype=np.float32),
@@ -364,5 +361,4 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     layer.metadata = f"trtmc.native_op=IAttention;source={name}"
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
-    context = cast(network, layer.get_output(0), trt.bfloat16)
-    return heads_to_rows(network, context, rows, heads * head_dim)
+    return heads_to_rows(network, layer.get_output(0), rows, heads * head_dim)
