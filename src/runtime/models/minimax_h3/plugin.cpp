@@ -33,6 +33,13 @@ struct CacheConfig {
     float threshold{0.025F};
 };
 
+bool is_lower_sha256(const std::string& value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+           });
+}
+
 MiniMaxH3Workflow load_workflow(const PipelineContext& ctx) {
     const std::string value = extract_json_string(ctx.config_json, "workflow", "t2va");
     if (value == "t2va")
@@ -149,6 +156,40 @@ void validate_ref2va_profile(const PipelineContext& ctx) {
             throw std::runtime_error(
                 "MiniMax-H3 Ref2VA bundle has an incompatible dynamic profile");
     }
+    if (extract_json_string(ctx.config_json, "ref2va_audio_encoder_implementation", "") !=
+            "aten-torchscript-fp32-v1" ||
+        extract_json_int(ctx.config_json, "ref2va_audio_encoder_plugin_count", -1) != 1 ||
+        extract_json_string(ctx.config_json, "ref2va_audio_encoder_module_format", "") !=
+            "torchscript-plan-constant-v1" ||
+        extract_json_string(ctx.config_json, "ref2va_audio_encoder_weight_norm", "") !=
+            "cuda-frozen-effective-v1" ||
+        extract_json_int(ctx.config_json, "ref2va_audio_encoder_hop_length", -1) != 800 ||
+        extract_json_int(ctx.config_json, "ref2va_audio_encoder_output_channels", -1) != 32)
+        throw std::runtime_error(
+            "MiniMax-H3 Ref2VA bundle has an incompatible exact audio encoder implementation");
+    if (extract_json_bool(ctx.config_json, "ref2va_audio_encoder_cuda_graphs", true))
+        throw std::runtime_error(
+            "MiniMax-H3 Ref2VA bundle must disable CUDA graphs for the exact audio encoder");
+    if (!extract_json_bool(ctx.config_json, "ref2va_audio_encoder_cudnn_tf32", false) ||
+        extract_json_bool(ctx.config_json, "ref2va_audio_encoder_matmul_tf32", true) ||
+        extract_json_bool(ctx.config_json, "ref2va_audio_encoder_graph_optimizer", true) ||
+        !extract_json_bool(ctx.config_json, "ref2va_audio_encoder_cudnn_enabled", false) ||
+        extract_json_bool(ctx.config_json, "ref2va_audio_encoder_cudnn_benchmark", true) ||
+        extract_json_bool(ctx.config_json, "ref2va_audio_encoder_cudnn_deterministic", true))
+        throw std::runtime_error(
+            "MiniMax-H3 Ref2VA bundle has incompatible audio encoder execution precision");
+    if (extract_json_int_array(ctx.config_json, "ref2va_audio_encoder_input_profile", 3) !=
+        std::vector<int32_t>({64000, 165600, 480000}))
+        throw std::runtime_error(
+            "MiniMax-H3 Ref2VA bundle has an incompatible exact audio encoder profile");
+    const int32_t audio_encoder_module_bytes =
+        extract_json_int(ctx.config_json, "ref2va_audio_encoder_module_bytes", -1);
+    const std::string audio_encoder_module_sha256 =
+        extract_json_string(ctx.config_json, "ref2va_audio_encoder_module_sha256", "");
+    if (audio_encoder_module_bytes < (300 << 20) || audio_encoder_module_bytes > (400 << 20) ||
+        !is_lower_sha256(audio_encoder_module_sha256))
+        throw std::runtime_error(
+            "MiniMax-H3 Ref2VA bundle has incompatible audio encoder trace provenance");
     if (extract_json_string(ctx.config_json, "ref2va_vision_plan_layout", "") !=
             "split-image-video-v1" ||
         extract_json_string(ctx.config_json, "minimax_h3_native_plugin_section", "") !=
@@ -260,7 +301,11 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
         ModuleCreateOptions options;
         options.stream = stream;
         options.runtime_cache_path = runtime_cache.c_str();
-        options.cuda_graphs = cuda_graphs;
+        // The exact audio encoder lazily copies and loads its embedded
+        // TorchScript module on first enqueue, which is not CUDA-capture safe.
+        // It is a one-shot conditioner plan; all other plans keep the caller's
+        // CUDA-graph policy.
+        options.cuda_graphs = cuda_graphs && name != "audio_vae_encoder_plan";
         return backend->create_module(plan.data(), plan.size(), options);
     };
 }

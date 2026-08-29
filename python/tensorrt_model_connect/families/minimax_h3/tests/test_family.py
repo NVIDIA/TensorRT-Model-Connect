@@ -389,6 +389,20 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
     def payload(name):
         def build(*args, **kwargs):
             calls[name] = {"args": args, "kwargs": kwargs}
+            if name == "audio_encoder":
+                kwargs["metadata_out"].update(
+                    {
+                        "module_bytes": 345_595_046,
+                        "module_sha256": "9" * 64,
+                        "cuda_graphs": False,
+                        "cudnn_tf32": True,
+                        "matmul_tf32": False,
+                        "graph_optimizer": False,
+                        "cudnn_enabled": True,
+                        "cudnn_benchmark": False,
+                        "cudnn_deterministic": False,
+                    }
+                )
             return name.encode()
 
         return build
@@ -592,6 +606,20 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
     def payload(name):
         def build(*args, **kwargs):
             calls[name] = {"args": args, "kwargs": kwargs}
+            if name == "audio_encoder":
+                kwargs["metadata_out"].update(
+                    {
+                        "module_bytes": 345_595_046,
+                        "module_sha256": "9" * 64,
+                        "cuda_graphs": False,
+                        "cudnn_tf32": True,
+                        "matmul_tf32": False,
+                        "graph_optimizer": False,
+                        "cudnn_enabled": True,
+                        "cudnn_benchmark": False,
+                        "cudnn_deterministic": False,
+                    }
+                )
             return name.encode()
 
         return build
@@ -772,6 +800,22 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
     assert bundle_config["minimax_h3_native_plugin_artifact"] == MINIMAX_H3_NATIVE_PLUGIN_FILENAME
     assert bundle_config["minimax_h3_native_plugin_abi"] == MINIMAX_H3_NATIVE_PLUGIN_ABI
     assert bundle_config["minimax_h3_native_plugin_identity"] == MINIMAX_H3_NATIVE_PLUGIN_IDENTITY
+    assert bundle_config["ref2va_audio_encoder_implementation"] == "aten-torchscript-fp32-v1"
+    assert bundle_config["ref2va_audio_encoder_plugin_count"] == 1
+    assert bundle_config["ref2va_audio_encoder_module_format"] == "torchscript-plan-constant-v1"
+    assert bundle_config["ref2va_audio_encoder_weight_norm"] == "cuda-frozen-effective-v1"
+    assert bundle_config["ref2va_audio_encoder_input_profile"] == [64000, 165600, 480000]
+    assert bundle_config["ref2va_audio_encoder_hop_length"] == 800
+    assert bundle_config["ref2va_audio_encoder_output_channels"] == 32
+    assert bundle_config["ref2va_audio_encoder_cuda_graphs"] is False
+    assert bundle_config["ref2va_audio_encoder_cudnn_tf32"] is True
+    assert bundle_config["ref2va_audio_encoder_matmul_tf32"] is False
+    assert bundle_config["ref2va_audio_encoder_graph_optimizer"] is False
+    assert bundle_config["ref2va_audio_encoder_cudnn_enabled"] is True
+    assert bundle_config["ref2va_audio_encoder_cudnn_benchmark"] is False
+    assert bundle_config["ref2va_audio_encoder_cudnn_deterministic"] is False
+    assert bundle_config["ref2va_audio_encoder_module_bytes"] == 345_595_046
+    assert bundle_config["ref2va_audio_encoder_module_sha256"] == "9" * 64
     assert (
         bundle_config["ref2va_language_attention_implementation"] == "tensorrt-bf16-iattention-v1"
     )
@@ -834,6 +878,14 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
             },
             parallel_config=SimpleNamespace(mode="single", cp_size=1),
         )
+
+
+def test_audio_encoder_plan_alone_forces_cuda_graphs_off() -> None:
+    source = (
+        Path(__file__).resolve().parents[5] / "src/runtime/models/minimax_h3/plugin.cpp"
+    ).read_text()
+    assert 'options.cuda_graphs = cuda_graphs && name != "audio_vae_encoder_plan";' in source
+    assert source.count("options.cuda_graphs = cuda_graphs;") == 1
 
 
 def test_audio_vae_decoder_onnx_contract_and_workspace_are_fail_closed(monkeypatch) -> None:

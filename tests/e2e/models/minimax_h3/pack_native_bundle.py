@@ -25,6 +25,13 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
     MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
     MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+    REF2VA_AUDIO_ENCODER_HOP_LENGTH,
+    REF2VA_AUDIO_ENCODER_IMPLEMENTATION,
+    REF2VA_AUDIO_ENCODER_INPUT_PROFILE,
+    REF2VA_AUDIO_ENCODER_MODULE_FORMAT,
+    REF2VA_AUDIO_ENCODER_OUTPUT_CHANNELS,
+    REF2VA_AUDIO_ENCODER_PLUGIN_COUNT,
+    REF2VA_AUDIO_ENCODER_WEIGHT_NORM,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION,
@@ -269,6 +276,7 @@ def main() -> int:
             }
         )
     elif workflow == "ref2va":
+        audio_encoder_metadata = recorded["audio_vae_encoder.plan"]["build_metadata"]
         config.update(
             {
                 "min_text_rows": profile.ref2va_min_text_rows,
@@ -289,6 +297,24 @@ def main() -> int:
                 "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
                 "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
                 "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+                "ref2va_audio_encoder_implementation": REF2VA_AUDIO_ENCODER_IMPLEMENTATION,
+                "ref2va_audio_encoder_plugin_count": REF2VA_AUDIO_ENCODER_PLUGIN_COUNT,
+                "ref2va_audio_encoder_module_format": REF2VA_AUDIO_ENCODER_MODULE_FORMAT,
+                "ref2va_audio_encoder_weight_norm": REF2VA_AUDIO_ENCODER_WEIGHT_NORM,
+                "ref2va_audio_encoder_input_profile": list(REF2VA_AUDIO_ENCODER_INPUT_PROFILE),
+                "ref2va_audio_encoder_hop_length": REF2VA_AUDIO_ENCODER_HOP_LENGTH,
+                "ref2va_audio_encoder_output_channels": REF2VA_AUDIO_ENCODER_OUTPUT_CHANNELS,
+                "ref2va_audio_encoder_cuda_graphs": audio_encoder_metadata["cuda_graphs"],
+                "ref2va_audio_encoder_cudnn_tf32": audio_encoder_metadata["cudnn_tf32"],
+                "ref2va_audio_encoder_matmul_tf32": audio_encoder_metadata["matmul_tf32"],
+                "ref2va_audio_encoder_graph_optimizer": audio_encoder_metadata["graph_optimizer"],
+                "ref2va_audio_encoder_cudnn_enabled": audio_encoder_metadata["cudnn_enabled"],
+                "ref2va_audio_encoder_cudnn_benchmark": audio_encoder_metadata["cudnn_benchmark"],
+                "ref2va_audio_encoder_cudnn_deterministic": audio_encoder_metadata[
+                    "cudnn_deterministic"
+                ],
+                "ref2va_audio_encoder_module_bytes": audio_encoder_metadata["module_bytes"],
+                "ref2va_audio_encoder_module_sha256": audio_encoder_metadata["module_sha256"],
                 "ref2va_language_attention_implementation": (
                     REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION
                 ),

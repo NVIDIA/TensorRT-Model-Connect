@@ -93,15 +93,26 @@ def _validate_resume_identity(previous: object, current: dict) -> None:
             raise ValueError(f"Cannot resume: existing receipt has different {key}")
 
 
-def _write(output: Path, name: str, payload: bytes, elapsed: float, receipt: dict) -> None:
+def _write(
+    output: Path,
+    name: str,
+    payload: bytes,
+    elapsed: float,
+    receipt: dict,
+    *,
+    build_metadata: dict | None = None,
+) -> None:
     path = output / name
     digest = hashlib.sha256(payload).hexdigest()
     atomic_write_bytes(path, payload)
-    receipt["components"][name] = {
+    record = {
         "bytes": len(payload),
         "sha256": digest,
         "build_s": elapsed,
     }
+    if build_metadata is not None:
+        record["build_metadata"] = build_metadata
+    receipt["components"][name] = record
 
 
 def main() -> int:
@@ -544,11 +555,20 @@ def main() -> int:
         )
 
         started = time.perf_counter()
+        build_metadata = {}
         plan = build_audio_vae_encoder_engine(
             model / "audio_vae",
             workspace_bytes=workspace_limit_bytes["audio_vae_encoder.plan"],
+            metadata_out=build_metadata,
         )
-        _write(output, "audio_vae_encoder.plan", plan, time.perf_counter() - started, receipt)
+        _write(
+            output,
+            "audio_vae_encoder.plan",
+            plan,
+            time.perf_counter() - started,
+            receipt,
+            build_metadata=build_metadata,
+        )
         checkpoint_receipt()
         del plan
         gc.collect()

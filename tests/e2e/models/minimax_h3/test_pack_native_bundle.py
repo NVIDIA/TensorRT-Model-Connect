@@ -333,6 +333,17 @@ def test_ref2va_packer_binds_ten_plans_processor_assets_and_partition(
         payload = filename.encode()
         (plans / filename).write_bytes(payload)
         recorded[filename] = {"bytes": len(payload), "sha256": f"{index:064x}"}
+    recorded["audio_vae_encoder.plan"]["build_metadata"] = {
+        "module_bytes": 345_595_046,
+        "module_sha256": "9" * 64,
+        "cuda_graphs": False,
+        "cudnn_tf32": True,
+        "matmul_tf32": False,
+        "graph_optimizer": False,
+        "cudnn_enabled": True,
+        "cudnn_benchmark": False,
+        "cudnn_deterministic": False,
+    }
     workspace_limits = {filename: 8 << 30 for filename in REF2VA_PLAN_FILENAMES}
     native_plugin = plans / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
     native_plugin.write_bytes(b"native-plugin")
@@ -454,6 +465,22 @@ def test_ref2va_packer_binds_ten_plans_processor_assets_and_partition(
     assert config["minimax_h3_native_plugin_artifact"] == MINIMAX_H3_NATIVE_PLUGIN_FILENAME
     assert config["minimax_h3_native_plugin_abi"] == MINIMAX_H3_NATIVE_PLUGIN_ABI
     assert config["minimax_h3_native_plugin_identity"] == MINIMAX_H3_NATIVE_PLUGIN_IDENTITY
+    assert config["ref2va_audio_encoder_implementation"] == "aten-torchscript-fp32-v1"
+    assert config["ref2va_audio_encoder_plugin_count"] == 1
+    assert config["ref2va_audio_encoder_module_format"] == "torchscript-plan-constant-v1"
+    assert config["ref2va_audio_encoder_weight_norm"] == "cuda-frozen-effective-v1"
+    assert config["ref2va_audio_encoder_input_profile"] == [64000, 165600, 480000]
+    assert config["ref2va_audio_encoder_hop_length"] == 800
+    assert config["ref2va_audio_encoder_output_channels"] == 32
+    assert config["ref2va_audio_encoder_cuda_graphs"] is False
+    assert config["ref2va_audio_encoder_cudnn_tf32"] is True
+    assert config["ref2va_audio_encoder_matmul_tf32"] is False
+    assert config["ref2va_audio_encoder_graph_optimizer"] is False
+    assert config["ref2va_audio_encoder_cudnn_enabled"] is True
+    assert config["ref2va_audio_encoder_cudnn_benchmark"] is False
+    assert config["ref2va_audio_encoder_cudnn_deterministic"] is False
+    assert config["ref2va_audio_encoder_module_bytes"] == 345_595_046
+    assert config["ref2va_audio_encoder_module_sha256"] == "9" * 64
     assert config["ref2va_language_attention_implementation"] == ("tensorrt-bf16-iattention-v1")
     assert config["ref2va_language_attention_precision"] == "bf16"
     assert "ref2va_language_attention_scale" not in config

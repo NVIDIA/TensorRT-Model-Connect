@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect.families.minimax_h3 import native_plugin_builder
@@ -30,6 +31,8 @@ def _reset_plugin_handles():
 
 
 def test_native_plugin_sources_define_fixed_v3_row_major_hf_contract() -> None:
+    audio_header = (_PLUGIN_DIR / "audio_encoder_plugin.h").read_text(encoding="utf-8")
+    audio_source = (_PLUGIN_DIR / "audio_encoder_plugin.cpp").read_text(encoding="utf-8")
     header = (_PLUGIN_DIR / "vision_attention_plugin.h").read_text(encoding="utf-8")
     source = (_PLUGIN_DIR / "vision_attention_plugin.cpp").read_text(encoding="utf-8")
     linear_header = (_PLUGIN_DIR / "linear_plugin.h").read_text(encoding="utf-8")
@@ -76,8 +79,18 @@ def test_native_plugin_sources_define_fixed_v3_row_major_hf_contract() -> None:
     assert "InferenceMode" in norm_source
     assert "CUDAStreamGuard" in norm_source
     assert "eps=1e-6;cudnn=true" in norm_source
+    assert '"MiniMaxH3AudioEncoder"' in audio_header
+    assert "kMIN_SAMPLES = 64000" in audio_header
+    assert "kOPT_SAMPLES = 165600" in audio_header
+    assert "kMAX_SAMPLES = 480000" in audio_header
+    assert "torch::jit::load" in audio_source
+    assert "NoTF32Guard" in audio_source
+    assert "CUDAStreamGuard" in audio_source
+    assert "module=torchscript" in audio_source
+    assert "python_runtime=false" in audio_source
     assert "IPluginCreatorV3One" in creator
     assert "plugin_registrar_minimax_h3_vision_attention" in creator
+    assert "plugin_registrar_minimax_h3_audio_encoder" in creator
     assert "plugin_registrar_minimax_h3_layer_norm" in creator
     assert "plugin_registrar_minimax_h3_linear" in creator
     assert "plugin_registrar_minimax_h3_patch_embed" in creator
@@ -95,6 +108,8 @@ def test_native_plugin_sources_define_fixed_v3_row_major_hf_contract() -> None:
 def test_native_plugin_source_files_cover_complete_standalone_target() -> None:
     assert {path.name for path in native_plugin_builder.native_plugin_source_files()} == {
         "CMakeLists.txt",
+        "audio_encoder_plugin.cpp",
+        "audio_encoder_plugin.h",
         "layer_norm_plugin.cpp",
         "layer_norm_plugin.h",
         "linear_plugin.cpp",
@@ -386,3 +401,160 @@ def test_add_fixed_plugin_uses_v3_with_three_inputs(
     assert network.layer.name == layer_name
     assert network.layer.metadata == f"trtmc.native_op={plugin_name};source={layer_name}"
     assert output.name == layer_name
+
+
+def test_add_audio_encoder_plugin_embeds_one_constant_and_uses_two_v3_inputs(monkeypatch) -> None:
+    selected_plugin = object()
+    observed = {}
+
+    class Creator:
+        def create_plugin(self, name, fields, phase):
+            observed.update(name=name, fields=fields, phase=phase)
+            return selected_plugin
+
+    class Output:
+        def __init__(self) -> None:
+            self.name = ""
+
+    class ConstantLayer:
+        def __init__(self) -> None:
+            self.output = Output()
+
+        def get_output(self, index: int):
+            assert index == 0
+            return self.output
+
+    class Layer:
+        name = ""
+        metadata = ""
+
+        def __init__(self) -> None:
+            self.output = Output()
+
+        def get_output(self, index: int):
+            assert index == 0
+            return self.output
+
+    class Network:
+        def __init__(self) -> None:
+            self.layer = Layer()
+
+        def add_constant(self, shape, values):
+            observed.update(constant_shape=shape, constant_values=values)
+            self.constant_layer = ConstantLayer()
+            return self.constant_layer
+
+        def add_plugin_v3(self, inputs, shape_inputs, plugin):
+            observed.update(inputs=inputs, shape_inputs=shape_inputs, plugin=plugin)
+            return self.layer
+
+    def plugin_creator(_trt, plugin_name):
+        assert plugin_name == "MiniMaxH3AudioEncoder"
+        return Creator()
+
+    monkeypatch.setattr(native_plugin_builder, "_plugin_creator", plugin_creator)
+    monkeypatch.setattr(native_plugin_builder, "_AUDIO_ENCODER_MODULE_MIN_BYTES", 4)
+    monkeypatch.setattr(native_plugin_builder, "_AUDIO_ENCODER_MODULE_MAX_BYTES", 32)
+    trt_module = SimpleNamespace(
+        PluginFieldCollection=lambda fields: fields,
+        TensorRTPhase=SimpleNamespace(BUILD="build"),
+    )
+    network = Network()
+    audio_samples = object()
+    module_bytes = b"PK\x03\x04torchscript"
+
+    output = native_plugin_builder.add_audio_encoder_plugin(
+        network,
+        audio_samples,
+        module_bytes,
+        trt_module=trt_module,
+        name="audio_encoder",
+    )
+
+    assert observed["name"] == "audio_encoder"
+    assert observed["phase"] == "build"
+    assert observed["fields"] == []
+    assert observed["constant_shape"] == (len(module_bytes),)
+    assert observed["constant_values"].dtype == np.int8
+    assert observed["constant_values"].tobytes() == module_bytes
+    assert observed["inputs"] == [audio_samples, network.constant_layer.output]
+    assert observed["shape_inputs"] == []
+    assert observed["plugin"] is selected_plugin
+    assert network.layer.metadata == (
+        "trtmc.native_op=MiniMaxH3AudioEncoder;source=audio_encoder;module_bytes=15;"
+        "module_sha256=a1e8a27d0f091b572ac3dadb8361d57b33f53a0696c13f6f6d6c3e7358efdd7d"
+    )
+    assert output.name == "audio_encoder"
+    assert id(network) in native_plugin_builder._AUDIO_ENCODER_MODULE_KEEPALIVE
+    native_plugin_builder.release_audio_encoder_module_storage(network)
+    assert id(network) not in native_plugin_builder._AUDIO_ENCODER_MODULE_KEEPALIVE
+
+
+def test_add_audio_encoder_plugin_rejects_empty_module() -> None:
+    with pytest.raises(ValueError, match="between 300 and 400 MiB"):
+        native_plugin_builder.add_audio_encoder_plugin(object(), object(), b"", trt_module=object())
+
+
+def test_add_audio_encoder_plugin_releases_keepalive_on_late_layer_error(monkeypatch) -> None:
+    class Output:
+        pass
+
+    class ConstantLayer:
+        def get_output(self, index):
+            assert index == 0
+            return Output()
+
+    class RaisingLayer:
+        @property
+        def name(self):
+            return ""
+
+        @name.setter
+        def name(self, _value):
+            raise RuntimeError("late layer failure")
+
+    class Network:
+        def add_constant(self, _shape, _values):
+            return ConstantLayer()
+
+        def add_plugin_v3(self, _inputs, _shape_inputs, _plugin):
+            return RaisingLayer()
+
+    class Creator:
+        def create_plugin(self, _name, _fields, _phase):
+            return object()
+
+    monkeypatch.setattr(native_plugin_builder, "_AUDIO_ENCODER_MODULE_MIN_BYTES", 4)
+    monkeypatch.setattr(native_plugin_builder, "_AUDIO_ENCODER_MODULE_MAX_BYTES", 8)
+    monkeypatch.setattr(native_plugin_builder, "_plugin_creator", lambda *_args: Creator())
+    network = Network()
+    trt_module = SimpleNamespace(
+        PluginFieldCollection=lambda fields: fields,
+        TensorRTPhase=SimpleNamespace(BUILD="build"),
+    )
+    with pytest.raises(RuntimeError, match="late layer failure"):
+        native_plugin_builder.add_audio_encoder_plugin(
+            network,
+            object(),
+            b"PK\x03\x04",
+            trt_module=trt_module,
+        )
+    assert id(network) not in native_plugin_builder._AUDIO_ENCODER_MODULE_KEEPALIVE
+
+
+def test_audio_encoder_plugin_caches_one_stream_ordered_module_load_per_instance() -> None:
+    source = next(
+        path
+        for path in native_plugin_builder.native_plugin_source_files()
+        if path.name == "audio_encoder_plugin.cpp"
+    ).read_text()
+    assert "std::lock_guard<std::mutex> lock(mutex)" in source
+    assert "if (module.has_value())" in source
+    assert "cudaMemcpyAsync" in source
+    assert "cudaMemcpyDeviceToHost, stream" in source
+    assert "cudaStreamSynchronize(stream)" in source
+    assert "std::vector<std::uint8_t>().swap(host_module_bytes)" in source
+    assert source.index("loaded_module->eval()") < source.index(
+        "module.emplace(std::move(*loaded_module))"
+    )
+    assert "GraphOptimizerEnabledGuard optimizer_guard(false)" in source

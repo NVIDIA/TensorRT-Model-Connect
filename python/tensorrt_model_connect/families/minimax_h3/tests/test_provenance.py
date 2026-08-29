@@ -244,6 +244,29 @@ def _receipt(tmp_path: Path) -> tuple[dict, Path, Path, Path]:
     return receipt, plans, snapshot, tokenizer
 
 
+def _audio_encoder_build_metadata(plan_bytes: int) -> dict:
+    return {
+        "implementation": "aten-torchscript-fp32-v1",
+        "plugin_count": 1,
+        "module_format": "torchscript-plan-constant-v1",
+        "module_bytes": 345_595_046,
+        "module_sha256": "9" * 64,
+        "weight_norm": "cuda-frozen-effective-v1",
+        "input_profile": [64000, 165600, 480000],
+        "network_layer_counts": {"constant": 1, "plugin_v3": 1},
+        "plugin_inputs": 2,
+        "python_runtime": False,
+        "cuda_graphs": False,
+        "cudnn_tf32": True,
+        "matmul_tf32": False,
+        "graph_optimizer": False,
+        "cudnn_enabled": True,
+        "cudnn_benchmark": False,
+        "cudnn_deterministic": False,
+        "plan_bytes": plan_bytes,
+    }
+
+
 def _validate(receipt: dict, plans: Path, snapshot: Path, tokenizer: Path) -> None:
     validate_build_receipt(
         receipt,
@@ -371,6 +394,9 @@ def test_ref2va_build_receipt_binds_workflow_partition_plans_and_assets(
         artifact = plans / filename
         artifact.write_bytes(bytes([index]) * index)
         components[filename] = file_record(artifact)
+    components["audio_vae_encoder.plan"]["build_metadata"] = _audio_encoder_build_metadata(
+        components["audio_vae_encoder.plan"]["bytes"]
+    )
     native_plugin = plans / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
     native_plugin.write_bytes(b"native-plugin")
     tokenizer = snapshot / "tokenizer" / "tokenizer.json"
@@ -416,6 +442,35 @@ def test_ref2va_build_receipt_binds_workflow_partition_plans_and_assets(
         hash_file=True,
         workflow="ref2va",
     )
+
+    for field, value in (
+        ("module_bytes", 1),
+        ("module_sha256", "bad"),
+        ("network_layer_counts", {"plugin_v3": 1}),
+        ("plugin_inputs", 1),
+        ("python_runtime", True),
+        ("cuda_graphs", True),
+        ("cudnn_tf32", False),
+        ("matmul_tf32", True),
+        ("graph_optimizer", True),
+        ("cudnn_enabled", False),
+        ("cudnn_benchmark", True),
+        ("cudnn_deterministic", True),
+    ):
+        malformed_metadata = copy.deepcopy(receipt)
+        malformed_metadata["components"]["audio_vae_encoder.plan"]["build_metadata"][field] = value
+        with pytest.raises(ValueError, match=field):
+            validate_build_receipt(
+                malformed_metadata,
+                plans_dir=plans,
+                snapshot=snapshot,
+                tokenizer=tokenizer,
+                build_helper=BUILD_HELPER,
+                source_revision=SOURCE_REVISION,
+                profile=SOL_ENGINE_1344X768_124F,
+                hash_files=False,
+                workflow="ref2va",
+            )
 
     native_plugin.write_bytes(b"tampered-dso")
     with pytest.raises(ValueError, match=MINIMAX_H3_NATIVE_PLUGIN_SECTION):
@@ -823,6 +878,22 @@ def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_an
         "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
         "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
         "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+        "ref2va_audio_encoder_implementation": "aten-torchscript-fp32-v1",
+        "ref2va_audio_encoder_plugin_count": 1,
+        "ref2va_audio_encoder_module_format": "torchscript-plan-constant-v1",
+        "ref2va_audio_encoder_weight_norm": "cuda-frozen-effective-v1",
+        "ref2va_audio_encoder_input_profile": [64000, 165600, 480000],
+        "ref2va_audio_encoder_hop_length": 800,
+        "ref2va_audio_encoder_output_channels": 32,
+        "ref2va_audio_encoder_cuda_graphs": False,
+        "ref2va_audio_encoder_cudnn_tf32": True,
+        "ref2va_audio_encoder_matmul_tf32": False,
+        "ref2va_audio_encoder_graph_optimizer": False,
+        "ref2va_audio_encoder_cudnn_enabled": True,
+        "ref2va_audio_encoder_cudnn_benchmark": False,
+        "ref2va_audio_encoder_cudnn_deterministic": False,
+        "ref2va_audio_encoder_module_bytes": 345_595_046,
+        "ref2va_audio_encoder_module_sha256": "9" * 64,
         "ref2va_language_attention_implementation": "tensorrt-bf16-iattention-v1",
         "ref2va_language_attention_precision": "bf16",
         "ref2va_language_q_pre_scale_precision": "bf16",
@@ -919,6 +990,18 @@ def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_an
         MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     }
     assert validated["minimax_h3_native_plugin_identity"] == MINIMAX_H3_NATIVE_PLUGIN_IDENTITY
+    assert validated["ref2va_audio_encoder_implementation"] == "aten-torchscript-fp32-v1"
+    assert validated["ref2va_audio_encoder_plugin_count"] == 1
+    assert validated["ref2va_audio_encoder_cuda_graphs"] is False
+    assert validated["ref2va_audio_encoder_cudnn_tf32"] is True
+    assert validated["ref2va_audio_encoder_matmul_tf32"] is False
+    assert validated["ref2va_audio_encoder_graph_optimizer"] is False
+    assert validated["ref2va_audio_encoder_cudnn_enabled"] is True
+    assert validated["ref2va_audio_encoder_cudnn_benchmark"] is False
+    assert validated["ref2va_audio_encoder_cudnn_deterministic"] is False
+    assert validated["ref2va_audio_encoder_input_profile"] == [64000, 165600, 480000]
+    assert validated["ref2va_audio_encoder_module_bytes"] == 345_595_046
+    assert validated["ref2va_audio_encoder_module_sha256"] == "9" * 64
     assert validated["ref2va_image_vision_patch_implementation"] == "aten-bf16-conv3d-v1"
     assert validated["ref2va_image_vision_patch_stride"] == [2, 16, 16]
     assert validated["ref2va_image_vision_linear_implementation"] == "aten-bf16-linear-v1"
@@ -928,6 +1011,27 @@ def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_an
     assert "ref2va_image_vision_q_pre_scale_precision" not in validated
     assert "ref2va_language_attention_scale" not in validated
     assert validated["ref2va_language_q_pre_scale_precision"] == "bf16"
+
+    for field, value in (
+        ("ref2va_audio_encoder_module_bytes", 1),
+        ("ref2va_audio_encoder_module_sha256", "bad"),
+    ):
+        malformed = copy.deepcopy(config)
+        malformed[field] = value
+        write_ref2va_bundle(malformed)
+        with pytest.raises(ValueError, match="audio encoder module"):
+            validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+    for field, value in (
+        ("ref2va_audio_encoder_cudnn_enabled", False),
+        ("ref2va_audio_encoder_cudnn_benchmark", True),
+        ("ref2va_audio_encoder_cudnn_deterministic", True),
+    ):
+        malformed = copy.deepcopy(config)
+        malformed[field] = value
+        write_ref2va_bundle(malformed)
+        with pytest.raises(ValueError, match="audio encoder cuDNN policy"):
+            validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
 
     write_ref2va_bundle(config, plugin_payload=b"tampered-plugin")
     with pytest.raises(ValueError, match="plugin section SHA256"):

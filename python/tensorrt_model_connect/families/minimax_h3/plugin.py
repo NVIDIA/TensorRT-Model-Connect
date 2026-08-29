@@ -28,6 +28,13 @@ from .config import (
     MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
     MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     MINIMAX_H3_WORKFLOWS,
+    REF2VA_AUDIO_ENCODER_HOP_LENGTH,
+    REF2VA_AUDIO_ENCODER_IMPLEMENTATION,
+    REF2VA_AUDIO_ENCODER_INPUT_PROFILE,
+    REF2VA_AUDIO_ENCODER_MODULE_FORMAT,
+    REF2VA_AUDIO_ENCODER_OUTPUT_CHANNELS,
+    REF2VA_AUDIO_ENCODER_PLUGIN_COUNT,
+    REF2VA_AUDIO_ENCODER_WEIGHT_NORM,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION,
@@ -602,6 +609,7 @@ class MiniMaxH3Plugin:
         from .audio_vae_builder import build_audio_vae_decoder_engine
 
         audio_vae_encoder_components = {}
+        audio_vae_encoder_metadata = {}
         if workflow == "ref2va":
             from .audio_vae_builder import build_audio_vae_encoder_engine
 
@@ -609,6 +617,7 @@ class MiniMaxH3Plugin:
                 weights["_audio_vae_dir"],
                 verbose=verbose,
                 workspace_bytes=workspace_limits["audio_vae_encoder.plan"],
+                metadata_out=audio_vae_encoder_metadata,
             )
             audio_vae_encoder_components["audio_vae_encoder"] = audio_vae_encoder_plan
             plan_sha256["audio_vae_encoder.plan"] = hashlib.sha256(
@@ -675,6 +684,37 @@ class MiniMaxH3Plugin:
                 "workspace_limit_bytes": workspace_limits,
                 "plan_sha256": plan_sha256,
                 "asset_sha256": asset_sha256,
+                **(
+                    {
+                        "ref2va_audio_encoder_module_bytes": audio_vae_encoder_metadata[
+                            "module_bytes"
+                        ],
+                        "ref2va_audio_encoder_module_sha256": audio_vae_encoder_metadata[
+                            "module_sha256"
+                        ],
+                        "ref2va_audio_encoder_cuda_graphs": audio_vae_encoder_metadata[
+                            "cuda_graphs"
+                        ],
+                        "ref2va_audio_encoder_cudnn_tf32": audio_vae_encoder_metadata["cudnn_tf32"],
+                        "ref2va_audio_encoder_matmul_tf32": audio_vae_encoder_metadata[
+                            "matmul_tf32"
+                        ],
+                        "ref2va_audio_encoder_graph_optimizer": audio_vae_encoder_metadata[
+                            "graph_optimizer"
+                        ],
+                        "ref2va_audio_encoder_cudnn_enabled": audio_vae_encoder_metadata[
+                            "cudnn_enabled"
+                        ],
+                        "ref2va_audio_encoder_cudnn_benchmark": audio_vae_encoder_metadata[
+                            "cudnn_benchmark"
+                        ],
+                        "ref2va_audio_encoder_cudnn_deterministic": audio_vae_encoder_metadata[
+                            "cudnn_deterministic"
+                        ],
+                    }
+                    if workflow == "ref2va"
+                    else {}
+                ),
             },
         }
 
@@ -815,6 +855,30 @@ class MiniMaxH3Plugin:
                 "vae_encoder_tile_t1_plan",
             ]
         elif workflow == "ref2va":
+            module_bytes = provenance.get("ref2va_audio_encoder_module_bytes")
+            module_sha256 = provenance.get("ref2va_audio_encoder_module_sha256")
+            if (
+                not isinstance(module_bytes, int)
+                or isinstance(module_bytes, bool)
+                or not (300 << 20) <= module_bytes <= (400 << 20)
+                or not isinstance(module_sha256, str)
+                or len(module_sha256) != 64
+                or module_sha256 != module_sha256.lower()
+                or provenance.get("ref2va_audio_encoder_cuda_graphs") is not False
+                or provenance.get("ref2va_audio_encoder_cudnn_tf32") is not True
+                or provenance.get("ref2va_audio_encoder_matmul_tf32") is not False
+                or provenance.get("ref2va_audio_encoder_graph_optimizer") is not False
+                or provenance.get("ref2va_audio_encoder_cudnn_enabled") is not True
+                or provenance.get("ref2va_audio_encoder_cudnn_benchmark") is not False
+                or provenance.get("ref2va_audio_encoder_cudnn_deterministic") is not False
+            ):
+                raise ValueError("MiniMax-H3 provenance has invalid audio encoder trace metadata")
+            try:
+                int(module_sha256, 16)
+            except ValueError as error:
+                raise ValueError(
+                    "MiniMax-H3 provenance has invalid audio encoder trace metadata"
+                ) from error
             expected_assets = (
                 "tokenizer.json",
                 *FL2VA_PROCESSOR_ASSET_SECTIONS,
@@ -919,6 +983,34 @@ class MiniMaxH3Plugin:
                     "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
                     "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
                     "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+                    "ref2va_audio_encoder_implementation": REF2VA_AUDIO_ENCODER_IMPLEMENTATION,
+                    "ref2va_audio_encoder_plugin_count": REF2VA_AUDIO_ENCODER_PLUGIN_COUNT,
+                    "ref2va_audio_encoder_module_format": REF2VA_AUDIO_ENCODER_MODULE_FORMAT,
+                    "ref2va_audio_encoder_weight_norm": REF2VA_AUDIO_ENCODER_WEIGHT_NORM,
+                    "ref2va_audio_encoder_input_profile": list(REF2VA_AUDIO_ENCODER_INPUT_PROFILE),
+                    "ref2va_audio_encoder_hop_length": REF2VA_AUDIO_ENCODER_HOP_LENGTH,
+                    "ref2va_audio_encoder_output_channels": (REF2VA_AUDIO_ENCODER_OUTPUT_CHANNELS),
+                    "ref2va_audio_encoder_cuda_graphs": provenance[
+                        "ref2va_audio_encoder_cuda_graphs"
+                    ],
+                    "ref2va_audio_encoder_cudnn_tf32": provenance[
+                        "ref2va_audio_encoder_cudnn_tf32"
+                    ],
+                    "ref2va_audio_encoder_matmul_tf32": provenance[
+                        "ref2va_audio_encoder_matmul_tf32"
+                    ],
+                    "ref2va_audio_encoder_graph_optimizer": provenance[
+                        "ref2va_audio_encoder_graph_optimizer"
+                    ],
+                    "ref2va_audio_encoder_cudnn_enabled": provenance[
+                        "ref2va_audio_encoder_cudnn_enabled"
+                    ],
+                    "ref2va_audio_encoder_cudnn_benchmark": provenance[
+                        "ref2va_audio_encoder_cudnn_benchmark"
+                    ],
+                    "ref2va_audio_encoder_cudnn_deterministic": provenance[
+                        "ref2va_audio_encoder_cudnn_deterministic"
+                    ],
                     "ref2va_language_attention_implementation": (
                         REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION
                     ),

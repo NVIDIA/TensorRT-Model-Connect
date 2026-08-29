@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "audio_encoder_plugin.h"
 #include "layer_norm_plugin.h"
 #include "linear_plugin.h"
 #include "patch_embed_plugin.h"
@@ -57,6 +58,7 @@ class FixedPluginCreator final : public nvinfer1::IPluginCreatorV3One {
 };
 
 using MiniMaxH3VisionAttentionCreator = FixedPluginCreator<MiniMaxH3VisionAttentionPlugin>;
+using MiniMaxH3AudioEncoderCreator = FixedPluginCreator<MiniMaxH3AudioEncoderPlugin>;
 using MiniMaxH3LayerNormCreator = FixedPluginCreator<MiniMaxH3LayerNormPlugin>;
 using MiniMaxH3LinearCreator = FixedPluginCreator<MiniMaxH3LinearPlugin>;
 using MiniMaxH3PatchEmbedCreator = FixedPluginCreator<MiniMaxH3PatchEmbedPlugin>;
@@ -64,11 +66,14 @@ using MiniMaxH3PatchEmbedCreator = FixedPluginCreator<MiniMaxH3PatchEmbedPlugin>
 namespace {
 
 MiniMaxH3VisionAttentionCreator plugin_creator_minimax_h3_vision_attention{};
+MiniMaxH3AudioEncoderCreator plugin_creator_minimax_h3_audio_encoder{};
 MiniMaxH3LayerNormCreator plugin_creator_minimax_h3_layer_norm{};
 MiniMaxH3LinearCreator plugin_creator_minimax_h3_linear{};
 MiniMaxH3PatchEmbedCreator plugin_creator_minimax_h3_patch_embed{};
 const bool plugin_registrar_minimax_h3_vision_attention =
     ::getPluginRegistry()->registerCreator(plugin_creator_minimax_h3_vision_attention, "");
+const bool plugin_registrar_minimax_h3_audio_encoder =
+    ::getPluginRegistry()->registerCreator(plugin_creator_minimax_h3_audio_encoder, "");
 const bool plugin_registrar_minimax_h3_layer_norm =
     ::getPluginRegistry()->registerCreator(plugin_creator_minimax_h3_layer_norm, "");
 const bool plugin_registrar_minimax_h3_linear =
@@ -81,11 +86,14 @@ const bool plugin_registrar_minimax_h3_patch_embed =
 bool native_plugin_registry_matches() noexcept {
     auto* registry = ::getPluginRegistry();
     return registry != nullptr && plugin_registrar_minimax_h3_vision_attention &&
-           plugin_registrar_minimax_h3_layer_norm && plugin_registrar_minimax_h3_linear &&
-           plugin_registrar_minimax_h3_patch_embed &&
+           plugin_registrar_minimax_h3_audio_encoder && plugin_registrar_minimax_h3_layer_norm &&
+           plugin_registrar_minimax_h3_linear && plugin_registrar_minimax_h3_patch_embed &&
            registry->getCreator(MiniMaxH3VisionAttentionPlugin::kPLUGIN_NAME,
                                 MiniMaxH3VisionAttentionPlugin::kPLUGIN_VERSION,
                                 "") == &plugin_creator_minimax_h3_vision_attention &&
+           registry->getCreator(MiniMaxH3AudioEncoderPlugin::kPLUGIN_NAME,
+                                MiniMaxH3AudioEncoderPlugin::kPLUGIN_VERSION,
+                                "") == &plugin_creator_minimax_h3_audio_encoder &&
            registry->getCreator(MiniMaxH3LayerNormPlugin::kPLUGIN_NAME,
                                 MiniMaxH3LayerNormPlugin::kPLUGIN_VERSION,
                                 "") == &plugin_creator_minimax_h3_layer_norm &&

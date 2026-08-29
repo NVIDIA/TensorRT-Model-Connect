@@ -22,6 +22,17 @@ from .config import (
     MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
     MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     MINIMAX_H3_WORKFLOWS,
+    REF2VA_AUDIO_ENCODER_HOP_LENGTH,
+    REF2VA_AUDIO_ENCODER_CUDA_GRAPHS,
+    REF2VA_AUDIO_ENCODER_CUDNN_TF32,
+    REF2VA_AUDIO_ENCODER_GRAPH_OPTIMIZER,
+    REF2VA_AUDIO_ENCODER_IMPLEMENTATION,
+    REF2VA_AUDIO_ENCODER_INPUT_PROFILE,
+    REF2VA_AUDIO_ENCODER_MODULE_FORMAT,
+    REF2VA_AUDIO_ENCODER_MATMUL_TF32,
+    REF2VA_AUDIO_ENCODER_OUTPUT_CHANNELS,
+    REF2VA_AUDIO_ENCODER_PLUGIN_COUNT,
+    REF2VA_AUDIO_ENCODER_WEIGHT_NORM,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION,
@@ -722,6 +733,65 @@ def serialized_profile(profile) -> dict:
     return json.loads(json.dumps(profile.__dict__))
 
 
+def _validate_audio_encoder_build_metadata(record: dict) -> None:
+    metadata = record.get("build_metadata")
+    expected_keys = {
+        "implementation",
+        "plugin_count",
+        "module_format",
+        "module_bytes",
+        "module_sha256",
+        "weight_norm",
+        "input_profile",
+        "network_layer_counts",
+        "plugin_inputs",
+        "python_runtime",
+        "cuda_graphs",
+        "cudnn_tf32",
+        "matmul_tf32",
+        "graph_optimizer",
+        "cudnn_enabled",
+        "cudnn_benchmark",
+        "cudnn_deterministic",
+        "plan_bytes",
+    }
+    if not isinstance(metadata, dict) or set(metadata) != expected_keys:
+        raise ValueError(
+            "MiniMax-H3 audio encoder receipt must contain exact TorchScript build metadata"
+        )
+    expected = {
+        "implementation": REF2VA_AUDIO_ENCODER_IMPLEMENTATION,
+        "plugin_count": REF2VA_AUDIO_ENCODER_PLUGIN_COUNT,
+        "module_format": REF2VA_AUDIO_ENCODER_MODULE_FORMAT,
+        "weight_norm": REF2VA_AUDIO_ENCODER_WEIGHT_NORM,
+        "input_profile": list(REF2VA_AUDIO_ENCODER_INPUT_PROFILE),
+        "network_layer_counts": {"constant": 1, "plugin_v3": 1},
+        "plugin_inputs": 2,
+        "python_runtime": False,
+        "cuda_graphs": False,
+        "cudnn_tf32": True,
+        "matmul_tf32": False,
+        "graph_optimizer": False,
+        "cudnn_enabled": True,
+        "cudnn_benchmark": False,
+        "cudnn_deterministic": False,
+        "plan_bytes": record.get("bytes"),
+    }
+    for key, value in expected.items():
+        if metadata.get(key) != value:
+            raise ValueError(f"MiniMax-H3 audio encoder receipt has invalid {key}")
+    module_bytes = metadata.get("module_bytes")
+    if (
+        not isinstance(module_bytes, int)
+        or isinstance(module_bytes, bool)
+        or not (300 << 20) <= module_bytes <= (400 << 20)
+    ):
+        raise ValueError("MiniMax-H3 audio encoder receipt has invalid module_bytes")
+    module_sha256 = metadata.get("module_sha256")
+    if not isinstance(module_sha256, str) or _SHA256.fullmatch(module_sha256) is None:
+        raise ValueError("MiniMax-H3 audio encoder receipt has invalid module_sha256")
+
+
 def _validate_build_receipt_metadata(
     receipt: object,
     *,
@@ -766,6 +836,8 @@ def _validate_build_receipt_metadata(
         raise ValueError("MiniMax-H3 build receipt must cover exactly the selected native plans")
     for filename in selected_plans:
         _validate_record_object(components.get(filename), filename)
+    if workflow == "ref2va":
+        _validate_audio_encoder_build_metadata(components["audio_vae_encoder.plan"])
     assets = receipt.get("assets")
     expected_assets = {"tokenizer.json"}
     if workflow in {"fl2va", "ref2va"}:
@@ -964,6 +1036,17 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
             "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
             "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
             "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+            "ref2va_audio_encoder_implementation": REF2VA_AUDIO_ENCODER_IMPLEMENTATION,
+            "ref2va_audio_encoder_plugin_count": REF2VA_AUDIO_ENCODER_PLUGIN_COUNT,
+            "ref2va_audio_encoder_module_format": REF2VA_AUDIO_ENCODER_MODULE_FORMAT,
+            "ref2va_audio_encoder_weight_norm": REF2VA_AUDIO_ENCODER_WEIGHT_NORM,
+            "ref2va_audio_encoder_input_profile": list(REF2VA_AUDIO_ENCODER_INPUT_PROFILE),
+            "ref2va_audio_encoder_hop_length": REF2VA_AUDIO_ENCODER_HOP_LENGTH,
+            "ref2va_audio_encoder_output_channels": REF2VA_AUDIO_ENCODER_OUTPUT_CHANNELS,
+            "ref2va_audio_encoder_cuda_graphs": REF2VA_AUDIO_ENCODER_CUDA_GRAPHS,
+            "ref2va_audio_encoder_cudnn_tf32": REF2VA_AUDIO_ENCODER_CUDNN_TF32,
+            "ref2va_audio_encoder_matmul_tf32": REF2VA_AUDIO_ENCODER_MATMUL_TF32,
+            "ref2va_audio_encoder_graph_optimizer": REF2VA_AUDIO_ENCODER_GRAPH_OPTIMIZER,
             "ref2va_language_attention_implementation": (REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION),
             "ref2va_language_attention_precision": REF2VA_LANGUAGE_ATTENTION_PRECISION,
             "ref2va_language_q_pre_scale_precision": REF2VA_LANGUAGE_Q_PRE_SCALE_PRECISION,
@@ -1007,6 +1090,28 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         for key, value in ref2va_expected.items():
             if config.get(key) != value:
                 raise ValueError(f"MiniMax-H3 Ref2VA bundle config has an invalid {key}")
+        module_bytes = config.get("ref2va_audio_encoder_module_bytes")
+        if (
+            not isinstance(module_bytes, int)
+            or isinstance(module_bytes, bool)
+            or not (300 << 20) <= module_bytes <= (400 << 20)
+        ):
+            raise ValueError(
+                "MiniMax-H3 Ref2VA bundle config has invalid audio encoder module bytes"
+            )
+        module_sha256 = config.get("ref2va_audio_encoder_module_sha256")
+        if not isinstance(module_sha256, str) or _SHA256.fullmatch(module_sha256) is None:
+            raise ValueError(
+                "MiniMax-H3 Ref2VA bundle config has invalid audio encoder module SHA256"
+            )
+        if (
+            config.get("ref2va_audio_encoder_cudnn_enabled") is not True
+            or config.get("ref2va_audio_encoder_cudnn_benchmark") is not False
+            or config.get("ref2va_audio_encoder_cudnn_deterministic") is not False
+        ):
+            raise ValueError(
+                "MiniMax-H3 Ref2VA bundle config has invalid audio encoder cuDNN policy"
+            )
     inventory_sha = config.get("checkpoint_inventory_sha256")
     if not isinstance(inventory_sha, str) or _SHA256.fullmatch(inventory_sha) is None:
         raise ValueError("MiniMax-H3 bundle config has an invalid checkpoint inventory SHA256")

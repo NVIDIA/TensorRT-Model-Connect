@@ -197,6 +197,30 @@ def test_main_passes_cli_workspace_to_every_builder(
                     "args": _args,
                     "kwargs": _kwargs,
                 }
+                if _plan_name == "audio_vae_encoder.plan":
+                    metadata = _kwargs["metadata_out"]
+                    metadata.update(
+                        {
+                            "implementation": "aten-torchscript-fp32-v1",
+                            "plugin_count": 1,
+                            "module_format": "torchscript-plan-constant-v1",
+                            "module_bytes": 345_595_046,
+                            "module_sha256": "9" * 64,
+                            "weight_norm": "cuda-frozen-effective-v1",
+                            "input_profile": [64000, 165600, 480000],
+                            "network_layer_counts": {"constant": 1, "plugin_v3": 1},
+                            "plugin_inputs": 2,
+                            "python_runtime": False,
+                            "cuda_graphs": False,
+                            "cudnn_tf32": True,
+                            "matmul_tf32": False,
+                            "graph_optimizer": False,
+                            "cudnn_enabled": True,
+                            "cudnn_benchmark": False,
+                            "cudnn_deterministic": False,
+                            "plan_bytes": len(effective_name.encode()),
+                        }
+                    )
                 return effective_name.encode()
 
             setattr(fake_module, builder_name, fake_builder)
@@ -306,6 +330,10 @@ def test_main_passes_cli_workspace_to_every_builder(
         assert observed["vae_encoder_tile_t1.plan"]["kwargs"] == {"num_frames": 1}
         assert observed["vae_encoder_tile_t17.plan"]["kwargs"] == {"num_frames": 17}
         assert observed["audio_vae_encoder.plan"]["args"] == (model / "audio_vae",)
+        assert (
+            receipt["components"]["audio_vae_encoder.plan"]["build_metadata"]
+            == observed["audio_vae_encoder.plan"]["kwargs"]["metadata_out"]
+        )
         assert partition_paths == [model / "transformer_ref"]
         assert model / "transformer_ref" in loaded_paths
         assert model / "transformer" not in loaded_paths

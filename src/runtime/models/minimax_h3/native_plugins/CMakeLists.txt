@@ -168,6 +168,7 @@ if(NOT _trt_detected_version STREQUAL MINIMAX_H3_TRT_EXPECTED_VERSION)
 endif()
 
 add_library(trtmc_minimax_h3_native_plugin SHARED
+  audio_encoder_plugin.cpp
   layer_norm_plugin.cpp
   linear_plugin.cpp
   patch_embed_plugin.cpp

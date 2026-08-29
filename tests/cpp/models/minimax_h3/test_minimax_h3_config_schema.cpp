@@ -79,6 +79,12 @@ constexpr std::array<std::pair<const char*, const char*>, 17> kRef2vaVisionProfi
     {"ref2va_video_vision_q_pre_scale_precision", "fp16"},
 }};
 
+constexpr std::array<std::pair<const char*, const char*>, 3> kRef2vaAudioEncoderProfile = {{
+    {"ref2va_audio_encoder_implementation", "aten-torchscript-fp32-v1"},
+    {"ref2va_audio_encoder_module_format", "torchscript-plan-constant-v1"},
+    {"ref2va_audio_encoder_weight_norm", "cuda-frozen-effective-v1"},
+}};
+
 constexpr std::array<std::pair<const char*, const char*>, 6> kRef2vaPatchProfile = {{
     {"ref2va_image_vision_patch_input_shape", "[-1,1536]"},
     {"ref2va_image_vision_patch_weight_shape", "[1152,3,2,16,16]"},
@@ -98,6 +104,10 @@ std::string ref2va_profile_json(const std::string& omitted = {}) {
         if (name != omitted)
             result += ",\"" + std::string(name) + "\":\"" + value + "\"";
     }
+    for (const auto& [name, value] : kRef2vaAudioEncoderProfile) {
+        if (name != omitted)
+            result += ",\"" + std::string(name) + "\":\"" + value + "\"";
+    }
     for (const auto& [name, value] : kRef2vaPatchProfile) {
         if (name != omitted)
             result += ",\"" + std::string(name) + "\":" + value;
@@ -108,6 +118,33 @@ std::string ref2va_profile_json(const std::string& omitted = {}) {
         result += ",\"ref2va_image_vision_linear_count\":116";
     if (omitted != "ref2va_image_vision_layer_norm_count")
         result += ",\"ref2va_image_vision_layer_norm_count\":58";
+    if (omitted != "ref2va_audio_encoder_plugin_count")
+        result += ",\"ref2va_audio_encoder_plugin_count\":1";
+    if (omitted != "ref2va_audio_encoder_hop_length")
+        result += ",\"ref2va_audio_encoder_hop_length\":800";
+    if (omitted != "ref2va_audio_encoder_output_channels")
+        result += ",\"ref2va_audio_encoder_output_channels\":32";
+    if (omitted != "ref2va_audio_encoder_cuda_graphs")
+        result += ",\"ref2va_audio_encoder_cuda_graphs\":false";
+    if (omitted != "ref2va_audio_encoder_cudnn_tf32")
+        result += ",\"ref2va_audio_encoder_cudnn_tf32\":true";
+    if (omitted != "ref2va_audio_encoder_matmul_tf32")
+        result += ",\"ref2va_audio_encoder_matmul_tf32\":false";
+    if (omitted != "ref2va_audio_encoder_graph_optimizer")
+        result += ",\"ref2va_audio_encoder_graph_optimizer\":false";
+    if (omitted != "ref2va_audio_encoder_cudnn_enabled")
+        result += ",\"ref2va_audio_encoder_cudnn_enabled\":true";
+    if (omitted != "ref2va_audio_encoder_cudnn_benchmark")
+        result += ",\"ref2va_audio_encoder_cudnn_benchmark\":false";
+    if (omitted != "ref2va_audio_encoder_cudnn_deterministic")
+        result += ",\"ref2va_audio_encoder_cudnn_deterministic\":false";
+    if (omitted != "ref2va_audio_encoder_input_profile")
+        result += ",\"ref2va_audio_encoder_input_profile\":[64000,165600,480000]";
+    if (omitted != "ref2va_audio_encoder_module_bytes")
+        result += ",\"ref2va_audio_encoder_module_bytes\":345595046";
+    if (omitted != "ref2va_audio_encoder_module_sha256")
+        result += ",\"ref2va_audio_encoder_module_sha256\":"
+                  "\"70dacec51cd0bd4e93984bf3ff4424f775d670615b24692c6e8c1be95a4bc44d\"";
     result += "}";
     return result;
 }
@@ -154,6 +191,42 @@ void check_ref2va_profile_abi() {
         const std::string error = create_error(ref2va_profile_json(name));
         check(error.find("incompatible patch plugin ABI") != std::string::npos,
               "missing Ref2VA patch-plugin ABI field fails closed");
+    }
+    for (const auto& [name, value] : kRef2vaAudioEncoderProfile) {
+        (void)value;
+        const std::string error = create_error(ref2va_profile_json(name));
+        check(error.find("incompatible exact audio encoder implementation") != std::string::npos,
+              "missing Ref2VA exact audio encoder field fails closed");
+    }
+    for (const char* name : {"ref2va_audio_encoder_plugin_count", "ref2va_audio_encoder_hop_length",
+                             "ref2va_audio_encoder_output_channels"}) {
+        const std::string error = create_error(ref2va_profile_json(name));
+        check(error.find("incompatible exact audio encoder implementation") != std::string::npos,
+              "missing Ref2VA exact audio encoder numeric field fails closed");
+    }
+    check(create_error(ref2va_profile_json("ref2va_audio_encoder_input_profile"))
+                  .find("incompatible exact audio encoder profile") != std::string::npos,
+          "missing Ref2VA exact audio encoder profile fails closed");
+    check(create_error(ref2va_profile_json("ref2va_audio_encoder_cuda_graphs"))
+                  .find("must disable CUDA graphs") != std::string::npos,
+          "missing Ref2VA exact audio encoder CUDA-graph boundary fails closed");
+    for (const char* name : {
+             "ref2va_audio_encoder_cudnn_tf32",
+             "ref2va_audio_encoder_matmul_tf32",
+             "ref2va_audio_encoder_graph_optimizer",
+             "ref2va_audio_encoder_cudnn_enabled",
+             "ref2va_audio_encoder_cudnn_benchmark",
+             "ref2va_audio_encoder_cudnn_deterministic",
+         }) {
+        const std::string error = create_error(ref2va_profile_json(name));
+        check(error.find("incompatible audio encoder execution precision") != std::string::npos,
+              "missing Ref2VA audio encoder execution precision fails closed");
+    }
+    for (const char* name :
+         {"ref2va_audio_encoder_module_bytes", "ref2va_audio_encoder_module_sha256"}) {
+        const std::string error = create_error(ref2va_profile_json(name));
+        check(error.find("incompatible audio encoder trace provenance") != std::string::npos,
+              "missing Ref2VA audio encoder trace provenance fails closed");
     }
     check(create_error(ref2va_profile_json("minimax_h3_native_plugin_abi"))
                   .find("incompatible vision plan layout") != std::string::npos,

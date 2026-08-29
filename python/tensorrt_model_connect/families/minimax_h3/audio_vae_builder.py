@@ -4,15 +4,16 @@
 """TensorRT builders for the official MiniMax-H3 audio VAE boundaries.
 
 The deployed engines are self-contained: reference waveforms are encoded and
-normalized by the float32 DAC/causal-attention path, while generated diffusion
-latents are denormalized and decoded by the float32 DAC/BigVGAN path. PyTorch
-is used only while exporting model-owned graphs to ONNX; the native runtime
-neither imports Python nor invokes a callback.
+normalized by an exact float32 TorchScript IPluginV3, while generated diffusion
+latents are denormalized and decoded by the float32 DAC/BigVGAN TensorRT path.
+PyTorch is build-only; the native runtime uses libtorch C++ and never imports
+Python or invokes a callback.
 """
 
 from __future__ import annotations
 
 import gc
+import hashlib
 import io
 import json
 import math
@@ -724,39 +725,135 @@ def _export_decoder_onnx(
     return payload
 
 
-def _export_encoder_onnx(
+def _validate_encoder_torchscript_graph(module: Any) -> None:
+    def nodes(block):
+        for node in block.nodes():
+            yield node
+            for nested in node.blocks():
+                yield from nodes(nested)
+
+    convolution_nodes = [
+        node
+        for node in nodes(module.inlined_graph)
+        if "convolution" in node.kind() or node.kind() == "aten::conv1d"
+    ]
+    if len(convolution_nodes) != 38 or any(
+        node.kind() != "aten::_convolution" for node in convolution_nodes
+    ):
+        counts: dict[str, int] = {}
+        for node in convolution_nodes:
+            counts[node.kind()] = counts.get(node.kind(), 0) + 1
+        raise RuntimeError(
+            f"MiniMax-H3 TorchScript audio encoder has an unbound convolution graph: {counts}"
+        )
+    for node in convolution_nodes:
+        inputs = list(node.inputs())
+        policy = tuple(value.toIValue() for value in inputs[-4:])
+        if len(inputs) != 13 or policy != (False, False, True, True):
+            raise RuntimeError(
+                "MiniMax-H3 TorchScript audio encoder convolution must serialize "
+                "benchmark=false, deterministic=false, cudnn_enabled=true, allow_tf32=true"
+            )
+
+
+def _export_encoder_torchscript(
     audio_vae_dir: Path, config: AudioVaeDecoderConfig, verbose: bool
 ) -> bytes:
     import torch
 
     module = _make_encoder_module(torch, config)
     _load_encoder_weights(torch, module, audio_vae_dir)
-    _remove_weight_normalization(torch, module)
-    dummy = torch.zeros((AUDIO_BATCH, 1, AUDIO_REFERENCE_OPT_SAMPLES), dtype=torch.float32)
-    onnx_buffer = io.BytesIO()
+    if not torch.cuda.is_available():
+        raise RuntimeError("MiniMax-H3 exact audio encoder tracing requires CUDA")
+    module = module.eval().cuda()
+    sample_counts = (
+        AUDIO_REFERENCE_MIN_SAMPLES,
+        AUDIO_REFERENCE_OPT_SAMPLES,
+        AUDIO_REFERENCE_MAX_SAMPLES,
+    )
+    samples = {}
+    for count in sample_counts:
+        left = torch.linspace(-0.75, 0.75, count, dtype=torch.float32, device="cuda")
+        samples[count] = torch.stack((left, left.flip(0))).reshape(AUDIO_BATCH, 1, count)
+    module_buffer = io.BytesIO()
     if verbose:
         print(
-            "[trtmc build]   Exporting official MiniMax-H3 float32 audio VAE "
-            "reference encoder with a dynamic 2-15 second input ...",
+            "[trtmc build]   Tracing exact MiniMax-H3 float32 audio VAE encoder "
+            "with CUDA-frozen weight norm and a dynamic 2-15 second input ...",
             file=sys.stderr,
         )
-    with torch.inference_mode():
-        torch.onnx.export(
-            module,
-            dummy,
-            onnx_buffer,
-            opset_version=17,
-            input_names=["audio_samples"],
-            output_names=["audio_condition_rows"],
-            dynamic_axes={
-                "audio_samples": {2: "num_samples"},
-                "audio_condition_rows": {1: "num_audio_latents"},
-            },
-            dynamo=False,
-        )
-    payload = onnx_buffer.getvalue()
-    del dummy, module
-    gc.collect()
+    prior_matmul_tf32 = torch.backends.cuda.matmul.allow_tf32
+    prior_cudnn_enabled = torch.backends.cudnn.enabled
+    prior_cudnn_benchmark = torch.backends.cudnn.benchmark
+    prior_cudnn_deterministic = torch.backends.cudnn.deterministic
+    prior_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    live_outputs = None
+    frozen_outputs = None
+    traced = None
+    output = None
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        # The pinned official HF path leaves cuDNN TF32 enabled. Tracing with
+        # this explicit value serializes allow_tf32=true into every
+        # aten::_convolution node, independent of later process-global state.
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.allow_tf32 = True
+        with torch.inference_mode():
+            live_outputs = {count: module(value) for count, value in samples.items()}
+            _remove_weight_normalization(torch, module)
+            frozen_outputs = {count: module(value) for count, value in samples.items()}
+            for count in sample_counts:
+                if not torch.equal(live_outputs[count], frozen_outputs[count]):
+                    raise RuntimeError(
+                        "MiniMax-H3 CUDA weight-norm freezing changed audio encoder output: "
+                        f"samples={count}"
+                    )
+            traced = torch.jit.trace(
+                module,
+                samples[AUDIO_REFERENCE_OPT_SAMPLES],
+                check_trace=False,
+                strict=False,
+            )
+            traced = torch.jit.freeze(traced.eval())
+            _validate_encoder_torchscript_graph(traced)
+            with torch.jit.optimized_execution(False):
+                for count in sample_counts:
+                    for repeat in range(2):
+                        output = traced(samples[count])
+                        expected_shape = (
+                            AUDIO_BATCH,
+                            count // AUDIO_HOP_LENGTH,
+                            AUDIO_LATENT_CHANNELS,
+                        )
+                        if tuple(output.shape) != expected_shape or output.dtype != torch.float32:
+                            raise RuntimeError(
+                                "MiniMax-H3 TorchScript audio encoder contract mismatch: "
+                                f"samples={count}, repeat={repeat}, "
+                                f"shape={tuple(output.shape)}, dtype={output.dtype}"
+                            )
+                        if not torch.equal(live_outputs[count], output):
+                            raise RuntimeError(
+                                "MiniMax-H3 TorchScript audio encoder is not bit-exact: "
+                                f"samples={count}, repeat={repeat}"
+                            )
+            torch.jit.save(traced, module_buffer)
+        payload = module_buffer.getvalue()
+        if not (300 << 20) <= len(payload) <= (400 << 20) or not payload.startswith(b"PK\x03\x04"):
+            raise RuntimeError(
+                "MiniMax-H3 TorchScript audio encoder artifact has an invalid serialized contract"
+            )
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prior_matmul_tf32
+        torch.backends.cudnn.enabled = prior_cudnn_enabled
+        torch.backends.cudnn.benchmark = prior_cudnn_benchmark
+        torch.backends.cudnn.deterministic = prior_cudnn_deterministic
+        torch.backends.cudnn.allow_tf32 = prior_cudnn_tf32
+        module_buffer.close()
+        del output, traced, frozen_outputs, live_outputs, samples, module
+        gc.collect()
+        torch.cuda.empty_cache()
     return payload
 
 
@@ -819,31 +916,52 @@ def _build_serialized_engine(
     return bytes(plan)
 
 
-def _build_serialized_encoder_engine(
-    onnx_bytes: bytes,
+def _finish_serialized_encoder_engine(
     *,
+    trt: Any,
+    builder: Any,
+    network: Any,
+    input_tensor: Any,
+    output_tensor: Any,
+    module_bytes: bytes,
     verbose: bool,
     workspace_bytes: int | None,
+    metadata_out: dict[str, Any] | None,
 ) -> bytes:
-    trt = trt_compat.get_trt()
-    logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(
-        trt_compat.network_creation_flags(explicit_batch=True, strongly_typed=True)
+    output_tensor.name = "audio_condition_rows"
+    network.mark_output(output_tensor)
+    module_sha256 = hashlib.sha256(module_bytes).hexdigest()
+    expected_plugin_metadata = (
+        "trtmc.native_op=MiniMaxH3AudioEncoder;source=audio_encoder;"
+        f"module_bytes={len(module_bytes)};module_sha256={module_sha256}"
     )
-    parser = trt.OnnxParser(network, logger)
-    if not parser.parse(onnx_bytes):
-        errors = [str(parser.get_error(index)) for index in range(parser.num_errors)]
+    constant_type = getattr(trt.LayerType, "CONSTANT", None)
+    plugin_v3_type = getattr(trt.LayerType, "PLUGIN_V3", None)
+    layers = [network.get_layer(index) for index in range(network.num_layers)]
+    constant_layers = [layer for layer in layers if layer.type == constant_type]
+    plugin_layers = [layer for layer in layers if layer.type == plugin_v3_type]
+    if constant_type is None or plugin_v3_type is None:
+        raise RuntimeError("TensorRT does not expose the required exact audio encoder layer types")
+    if network.num_inputs != 1 or network.num_outputs != 1 or len(layers) != 2:
         raise RuntimeError(
-            "MiniMax-H3 audio VAE encoder ONNX parsing failed:\n" + "\n".join(errors)
+            "MiniMax-H3 exact audio encoder network must contain only Constant + IPluginV3"
         )
-
-    if network.num_inputs != 1 or network.num_outputs != 1:
+    if len(constant_layers) != 1 or len(plugin_layers) != 1:
         raise RuntimeError(
-            "MiniMax-H3 audio VAE encoder ONNX must expose exactly one input and one output"
+            "MiniMax-H3 exact audio encoder network must contain exactly Constant + IPluginV3"
         )
-    input_tensor = network.get_input(0)
-    output_tensor = network.get_output(0)
+    constant_layer = constant_layers[0]
+    plugin_layer = plugin_layers[0]
+    constant_output = constant_layer.get_output(0)
+    if (
+        getattr(constant_layer, "num_inputs", 0) != 0
+        or getattr(plugin_layer, "num_inputs", -1) != 2
+        or getattr(plugin_layer, "metadata", "") != expected_plugin_metadata
+        or constant_output is None
+        or tuple(constant_output.shape) != (len(module_bytes),)
+        or constant_output.dtype != trt.int8
+    ):
+        raise RuntimeError("MiniMax-H3 exact audio encoder Constant + IPluginV3 ABI is invalid")
     input_contract = (input_tensor.name, tuple(input_tensor.shape), input_tensor.dtype)
     output_contract = (output_tensor.name, tuple(output_tensor.shape), output_tensor.dtype)
     expected_input = ("audio_samples", (AUDIO_BATCH, 1, -1), trt.float32)
@@ -854,7 +972,7 @@ def _build_serialized_encoder_engine(
     )
     if input_contract != expected_input or output_contract != expected_output:
         raise RuntimeError(
-            "MiniMax-H3 audio VAE encoder ONNX contract mismatch: "
+            "MiniMax-H3 exact audio encoder plugin contract mismatch: "
             f"input={input_contract}, output={output_contract}"
         )
 
@@ -866,7 +984,8 @@ def _build_serialized_encoder_engine(
     build_config.set_memory_pool_limit(pool, resolved_workspace)
     if int(build_config.get_memory_pool_limit(pool)) != resolved_workspace:
         raise RuntimeError("TensorRT did not apply the requested MiniMax-H3 audio workspace limit")
-    # Hugging Face keeps the Ref2VA audio encoder on the full-FP32 path.
+    # Hugging Face keeps the Ref2VA audio encoder on the full-FP32 path. The
+    # TorchScript plugin additionally applies a thread-local NoTF32Guard.
     build_config.clear_flag(trt.BuilderFlag.TF32)
 
     profile = builder.create_optimization_profile()
@@ -882,14 +1001,89 @@ def _build_serialized_encoder_engine(
 
     if verbose:
         print(
-            "[trtmc build]   Building MiniMax-H3 float32 audio VAE reference encoder "
-            "TensorRT engine (2-15 seconds at 32000 Hz) ...",
+            "[trtmc build]   Building exact MiniMax-H3 TorchScript audio encoder "
+            "IPluginV3 plan (2-15 seconds at 32000 Hz) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, build_config)
     if plan is None:
-        raise RuntimeError("TensorRT MiniMax-H3 audio VAE encoder build failed")
-    return bytes(plan)
+        raise RuntimeError("TensorRT MiniMax-H3 exact audio encoder plugin build failed")
+    payload = bytes(plan)
+    if metadata_out is not None:
+        metadata_out.clear()
+        metadata_out.update(
+            {
+                "implementation": "aten-torchscript-fp32-v1",
+                "plugin_count": 1,
+                "module_format": "torchscript-plan-constant-v1",
+                "module_bytes": len(module_bytes),
+                "module_sha256": module_sha256,
+                "weight_norm": "cuda-frozen-effective-v1",
+                "input_profile": [
+                    AUDIO_REFERENCE_MIN_SAMPLES,
+                    AUDIO_REFERENCE_OPT_SAMPLES,
+                    AUDIO_REFERENCE_MAX_SAMPLES,
+                ],
+                "network_layer_counts": {"constant": 1, "plugin_v3": 1},
+                "plugin_inputs": 2,
+                "python_runtime": False,
+                "cuda_graphs": False,
+                "cudnn_tf32": True,
+                "matmul_tf32": False,
+                "graph_optimizer": False,
+                "cudnn_enabled": True,
+                "cudnn_benchmark": False,
+                "cudnn_deterministic": False,
+                "plan_bytes": len(payload),
+            }
+        )
+    return payload
+
+
+def _build_serialized_encoder_engine(
+    module_bytes: bytes,
+    *,
+    verbose: bool,
+    workspace_bytes: int | None,
+    metadata_out: dict[str, Any] | None = None,
+) -> bytes:
+    trt = trt_compat.get_trt()
+    from .native_plugin_builder import (
+        add_audio_encoder_plugin,
+        load_native_plugin,
+        release_audio_encoder_module_storage,
+    )
+
+    load_native_plugin(verbose=verbose)
+    logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        trt_compat.network_creation_flags(explicit_batch=True, strongly_typed=True)
+    )
+    input_tensor = network.add_input("audio_samples", trt.float32, (AUDIO_BATCH, 1, -1))
+    if input_tensor is None:
+        raise RuntimeError("TensorRT failed to add the MiniMax-H3 audio encoder input")
+    try:
+        output_tensor = add_audio_encoder_plugin(
+            network,
+            input_tensor,
+            module_bytes,
+            trt_module=trt,
+            name="audio_encoder",
+        )
+        return _finish_serialized_encoder_engine(
+            trt=trt,
+            builder=builder,
+            network=network,
+            input_tensor=input_tensor,
+            output_tensor=output_tensor,
+            module_bytes=module_bytes,
+            verbose=verbose,
+            workspace_bytes=workspace_bytes,
+            metadata_out=metadata_out,
+        )
+    finally:
+        release_audio_encoder_module_storage(network)
 
 
 def build_audio_vae_decoder_engine(
@@ -919,18 +1113,20 @@ def build_audio_vae_encoder_engine(
     *,
     verbose: bool = False,
     workspace_bytes: int | None = None,
+    metadata_out: dict[str, Any] | None = None,
 ) -> bytes:
     """Build the dynamic Ref2VA waveform -> normalized condition-row engine."""
 
     root = Path(audio_vae_dir)
     config = load_audio_vae_config(root)
-    onnx_bytes = _export_encoder_onnx(root, config, verbose)
+    module_bytes = _export_encoder_torchscript(root, config, verbose)
     try:
         return _build_serialized_encoder_engine(
-            onnx_bytes,
+            module_bytes,
             verbose=verbose,
             workspace_bytes=workspace_bytes,
+            metadata_out=metadata_out,
         )
     finally:
-        del onnx_bytes
+        del module_bytes
         gc.collect()

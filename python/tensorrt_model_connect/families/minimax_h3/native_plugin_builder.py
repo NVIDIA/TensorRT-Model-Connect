@@ -19,10 +19,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 _PLUGIN_ENV = "TRTMC_MINIMAX_H3_NATIVE_PLUGIN_LIBRARY"
 _BUILD_DIR_ENV = "TRTMC_MINIMAX_H3_NATIVE_PLUGIN_BUILD_DIR"
 _VISION_PLUGIN_NAME = "MiniMaxH3VisionAttention"
+_AUDIO_ENCODER_PLUGIN_NAME = "MiniMaxH3AudioEncoder"
 _LAYER_NORM_PLUGIN_NAME = "MiniMaxH3LayerNorm"
 _LINEAR_PLUGIN_NAME = "MiniMaxH3Linear"
 _PATCH_EMBED_PLUGIN_NAME = "MiniMaxH3PatchEmbed"
@@ -36,6 +39,9 @@ _PLUGIN_BUILD_IDENTITY_SYMBOL = "trtmc_minimax_h3_native_plugin_build_identity"
 _PLUGIN_REGISTRY_SYMBOL = "trtmc_minimax_h3_native_plugin_registry_matches"
 _PLUGIN_HANDLES: dict[Path, Any] = {}
 _FAILED_PLUGIN_HANDLES: dict[Path, Any] = {}
+_AUDIO_ENCODER_MODULE_KEEPALIVE: dict[int, np.ndarray] = {}
+_AUDIO_ENCODER_MODULE_MIN_BYTES = 300 << 20
+_AUDIO_ENCODER_MODULE_MAX_BYTES = 400 << 20
 
 
 def native_plugin_source_files() -> tuple[Path, ...]:
@@ -570,7 +576,69 @@ def add_layer_norm_plugin(
     )
 
 
+def add_audio_encoder_plugin(
+    network: Any,
+    audio_samples: Any,
+    module_bytes: bytes,
+    *,
+    trt_module: Any,
+    name: str = "audio_encoder",
+) -> Any:
+    """Add the exact FP32 TorchScript audio encoder with its module embedded in the plan."""
+
+    if not isinstance(module_bytes, bytes):
+        raise TypeError("MiniMax-H3 audio encoder TorchScript module must be bytes")
+    if not _AUDIO_ENCODER_MODULE_MIN_BYTES <= len(module_bytes) <= _AUDIO_ENCODER_MODULE_MAX_BYTES:
+        raise ValueError(
+            "MiniMax-H3 audio encoder TorchScript module must be between 300 and 400 MiB"
+        )
+    if not module_bytes.startswith(b"PK\x03\x04"):
+        raise ValueError("MiniMax-H3 audio encoder TorchScript module must be a ZIP archive")
+    add_plugin = getattr(network, "add_plugin_v3", None)
+    if add_plugin is None:
+        raise RuntimeError("TensorRT network does not support IPluginV3 layers")
+    module_array = np.frombuffer(module_bytes, dtype=np.int8)
+    _AUDIO_ENCODER_MODULE_KEEPALIVE[id(network)] = module_array
+    try:
+        module_layer = network.add_constant((len(module_bytes),), module_array)
+        if module_layer is None:
+            raise RuntimeError("TensorRT rejected the embedded audio encoder module constant")
+        module_tensor = module_layer.get_output(0)
+        if module_tensor is None:
+            raise RuntimeError("TensorRT audio encoder module constant has no output")
+        fields = trt_module.PluginFieldCollection([])
+        plugin = _plugin_creator(trt_module, _AUDIO_ENCODER_PLUGIN_NAME).create_plugin(
+            name, fields, trt_module.TensorRTPhase.BUILD
+        )
+        if plugin is None:
+            raise RuntimeError(f"TensorRT failed to create the {name} plugin")
+        layer = add_plugin([audio_samples, module_tensor], [], plugin)
+        if layer is None:
+            raise RuntimeError(f"TensorRT failed to add the {name} plugin layer")
+        layer.name = name
+        layer.metadata = (
+            f"trtmc.native_op={_AUDIO_ENCODER_PLUGIN_NAME};source={name};"
+            f"module_bytes={len(module_bytes)};"
+            f"module_sha256={hashlib.sha256(module_bytes).hexdigest()}"
+        )
+        output = layer.get_output(0)
+        if output is None:
+            raise RuntimeError(f"TensorRT {name} plugin layer has no output")
+        output.name = name
+        return output
+    except BaseException:
+        _AUDIO_ENCODER_MODULE_KEEPALIVE.pop(id(network), None)
+        raise
+
+
+def release_audio_encoder_module_storage(network: Any) -> None:
+    """Release the embedded TorchScript backing buffer after engine serialization."""
+
+    _AUDIO_ENCODER_MODULE_KEEPALIVE.pop(id(network), None)
+
+
 __all__ = [
+    "add_audio_encoder_plugin",
     "add_layer_norm_plugin",
     "add_linear_plugin",
     "add_patch_embed_plugin",
@@ -578,4 +646,5 @@ __all__ = [
     "ensure_native_plugin",
     "load_native_plugin",
     "native_plugin_source_files",
+    "release_audio_encoder_module_storage",
 ]
