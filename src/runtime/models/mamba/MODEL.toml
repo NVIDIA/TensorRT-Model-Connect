@@ -5,10 +5,10 @@ id = "mamba"
 runtime_library = "libtrtmc_model_mamba.so"
 runtime_plugins = ["plugin.cpp|register_mamba_plugin"]
 runtime_strategies = ["mamba_ssm_recurrent"]
-[validation_profiles]
-decoder_debug = ["mamba_ssm_recurrent"]
-
 runtime_tests = [
   "test_mamba_recurrent_output_initializers|test_mamba_recurrent_output_initializers.cpp|_|_|_",
-  "test_mamba_recurrent_pipeline|test_mamba_recurrent_pipeline.cpp|trtmc_model_mamba,trtmc_backend_trt|_|REQUIRES_TRT",
+  "test_mamba_recurrent_pipeline|test_mamba_recurrent_pipeline.cpp|trtmc_model_mamba,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]
+
+[validation_profiles]
+decoder_debug = ["mamba_ssm_recurrent"]

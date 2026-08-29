@@ -135,6 +135,59 @@ def test_owner_build_writes_private_free_single_engine_bundle(
     assert timing["total_s"] >= 0.0
 
 
+def test_owner_build_writes_embedding_runtime_for_mean_pool_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir = _write_model_dir(tmp_path / "model")
+    (model_dir / "modules.json").write_text(
+        json.dumps(
+            [
+                {
+                    "idx": 0,
+                    "name": "0",
+                    "path": "",
+                    "type": "sentence_transformers.models.Transformer",
+                },
+                {
+                    "idx": 1,
+                    "name": "1",
+                    "path": "1_Pooling",
+                    "type": "sentence_transformers.models.Pooling",
+                },
+                {
+                    "idx": 2,
+                    "name": "2",
+                    "path": "2_Normalize",
+                    "type": "sentence_transformers.models.Normalize",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    pooling_dir = model_dir / "1_Pooling"
+    pooling_dir.mkdir()
+    (pooling_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "pooling_mode_cls_token": False,
+                "pooling_mode_mean_tokens": True,
+                "pooling_mode_max_tokens": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict = {}
+    _stub_owner_build(monkeypatch, captured)
+    monkeypatch.setattr(model, "build_engine", lambda *_args, **_kwargs: b"plan")
+
+    model.build(str(model_dir), str(tmp_path / "embedding.bundle"))
+
+    runtime_config = json.loads(_section(captured, "config.json"))
+    assert captured["info"].runtime_strategy == "bert_embedding"
+    assert runtime_config["runtime_strategy"] == "bert_embedding"
+
+
 def test_owner_build_preserves_default_and_rejects_zero_max_length(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

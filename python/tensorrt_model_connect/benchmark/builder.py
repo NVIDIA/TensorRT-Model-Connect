@@ -21,6 +21,7 @@ import time
 from typing import Any, Iterable, Mapping, Sequence
 
 from .. import trt_compat
+from ..bundle_writer import bundle_source_revision
 from .types import BenchmarkError, ModelDescriptor, ResolvedCase
 
 
@@ -38,6 +39,7 @@ class BundlePreparation:
     stderr_log: Path | None = None
     builder_tensorrt_version: str | None = None
     runtime_backend_abi: str | None = None
+    source_revision: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -51,6 +53,7 @@ class BundlePreparation:
             "stderr_log": str(self.stderr_log) if self.stderr_log else None,
             "builder_tensorrt_version": self.builder_tensorrt_version,
             "runtime_backend_abi": self.runtime_backend_abi,
+            "source_revision": self.source_revision,
             "included_in_performance_metrics": False,
         }
 
@@ -82,6 +85,7 @@ class _BuildPlan:
     environment: Mapping[str, str]
     timeout_s: int
     runtime: _BuilderRuntime
+    source_revision: str | None
 
 
 class BundleBuilder:
@@ -143,14 +147,30 @@ class BundleBuilder:
         requested_bundle = requested_bundle.expanduser().resolve()
         requested_is_managed = _is_relative_to(requested_bundle, self.cache_root)
         if requested_bundle.is_file() and not requested_is_managed and not rebuild:
-            return None, BundlePreparation(model.name, "reused", requested_bundle)
+            actual_revision = bundle_source_revision(requested_bundle)
+            expected_revision = _expected_source_revision()
+            if expected_revision and actual_revision != expected_revision:
+                raise BenchmarkError(
+                    f"external bundle {requested_bundle} source revision "
+                    f"{actual_revision or '<missing>'} does not match {expected_revision}"
+                )
+            return None, BundlePreparation(
+                model.name,
+                "reused",
+                requested_bundle,
+                source_revision=actual_revision or None,
+            )
         if requested_bundle.is_file() and not requested_is_managed:
             raise BenchmarkError(
                 f"--rebuild cannot overwrite explicit/external bundle {requested_bundle}; "
                 "omit --bundle to rebuild the managed cache"
             )
         plan = self._plan(model, cases)
-        if plan.bundle.is_file() and not rebuild:
+        bundle_matches_revision = (
+            not plan.source_revision
+            or bundle_source_revision(plan.bundle) == plan.source_revision
+        )
+        if plan.bundle.is_file() and not rebuild and bundle_matches_revision:
             return plan.bundle, BundlePreparation(
                 model.name,
                 "cache_hit",
@@ -158,6 +178,7 @@ class BundleBuilder:
                 plan.cache_key,
                 builder_tensorrt_version=plan.runtime.version,
                 runtime_backend_abi=plan.runtime.backend_abi,
+                source_revision=plan.source_revision,
             )
         if not allow_build:
             raise BenchmarkError(
@@ -166,7 +187,11 @@ class BundleBuilder:
             )
         if dry_run:
             return plan.bundle, BundlePreparation(
-                model.name, "would_build", plan.bundle, plan.cache_key
+                model.name,
+                "would_build",
+                plan.bundle,
+                plan.cache_key,
+                source_revision=plan.source_revision,
             )
         return plan.bundle, self._build(plan)
 
@@ -177,6 +202,7 @@ class BundleBuilder:
         identity_options = dict(options)
         if "fp8_scales" in identity_options:
             identity_options["fp8_scales"] = model.build_settings["fp8_scales"]
+        source_revision = _expected_source_revision()
         identity = {
             "schema_version": "trtmc.benchmark-bundle-cache/v2",
             "model": model.identity(),
@@ -186,6 +212,8 @@ class BundleBuilder:
             "builder_sources_sha256": _builder_source_digest(model.family),
             "platform": _platform_identity(runtime),
         }
+        if source_revision:
+            identity["source_revision"] = source_revision
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         cache_key = hashlib.sha256(encoded).hexdigest()[:16]
         bundle = self.cache_root / model.name / cache_key / model.bundle_name
@@ -193,7 +221,16 @@ class BundleBuilder:
         timeout = int(model.build_settings.get("build_timeout_s", 3600))
         if timeout <= 0:
             raise BenchmarkError(f"build_timeout_s for {model.name} must be positive")
-        return _BuildPlan(model, bundle, cache_key, command, environment, timeout, runtime)
+        return _BuildPlan(
+            model,
+            bundle,
+            cache_key,
+            command,
+            environment,
+            timeout,
+            runtime,
+            source_revision,
+        )
 
     def _build(self, plan: _BuildPlan) -> BundlePreparation:
         plan.bundle.parent.mkdir(parents=True, exist_ok=True)
@@ -249,6 +286,16 @@ class BundleBuilder:
                 ),
             )
         os.replace(temporary, plan.bundle)
+        actual_revision = bundle_source_revision(plan.bundle)
+        if plan.source_revision and actual_revision != plan.source_revision:
+            plan.bundle.unlink()
+            raise BenchmarkError(
+                f"bundle build for {plan.model.name} produced source revision "
+                f"{actual_revision or '<missing>'}; expected {plan.source_revision}",
+                stage="build",
+                domain="harness/unknown",
+                code="bundle_source_revision_mismatch",
+            )
         record = BundlePreparation(
             model=plan.model.name,
             status="built",
@@ -260,6 +307,7 @@ class BundleBuilder:
             stderr_log=stderr_log,
             builder_tensorrt_version=plan.runtime.version,
             runtime_backend_abi=plan.runtime.backend_abi,
+            source_revision=plan.source_revision,
         )
         (plan.bundle.parent / "build.json").write_text(
             json.dumps(record.to_json(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -278,6 +326,15 @@ class BundleBuilder:
             env=dict(environment),
             check=False,
         )
+
+
+def _expected_source_revision() -> str | None:
+    revision = os.environ.get("TRTMC_ENGINE_BUILD_REVISION", "").strip().lower()
+    if not revision:
+        return None
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise BenchmarkError("TRTMC_ENGINE_BUILD_REVISION must be an exact Git SHA")
+    return revision
 
 
 def default_bundle_cache() -> Path:

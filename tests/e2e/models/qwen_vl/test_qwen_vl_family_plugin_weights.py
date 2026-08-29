@@ -9,6 +9,9 @@ Shared test code is limited to filesystem and serialization helpers.
 
 from __future__ import annotations
 
+import json
+from unittest.mock import patch
+
 from tests.builder.family_plugin_test_support import (
     ModelConfig,
     _rand,
@@ -68,6 +71,7 @@ class TestQwenVLPlugin:
             assert f"layer.{i}.w_q" in weights
         assert "final_norm" in weights
         assert "w_out" in weights
+        assert plugin.get_bundle_config_overrides(cfg) is None
 
     def test_qwen3_vl_language_model_prefix(self, tmp_path):
         """Qwen3-VL uses model.language_model.layers.{i} prefix."""
@@ -179,3 +183,124 @@ class TestQwenVLPlugin:
             assert not key.startswith("visual."), f"Vision key leaked: {key}"
             assert not key.startswith("model.visual."), \
                 f"Vision key leaked: {key}"
+
+    def test_qwen3_vl_mock_bundle_serializes_decoder_geometry_at_top_level(
+        self,
+        tmp_path,
+    ):
+        """Exercise the pinned Qwen3-VL producer contract with mocked engines."""
+        from tensorrt_model_connect.engine_builder import build_bundle
+        from tensorrt_model_connect.families.qwen_vl.plugin import (
+            plugin as production_plugin,
+        )
+
+        # Qwen/Qwen3-VL-2B-Instruct at
+        # 89644892e4d85e24eaac8bacfd4f463576704203.
+        source_config = {
+            "architectures": ["Qwen3VLForConditionalGeneration"],
+            "image_token_id": 151655,
+            "model_type": "qwen3_vl",
+            "text_config": {
+                "bos_token_id": 151643,
+                "eos_token_id": 151645,
+                "head_dim": 128,
+                "hidden_size": 2048,
+                "intermediate_size": 6144,
+                "max_position_embeddings": 262144,
+                "model_type": "qwen3_vl_text",
+                "num_attention_heads": 16,
+                "num_hidden_layers": 28,
+                "num_key_value_heads": 8,
+                "rms_norm_eps": 1e-6,
+                "rope_theta": 5000000,
+                "vocab_size": 151936,
+            },
+            "vision_config": {
+                "deepstack_visual_indexes": [5, 11, 17],
+                "hidden_size": 1024,
+                "out_hidden_size": 2048,
+                "patch_size": 16,
+                "spatial_merge_size": 2,
+                "temporal_patch_size": 2,
+            },
+        }
+        _write_config(tmp_path, source_config)
+        (tmp_path / "generation_config.json").write_text(
+            json.dumps(
+                {
+                    "bos_token_id": 151643,
+                    "eos_token_id": [151645, 151643],
+                    "pad_token_id": 151643,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class MockQwenVLPlugin:
+            name = "qwen_vl"
+            runtime_strategy = "qwen_vl_vision_language"
+            embed_input = True
+            requires_tokenizer = False
+
+            @staticmethod
+            def load_weights(_model_dir, _config):
+                return {}
+
+            @staticmethod
+            def build_engine(_config, _weights, _max_cache_length, **_kwargs):
+                return b"MOCK_DECODER_PLAN"
+
+            @staticmethod
+            def build_vision_engine(_model_dir, _config, _weights, **_kwargs):
+                return b"MOCK_VISION_PLAN"
+
+            @staticmethod
+            def get_vl_config(config):
+                return production_plugin.get_vl_config(config)
+
+            @staticmethod
+            def get_bundle_config_overrides(config):
+                return production_plugin.get_bundle_config_overrides(config)
+
+        with (
+            patch(
+                "tensorrt_model_connect.engine_builder.find_plugin",
+                return_value=MockQwenVLPlugin(),
+            ),
+            patch(
+                "tensorrt_model_connect.engine_builder._get_trt_version",
+                return_value="11.1.0",
+            ),
+            patch(
+                "tensorrt_model_connect.engine_builder._get_gpu_name",
+                return_value="CPU unit mock",
+            ),
+            patch("tensorrt_model_connect.engine_builder.write_bundle") as write_bundle,
+        ):
+            build_bundle(
+                str(tmp_path),
+                str(tmp_path / "qwen3-vl-2b.bundle"),
+                max_cache_length=256,
+            )
+
+        sections = {
+            section.name: section.data for section in write_bundle.call_args.args[2]
+        }
+        runtime_config = json.loads(sections["config.json"])
+        decoder_config = source_config["text_config"]
+        assert runtime_config["text_config"] == decoder_config
+        decoder_contract = {
+            key: decoder_config[key]
+            for key in (
+                "vocab_size",
+                "hidden_size",
+                "num_hidden_layers",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "head_dim",
+                "bos_token_id",
+            )
+        }
+        assert all(key not in source_config for key in decoder_contract)
+        assert {key: runtime_config[key] for key in decoder_contract} == decoder_contract
+        assert runtime_config["eos_token_id"] == [151645, 151643]

@@ -74,12 +74,25 @@ entries:
       mode: torch-compile
       compile_scope: model.forward
       output_token_policy: strip-start-and-eos
-  - id: bert.encode
+  - id: bert.embed
     family: bert
-    operation: encode
+    operation: embed
     model: all-minilm-l6-v2
     workload:
       testcase: all-minilm-l6-v2
+    baseline:
+      runner: task-reference
+      adapter: hf-transformers-embedding
+      mode: hf-eager
+      reference_backend: hf_transformers
+      timing_scope: task-pipeline-call-wall
+      input_preparation_included: true
+  - id: bert.encode
+    family: bert
+    operation: encode
+    model: bert-base-uncased
+    workload:
+      testcase: bert-base-uncased
     baseline:
       runner: hf-transformers
       mode: torch-compile
@@ -1019,10 +1032,12 @@ entries:
 additional_profiles:
   - model: bark-large
     inherit: bark.generate_audio
-  - model: bert-base-uncased
-    inherit: bert.encode
   - model: bge-small-en-v1.5
     inherit: bert.encode
+  - model: multilingual-e5-small
+    inherit: bert.embed
+    workload:
+      testcase: multilingual-e5-small-query-en
   - model: deepseek-v2-tiny
     inherit: deepseek_v2.generate
   - model: dinov3-convnext-tiny-pretrain-lvd1689m
@@ -1079,6 +1094,8 @@ additional_profiles:
   - model: tinyllama-1.1b
     inherit: llama.generate
   - model: whisper-large-v3-turbo
+    inherit: whisper.transcribe
+  - model: whisper-small-fp16
     inherit: whisper.transcribe
   - model: xlm-roberta-base
     inherit: roberta.encode

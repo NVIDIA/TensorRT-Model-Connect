@@ -72,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="result directory; an existing explicit directory is replaced",
     )
     run.add_argument("--dry-run", action="store_true", help="print resolved cases only")
+    run.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="materialize selected bundles and emit JSON evidence without measuring",
+    )
 
     list_command = subparsers.add_parser("list", help="list benchmark catalog entries")
     list_subparsers = list_command.add_subparsers(dest="list_command", required=True)
@@ -171,6 +176,8 @@ def _report(arguments: argparse.Namespace) -> int:
 
 
 def _run(arguments: argparse.Namespace) -> int:
+    if arguments.dry_run and arguments.prepare_only:
+        raise BenchmarkError("--dry-run and --prepare-only cannot be combined")
     spec = _load_spec(arguments.config)
     catalog = ManifestCatalog(arguments.manifest_root)
     worker: Path | None = None
@@ -192,6 +199,15 @@ def _run(arguments: argparse.Namespace) -> int:
     )
     if arguments.dry_run:
         print(json.dumps([case.to_json() for case in cases], indent=2, sort_keys=True))
+        return 0
+    if arguments.prepare_only:
+        print(
+            json.dumps(
+                {"bundles": [record.to_json() for record in bundle_preparation]},
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     output = _absolute_path(arguments.output or default_output_dir())
     working_output = _working_output(output, overwrite=arguments.output is not None)

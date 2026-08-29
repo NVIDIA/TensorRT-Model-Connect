@@ -195,7 +195,9 @@ If authorization rejects the request, ask the maintainer to remove and re-add
 the retained label after satisfying the reported prerequisite. Adding an
 already-present label does not create a new trigger event.
 
-Wait for `trtmc/premerge/required` to pass on the exact pull-request head SHA.
+Wait for `TRTMC Internal CI / Automated premerge gate` to pass on the exact
+pull-request head SHA. This is an automated test result, not a request for an
+individual maintainer review.
 If you push another commit, the previous result no longer validates the current
 head; finish the update, wait for automatic Community CPU validation, and
 mention `@yifeif-nv` once to request a new protected run. Private runner details,

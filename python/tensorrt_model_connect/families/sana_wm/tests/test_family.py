@@ -42,7 +42,7 @@ _SANA_WM_ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
-def _clear_sana_wm_env(monkeypatch) -> None:
+def _clear_sana_wm_env(monkeypatch, tmp_path) -> None:
     for name in _SANA_WM_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
@@ -50,6 +50,17 @@ def _clear_sana_wm_env(monkeypatch) -> None:
         "_cached_stage1_text_encoder_dir",
         lambda _raw_config: None,
     )
+    native_plugin = tmp_path / "libtrtmc_sana_wm_native_plugin.so"
+    native_plugin.write_bytes(b"CPU unit native plugin fixture")
+    native_plugin_builder = importlib.import_module(
+        "tensorrt_model_connect.families.sana_wm.native_plugin_builder"
+    )
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "ensure_native_plugin",
+        lambda **_kwargs: native_plugin,
+    )
+    monkeypatch.setattr(sana_wm_plugin_mod.ctypes, "CDLL", lambda *_args, **_kwargs: object())
 
 
 def _sana_yaml() -> str:

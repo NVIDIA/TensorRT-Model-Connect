@@ -482,6 +482,8 @@ def test_deepseek_ocr_bounds_sequence_prefill_profile(
     assert sequence_prefill_profile_lengths(max_cache_length) == expected
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_deepseek_ocr_decomposes_multirow_sequence_attention() -> None:
     trt = trt_compat.get_trt()
     builder = trt.Builder(trt.Logger(trt.Logger.ERROR))

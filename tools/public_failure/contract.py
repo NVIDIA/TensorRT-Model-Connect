@@ -12,14 +12,16 @@ from typing import Collection, Mapping
 
 from .policy import (
     FAILURE_CLASS_BY_INTERNAL_TYPE,
-    POLICY_VERSION,
     PUBLIC_BACKENDS,
     PUBLIC_GPU_TYPES,
     PUBLIC_METRIC_NAMES,
     PUBLIC_METRIC_OPERATORS,
     PUBLIC_MODELS,
     PUBLIC_REASON_CODES,
+    PUBLIC_SUBJECTS,
     PUBLIC_STAGE_BY_INTERNAL_STAGE,
+    SUPPORTED_POLICY_VERSIONS,
+    SUPPORTED_SCHEMA_VERSIONS,
 )
 
 
@@ -34,6 +36,7 @@ REPORT_FIELDS = frozenset(
         "base_sha",
         "tested_revision",
         "tested_revision_kind",
+        "dispatch_nonce",
         "run_attempt",
         "result",
         "failures",
@@ -41,6 +44,7 @@ REPORT_FIELDS = frozenset(
         "generated_at",
     }
 )
+REPORT_REQUIRED_FIELDS = REPORT_FIELDS - {"dispatch_nonce"}
 FAILURE_FIELDS = frozenset(
     {
         "public_stage",
@@ -51,15 +55,19 @@ FAILURE_FIELDS = frozenset(
         "failure_class",
         "reason_code",
         "metric",
+        "subject",
+        "excerpt",
         "disclosure",
     }
 )
 METRIC_FIELDS = frozenset({"name", "observed", "operator", "threshold"})
-FAILURE_REQUIRED_FIELDS = FAILURE_FIELDS - {"metric"}
+FAILURE_REQUIRED_FIELDS = FAILURE_FIELDS - {"metric", "subject", "excerpt"}
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
+DISPATCH_NONCE_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
 REPORT_ID_PATTERN = re.compile(r"trtmc-pr[1-9][0-9]*-[0-9a-f]{7}-attempt[1-9][0-9]*\Z")
 TIMESTAMP_PATTERN = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\Z")
 TEST_ID_PATTERN = re.compile(r"[A-Za-z0-9_./:\[\],=+-]+\Z")
+EXCERPT_LINE_PATTERN = re.compile(r"[\x20-\x7e]{1,240}\Z")
 PUBLIC_FAILURE_CLASSES = frozenset(FAILURE_CLASS_BY_INTERNAL_TYPE.values()) | {"unknown"}
 PUBLIC_STAGES = frozenset(PUBLIC_STAGE_BY_INTERNAL_STAGE.values()) | {"protected-ci"}
 PUBLIC_MODEL_NAMES = PUBLIC_MODELS | {"other-model"}
@@ -130,6 +138,25 @@ def _validate_failure(failure: Mapping[str, object], index: int) -> None:
     _require_enum(failure.get("gpu_type"), PUBLIC_GPU_NAMES, f"{path}.gpu_type")
     _require_enum(failure.get("failure_class"), PUBLIC_FAILURE_CLASSES, f"{path}.failure_class")
     _require_enum(failure.get("reason_code"), PUBLIC_REASON_CODES, f"{path}.reason_code")
+    if "subject" in failure:
+        _require_enum(failure.get("subject"), PUBLIC_SUBJECTS, f"{path}.subject")
+    if "excerpt" in failure:
+        excerpt = failure.get("excerpt")
+        if not isinstance(excerpt, list) or not excerpt or len(excerpt) > 20:
+            raise PublicFailureValidationError(
+                f"{path}.excerpt must be a non-empty array of at most 20 lines"
+            )
+        if sum(len(line) for line in excerpt if isinstance(line, str)) > 4000:
+            raise PublicFailureValidationError(
+                f"{path}.excerpt must contain at most 4000 characters"
+            )
+        for line_index, line in enumerate(excerpt):
+            _require_string(
+                line,
+                f"{path}.excerpt[{line_index}]",
+                max_length=240,
+                pattern=EXCERPT_LINE_PATTERN,
+            )
     _require_enum(
         failure.get("disclosure"),
         {"full", "truncated", "withheld"},
@@ -143,10 +170,16 @@ def _validate_failure(failure: Mapping[str, object], index: int) -> None:
     )
     if test_id.startswith("/") or ".." in test_id or "\\" in test_id:
         raise PublicFailureValidationError(f"{path}.test_id is not a safe relative test ID")
+    reason_code = failure.get("reason_code")
     metric = failure.get("metric")
+    if reason_code == "metric_threshold_exceeded" and metric is None:
+        raise PublicFailureValidationError(f"{path} must include metric threshold evidence")
+    if reason_code == "unknown":
+        if failure.get("disclosure") != "withheld":
+            raise PublicFailureValidationError(f"{path} must withhold an unknown reason")
+        if "excerpt" in failure:
+            raise PublicFailureValidationError(f"{path} cannot excerpt an unknown reason")
     if metric is None:
-        if failure.get("disclosure") == "full":
-            raise PublicFailureValidationError(f"{path}.metric is required for full disclosure")
         return
     if not isinstance(metric, Mapping):
         raise PublicFailureValidationError(f"{path}.metric must be an object")
@@ -158,10 +191,13 @@ def validate_public_failure(report: Mapping[str, object]) -> None:
     if not isinstance(report, Mapping):
         raise PublicFailureValidationError("report must be an object")
     _reject_unknown_fields(report, REPORT_FIELDS, "report")
-    _require_fields(report, REPORT_FIELDS, "report")
-    if report.get("schema_version") != 1 or isinstance(report.get("schema_version"), bool):
-        raise PublicFailureValidationError("schema_version must be 1")
-    if report.get("policy_version") != POLICY_VERSION:
+    _require_fields(report, REPORT_REQUIRED_FIELDS, "report")
+    if (
+        isinstance(report.get("schema_version"), bool)
+        or report.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS
+    ):
+        raise PublicFailureValidationError("schema_version is not supported")
+    if report.get("policy_version") not in SUPPORTED_POLICY_VERSIONS:
         raise PublicFailureValidationError("policy_version is not supported")
     if report.get("repository") != "NVIDIA/TensorRT-Model-Connect":
         raise PublicFailureValidationError("repository is not supported")
@@ -181,7 +217,14 @@ def validate_public_failure(report: Mapping[str, object]) -> None:
     )
     for key in ("head_sha", "base_sha", "tested_revision"):
         _require_string(report.get(key), key, max_length=40, pattern=SHA_PATTERN)
-    _require_enum(report.get("tested_revision_kind"), {"head"}, "tested_revision_kind")
+    if "dispatch_nonce" in report:
+        _require_string(
+            report.get("dispatch_nonce"),
+            "dispatch_nonce",
+            max_length=32,
+            pattern=DISPATCH_NONCE_PATTERN,
+        )
+    _require_enum(report.get("tested_revision_kind"), {"head", "merge"}, "tested_revision_kind")
     _require_enum(report.get("result"), {"failure", "error"}, "result")
     _require_string(
         report.get("generated_at"),

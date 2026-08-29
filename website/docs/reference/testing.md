@@ -4,31 +4,32 @@ title: Testing Reference
 
 ## CI and evidence boundary
 
-Source contains the test implementation and three GitHub workflows: automatic
-public CPU validation, the Internal CI Bridge, and the path-scoped Pages
-deployment. Protected premerge, including legal compliance, and nightly
-orchestration run in private Internal CI.
+Source contains the test implementation and four GitHub workflows: automatic
+public CPU validation, pull-request metadata validation, the Internal CI
+Bridge, and the path-scoped Pages deployment. Protected premerge, including
+legal compliance, and nightly orchestration run in private Internal CI.
 
 Opening or updating a pull request automatically runs public CPU validation on
 the exact current PR merge. After the public required check passes, an
 authorized collaborator with maintain or admin access applies `run-internal-ci`
 to dispatch the exact current PR head. Source receives contributor-visible
-native pull-request checks and public Actions logs, plus only the sanitized
-`trtmc/premerge/required` status from protected CI. Raw protected logs,
-artifacts, runner details, internal packages, and the complete report remain
-private. Neither path triggers on a push to `main`, so merging a passing PR
-does not rerun the same premerge suite.
+native pull-request checks, one `TRTMC Internal CI / Automated premerge gate`
+status, and a bounded plain-text failure report containing only approved
+structured fields. Raw protected logs, runner details, internal packages,
+repositories, and complete protected reports remain private. Neither path
+triggers on a push to `main`, so merging a passing PR does not rerun the same
+premerge suite.
 
 Source has no separate pull-request documentation-validation workflow. The
 Pages workflow builds the site before deployment from `main`, but it is not a
 pull-request documentation gate.
 
-### Local protected-failure report prototype
+### Protected-failure report tooling
 
-`tools/public_failure/` contains a local-only P0 implementation for reviewing a
-possible sanitized protected-CI failure report. It rebuilds a new object from a
-closed allowlist, validates `public-failure-v1`, renders a deterministic
-script-free HTML file, and scans the JSON and HTML for sensitive-looking data.
+`tools/public_failure/` rebuilds a public report from a closed allowlist,
+validates `public-failure-v1`, renders deterministic plain text, and scans the
+JSON and exact contributor-visible bytes for sensitive-looking data. The
+trusted Internal CI Bridge uses the same validation and rendering code.
 
 Generate the synthetic preview locally:
 
@@ -39,11 +40,11 @@ python3 -m tools.public_failure \
   --output-dir /tmp/trtmc-public-failure-preview
 ```
 
-This command only writes files under the selected local directory. No Source
-workflow calls it, and it cannot upload a report, update a GitHub status, or
-write a PR comment. Its presence is not evidence that protected failure details
-are currently public. Raw logs and arbitrary diagnostic text remain outside the
-public contract.
+The local command only writes files under the selected directory. Publication
+is restricted to the trusted default-branch bridge. Raw logs and arbitrary
+diagnostic text remain outside the public contract; the v1 validator accepts a
+legacy `excerpt` only during migration, while the exporter and renderer always
+discard it.
 
 ## Local documentation validation
 
@@ -95,12 +96,13 @@ change must not claim that this checker passes.
 
 ## Active workflow inventory
 
-Source contains exactly these three workflow files:
+Source contains exactly these four workflow files:
 
 | Workflow | Trigger and evidence boundary |
 | --- | --- |
 | `.github/workflows/community-cpu.yml` | Pull-request open, update, or reopen event; automatically runs read-only CPU validation against the exact GitHub merge revision and publishes native checks with public logs. |
-| `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, verifies current public CPU success, captures the exact PR head, and dispatches private premerge. |
+| `.github/workflows/pr-metadata.yml` | Validates pull-request metadata and contributor-facing ownership declarations. |
+| `.github/workflows/internal-ci-bridge.yml` | One-shot `run-internal-ci` label or manual request; authorizes the actor, fixes the exact PR head/base, dispatches private premerge, and publishes the automated status and bounded structured failure log. |
 | `.github/workflows/pages.yml` | Pushes affecting `website/**` on `main`, or manual runs; builds and deploys only the documentation site to GitHub Pages. |
 
 Internal scheduled nightly and model proof are not Source workflows. Their raw

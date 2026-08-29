@@ -48,6 +48,7 @@ LFM2_EXCLUSION_REASON = (
 )
 TASK_ADAPTERS = {
     "bark.generate_audio": "hf-transformers-tts",
+    "bert.embed": "hf-transformers-embedding",
     "canary.transcribe": "nemo-asr",
     "chronos_bolt.solve": "pytorch-timeseries",
     "deepseek_ocr.generate": "hf-transformers-vlm",
@@ -269,9 +270,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 108
-    assert len(raw_entries) == 79
-    assert len(raw_additional) == 29
+    assert len(cases) == 110
+    assert len(raw_entries) == 80
+    assert len(raw_additional) == 30
     assert excluded_profiles == {
         "lfm2-1.2b": LFM2_EXCLUSION_REASON,
         "lfm2-2.6b": LFM2_EXCLUSION_REASON,
@@ -288,15 +289,15 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
     assert not any("priority" in entry for entry in raw_entries)
     assert {case["model"] for case in cases} == ready_profiles - set(excluded_profiles)
     assert not any(performance_catalog.is_l0_profile(case["model"]) for case in cases)
-    assert len({(case["family"], case["operation"]) for case in cases}) == 79
+    assert len({(case["family"], case["operation"]) for case in cases}) == 80
     assert len({case["family"] for case in cases}) == 78
     assert [case["operation"] for case in cases if case["family"] == "eagle_vlm"] == [
         "embed",
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 24,
-        "public_pipeline_call_wall": 84,
+        "model_call_wall": 25,
+        "public_pipeline_call_wall": 85,
     }
     assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
         "canary.transcribe",
@@ -306,6 +307,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "nemotron_speech_streaming.transcribe@nemotron-speech-streaming-en-0.6b",
     }
     by_id = {case["id"]: case for case in cases}
+    assert by_id["bert.embed@multilingual-e5-small"]["workload"]["testcase"] == (
+        "multilingual-e5-small-query-en"
+    )
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["eagle_vlm.rerank"]["baseline"]["precision"] == "fp16"
     assert by_id["eagle_vlm.rerank"]["baseline"]["local_files_only"] is True
@@ -1115,15 +1119,44 @@ def test_performance_projection_rejects_receipt_classification_drift(tmp_path) -
         )
 
 
-def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
-    tmp_path, monkeypatch
-) -> None:
+def test_performance_ledger_contract_is_independent_of_execution_revision(tmp_path) -> None:
     case = next(
         row for row in performance_catalog.load_suite(SUITE).cases if row["id"] == "gpt2.generate"
     )
     results = {
         "run_id": "run-1",
-        "git_commit": "revision-1",
+        "git_commit": "a" * 40,
+        "suite_sha256": "suite-1",
+        "environment_config": {"sha256": "environment-1"},
+    }
+
+    perf_matrix._open_perf_ledger(tmp_path, [case], results)
+    perf_matrix._open_perf_ledger(
+        tmp_path,
+        [case],
+        {**results, "git_commit": "b" * 40},
+    )
+
+
+def test_performance_resume_accepts_model_invalidation() -> None:
+    arguments = perf_matrix.build_parser().parse_args(
+        ["resume", "run", "--invalidate-model", "model-a"]
+    )
+
+    assert arguments.invalidate_model == ["model-a"]
+
+
+def test_performance_adapter_resumes_an_interrupted_case_as_a_new_attempt(
+    tmp_path, monkeypatch
+) -> None:
+    revision = "a" * 40
+    monkeypatch.setattr(perf_matrix, "_git_commit", lambda: revision)
+    case = next(
+        row for row in performance_catalog.load_suite(SUITE).cases if row["id"] == "gpt2.generate"
+    )
+    results = {
+        "run_id": "run-1",
+        "git_commit": revision,
         "suite_sha256": "suite-1",
         "environment_config": {"sha256": "environment-1"},
         "selected_entry_ids": [case["id"]],
@@ -2095,15 +2128,16 @@ def test_public_perf_progress_has_no_traffic_light(status: str) -> None:
 def test_run_consolidates_results_and_records_replayable_commands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    revision = "a" * 40
     fake_trtmc = tmp_path / "trtmc-bench"
     fake_worker = tmp_path / "trtmc_benchmark_worker"
     fake_baseline = tmp_path / "hf_transformers.py"
     results_root = tmp_path / "results"
     scratch_root = tmp_path / "scratch"
     environment = tmp_path / "gb300.yaml"
-    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
+    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", revision)
     _write_fake_trtmc(fake_trtmc)
-    _write_fake_worker(fake_worker, "tested-commit")
+    _write_fake_worker(fake_worker, revision)
     _write_fake_baseline(fake_baseline)
     _write_environment(
         environment,
@@ -2157,7 +2191,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 108
+    assert len(rows) == 110
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())
@@ -2213,9 +2247,9 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert results["reference_preflight"]["entry_count"] == 1
     assert results["candidate_worker_preflight"]["build"] == {
         "configuration": "Release",
-        "source_revision": "tested-commit",
+        "source_revision": revision,
     }
-    assert results["candidate_worker_preflight"]["validated_against"] == "tested-commit"
+    assert results["candidate_worker_preflight"]["validated_against"] == revision
     assert rows["gpt2.generate"]["status"] == "green"
     assert rows["gpt2.generate"]["candidate"]["backend"] == "trtmc-bench"
     assert rows["gpt2.generate"]["candidate"]["preparation"] == {
@@ -2390,18 +2424,92 @@ def test_check_runs_preflight_without_creating_results(
     assert not scratch_root.exists()
 
 
+def test_prepare_materializes_bundles_without_starting_campaign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    revision = "a" * 40
+    output = tmp_path / "preparation.json"
+    selected = [
+        {
+            "id": "gpt2.generate",
+            "family": "gpt2",
+            "model": "distilgpt2",
+            "workload": {"testcase": "distilgpt2"},
+            "measurement": {"warmup": 1, "iterations": 2},
+            "baseline": {"runner": "hf-transformers", "asset_loading_included": False},
+        }
+    ]
+    environment = {
+        "storage": {"results_root": str(tmp_path / "results")},
+    }
+    options = Namespace(
+        output=tmp_path / "results",
+        scratch_root=tmp_path / "scratch",
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        bundle_cache=tmp_path / "bundles",
+        bundle_roots=(),
+        runtime_dirs=(),
+        timeout_seconds=30,
+        require_prebuilt_bundles=False,
+    )
+    monkeypatch.setattr(
+        perf_matrix,
+        "_load_suite_request",
+        lambda _arguments: (None, selected, environment),
+    )
+    monkeypatch.setattr(perf_matrix, "_run_options", lambda *_args, **_kwargs: options)
+    monkeypatch.setattr(perf_matrix, "_environment_preflight", lambda *_args: {})
+    monkeypatch.setattr(perf_matrix, "_preflight_worker", lambda *_args: {})
+    monkeypatch.setattr(
+        perf_matrix,
+        "_preflight_candidates",
+        lambda cases, _options: ({cases[0]["id"]: ({}, [], {})}, {}),
+    )
+    monkeypatch.setattr(perf_matrix, "_git_commit", lambda: revision)
+
+    def run(command, *_args):
+        assert "--prepare-only" in command
+        return {
+            "exit_code": 0,
+            "stdout": json.dumps(
+                {
+                    "bundles": [
+                        {
+                            "model": "distilgpt2",
+                            "status": "built",
+                            "bundle": str(tmp_path / "bundles/distilgpt2.bundle"),
+                            "build_time_s": 1.0,
+                            "source_revision": revision,
+                            "included_in_performance_metrics": False,
+                        }
+                    ]
+                }
+            ),
+            "stderr_tail": "",
+        }
+
+    monkeypatch.setattr(perf_matrix, "_run_command", run)
+
+    assert perf_matrix._prepare(Namespace(output=output)) == 0
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["git_commit"] == revision
+    assert receipt["bundles"][0]["source_revision"] == revision
+
+
 def test_run_records_preflight_failure_and_finishes_campaign(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    revision = "a" * 40
     fake_trtmc = tmp_path / "trtmc-bench"
     fake_worker = tmp_path / "trtmc_benchmark_worker"
     fake_baseline = tmp_path / "hf_transformers.py"
     results_root = tmp_path / "results"
     scratch_root = tmp_path / "scratch"
     environment = tmp_path / "gb300.yaml"
-    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
+    monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", revision)
     _write_fake_trtmc(fake_trtmc)
-    _write_fake_worker(fake_worker, "tested-commit")
+    _write_fake_worker(fake_worker, revision)
     _write_fake_baseline(fake_baseline)
     _write_environment(
         environment,
@@ -2625,6 +2733,27 @@ def test_candidate_command_forwards_workload_runtime_overrides(tmp_path: Path) -
     argv = perf_matrix._candidate_base_argv(case, options)
 
     assert "runtime.cuda_graphs=true" in argv
+
+
+def test_candidate_command_requires_prebuilt_bundle_when_requested(tmp_path: Path) -> None:
+    case = {
+        "id": "gpt2.generate",
+        "family": "gpt2",
+        "model": "distilgpt2",
+        "workload": {"testcase": "distilgpt2"},
+        "measurement": {"warmup": 2, "iterations": 10},
+        "baseline": {"runner": "hf-transformers", "asset_loading_included": False},
+    }
+    options = Namespace(
+        trtmc_bench="trtmc-bench",
+        trtmc_worker=None,
+        bundle_cache=None,
+        bundle_roots=(),
+        runtime_dirs=(),
+        require_prebuilt_bundles=True,
+    )
+
+    assert "--no-build" in perf_matrix._candidate_base_argv(case, options)
 
 
 def test_task_reference_can_require_local_model_files_per_case(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ from .policy import (
     public_model,
     public_reason_code,
     public_stage,
+    public_subject,
 )
 
 
@@ -36,6 +37,7 @@ class ExportContext:
     head_sha: str
     base_sha: str
     tested_revision: str
+    dispatch_nonce: str | None
     run_attempt: int
     result: str
     generated_at: str
@@ -76,6 +78,13 @@ def _export_test_id(value: object) -> str:
 
 def _export_one_failure(value: Mapping[str, object]) -> dict[str, Any]:
     metric = _export_metric(value.get("metric"))
+    reason_code = public_reason_code(value.get("reason_code"))
+    subject = public_subject(value.get("subject"))
+    if reason_code == "metric_threshold_exceeded" and metric is None:
+        reason_code = "unknown"
+    if reason_code == "unknown":
+        metric = None
+        subject = None
     public = {
         "public_stage": public_stage(value.get("stage")),
         "model": public_model(value.get("model")),
@@ -83,11 +92,13 @@ def _export_one_failure(value: Mapping[str, object]) -> dict[str, Any]:
         "gpu_type": public_gpu_type(value.get("gpu_type")),
         "test_id": _export_test_id(value.get("test_id")),
         "failure_class": public_failure_class(value.get("failure_type")),
-        "reason_code": public_reason_code(value.get("reason_code")),
-        "disclosure": "full" if metric is not None else "withheld",
+        "reason_code": reason_code,
+        "disclosure": "withheld" if reason_code == "unknown" else "full",
     }
     if metric is not None:
         public["metric"] = metric
+    if subject is not None:
+        public["subject"] = subject
     return public
 
 
@@ -99,7 +110,7 @@ def export_failure(
     failures = raw_failures if isinstance(raw_failures, list) else []
     approved_failures = [item for item in failures if isinstance(item, Mapping)]
     visible_failures = approved_failures[:MAX_PUBLIC_FAILURES]
-    return {
+    report = {
         "schema_version": 1,
         "policy_version": POLICY_VERSION,
         "report_id": (
@@ -117,3 +128,6 @@ def export_failure(
         "omitted_failure_count": len(approved_failures) - len(visible_failures),
         "generated_at": context.generated_at,
     }
+    if context.dispatch_nonce is not None:
+        report["dispatch_nonce"] = context.dispatch_nonce
+    return report

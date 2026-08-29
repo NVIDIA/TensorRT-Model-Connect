@@ -23,8 +23,8 @@ export TRTMC_CHECK_PYTHON=/opt/venv/bin/python3
 the Accuracy binaries, model plugins, TensorRT backend, Perf worker, and Perf
 bundle cache from this directory and `TRTMC_CHECK_STORAGE_ROOT`.
 
-The controller Python must contain the repository's base dependencies. Missing
-family build, reference, and scoring profiles are created under
+The controller Python must contain the repository's base dependencies. Debug
+runs create missing family build, reference, and scoring profiles under
 `${TRTMC_CHECK_STORAGE_ROOT}/python-profiles` when first needed.
 
 ## Select
@@ -54,7 +54,14 @@ model in `tests/validation/model_workloads.yaml`.
 
 ## Run
 
-Run one model through Accuracy and then Perf:
+By default, `run` is a formal qualification run. Each execution attempt freezes source identity,
+prepares missing dependencies, runs preflight, and then switches measurement to
+prebuilt-only mode. During development, add `--debug` to allow a dirty worktree
+and on-demand dependency creation. Every run still resolves the active worktree
+HEAD to a 40-character commit SHA and places the current repository Python paths
+first in each child process.
+
+Run one model through formal Accuracy and then Perf qualification:
 
 ```bash
 $TRTMC_CHECK_PYTHON tools/model_checks.py run \
@@ -62,6 +69,36 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --model distilgpt2 \
   --run-id gb300-distilgpt2-smoke
 ```
+
+The single command owns both preparation and frozen measurement:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform gb300 \
+  --model distilgpt2 \
+  --run-id gb300-distilgpt2-qualification
+```
+
+For an editable debug run:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform gb300 \
+  --model distilgpt2 \
+  --debug \
+  --run-id gb300-distilgpt2-debug
+```
+
+The controller creates missing Python profiles, pinned reference-source
+checkouts, and Perf bundles before measurement. Measurement then runs with
+dependency creation and Perf bundle builds disabled. Qualification also rejects
+a dirty worktree, imports outside the active worktree, and a requested revision
+different from HEAD. It rechecks that identity after preparation and before and
+after every task, so evidence from an attempt cannot silently cross a mid-run
+edit. Accuracy and Perf receipts record the exact SHA tested; native workers and
+bundles must report that SHA. A campaign may be resumed on a later commit, but
+all final Accuracy and Perf receipts for one model must agree on one SHA. Other
+models may complete on different SHAs.
 
 Run full Accuracy and Perf on separate GB300 machines:
 
@@ -101,7 +138,8 @@ Results are written below:
 ${TRTMC_CHECK_STORAGE_ROOT}/results/<run-id>/
 ```
 
-Resume with the same selection and run ID:
+Resume with the same selection, intent, and run ID. Interrupted and retryable
+cases run again; terminal cases remain intact even when HEAD has advanced:
 
 ```bash
 $TRTMC_CHECK_PYTHON tools/model_checks.py run \
@@ -111,6 +149,25 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --run-id gb300-accuracy-all \
   --resume
 ```
+
+After changing code that affects one model, invalidate that model as a unit so
+all of its selected Accuracy and Perf evidence is regenerated on the current
+HEAD:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py run \
+  --platform gb300 \
+  --all \
+  --run-id gb300-all \
+  --resume \
+  --invalidate-model distilgpt2
+```
+
+`--invalidate-model` is repeatable. It does not discard other models' evidence.
+Managed stale engines and Perf bundles are rebuilt automatically when their
+recorded source revision differs; Accuracy's lower-level `--force-build` remains
+available for cache diagnosis, but forcing a build does not replace model-level
+evidence invalidation.
 
 ## Shard a campaign
 
@@ -137,7 +194,8 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py consolidate \
 
 The immutable campaign inventory determines assignment by case order modulo
 the shard count. Resume one failed shard with the same selection, `--shard`,
-run ID, and `--resume`. A shard uses its own writable Perf bundle cache, so
+run ID, and `--resume`; use the same `--invalidate-model` on every shard that
+owns cases for the changed model. A shard uses its own writable Perf bundle cache, so
 independent workers never build into the same cache directory.
 
 ## Platforms

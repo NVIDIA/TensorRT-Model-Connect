@@ -8,7 +8,9 @@ from __future__ import annotations
 from typing import Final
 
 
-POLICY_VERSION: Final = "2026-08-26"
+POLICY_VERSION: Final = "2026-08-27"
+SUPPORTED_POLICY_VERSIONS: Final = frozenset({POLICY_VERSION})
+SUPPORTED_SCHEMA_VERSIONS: Final = frozenset({1})
 
 FAILURE_CLASS_BY_INTERNAL_TYPE: Final = {
     "compare_fail": "accuracy_regression",
@@ -20,6 +22,11 @@ FAILURE_CLASS_BY_INTERNAL_TYPE: Final = {
     "infrastructure_error": "infrastructure_error",
     "timeout": "timeout",
     "out_of_memory": "out_of_memory",
+    "unit_fail": "test_failure",
+    "source_quality_fail": "source_quality_error",
+    "legal_fail": "legal_error",
+    "package_fail": "package_error",
+    "contract_fail": "contract_error",
 }
 
 PUBLIC_STAGE_BY_INTERNAL_STAGE: Final = {
@@ -31,6 +38,12 @@ PUBLIC_STAGE_BY_INTERNAL_STAGE: Final = {
     "determinism": "determinism",
     "artifact_write": "artifact-write",
     "model-proof": "model-proof",
+    "unit": "unit",
+    "source-quality": "source-quality",
+    "legal": "legal",
+    "package": "package",
+    "runtime-control": "runtime-control",
+    "model-cache": "model-cache",
 }
 
 # This intentionally starts small. Adding a value is a disclosure-policy change.
@@ -38,6 +51,7 @@ PUBLIC_MODELS: Final = frozenset(
     {
         "chronos_bolt",
         "codegen",
+        "fast_foundation_stereo",
         "llama",
         "patchtsmixer",
         "personaplex",
@@ -60,8 +74,25 @@ PUBLIC_REASON_CODES: Final = frozenset(
         "runtime_failed",
         "timed_out",
         "unknown",
+        "canonical_document_mismatch",
+        "complexity_limit_exceeded",
+        "model_contract_failed",
+        "model_output_mismatch",
+        "python_dependency_missing",
+        "python_package_import_failed",
+        "runtime_catalog_miss",
+        "runtime_image_pull_timeout",
+        "source_formatting_failed",
+        "source_revision_mismatch",
+        "spdx_preamble_invalid",
+        "test_failed",
+        "github_automation_permission_denied",
+        "gpu_capacity_unavailable",
+        "model_cache_warm_failed",
     }
 )
+
+PUBLIC_SUBJECTS: Final = frozenset({"jsonschema", "tensorrt_model_connect"})
 
 PUBLIC_METRIC_NAMES: Final = frozenset(
     {
@@ -94,10 +125,15 @@ def public_backend(value: object) -> str:
 
 
 def public_gpu_type(value: object) -> str:
-    candidate = str(value)
-    return candidate if candidate in PUBLIC_GPU_TYPES else "protected-gpu"
+    del value
+    return "protected-gpu"
 
 
 def public_reason_code(value: object) -> str:
     candidate = str(value)
     return candidate if candidate in PUBLIC_REASON_CODES else "unknown"
+
+
+def public_subject(value: object) -> str | None:
+    candidate = str(value)
+    return candidate if candidate in PUBLIC_SUBJECTS else None

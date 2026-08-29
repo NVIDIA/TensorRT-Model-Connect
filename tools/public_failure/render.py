@@ -1,157 +1,114 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Render validated public-failure-v1 data as one self-contained HTML file."""
+"""Render validated public-failure-v1 data as deterministic plain text."""
 
 from __future__ import annotations
 
-import html
 from typing import Mapping
 
 from .contract import validate_public_failure
 
 
-STYLES = """
-:root { color-scheme: light; font-family: Arial, Helvetica, sans-serif; }
-* { box-sizing: border-box; }
-body { margin: 0; color: #202020; background: #fff; font-size: 14px; line-height: 1.45; }
-main { width: min(1120px, calc(100% - 40px)); margin: 0 auto; padding: 32px 0; }
-.report-header { padding: 18px 0 16px; border-top: 5px solid #c62828;
-  border-bottom: 1px solid #8c8c8c; }
-.product { margin: 0 0 7px; color: #555; font-size: 12px; font-weight: 700;
-  letter-spacing: .06em; text-transform: uppercase; }
-.title-row { display: flex; gap: 18px; align-items: center; justify-content: space-between; }
-h1 { margin: 0; font-size: 27px; font-weight: 600; line-height: 1.2; }
-.status { display: inline-block; padding: 5px 10px; border: 1px solid #9f1f1f;
-  color: #8f1818; background: #fff; font-size: 12px; font-weight: 700;
-  letter-spacing: .06em; }
-.notice { margin: 18px 0; padding: 10px 12px; border-left: 3px solid #686868;
-  color: #4d4d4d; background: #f5f5f5; }
-h2 { margin: 26px 0 8px; font-size: 17px; font-weight: 600; }
-table { width: 100%; border-collapse: collapse; }
-.run-meta { border-top: 1px solid #b4b4b4; }
-.run-meta th, .run-meta td { padding: 8px 10px; border-bottom: 1px solid #d4d4d4;
-  text-align: left; vertical-align: top; }
-.run-meta th { width: 180px; color: #4b4b4b; background: #f3f3f3; font-weight: 600; }
-.table-wrap { width: 100%; overflow-x: auto; border-top: 2px solid #555; }
-.failure-table { min-width: 900px; }
-.failure-table th, .failure-table td { padding: 9px 10px; border-right: 1px solid #d4d4d4;
-  border-bottom: 1px solid #bdbdbd; text-align: left; vertical-align: top; }
-.failure-table th:last-child, .failure-table td:last-child { border-right: 0; }
-.failure-table th { color: #333; background: #ededed; font-size: 12px; font-weight: 700; }
-.failure-table tbody tr:nth-child(even) { background: #fafafa; }
-.failure-index { width: 44px; text-align: center !important; }
-.classification { width: 185px; }
-.location { width: 175px; }
-.test-id { min-width: 270px; overflow-wrap: anywhere; }
-.evidence { min-width: 220px; }
-.secondary { display: block; margin-top: 3px; color: #5f5f5f; font-size: 12px; }
-.withheld { color: #5f5f5f; font-style: italic; }
-.omitted { margin: 9px 0 0; color: #555; }
-footer { margin-top: 28px; padding-top: 10px; border-top: 1px solid #aaa;
-  color: #555; font-size: 12px; }
-code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-@media (max-width: 600px) {
-  main { width: min(100% - 24px, 1120px); padding-top: 18px; }
-  .title-row { display: block; }
-  .status { margin-top: 12px; }
-  .run-meta th { width: 120px; }
+REASON_SUMMARIES = {
+    "artifact_write_failed": "The test harness could not write its result artifact.",
+    "build_failed": "The tested source failed to build.",
+    "canonical_document_mismatch": "A canonical repository document does not match policy.",
+    "complexity_limit_exceeded": "Source complexity exceeds the configured limit.",
+    "determinism_check_failed": "The determinism check failed.",
+    "github_automation_permission_denied": "GitHub Actions is not allowed to create the required pull request.",
+    "gpu_capacity_unavailable": "The protected GPU did not have enough allocatable capacity.",
+    "infrastructure_failed": "Protected CI infrastructure failed.",
+    "metric_threshold_exceeded": "A correctness metric exceeded its allowed threshold.",
+    "model_contract_failed": "A model-specific regression contract failed.",
+    "model_cache_warm_failed": "A required public model cache could not be warmed.",
+    "model_output_mismatch": "Model output did not match the required reference.",
+    "out_of_memory": "The test ran out of memory.",
+    "python_dependency_missing": "A required Python dependency is unavailable.",
+    "python_package_import_failed": "The built Python package could not be imported.",
+    "reference_failed": "The reference implementation failed.",
+    "runtime_catalog_miss": "No qualified runtime exists for this exact Source revision.",
+    "runtime_failed": "The tested runtime execution failed.",
+    "runtime_image_pull_timeout": "The qualified runtime image could not be fetched in time.",
+    "source_formatting_failed": "Source formatting validation failed.",
+    "source_revision_mismatch": "The selected runtime does not match the tested Source inputs.",
+    "spdx_preamble_invalid": "An SPDX directive is outside the approved file preamble.",
+    "test_failed": "A named test failed.",
+    "timed_out": "The test exceeded its time limit.",
+    "unknown": "No structured failure detail was safe to disclose.",
 }
-""".strip()
-
-
-def _escape(value: object) -> str:
-    return html.escape(str(value), quote=True)
 
 
 def _format_number(value: object) -> str:
     return format(float(value), ".8g")
 
 
-def _failure_row(failure: Mapping[str, object], index: int) -> str:
+def _failure_lines(failure: Mapping[str, object], index: int) -> list[str]:
+    lines = [
+        f"Failure {index}",
+        f"  Class: {failure['failure_class']}",
+        f"  Reason: {failure['reason_code']}",
+        f"  Cause: {REASON_SUMMARIES[str(failure['reason_code'])]}",
+        f"  Stage: {failure['public_stage']}",
+        f"  Model: {failure['model']}",
+        f"  Backend: {failure['backend']}",
+        "  GPU: protected-gpu",
+        f"  Test: {failure['test_id']}",
+    ]
+    if "subject" in failure:
+        lines.append(f"  Subject: {failure['subject']}")
     metric = failure.get("metric")
     if isinstance(metric, Mapping):
-        evidence = (
-            f"<code>{_escape(metric['name'])}</code>"
-            f'<span class="secondary">Observed: {_format_number(metric["observed"])}; '
-            f"Requirement: {_escape(metric['operator'])} "
-            f"{_format_number(metric['threshold'])}</span>"
+        lines.extend(
+            [
+                f"  Metric: {metric['name']}",
+                f"  Observed: {_format_number(metric['observed'])}",
+                (
+                    f"  Requirement: {metric['operator']} "
+                    f"{_format_number(metric['threshold'])}"
+                ),
+            ]
         )
-    else:
-        evidence = '<span class="withheld">Details withheld</span>'
-    return (
-        "<tr>"
-        f'<td class="failure-index">{index}</td>'
-        '<td class="classification">'
-        f"<strong>{_escape(failure['failure_class'])}</strong>"
-        f'<span class="secondary">{_escape(failure["reason_code"])}</span></td>'
-        '<td class="location">'
-        f"{_escape(failure['public_stage'])}"
-        f'<span class="secondary">{_escape(failure["model"])} · '
-        f"{_escape(failure['backend'])} · {_escape(failure['gpu_type'])}</span></td>"
-        f'<td class="test-id"><code>{_escape(failure["test_id"])}</code></td>'
-        f'<td class="evidence">{evidence}</td>'
-        "</tr>"
-    )
+    elif failure["disclosure"] == "withheld":
+        lines.append("  Evidence: details withheld")
+    return lines
 
 
 def render_failure_report(report: Mapping[str, object]) -> bytes:
-    """Validate and render one deterministic, script-free HTML document."""
+    """Validate and render one deterministic UTF-8 ``public-failure.log``."""
     validate_public_failure(report)
-    failures = report["failures"]
-    rows = "".join(_failure_row(failure, index) for index, failure in enumerate(failures, start=1))
-    if not rows:
-        rows = (
-            '<tr><td colspan="5" class="withheld">No structured failure details were '
-            "safe to disclose.</td></tr>"
-        )
-    omitted = int(report["omitted_failure_count"])
-    omitted_note = (
-        f'<p class="omitted">{omitted} additional failure(s) were omitted.</p>' if omitted else ""
-    )
     status = "FAILED" if report["result"] == "failure" else "ERROR"
-    document = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
-  <title>TRTMC Protected CI failure</title>
-  <style>{STYLES}</style>
-</head>
-<body>
-<main>
-  <header class="report-header">
-    <p class="product">TensorRT Model Connect / Protected CI</p>
-    <div class="title-row">
-      <h1>TRTMC Protected CI failure report</h1>
-      <span class="status">{status}</span>
-    </div>
-  </header>
-  <p class="notice">This report contains only approved structured fields. Raw logs and internal diagnostics are not included.</p>
-  <h2>Run identification</h2>
-  <table class="run-meta">
-    <tbody>
-      <tr><th scope="row">Repository</th><td>{_escape(report["repository"])}</td></tr>
-      <tr><th scope="row">Pull request</th><td>#{_escape(report["pr_number"])}</td></tr>
-      <tr><th scope="row">Head commit</th><td><code>{_escape(report["head_sha"])}</code></td></tr>
-      <tr><th scope="row">Tested revision</th><td><code>{_escape(report["tested_revision"])}</code> ({_escape(report["tested_revision_kind"])})</td></tr>
-      <tr><th scope="row">Run attempt</th><td>{_escape(report["run_attempt"])}</td></tr>
-      <tr><th scope="row">Generated at</th><td>{_escape(report["generated_at"])}</td></tr>
-      <tr><th scope="row">Disclosure policy</th><td>{_escape(report["policy_version"])}</td></tr>
-    </tbody>
-  </table>
-  <h2>Failure summary</h2>
-  <div class="table-wrap">
-    <table class="failure-table">
-      <thead><tr><th class="failure-index">#</th><th>Classification</th><th>Location</th><th>Test</th><th>Evidence</th></tr></thead>
-      <tbody>{rows}</tbody>
-    </table>
-  </div>
-  {omitted_note}
-  <footer>Report ID: <code>{_escape(report["report_id"])}</code></footer>
-</main>
-</body>
-</html>
-"""
-    return document.encode("utf-8")
+    lines = [
+        "TRTMC Protected CI failure",
+        "==========================",
+        "",
+        "This log contains only approved structured failure fields.",
+        "",
+        f"Status: {status}",
+        f"Repository: {report['repository']}",
+        f"Pull request: #{report['pr_number']}",
+        f"Head commit: {report['head_sha']}",
+        (
+            f"Tested revision: {report['tested_revision']} "
+            f"({report['tested_revision_kind']})"
+        ),
+        f"Run attempt: {report['run_attempt']}",
+        f"Generated at: {report['generated_at']}",
+        f"Disclosure policy: {report['policy_version']}",
+        "",
+        "Failure summary",
+        "---------------",
+    ]
+    failures = report["failures"]
+    if failures:
+        for index, failure in enumerate(failures, start=1):
+            if index > 1:
+                lines.append("")
+            lines.extend(_failure_lines(failure, index))
+    else:
+        lines.append("No structured failure details were safe to disclose.")
+    omitted = int(report["omitted_failure_count"])
+    if omitted:
+        lines.extend(["", f"{omitted} additional failure(s) were omitted."])
+    lines.extend(["", f"Report ID: {report['report_id']}"])
+    return ("\n".join(lines) + "\n").encode("utf-8")

@@ -29,7 +29,7 @@ esac
 
 docker build \
   -f "$DOCKERFILE" \
-  -t "$IMAGE" .
+  -t "$IMAGE" requirements
 
 SOURCE_DIR="$(git rev-parse --show-toplevel)"
 

@@ -50,76 +50,116 @@ __global__ void combined_volume_dhwc8_kernel(const __half* reference, const __ha
                                              const __half* right_projected,
                                              const __half* reference_norm,
                                              const __half* target_norm, __half* output) {
-    // Compute along X so reads from the NCHW inputs remain coalesced, then
-    // transpose through shared memory so the kDHWC8 output writes are also
-    // coalesced. The extra column removes shared-memory bank conflicts during
-    // the channel-minor store phase.
+    // Keep each (height, X tile) block resident across all disparities. Inputs
+    // that do not depend on disparity are loaded once and reused from shared memory.
+    __shared__ __half reference_tile[kFeatureChannels][kOutputXTile + 1];
+    __shared__ __half left_projected_tile[kProjectedChannels][kOutputXTile + 1];
+    __shared__ __half reference_norm_tile[kGroups][kOutputXTile + 1];
     __shared__ __half output_tile[kCombinedChannels][kOutputXTile + 1];
 
-    int32_t remaining_block = blockIdx.x;
-    const int32_t tile_index = remaining_block % kOutputXTiles;
-    remaining_block /= kOutputXTiles;
-    const int32_t height_index = remaining_block % kHeight;
-    const int32_t disparity = remaining_block / kHeight;
-    const int32_t output_channel = threadIdx.x / kOutputXTile;
-    const int32_t tile_width = threadIdx.x % kOutputXTile;
-    const int32_t width_index = tile_index * kOutputXTile + tile_width;
+    const int32_t tile_index = blockIdx.x % kOutputXTiles;
+    const int32_t height_index = blockIdx.x / kOutputXTiles;
+    for (int32_t index = threadIdx.x; index < kFeatureChannels * kOutputXTile;
+         index += blockDim.x) {
+        const int32_t channel = index / kOutputXTile;
+        const int32_t tile_width = index % kOutputXTile;
+        const int32_t width_index = tile_index * kOutputXTile + tile_width;
+        __half value = __float2half_rn(0.0F);
+        if (width_index < kWidth) {
+            const int32_t input_index = (channel * kHeight + height_index) * kWidth + width_index;
+            value = reference[input_index];
+        }
+        reference_tile[channel][tile_width] = value;
+    }
+    for (int32_t index = threadIdx.x; index < kProjectedChannels * kOutputXTile;
+         index += blockDim.x) {
+        const int32_t channel = index / kOutputXTile;
+        const int32_t tile_width = index % kOutputXTile;
+        const int32_t width_index = tile_index * kOutputXTile + tile_width;
+        __half value = __float2half_rn(0.0F);
+        if (width_index < kWidth) {
+            const int32_t input_index = (channel * kHeight + height_index) * kWidth + width_index;
+            value = left_projected[input_index];
+        }
+        left_projected_tile[channel][tile_width] = value;
+    }
+    for (int32_t index = threadIdx.x; index < kGroups * kOutputXTile; index += blockDim.x) {
+        const int32_t group = index / kOutputXTile;
+        const int32_t tile_width = index % kOutputXTile;
+        const int32_t width_index = tile_index * kOutputXTile + tile_width;
+        __half value = __float2half_rn(0.0F);
+        if (width_index < kWidth) {
+            const int32_t norm_index = (group * kHeight + height_index) * kWidth + width_index;
+            value = reference_norm[norm_index];
+        }
+        reference_norm_tile[group][tile_width] = value;
+    }
+    __syncthreads();
 
-    __half value = __float2half_rn(0.0F);
-    if (width_index < kWidth) {
-        if (output_channel >= kGroups) {
-            int32_t projected_channel = output_channel - kGroups;
-            const __half* projected = left_projected;
-            int32_t projected_width = width_index;
-            if (projected_channel >= kProjectedChannels) {
-                projected_channel -= kProjectedChannels;
-                projected = right_projected;
-                projected_width -= disparity;
+    for (int32_t disparity = 0; disparity < kDisparities; ++disparity) {
+        const int32_t projection_index = threadIdx.x;
+        if (projection_index < 2 * kProjectedChannels * kOutputXTile) {
+            int32_t projected_channel = projection_index / kOutputXTile;
+            const int32_t tile_width = projection_index % kOutputXTile;
+            const int32_t width_index = tile_index * kOutputXTile + tile_width;
+            const int32_t output_channel = kGroups + projected_channel;
+            __half value = __float2half_rn(0.0F);
+            if (width_index < kWidth) {
+                if (projected_channel < kProjectedChannels) {
+                    value = left_projected_tile[projected_channel][tile_width];
+                } else {
+                    projected_channel -= kProjectedChannels;
+                    const int32_t projected_width = width_index - disparity;
+                    if (projected_width >= 0) {
+                        const int32_t projected_input_index =
+                            (projected_channel * kHeight + height_index) * kWidth + projected_width;
+                        value = right_projected[projected_input_index];
+                    }
+                }
             }
-            if (projected_width >= 0) {
-                const int32_t projected_index =
-                    (projected_channel * kHeight + height_index) * kWidth + projected_width;
-                value = projected[projected_index];
-            }
-        } else {
-            const int32_t group = output_channel;
+            output_tile[output_channel][tile_width] = value;
+        }
+
+        // One thread retains the original channel accumulation order for each
+        // correlation value, keeping results bitwise identical to the old kernel.
+        const int32_t correlation_index = threadIdx.x;
+        if (correlation_index < kGroups * kOutputXTile) {
+            const int32_t group = correlation_index / kOutputXTile;
+            const int32_t tile_width = correlation_index % kOutputXTile;
+            const int32_t width_index = tile_index * kOutputXTile + tile_width;
             const int32_t target_width = width_index - disparity;
-            if (target_width >= 0) {
+            __half value = __float2half_rn(0.0F);
+            if (width_index < kWidth && target_width >= 0) {
                 float dot = 0.0F;
                 for (int32_t channel = 0; channel < kChannelsPerGroup; ++channel) {
                     const int32_t channel_index = group * kChannelsPerGroup + channel;
-                    const int32_t reference_index =
-                        (channel_index * kHeight + height_index) * kWidth + width_index;
                     const int32_t target_index =
                         (channel_index * kHeight + height_index) * kWidth + target_width;
-                    dot += __half2float(reference[reference_index]) *
+                    dot += __half2float(reference_tile[channel_index][tile_width]) *
                            __half2float(target[target_index]);
                 }
-                const int32_t reference_norm_index =
-                    (group * kHeight + height_index) * kWidth + width_index;
                 const int32_t target_norm_index =
                     (group * kHeight + height_index) * kWidth + target_width;
-                const float denominator = __half2float(reference_norm[reference_norm_index]) *
+                const float denominator = __half2float(reference_norm_tile[group][tile_width]) *
                                               __half2float(target_norm[target_norm_index]) +
                                           1.0e-5F;
                 value = __float2half_rn(dot / denominator);
             }
+            output_tile[group][tile_width] = value;
         }
-    }
-    output_tile[output_channel][tile_width] = value;
-    __syncthreads();
+        __syncthreads();
 
-    // TensorRT's kDHWC8 format stores the vectorized channel dimension minor.
-    // kCombinedChannels is exactly divisible by eight, so there is no padding.
-    const int32_t store_width = threadIdx.x / kCombinedChannels;
-    const int32_t store_channel = threadIdx.x % kCombinedChannels;
-    const int32_t global_store_width = tile_index * kOutputXTile + store_width;
-    if (global_store_width < kWidth) {
-        const int32_t output_index =
-            ((disparity * kHeight + height_index) * kWidth + global_store_width) *
-                kCombinedChannels +
-            store_channel;
-        output[output_index] = output_tile[store_channel][store_width];
+        const int32_t store_width = threadIdx.x / kCombinedChannels;
+        const int32_t store_channel = threadIdx.x % kCombinedChannels;
+        const int32_t global_store_width = tile_index * kOutputXTile + store_width;
+        if (global_store_width < kWidth) {
+            const int32_t output_index =
+                ((disparity * kHeight + height_index) * kWidth + global_store_width) *
+                    kCombinedChannels +
+                store_channel;
+            output[output_index] = output_tile[store_channel][store_width];
+        }
+        __syncthreads();
     }
 }
 
@@ -253,8 +293,7 @@ FastFoundationStereoCombinedVolumePlugin::enqueue(nvinfer1::PluginTensorDesc con
                         stream>>>(static_cast<const __half*>(inputs[1]), target_norm);
     if (cudaGetLastError() != cudaSuccess)
         return -1;
-    combined_volume_dhwc8_kernel<<<kDisparities * kHeight * kOutputXTiles, kOutputThreads, 0,
-                                   stream>>>(
+    combined_volume_dhwc8_kernel<<<kHeight * kOutputXTiles, kOutputThreads, 0, stream>>>(
         static_cast<const __half*>(inputs[0]), static_cast<const __half*>(inputs[1]),
         static_cast<const __half*>(inputs[2]), static_cast<const __half*>(inputs[3]),
         reference_norm, target_norm, static_cast<__half*>(outputs[0]));

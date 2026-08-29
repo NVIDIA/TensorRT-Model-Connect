@@ -10,5 +10,5 @@ legacy_runtime_strategy_aliases = ["text_to_audio|default|_|_|text_to_audio_bark
 runtime_tests = [
   "test_bark_config_schema|test_bark_config_schema.cpp|trtmc_model_bark|_|_",
   "test_bark_generation_plan|test_bark_generation_plan.cpp|_|_|_",
-  "test_bark_pipeline|test_bark_pipeline.cpp|trtmc_model_bark|_|REQUIRES_TRT",
+  "test_bark_pipeline|test_bark_pipeline.cpp|trtmc_model_bark|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

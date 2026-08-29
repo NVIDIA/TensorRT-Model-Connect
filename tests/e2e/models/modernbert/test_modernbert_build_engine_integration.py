@@ -11,6 +11,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytestmark = [pytest.mark.gpu, pytest.mark.trt]
+
 pytest.importorskip("tensorrt", reason="TensorRT is required for family builder tests")
 
 

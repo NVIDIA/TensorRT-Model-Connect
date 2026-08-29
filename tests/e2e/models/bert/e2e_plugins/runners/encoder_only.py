@@ -42,9 +42,13 @@ class EncoderOnlyRunner:
         bundle_path = os.path.join(ctx.engine_dir, case.bundle)
         prompt = case.inputs.get("prompt", "")
 
-        # encoder-only models use 'encode' to get hidden states / CLS embedding
+        # Embedding runtimes use the pooled/L2-normalized public entrypoint;
+        # representation runtimes keep the CLS-oriented encoder contract.
+        entrypoint = (
+            "embed" if case.runtime_strategy == "bert_embedding" else "encode"
+        )
         cmd = [
-            ctx.binary_path, "encode", bundle_path,
+            ctx.binary_path, entrypoint, bundle_path,
             "--prompt", prompt,
         ]
 

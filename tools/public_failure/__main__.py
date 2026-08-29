@@ -28,6 +28,7 @@ def _context_from_object(value: Mapping[str, object]) -> ExportContext:
         head_sha=value.get("head_sha"),
         base_sha=value.get("base_sha"),
         tested_revision=value.get("tested_revision"),
+        dispatch_nonce=value.get("dispatch_nonce"),
         run_attempt=value.get("run_attempt"),
         result=value.get("result"),
         generated_at=value.get("generated_at"),
@@ -37,7 +38,7 @@ def _context_from_object(value: Mapping[str, object]) -> ExportContext:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Generate local public-failure-v1 JSON and HTML. Nothing is uploaded."
+        description="Generate local public-failure-v1 JSON and text log. Nothing is uploaded."
     )
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--context", type=Path, required=True)
@@ -51,8 +52,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     context = _context_from_object(_load_object(args.context))
     artifacts = build_failure_artifacts(internal, context)
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "report.html").unlink(missing_ok=True)
     (args.output_dir / "public-failure.json").write_bytes(artifacts.json_bytes)
-    (args.output_dir / "report.html").write_bytes(artifacts.html_bytes)
+    (args.output_dir / "public-failure.log").write_bytes(artifacts.log_bytes)
     print(f"Local preview written to {args.output_dir}")
     return 0
 

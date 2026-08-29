@@ -1,0 +1,27 @@
+{
+  "name": "whisper-small-fp16",
+  "hf_id": "openai/whisper-small",
+  "hf_revision": "973afd24965f72e36ca33b3055d56a652f456b4d",
+  "bundle": "whisper-small-fp16.bundle",
+  "family": "whisper",
+  "runtime_strategy": "whisper_speech_to_text",
+  "task_strategy": "speech_to_text",
+  "precision": "fp16",
+  "fp32_layers": [0],
+  "max_cache_length": 128,
+  "trust_remote_code": false,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "testcases": [
+    {
+      "name": "whisper-small-fp16",
+      "trace_id": "IT-E2E-WHSPS-FP16-01",
+      "reference_family": "asr_whisper",
+      "user_contract": "exact_transcript",
+      "reference_precision": "fp32",
+      "test_type": "transcription",
+      "prompt": "test",
+      "max_new_tokens": 20,
+      "test_input_audio": "data/Recording.wav"
+    }
+  ]
+}

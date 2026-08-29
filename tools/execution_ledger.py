@@ -327,6 +327,47 @@ class ExecutionLedger:
             reopened.append(case_id)
         return reopened
 
+    def reopen_cases(
+        self,
+        case_ids: Sequence[str],
+        *,
+        reason: str,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> list[str]:
+        """Reopen explicitly selected terminal cases without touching other receipts."""
+
+        selected = list(dict.fromkeys(str(case_id) for case_id in case_ids))
+        if not str(reason).strip():
+            raise ExecutionLedgerError("case reopen reason must be non-empty")
+        receipts: dict[str, dict[str, Any]] = {}
+        for case_id in selected:
+            receipt = self.receipt(case_id)
+            if receipt["state"] != "terminal":
+                raise ExecutionLedgerError(f"case {case_id!r} is not terminal")
+            receipts[case_id] = receipt
+
+        reopened: list[str] = []
+        for case_id in selected:
+            receipt = receipts[case_id]
+            receipt["previous_results"].append(
+                {
+                    "attempt": receipt["attempts"][-1]["attempt"],
+                    "result": receipt["result"],
+                    "payload": receipt["payload"],
+                    "finished_at": receipt["updated_at"],
+                    "reopen_reason": str(reason),
+                    "reopen_evidence": deepcopy(dict(evidence or {})),
+                }
+            )
+            receipt["state"] = "pending"
+            receipt["stage"] = None
+            receipt["result"] = None
+            receipt["payload"] = None
+            receipt["updated_at"] = _now()
+            self._write_receipt(case_id, receipt)
+            reopened.append(case_id)
+        return reopened
+
     def _pending_receipt(self, case_id: str) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -387,7 +428,7 @@ class ExecutionLedger:
         previous_results = receipt.get("previous_results")
         if not isinstance(previous_results, list) or any(
             not isinstance(previous, Mapping)
-            or previous.get("result") != "white"
+            or previous.get("result") not in TERMINAL_RESULTS
             or not isinstance(previous.get("payload"), Mapping)
             for previous in previous_results
         ):
@@ -409,7 +450,13 @@ class ExecutionLedger:
                 "failed",
                 "timed_out",
             }:
-                raise ExecutionLedgerError(f"pending case {case_id!r} has no retryable attempt")
+                explicitly_reopened = bool(previous_results) and previous_results[-1].get(
+                    "attempt"
+                ) == attempts[-1].get("attempt")
+                if not explicitly_reopened:
+                    raise ExecutionLedgerError(
+                        f"pending case {case_id!r} has no retryable attempt"
+                    )
         if state in {"running", "terminal"} and receipt.get("stage") != attempts[-1].get(
             "stage"
         ):

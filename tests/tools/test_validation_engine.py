@@ -1372,8 +1372,8 @@ def test_default_suites_include_encoder_embedding_parity() -> None:
         "representation_parity",
         "embedding_vector",
     ]
-    assert len(suite["default_model_names"]) == 19
-    assert len(selected) == 19
+    assert len(suite["default_model_names"]) == 20
+    assert len(selected) == 20
     assert {model["name"] for model in selected} == set(suite["default_model_names"])
     models_by_name = {model["name"]: model for model in models}
     assert validation_engine.resolve_suite_for_model(
@@ -1388,6 +1388,9 @@ def test_default_suites_include_encoder_embedding_parity() -> None:
     assert validation_engine.resolve_suite_for_model(
         suite, models_by_name["fnet-base"]
     )["gates"]["max_pair_cosine_abs_delta"] == 0.1
+    assert validation_engine.effective_validation_config(
+        suite, models_by_name["multilingual-e5-small"]
+    )["sts_prompt_prefix"] == "query: "
 
 
 def test_phi4_multimodal_workload_reserves_dynamic_hd_cache() -> None:
@@ -1435,6 +1438,32 @@ def test_prepare_stsbenchmark_expands_each_pair_to_shared_sentence_inputs(
     assert len(answers["requests"]) == 2
     assert manifest["pair_count"] == 1
     assert manifest["request_count"] == 2
+
+
+def test_prepare_stsbenchmark_applies_configured_shared_prompt_prefix(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "stsbenchmark_test.jsonl"
+    _write_stsbenchmark(dataset)
+    suite = validation_engine.suite_by_id(
+        validation_engine.load_suites(), "stsbenchmark_encoder_embedding_parity"
+    )
+
+    outputs = validation_engine.prepare_sts_pair_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+        subject="main-captions",
+        sample_seed=None,
+        validation_config={"sts_prompt_prefix": "query: "},
+    )
+
+    prompts = validation_engine.load_jsonl(outputs["prompts"])
+    assert [row["prompt"] for row in prompts] == [
+        "query: A plane is taking off.",
+        "query: An airplane is taking off.",
+    ]
 
 
 def test_compare_encoder_embedding_predictions_gates_vector_and_pair_parity() -> None:
@@ -1816,16 +1845,25 @@ def test_plan_selects_refcoco_locateanything_model() -> None:
 def test_plan_selects_librispeech_asr_models() -> None:
     suites = validation_engine.load_suites()
     models = validation_engine.load_manifest_records()
+    whisper_small = next(
+        model for model in models if model["name"] == "whisper-small-fp16"
+    )
+
+    assert whisper_small["hf_revision"] == (
+        "973afd24965f72e36ca33b3055d56a652f456b4d"
+    )
 
     rows = validation_engine.build_plan(suites, models, suite_id="librispeech_clean_asr")
 
     selected = {row["model"]: row for row in rows}
     assert "whisper-tiny-fp16" in selected
     assert selected["whisper-tiny-fp16"]["runtime_strategy"] == "whisper_speech_to_text"
+    assert selected["whisper-small-fp16"]["runtime_strategy"] == "whisper_speech_to_text"
     assert "canary-1b-v2" in selected
     assert selected["canary-1b-v2"]["runtime_strategy"] == "canary_speech_to_text"
     assert set(selected) == {
         "whisper-tiny-fp16",
+        "whisper-small-fp16",
         "whisper-large-v3-turbo",
         "canary-1b-v2",
     }
@@ -7445,6 +7483,7 @@ def test_flux_fp8_build_command_resolves_model_owned_scales(tmp_path: Path) -> N
 def test_eval_one_model_diffusion_uses_clip_parity_summary(
     tmp_path: Path, monkeypatch
 ) -> None:
+    revision = "a" * 40
     dataset = tmp_path / "dpg_bench.json"
     dataset.write_text(json.dumps({"dataset": "DPG-Bench", "requests": [{
         "sample_id": "dpg_bench_000000",
@@ -7467,6 +7506,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
         }])
 
     def fake_bundle(*_args, **kwargs):
+        assert kwargs["expected_source_revision"] == revision
         return kwargs["bundle_path"], True
 
     def fake_trt(args):
@@ -7494,6 +7534,7 @@ def test_eval_one_model_diffusion_uses_clip_parity_summary(
     monkeypatch.setattr(validation_engine, "run_hf_reference_subprocess", fake_hf)
     monkeypatch.setattr(validation_engine, "ensure_bundle", fake_bundle)
     monkeypatch.setattr(validation_engine, "run_bundle", fake_trt)
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", revision)
     monkeypatch.setattr(validation_engine, "compare_diffusion_image_predictions", fake_compare)
     monkeypatch.setattr(
         validation_engine,

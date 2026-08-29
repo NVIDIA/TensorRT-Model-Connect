@@ -20,7 +20,7 @@ class PublicFailureArtifacts:
 
     report: dict[str, Any]
     json_bytes: bytes
-    html_bytes: bytes
+    log_bytes: bytes
 
 
 def build_failure_artifacts(
@@ -30,10 +30,10 @@ def build_failure_artifacts(
     report = export_failure(internal_artifacts, context)
     validate_public_failure(report)
     json_bytes = serialize_public_failure(report)
-    html_bytes = render_failure_report(report)
-    assert_public_payload_safe(report, html_bytes)
+    log_bytes = render_failure_report(report)
+    assert_public_payload_safe(report, log_bytes)
     return PublicFailureArtifacts(
         report=report,
         json_bytes=json_bytes,
-        html_bytes=html_bytes,
+        log_bytes=log_bytes,
     )

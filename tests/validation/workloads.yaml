@@ -717,6 +717,7 @@ suites:
     user_contract: exact_transcript
     default_model_names:
       - whisper-tiny-fp16
+      - whisper-small-fp16
       - whisper-large-v3-turbo
       - canary-1b-v2
     dataset:
@@ -1459,6 +1460,7 @@ suites:
       - electra-base-discriminator
       - fnet-base
       - modernbert-base
+      - multilingual-e5-small
       - nemotron-embed-vl-1b-v2
       - paraphrase-multilingual-minilm-l12-v2
       - roberta-base
@@ -1484,6 +1486,10 @@ suites:
       task_metric: sts_spearman
     model_overrides:
       by_model:
+        multilingual-e5-small:
+          # JiaxinD: E5's model card requires the query prefix on both sides
+          # for symmetric semantic-similarity tasks such as STSBenchmark.
+          sts_prompt_prefix: "query: "
         xlnet-base:
           # Upstream XLNet retains FP32 relative-attention parameters that
           # cannot participate in its FP16 einsum. Compare both sides in FP32.

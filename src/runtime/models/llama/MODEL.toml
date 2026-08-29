@@ -5,12 +5,12 @@ id = "llama"
 runtime_library = "libtrtmc_model_llama.so"
 runtime_plugins = ["plugin.cpp|register_llama_plugin"]
 runtime_strategies = ["llama_decoder_kv_cache"]
-[validation_profiles]
-decoder_debug = ["llama_decoder_kv_cache"]
-
 runtime_tests = [
   "test_llama_plugin_helpers|test_llama_plugin_helpers.cpp|_|plugin_helpers.cpp|_",
   "test_llama_chat_template|test_llama_chat_template.cpp|trtmc_model_llama|_|_",
-  "test_llama_pipeline|test_llama_pipeline.cpp|trtmc_model_llama,trtmc_backend_trt|_|REQUIRES_TRT",
+  "test_llama_pipeline|test_llama_pipeline.cpp|trtmc_model_llama,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
   "test_llama_native_kv_cache|test_llama_native_kv_cache.cpp|trtmc_model_llama|_|REQUIRES_GPU",
 ]
+
+[validation_profiles]
+decoder_debug = ["llama_decoder_kv_cache"]

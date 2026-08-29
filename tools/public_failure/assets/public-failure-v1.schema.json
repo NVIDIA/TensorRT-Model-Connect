@@ -22,7 +22,7 @@
   ],
   "properties": {
     "schema_version": { "const": 1 },
-    "policy_version": { "const": "2026-08-26" },
+    "policy_version": { "const": "2026-08-27" },
     "report_id": {
       "type": "string",
       "maxLength": 100,
@@ -33,7 +33,12 @@
     "head_sha": { "$ref": "#/$defs/sha" },
     "base_sha": { "$ref": "#/$defs/sha" },
     "tested_revision": { "$ref": "#/$defs/sha" },
-    "tested_revision_kind": { "const": "head" },
+    "tested_revision_kind": { "enum": ["head", "merge"] },
+    "dispatch_nonce": {
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[0-9a-f]{32}$"
+    },
     "run_attempt": { "type": "integer", "minimum": 1, "maximum": 1000 },
     "result": { "enum": ["failure", "error"] },
     "failures": {
@@ -100,6 +105,12 @@
             "determinism",
             "artifact-write",
             "model-proof",
+            "unit",
+            "source-quality",
+            "legal",
+            "package",
+            "runtime-control",
+            "model-cache",
             "protected-ci"
           ]
         },
@@ -107,6 +118,7 @@
           "enum": [
             "chronos_bolt",
             "codegen",
+            "fast_foundation_stereo",
             "llama",
             "patchtsmixer",
             "personaplex",
@@ -137,6 +149,11 @@
             "infrastructure_error",
             "timeout",
             "out_of_memory",
+            "test_failure",
+            "source_quality_error",
+            "legal_error",
+            "package_error",
+            "contract_error",
             "unknown"
           ]
         },
@@ -151,19 +168,56 @@
             "reference_failed",
             "runtime_failed",
             "timed_out",
+            "canonical_document_mismatch",
+            "complexity_limit_exceeded",
+            "model_contract_failed",
+            "model_output_mismatch",
+            "python_dependency_missing",
+            "python_package_import_failed",
+            "runtime_catalog_miss",
+            "runtime_image_pull_timeout",
+            "source_formatting_failed",
+            "source_revision_mismatch",
+            "spdx_preamble_invalid",
+            "test_failed",
+            "github_automation_permission_denied",
+            "gpu_capacity_unavailable",
+            "model_cache_warm_failed",
             "unknown"
           ]
         },
         "metric": { "$ref": "#/$defs/metric" },
+        "subject": { "enum": ["jsonschema", "tensorrt_model_connect"] },
+        "excerpt": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "pattern": "^[ -~]+$"
+          }
+        },
         "disclosure": { "enum": ["full", "truncated", "withheld"] }
       },
       "allOf": [
         {
           "if": {
-            "properties": { "disclosure": { "const": "full" } },
-            "required": ["disclosure"]
+            "properties": { "reason_code": { "const": "metric_threshold_exceeded" } },
+            "required": ["reason_code"]
           },
           "then": { "required": ["metric"] }
+        },
+        {
+          "if": {
+            "properties": { "reason_code": { "const": "unknown" } },
+            "required": ["reason_code"]
+          },
+          "then": {
+            "properties": { "disclosure": { "const": "withheld" } },
+            "not": { "required": ["excerpt"] }
+          }
         }
       ]
     }

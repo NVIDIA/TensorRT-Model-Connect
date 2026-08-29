@@ -22,6 +22,7 @@ class FastFoundationStereoPipeline final : public IPipeline {
   public:
     FastFoundationStereoPipeline(std::unique_ptr<ITrtModule> feature,
                                  std::unique_ptr<ITrtModule> post, std::string model_id);
+    ~FastFoundationStereoPipeline() override;
 
     StereoDisparityResult estimate_disparity(const float* left_pixels, const float* right_pixels,
                                              int32_t height, int32_t width) override;
@@ -31,6 +32,8 @@ class FastFoundationStereoPipeline final : public IPipeline {
 
   private:
     void bind_post_inputs();
+    void pin_input(std::vector<float>& input, bool& pinned, const char* name);
+    void upload_feature_input(const char* name, const std::vector<float>& input);
 
     std::unique_ptr<ITrtModule> feature_;
     std::unique_ptr<ITrtModule> post_;
@@ -39,6 +42,8 @@ class FastFoundationStereoPipeline final : public IPipeline {
     std::vector<float> padded_output_;
     std::string model_id_;
     bool post_inputs_bound_{false};
+    bool left_input_pinned_{false};
+    bool right_input_pinned_{false};
 };
 
 } // namespace trtmc

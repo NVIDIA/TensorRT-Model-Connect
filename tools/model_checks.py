@@ -29,11 +29,12 @@ for source_root in (REPOSITORY, PYTHON_SOURCE):
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
-from tools import campaign_shards  # noqa: E402
+from tools import campaign_shards, case_evidence  # noqa: E402
 from tools import model_ci  # noqa: E402
 from tools import model_selection  # noqa: E402
 from tools import perf_matrix  # noqa: E402
 from tools import trtmc_validate  # noqa: E402
+from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools.ci.context import CiContext  # noqa: E402
 from tools.ci.model_reference_cache import (  # noqa: E402
     ModelReferenceCacheWarmer,
@@ -64,6 +65,7 @@ MANAGED_TASK_ENVIRONMENT_VARIABLES = frozenset(
         PROFILE_ROOT_ENV,
         PREBUILT_ONLY_ENV,
         "TRTMC_PERF_SOURCE_REVISION",
+        trtmc_validate.REFERENCE_SOURCES_PREBUILT_ONLY_ENV,
         "TRTMC_VALIDATION_SOURCE_REVISION",
     }
 )
@@ -108,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--environment",
         help="execution environment ID or YAML; defaults to the platform ID",
     )
+    run.add_argument(
+        "--debug",
+        action="store_true",
+        help="allow missing dependencies to be prepared during this non-qualification run",
+    )
     run.add_argument("--run-id", help="stable output directory name")
     run.add_argument("--dry-run", action="store_true", help="write and print commands only")
     run.add_argument(
@@ -119,6 +126,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         action="store_true",
         help="resume the existing --run-id after verifying its request",
+    )
+    run.add_argument(
+        "--invalidate-model",
+        action="append",
+        default=[],
+        help=(
+            "with --resume, re-run every selected Accuracy and Perf case for this "
+            "model; repeatable"
+        ),
     )
     run.add_argument(
         "--hf-cache-seed-dir",
@@ -418,11 +434,17 @@ def _task_environment(
     overrides: Mapping[str, str] | None = None,
     *,
     source_revision: str = "",
+    allow_dependency_creation: bool = True,
 ) -> dict[str, str]:
-    """Use a managed shared profile cache and create missing profiles on demand."""
+    """Build a child environment rooted in this worktree and its managed caches."""
     child = os.environ.copy()
     child[PROFILE_ROOT_ENV] = str(environment["storage"]["python_profiles_root"])
-    child.pop(PREBUILT_ONLY_ENV, None)
+    if allow_dependency_creation:
+        child.pop(PREBUILT_ONLY_ENV, None)
+        child.pop(trtmc_validate.REFERENCE_SOURCES_PREBUILT_ONLY_ENV, None)
+    else:
+        child[PREBUILT_ONLY_ENV] = "1"
+        child[trtmc_validate.REFERENCE_SOURCES_PREBUILT_ONLY_ENV] = "1"
     library_dirs = [str(path) for path in environment.get("library_dirs", [])]
     missing_library_dirs = [path for path in library_dirs if not Path(path).is_dir()]
     if missing_library_dirs:
@@ -446,17 +468,17 @@ def _task_environment(
         executable_dirs.append(inherited_path)
     if executable_dirs:
         child["PATH"] = os.pathsep.join(executable_dirs)
-    python_dirs = [str(path) for path in environment.get("python_dirs", [])]
-    missing_python_dirs = [path for path in python_dirs if not Path(path).is_dir()]
+    configured_python_dirs = [str(path) for path in environment.get("python_dirs", [])]
+    missing_python_dirs = [path for path in configured_python_dirs if not Path(path).is_dir()]
     if missing_python_dirs:
         raise ModelCheckError(
             "model-check Python runtime directory does not exist: " + ", ".join(missing_python_dirs)
         )
+    python_dirs = [str(PYTHON_SOURCE), str(REPOSITORY), *configured_python_dirs]
     inherited_python_path = child.get("PYTHONPATH", "")
     if inherited_python_path:
-        python_dirs.append(inherited_python_path)
-    if python_dirs:
-        child["PYTHONPATH"] = os.pathsep.join(python_dirs)
+        python_dirs.extend(inherited_python_path.split(os.pathsep))
+    child["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(filter(None, python_dirs)))
     child.update(
         {
             str(name): str(value)
@@ -467,6 +489,7 @@ def _task_environment(
         revision = source_revision.lower()
         child["TRTMC_VALIDATION_SOURCE_REVISION"] = revision
         child["TRTMC_PERF_SOURCE_REVISION"] = revision
+        child["TRTMC_ENGINE_BUILD_REVISION"] = revision
     child.update(overrides or {})
     return child
 
@@ -943,93 +966,6 @@ def _task_bindings(plan: Mapping[str, Any], task: str) -> list[dict[str, Any]]:
     ]
 
 
-def _public_report_identity(path: Path) -> tuple[str, set[str]] | None:
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(report, Mapping):
-        return None
-    identity = report.get("identity")
-    results = report.get("results")
-    if not isinstance(identity, Mapping) or not isinstance(results, list):
-        return None
-    revision = str(identity.get("source_revision", ""))
-    result_ids = {
-        str(row["id"])
-        for row in results
-        if isinstance(row, Mapping) and str(row.get("id", ""))
-    }
-    if not revision or not result_ids:
-        return None
-    return revision, result_ids
-
-
-def _model_source_identity(
-    execution_root: Path,
-    *,
-    task_bindings: Mapping[str, Sequence[Mapping[str, Any]]],
-    task_results: Mapping[str, int],
-    expected_revision: str,
-) -> dict[str, Any]:
-    """Verify each selected model's task evidence against public reports."""
-    expected_ids: dict[str, dict[str, set[str]]] = {}
-    for task, bindings in task_bindings.items():
-        for binding in bindings:
-            model = str(binding["model"])
-            if task == "accuracy":
-                result_id = f"{model}::{binding['workload']}"
-            else:
-                result_id = str(binding["entry"])
-            expected_ids.setdefault(model, {}).setdefault(task, set()).add(result_id)
-
-    report_paths = {
-        "accuracy": [execution_root / "accuracy" / "report.json"],
-        "perf": sorted((execution_root / "perf" / "results").glob("*/report.json")),
-    }
-    reports = {
-        task: [
-            record
-            for path in report_paths.get(task, [])
-            if (record := _public_report_identity(path)) is not None
-        ]
-        for task in task_bindings
-    }
-
-    models: dict[str, Any] = {}
-    for model, expected_tasks in sorted(expected_ids.items()):
-        observed_tasks: set[str] = set()
-        observed_revisions: set[str] = set()
-        for task, ids in expected_tasks.items():
-            if task_results.get(task) != 0:
-                continue
-            matched_ids: set[str] = set()
-            task_revisions: set[str] = set()
-            for revision, result_ids in reports.get(task, []):
-                overlap = ids & result_ids
-                if not overlap:
-                    continue
-                matched_ids.update(overlap)
-                task_revisions.add(revision)
-            if matched_ids == ids and task_revisions:
-                observed_tasks.add(task)
-                observed_revisions.update(task_revisions)
-        source_revision = (
-            next(iter(observed_revisions)) if len(observed_revisions) == 1 else None
-        )
-        models[model] = {
-            "status": (
-                "consistent"
-                if observed_tasks == set(expected_tasks)
-                and observed_revisions == {expected_revision}
-                else "inconsistent"
-            ),
-            "source_revision": source_revision,
-            "tasks": sorted(observed_tasks),
-        }
-    return {"models": models}
-
-
 def _campaign_cases(
     plan: Mapping[str, Any],
     *,
@@ -1266,6 +1202,7 @@ def _perf_command(
     resolved_environment: Path,
     *,
     bindings: Sequence[Mapping[str, Any]] | None = None,
+    require_prebuilt: bool = False,
 ) -> list[str] | None:
     bindings = list(bindings) if bindings is not None else _task_bindings(plan, "perf")
     if not bindings:
@@ -1281,12 +1218,43 @@ def _perf_command(
     ]
     for binding in bindings:
         command.extend(["--entry", str(binding["entry"])])
+    if require_prebuilt:
+        command.append("--no-build")
+    return command
+
+
+def _perf_prepare_command(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    resolved_environment: Path,
+    receipt: Path,
+    *,
+    bindings: Sequence[Mapping[str, Any]] | None = None,
+) -> list[str] | None:
+    bindings = list(bindings) if bindings is not None else _task_bindings(plan, "perf")
+    if not bindings:
+        return None
+    config = environment["tasks"]["perf"]
+    command = [
+        str(config["runner_python"]),
+        str(REPOSITORY / "tools" / "perf_matrix.py"),
+        "prepare",
+        str(config["suite"]),
+        "--environment",
+        str(resolved_environment),
+        "--output",
+        str(receipt),
+    ]
+    for binding in bindings:
+        command.extend(["--entry", str(binding["entry"])])
     return command
 
 
 def _perf_resume_command(
     environment: Mapping[str, Any],
     results_root: Path,
+    *,
+    require_prebuilt: bool = False,
 ) -> list[str] | None:
     if not results_root.is_dir():
         return None
@@ -1300,15 +1268,18 @@ def _perf_resume_command(
             f"cannot identify one Perf run to resume below {results_root}: found {len(candidates)}"
         )
     config = environment["tasks"]["perf"]
-    return [
+    command = [
         str(config["runner_python"]),
         str(REPOSITORY / "tools" / "perf_matrix.py"),
         "resume",
         str(candidates[0]),
     ]
+    if require_prebuilt:
+        command.append("--no-build")
+    return command
 
 
-def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
+def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> dict[str, Any]:
     try:
         previous = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -1317,9 +1288,17 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
         raise ModelCheckError(f"cannot read resume request {path}: {exc}") from exc
     if not isinstance(previous, Mapping):
         raise ModelCheckError(f"resume request must contain a JSON object: {path}")
+    previous_revision = previous.get("revision")
+    try:
+        case_evidence.exact_source_revision(
+            previous_revision, label="exact recorded execution revision"
+        )
+    except case_evidence.CaseEvidenceError as error:
+        raise ModelCheckError(str(error)) from error
     for field in (
         "schema_version",
         "run_id",
+        "intent",
         "platform",
         "platform_source",
         "platform_config",
@@ -1331,10 +1310,34 @@ def _verify_resume_request(path: Path, request: Mapping[str, Any]) -> None:
     ):
         if previous.get(field) != request.get(field):
             raise ModelCheckError(f"cannot resume because the resolved {field} changed")
-    if request.get("shard") is not None:
-        for field in ("revision", "shard"):
-            if previous.get(field) != request.get(field):
-                raise ModelCheckError(f"cannot resume because the resolved {field} changed")
+    if previous.get("shard") != request.get("shard"):
+        raise ModelCheckError("cannot resume because the resolved shard changed")
+    return dict(previous)
+
+
+def _write_request(path: Path, request: Mapping[str, Any]) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _record_execution_attempt(
+    request: dict[str, Any],
+    *,
+    revision: str,
+    source_identity: Mapping[str, Any],
+) -> None:
+    attempts = request.setdefault("execution_attempts", [])
+    if not isinstance(attempts, list):
+        raise ModelCheckError("cannot resume with invalid execution attempt history")
+    attempts.append(
+        {
+            "revision": revision,
+            "source_identity": dict(source_identity),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "dry_run": bool(request.get("dry_run")),
+        }
+    )
 
 
 def _perf_shard_output(shard_root: Path) -> Path | None:
@@ -1345,6 +1348,85 @@ def _perf_shard_output(shard_root: Path) -> Path | None:
     if len(candidates) > 1:
         raise ModelCheckError(f"shard has multiple Performance runs: {shard_root}")
     return candidates[0] if candidates else None
+
+
+def _resume_preparation_bindings(
+    execution_root: Path,
+    task_bindings: Mapping[str, Sequence[Mapping[str, Any]]],
+    invalidated_models: set[str],
+) -> dict[str, list[Mapping[str, Any]]]:
+    active: dict[str, list[Mapping[str, Any]]] = {}
+    for task, bindings in task_bindings.items():
+        bindings = list(bindings)
+        output = (
+            execution_root / "accuracy"
+            if task == "accuracy"
+            else _perf_shard_output(execution_root)
+        )
+        if output is None or not (output / "ledger" / "campaign.json").is_file():
+            active[task] = bindings
+            continue
+        try:
+            ledger = ExecutionLedger.load(
+                output,
+                task_kind="performance" if task == "perf" else "accuracy",
+            )
+        except ExecutionLedgerError as error:
+            raise ModelCheckError(str(error)) from error
+        selected: list[Mapping[str, Any]] = []
+        for binding in bindings:
+            case_id = (
+                f"{binding['model']}::{binding['workload']}"
+                if task == "accuracy"
+                else str(binding["entry"])
+            )
+            receipt = ledger.receipt(case_id)
+            attempts = receipt.get("attempts", [])
+            evidence = attempts[-1].get("evidence", {}) if attempts else {}
+            retryable = (
+                receipt.get("result") == "white"
+                and isinstance(evidence, Mapping)
+                and evidence.get("retryable") is True
+            )
+            if (
+                str(binding["model"]) in invalidated_models
+                or receipt.get("state") != "terminal"
+                or retryable
+            ):
+                selected.append(binding)
+        active[task] = selected
+    return active
+
+
+def _model_source_identity(
+    execution_root: Path,
+    tasks: Iterable[str],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        output = (
+            execution_root / "accuracy"
+            if task == "accuracy"
+            else _perf_shard_output(execution_root)
+        )
+        report_path = output / "report.json" if output is not None else None
+        if report_path is None or not report_path.is_file():
+            raise ModelCheckError(f"completed {_task_label(task)} task has no report.json")
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ModelCheckError(f"cannot read {_task_label(task)} report: {error}") from error
+        report_rows = report.get("results") if isinstance(report, Mapping) else None
+        if not isinstance(report_rows, list):
+            raise ModelCheckError(f"{_task_label(task)} report has no result rows")
+        for row in report_rows:
+            if not isinstance(row, Mapping):
+                raise ModelCheckError(f"{_task_label(task)} report contains an invalid row")
+            rows.append({**dict(row), "task": task})
+    try:
+        return case_evidence.summarize_model_revisions(rows)
+    except case_evidence.CaseEvidenceError as error:
+        raise ModelCheckError(str(error)) from error
 
 
 def _refresh_shard_report(task: str, output: Path) -> None:
@@ -1371,10 +1453,10 @@ def _validate_shard_member(
     label: str,
     index: int,
     campaign: Mapping[str, Any],
-) -> bool:
+) -> dict[str, Any] | None:
     request_path = shard_root / "request.json"
     if not request_path.is_file():
-        return False
+        return None
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -1393,13 +1475,35 @@ def _validate_shard_member(
     if (
         not isinstance(request, Mapping)
         or request.get("run_id") != campaign.get("run_id")
-        or request.get("revision") != campaign.get("revision")
         or request.get("platform") != campaign.get("platform")
         or request.get("shard") != expected_shard
         or stable_selection != campaign.get("selection")
     ):
         raise ModelCheckError(f"shard {label} does not belong to this campaign")
-    return True
+    return dict(request)
+
+
+def _shard_result_status(
+    shard_root: Path,
+    request: Mapping[str, Any],
+) -> str | None:
+    result_path = shard_root / "result.json"
+    if not result_path.is_file():
+        return None
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ModelCheckError(f"cannot read shard result {result_path}: {error}") from error
+    if not isinstance(result, Mapping) or result.get("run_id") != request.get("run_id"):
+        raise ModelCheckError(f"shard result does not belong to its request: {result_path}")
+    if result.get("execution_revision") != request.get("revision"):
+        return None
+    status = result.get("status")
+    if status == "running":
+        return None
+    if status not in {"passed", "failed"}:
+        raise ModelCheckError(f"shard result has invalid status: {result_path}")
+    return str(status)
 
 
 def _consolidate_once(run_root: Path) -> bool:
@@ -1412,18 +1516,23 @@ def _consolidate_once(run_root: Path) -> bool:
     if not isinstance(cases, list) or not isinstance(shard_count, int) or shard_count < 1:
         raise ModelCheckError("sharded campaign inventory is invalid")
     shards = []
+    shard_results_complete = True
+    shards_passed = True
     for index in range(shard_count):
         label = campaign_shards.shard_name(index, shard_count)
         shard_root = run_root / "shards" / label
-        ready = False
+        request = None
         if shard_root.exists():
-            ready = _validate_shard_member(
+            request = _validate_shard_member(
                 shard_root,
                 label=label,
                 index=index,
                 campaign=campaign,
             )
-        shards.append((index, label, shard_root, ready))
+        status = _shard_result_status(shard_root, request) if request is not None else None
+        shard_results_complete = shard_results_complete and status is not None
+        shards_passed = shards_passed and status == "passed"
+        shards.append((index, label, shard_root, request is not None))
 
     all_terminal = True
     for task, report_kind in (
@@ -1465,6 +1574,34 @@ def _consolidate_once(run_root: Path) -> bool:
             f"terminal · {run_root / task / 'report.json'}",
             flush=True,
         )
+    all_terminal = all_terminal and shard_results_complete
+    if all_terminal:
+        combined_rows: list[dict[str, Any]] = []
+        for task in TASKS:
+            report_path = run_root / task / "report.json"
+            if not report_path.is_file():
+                continue
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            for row in report.get("results", []):
+                if isinstance(row, Mapping):
+                    combined_rows.append({**dict(row), "task": task})
+        try:
+            source_identity = case_evidence.summarize_model_revisions(combined_rows)
+        except case_evidence.CaseEvidenceError as error:
+            raise ModelCheckError(str(error)) from error
+        _write_request(
+            run_root / "result.json",
+            {
+                "schema_version": "trtmc.model-check-run-result/v1",
+                "run_id": campaign.get("run_id"),
+                "model_source_identity": source_identity,
+                "status": (
+                    "passed"
+                    if shards_passed and source_identity["consistent"]
+                    else "failed"
+                ),
+            },
+        )
     return all_terminal
 
 
@@ -1477,7 +1614,12 @@ def _consolidate(arguments: argparse.Namespace) -> int:
             while True:
                 complete = _consolidate_once(run_root)
                 if complete or not arguments.watch:
-                    return 0
+                    if not complete:
+                        return 0
+                    result = json.loads(
+                        (run_root / "result.json").read_text(encoding="utf-8")
+                    )
+                    return 0 if result.get("status") == "passed" else 1
                 time.sleep(arguments.interval_seconds)
     except campaign_shards.CampaignShardError as error:
         raise ModelCheckError(str(error)) from error
@@ -1497,12 +1639,186 @@ def _resolved_revision(revision: str) -> str:
     return value
 
 
+def _worktree_changes() -> tuple[str, ...]:
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=REPOSITORY,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode:
+        raise ModelCheckError("cannot inspect the active worktree state")
+    return tuple(line for line in status.stdout.splitlines() if line)
+
+
+def _source_identity(revision: str, *, require_clean: bool = False) -> dict[str, Any]:
+    modules = {
+        "model_checks": sys.modules[__name__],
+        "perf_matrix": perf_matrix,
+        "trtmc_validate": trtmc_validate,
+        "performance_catalog": performance_catalog,
+        "validation_catalog": validation_catalog,
+        "python_profiles": sys.modules["tensorrt_model_connect.python_profiles"],
+    }
+    imports: dict[str, str] = {}
+    for name, module in modules.items():
+        module_path = Path(str(module.__file__)).resolve()
+        try:
+            imports[name] = str(module_path.relative_to(REPOSITORY))
+        except ValueError as exc:
+            raise ModelCheckError(
+                f"{name} was imported from outside the active worktree: {module_path}"
+            ) from exc
+    head = _resolved_revision("HEAD")
+    if revision != head:
+        raise ModelCheckError(
+            "requested source revision does not match the active worktree HEAD: "
+            f"requested={revision}, HEAD={head}"
+        )
+    if require_clean:
+        changes = _worktree_changes()
+        if changes:
+            raise ModelCheckError(
+                "qualification requires a clean worktree; commit or remove local changes"
+            )
+    return {"revision": revision, "imports": imports}
+
+
+def _revalidate_qualification_source(
+    revision: str,
+    expected: Mapping[str, Any],
+) -> None:
+    current = _source_identity(revision, require_clean=True)
+    if current != expected:
+        raise ModelCheckError("qualification source identity changed during the run")
+
+
+def _prepare_accuracy_dependencies(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    arguments: argparse.Namespace,
+    *,
+    bindings: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
+    bindings = list(bindings) if bindings is not None else _task_bindings(plan, "accuracy")
+    if not bindings:
+        return
+    task_models = validation_catalog.load_manifest_records_by_name(arguments.models_dir)
+    suites = {suite["id"]: suite for suite in validation_catalog.load_suites(arguments.suites)}
+    profile_names: list[str] = []
+    for binding in bindings:
+        selected = trtmc_validate.Binding(
+            str(binding["model"]),
+            str(binding["workload"]),
+        )
+        profile_names.extend(
+            trtmc_validate.binding_profiles(
+                selected,
+                task_models=task_models,
+                suites=suites,
+            )
+        )
+
+    config = environment["tasks"]["accuracy"]
+    options = config.get("options", {})
+    profile_root = str(environment["storage"]["python_profiles_root"])
+    previous_profile_root = os.environ.get(PROFILE_ROOT_ENV)
+    previous_prebuilt = os.environ.get(PREBUILT_ONLY_ENV)
+    os.environ[PROFILE_ROOT_ENV] = profile_root
+    os.environ.pop(PREBUILT_ONLY_ENV, None)
+    try:
+        trtmc_validate.ensure_environments(
+            tuple(dict.fromkeys(profile_names)),
+            str(options.get("hf-python", config["runner_python"])),
+        )
+    finally:
+        if previous_profile_root is None:
+            os.environ.pop(PROFILE_ROOT_ENV, None)
+        else:
+            os.environ[PROFILE_ROOT_ENV] = previous_profile_root
+        if previous_prebuilt is None:
+            os.environ.pop(PREBUILT_ONLY_ENV, None)
+        else:
+            os.environ[PREBUILT_ONLY_ENV] = previous_prebuilt
+
+    prepared_models: set[str] = set()
+    for binding in bindings:
+        model = str(binding["model"])
+        if model in prepared_models:
+            continue
+        prepared_models.add(model)
+        record = task_models[model]
+        trtmc_validate.ensure_reference_sources(
+            str(record.get("family", "") or ""),
+            Path(str(options["reference-cache-dir"])),
+            record.get("model_reference_cache"),
+            source_cache_root=Path(str(environment["storage"]["model_reference_cache_root"])),
+            prebuilt_only=False,
+        )
+
+
+def _prepare_qualification_dependencies(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    arguments: argparse.Namespace,
+    *,
+    task_bindings: Mapping[str, Sequence[Mapping[str, Any]]],
+    perf_environment: Path | None,
+    perf_preparation_receipt: Path | None,
+    model_reference_cache_root: Path,
+) -> dict[str, str]:
+    print("\nPreparing qualification dependencies", flush=True)
+    _prepare_accuracy_dependencies(
+        plan,
+        environment,
+        arguments,
+        bindings=task_bindings.get("accuracy", ()),
+    )
+    contracts = _selected_perf_reference_contracts(
+        plan,
+        arguments.models_dir,
+        bindings=task_bindings.get("perf", ()),
+    )
+    reference_environment = _prepare_perf_reference_dependencies(
+        contracts,
+        model_reference_cache_root,
+    )
+    if perf_environment is not None and perf_preparation_receipt is not None:
+        command = _perf_prepare_command(
+            plan,
+            environment,
+            perf_environment,
+            perf_preparation_receipt,
+            bindings=task_bindings.get("perf", ()),
+        )
+        if command is not None:
+            completed = subprocess.run(
+                _detailed_command(command, verbose=arguments.verbose),
+                cwd=REPOSITORY,
+                check=False,
+                env=_task_environment(
+                    environment,
+                    reference_environment,
+                    source_revision=arguments.revision,
+                ),
+            )
+            if completed.returncode:
+                raise ModelCheckError("Perf bundle preparation failed")
+    print("Qualification dependencies prepared; starting frozen measurement", flush=True)
+    return reference_environment
+
+
 def _run(arguments: argparse.Namespace) -> int:
+    arguments.intent = "debug" if arguments.debug else "qualification"
     shard = campaign_shards.parse_shard(arguments.shard) if arguments.shard else None
-    if shard is not None:
-        if not arguments.run_id:
-            raise ModelCheckError("--shard requires an explicit shared --run-id")
-        arguments.revision = _resolved_revision(arguments.revision)
+    if shard is not None and not arguments.run_id:
+        raise ModelCheckError("--shard requires an explicit shared --run-id")
+    arguments.revision = _resolved_revision(arguments.revision)
+    source_identity = _source_identity(
+        arguments.revision,
+        require_clean=arguments.intent == "qualification",
+    )
     platform = load_platform(arguments.platform)
     environment = load_execution_environment(
         arguments.environment or str(platform["id"]),
@@ -1513,6 +1829,16 @@ def _run(arguments: argparse.Namespace) -> int:
     if plan["summary"]["blocker_count"]:
         print(_render(plan))
         raise ModelCheckError("selection has unconfigured task bindings")
+    invalidated_models = set(arguments.invalidate_model)
+    if invalidated_models and not arguments.resume:
+        raise ModelCheckError("--invalidate-model requires --resume")
+    selected_models = {str(model["model"]) for model in plan["models"]}
+    unknown_invalidations = sorted(invalidated_models - selected_models)
+    if unknown_invalidations:
+        raise ModelCheckError(
+            "cannot invalidate models outside this run: "
+            + ", ".join(unknown_invalidations)
+        )
 
     run_id = arguments.run_id or _default_run_id(str(platform["id"]))
     if not RUN_ID_PATTERN.fullmatch(run_id):
@@ -1589,7 +1915,7 @@ def _run(arguments: argparse.Namespace) -> int:
                 {
                     "run_id": run_id,
                     "platform": platform["id"],
-                    "revision": arguments.revision,
+                    "intent": arguments.intent,
                     "shard_count": shard[1],
                     "selection": stable_selection,
                     "cases": campaign_cases,
@@ -1623,6 +1949,9 @@ def _run(arguments: argparse.Namespace) -> int:
             scratch_root=execution_root / "work" / "perf",
             bundle_cache=(execution_root / "cache" / "perf" if shard else None),
         )
+    perf_preparation_receipt = (
+        execution_root / "perf-bundle-preparation.json" if perf_environment is not None else None
+    )
     commands: list[tuple[str, list[str] | None]] = []
     for task in plan["execution"]["task_order"]:
         if task == "accuracy":
@@ -1640,6 +1969,7 @@ def _run(arguments: argparse.Namespace) -> int:
                     environment,
                     perf_environment,
                     bindings=task_bindings[task],
+                    require_prebuilt=arguments.intent == "qualification",
                 )
                 if perf_environment is not None
                 else None
@@ -1649,6 +1979,8 @@ def _run(arguments: argparse.Namespace) -> int:
         "schema_version": "trtmc.model-check-run/v1",
         "run_id": run_id,
         "revision": arguments.revision,
+        "intent": arguments.intent,
+        "source_identity": source_identity,
         "platform": platform["id"],
         "platform_source": platform["source"],
         "platform_config": platform,
@@ -1674,14 +2006,19 @@ def _run(arguments: argparse.Namespace) -> int:
     }
     request_path = execution_root / "request.json"
     if arguments.resume:
-        _verify_resume_request(request_path, request)
+        previous_request = _verify_resume_request(request_path, request)
+        previous_attempts = previous_request.get("execution_attempts", [])
+        if not isinstance(previous_attempts, list):
+            raise ModelCheckError("cannot resume with invalid execution attempt history")
+        request["execution_attempts"] = list(previous_attempts)
     else:
-        temporary_request = request_path.with_name(f".{request_path.name}.{os.getpid()}.tmp")
-        temporary_request.write_text(
-            json.dumps(request, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temporary_request.replace(request_path)
+        request["execution_attempts"] = []
+    _record_execution_attempt(
+        request,
+        revision=arguments.revision,
+        source_identity=source_identity,
+    )
+    _write_request(request_path, request)
 
     execution_commands = list(commands)
     if arguments.resume:
@@ -1690,20 +2027,37 @@ def _run(arguments: argparse.Namespace) -> int:
             if command is None:
                 execution_commands.append((task, None))
             elif task == "accuracy":
-                execution_commands.append((task, [*command, "--resume-existing"]))
+                resumed = [*command, "--resume-existing"]
+                task_models = {str(binding["model"]) for binding in task_bindings[task]}
+                for model in sorted(invalidated_models & task_models):
+                    resumed.extend(["--invalidate-model", model])
+                execution_commands.append((task, resumed))
             else:
                 resume_command = _perf_resume_command(
                     environment,
                     execution_root / "perf" / "results",
+                    require_prebuilt=arguments.intent == "qualification",
                 )
-                execution_commands.append((task, resume_command or command))
+                resumed = resume_command or command
+                if resume_command is not None:
+                    task_models = {
+                        str(binding["model"]) for binding in task_bindings[task]
+                    }
+                    for model in sorted(invalidated_models & task_models):
+                        resumed.extend(["--invalidate-model", model])
+                execution_commands.append((task, resumed))
     print(_render_run_header(plan, run_id=run_id, run_root=execution_root))
     if shard is not None:
         print(
             f"Shard: {shard[0]}/{shard[1]} · "
             f"{sum(len(bindings) for bindings in task_bindings.values())} bindings"
         )
-    print(f"Python profiles: {python_profiles_root} (shared; creates missing profiles)")
+    profile_policy = (
+        "shared; creates missing profiles"
+        if arguments.intent == "debug"
+        else "prepared before measurement; prebuilt during measurement"
+    )
+    print(f"Python profiles: {python_profiles_root} ({profile_policy})")
     if arguments.verbose or arguments.dry_run:
         print("\nCommands:")
         for task, command in execution_commands:
@@ -1716,24 +2070,53 @@ def _run(arguments: argparse.Namespace) -> int:
     if arguments.dry_run:
         return 0
 
-    reference_environment: dict[str, str] = {}
-    reference_contracts = _selected_perf_reference_contracts(
-        plan,
-        arguments.models_dir,
-        bindings=task_bindings.get("perf", ()),
+    if shard is not None:
+        _write_request(
+            execution_root / "result.json",
+            {
+                "schema_version": "trtmc.model-check-run-result/v1",
+                "run_id": run_id,
+                "execution_revision": arguments.revision,
+                "status": "running",
+            },
+        )
+
+    preparation_bindings = (
+        _resume_preparation_bindings(
+            execution_root,
+            task_bindings,
+            invalidated_models,
+        )
+        if arguments.resume
+        else task_bindings
     )
-    reference_environment.update(
-        _prepare_perf_reference_dependencies(
+    if arguments.intent == "qualification":
+        reference_environment = _prepare_qualification_dependencies(
+            plan,
+            environment,
+            arguments,
+            task_bindings=preparation_bindings,
+            perf_environment=perf_environment,
+            perf_preparation_receipt=perf_preparation_receipt,
+            model_reference_cache_root=model_reference_cache_root,
+        )
+        _revalidate_qualification_source(arguments.revision, source_identity)
+    else:
+        reference_contracts = _selected_perf_reference_contracts(
+            plan,
+            arguments.models_dir,
+            bindings=preparation_bindings.get("perf", ()),
+        )
+        reference_environment = _prepare_perf_reference_dependencies(
             reference_contracts,
             model_reference_cache_root,
         )
-    )
-    if reference_contracts:
-        print(
-            f"Prepared external model sources: {len(reference_contracts)} "
-            f"under {model_reference_cache_root}",
-            flush=True,
-        )
+        if reference_contracts:
+            print(
+                f"Prepared external model sources: {len(reference_contracts)} "
+                f"under {model_reference_cache_root}",
+                flush=True,
+            )
 
     task_results: dict[str, int] = {}
     runnable = [(task, command) for task, command in execution_commands if command is not None]
@@ -1742,6 +2125,8 @@ def _run(arguments: argparse.Namespace) -> int:
         print(f"\n[{index}/{len(runnable)}] {label}", flush=True)
         if command is None:
             continue
+        if arguments.intent == "qualification":
+            _revalidate_qualification_source(arguments.revision, source_identity)
         completed = subprocess.run(
             _detailed_command(command, verbose=arguments.verbose),
             cwd=REPOSITORY,
@@ -1750,33 +2135,61 @@ def _run(arguments: argparse.Namespace) -> int:
                 environment,
                 reference_environment,
                 source_revision=arguments.revision,
+                allow_dependency_creation=arguments.intent == "debug",
             ),
         )
+        if arguments.intent == "qualification":
+            _revalidate_qualification_source(arguments.revision, source_identity)
+        if (
+            task == "perf"
+            and completed.returncode == 0
+            and preparation_bindings.get("perf")
+            and perf_preparation_receipt is not None
+            and perf_preparation_receipt.is_file()
+        ):
+            perf_output = _perf_shard_output(execution_root)
+            if perf_output is None:
+                raise ModelCheckError("cannot locate completed Perf output")
+            try:
+                perf_matrix.write_report(
+                    perf_output,
+                    preparation_receipt=perf_preparation_receipt,
+                )
+            except perf_matrix.PerfMatrixError as error:
+                raise ModelCheckError(str(error)) from error
         task_results[task] = completed.returncode
         status = "PASSED" if completed.returncode == 0 else "FAILED"
         print(f"[{index}/{len(runnable)}] {label}: {status}", flush=True)
+    tasks_passed = all(code == 0 for code in task_results.values())
+    model_source_identity = (
+        _model_source_identity(execution_root, task_results)
+        if tasks_passed and task_results
+        else None
+    )
+    identity_passed = (
+        model_source_identity is None or model_source_identity["consistent"]
+    )
     result = {
         "schema_version": "trtmc.model-check-run-result/v1",
         "run_id": run_id,
         "resumed": bool(arguments.resume),
         "execution_revision": arguments.revision,
         "task_exit_codes": task_results,
-        "model_source_identity": _model_source_identity(
-            execution_root,
-            task_bindings=task_bindings,
-            task_results=task_results,
-            expected_revision=arguments.revision,
-        ),
-        "status": "passed" if all(code == 0 for code in task_results.values()) else "failed",
+        "model_source_identity": model_source_identity,
+        "status": "passed" if tasks_passed and identity_passed else "failed",
     }
-    (execution_root / "result.json").write_text(
-        json.dumps(result, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    _write_request(execution_root / "result.json", result)
     print(f"\nOverall: {result['status'].upper()}")
     for task, returncode in task_results.items():
         status = "PASSED" if returncode == 0 else "FAILED"
         print(f"  {_task_label(task)}: {status}")
+    if model_source_identity is not None and not identity_passed:
+        inconsistent = [
+            model
+            for model, evidence in model_source_identity["models"].items()
+            if evidence["status"] != "consistent"
+        ]
+        print("  Source identity: FAILED · " + ", ".join(inconsistent))
     print(f"Run root: {execution_root}")
     return 0 if result["status"] == "passed" else 1
 
@@ -1795,6 +2208,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         ModelCheckError,
         campaign_shards.CampaignShardError,
+        case_evidence.CaseEvidenceError,
         model_ci.ModelCIError,
         model_selection.ModelSelectionError,
         perf_matrix.PerfMatrixError,

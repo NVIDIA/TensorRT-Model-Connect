@@ -66,7 +66,7 @@ from tools.reporting_html import (  # noqa: E402
     sorted_filter_values,
     task_type_label,
 )
-from tools import model_selection  # noqa: E402
+from tools import case_evidence, model_selection  # noqa: E402
 from tools.performance import catalog as performance_catalog  # noqa: E402
 from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError  # noqa: E402
 from tools import qualification_report  # noqa: E402
@@ -75,6 +75,7 @@ from tools import qualification_report  # noqa: E402
 RESULT_SCHEMA = "trtmc.perf-matrix/v1"
 PREPARATION_SCHEMA = "trtmc.perf-bundle-preparation/v1"
 ENVIRONMENT_SCHEMA = "trtmc.perf-environment/v1"
+EXACT_SOURCE_REVISION_PATTERN = re.compile(r"[0-9a-fA-F]{40}")
 SEQUENCE_RUNTIME_MARKERS = ("bart_", "marian_", "m2m_100_", "t5_")
 REPRODUCTION_ENVIRONMENT_NAMES = (
     "CUDA_VISIBLE_DEVICES",
@@ -126,6 +127,7 @@ class RunOptions:
     hf_cache_mode: str = "shared"
     hf_cache_retention: str = "retain"
     verbose: bool = False
+    require_prebuilt_bundles: bool = False
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -133,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("check", "resolve and validate the selected matrix entries"),
+        ("prepare", "materialize selected bundles without measuring them"),
         ("run", "run the selected matrix entries"),
     ):
         command = commands.add_parser(name, help=help_text)
@@ -168,12 +171,39 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="print full TRTMC and reference commands",
         )
+        if name == "prepare":
+            command.add_argument(
+                "--output",
+                required=True,
+                type=Path,
+                help="write bundle preparation evidence to this JSON file",
+            )
+        if name == "run":
+            command.add_argument(
+                "--no-build",
+                action="store_true",
+                help="require bundles prepared before the performance campaign",
+            )
     resume = commands.add_parser("resume", help="continue an incomplete run")
     resume.add_argument("run_directory", type=Path)
     resume.add_argument(
         "--verbose",
         action="store_true",
         help="print full TRTMC and reference commands",
+    )
+    resume.add_argument(
+        "--no-build",
+        action="store_true",
+        help="require bundles prepared before the resumed campaign",
+    )
+    resume.add_argument(
+        "--invalidate-model",
+        action="append",
+        default=[],
+        help=(
+            "re-run every selected Performance case for this model; repeatable and "
+            "only valid while resuming"
+        ),
     )
     report = commands.add_parser(
         "report",
@@ -401,6 +431,7 @@ def _run_options(
     output: Path,
     *,
     verbose: bool = False,
+    require_prebuilt_bundles: bool = False,
 ) -> RunOptions:
     tools = environment["tools"]
     storage = environment["storage"]
@@ -424,6 +455,7 @@ def _run_options(
         hf_cache_mode=str(execution["hf_cache_mode"]),
         hf_cache_retention=str(execution["hf_cache_retention"]),
         verbose=verbose,
+        require_prebuilt_bundles=require_prebuilt_bundles,
     )
 
 
@@ -454,6 +486,15 @@ def _git_commit() -> str | None:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _execution_revision() -> str:
+    try:
+        return case_evidence.exact_source_revision(
+            _git_commit(), label="repository revision"
+        )
+    except case_evidence.CaseEvidenceError as error:
+        raise PerfMatrixError(str(error)) from error
 
 
 def _gpu_environment() -> dict[str, Any]:
@@ -502,6 +543,8 @@ def _initial_results(
         "nvidia_visible_devices": os.environ.get("NVIDIA_VISIBLE_DEVICES", ""),
         **_gpu_environment(),
     }
+    started_at = _now()
+    revision = _execution_revision()
     return {
         "schema_version": RESULT_SCHEMA,
         "status": "running",
@@ -509,8 +552,16 @@ def _initial_results(
         "suite_name": str(suite.get("name", suite_path.stem)),
         "suite_sha256": _sha256_file(suite_path),
         "repository_root": str(REPOSITORY),
-        "git_commit": _git_commit(),
-        "started_at": _now(),
+        "git_commit": revision,
+        "source_revisions": [revision],
+        "execution_attempts": [
+            {
+                "source_revision": revision,
+                "started_at": started_at,
+                "finished_at": None,
+            }
+        ],
+        "started_at": started_at,
         "environment": environment,
         "environment_config": deepcopy(dict(environment_config)),
         "catalog_coverage": {
@@ -555,7 +606,6 @@ def _open_perf_ledger(
     results: Mapping[str, Any],
 ) -> ExecutionLedger:
     fingerprint_input = {
-        "git_commit": results.get("git_commit"),
         "suite_sha256": results.get("suite_sha256"),
         "environment_sha256": results.get("environment_config", {}).get("sha256"),
     }
@@ -586,6 +636,48 @@ def _load_resume(path: Path) -> dict[str, Any]:
     value["status"] = "running"
     value.pop("finished_at", None)
     return value
+
+
+def _record_execution_attempt(
+    results: MutableMapping[str, Any], source_revision: str
+) -> None:
+    previous_revision = str(results.get("git_commit", "") or "").strip().lower()
+    revisions = results.setdefault("source_revisions", [])
+    if not isinstance(revisions, list):
+        raise PerfMatrixError("cannot resume with invalid source revision history")
+    if (
+        case_evidence.EXACT_SOURCE_REVISION.fullmatch(previous_revision)
+        and previous_revision not in revisions
+    ):
+        revisions.append(previous_revision)
+    if source_revision not in revisions:
+        revisions.append(source_revision)
+    attempts = results.setdefault("execution_attempts", [])
+    if not isinstance(attempts, list):
+        raise PerfMatrixError("cannot resume with invalid execution attempt history")
+    if not attempts and case_evidence.EXACT_SOURCE_REVISION.fullmatch(previous_revision):
+        attempts.append(
+            {
+                "source_revision": previous_revision,
+                "started_at": results.get("started_at"),
+                "finished_at": results.get("finished_at"),
+                "legacy": True,
+            }
+        )
+    attempts.append(
+        {
+            "source_revision": source_revision,
+            "started_at": _now(),
+            "finished_at": None,
+        }
+    )
+    results["git_commit"] = source_revision
+
+
+def _finish_execution_attempt(results: MutableMapping[str, Any]) -> None:
+    attempts = results.get("execution_attempts")
+    if isinstance(attempts, list) and attempts and isinstance(attempts[-1], MutableMapping):
+        attempts[-1]["finished_at"] = _now()
 
 
 def _result_rows(
@@ -630,6 +722,8 @@ def _candidate_base_argv(case: Mapping[str, Any], options: RunOptions) -> list[s
         argv.extend(["--bundle-cache", str(options.bundle_cache.resolve())])
     if options.trtmc_worker is not None:
         argv.extend(["--worker", str(options.trtmc_worker.resolve())])
+    if getattr(options, "require_prebuilt_bundles", False):
+        argv.append("--no-build")
     for root in options.bundle_roots:
         argv.extend(["--bundle-root", str(root.resolve())])
     for directory in options.runtime_dirs:
@@ -1321,6 +1415,7 @@ def _perf_attempt_evidence(
                 }
             )
     return {
+        "source_revision": _execution_revision(),
         "commands": {"resolve": deepcopy(dict(resolve_command))},
         "logs": logs,
         "environment": {
@@ -2686,10 +2781,17 @@ def _materialize_public_perf_report(
     output: Path,
     results: Mapping[str, Any],
 ) -> tuple[Path, Path, dict[str, Any]]:
+    public_results = _public_perf_results(results)
+    revision_summary = case_evidence.summarize_model_revisions(
+        {**row, "task": "performance"} for row in public_results
+    )
+    source_revisions = revision_summary["source_revisions"]
+    report_revision = source_revisions[0] if len(source_revisions) == 1 else None
     environment = results.get("environment", {})
     environment = environment if isinstance(environment, Mapping) else {}
     run = {
-        "source_revision": results.get("git_commit"),
+        "source_revision": report_revision,
+        "source_revisions": source_revisions,
         "hostname": environment.get("hostname"),
         "gpu": environment.get("gpu"),
         "gpu_uuid": environment.get("gpu_uuid"),
@@ -2709,16 +2811,17 @@ def _materialize_public_perf_report(
         identity={
             "run_id": output.name,
             "disposition": results.get("status", "running"),
-            "source_revision": results.get("git_commit"),
+            "source_revision": report_revision,
         },
         run=run,
-        results=_public_perf_results(results),
+        results=public_results,
         metadata={
             "campaign": {
                 "suite_name": results.get("suite_name"),
                 "suite_sha256": results.get("suite_sha256"),
                 "status": results.get("status", "running"),
-            }
+            },
+            "model_source_identity": revision_summary,
         },
     )
 
@@ -3521,6 +3624,11 @@ def _execute_campaign(
     worker: Mapping[str, Any],
     storage_preflight: Mapping[str, Any],
 ) -> int:
+    execution_revision = _execution_revision()
+    if results.get("git_commit") != execution_revision:
+        raise PerfMatrixError(
+            "performance execution revision changed after campaign initialization"
+        )
     ledger = _open_perf_ledger(options.output, selected, results)
     ledger.recover_interrupted()
     results["candidate_worker_preflight"] = dict(worker)
@@ -3539,6 +3647,15 @@ def _execute_campaign(
         receipt = ledger.receipt(case_id)
         if receipt["state"] == "terminal" or not _should_skip(rows[case_id]):
             continue
+        try:
+            prior_revision = case_evidence.exact_source_revision(
+                rows[case_id].get("source_revision"),
+                f"Performance case {case_id} source revision",
+            )
+        except case_evidence.CaseEvidenceError:
+            continue
+        if prior_revision != execution_revision:
+            continue
         ledger.begin(
             case_id,
             stage="legacy-import",
@@ -3550,7 +3667,11 @@ def _execute_campaign(
         state, result = _perf_state_and_result(rows[case_id])
         if state != "terminal" or result is None:
             raise PerfMatrixError(f"cannot import incomplete result for {case_id!r}")
-        ledger.finish(case_id, result=result, payload=rows[case_id])
+        ledger.finish(
+            case_id,
+            result=result,
+            payload=case_evidence.stamp_case(rows[case_id], prior_revision),
+        )
     _sync_perf_results_from_ledger(results, ledger)
     rows = _result_rows(results)
     work_root = options.scratch_root / options.output.name
@@ -3561,7 +3682,9 @@ def _execute_campaign(
         receipt = ledger.receipt(case_id)
         if failure is None or receipt["state"] == "terminal":
             continue
-        failure_row = _resolution_failure_row(case, failure)
+        failure_row = case_evidence.stamp_case(
+            _resolution_failure_row(case, failure), execution_revision
+        )
         ledger.begin(
             case_id,
             stage="preflight",
@@ -3651,6 +3774,7 @@ def _execute_campaign(
         state, result = _perf_state_and_result(row)
         if state != "terminal" or result is None:
             raise PerfMatrixError(f"Performance case {case_id!r} did not finish")
+        row = case_evidence.stamp_case(row, execution_revision)
         ledger.finish(
             case_id,
             result=result,
@@ -3679,7 +3803,8 @@ def _execute_campaign(
     selected_ids = {str(case["id"]) for case in selected}
     results["finished_at"] = _now()
     results["status"] = _final_status(_selected_rows(results, selected_ids))
-    _write_artifacts(options.output, results, ledger)
+    _finish_execution_attempt(results)
+    _, _, final_report = _write_artifacts(options.output, results, ledger)
     try:
         work_root.rmdir()
     except OSError:
@@ -3691,7 +3816,14 @@ def _execute_campaign(
     print(f"Results: {options.output / 'results.json'}")
     print(f"Report data: {options.output / 'report.json'}")
     print(f"Report: {options.output / 'report.html'}")
-    return 1 if _campaign_failed(results, selected_ids) else 0
+    source_identity_failed = not final_report["model_source_identity"]["consistent"]
+    if source_identity_failed:
+        print(
+            "Performance source identity is mixed, missing, or incomplete; "
+            "re-run the affected model with --invalidate-model",
+            file=sys.stderr,
+        )
+    return 1 if _campaign_failed(results, selected_ids) or source_identity_failed else 0
 
 
 def _load_suite_request(
@@ -3752,6 +3884,68 @@ def _check(arguments: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _prepare(arguments: argparse.Namespace) -> int:
+    _, selected, environment = _load_suite_request(arguments)
+    options = _run_options(environment, Path(str(environment["storage"]["results_root"])))
+    _environment_preflight(environment, options)
+    _preflight_worker(options)
+    _preflight, failures = _preflight_candidates(selected, options)
+    if failures:
+        for case_id, failure in sorted(failures.items()):
+            print(f"[{case_id}] {failure['stage']}: {failure['reason']}", file=sys.stderr)
+        return 1
+
+    revision = str(_git_commit() or "").strip().lower()
+    if EXACT_SOURCE_REVISION_PATTERN.fullmatch(revision) is None:
+        raise PerfMatrixError("bundle preparation requires an exact 40-character source revision")
+    bundles: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for case in selected:
+        case_id = str(case["id"])
+        print(f"[{case_id}] bundle preparation", flush=True)
+        command = _run_command(
+            [*_candidate_base_argv(case, options), "--prepare-only"],
+            _command_environment(),
+            options.timeout_seconds,
+        )
+        if command["exit_code"] != 0:
+            raise PerfMatrixError(
+                f"bundle preparation failed for {case_id}: {command['stderr_tail']}"
+            )
+        try:
+            receipt = json.loads(command["stdout"])
+        except json.JSONDecodeError as exc:
+            raise PerfMatrixError(
+                f"trtmc-bench returned invalid bundle preparation JSON for {case_id}"
+            ) from exc
+        records = receipt.get("bundles") if isinstance(receipt, Mapping) else None
+        if not isinstance(records, list) or not records:
+            raise PerfMatrixError(f"trtmc-bench prepared no bundle for {case_id}")
+        for record in records:
+            if not isinstance(record, Mapping):
+                raise PerfMatrixError(f"trtmc-bench returned invalid bundle evidence for {case_id}")
+            if record.get("source_revision") != revision:
+                raise PerfMatrixError(
+                    f"bundle for {case_id} does not match source revision {revision}"
+                )
+            key = (str(record.get("model", "")), str(record.get("bundle", "")))
+            if key not in seen:
+                seen.add(key)
+                bundles.append(dict(record))
+    _write_json(
+        arguments.output.resolve(),
+        {
+            "schema_version": PREPARATION_SCHEMA,
+            "scope": "test_task",
+            "git_commit": revision,
+            "included_in_performance_metrics": False,
+            "bundles": bundles,
+        },
+    )
+    print(f"Bundle preparation: {arguments.output.resolve()}")
+    return 0
+
+
 def _run_new(arguments: argparse.Namespace) -> int:
     suite, selected, environment = _load_suite_request(arguments)
     results_root = Path(str(environment["storage"]["results_root"]))
@@ -3759,11 +3953,17 @@ def _run_new(arguments: argparse.Namespace) -> int:
         environment,
         results_root,
         verbose=arguments.verbose,
+        require_prebuilt_bundles=arguments.no_build,
     )
     storage = _environment_preflight(environment, preliminary_options)
     worker = _preflight_worker(preliminary_options)
     run_id, output = _new_run_directory(results_root, suite.definition)
-    options = _run_options(environment, output, verbose=arguments.verbose)
+    options = _run_options(
+        environment,
+        output,
+        verbose=arguments.verbose,
+        require_prebuilt_bundles=arguments.no_build,
+    )
     results = _initial_results(suite, selected, environment)
     results["run_id"] = run_id
     ledger = _open_perf_ledger(output, selected, results)
@@ -3800,8 +4000,6 @@ def _resume(arguments: argparse.Namespace) -> int:
         raise PerfMatrixError("cannot resume because the suite content changed")
     if environment_record.get("sha256") != _sha256_file(environment_path):
         raise PerfMatrixError("cannot resume because the environment content changed")
-    if results.get("git_commit") != _git_commit():
-        raise PerfMatrixError("cannot resume because the repository revision changed")
     suite = _load_performance_suite(suite_path)
     selected_ids = results.get("selected_entry_ids")
     if not isinstance(selected_ids, list) or not all(
@@ -3815,10 +4013,44 @@ def _resume(arguments: argparse.Namespace) -> int:
     environment = _read_environment(environment_path)
     if environment != environment_record:
         raise PerfMatrixError("cannot resume because the resolved environment values changed")
-    options = _run_options(environment, output, verbose=arguments.verbose)
+    execution_revision = _execution_revision()
+    invalidated_models = set(getattr(arguments, "invalidate_model", []))
+    selected_models = {str(case["model"]) for case in selected}
+    unknown_models = sorted(invalidated_models - selected_models)
+    if unknown_models:
+        raise PerfMatrixError(
+            "cannot invalidate models outside this run: " + ", ".join(unknown_models)
+        )
+    _record_execution_attempt(results, execution_revision)
+    options = _run_options(
+        environment,
+        output,
+        verbose=arguments.verbose,
+        require_prebuilt_bundles=arguments.no_build,
+    )
     ledger = _open_perf_ledger(output, selected, results)
     ledger.recover_interrupted()
     ledger.reopen_retryable()
+    invalidated_case_ids = [
+        str(case["id"])
+        for case in selected
+        if str(case["model"]) in invalidated_models
+        and ledger.receipt(str(case["id"]))["state"] == "terminal"
+    ]
+    if invalidated_case_ids:
+        ledger.reopen_cases(
+            invalidated_case_ids,
+            reason="model_invalidation",
+            evidence={
+                "models": sorted(invalidated_models),
+                "requested_revision": execution_revision,
+            },
+        )
+    if invalidated_models:
+        rows = _result_rows(results)
+        for case in selected:
+            if str(case["model"]) in invalidated_models:
+                rows[str(case["id"])] = _pending_perf_row(case)
     _write_artifacts(output, results, ledger)
     storage = _environment_preflight(environment, options)
     worker = _preflight_worker(options)
@@ -3840,6 +4072,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments = build_parser().parse_args(argv)
         if arguments.command == "check":
             return _check(arguments)
+        if arguments.command == "prepare":
+            return _prepare(arguments)
         if arguments.command == "run":
             return _run_new(arguments)
         if arguments.command == "resume":
@@ -3847,7 +4081,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "report":
             return _report_existing(arguments)
         raise PerfMatrixError(f"unsupported command: {arguments.command}")
-    except PerfMatrixError as exc:
+    except (PerfMatrixError, case_evidence.CaseEvidenceError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

@@ -6,6 +6,7 @@ plugin = "whisper"
 test_manifests = [
   "manifests/whisper-large-v3-turbo-tp4.json",
   "manifests/whisper-large-v3-turbo.json",
+  "manifests/whisper-small-fp16.json",
   "manifests/whisper-tiny-fp16-tp2.json",
   "manifests/whisper-tiny-fp16.json",
 ]
