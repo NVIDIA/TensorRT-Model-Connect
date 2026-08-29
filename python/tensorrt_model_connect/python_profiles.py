@@ -653,8 +653,12 @@ def _profile_subprocess_environment() -> dict[str, str]:
     return environment
 
 
-def _profile_install_environment() -> dict[str, str]:
+def _profile_install_environment(
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     environment = _profile_subprocess_environment()
+    if overrides is not None:
+        environment.update(overrides)
     if not environment.get("MAX_JOBS", "").strip():
         environment["MAX_JOBS"] = _DEFAULT_PROFILE_BUILD_JOBS
     _configure_targeted_nvcc(environment)
@@ -930,8 +934,7 @@ def _materialize_venv_profile(
                 _write_base_site_packages_overlay(base_python, str(tmp_python))
 
             if requirements_text.strip():
-                install_environment = _profile_install_environment()
-                install_environment.update(build_environment)
+                install_environment = _profile_install_environment(build_environment)
                 _run_profile_command(
                     [
                         str(tmp_python),

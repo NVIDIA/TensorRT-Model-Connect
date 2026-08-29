@@ -263,7 +263,7 @@ def test_exact_pin_verification_drops_ambient_pythonpath(monkeypatch):
     assert "PYTHONPATH" not in calls[0][1]["env"]
 
 
-def test_profile_source_builds_filter_hard_coded_cuda_architectures(monkeypatch, tmp_path):
+def test_profile_source_builds_apply_declared_environment_before_cuda_filter(monkeypatch, tmp_path):
     cuda_home = tmp_path / "cuda"
     nvcc = cuda_home / "bin" / "nvcc"
     nvcc.parent.mkdir(parents=True)
@@ -274,10 +274,12 @@ def test_profile_source_builds_filter_hard_coded_cuda_architectures(monkeypatch,
     wrapper_root = tmp_path / "wrappers"
     wrapper_root.mkdir()
     monkeypatch.setattr(shared_profiles.tempfile, "tempdir", str(wrapper_root))
-    monkeypatch.setenv("CUDA_HOME", str(cuda_home))
-    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "10.0;11.0+PTX")
-
-    environment = shared_profiles._profile_install_environment()
+    environment = shared_profiles._profile_install_environment(
+        {
+            "CUDA_HOME": str(cuda_home),
+            "TORCH_CUDA_ARCH_LIST": "10.0;11.0+PTX",
+        }
+    )
     result = subprocess.run(
         [
             str(Path(environment["CUDA_HOME"]) / "bin" / "nvcc"),
