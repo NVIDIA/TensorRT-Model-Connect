@@ -5,6 +5,13 @@ id = "xglm"
 plugin = "xglm"
 module = "plugin"
 capabilities = ["split_decoder_roles"]
+python_profile_specs = [
+  "xglm_tokenizer|families/xglm/python_profile_requirements/xglm_tokenizer.lock.txt|families/xglm/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "build|xglm_tokenizer",
+  "reference|xglm_tokenizer",
+]
 aliases = [
   "xglm",
 ]

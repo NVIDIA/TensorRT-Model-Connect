@@ -4,6 +4,13 @@
 id = "olmo"
 plugin = "olmo"
 module = "plugin"
+python_profile_specs = [
+  "olmo_tokenizer|families/olmo/python_profile_requirements/olmo_tokenizer.lock.txt|families/olmo/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "build|olmo_tokenizer",
+  "reference|olmo_tokenizer",
+]
 capabilities = ["split_decoder_roles"]
 aliases = [
   "olmo",

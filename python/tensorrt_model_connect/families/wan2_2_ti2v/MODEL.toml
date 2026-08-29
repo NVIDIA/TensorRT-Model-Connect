@@ -3,6 +3,12 @@
 
 id = "wan2_2_ti2v"
 plugin = "wan2_2_ti2v"
+python_profile_specs = [
+  "wan2_2_ti2v_reference|families/wan2_2_ti2v/python_profile_requirements/wan2_2_ti2v_reference.lock.txt|families/wan2_2_ti2v/python_profile_verify.py|true|false",
+]
+default_execution_profiles = [
+  "reference|wan2_2_ti2v_reference",
+]
 module = "plugin"
 aliases = [
   "ti2v",

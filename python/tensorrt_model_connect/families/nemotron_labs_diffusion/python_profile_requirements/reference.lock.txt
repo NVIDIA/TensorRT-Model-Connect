@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+accelerate==1.14.0
+huggingface-hub==1.22.0
+peft==0.20.0
+safetensors==0.8.0
+tokenizers==0.22.2
+transformers==5.2.0

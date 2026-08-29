@@ -20,9 +20,8 @@ from tools.ci.docker_image import CiError, DockerImageManager, WorkflowImageLock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT = REPO_ROOT / "tools" / "ci" / "docker_image.py"
-DEFAULT_PROFILES = (
-    "chronos,deepseek_ocr,elf_flow,elf_flow_reference,internlm,lance_reference,magpie_tts_reference,"
-    "nemotron_h_reference,phi4_multimodal,reference_common,sana_wm_reference"
+DEFAULT_PROFILES = ",".join(
+    DockerImageManager(REPO_ROOT).source_contract()["python_profiles"]
 )
 TENSORRT_VERSION = "11.1.0.106"
 TENSORRT_APT_VERSION = "11.1.0.106-1+cuda13.3"
@@ -137,7 +136,7 @@ fi
 
 if [ "${1:-}" = "run" ]; then
   capability="${FAKE_DOCKER_CAPABILITY:-available}"
-  profiles="${FAKE_DOCKER_PROFILES-chronos,deepseek_ocr,elf_flow,elf_flow_reference,internlm,lance_reference,magpie_tts_reference,nemotron_h_reference,phi4_multimodal,reference_common,sana_wm_reference}"
+  profiles="${FAKE_DOCKER_PROFILES-}"
   if [ -f "$FAKE_DOCKER_REBUILT" ]; then
     capability="available"
     profiles="$FAKE_DOCKER_REBUILT_PROFILES"
