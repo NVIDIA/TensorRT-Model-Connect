@@ -895,9 +895,10 @@ def test_whisper_nightly_selection_leases_one_complete_gpu(
         },
     )
 
-    assert len(selection["e2e_cases"]) == 16
+    assert len(selection["e2e_cases"]) == 17
     assert {case["manifest"] for case in selection["e2e_cases"]} == {
         "whisper-large-v3-turbo.json",
+        "whisper-small-fp16.json",
         "whisper-tiny-fp16.json",
     }
     assert {case["resource_class"] for case in selection["e2e_cases"]} == {"exclusive_gpu"}

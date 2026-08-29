@@ -25,6 +25,7 @@ WHISPER_DIR = Path(__file__).resolve().parent
 LONG_AUDIO_SHA256 = (
     "166d138dc95c706e4eedbebb48f4ac4c8cb1b77ea796c0bc650da518308657e2"
 )
+WHISPER_SMALL_REVISION = "973afd24965f72e36ca33b3055d56a652f456b4d"
 
 
 def _model_config(model_dir: Path, **raw) -> ModelConfig:
@@ -117,6 +118,73 @@ def test_hf_reference_uses_the_manifest_generation_budget(
     )
     assert "skip_special_tokens=True)[0].strip()" in script
     assert "torch_dtype=torch.float32" in script
+
+
+def test_whisper_small_pins_build_and_reference_to_one_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest = json.loads(
+        (
+            WHISPER_DIR / "manifests" / "whisper-small-fp16.json"
+        ).read_text(encoding="utf-8")
+    )
+    testcase = manifest["testcases"][0]
+
+    assert manifest["hf_id"] == "openai/whisper-small"
+    assert manifest["hf_revision"] == WHISPER_SMALL_REVISION
+    assert manifest["runtime_strategy"] == "whisper_speech_to_text"
+    assert manifest["task_strategy"] == "speech_to_text"
+    assert manifest["precision"] == "fp16"
+    assert manifest["fp32_layers"] == [0]
+    assert testcase["reference_precision"] == "fp32"
+    assert manifest["max_cache_length"] >= 4 + testcase["max_new_tokens"]
+    thresholds = json.loads(
+        (
+            WHISPER_DIR / "thresholds" / "whisper-small-fp16.json"
+        ).read_text(encoding="utf-8")
+    )["threshold_overrides"]
+    assert thresholds["contract_ned_threshold"] == 0.0
+    assert thresholds["contract_wer_threshold"] == 0.0
+
+    captured: dict = {}
+    marker = object()
+
+    def _capture_reference(**kwargs):
+        captured.update(kwargs)
+        return marker
+
+    monkeypatch.setattr(
+        hf_transformers, "run_reference_subprocess", _capture_reference
+    )
+    case = SimpleNamespace(
+        metadata={
+            "reference_precision": testcase["reference_precision"],
+            "trust_remote_code": manifest["trust_remote_code"],
+        },
+        inputs={
+            "audio": str(tmp_path / "input.wav"),
+            "max_new_tokens": testcase["max_new_tokens"],
+        },
+        hf_id=manifest["hf_id"],
+        hf_revision=manifest["hf_revision"],
+        name=manifest["name"],
+    )
+    stage = SimpleNamespace(name="full_generation")
+    ctx = SimpleNamespace(
+        artifacts_dir=str(tmp_path),
+        ld_library_path="",
+        reference_python_path=lambda: None,
+    )
+
+    result = hf_transformers.HfTransformersReference()._run_speech_to_text_ref(
+        case, stage, ctx
+    )
+
+    assert result is marker
+    script = captured["command"][2]
+    assert f"revision = {WHISPER_SMALL_REVISION!r}" in script
+    assert script.count("revision=revision") == 2
+    assert captured["metadata"]["hf_revision"] == WHISPER_SMALL_REVISION
 
 
 def test_long_audio_sentinel_has_pinned_qa_provenance() -> None:

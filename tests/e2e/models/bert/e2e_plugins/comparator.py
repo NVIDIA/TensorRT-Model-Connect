@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 from .comparators.encoder_only import EncoderOnlyComparator
+from .comparators.bert_embedding import EmbeddingComparator
 
 
 class BertEncoderOnlyNlpComparator(EncoderOnlyComparator):
     """bert local comparator for encoder_only_nlp."""
 
-comparator = BertEncoderOnlyNlpComparator()
+comparator = [BertEncoderOnlyNlpComparator(), EmbeddingComparator()]

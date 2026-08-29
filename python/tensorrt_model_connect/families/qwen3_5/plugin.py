@@ -711,6 +711,14 @@ class Qwen35Plugin:
         num_attn = sum(1 for lt in layer_types if lt == "attention")
 
         return {
+            "vocab_size": config.vocab_size,
+            "hidden_size": config.hidden_size,
+            "num_hidden_layers": config.num_hidden_layers,
+            "num_attention_heads": config.num_attention_heads,
+            "num_key_value_heads": config.num_key_value_heads,
+            "head_dim": config.head_dim,
+            "bos_token_id": config.bos_token_id,
+            "eos_token_id": config.eos_token_id,
             "layer_types": layer_types,
             "num_mamba_layers": num_mamba,
             "num_attention_layers": num_attn,

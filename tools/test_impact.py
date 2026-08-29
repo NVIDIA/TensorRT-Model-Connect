@@ -1845,6 +1845,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_local_qwen3_fixture_scopes_to_qwen3",),
         ),
         ClassificationRule(
+            priority=453,
+            name="cosmos3_dual_spark_example",
+            matcher=_regex_rule(r"examples/models/(cosmos3)/dual_spark/.+$"),
+            resolver=_match_result(
+                "cosmos3_dual_spark_example",
+                _family_models,
+                ["cpp", "tools"],
+                True,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_cosmos3_dual_spark_example_is_model_owned",
+            ),
+        ),
+        ClassificationRule(
             priority=454,
             name="nemotron_voicechat_full_duplex_example",
             matcher=_regex_rule(r"examples/models/(nemotron_voicechat)/full_duplex/.+$"),
@@ -1923,6 +1937,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="report_generation_tool",
             matcher=_path_in(
                 {
+                    "tools/case_evidence.py",
                     "tools/execution_ledger.py",
                     "tools/performance/__init__.py",
                     "tools/performance/catalog.py",

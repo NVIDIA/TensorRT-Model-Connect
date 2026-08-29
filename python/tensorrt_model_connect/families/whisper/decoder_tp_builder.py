@@ -14,18 +14,19 @@ This intentionally mirrors the single-device Whisper decoder graph in
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import importlib
 import sys
+from typing import TYPE_CHECKING
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
 )
 
+graph_ops = importlib.import_module(f"{__package__}.graph_ops")
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:

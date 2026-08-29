@@ -14,11 +14,11 @@ from pathlib import Path
 import shutil
 from typing import Any, Mapping, Sequence
 
-from tools import qualification_report
+from tools import case_evidence, qualification_report
 from tools.execution_ledger import ExecutionLedger, ExecutionLedgerError
 
 
-CAMPAIGN_SCHEMA = "trtmc.model-check-sharded-campaign/v1"
+CAMPAIGN_SCHEMA = "trtmc.model-check-sharded-campaign/v2"
 
 
 class CampaignShardError(ValueError):
@@ -327,8 +327,18 @@ def merge_receipt_reports(
             }
         )
 
+    ordered_rows = [rows[case_id] for case_id in expected_ids]
+    try:
+        revision_summary = case_evidence.summarize_model_revisions(
+            {**row, "task": task_kind} for row in ordered_rows
+        )
+    except case_evidence.CaseEvidenceError as error:
+        raise CampaignShardError(str(error)) from error
+    source_revisions = revision_summary["source_revisions"]
+    source_revision = source_revisions[0] if len(source_revisions) == 1 else None
     public_run = {
-        "source_revision": campaign.get("revision"),
+        "source_revision": source_revision,
+        "source_revisions": source_revisions,
         "platform": campaign.get("platform"),
         "hostname": "multiple shards",
         "shards": shard_runs,
@@ -336,7 +346,7 @@ def merge_receipt_reports(
     public_identity = {
         "run_id": campaign.get("run_id"),
         "disposition": "completed",
-        "source_revision": campaign.get("revision"),
+        "source_revision": source_revision,
     }
     if any(row["state"] != "terminal" for row in rows.values()):
         public_identity["disposition"] = "running"
@@ -350,12 +360,13 @@ def merge_receipt_reports(
         ),
         identity=public_identity,
         run=public_run,
-        results=[rows[case_id] for case_id in expected_ids],
+        results=ordered_rows,
         metadata={
             "campaign": {
                 "schema_version": CAMPAIGN_SCHEMA,
                 "shard_count": campaign.get("shard_count"),
             },
+            "model_source_identity": revision_summary,
             "receipt_sources": receipt_sources,
         },
     )

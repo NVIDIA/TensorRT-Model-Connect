@@ -2349,6 +2349,10 @@ def prepare_sts_pair_dataset(
     validation_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     """Prepare STS sentence pairs as byte-shared HF/TRTMC text inputs."""
+    config = validation_config if isinstance(validation_config, dict) else {}
+    prompt_prefix = config.get("sts_prompt_prefix", "")
+    if not isinstance(prompt_prefix, str):
+        raise ValueError("task_eval.sts_prompt_prefix must be a string")
     indexed: list[tuple[int, dict[str, Any]]] = []
     for dataset_index, row in enumerate(load_jsonl(dataset_path)):
         genre = str(row.get("genre", ""))
@@ -2389,7 +2393,7 @@ def prepare_sts_pair_dataset(
                     "score": row["score"],
                     "subject": str(row.get("genre", "")),
                     "dataset": str(row.get("dataset", "")),
-                    "prompt": str(row[pair_side]),
+                    "prompt": f"{prompt_prefix}{row[pair_side]}",
                 }
                 requests.append(request)
                 prompts_file.write(
@@ -11460,7 +11464,9 @@ def eval_one_model(
         log_path=work_dir / "build.log",
         cuda_visible_devices=args.cuda_visible_devices,
         expected_source_revision=str(
-            validation_config.get("reference_source_revision", "") or ""
+            os.environ.get("TRTMC_ENGINE_BUILD_REVISION", "").strip()
+            or validation_config.get("reference_source_revision", "")
+            or ""
         ),
     )
 

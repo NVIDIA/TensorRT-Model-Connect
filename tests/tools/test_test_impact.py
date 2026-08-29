@@ -280,6 +280,13 @@ class TorchReference:
             "hf_id": "example/voicechat-case",
         },
         {
+            "name": "cosmos3-case",
+            "family": "cosmos3",
+            "runtime_strategy": "diffusion_cosmos3",
+            "task_strategy": "diffusion_media_generation",
+            "hf_id": "example/cosmos3-case",
+        },
+        {
             "name": "media-core",
             "family": "media_family",
             "runtime_strategy": "diffusion_media_primary",
@@ -1821,6 +1828,7 @@ class TestUnitTiers:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/case_evidence.py",
             "tools/execution_ledger.py",
             "tools/performance/__init__.py",
             "tools/performance/catalog.py",
@@ -1960,6 +1968,24 @@ class TestUnitTiers:
 
         assert match.rule == "nemotron_voicechat_full_duplex_example"
         assert match.models == ["voicechat-case"]
+        assert match.unit_tiers == ["cpp", "tools"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "examples/models/cosmos3/dual_spark/run_dual_spark.py",
+            "examples/models/cosmos3/dual_spark/Dockerfile",
+            "examples/models/cosmos3/dual_spark/Dockerfile.dockerignore",
+            "examples/models/cosmos3/dual_spark/README.md",
+        ],
+    )
+    def test_cosmos3_dual_spark_example_is_model_owned(self, imap, path):
+        """The dual-Spark example runs Cosmos3 plus its C++ and tools checks."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "cosmos3_dual_spark_example"
+        assert match.models == ["cosmos3-case"]
         assert match.unit_tiers == ["cpp", "tools"]
         assert match.rebuild_cpp is True
 
@@ -2974,6 +3000,7 @@ diff --git a/tests/e2e_harness/manifest_loader.py b/tests/e2e_harness/manifest_l
             "tests/e2e_harness/manifest_loader.py", broad, diff_text, imap
         )
         assert refined.rule == "harness_manifest_diffusion_thresholds"
+        assert "cosmos3-case" in refined.models
         assert "media-core" in refined.models
         assert "decoder-small" not in refined.models
 
@@ -3118,6 +3145,7 @@ diff --git a/python/tensorrt_model_connect/engine_builder.py b/python/tensorrt_m
             imap,
         )
         assert refined.rule == "shared_builder_diffusion_tokenizer"
+        assert "cosmos3-case" in refined.models
         assert "media-core" in refined.models
         assert "decoder-small" not in refined.models
 

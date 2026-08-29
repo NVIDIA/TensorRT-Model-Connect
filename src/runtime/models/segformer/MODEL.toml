@@ -8,5 +8,5 @@ runtime_strategies = ["segformer_segmentation"]
 runtime_tests = [
   "test_segformer_preprocess_seam|test_segformer_preprocess_seam.cpp|trtmc_model_segformer|_|_",
   "test_segformer_postprocess_seam|test_segformer_postprocess_seam.cpp|_|_|_",
-  "test_segformer_segment_pipeline|test_segformer_segment_pipeline.cpp|trtmc_model_segformer|_|REQUIRES_TRT",
+  "test_segformer_segment_pipeline|test_segformer_segment_pipeline.cpp|trtmc_model_segformer|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

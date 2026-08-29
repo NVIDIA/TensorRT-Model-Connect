@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Start empty. The image needs shared runtime and builder sources plus Cosmos3;
+# other model families, website sources, repository metadata, generated
+# artifacts, caches, and credentials must not enter the Docker build context.
+*
+
+!CMakeLists.txt
+!pyproject.toml
+!_pyproject_backend.py
+!README.md
+!LICENSE
+!NOTICE
+!ASSET_LICENSES.md
+
+!cmake/
+!cmake/**
+
+!include/
+!include/**
+
+!python/
+!python/**
+python/tensorrt_model_connect/families/**
+!python/tensorrt_model_connect/families/__init__.py
+!python/tensorrt_model_connect/families/cosmos3/
+!python/tensorrt_model_connect/families/cosmos3/**
+
+!src/
+!src/**
+src/runtime/models/**
+!src/runtime/models/cosmos3/
+!src/runtime/models/cosmos3/**
+
+!third_party/
+third_party/**
+!third_party/stb/
+!third_party/stb/**
+
+# Runtime manifests validate their declared C++ test source paths during CMake
+# configuration even when test targets are disabled.
+!tests/
+tests/**
+!tests/cpp/
+tests/cpp/**
+!tests/cpp/models/
+tests/cpp/models/**
+!tests/cpp/models/cosmos3/
+!tests/cpp/models/cosmos3/**
+
+# Guard against basename negations above matching similarly named directories
+# below unrelated source trees.
+examples/**
+website/**
+
+# Defense in depth if a future allowlist entry becomes broader.
+**/__pycache__/
+**/*.py[cod]
+**/*.bundle
+**/*.engine
+**/*.plan
+**/*.trtfb
+**/build/
+**/build-*/
+**/hf-cache/
+/models/
+/outputs/
+/secrets/

@@ -19,6 +19,7 @@ from ...parallel_config import (
     require_tensorrt_11_for_tensor_parallel,
 )
 from .config import ModelConfig
+from .checkpoint import runtime_strategy_for_model
 
 try:
     from cuda.bindings import runtime as _cuda_runtime
@@ -962,6 +963,7 @@ def build(model_dir: str, output_path: str, **options: object) -> None:
     from ...bundle_writer import BundleInfo, BundleSection, write_bundle
 
     model_path = Path(model_dir)
+    selected_runtime_strategy = runtime_strategy_for_model(model_path)
     parallel = normalize_parallel_config(options.get("parallel_config"))
     if parallel.cp_enabled:
         raise NotImplementedError("BERT does not support context-parallel builds")
@@ -1113,7 +1115,7 @@ def build(model_dir: str, output_path: str, **options: object) -> None:
         num_attention_heads=config.num_attention_heads,
         num_key_value_heads=config.num_key_value_heads,
         max_cache_length=max_cache_length,
-        runtime_strategy=runtime_strategy,
+        runtime_strategy=selected_runtime_strategy,
         precision=precision,
         tokenizer_add_special_tokens=add_special_tokens,
     )
@@ -1126,7 +1128,7 @@ def build(model_dir: str, output_path: str, **options: object) -> None:
     }
     runtime_config.update(
         {
-            "runtime_strategy": runtime_strategy,
+            "runtime_strategy": selected_runtime_strategy,
             "engine_backend": "trt",
             "trt_version": trt_version,
             "precision": precision,

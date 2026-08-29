@@ -247,6 +247,8 @@ def _require_cuda() -> None:
         pytest.skip("No CUDA device available for engine execution tests")
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_sliding_layers_restrict_attention_to_window():
     """Engines with sliding layer_types must diverge from all-full engines
     exactly when the prompt outgrows the sliding window."""

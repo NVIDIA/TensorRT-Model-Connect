@@ -328,6 +328,7 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
         "statuses": "write",
     }
     assert workflow_config["jobs"]["dispatch"]["permissions"] == {"contents": "read"}
+    assert workflow_config["jobs"]["dispatch"]["timeout-minutes"] == 360
     assert workflow_config["jobs"]["publish"]["permissions"] == {
         "actions": "read",
         "contents": "read",
@@ -430,6 +431,8 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert ".created_at >= $dispatched_at" not in dispatch
     assert "actions/workflows/premerge.yml/runs?event=workflow_dispatch" in dispatch
     assert "actions/runs/$RUN_ID" in dispatch
+    assert "while true; do" in dispatch
+    assert "seq 1 220" not in dispatch
     assert "--name public-failure-payload" in dispatch
     assert "--log" not in dispatch
     assert "validate_public_failure(report)" in dispatch
@@ -783,7 +786,7 @@ def test_source_ci_image_uses_common_and_parameterized_tensorrt_overlay() -> Non
     )
     for architecture, source_dockerfile in source_dockerfiles.items():
         assert "FROM ${TENSORRT_IMAGE}" in source_dockerfile
-        assert "COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt" in source_dockerfile
+        assert "COPY community-ci.txt /tmp/trtmc-community-ci.txt" in source_dockerfile
         assert "pip install --requirement /tmp/trtmc-community-ci.txt" in source_dockerfile
         assert "pre-commit>=" not in source_dockerfile
         assert "https://download.pytorch.org/whl/cpu" in source_dockerfile
@@ -1210,7 +1213,7 @@ def test_source_quality_lint_uses_resolved_ci_base_ref() -> None:
     assert "f\"origin/{self.context.env.get('GITHUB_REF_NAME', 'main')}\"" in text
 
 
-def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
+def test_premerge_unit_stage_runs_all_cpu_tests_without_native_wheel() -> None:
     script = _ci_source("quality.py")
     stage = script.split("def premerge", maxsplit=1)[1].split("def _premerge_scope", maxsplit=1)[0]
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
@@ -1221,17 +1224,25 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '"TRTMC_CI_SCRATCH_DIR", "/tmp"' in stage
     assert "TRTMC_PREMERGE_UNIT_BUILD_DIR" in stage
     assert '"not gpu and not trt and not e2e and not model_proof_allocator"' in stage
-    assert "tests/builder/" in stage
-    assert "tests/tools/" in stage
-    assert 'glob("test_*.py")' in script
+    assert '["tests/builder/", "tests/tools/", "tests/e2e_harness/"]' in script
+    assert "tests/e2e/models" in script
+    assert "python/tensorrt_model_connect/families" in script
+    assert "tests/test_e2e_selection.py" in script
+    assert "tests/e2e/test_diffusion_image_parity_inputs.py" in script
+    assert "tests/e2e/test_error_handling.py" in stage
+    assert '"--ignore-glob=*_e2e.py"' in stage
+    assert "_mixed_e2e_cpu_contract_files" in script
+    assert 'f"--deselect={path}::test_model_e2e"' in stage
     assert '"-q"' in stage and '"-x"' in stage
     assert '"--dist=worksteal"' in stage
+    assert '"--import-mode=importlib"' in stage
     assert 'if scope == "community-all"' in stage
     assert "test_distinct_explicit_hf_cache_paths_reach_both_containers" in stage
     assert 'not model_proof_allocator"' in stage
     assert '"-m"' in stage and '"model_proof_allocator"' in stage
     assert '["trtmc", "test_cli_args", "test_config_cli_support"]' in script
-    assert '["trtmc", "trtmc_platform_cpp_tests"]' in script
+    assert '["trtmc", "trtmc_cpu_cpp_tests"]' in script
+    assert '["-L", "cpu"]' in script
     assert '"TRTMC_PREMERGE_UNIT_SCOPE", "all"' in stage
     assert "tests/builder/test_cli.py" in script
     assert 'if scope == "builder"' in script
@@ -1240,18 +1251,29 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
     assert '[build / "trtmc", "version"]' in stage
     assert '[build / "trtmc", "--help"]' in stage
     assert "--stop-on-failure" in stage
-    assert "libtrtmc_model_*.so*" in stage
     assert "-DTRTMC_ENABLE_TRT=OFF" not in stage
     assert "-DTRTMC_BUILD_BACKEND_TRT=OFF" not in stage
     assert "-DTRTMC_ENABLE_TVM_FFI=OFF" not in stage
     assert "conan " not in stage
     assert "build_pip_package" not in stage
+    assert "--ignore=tests/builder/test_flashinfer_benchmark.py" in stage
+    assert "--ignore=tests/builder/test_tvm_ffi_plugin.py" in stage
     assert "trtmc_model_plugins" not in stage
     assert "add_custom_target(trtmc_platform_cpp_tests)" in cmake
+    assert "add_custom_target(trtmc_cpu_cpp_tests)" in cmake
+    assert "if(ARG_UNPARSED_ARGUMENTS)" in cmake
+    assert (
+        "add_dependencies(trtmc_cpu_cpp_tests test_optimized_runtime_bundle_contract)" in cmake
+    )
+    assert len(re.findall(r"(?m)^\s*add_test\(", cmake)) == 2
+    assert "add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})" in cmake
+    assert "NAME test_optimized_runtime_bundle_contract" in cmake
+    assert '"${_trtmc_test_owner_label};${_trtmc_test_resource_label}"' in cmake
     assert "trtmc_add_test(test_model_plugin_loader MODEL_OWNED)" in cmake
     assert "test_c_abi_runtime_regression" not in cmake
     assert (
-        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|trtmc_model_qwen|_|_"
+        "test_c_abi_runtime_regression|test_c_abi_runtime_regression.cpp|"
+        "trtmc_model_qwen|_|REQUIRES_GPU"
         in qwen_manifest
     )
     assert "MODEL_OWNED\n        ${_trtmc_test_options}" in cmake
@@ -1305,6 +1327,97 @@ def test_builder_unit_scope_runs_python_without_native_build(tmp_path: Path) -> 
     assert "tests/builder/" in pytest_commands[0]
     assert selected_test in pytest_commands[0]
     assert not [command for command in context.commands if command[0] in {"cmake", "ctest"}]
+
+
+def test_all_unit_scope_isolates_shared_and_family_python_suites(tmp_path: Path) -> None:
+    mixed_file = (
+        tmp_path / "tests/e2e/models/example/optimized_adapter/test_example_e2e.py"
+    )
+    mixed_file.parent.mkdir(parents=True)
+    mixed_file.write_text(
+        "def test_model_e2e(): pass\n"
+        "def test_manifest_contract(): pass\n",
+        encoding="utf-8",
+    )
+
+    class RecordingContext:
+        repository = tmp_path
+        env = {
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "TRTMC_PREMERGE_UNIT_SCOPE": "community-all",
+            "TRTMC_UNIT_BUILD_JOBS": "8",
+            "TRTMC_UNIT_TEST_JOBS": "8",
+        }
+
+        def __init__(self) -> None:
+            self.commands: list[list[object]] = []
+
+        def positive_integer(self, value: str, _name: str) -> int:
+            return int(value)
+
+        def run(self, command: list[object], **_kwargs: object) -> subprocess.CompletedProcess:
+            self.commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    context = RecordingContext()
+    UnitTestRunner(context).premerge()
+
+    pytest_commands = [
+        command for command in context.commands if command[:3] == ["python", "-m", "pytest"]
+    ]
+    source_commands = [
+        command
+        for command in pytest_commands
+        if "model_proof_allocator" not in command
+        and "tests/e2e/test_error_handling.py" not in command
+    ]
+    assert len(source_commands) == 4
+    shared, models, family, mixed = source_commands
+    assert all(
+        target in shared for target in ("tests/builder/", "tests/tools/", "tests/e2e_harness/")
+    )
+    assert "tests/e2e/models/" not in shared
+    assert "--ignore-glob=*_e2e.py" not in shared
+    assert all(
+        target in models
+        for target in (
+            "tests/e2e/models/",
+            "tests/test_e2e_selection.py",
+            "tests/e2e/test_diffusion_image_parity_inputs.py",
+        )
+    )
+    assert "python/tensorrt_model_connect/families/" not in models
+    assert "--ignore-glob=*_e2e.py" in models
+    assert "python/tensorrt_model_connect/families/" in family
+    assert "tests/e2e/models/" not in family
+    assert "--ignore-glob=*_e2e.py" not in family
+    relative_mixed = "tests/e2e/models/example/optimized_adapter/test_example_e2e.py"
+    assert relative_mixed in mixed
+    assert f"--deselect={relative_mixed}::test_model_e2e" in mixed
+    assert "--ignore-glob=*_e2e.py" not in mixed
+    for command in source_commands:
+        assert "--import-mode=importlib" in command
+        assert "not gpu and not trt and not e2e and not model_proof_allocator" in command
+
+    build_command = next(
+        command for command in context.commands if command[:2] == ["cmake", "--build"]
+    )
+    assert "trtmc_cpu_cpp_tests" in build_command
+    ctest_command = next(command for command in context.commands if command[0] == "ctest")
+    label_index = ctest_command.index("-L")
+    assert ctest_command[label_index : label_index + 2] == ["-L", "cpu"]
+
+
+def test_mixed_e2e_cpu_contract_inventory_is_not_hidden() -> None:
+    class InventoryContext:
+        repository = REPO_ROOT
+
+    selected = set(UnitTestRunner(InventoryContext())._mixed_e2e_cpu_contract_files())
+
+    assert {
+        "tests/e2e/models/fast_foundation_stereo/test_fast_foundation_stereo_e2e.py",
+        "tests/e2e/models/minimax_h3/test_minimax_h3_e2e.py",
+    } <= selected
 
 
 @pytest.mark.parametrize(

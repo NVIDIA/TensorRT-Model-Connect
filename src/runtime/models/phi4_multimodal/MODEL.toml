@@ -6,5 +6,5 @@ runtime_library = "libtrtmc_model_phi4_multimodal.so"
 runtime_plugins = ["plugin.cpp|register_phi4_multimodal_plugin"]
 runtime_strategies = ["phi4_multimodal_vision_language"]
 runtime_tests = [
-  "test_phi4_multimodal_vl_pipeline|test_phi4_multimodal_vl_pipeline.cpp|trtmc_model_phi4_multimodal,trtmc_backend_trt|_|REQUIRES_TRT",
+  "test_phi4_multimodal_vl_pipeline|test_phi4_multimodal_vl_pipeline.cpp|trtmc_model_phi4_multimodal,trtmc_backend_trt|_|REQUIRES_TRT,REQUIRES_GPU",
 ]

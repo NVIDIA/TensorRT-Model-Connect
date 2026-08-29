@@ -286,6 +286,8 @@ def test_timm_dinov3_qkvb_config_normalizes_before_metadata(tmp_path: Path) -> N
     assert metadata["num_attention_heads"] == 6
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_real_tensorrt_timm_mapped_vit_build(tmp_path: Path) -> None:
     _write_tiny_timm_vit(tmp_path)
     config = ModelConfig.from_dir(tmp_path)
@@ -319,6 +321,8 @@ def test_vit_config_and_bundle_metadata_preserve_hf_contract(tmp_path: Path) -> 
     assert plugin.default_max_cache_length(config) == 1
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 @pytest.mark.parametrize("precision", ["fp32", "fp16"])
 def test_real_tensorrt_vit_build_marks_hf_outputs(tmp_path: Path, precision: str) -> None:
     _write_tiny_vit(tmp_path)
@@ -337,6 +341,8 @@ def test_real_tensorrt_vit_build_marks_hf_outputs(tmp_path: Path, precision: str
     assert engine.get_tensor_dtype("pooler_output") == trt.float32
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_real_tensorrt_vit_fp32_matches_transformers(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")

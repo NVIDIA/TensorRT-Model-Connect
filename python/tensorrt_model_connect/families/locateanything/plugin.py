@@ -170,6 +170,14 @@ class LocateAnythingPlugin:
             "model_type": "locateanything",
             "runtime_strategy": "locateanything_vision_language",
             "embed_input": True,
+            "vocab_size": config.vocab_size,
+            "hidden_size": config.hidden_size,
+            "num_hidden_layers": config.num_hidden_layers,
+            "num_attention_heads": config.num_attention_heads,
+            "num_key_value_heads": config.num_key_value_heads,
+            "head_dim": config.head_dim,
+            "bos_token_id": config.bos_token_id,
+            "eos_token_id": config.eos_token_id,
         }
 
 

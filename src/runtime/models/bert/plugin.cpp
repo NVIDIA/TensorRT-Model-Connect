@@ -61,11 +61,14 @@ class EncoderPlugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, engine_section), engine_section.c_str(), opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
-        return std::make_unique<EncoderPipeline>(std::move(loaded.module), "encoder_only",
+        const auto mode =
+            (ctx.config.runtime_strategy == "bert_embedding") ? "embedding" : "encoder_only";
+        return std::make_unique<EncoderPipeline>(std::move(loaded.module), mode,
                                                  std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 
-REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_bert_plugin, EncoderPlugin, "bert_encoder_only");
+REGISTER_PIPELINE_PLUGIN_WITH_MANIFEST(register_bert_plugin, EncoderPlugin, "bert_encoder_only",
+                                       "bert_embedding");
 
 } // namespace trtmc

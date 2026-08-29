@@ -79,6 +79,8 @@ class TestGPT2BuildEngine:
         t["lm_head.weight"] = _rand(vocab, hidden)
         return t
 
+    @pytest.mark.gpu
+    @pytest.mark.trt
     def test_build_engine(self, tmp_path):
         from tensorrt_model_connect.families.gpt2 import plugin
         config = {

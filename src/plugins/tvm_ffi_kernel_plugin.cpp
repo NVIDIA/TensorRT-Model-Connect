@@ -11,6 +11,7 @@
 
 #include "plugins/tvm_ffi_runtime_bindings.h"
 
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
@@ -77,15 +78,24 @@ TvmFfiKernelPlugin::~TvmFfiKernelPlugin() = default;
 
 namespace {
 
+/// @brief Parse and validate a same-as-input dimension reference.
+static int32_t parse_input_index(const std::string& dims) {
+    const char* first = dims.data() + 14;
+    const char* last = dims.data() + dims.size();
+    int32_t input_index = -1;
+    const auto [end, error] = std::from_chars(first, last, input_index);
+    if (first == last || error != std::errc{} || end != last || input_index < 0) {
+        throw std::runtime_error("Invalid TvmFfiKernelPlugin output input index");
+    }
+    return input_index;
+}
+
+/// @brief Decode inherited or fixed output dimensions from JSON.
 static void parse_dims(TvmFfiOutputSpec& spec, const nlohmann::json& dims_obj) {
     if (dims_obj.is_string()) {
         std::string dims_str = dims_obj.get<std::string>();
         if (dims_str.find("same_as_input_") == 0) {
-            try {
-                spec.same_as_input_index = static_cast<int32_t>(std::stoi(dims_str.substr(14)));
-            } catch (...) {
-                spec.same_as_input_index = -1;
-            }
+            spec.same_as_input_index = parse_input_index(dims_str);
         } else {
             spec.same_as_input_index = -1;
         }

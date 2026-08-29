@@ -172,6 +172,8 @@ models:
     workloads: [mmlu_continuation_parity]
   modernbert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
+  multilingual-e5-small:
+    workloads: [stsbenchmark_encoder_embedding_parity]
   nemotron-3.5-asr-streaming-0.6b:
     workloads: [librispeech_clean_asr_streaming]
   nemotron-embed-vl-1b-v2:
@@ -280,6 +282,8 @@ models:
   wan22-ti2v-5b:
     workloads: [vbench_ti2v_official_profile_parity]
   whisper-large-v3-turbo:
+    workloads: [librispeech_clean_asr]
+  whisper-small-fp16:
     workloads: [librispeech_clean_asr]
   whisper-tiny-fp16:
     workloads: [librispeech_clean_asr]
