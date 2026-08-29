@@ -1,0 +1,27 @@
+{
+  "name": "glmasr-nano-fp16",
+  "hf_id": "zai-org/GLM-ASR-Nano-2512",
+  "hf_revision": "61ba4e0b3309b6656edea3e93e419f7bd5c61957",
+  "bundle": "glmasr-nano-fp16.bundle",
+  "family": "glmasr",
+  "runtime_strategy": "glmasr_speech_to_text",
+  "task_strategy": "speech_to_text",
+  "precision": "fp16",
+  "max_cache_length": 384,
+  "trust_remote_code": false,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "testcases": [
+    {
+      "name": "glmasr-nano-fp16",
+      "trace_id": "IT-E2E-GLMASR-01",
+      "reference_family": "asr_glmasr",
+      "user_contract": "exact_transcript",
+      "test_type": "transcription",
+      "reference_precision": "fp32",
+      "prompt": "test",
+      "max_new_tokens": 72,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "notes": "The prompt carries one audio placeholder per post-merge encoder frame, so its length grows with the clip: this 23.3 s sample needs 291 placeholders and a 306 token prompt. max_cache_length is 384 because the decoder engine fails to build at 512 with a TensorRT Myelin internal error, and max_new_tokens is 72 so the case stays inside that cache (306 + 72 = 378) instead of relying on an early end-of-sequence. Both bounds together cap the clip length this profile covers."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "glmasr"
+runtime_library = "libtrtmc_model_glmasr.so"
+runtime_plugins = ["plugin.cpp|register_glmasr_plugin"]
+runtime_strategies = ["glmasr_speech_to_text"]
+runtime_tests = [
+  "test_glmasr_mel_spectrogram|test_glmasr_mel_spectrogram.cpp|_|glmasr_mel_spectrogram.cpp|_",
+  "test_glmasr_prompt_plan|test_glmasr_prompt_plan.cpp|_|_|_",
+]
