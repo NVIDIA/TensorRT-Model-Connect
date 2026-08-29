@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from importlib.metadata import version
+
 import chronos
+import sklearn
 import transformers
 
 config = transformers.T5Config(
@@ -25,8 +28,15 @@ config.chronos_config = {
     "use_reg_token": True,
 }
 chronos.chronos_bolt.ChronosBoltModelForForecasting(config).eval()
+assert version("numpy") == "1.26.4"
+assert version("scipy") == "1.15.3"
+assert version("scikit-learn") == "1.7.2"
+assert version("joblib") == "1.5.3"
+assert version("threadpoolctl") == "3.6.0"
+assert sklearn.__version__ == "1.7.2"
 print(
     f"chronos={chronos.__version__} "
     f"transformers={transformers.__version__} "
+    f"scikit-learn={sklearn.__version__} "
     "chronos_bolt_ctor=ok"
 )
