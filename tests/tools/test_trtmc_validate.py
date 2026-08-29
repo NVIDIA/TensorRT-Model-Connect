@@ -96,6 +96,16 @@ def test_model_workload_catalog_covers_every_ready_model():
     ]
 
 
+def test_fast_foundation_stereo_catalog_binds_middlebury_task_accuracy() -> None:
+    catalog = trtmc_validate.load_catalog()
+
+    assert catalog["sample_limits"]["fast_foundation_stereo_middlebury_q_task_accuracy"] == 15
+    assert catalog["models"]["fast-foundation-stereo"]["workloads"] == [
+        "fast_foundation_stereo_synthetic_parity",
+        "fast_foundation_stereo_middlebury_q_task_accuracy",
+    ]
+
+
 def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     catalog = trtmc_validate.load_catalog()
     suites = validation_catalog.load_suites()

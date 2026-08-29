@@ -58,7 +58,7 @@ def test_validation_contract_uses_model_plugin_parity() -> None:
     )
 
 
-def test_middlebury_q_task_accuracy_contract_is_bound_alongside_parity() -> None:
+def test_middlebury_q_task_accuracy_contract() -> None:
     suites = {item["id"]: item for item in validation_catalog.load_suites()}
     task_accuracy = suites["fast_foundation_stereo_middlebury_q_task_accuracy"]
     assert task_accuracy["dataset"] == {
@@ -71,14 +71,3 @@ def test_middlebury_q_task_accuracy_contract_is_bound_alongside_parity() -> None
         "candidate_nonocc_epe_max_reference_plus_px": 0.5,
         "candidate_nonocc_bp2_max_reference_plus_fraction": 0.03,
     }
-    catalog = validation_catalog.load_structured_file(
-        Path(__file__).parents[3] / "validation" / "model_workloads.yaml"
-    )
-    assert catalog["sample_limits"][
-        "fast_foundation_stereo_middlebury_q_task_accuracy"
-    ] == 15
-    bindings = catalog["models"]["fast-foundation-stereo"]["workloads"]
-    assert bindings == [
-        "fast_foundation_stereo_synthetic_parity",
-        "fast_foundation_stereo_middlebury_q_task_accuracy",
-    ]
