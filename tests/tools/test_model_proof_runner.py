@@ -1873,6 +1873,9 @@ def test_profile_preparation_uses_a_minimal_online_boundary(
     assert "demo-package==1.0.0" in download
     assert f"src={packages},dst={PROFILE_PACKAGES_ROOT}" in download
     assert f"src={projection}" not in download
+    assert "HOME=/tmp" in download
+    assert "USER=trtmc-ci" in download
+    assert "LOGNAME=trtmc-ci" in download
     assert "NVIDIA_VISIBLE_DEVICES=void" in download
     assert "CUDA_VISIBLE_DEVICES=" in download
 
@@ -1885,6 +1888,9 @@ def test_profile_preparation_uses_a_minimal_online_boundary(
     assert "PIP_CONFIG_FILE=/dev/null" in install
     assert f"PIP_FIND_LINKS={PROFILE_PACKAGES_ROOT}" in install
     assert "PIP_NO_INDEX=1" in install
+    assert "HOME=/tmp" in install
+    assert "USER=trtmc-ci" in install
+    assert "LOGNAME=trtmc-ci" in install
     assert f"src={projection},dst=/src,readonly" in install
     assert f"src={profiles},dst={PREPARED_PROFILE_ROOT}" in install
     assert f"src={packages},dst={PROFILE_PACKAGES_ROOT},readonly" in install
