@@ -4,7 +4,7 @@
 id = "canary"
 plugin = "canary"
 python_profile_specs = [
-  "canary_reference|families/canary/python_profile_requirements/canary_reference.lock.txt|families/canary/python_profile_verify.py|true|false",
+  "canary_reference|families/canary/python_profile_requirements/canary_reference.lock.txt|families/canary/python_profile_verify.py|true|true",
 ]
 default_execution_profiles = [
   "reference|canary_reference",

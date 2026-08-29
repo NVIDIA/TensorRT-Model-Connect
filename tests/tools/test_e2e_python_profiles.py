@@ -309,6 +309,22 @@ def test_lazy_profiles_are_excluded_from_offline_preparation() -> None:
     assert "reference_common" in prebuilt
 
 
+def test_family_default_profiles_are_prepared_for_offline_execution() -> None:
+    package_root = Path(shared_profiles.__file__).resolve().parent
+    prepared = set(
+        shared_profiles.prebuilt_python_profile_names(
+            shared_profiles.load_python_profile_registry()
+        )
+    )
+
+    for manifest_path in sorted((package_root / "families").glob("*/MODEL.toml")):
+        with manifest_path.open("rb") as stream:
+            manifest = shared_profiles.tomllib.load(stream)
+        for raw_default in manifest.get("default_execution_profiles", []):
+            _phase, profile = (part.strip() for part in raw_default.split("|", maxsplit=1))
+            assert profile == "base" or profile in prepared, manifest["id"]
+
+
 def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
     with pytest.raises(ValueError, match="exact name==version pins"):
         shared_profiles._exact_pinned_requirements("transformers>=4.48\n")

@@ -5,7 +5,7 @@ id = "minimax_h3"
 plugin = "minimax_h3"
 module = "plugin"
 python_profile_specs = [
-  "minimax_h3_reference|families/minimax_h3/python_profile_requirements/minimax_h3_reference.lock.txt|families/minimax_h3/python_profile_reference_verify.py|true|false",
+  "minimax_h3_reference|families/minimax_h3/python_profile_requirements/minimax_h3_reference.lock.txt|families/minimax_h3/python_profile_reference_verify.py|true|true",
 ]
 default_execution_profiles = [
   "reference|minimax_h3_reference",
