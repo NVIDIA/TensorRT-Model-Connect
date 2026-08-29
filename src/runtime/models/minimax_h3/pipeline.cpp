@@ -34,6 +34,24 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+float publish_fp32(float value) {
+    // PyTorch eager publishes every tensor operation before the next one. Keep
+    // the same FP32 boundary here: without the volatile store an optimized
+    // AArch64 build contracts the scheduler's multiply/add pairs into FMA.
+    volatile float published = value;
+    return published;
+}
+
+float torch_linspace_unit_descending(int32_t index, int32_t points) {
+    // ATen evaluates linspace from the nearest endpoint, using a fused
+    // multiply-add for each element. The midpoint split avoids accumulating a
+    // different rounding history in the low half of the descending interval.
+    const float step = publish_fp32(-1.0F / static_cast<float>(points - 1));
+    if (index < points / 2)
+        return std::fma(step, static_cast<float>(index), 1.0F);
+    return std::fma(-step, static_cast<float>(points - 1 - index), 0.0F);
+}
+
 constexpr int32_t kTextRows = 537;
 constexpr int32_t kTextDim = 5120;
 constexpr int32_t kAudioLatents = 207;
@@ -1267,10 +1285,24 @@ encode_ref2va_vision(const MiniMaxH3Ref2VAConditionerPresentation& presentation,
     // Qwen vision blocks. Do not synthesize visual input or load its engine.
     if (presentation.vision_inputs.empty())
         return result;
-    auto module = loader("vision_conditioner_plan", stream);
-    module->set_timing_label("vision_conditioner_plan");
-    module->reset_execution_context();
+    auto remaining_images = static_cast<int32_t>(std::count_if(
+        presentation.vision_inputs.begin(), presentation.vision_inputs.end(),
+        [](const auto& input) { return input.kind == MiniMaxH3Ref2VAVisionKind::kImage; }));
+    auto remaining_videos =
+        static_cast<int32_t>(presentation.vision_inputs.size()) - remaining_images;
+    std::unique_ptr<ITrtModule> image_module;
+    std::unique_ptr<ITrtModule> video_module;
     for (const auto& vision : presentation.vision_inputs) {
+        const bool image = vision.kind == MiniMaxH3Ref2VAVisionKind::kImage;
+        auto& module = image ? image_module : video_module;
+        auto& remaining = image ? remaining_images : remaining_videos;
+        const char* plan =
+            image ? "vision_conditioner_image_plan" : "vision_conditioner_video_plan";
+        if (!module) {
+            module = loader(plan, stream);
+            module->set_timing_label(plan);
+            module->reset_execution_context();
+        }
         const int32_t patch_rows = vision.grid_h * vision.grid_w;
         const int32_t merged_rows =
             patch_rows / (kMiniMaxH3Ref2VASpatialMergeSize * kMiniMaxH3Ref2VASpatialMergeSize);
@@ -1302,8 +1334,13 @@ encode_ref2va_vision(const MiniMaxH3Ref2VAConditionerPresentation& presentation,
             result.deepstack[level].insert(result.deepstack[level].end(), features.begin(),
                                            features.end());
         }
+        if (--remaining == 0) {
+            module->sync();
+            module.reset();
+        }
     }
-    module->sync();
+    image_module.reset();
+    video_module.reset();
     return result;
 }
 
@@ -2403,8 +2440,11 @@ MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
     MiniMaxH3Schedule result;
     result.sigmas.reserve(grid_points);
     for (int32_t index = 0; index < grid_points; ++index) {
-        const float base = static_cast<float>(1.0 - static_cast<double>(index) / (grid_points - 1));
-        const float sigma = shift * base / (1.0F + (shift - 1.0F) * base);
+        const float base = torch_linspace_unit_descending(index, grid_points);
+        const float numerator = publish_fp32(shift * base);
+        const float shifted_base = publish_fp32(publish_fp32(shift - 1.0F) * base);
+        const float denominator = publish_fp32(1.0F + shifted_base);
+        const float sigma = publish_fp32(numerator / denominator);
         if (result.sigmas.empty() || sigma != result.sigmas.back())
             result.sigmas.push_back(sigma);
     }
@@ -2412,7 +2452,7 @@ MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
         throw std::runtime_error("MiniMax-H3 sigma grid collapsed unexpectedly");
     result.timesteps.reserve(result.sigmas.size() - 1);
     for (std::size_t index = 0; index + 1 < result.sigmas.size(); ++index)
-        result.timesteps.push_back(1.0F - result.sigmas[index]);
+        result.timesteps.push_back(publish_fp32(1.0F - result.sigmas[index]));
     return result;
 }
 
@@ -2420,11 +2460,16 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
                                float timestep, float sigma, float sigma_next) {
     if (sample == nullptr || velocity == nullptr || !(sigma > 0.0F))
         throw std::invalid_argument("MiniMax-H3 scheduler received invalid inputs");
-    const float sigma_from_timestep = 1.0F - timestep;
-    const float ratio = sigma_next / sigma;
+    const float sigma_from_timestep = publish_fp32(1.0F - timestep);
+    const float ratio = publish_fp32(sigma_next / sigma);
+    const float next_weight = publish_fp32(1.0F - ratio);
     for (std::size_t index = 0; index < count; ++index) {
-        const float denoised = sample[index] + sigma_from_timestep * velocity[index];
-        sample[index] = ratio * sample[index] + (1.0F - ratio) * denoised;
+        const float current = sample[index];
+        const float velocity_term = publish_fp32(sigma_from_timestep * velocity[index]);
+        const float denoised = publish_fp32(current + velocity_term);
+        const float current_term = publish_fp32(ratio * current);
+        const float denoised_term = publish_fp32(next_weight * denoised);
+        sample[index] = publish_fp32(current_term + denoised_term);
     }
 }
 

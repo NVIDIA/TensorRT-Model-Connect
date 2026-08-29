@@ -389,6 +389,66 @@ def _audio_only_receipts(reference_count: int = 1) -> tuple[dict, dict]:
     return trt_receipt, ref_receipt
 
 
+def _visual_routing_receipts(kinds: list[str]) -> tuple[dict, dict]:
+    workload = {"workflow": "ref2va", "reference_kinds": kinds}
+    engine_execute = {
+        "language_conditioner_plan_ms": 1.0,
+        "ref2va_denoiser_plan_ms": 1.0,
+    }
+    if "image" in kinds:
+        engine_execute["vision_conditioner_image_plan_ms"] = 1.0
+    if "video" in kinds:
+        engine_execute["vision_conditioner_video_plan_ms"] = 1.0
+    return (
+        {
+            "workload": workload,
+            "runtime": {"references": len(kinds)},
+            "engine_execute": engine_execute,
+        },
+        {"request": workload},
+    )
+
+
+@pytest.mark.parametrize(
+    "kinds",
+    [
+        ["image"],
+        ["video"],
+        ["image", "audio"],
+        ["audio", "image", "video", "image"],
+    ],
+)
+def test_visual_receipts_bind_kind_specialized_vision_routing(kinds: list[str]) -> None:
+    validate_ref2va_receipt_contract(*_visual_routing_receipts(kinds))
+
+
+@pytest.mark.parametrize(
+    ("kinds", "mutation"),
+    [
+        (["image"], "missing_image"),
+        (["video"], "missing_video"),
+        (["image"], "extra_video"),
+        (["video"], "extra_image"),
+        (["image"], "legacy"),
+    ],
+)
+def test_visual_receipts_reject_wrong_vision_plan_routing(kinds: list[str], mutation: str) -> None:
+    trt_receipt, ref_receipt = _visual_routing_receipts(kinds)
+    timings = trt_receipt["engine_execute"]
+    if mutation == "missing_image":
+        del timings["vision_conditioner_image_plan_ms"]
+    elif mutation == "missing_video":
+        del timings["vision_conditioner_video_plan_ms"]
+    elif mutation == "extra_video":
+        timings["vision_conditioner_video_plan_ms"] = 1.0
+    elif mutation == "extra_image":
+        timings["vision_conditioner_image_plan_ms"] = 1.0
+    else:
+        timings["vision_conditioner_plan_ms"] = 1.0
+    with pytest.raises(ValueError, match="vision engine routing"):
+        validate_ref2va_receipt_contract(trt_receipt, ref_receipt)
+
+
 def test_audio_only_receipts_bind_shim_and_zero_visual_engine_routing() -> None:
     trt_receipt, ref_receipt = _audio_only_receipts()
     validate_ref2va_receipt_contract(trt_receipt, ref_receipt)

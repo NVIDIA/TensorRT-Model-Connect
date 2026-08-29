@@ -25,6 +25,12 @@ uint32_t bits(float value) {
     return output;
 }
 
+float from_bits(uint32_t value) {
+    float output = 0.0F;
+    std::memcpy(&output, &value, sizeof(output));
+    return output;
+}
+
 uint64_t update_fnv1a(uint64_t hash, const std::vector<float>& values) {
     const auto* bytes = reinterpret_cast<const uint8_t*>(values.data());
     for (std::size_t index = 0; index < values.size() * sizeof(float); ++index) {
@@ -42,9 +48,9 @@ void check_cuda(cudaError_t status, const char* operation) {
 void test_scheduler_matches_cpu() {
     // Exceeds the production launch cap so the grid-stride path is covered.
     constexpr std::size_t count = 1100003;
-    constexpr float timestep = 0.421875F;
-    constexpr float sigma = 0.578125F;
-    constexpr float sigma_next = 0.53125F;
+    constexpr float timestep = 0.0F;
+    constexpr float sigma = 1.0F;
+    const float sigma_next = from_bits(0x3f7e3c07U);
     std::vector<float> sample(count);
     std::vector<float> velocity(count);
     for (std::size_t index = 0; index < count; ++index) {
@@ -52,6 +58,10 @@ void test_scheduler_matches_cpu() {
         velocity[index] =
             static_cast<float>(static_cast<int32_t>((index * 37U) % 307U) - 153) / 23.0F;
     }
+    // This captured first-audio-step pair differs by one ULP when either side
+    // contracts the published multiply/add operations into FMA.
+    sample[0] = from_bits(0x3f477037U);
+    velocity[0] = from_bits(0x3ec784e5U);
     std::vector<float> expected = sample;
     trtmc::minimax_h3_scheduler_step(expected.data(), velocity.data(), count, timestep, sigma,
                                      sigma_next);
@@ -88,9 +98,7 @@ void test_scheduler_matches_cpu() {
     check_cuda(cudaStreamDestroy(stream), "cudaStreamDestroy");
 
     for (std::size_t index = 0; index < count; ++index) {
-        const float tolerance = 2.0e-6F + 2.0e-6F * std::abs(expected[index]);
-        if (!std::isfinite(sample[index]) ||
-            std::abs(sample[index] - expected[index]) > tolerance) {
+        if (!std::isfinite(sample[index]) || bits(sample[index]) != bits(expected[index])) {
             throw std::runtime_error("CUDA scheduler differs from CPU at index " +
                                      std::to_string(index));
         }

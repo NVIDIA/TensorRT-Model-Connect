@@ -31,7 +31,7 @@ hosts without TensorRT.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import gc
 import math
 import sys
@@ -40,10 +40,34 @@ from typing import Any, Mapping
 import ml_dtypes
 import numpy as np
 
+from .config import (
+    REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_ATTENTION_PRECISION,
+    REF2VA_IMAGE_VISION_LINEAR_COUNT,
+    REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_LAYER_NORM_COUNT,
+    REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_PROFILE,
+    REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_VIDEO_VISION_ATTENTION_PRECISION,
+    REF2VA_VIDEO_VISION_PATCH_PROFILE,
+    REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION,
+)
+
 
 VISION_CONDITIONER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 _VISUAL_PREFIX = "model.visual"
 _WORKFLOWS = ("fl2va", "ref2va")
+_REF2VA_MODALITIES = ("image", "video")
+_REF2VA_ATTENTION_BACKEND_TRT = REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION
+_REF2VA_ATTENTION_BACKEND_PLUGIN = REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION
+_REF2VA_LINEAR_BACKEND_TRT = "tensorrt-bf16-gemm-v1"
+_REF2VA_LINEAR_BACKEND_PLUGIN = REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION
+_REF2VA_NORM_BACKEND_TRT = "tensorrt-explicit-fp32-layer-norm-v1"
+_REF2VA_NORM_BACKEND_PLUGIN = REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION
+_REF2VA_PATCH_BACKEND_TRT = "tensorrt-bf16-gemm-v1"
+_REF2VA_PATCH_BACKEND_PLUGIN = REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION
 _REF2VA_MIN_PATCHES = 48 * 48
 _REF2VA_OPT_PATCHES = 48 * 84
 _REF2VA_MAX_PATCHES = 65536
@@ -270,6 +294,28 @@ class MiniMaxH3VisionConditionerSpec:
         )
 
 
+def _specialize_ref2va_spec(
+    spec: MiniMaxH3VisionConditionerSpec, modality: str | None
+) -> MiniMaxH3VisionConditionerSpec:
+    if spec.workflow != "ref2va":
+        if modality is not None:
+            raise ValueError("MiniMax-H3 FL2VA does not accept a Ref2VA vision modality")
+        return spec
+    if modality not in _REF2VA_MODALITIES:
+        raise ValueError("MiniMax-H3 Ref2VA vision modality must be 'image' or 'video'")
+    profile = (
+        REF2VA_IMAGE_VISION_PATCH_PROFILE
+        if modality == "image"
+        else REF2VA_VIDEO_VISION_PATCH_PROFILE
+    )
+    return replace(
+        spec,
+        min_patches=profile[0],
+        opt_patches=profile[1],
+        max_patches=profile[2],
+    )
+
+
 def expected_weight_shapes(
     spec: MiniMaxH3VisionConditionerSpec | None = None,
 ) -> dict[str, tuple[int, ...]]:
@@ -394,16 +440,35 @@ def _processor_merge_group_coordinates(
     return _merge_group_coordinates(spec.grid_h, spec.grid_w, spec.spatial_merge_size)
 
 
+def _torch_linspace_fp32(start: float, end: float, steps: int) -> np.ndarray:
+    """Reproduce ATen's endpoint-directed FP32 linspace without importing Torch."""
+
+    if steps <= 0:
+        raise ValueError("MiniMax-H3 linspace steps must be positive")
+    start_fp32 = np.float32(start)
+    end_fp32 = np.float32(end)
+    if steps == 1:
+        return np.asarray([start_fp32], dtype=np.float32)
+    step = np.float32((np.float64(end_fp32) - np.float64(start_fp32)) / np.float64(steps - 1))
+    indexes = np.arange(steps, dtype=np.int64)
+    result = np.empty(steps, dtype=np.float32)
+    midpoint = steps // 2
+    # A float64 product plus add exactly represents one FP32 FMA before the
+    # final cast. ATen changes endpoint at the midpoint to limit error.
+    result[:midpoint] = (
+        np.float64(start_fp32) + np.float64(step) * indexes[:midpoint].astype(np.float64)
+    ).astype(np.float32)
+    result[midpoint:] = (
+        np.float64(end_fp32)
+        - np.float64(step) * (steps - 1 - indexes[midpoint:]).astype(np.float64)
+    ).astype(np.float32)
+    return result
+
+
 def _interpolation_axis_taps_weights(
     indexes: np.ndarray, size: int, source_side: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    if size == 1:
-        source = np.zeros_like(indexes, dtype=np.float32)
-    else:
-        # Pinned Qwen3-VL multiplies each FP32 index by `(side - 1)` first,
-        # then divides by `(size - 1)`. Both operations publish FP32, and the
-        # alternative division-first form differs by one ULP on H3 grids.
-        source = (indexes.astype(np.float32) * np.float32(source_side - 1)) / np.float32(size - 1)
+    source = _torch_linspace_fp32(0.0, float(source_side - 1), size)[indexes]
     floor = np.floor(source).astype(np.int64)
     taps = np.stack((floor, floor + 1), axis=1)
     taps = np.clip(taps, 0, source_side - 1)
@@ -585,7 +650,7 @@ def _interpolated_position_embeddings(
     position_embeddings: np.ndarray,
     spec: MiniMaxH3VisionConditionerSpec,
 ) -> np.ndarray:
-    """Match HF's BF16 table, FP32 interpolation, then one BF16 publication."""
+    """Match HF's BF16 weights, products, and left-associated sums."""
 
     table = np.asarray(position_embeddings)
     expected = (spec.num_position_embeddings, spec.hidden_size)
@@ -595,9 +660,11 @@ def _interpolated_position_embeddings(
         )
     indices, weights = _position_interpolation_indices_weights(spec)
     table_bf16 = _round_float32_to_bf16(table)
-    result = table_bf16[indices[:, 0]] * weights[:, 0, None]
+    weights_bf16 = _round_float32_to_bf16(weights)
+    result = _round_float32_to_bf16(table_bf16[indices[:, 0]] * weights_bf16[:, 0, None])
     for tap in range(1, 4):
-        result = result + table_bf16[indices[:, tap]] * weights[:, tap, None]
+        term = _round_float32_to_bf16(table_bf16[indices[:, tap]] * weights_bf16[:, tap, None])
+        result = _round_float32_to_bf16(result + term)
     return np.ascontiguousarray(result.astype(ml_dtypes.bfloat16))
 
 
@@ -921,6 +988,8 @@ def _dynamic_column_slice(network, tensor, start: int, width: int, op):
 
 
 def _runtime_interpolated_positions(network, table, indices, weights, spec, trt, op):
+    zero = op.constant(network, np.zeros((1, 1), dtype=np.float32))
+    zero = op.cast(network, zero, trt.bfloat16)
     result = None
     for tap in range(4):
         tap_index = op.constant(network, np.asarray([tap], np.int32), dtype=np.int32)
@@ -928,16 +997,23 @@ def _runtime_interpolated_positions(network, table, indices, weights, spec, trt,
         position_index = network.add_shuffle(position_index)
         position_index.reshape_dims = (-1,)
         position = network.add_gather(table, position_index.get_output(0), 0).get_output(0)
-        position = op.cast(network, position, trt.float32)
         blend = network.add_gather(weights, tap_index, 1).get_output(0)
+        blend = op.cast(network, blend, trt.bfloat16)
         term = network.add_elementwise(position, blend, trt.ElementWiseOperation.PROD).get_output(0)
+        # HF eager publishes every BF16 product and each left-associated BF16
+        # sum. The zero-add prevents TensorRT from contracting those rounds.
+        term = network.add_elementwise(term, zero, trt.ElementWiseOperation.SUM).get_output(0)
         result = (
             term
             if result is None
             else network.add_elementwise(result, term, trt.ElementWiseOperation.SUM).get_output(0)
         )
+        if tap:
+            result = network.add_elementwise(result, zero, trt.ElementWiseOperation.SUM).get_output(
+                0
+            )
     assert result is not None
-    return op.cast(network, result, trt.bfloat16)
+    return result
 
 
 def _runtime_vision_rope_tables(network, position_ids, spec, trt, op):
@@ -981,48 +1057,297 @@ def _apply_vision_rope_dynamic(network, tensor, cosine, sine, heads, spec, trt, 
     return op.cast(network, result, source_dtype)
 
 
-def _vision_attention_dynamic(network, hidden, weights, prefix, cosine, sine, spec, trt, op):
-    qkv = op.linear(
+def _load_ref2va_native_plugin(*, verbose: bool) -> None:
+    """Register the H3-owned ATen creators before building a Ref2VA plan."""
+
+    from .native_plugin_builder import load_native_plugin
+
+    load_native_plugin(verbose=verbose)
+
+
+def _add_ref2va_image_patch_embed_plugin(network, pixel, weight, bias, trt, *, name: str):
+    """Add exact HF BF16 Conv3d patch embedding with model-owned constants."""
+
+    from .native_plugin_builder import add_patch_embed_plugin
+
+    hidden = add_patch_embed_plugin(
+        network,
+        pixel,
+        weight,
+        bias,
+        trt_module=trt,
+        name=name,
+    )
+    if hidden is None:
+        raise RuntimeError(f"TensorRT rejected MiniMax-H3 patch embed plugin {name}")
+    return hidden
+
+
+def _add_ref2va_image_linear_plugin(network, tensor, weight, bias, trt, *, name: str):
+    """Add one exact HF BF16 Linear through the H3-owned V3 plugin."""
+
+    from .native_plugin_builder import add_linear_plugin
+
+    output = add_linear_plugin(
+        network,
+        tensor,
+        weight,
+        bias,
+        trt_module=trt,
+        name=name,
+    )
+    if output is None:
+        raise RuntimeError(f"TensorRT rejected MiniMax-H3 linear plugin {name}")
+    return output
+
+
+def _add_ref2va_image_layer_norm_plugin(network, tensor, weight, bias, trt, *, name: str):
+    """Add one exact HF BF16 LayerNorm through the H3-owned V3 plugin."""
+
+    from .native_plugin_builder import add_layer_norm_plugin
+
+    output = add_layer_norm_plugin(
+        network,
+        tensor,
+        weight,
+        bias,
+        trt_module=trt,
+        name=name,
+    )
+    if output is None:
+        raise RuntimeError(f"TensorRT rejected MiniMax-H3 LayerNorm plugin {name}")
+    return output
+
+
+def _layer_norm_ref2va(
+    network,
+    tensor,
+    weight,
+    bias,
+    width: int,
+    eps: float,
+    trt,
+    op,
+    *,
+    norm_backend: str,
+    name: str,
+):
+    if norm_backend == _REF2VA_NORM_BACKEND_TRT:
+        return _layer_norm(network, tensor, weight, bias, width, eps, trt, op)
+    if norm_backend != _REF2VA_NORM_BACKEND_PLUGIN:
+        raise ValueError(f"Unsupported MiniMax-H3 vision norm backend {norm_backend!r}")
+    if not math.isclose(eps, 1.0e-6, rel_tol=0.0, abs_tol=0.0):
+        raise ValueError("MiniMax-H3 image LayerNorm plugin requires epsilon=1e-6")
+    weight_value = np.ascontiguousarray(np.asarray(weight, dtype=ml_dtypes.bfloat16))
+    bias_value = np.ascontiguousarray(np.asarray(bias, dtype=ml_dtypes.bfloat16))
+    if weight_value.shape != (width,) or bias_value.shape != (width,):
+        raise ValueError(f"MiniMax-H3 image LayerNorm plugin has invalid constants for {name}")
+    tensor = op.cast(network, tensor, trt.bfloat16)
+    weight_tensor = op.weight_constant(network, weight_value)
+    bias_tensor = op.weight_constant(network, bias_value)
+    weight_tensor = op.cast(network, weight_tensor, trt.bfloat16)
+    bias_tensor = op.cast(network, bias_tensor, trt.bfloat16)
+    return _add_ref2va_image_layer_norm_plugin(
+        network,
+        tensor,
+        weight_tensor,
+        bias_tensor,
+        trt,
+        name=name,
+    )
+
+
+def _linear_ref2va(
+    network,
+    tensor,
+    weight,
+    bias,
+    trt,
+    op,
+    *,
+    linear_backend: str,
+    name: str,
+):
+    if linear_backend == _REF2VA_LINEAR_BACKEND_TRT:
+        return op.linear(
+            network,
+            tensor,
+            weight,
+            bias,
+            compute_dtype=trt.bfloat16,
+        )
+    if linear_backend != _REF2VA_LINEAR_BACKEND_PLUGIN:
+        raise ValueError(f"Unsupported MiniMax-H3 vision linear backend {linear_backend!r}")
+    if bias is None:
+        raise ValueError("MiniMax-H3 image Linear plugin requires an explicit bias")
+    weight_value = np.ascontiguousarray(np.asarray(weight, dtype=ml_dtypes.bfloat16))
+    bias_value = np.ascontiguousarray(np.asarray(bias, dtype=ml_dtypes.bfloat16))
+    if weight_value.ndim != 2 or bias_value.shape != (weight_value.shape[0],):
+        raise ValueError(f"MiniMax-H3 image Linear plugin has invalid constants for {name}")
+    tensor = op.cast(network, tensor, trt.bfloat16)
+    weight_tensor = op.weight_constant(network, weight_value)
+    bias_tensor = op.weight_constant(network, bias_value)
+    weight_tensor = op.cast(network, weight_tensor, trt.bfloat16)
+    bias_tensor = op.cast(network, bias_tensor, trt.bfloat16)
+    return _add_ref2va_image_linear_plugin(
+        network,
+        tensor,
+        weight_tensor,
+        bias_tensor,
+        trt,
+        name=name,
+    )
+
+
+def _patch_embedding_ref2va_image_plugin(network, pixel_values, weights, spec, trt, op):
+    prefix = f"{_VISUAL_PREFIX}.patch_embed.proj"
+    projection = np.ascontiguousarray(
+        np.asarray(weights[f"{prefix}.weight"], dtype=ml_dtypes.bfloat16)
+    )
+    bias = np.ascontiguousarray(np.asarray(weights[f"{prefix}.bias"], dtype=ml_dtypes.bfloat16))
+    expected_weight = (
+        spec.hidden_size,
+        spec.in_channels,
+        spec.temporal_patch_size,
+        spec.patch_size,
+        spec.patch_size,
+    )
+    if projection.shape != expected_weight or bias.shape != (spec.hidden_size,):
+        raise ValueError("MiniMax-H3 image patch plugin constants do not match the vision ABI")
+    weight_tensor = op.weight_constant(network, projection)
+    bias_tensor = op.weight_constant(network, bias)
+    weight_tensor = op.cast(network, weight_tensor, trt.bfloat16)
+    bias_tensor = op.cast(network, bias_tensor, trt.bfloat16)
+    return _add_ref2va_image_patch_embed_plugin(
+        network,
+        pixel_values,
+        weight_tensor,
+        bias_tensor,
+        trt,
+        name=f"{prefix}.hf_conv3d",
+    )
+
+
+def _add_ref2va_image_attention_plugin(network, q, k, v, trt, *, name: str):
+    """Add the exact HF SDPA plugin without coupling this builder to its implementation."""
+
+    from .native_plugin_builder import add_vision_attention_plugin
+
+    context = add_vision_attention_plugin(
+        network,
+        q,
+        k,
+        v,
+        trt_module=trt,
+        name=name,
+    )
+    if context is None:
+        raise RuntimeError(f"TensorRT rejected MiniMax-H3 vision attention plugin {name}")
+    return context
+
+
+def _vision_attention_dynamic(
+    network,
+    hidden,
+    weights,
+    prefix,
+    cosine,
+    sine,
+    spec,
+    attention_backend,
+    linear_backend,
+    attention_dtype,
+    q_scale_dtype,
+    trt,
+    op,
+):
+    qkv = _linear_ref2va(
         network,
         hidden,
         weights[f"{prefix}.attn.qkv.weight"],
         weights[f"{prefix}.attn.qkv.bias"],
-        compute_dtype=trt.bfloat16,
+        trt,
+        op,
+        linear_backend=linear_backend,
+        name=f"{prefix}.attn.qkv.hf_linear",
     )
     q = _dynamic_column_slice(network, qkv, 0, spec.hidden_size, op)
     k = _dynamic_column_slice(network, qkv, spec.hidden_size, spec.hidden_size, op)
     v = _dynamic_column_slice(network, qkv, 2 * spec.hidden_size, spec.hidden_size, op)
     q = _apply_vision_rope_dynamic(network, q, cosine, sine, spec.num_heads, spec, trt, op)
     k = _apply_vision_rope_dynamic(network, k, cosine, sine, spec.num_heads, spec, trt, op)
-    q = _rows_to_heads_dynamic(network, q, spec.num_heads, spec.head_dim, trt)
-    k = _rows_to_heads_dynamic(network, k, spec.num_heads, spec.head_dim, trt)
-    v = _rows_to_heads_dynamic(network, v, spec.num_heads, spec.head_dim, trt)
-    scale = op.constant(
-        network,
-        np.full((1, 1, 1, 1), 1.0 / math.sqrt(spec.head_dim), np.float32),
-    )
-    scale = op.cast(network, scale, q.dtype)
-    q = network.add_elementwise(q, scale, trt.ElementWiseOperation.PROD).get_output(0)
-    attention = network.add_attention(q, k, v, trt.AttentionNormalizationOp.SOFTMAX, False)
-    if attention is None:
-        raise RuntimeError(f"TensorRT failed to add dynamic vision attention {prefix}")
-    attention.name = f"{prefix}.attn.native_dynamic_attention"
-    attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
-    attention.get_output(0).name = f"{attention.name}.output"
-    attention.decomposable = False
-    context = _heads_to_rows_dynamic(network, attention.get_output(0), spec.hidden_size, trt)
-    return op.linear(
+    if attention_backend == _REF2VA_ATTENTION_BACKEND_PLUGIN:
+        # Match HF's BF16 SDPA call directly. The plugin owns the standard
+        # 1/sqrt(head_dim) scale and HF-stride head view, so this path keeps
+        # row-major [patch_rows, hidden_size] and must not pre-scale Q.
+        q = op.cast(network, q, trt.bfloat16)
+        k = op.cast(network, k, trt.bfloat16)
+        v = op.cast(network, v, trt.bfloat16)
+        context = _add_ref2va_image_attention_plugin(
+            network,
+            q,
+            k,
+            v,
+            trt,
+            name=f"{prefix}.attn.hf_sdpa",
+        )
+    elif attention_backend == _REF2VA_ATTENTION_BACKEND_TRT:
+        # IAttention has no separate score-scale input. Reference videos use
+        # FP16 to avoid the dominant BF16 pre-softmax scale rounding.
+        q = _rows_to_heads_dynamic(network, q, spec.num_heads, spec.head_dim, trt)
+        k = _rows_to_heads_dynamic(network, k, spec.num_heads, spec.head_dim, trt)
+        v = _rows_to_heads_dynamic(network, v, spec.num_heads, spec.head_dim, trt)
+        k = op.cast(network, k, attention_dtype)
+        v = op.cast(network, v, attention_dtype)
+        q = op.cast(network, q, q_scale_dtype)
+        scale = op.constant(
+            network,
+            np.full((1, 1, 1, 1), 1.0 / math.sqrt(spec.head_dim), np.float32),
+        )
+        scale = op.cast(network, scale, q.dtype)
+        q = network.add_elementwise(q, scale, trt.ElementWiseOperation.PROD).get_output(0)
+        q = op.cast(network, q, attention_dtype)
+        attention = network.add_attention(q, k, v, trt.AttentionNormalizationOp.SOFTMAX, False)
+        if attention is None:
+            raise RuntimeError(f"TensorRT failed to add dynamic vision attention {prefix}")
+        attention.name = f"{prefix}.attn.native_dynamic_attention"
+        attention.metadata = f"trtmc.native_op=IAttention;source={attention.name}"
+        attention.get_output(0).name = f"{attention.name}.output"
+        attention.decomposable = False
+        context = _heads_to_rows_dynamic(network, attention.get_output(0), spec.hidden_size, trt)
+    else:
+        raise ValueError(f"Unsupported MiniMax-H3 vision attention backend {attention_backend!r}")
+    context = op.cast(network, context, trt.bfloat16)
+    return _linear_ref2va(
         network,
         context,
         weights[f"{prefix}.attn.proj.weight"],
         weights[f"{prefix}.attn.proj.bias"],
-        compute_dtype=trt.bfloat16,
+        trt,
+        op,
+        linear_backend=linear_backend,
+        name=f"{prefix}.attn.proj.hf_linear",
     )
 
 
-def _vision_block_dynamic(network, hidden, weights, index, cosine, sine, spec, trt, op):
+def _vision_block_dynamic(
+    network,
+    hidden,
+    weights,
+    index,
+    cosine,
+    sine,
+    spec,
+    attention_backend,
+    linear_backend,
+    norm_backend,
+    attention_dtype,
+    q_scale_dtype,
+    trt,
+    op,
+):
     prefix = f"{_VISUAL_PREFIX}.blocks.{index}"
-    normalized = _layer_norm(
+    normalized = _layer_norm_ref2va(
         network,
         hidden,
         weights[f"{prefix}.norm1.weight"],
@@ -1031,12 +1356,26 @@ def _vision_block_dynamic(network, hidden, weights, index, cosine, sine, spec, t
         spec.layer_norm_eps,
         trt,
         op,
+        norm_backend=norm_backend,
+        name=f"{prefix}.norm1.hf_layer_norm",
     )
     update = _vision_attention_dynamic(
-        network, normalized, weights, prefix, cosine, sine, spec, trt, op
+        network,
+        normalized,
+        weights,
+        prefix,
+        cosine,
+        sine,
+        spec,
+        attention_backend,
+        linear_backend,
+        attention_dtype,
+        q_scale_dtype,
+        trt,
+        op,
     )
     hidden = network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
-    normalized = _layer_norm(
+    normalized = _layer_norm_ref2va(
         network,
         hidden,
         weights[f"{prefix}.norm2.weight"],
@@ -1045,30 +1384,50 @@ def _vision_block_dynamic(network, hidden, weights, index, cosine, sine, spec, t
         spec.layer_norm_eps,
         trt,
         op,
+        norm_backend=norm_backend,
+        name=f"{prefix}.norm2.hf_layer_norm",
     )
-    update = op.linear(
+    update = _linear_ref2va(
         network,
         normalized,
         weights[f"{prefix}.mlp.linear_fc1.weight"],
         weights[f"{prefix}.mlp.linear_fc1.bias"],
-        compute_dtype=trt.bfloat16,
+        trt,
+        op,
+        linear_backend=linear_backend,
+        name=f"{prefix}.mlp.linear_fc1.hf_linear",
     )
     update = _gelu_tanh(network, update, trt, op)
-    update = op.linear(
+    update = _linear_ref2va(
         network,
         update,
         weights[f"{prefix}.mlp.linear_fc2.weight"],
         weights[f"{prefix}.mlp.linear_fc2.bias"],
-        compute_dtype=trt.bfloat16,
+        trt,
+        op,
+        linear_backend=linear_backend,
+        name=f"{prefix}.mlp.linear_fc2.hf_linear",
     )
     return network.add_elementwise(hidden, update, trt.ElementWiseOperation.SUM).get_output(0)
 
 
-def _patch_merger_dynamic(network, hidden, weights, prefix, *, postshuffle_norm, spec, trt, op):
+def _patch_merger_dynamic(
+    network,
+    hidden,
+    weights,
+    prefix,
+    *,
+    postshuffle_norm,
+    spec,
+    linear_backend,
+    norm_backend,
+    trt,
+    op,
+):
     if postshuffle_norm:
         grouped = network.add_shuffle(hidden)
         grouped.reshape_dims = (-1, spec.merged_hidden_size)
-        hidden = _layer_norm(
+        hidden = _layer_norm_ref2va(
             network,
             grouped.get_output(0),
             weights[f"{prefix}.norm.weight"],
@@ -1077,9 +1436,11 @@ def _patch_merger_dynamic(network, hidden, weights, prefix, *, postshuffle_norm,
             spec.layer_norm_eps,
             trt,
             op,
+            norm_backend=norm_backend,
+            name=f"{prefix}.norm.hf_layer_norm",
         )
     else:
-        hidden = _layer_norm(
+        hidden = _layer_norm_ref2va(
             network,
             hidden,
             weights[f"{prefix}.norm.weight"],
@@ -1088,24 +1449,32 @@ def _patch_merger_dynamic(network, hidden, weights, prefix, *, postshuffle_norm,
             spec.layer_norm_eps,
             trt,
             op,
+            norm_backend=norm_backend,
+            name=f"{prefix}.norm.hf_layer_norm",
         )
         grouped = network.add_shuffle(hidden)
         grouped.reshape_dims = (-1, spec.merged_hidden_size)
         hidden = grouped.get_output(0)
-    hidden = op.linear(
+    hidden = _linear_ref2va(
         network,
         hidden,
         weights[f"{prefix}.linear_fc1.weight"],
         weights[f"{prefix}.linear_fc1.bias"],
-        compute_dtype=trt.bfloat16,
+        trt,
+        op,
+        linear_backend=linear_backend,
+        name=f"{prefix}.linear_fc1.hf_linear",
     )
     hidden = _gelu_exact(network, hidden, trt, op)
-    return op.linear(
+    return _linear_ref2va(
         network,
         hidden,
         weights[f"{prefix}.linear_fc2.weight"],
         weights[f"{prefix}.linear_fc2.bias"],
-        compute_dtype=trt.bfloat16,
+        trt,
+        op,
+        linear_backend=linear_backend,
+        name=f"{prefix}.linear_fc2.hf_linear",
     )
 
 
@@ -1115,6 +1484,18 @@ def _resolve_pixel_dtype(pixel_dtype: str, trt):
     if pixel_dtype == "bf16":
         return trt.bfloat16
     raise ValueError(f"MiniMax-H3 vision pixel_dtype must be 'fp32' or 'bf16', got {pixel_dtype!r}")
+
+
+def _resolve_compute_dtype(precision: str, trt):
+    """Resolve one family-owned precision contract without an implicit fallback."""
+
+    if precision == "bf16":
+        return trt.bfloat16
+    if precision == "fp16":
+        return trt.float16
+    if precision == "fp32":
+        return trt.float32
+    raise ValueError(f"Unsupported MiniMax-H3 vision compute precision {precision!r}")
 
 
 def _assemble_vision_conditioner_graph(
@@ -1243,9 +1624,167 @@ def _add_ref2va_profile(builder, config, spec):
         raise RuntimeError("TensorRT rejected the MiniMax-H3 Ref2VA vision profile")
 
 
-def _assemble_ref2va_vision_graph(network, weights, spec, inputs, trt, op):
+def _validate_ref2va_plugin_network(network, spec, trt) -> dict[str, int]:
+    """Require exact patch, attention, and all 116 Linear V3 image plugins."""
+
+    layers = [network.get_layer(index) for index in range(network.num_layers)]
+    plugin_v3 = getattr(trt.LayerType, "PLUGIN_V3", None)
+    if plugin_v3 is None:
+        raise RuntimeError("TensorRT does not expose the IPluginV3 layer type required by H3")
+    plugins = [layer for layer in layers if layer.type == plugin_v3]
+    linear_names = {
+        *(
+            f"{_VISUAL_PREFIX}.blocks.{index}.{suffix}.hf_linear"
+            for index in range(spec.depth)
+            for suffix in (
+                "attn.qkv",
+                "attn.proj",
+                "mlp.linear_fc1",
+                "mlp.linear_fc2",
+            )
+        ),
+        *(
+            f"{prefix}.{suffix}.hf_linear"
+            for prefix in (
+                f"{_VISUAL_PREFIX}.merger",
+                *(
+                    f"{_VISUAL_PREFIX}.deepstack_merger_list.{index}"
+                    for index in range(len(spec.deepstack_visual_indexes))
+                ),
+            )
+            for suffix in ("linear_fc1", "linear_fc2")
+        ),
+    }
+    if len(linear_names) != REF2VA_IMAGE_VISION_LINEAR_COUNT:
+        raise RuntimeError("MiniMax-H3 image Linear plugin inventory is inconsistent")
+    norm_names = {
+        *(
+            f"{_VISUAL_PREFIX}.blocks.{index}.{suffix}.hf_layer_norm"
+            for index in range(spec.depth)
+            for suffix in ("norm1", "norm2")
+        ),
+        f"{_VISUAL_PREFIX}.merger.norm.hf_layer_norm",
+        *(
+            f"{_VISUAL_PREFIX}.deepstack_merger_list.{index}.norm.hf_layer_norm"
+            for index in range(len(spec.deepstack_visual_indexes))
+        ),
+    }
+    if len(norm_names) != REF2VA_IMAGE_VISION_LAYER_NORM_COUNT:
+        raise RuntimeError("MiniMax-H3 image LayerNorm plugin inventory is inconsistent")
+    expected_names = {
+        f"{_VISUAL_PREFIX}.patch_embed.proj.hf_conv3d",
+        *(f"{_VISUAL_PREFIX}.blocks.{index}.attn.hf_sdpa" for index in range(spec.depth)),
+        *linear_names,
+        *norm_names,
+    }
+    expected_metadata = {
+        name: (
+            "MiniMaxH3PatchEmbed"
+            if name.endswith(".hf_conv3d")
+            else "MiniMaxH3VisionAttention"
+            if name.endswith(".hf_sdpa")
+            else "MiniMaxH3Linear"
+            if name.endswith(".hf_linear")
+            else "MiniMaxH3LayerNorm"
+        )
+        for name in expected_names
+    }
+    actual_names = {layer.name for layer in plugins}
+    violations = {}
+    expected_plugin_count = (
+        spec.depth + 1 + REF2VA_IMAGE_VISION_LINEAR_COUNT + REF2VA_IMAGE_VISION_LAYER_NORM_COUNT
+    )
+    if len(plugins) != expected_plugin_count or actual_names != expected_names:
+        violations["plugin_v3"] = {
+            "count": len(plugins),
+            "names": sorted(actual_names),
+        }
+    metadata_mismatches = {
+        layer.name: getattr(layer, "metadata", "")
+        for layer in plugins
+        if getattr(layer, "metadata", "")
+        != f"trtmc.native_op={expected_metadata.get(layer.name, '')};source={layer.name}"
+    }
+    if metadata_mismatches:
+        violations["plugin_metadata"] = metadata_mismatches
+    for kind_name in (
+        "PLUGIN",
+        "PLUGIN_V2",
+        "ATTENTION_INPUT",
+        "ATTENTION_OUTPUT",
+        "MATRIX_MULTIPLY",
+        "NORMALIZATION",
+        "REDUCE",
+        "DIST_COLLECTIVE",
+    ):
+        kind = getattr(trt.LayerType, kind_name, None)
+        if kind is None:
+            continue
+        count = sum(layer.type == kind for layer in layers)
+        if count:
+            violations[kind_name.lower()] = count
+    if violations:
+        raise RuntimeError(f"MiniMax-H3 Ref2VA image plugin contract failed: {violations}")
+    return {
+        "attention_input": 0,
+        "attention_output": 0,
+        "plugin_v3": len(plugins),
+        "dist_collective": 0,
+    }
+
+
+def _assemble_ref2va_vision_graph(
+    network,
+    weights,
+    spec,
+    inputs,
+    trt,
+    op,
+    *,
+    attention_backend=_REF2VA_ATTENTION_BACKEND_TRT,
+    linear_backend=_REF2VA_LINEAR_BACKEND_TRT,
+    norm_backend=_REF2VA_NORM_BACKEND_TRT,
+    patch_backend=_REF2VA_PATCH_BACKEND_TRT,
+    attention_dtype=None,
+    q_scale_dtype=None,
+):
+    if attention_backend not in {
+        _REF2VA_ATTENTION_BACKEND_TRT,
+        _REF2VA_ATTENTION_BACKEND_PLUGIN,
+    }:
+        raise ValueError(f"Unsupported MiniMax-H3 vision attention backend {attention_backend!r}")
+    if patch_backend not in {
+        _REF2VA_PATCH_BACKEND_TRT,
+        _REF2VA_PATCH_BACKEND_PLUGIN,
+    }:
+        raise ValueError(f"Unsupported MiniMax-H3 vision patch backend {patch_backend!r}")
+    if linear_backend not in {
+        _REF2VA_LINEAR_BACKEND_TRT,
+        _REF2VA_LINEAR_BACKEND_PLUGIN,
+    }:
+        raise ValueError(f"Unsupported MiniMax-H3 vision linear backend {linear_backend!r}")
+    if norm_backend not in {
+        _REF2VA_NORM_BACKEND_TRT,
+        _REF2VA_NORM_BACKEND_PLUGIN,
+    }:
+        raise ValueError(f"Unsupported MiniMax-H3 vision norm backend {norm_backend!r}")
+    if attention_dtype is None:
+        attention_dtype = trt.bfloat16
+    if q_scale_dtype is None:
+        q_scale_dtype = attention_dtype
     pixel_values = op.cast(network, inputs["pixel_values"], trt.bfloat16)
-    hidden = _patch_embedding(network, pixel_values, weights, spec, trt, op)
+    hidden = (
+        _patch_embedding_ref2va_image_plugin(
+            network,
+            pixel_values,
+            weights,
+            spec,
+            trt,
+            op,
+        )
+        if patch_backend == _REF2VA_PATCH_BACKEND_PLUGIN
+        else _patch_embedding(network, pixel_values, weights, spec, trt, op)
+    )
     position_table = op.weight_constant(network, weights[f"{_VISUAL_PREFIX}.pos_embed.weight"])
     position_table = op.cast(network, position_table, trt.bfloat16)
     positions = _runtime_interpolated_positions(
@@ -1264,7 +1803,22 @@ def _assemble_ref2va_vision_graph(network, weights, spec, inputs, trt, op):
     deepstack_hidden = {}
     deepstack_indexes = set(spec.deepstack_visual_indexes)
     for index in range(spec.depth):
-        hidden = _vision_block_dynamic(network, hidden, weights, index, cosine, sine, spec, trt, op)
+        hidden = _vision_block_dynamic(
+            network,
+            hidden,
+            weights,
+            index,
+            cosine,
+            sine,
+            spec,
+            attention_backend,
+            linear_backend,
+            norm_backend,
+            attention_dtype,
+            q_scale_dtype,
+            trt,
+            op,
+        )
         if index in deepstack_indexes:
             deepstack_hidden[index] = hidden
 
@@ -1276,6 +1830,8 @@ def _assemble_ref2va_vision_graph(network, weights, spec, inputs, trt, op):
         f"{_VISUAL_PREFIX}.merger",
         postshuffle_norm=False,
         spec=spec,
+        linear_backend=linear_backend,
+        norm_backend=norm_backend,
         trt=trt,
         op=op,
     )
@@ -1290,6 +1846,8 @@ def _assemble_ref2va_vision_graph(network, weights, spec, inputs, trt, op):
             f"{_VISUAL_PREFIX}.deepstack_merger_list.{merger_index}",
             postshuffle_norm=True,
             spec=spec,
+            linear_backend=linear_backend,
+            norm_backend=norm_backend,
             trt=trt,
             op=op,
         )
@@ -1305,6 +1863,7 @@ def build_vision_conditioner_engine(
     *,
     workflow: str = "fl2va",
     pixel_dtype: str = "fp32",
+    ref2va_modality: str | None = None,
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
@@ -1313,14 +1872,18 @@ def build_vision_conditioner_engine(
 
     ``pixel_dtype`` selects the processor buffer ABI and accepts only ``fp32``
     or ``bf16``.  Both paths cast to checkpoint-native BF16 before the learned
-    patch projection.  Outputs remain BF16, matching the official Qwen3-VL
+    patch projection. Outputs remain BF16, matching the official Qwen3-VL
     vision tower, and are named ``image_features`` followed by
-    ``deepstack_features_0`` through ``deepstack_features_2``.
+    ``deepstack_features_0`` through ``deepstack_features_2``. Ref2VA builds
+    require an explicit ``image`` or ``video`` modality. Images use the H3-owned
+    exact-HF ATen PatchEmbed, Linear, and SDPA plugins, while videos retain the
+    qualified TensorRT GEMM and FP16 IAttention boundaries.
     """
 
     spec = MiniMaxH3VisionConditionerSpec.from_checkpoint_config(
         checkpoint_config, workflow=workflow
     )
+    spec = _specialize_ref2va_spec(spec, ref2va_modality)
     validate_vision_weights(weights, spec)
 
     from tensorrt_model_connect import trt_compat
@@ -1331,6 +1894,40 @@ def build_vision_conditioner_engine(
     # Validate this before allocating a TensorRT builder, including on hosts
     # where the requested binding type is not supported by an older TRT.
     _resolve_pixel_dtype(pixel_dtype, trt)
+    precision = (
+        REF2VA_VIDEO_VISION_ATTENTION_PRECISION
+        if ref2va_modality == "video"
+        else REF2VA_IMAGE_VISION_ATTENTION_PRECISION
+    )
+    attention_dtype = _resolve_compute_dtype(precision, trt)
+    q_scale_dtype = (
+        _resolve_compute_dtype(REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION, trt)
+        if ref2va_modality == "video"
+        else attention_dtype
+    )
+    attention_backend = (
+        _REF2VA_ATTENTION_BACKEND_PLUGIN
+        if ref2va_modality == "image"
+        else _REF2VA_ATTENTION_BACKEND_TRT
+    )
+    linear_backend = (
+        _REF2VA_LINEAR_BACKEND_PLUGIN if ref2va_modality == "image" else _REF2VA_LINEAR_BACKEND_TRT
+    )
+    norm_backend = (
+        _REF2VA_NORM_BACKEND_PLUGIN if ref2va_modality == "image" else _REF2VA_NORM_BACKEND_TRT
+    )
+    patch_backend = (
+        _REF2VA_PATCH_BACKEND_PLUGIN if ref2va_modality == "image" else _REF2VA_PATCH_BACKEND_TRT
+    )
+    if (
+        attention_backend == _REF2VA_ATTENTION_BACKEND_PLUGIN
+        or linear_backend == _REF2VA_LINEAR_BACKEND_PLUGIN
+        or norm_backend == _REF2VA_NORM_BACKEND_PLUGIN
+        or patch_backend == _REF2VA_PATCH_BACKEND_PLUGIN
+    ):
+        # Loading is part of the image-plan build contract. Never construct a
+        # fallback image plan when either exact HF creator is absent.
+        _load_ref2va_native_plugin(verbose=verbose)
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -1356,14 +1953,35 @@ def build_vision_conditioner_engine(
                 op=op,
             )
         else:
-            _assemble_ref2va_vision_graph(network, weights, spec, ref2va_inputs, trt, op)
-        op.validate_native_network(
-            network, expected_attentions=spec.depth, label="vision conditioner"
-        )
+            _assemble_ref2va_vision_graph(
+                network,
+                weights,
+                spec,
+                ref2va_inputs,
+                trt,
+                op,
+                attention_backend=attention_backend,
+                linear_backend=linear_backend,
+                norm_backend=norm_backend,
+                patch_backend=patch_backend,
+                attention_dtype=attention_dtype,
+                q_scale_dtype=q_scale_dtype,
+            )
+        if attention_backend == _REF2VA_ATTENTION_BACKEND_PLUGIN:
+            _validate_ref2va_plugin_network(network, spec, trt)
+        else:
+            op.validate_native_network(
+                network, expected_attentions=spec.depth, label="vision conditioner"
+            )
         print(
             "[minimax-h3] building native Qwen3-VL vision conditioner: "
             f"workflow={spec.workflow}, patches={spec.min_patches}..{spec.max_patches}, "
             f"pixel_dtype={pixel_dtype}, "
+            f"ref2va_modality={ref2va_modality}, "
+            f"attention_backend={attention_backend}, "
+            f"linear_backend={linear_backend}, "
+            f"norm_backend={norm_backend}, "
+            f"patch_backend={patch_backend}, "
             f"deepstack={spec.deepstack_visual_indexes}",
             file=sys.stderr,
         )

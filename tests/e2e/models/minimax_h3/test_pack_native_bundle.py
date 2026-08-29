@@ -14,6 +14,10 @@ import pytest
 from tensorrt_model_connect.families.minimax_h3.config import (
     FL2VA_PLAN_FILENAMES,
     FL2VA_PROCESSOR_ASSET_SECTIONS,
+    MINIMAX_H3_NATIVE_PLUGIN_ABI,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
     REF2VA_MAX_TEXT_ROWS,
@@ -115,12 +119,14 @@ def test_staged_loading_partitions_every_bundle_section() -> None:
     ref2va = pack_native_bundle._bundle_loading_policy(
         pack_native_bundle.REF2VA_PLAN_SECTIONS,
         processor_sections=FL2VA_PROCESSOR_ASSET_SECTIONS,
+        native_plugin_section=MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     )
     assert ref2va == {
         "mode": "staged",
         "eager_sections": [
             "tokenizer.json",
             *FL2VA_PROCESSOR_ASSET_SECTIONS,
+            MINIMAX_H3_NATIVE_PLUGIN_SECTION,
             "config.json",
         ],
         "lazy_sections": [
@@ -315,7 +321,7 @@ def test_fl2va_packer_binds_seven_plans_processor_assets_and_workflow(
     capsys.readouterr()
 
 
-def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
+def test_ref2va_packer_binds_ten_plans_processor_assets_and_partition(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -328,6 +334,8 @@ def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
         (plans / filename).write_bytes(payload)
         recorded[filename] = {"bytes": len(payload), "sha256": f"{index:064x}"}
     workspace_limits = {filename: 8 << 30 for filename in REF2VA_PLAN_FILENAMES}
+    native_plugin = plans / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+    native_plugin.write_bytes(b"native-plugin")
     model = tmp_path / "model"
     asset_records = {}
     for index, relative in enumerate(
@@ -344,6 +352,10 @@ def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
             path.write_text("{}")
         receipt_name = "tokenizer.json" if relative == "tokenizer/tokenizer.json" else relative
         asset_records[receipt_name] = {"bytes": 2, "sha256": f"{index:064x}"}
+    asset_records[MINIMAX_H3_NATIVE_PLUGIN_SECTION] = {
+        "bytes": len(b"native-plugin"),
+        "sha256": "f" * 64,
+    }
     (plans / "build_receipt.json").write_text(
         json.dumps(
             {
@@ -403,6 +415,7 @@ def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
         *pack_native_bundle.REF2VA_PLAN_SECTIONS,
         "tokenizer.json",
         *FL2VA_PROCESSOR_ASSET_SECTIONS,
+        MINIMAX_H3_NATIVE_PLUGIN_SECTION,
         "config.json",
     ]
     for section_name in FL2VA_PROCESSOR_ASSET_SECTIONS:
@@ -414,9 +427,13 @@ def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
     assert config["first_block_cache"] is False
     assert config["denoiser_cache_mode"] == "monolithic"
     assert tuple(config["plan_sha256"]) == REF2VA_PLAN_FILENAMES
+    assert "vision_conditioner_image_plan" in captured["section_names"]
+    assert "vision_conditioner_video_plan" in captured["section_names"]
+    assert "vision_conditioner_plan" not in captured["section_names"]
     assert tuple(config["asset_sha256"]) == (
         "tokenizer.json",
         *FL2VA_PROCESSOR_ASSET_SECTIONS,
+        MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     )
     assert config["processor_asset_sections"] == list(FL2VA_PROCESSOR_ASSET_SECTIONS)
     assert config["min_text_rows"] == 1
@@ -432,6 +449,36 @@ def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
     assert config["ref2va_max_videos"] == 3
     assert config["ref2va_max_audios"] == 3
     assert config["ref2va_max_references"] == 12
+    assert config["ref2va_vision_plan_layout"] == "split-image-video-v1"
+    assert config["minimax_h3_native_plugin_section"] == MINIMAX_H3_NATIVE_PLUGIN_SECTION
+    assert config["minimax_h3_native_plugin_artifact"] == MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+    assert config["minimax_h3_native_plugin_abi"] == MINIMAX_H3_NATIVE_PLUGIN_ABI
+    assert config["minimax_h3_native_plugin_identity"] == MINIMAX_H3_NATIVE_PLUGIN_IDENTITY
+    assert config["ref2va_language_attention_implementation"] == ("tensorrt-bf16-iattention-v1")
+    assert config["ref2va_language_attention_precision"] == "bf16"
+    assert "ref2va_language_attention_scale" not in config
+    assert config["ref2va_language_q_pre_scale_precision"] == "bf16"
+    assert config["ref2va_image_vision_attention_implementation"] == "aten-bf16-sdpa-v1"
+    assert config["ref2va_image_vision_attention_precision"] == "bf16"
+    assert config["ref2va_image_vision_attention_scale"] == "fp64:0x1.e2b7dddfefa66p-4"
+    assert config["ref2va_image_vision_linear_implementation"] == "aten-bf16-linear-v1"
+    assert config["ref2va_image_vision_linear_count"] == 116
+    assert config["ref2va_image_vision_layer_norm_implementation"] == ("aten-bf16-layer-norm-v1")
+    assert config["ref2va_image_vision_layer_norm_count"] == 58
+    assert config["ref2va_image_vision_patch_implementation"] == "aten-bf16-conv3d-v1"
+    assert config["ref2va_image_vision_patch_precision"] == "bf16"
+    assert config["ref2va_image_vision_patch_input_shape"] == [-1, 1536]
+    assert config["ref2va_image_vision_patch_weight_shape"] == [1152, 3, 2, 16, 16]
+    assert config["ref2va_image_vision_patch_bias_shape"] == [1152]
+    assert config["ref2va_image_vision_patch_kernel"] == [2, 16, 16]
+    assert config["ref2va_image_vision_patch_stride"] == [2, 16, 16]
+    assert config["ref2va_image_vision_patch_output_shape"] == [-1, 1152]
+    assert config["ref2va_video_vision_attention_implementation"] == ("tensorrt-fp16-iattention-v1")
+    assert config["ref2va_video_vision_attention_precision"] == "fp16"
+    assert "ref2va_image_vision_q_pre_scale_precision" not in config
+    assert config["ref2va_video_vision_q_pre_scale_precision"] == "fp16"
+    assert config["ref2va_image_vision_patch_profile"] == [16384, 16384, 65536]
+    assert config["ref2va_video_vision_patch_profile"] == [2304, 4032, 4176]
     assert config["ref2va_reference_min_seconds"] == 2
     assert config["ref2va_reference_max_seconds"] == 15
     assert config["ref2va_vae_tile_size"] == 256
@@ -440,5 +487,10 @@ def test_ref2va_packer_binds_nine_plans_processor_assets_and_partition(
     assert config["bundle_loading"] == pack_native_bundle._bundle_loading_policy(
         pack_native_bundle.REF2VA_PLAN_SECTIONS,
         processor_sections=FL2VA_PROCESSOR_ASSET_SECTIONS,
+        native_plugin_section=MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     )
     capsys.readouterr()
+
+    native_plugin.unlink()
+    with pytest.raises(FileNotFoundError, match=MINIMAX_H3_NATIVE_PLUGIN_FILENAME):
+        pack_native_bundle.main()

@@ -17,12 +17,40 @@ from pathlib import Path
 
 from .config import (
     FL2VA_PROCESSOR_ASSET_SECTIONS,
+    MINIMAX_H3_NATIVE_PLUGIN_ABI,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     MINIMAX_H3_WORKFLOWS,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
+    REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_ATTENTION_PRECISION,
+    REF2VA_IMAGE_VISION_ATTENTION_SCALE,
+    REF2VA_IMAGE_VISION_LINEAR_COUNT,
+    REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_LAYER_NORM_COUNT,
+    REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_BIAS_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_INPUT_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_KERNEL,
+    REF2VA_IMAGE_VISION_PATCH_OUTPUT_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_PRECISION,
+    REF2VA_IMAGE_VISION_PATCH_PROFILE,
+    REF2VA_IMAGE_VISION_PATCH_STRIDE,
+    REF2VA_IMAGE_VISION_PATCH_WEIGHT_SHAPE,
+    REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION,
+    REF2VA_LANGUAGE_ATTENTION_PRECISION,
+    REF2VA_LANGUAGE_Q_PRE_SCALE_PRECISION,
     REF2VA_MAX_TEXT_ROWS,
     REF2VA_MIN_CONDITION_VIDEO_ROWS,
     REF2VA_OPT_CONDITION_VIDEO_ROWS,
+    REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_VIDEO_VISION_ATTENTION_PRECISION,
+    REF2VA_VIDEO_VISION_PATCH_PROFILE,
+    REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION,
+    REF2VA_VISION_PLAN_LAYOUT,
     native_plan_filenames,
 )
 
@@ -371,14 +399,23 @@ def validate_checkpoint_snapshot_record(record: object, *, workflow: str = "t2va
 def builder_source_sha256() -> str:
     """Hash the semantic native builder surface shared by all entrypoints."""
 
+    from .native_plugin_builder import native_plugin_source_files
+
     family_root = Path(__file__).resolve().parent
     package_root = family_root.parents[1]
     repo_root = package_root.parents[1]
     sources = [*family_root.glob("*.py"), package_root / "trt_compat.py"]
+    logical_sources = [(str(path.relative_to(repo_root)), path) for path in sorted(set(sources))]
+    logical_sources.extend(
+        (
+            f"src/runtime/models/minimax_h3/native_plugins/{path.name}",
+            path,
+        )
+        for path in native_plugin_source_files()
+    )
     digest = hashlib.sha256()
-    for path in sorted(set(sources)):
-        relative = path.relative_to(repo_root)
-        digest.update(str(relative).encode())
+    for logical_path, path in sorted(logical_sources):
+        digest.update(logical_path.encode())
         digest.update(b"\0")
         with path.open("rb") as stream:
             while chunk := stream.read(1 << 20):
@@ -733,6 +770,8 @@ def _validate_build_receipt_metadata(
     expected_assets = {"tokenizer.json"}
     if workflow in {"fl2va", "ref2va"}:
         expected_assets.update(FL2VA_PROCESSOR_ASSET_SECTIONS)
+    if workflow == "ref2va":
+        expected_assets.add(MINIMAX_H3_NATIVE_PLUGIN_SECTION)
     if not isinstance(assets, dict) or set(assets) != expected_assets:
         raise ValueError("MiniMax-H3 build receipt must cover exactly the selected assets")
     for name in expected_assets:
@@ -779,6 +818,13 @@ def validate_build_receipt(
                 relative,
                 hash_file=hash_files,
             )
+    if workflow == "ref2va":
+        validate_record(
+            plans_dir / MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+            receipt["assets"][MINIMAX_H3_NATIVE_PLUGIN_SECTION],
+            MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+            hash_file=hash_files,
+        )
     return source_sha, components, tokenizer_record, recorded_snapshot
 
 
@@ -807,7 +853,7 @@ def validate_component_build_receipt(
     return source_sha, component_record, snapshot_record
 
 
-def load_bundle_config(bundle: Path) -> dict:
+def _load_bundle_sections(bundle: Path) -> tuple[dict, int]:
     with bundle.open("rb") as stream:
         if stream.read(len(_BUNDLE_MAGIC)) != _BUNDLE_MAGIC:
             raise ValueError("MiniMax-H3 bundle has invalid magic")
@@ -822,27 +868,39 @@ def load_bundle_config(bundle: Path) -> dict:
             raise ValueError("MiniMax-H3 bundle has a truncated header")
         header = json.loads(raw_header)
         sections = header.get("sections") if isinstance(header, dict) else None
-        config_section = sections.get("config.json") if isinstance(sections, dict) else None
-        if not isinstance(config_section, dict):
-            raise ValueError("MiniMax-H3 bundle is missing config.json")
-        offset = config_section.get("offset")
-        size = config_section.get("size")
-        if (
-            not isinstance(offset, int)
-            or isinstance(offset, bool)
-            or offset < 0
-            or not isinstance(size, int)
-            or isinstance(size, bool)
-            or size <= 0
-        ):
-            raise ValueError("MiniMax-H3 bundle config.json section has invalid bounds")
-        data_start = len(_BUNDLE_MAGIC) + 8 + header_size
-        if offset + size > bundle.stat().st_size - data_start:
-            raise ValueError("MiniMax-H3 bundle config.json section is out of bounds")
+    if not isinstance(sections, dict):
+        raise ValueError("MiniMax-H3 bundle has an invalid section index")
+    return sections, len(_BUNDLE_MAGIC) + 8 + header_size
+
+
+def _read_bundle_section(bundle: Path, section_name: str, sections: dict, data_start: int) -> bytes:
+    section = sections.get(section_name)
+    if not isinstance(section, dict):
+        raise ValueError(f"MiniMax-H3 bundle is missing {section_name}")
+    offset = section.get("offset")
+    size = section.get("size")
+    if (
+        not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or offset < 0
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size <= 0
+    ):
+        raise ValueError(f"MiniMax-H3 bundle {section_name} section has invalid bounds")
+    if offset + size > bundle.stat().st_size - data_start:
+        raise ValueError(f"MiniMax-H3 bundle {section_name} section is out of bounds")
+    with bundle.open("rb") as stream:
         stream.seek(data_start + offset)
-        raw_config = stream.read(size)
-        if len(raw_config) != size:
-            raise ValueError("MiniMax-H3 bundle config.json section is truncated")
+        payload = stream.read(size)
+    if len(payload) != size:
+        raise ValueError(f"MiniMax-H3 bundle {section_name} section is truncated")
+    return payload
+
+
+def load_bundle_config(bundle: Path) -> dict:
+    sections, data_start = _load_bundle_sections(bundle)
+    raw_config = _read_bundle_section(bundle, "config.json", sections, data_start)
     config = json.loads(raw_config)
     if not isinstance(config, dict):
         raise ValueError("MiniMax-H3 bundle config.json must be a JSON object")
@@ -901,6 +959,44 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
             "ref2va_max_videos": 3,
             "ref2va_max_audios": 3,
             "ref2va_max_references": 12,
+            "ref2va_vision_plan_layout": REF2VA_VISION_PLAN_LAYOUT,
+            "minimax_h3_native_plugin_section": MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+            "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+            "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
+            "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+            "ref2va_language_attention_implementation": (REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION),
+            "ref2va_language_attention_precision": REF2VA_LANGUAGE_ATTENTION_PRECISION,
+            "ref2va_language_q_pre_scale_precision": REF2VA_LANGUAGE_Q_PRE_SCALE_PRECISION,
+            "ref2va_image_vision_attention_implementation": (
+                REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION
+            ),
+            "ref2va_image_vision_attention_precision": (REF2VA_IMAGE_VISION_ATTENTION_PRECISION),
+            "ref2va_image_vision_attention_scale": REF2VA_IMAGE_VISION_ATTENTION_SCALE,
+            "ref2va_image_vision_linear_implementation": (
+                REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION
+            ),
+            "ref2va_image_vision_linear_count": REF2VA_IMAGE_VISION_LINEAR_COUNT,
+            "ref2va_image_vision_layer_norm_implementation": (
+                REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION
+            ),
+            "ref2va_image_vision_layer_norm_count": REF2VA_IMAGE_VISION_LAYER_NORM_COUNT,
+            "ref2va_image_vision_patch_implementation": (REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION),
+            "ref2va_image_vision_patch_precision": REF2VA_IMAGE_VISION_PATCH_PRECISION,
+            "ref2va_image_vision_patch_input_shape": list(REF2VA_IMAGE_VISION_PATCH_INPUT_SHAPE),
+            "ref2va_image_vision_patch_weight_shape": list(REF2VA_IMAGE_VISION_PATCH_WEIGHT_SHAPE),
+            "ref2va_image_vision_patch_bias_shape": list(REF2VA_IMAGE_VISION_PATCH_BIAS_SHAPE),
+            "ref2va_image_vision_patch_kernel": list(REF2VA_IMAGE_VISION_PATCH_KERNEL),
+            "ref2va_image_vision_patch_stride": list(REF2VA_IMAGE_VISION_PATCH_STRIDE),
+            "ref2va_image_vision_patch_output_shape": list(REF2VA_IMAGE_VISION_PATCH_OUTPUT_SHAPE),
+            "ref2va_video_vision_attention_implementation": (
+                REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION
+            ),
+            "ref2va_video_vision_attention_precision": (REF2VA_VIDEO_VISION_ATTENTION_PRECISION),
+            "ref2va_video_vision_q_pre_scale_precision": (
+                REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION
+            ),
+            "ref2va_image_vision_patch_profile": list(REF2VA_IMAGE_VISION_PATCH_PROFILE),
+            "ref2va_video_vision_patch_profile": list(REF2VA_VIDEO_VISION_PATCH_PROFILE),
             "ref2va_reference_min_seconds": 2,
             "ref2va_reference_max_seconds": 15,
             "ref2va_vae_tile_size": 256,
@@ -923,8 +1019,15 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         workflow=workflow,
     )
     expected_eager = ["tokenizer.json", "config.json"]
-    if workflow in {"fl2va", "ref2va"}:
+    if workflow == "fl2va":
         expected_eager = ["tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS, "config.json"]
+    elif workflow == "ref2va":
+        expected_eager = [
+            "tokenizer.json",
+            *FL2VA_PROCESSOR_ASSET_SECTIONS,
+            MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+            "config.json",
+        ]
     expected_loading = {
         "mode": "staged",
         "eager_sections": expected_eager,
@@ -932,6 +1035,14 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
     }
     if config.get("bundle_loading") != expected_loading:
         raise ValueError("MiniMax-H3 bundle config has an invalid staged-loading section set")
+    sections, data_start = _load_bundle_sections(bundle)
+    expected_sections = set(expected_loading["eager_sections"]) | set(
+        expected_loading["lazy_sections"]
+    )
+    if workflow == "ref2va" and set(sections) != expected_sections:
+        raise ValueError("MiniMax-H3 bundle sections do not match the staged-loading contract")
+    if workflow != "ref2va" and MINIMAX_H3_NATIVE_PLUGIN_SECTION in sections:
+        raise ValueError("MiniMax-H3 non-Ref2VA bundle contains a native plugin section")
     plan_sha = config.get("plan_sha256")
     if not isinstance(plan_sha, dict) or set(plan_sha) != set(selected_plans):
         raise ValueError("MiniMax-H3 bundle config must identify exactly the selected native plans")
@@ -946,14 +1057,28 @@ def validate_native_bundle_config(bundle: Path, *, source_revision: str) -> dict
         raise ValueError("MiniMax-H3 bundle cache mode and profile flag disagree")
     if workflow in {"fl2va", "ref2va"}:
         expected_assets = {"tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS}
+        if workflow == "ref2va":
+            expected_assets.add(MINIMAX_H3_NATIVE_PLUGIN_SECTION)
         asset_sha = config.get("asset_sha256")
         if not isinstance(asset_sha, dict) or set(asset_sha) != expected_assets:
-            raise ValueError("MiniMax-H3 conditioned bundle must hash every processor asset")
+            raise ValueError("MiniMax-H3 conditioned bundle must hash every selected asset")
         if any(
             not isinstance(value, str) or _SHA256.fullmatch(value) is None
             for value in asset_sha.values()
         ):
             raise ValueError("MiniMax-H3 conditioned bundle has an invalid asset SHA256")
+        if workflow == "ref2va":
+            plugin_payload = _read_bundle_section(
+                bundle,
+                MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+                sections,
+                data_start,
+            )
+            if (
+                hashlib.sha256(plugin_payload).hexdigest()
+                != asset_sha[MINIMAX_H3_NATIVE_PLUGIN_SECTION]
+            ):
+                raise ValueError("MiniMax-H3 native plugin section SHA256 does not match")
     validate_workspace_limit_bytes(
         config.get("workspace_limit_bytes"),
         first_block_cache=first_block_cache,

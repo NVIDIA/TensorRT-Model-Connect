@@ -66,8 +66,8 @@ struct MiniMaxH3Ref2VAVisionInput {
     int32_t grid_w{0};
     std::vector<float> pixel_values;       // [grid_h * grid_w, 1536]
     std::vector<int32_t> position_indices; // [grid_h * grid_w, 4]
-    // Upstream multiplies the BF16 learned table by FP32 interpolation weights
-    // and casts only the final four-tap sum. Bind as FP32 [rows, 4].
+    // Bind exact ATen-linspace weights as FP32 [rows, 4]. The engine publishes
+    // them to BF16 before reproducing upstream's BF16 products and sums.
     std::vector<float> position_weights;
     std::vector<int32_t> vision_position_ids; // [grid_h * grid_w, 2]
 };

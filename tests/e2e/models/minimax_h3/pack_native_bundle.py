@@ -21,12 +21,40 @@ from tensorrt_model_connect.bundle_writer import (
 from tensorrt_model_connect.families.minimax_h3.config import (
     FL2VA_PLAN_FILENAMES,
     FL2VA_PROCESSOR_ASSET_SECTIONS,
+    MINIMAX_H3_NATIVE_PLUGIN_ABI,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
+    REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_ATTENTION_PRECISION,
+    REF2VA_IMAGE_VISION_ATTENTION_SCALE,
+    REF2VA_IMAGE_VISION_LINEAR_COUNT,
+    REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_LAYER_NORM_COUNT,
+    REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_BIAS_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_INPUT_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_KERNEL,
+    REF2VA_IMAGE_VISION_PATCH_OUTPUT_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_PRECISION,
+    REF2VA_IMAGE_VISION_PATCH_PROFILE,
+    REF2VA_IMAGE_VISION_PATCH_STRIDE,
+    REF2VA_IMAGE_VISION_PATCH_WEIGHT_SHAPE,
+    REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION,
+    REF2VA_LANGUAGE_ATTENTION_PRECISION,
+    REF2VA_LANGUAGE_Q_PRE_SCALE_PRECISION,
     REF2VA_MAX_TEXT_ROWS,
     REF2VA_MIN_CONDITION_VIDEO_ROWS,
     REF2VA_OPT_CONDITION_VIDEO_ROWS,
     REF2VA_PLAN_FILENAMES,
+    REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_VIDEO_VISION_ATTENTION_PRECISION,
+    REF2VA_VIDEO_VISION_PATCH_PROFILE,
+    REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION,
+    REF2VA_VISION_PLAN_LAYOUT,
     SOL_ENGINE_1344X768_124F,
 )
 from tensorrt_model_connect.families.minimax_h3.provenance import (
@@ -78,12 +106,18 @@ def _bundle_loading_policy(
     plan_sections=PLAN_SECTIONS,
     *,
     processor_sections: tuple[str, ...] = (),
+    native_plugin_section: str | None = None,
 ) -> dict[str, object]:
     """Keep only metadata resident; H3 loads one large plan at a time."""
 
     return {
         "mode": "staged",
-        "eager_sections": ["tokenizer.json", *processor_sections, "config.json"],
+        "eager_sections": [
+            "tokenizer.json",
+            *processor_sections,
+            *([native_plugin_section] if native_plugin_section is not None else []),
+            "config.json",
+        ],
         "lazy_sections": list(plan_sections),
     }
 
@@ -112,14 +146,17 @@ def main() -> int:
     if workflow == "ref2va":
         plan_sections = REF2VA_PLAN_SECTIONS
         processor_sections = FL2VA_PROCESSOR_ASSET_SECTIONS
+        native_plugin_section = MINIMAX_H3_NATIVE_PLUGIN_SECTION
     elif workflow == "fl2va":
         plan_sections = FL2VA_PLAN_SECTIONS
         processor_sections = FL2VA_PROCESSOR_ASSET_SECTIONS
+        native_plugin_section = None
     else:
         plan_sections = (
             FIRST_BLOCK_CACHE_PLAN_SECTIONS if profile.first_block_cache else PLAN_SECTIONS
         )
         processor_sections = ()
+        native_plugin_section = None
     trt_version, trt_abi, gpu_name = _target_metadata()
     receipt_path = plans / "build_receipt.json"
     if not receipt_path.is_file():
@@ -161,6 +198,14 @@ def main() -> int:
                 expected_sha256=receipt["assets"][section_name]["sha256"],
             )
         )
+    if native_plugin_section is not None:
+        sections.append(
+            _bundle_section_from_file(
+                native_plugin_section,
+                (plans / MINIMAX_H3_NATIVE_PLUGIN_FILENAME).resolve(strict=True),
+                expected_sha256=receipt["assets"][native_plugin_section]["sha256"],
+            )
+        )
     config = {
         "model_type": "minimax_h3",
         "runtime_strategy": "diffusion_minimax_h3",
@@ -173,6 +218,7 @@ def main() -> int:
         "bundle_loading": _bundle_loading_policy(
             plan_sections,
             processor_sections=processor_sections,
+            native_plugin_section=native_plugin_section,
         ),
         "tokenizer_add_special_tokens": 0,
         "checkpoint_revision": CHECKPOINT_REVISION,
@@ -238,6 +284,58 @@ def main() -> int:
                 "ref2va_max_videos": 3,
                 "ref2va_max_audios": 3,
                 "ref2va_max_references": 12,
+                "ref2va_vision_plan_layout": REF2VA_VISION_PLAN_LAYOUT,
+                "minimax_h3_native_plugin_section": MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+                "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+                "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
+                "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+                "ref2va_language_attention_implementation": (
+                    REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION
+                ),
+                "ref2va_language_attention_precision": REF2VA_LANGUAGE_ATTENTION_PRECISION,
+                "ref2va_language_q_pre_scale_precision": (REF2VA_LANGUAGE_Q_PRE_SCALE_PRECISION),
+                "ref2va_image_vision_attention_implementation": (
+                    REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION
+                ),
+                "ref2va_image_vision_attention_precision": (
+                    REF2VA_IMAGE_VISION_ATTENTION_PRECISION
+                ),
+                "ref2va_image_vision_attention_scale": (REF2VA_IMAGE_VISION_ATTENTION_SCALE),
+                "ref2va_image_vision_linear_implementation": (
+                    REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION
+                ),
+                "ref2va_image_vision_linear_count": REF2VA_IMAGE_VISION_LINEAR_COUNT,
+                "ref2va_image_vision_layer_norm_implementation": (
+                    REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION
+                ),
+                "ref2va_image_vision_layer_norm_count": REF2VA_IMAGE_VISION_LAYER_NORM_COUNT,
+                "ref2va_image_vision_patch_implementation": (
+                    REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION
+                ),
+                "ref2va_image_vision_patch_precision": REF2VA_IMAGE_VISION_PATCH_PRECISION,
+                "ref2va_image_vision_patch_input_shape": list(
+                    REF2VA_IMAGE_VISION_PATCH_INPUT_SHAPE
+                ),
+                "ref2va_image_vision_patch_weight_shape": list(
+                    REF2VA_IMAGE_VISION_PATCH_WEIGHT_SHAPE
+                ),
+                "ref2va_image_vision_patch_bias_shape": list(REF2VA_IMAGE_VISION_PATCH_BIAS_SHAPE),
+                "ref2va_image_vision_patch_kernel": list(REF2VA_IMAGE_VISION_PATCH_KERNEL),
+                "ref2va_image_vision_patch_stride": list(REF2VA_IMAGE_VISION_PATCH_STRIDE),
+                "ref2va_image_vision_patch_output_shape": list(
+                    REF2VA_IMAGE_VISION_PATCH_OUTPUT_SHAPE
+                ),
+                "ref2va_video_vision_attention_implementation": (
+                    REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION
+                ),
+                "ref2va_video_vision_attention_precision": (
+                    REF2VA_VIDEO_VISION_ATTENTION_PRECISION
+                ),
+                "ref2va_video_vision_q_pre_scale_precision": (
+                    REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION
+                ),
+                "ref2va_image_vision_patch_profile": list(REF2VA_IMAGE_VISION_PATCH_PROFILE),
+                "ref2va_video_vision_patch_profile": list(REF2VA_VIDEO_VISION_PATCH_PROFILE),
                 "ref2va_reference_min_seconds": 2,
                 "ref2va_reference_max_seconds": 15,
                 "ref2va_vae_tile_size": 256,
@@ -246,7 +344,11 @@ def main() -> int:
                 "processor_asset_sections": list(processor_sections),
                 "asset_sha256": {
                     name: receipt["assets"][name]["sha256"]
-                    for name in ("tokenizer.json", *processor_sections)
+                    for name in (
+                        "tokenizer.json",
+                        *processor_sections,
+                        MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+                    )
                 },
             }
         )

@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -21,6 +22,12 @@ void check(bool condition, const char* label) {
         std::cerr << "FAIL: " << label << '\n';
         ++failures;
     }
+}
+
+uint32_t float_bits(float value) {
+    uint32_t result = 0;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
 }
 
 int32_t mrope_at(const trtmc::MiniMaxH3Ref2VAConditionerPresentation& presentation, int32_t axis,
@@ -204,6 +211,13 @@ void test_image_reference_builds_dynamic_qwen_run() {
           "Ref2VA image interpolation preserves the nontrivial left weight in FP32");
     check(std::abs(input.position_weights[5] - 0.37007874F) < 1.0e-7F,
           "Ref2VA image interpolation preserves the nontrivial right weight in FP32");
+    // Processor merge order places patch coordinate (row=0, column=5) at raw
+    // row 9. These bits distinguish ATen's endpoint-directed linspace from a
+    // multiply-then-divide approximation.
+    check(float_bits(input.position_weights[36]) == 0x3E193260U,
+          "Ref2VA image interpolation matches the pinned ATen left-weight bits");
+    check(float_bits(input.position_weights[37]) == 0x3F59B368U,
+          "Ref2VA image interpolation matches the pinned ATen right-weight bits");
 }
 
 void test_video_soundtrack_precedes_timestamped_video_pair() {

@@ -44,6 +44,33 @@ def validate_ref2va_receipt_contract(trt_receipt: dict, ref_receipt: dict) -> No
         or any(kind not in {"image", "video", "audio"} for kind in trt_kinds)
     ):
         raise ValueError("MiniMax-H3 TRT and HF receipts identify different Ref2VA inputs")
+    runtime = trt_receipt.get("runtime")
+    engine_execute = trt_receipt.get("engine_execute")
+    if not isinstance(runtime, dict) or not isinstance(engine_execute, dict):
+        raise ValueError("MiniMax-H3 native Ref2VA receipt has no runtime engine evidence")
+
+    image_timing = engine_execute.get("vision_conditioner_image_plan_ms")
+    video_timing = engine_execute.get("vision_conditioner_video_plan_ms")
+
+    def valid_timing(value: object) -> bool:
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and np.isfinite(value)
+            and value > 0.0
+        )
+
+    image_expected = "image" in trt_kinds
+    video_expected = "video" in trt_kinds
+    if (
+        runtime.get("references") != len(trt_kinds)
+        or "vision_conditioner_plan_ms" in engine_execute
+        or (image_timing is not None) != image_expected
+        or (video_timing is not None) != video_expected
+        or (image_expected and not valid_timing(image_timing))
+        or (video_expected and not valid_timing(video_timing))
+    ):
+        raise ValueError("MiniMax-H3 native Ref2VA vision engine routing is inconsistent")
     if set(trt_kinds) != {"audio"}:
         return
     if len(trt_kinds) > 3:
@@ -85,19 +112,13 @@ def validate_ref2va_receipt_contract(trt_receipt: dict, ref_receipt: dict) -> No
     ):
         raise ValueError("MiniMax-H3 HF audio-only compatibility evidence is inconsistent")
 
-    runtime = trt_receipt.get("runtime")
-    engine_execute = trt_receipt.get("engine_execute")
-    if not isinstance(runtime, dict) or not isinstance(engine_execute, dict):
-        raise ValueError("MiniMax-H3 native audio-only receipt has no runtime engine evidence")
     condition_audio_rows = runtime.get("condition_audio_rows")
     audio_encoder_ms = engine_execute.get("audio_vae_encoder_plan_ms")
     if (
-        runtime.get("references") != len(trt_kinds)
-        or runtime.get("condition_video_rows") != 0
+        runtime.get("condition_video_rows") != 0
         or isinstance(condition_audio_rows, bool)
         or not isinstance(condition_audio_rows, int)
         or condition_audio_rows <= 0
-        or "vision_conditioner_plan_ms" in engine_execute
         or "vae_encoder_tile_t1_plan_ms" in engine_execute
         or "vae_encoder_tile_t17_plan_ms" in engine_execute
         or isinstance(audio_encoder_ms, bool)

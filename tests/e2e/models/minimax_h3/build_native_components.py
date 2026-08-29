@@ -20,6 +20,8 @@ from tensorrt_model_connect.families.minimax_h3.checkpoint import (
 )
 from tensorrt_model_connect.families.minimax_h3.config import (
     FL2VA_PROCESSOR_ASSET_SECTIONS,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     SOL_ENGINE_1344X768_124F,
     default_workspace_limit_bytes,
 )
@@ -165,6 +167,22 @@ def main() -> int:
         asset_paths.update(
             {relative: model / relative for relative in FL2VA_PROCESSOR_ASSET_SECTIONS}
         )
+    native_plugin_source = None
+    native_plugin_artifact = None
+    native_plugin_payload = None
+    if workflow == "ref2va":
+        from tensorrt_model_connect.families.minimax_h3.native_plugin_builder import (
+            ensure_native_plugin,
+        )
+
+        native_plugin_source = ensure_native_plugin()
+        native_plugin_payload = native_plugin_source.read_bytes()
+        if not native_plugin_payload:
+            raise RuntimeError(
+                f"MiniMax-H3 native plugin artifact is empty: {native_plugin_source}"
+            )
+        native_plugin_artifact = output / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+        asset_paths[MINIMAX_H3_NATIVE_PLUGIN_SECTION] = native_plugin_source
     checkpoint_partition = "transformer_ref" if workflow == "ref2va" else "transformer"
     receipt = {
         "workflow": workflow,
@@ -182,9 +200,14 @@ def main() -> int:
     if args.resume and receipt_path.is_file():
         previous = json.loads(receipt_path.read_text())
         _validate_resume_identity(previous, receipt)
-        for name, path in asset_paths.items():
+        validation_paths = dict(asset_paths)
+        if native_plugin_artifact is not None:
+            validation_paths[MINIMAX_H3_NATIVE_PLUGIN_SECTION] = native_plugin_artifact
+        for name, path in validation_paths.items():
             validate_record(path, previous["assets"][name], name, hash_file=True)
         receipt["components"].update(previous.get("components", {}))
+    elif native_plugin_artifact is not None and native_plugin_payload is not None:
+        atomic_write_bytes(native_plugin_artifact, native_plugin_payload)
     if workflow == "ref2va":
         default_components = (
             "language_conditioner",
@@ -260,9 +283,20 @@ def main() -> int:
         del weights, plan
         gc.collect()
 
+    vision_plan_specs = (
+        (("vision_conditioner.plan", None),)
+        if workflow == "fl2va"
+        else (
+            ("vision_conditioner_image.plan", "image"),
+            ("vision_conditioner_video.plan", "video"),
+        )
+    )
     if workflow in {"fl2va", "ref2va"} and (
         should_build("language_conditioner", "language_conditioner.plan")
-        or should_build("vision_conditioner", "vision_conditioner.plan")
+        or any(
+            should_build("vision_conditioner", filename)
+            for filename, _modality in vision_plan_specs
+        )
     ):
         text_config = json.loads((model / "text_encoder" / "config.json").read_text())
         if not isinstance(text_config, dict):
@@ -300,7 +334,12 @@ def main() -> int:
             del weights, plan
             gc.collect()
 
-        if should_build("vision_conditioner", "vision_conditioner.plan"):
+        pending_vision = [
+            (filename, modality)
+            for filename, modality in vision_plan_specs
+            if should_build("vision_conditioner", filename)
+        ]
+        if pending_vision:
             from tensorrt_model_connect.families.minimax_h3.vision_conditioner_builder import (
                 build_vision_conditioner_engine,
             )
@@ -313,23 +352,26 @@ def main() -> int:
             )
             weights = numpy_state(state)
             del state
-            started = time.perf_counter()
-            plan = build_vision_conditioner_engine(
-                text_config,
-                weights,
-                workflow=workflow,
-                consume_weights=True,
-                workspace_bytes=workspace_limit_bytes["vision_conditioner.plan"],
-            )
-            _write(
-                output,
-                "vision_conditioner.plan",
-                plan,
-                time.perf_counter() - started,
-                receipt,
-            )
-            checkpoint_receipt()
-            del weights, plan
+            for index, (filename, modality) in enumerate(pending_vision):
+                started = time.perf_counter()
+                plan = build_vision_conditioner_engine(
+                    text_config,
+                    weights,
+                    workflow=workflow,
+                    ref2va_modality=modality,
+                    consume_weights=index + 1 == len(pending_vision),
+                    workspace_bytes=workspace_limit_bytes[filename],
+                )
+                _write(
+                    output,
+                    filename,
+                    plan,
+                    time.perf_counter() - started,
+                    receipt,
+                )
+                checkpoint_receipt()
+                del plan
+            del weights
             gc.collect()
 
     from tensorrt_model_connect.families.minimax_h3.adaln_builder import (

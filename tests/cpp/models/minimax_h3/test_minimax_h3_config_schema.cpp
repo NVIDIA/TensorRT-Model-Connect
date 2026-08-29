@@ -59,12 +59,55 @@ constexpr std::array<std::pair<const char*, int32_t>, 17> kRef2vaProfile = {{
     {"ref2va_vae_tile_min_overlap", 64},
 }};
 
+constexpr std::array<std::pair<const char*, const char*>, 17> kRef2vaVisionProfile = {{
+    {"ref2va_vision_plan_layout", "split-image-video-v1"},
+    {"minimax_h3_native_plugin_section", "minimax_h3_native_plugin_so"},
+    {"minimax_h3_native_plugin_artifact", "libtrtmc_minimax_h3_native_plugin.so"},
+    {"minimax_h3_native_plugin_identity", "trtmc.minimax_h3.native_plugin:aten-ops:1"},
+    {"ref2va_language_attention_implementation", "tensorrt-bf16-iattention-v1"},
+    {"ref2va_language_attention_precision", "bf16"},
+    {"ref2va_language_q_pre_scale_precision", "bf16"},
+    {"ref2va_image_vision_attention_implementation", "aten-bf16-sdpa-v1"},
+    {"ref2va_image_vision_attention_precision", "bf16"},
+    {"ref2va_image_vision_attention_scale", "fp64:0x1.e2b7dddfefa66p-4"},
+    {"ref2va_image_vision_patch_implementation", "aten-bf16-conv3d-v1"},
+    {"ref2va_image_vision_patch_precision", "bf16"},
+    {"ref2va_image_vision_linear_implementation", "aten-bf16-linear-v1"},
+    {"ref2va_image_vision_layer_norm_implementation", "aten-bf16-layer-norm-v1"},
+    {"ref2va_video_vision_attention_implementation", "tensorrt-fp16-iattention-v1"},
+    {"ref2va_video_vision_attention_precision", "fp16"},
+    {"ref2va_video_vision_q_pre_scale_precision", "fp16"},
+}};
+
+constexpr std::array<std::pair<const char*, const char*>, 6> kRef2vaPatchProfile = {{
+    {"ref2va_image_vision_patch_input_shape", "[-1,1536]"},
+    {"ref2va_image_vision_patch_weight_shape", "[1152,3,2,16,16]"},
+    {"ref2va_image_vision_patch_bias_shape", "[1152]"},
+    {"ref2va_image_vision_patch_kernel", "[2,16,16]"},
+    {"ref2va_image_vision_patch_stride", "[2,16,16]"},
+    {"ref2va_image_vision_patch_output_shape", "[-1,1152]"},
+}};
+
 std::string ref2va_profile_json(const std::string& omitted = {}) {
     std::string result = R"({"workflow":"ref2va")";
     for (const auto& [name, value] : kRef2vaProfile) {
         if (name != omitted)
             result += ",\"" + std::string(name) + "\":" + std::to_string(value);
     }
+    for (const auto& [name, value] : kRef2vaVisionProfile) {
+        if (name != omitted)
+            result += ",\"" + std::string(name) + "\":\"" + value + "\"";
+    }
+    for (const auto& [name, value] : kRef2vaPatchProfile) {
+        if (name != omitted)
+            result += ",\"" + std::string(name) + "\":" + value;
+    }
+    if (omitted != "minimax_h3_native_plugin_abi")
+        result += ",\"minimax_h3_native_plugin_abi\":1";
+    if (omitted != "ref2va_image_vision_linear_count")
+        result += ",\"ref2va_image_vision_linear_count\":116";
+    if (omitted != "ref2va_image_vision_layer_norm_count")
+        result += ",\"ref2va_image_vision_layer_norm_count\":58";
     result += "}";
     return result;
 }
@@ -100,6 +143,27 @@ void check_ref2va_profile_abi() {
         check(error.find("incompatible dynamic profile") != std::string::npos,
               "missing Ref2VA profile ABI field fails closed");
     }
+    for (const auto& [name, value] : kRef2vaVisionProfile) {
+        (void)value;
+        const std::string error = create_error(ref2va_profile_json(name));
+        check(error.find("incompatible vision plan layout") != std::string::npos,
+              "missing Ref2VA vision-plan ABI field fails closed");
+    }
+    for (const auto& [name, value] : kRef2vaPatchProfile) {
+        (void)value;
+        const std::string error = create_error(ref2va_profile_json(name));
+        check(error.find("incompatible patch plugin ABI") != std::string::npos,
+              "missing Ref2VA patch-plugin ABI field fails closed");
+    }
+    check(create_error(ref2va_profile_json("minimax_h3_native_plugin_abi"))
+                  .find("incompatible vision plan layout") != std::string::npos,
+          "missing Ref2VA native-plugin ABI field fails closed");
+    check(create_error(ref2va_profile_json("ref2va_image_vision_linear_count"))
+                  .find("incompatible vision plan layout") != std::string::npos,
+          "missing Ref2VA Linear-plugin count fails closed");
+    check(create_error(ref2va_profile_json("ref2va_image_vision_layer_norm_count"))
+                  .find("incompatible vision plan layout") != std::string::npos,
+          "missing Ref2VA LayerNorm-plugin count fails closed");
 
     std::string legacy = ref2va_profile_json();
     const std::string current = "\"ref2va_min_condition_video_rows\":0";

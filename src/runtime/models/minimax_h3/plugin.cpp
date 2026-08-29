@@ -5,6 +5,7 @@
 
 #include "bundle/bundle_format.h"
 #include "bundle/bundle_view.h"
+#include "runtime/models/minimax_h3/native_plugin_loader.h"
 #include "runtime/models/minimax_h3/pipeline.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/pipeline_registry.h"
@@ -20,6 +21,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace trtmc {
 namespace {
@@ -68,10 +70,12 @@ SectionMap index_sections(const BundleInfo& info, bool first_block_cache,
         for (const char* name : fl2va_names)
             add_section(name);
     } else if (workflow == MiniMaxH3Workflow::kRef2va) {
-        constexpr std::array<const char*, 9> ref2va_names = {
-            "language_conditioner_plan", "vision_conditioner_plan", "vae_encoder_tile_t1_plan",
-            "vae_encoder_tile_t17_plan", "audio_vae_encoder_plan",  "adaln_precompute_plan",
-            "ref2va_denoiser_plan",      "vae_tile_decoder_plan",   "audio_vae_decoder_plan"};
+        constexpr std::array<const char*, 10> ref2va_names = {
+            "language_conditioner_plan",     "vision_conditioner_image_plan",
+            "vision_conditioner_video_plan", "vae_encoder_tile_t1_plan",
+            "vae_encoder_tile_t17_plan",     "audio_vae_encoder_plan",
+            "adaln_precompute_plan",         "ref2va_denoiser_plan",
+            "vae_tile_decoder_plan",         "audio_vae_decoder_plan"};
         for (const char* name : ref2va_names)
             add_section(name);
     } else if (first_block_cache) {
@@ -145,6 +149,55 @@ void validate_ref2va_profile(const PipelineContext& ctx) {
             throw std::runtime_error(
                 "MiniMax-H3 Ref2VA bundle has an incompatible dynamic profile");
     }
+    if (extract_json_string(ctx.config_json, "ref2va_vision_plan_layout", "") !=
+            "split-image-video-v1" ||
+        extract_json_string(ctx.config_json, "minimax_h3_native_plugin_section", "") !=
+            "minimax_h3_native_plugin_so" ||
+        extract_json_string(ctx.config_json, "minimax_h3_native_plugin_artifact", "") !=
+            "libtrtmc_minimax_h3_native_plugin.so" ||
+        extract_json_int(ctx.config_json, "minimax_h3_native_plugin_abi", -1) != 1 ||
+        extract_json_string(ctx.config_json, "minimax_h3_native_plugin_identity", "") !=
+            "trtmc.minimax_h3.native_plugin:aten-ops:1" ||
+        extract_json_string(ctx.config_json, "ref2va_language_attention_implementation", "") !=
+            "tensorrt-bf16-iattention-v1" ||
+        extract_json_string(ctx.config_json, "ref2va_language_attention_precision", "") != "bf16" ||
+        extract_json_string(ctx.config_json, "ref2va_language_q_pre_scale_precision", "") !=
+            "bf16" ||
+        extract_json_string(ctx.config_json, "ref2va_image_vision_attention_implementation", "") !=
+            "aten-bf16-sdpa-v1" ||
+        extract_json_string(ctx.config_json, "ref2va_image_vision_attention_precision", "") !=
+            "bf16" ||
+        extract_json_string(ctx.config_json, "ref2va_image_vision_attention_scale", "") !=
+            "fp64:0x1.e2b7dddfefa66p-4" ||
+        extract_json_string(ctx.config_json, "ref2va_image_vision_patch_implementation", "") !=
+            "aten-bf16-conv3d-v1" ||
+        extract_json_string(ctx.config_json, "ref2va_image_vision_patch_precision", "") != "bf16" ||
+        extract_json_string(ctx.config_json, "ref2va_image_vision_linear_implementation", "") !=
+            "aten-bf16-linear-v1" ||
+        extract_json_int(ctx.config_json, "ref2va_image_vision_linear_count", -1) != 116 ||
+        extract_json_string(ctx.config_json, "ref2va_image_vision_layer_norm_implementation", "") !=
+            "aten-bf16-layer-norm-v1" ||
+        extract_json_int(ctx.config_json, "ref2va_image_vision_layer_norm_count", -1) != 58 ||
+        extract_json_string(ctx.config_json, "ref2va_video_vision_attention_implementation", "") !=
+            "tensorrt-fp16-iattention-v1" ||
+        extract_json_string(ctx.config_json, "ref2va_video_vision_attention_precision", "") !=
+            "fp16" ||
+        extract_json_string(ctx.config_json, "ref2va_video_vision_q_pre_scale_precision", "") !=
+            "fp16")
+        throw std::runtime_error("MiniMax-H3 Ref2VA bundle has an incompatible vision plan layout");
+    if (extract_json_int_array(ctx.config_json, "ref2va_image_vision_patch_input_shape", 2) !=
+            std::vector<int32_t>({-1, 1536}) ||
+        extract_json_int_array(ctx.config_json, "ref2va_image_vision_patch_weight_shape", 5) !=
+            std::vector<int32_t>({1152, 3, 2, 16, 16}) ||
+        extract_json_int_array(ctx.config_json, "ref2va_image_vision_patch_bias_shape", 1) !=
+            std::vector<int32_t>({1152}) ||
+        extract_json_int_array(ctx.config_json, "ref2va_image_vision_patch_kernel", 3) !=
+            std::vector<int32_t>({2, 16, 16}) ||
+        extract_json_int_array(ctx.config_json, "ref2va_image_vision_patch_stride", 3) !=
+            std::vector<int32_t>({2, 16, 16}) ||
+        extract_json_int_array(ctx.config_json, "ref2va_image_vision_patch_output_shape", 2) !=
+            std::vector<int32_t>({-1, 1152}))
+        throw std::runtime_error("MiniMax-H3 Ref2VA bundle has an incompatible patch plugin ABI");
     for (const char* name :
          {"processor/preprocessor_config.json", "processor/video_preprocessor_config.json"}) {
         const auto* section = find_section(ctx.bundle, name);
@@ -240,6 +293,8 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
         validate_profile(ctx);
         const MiniMaxH3Workflow workflow = load_workflow(ctx);
+        if (workflow == MiniMaxH3Workflow::kRef2va)
+            load_minimax_h3_native_plugin(ctx);
         const CacheConfig cache = load_cache_config(ctx);
         auto sections = index_sections(ctx.bundle.info, cache.enabled, workflow);
         auto loader = make_module_loader(ctx, sections);

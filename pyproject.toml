@@ -56,6 +56,7 @@ packages = ["python/tensorrt_model_connect"]
 include = [
     "python",
     "src/runtime/models/fast_foundation_stereo/native_plugins",
+    "src/runtime/models/minimax_h3/native_plugins",
     "third_party",
 ]
 exclude = [

@@ -37,6 +37,10 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     FL2VA_PLAN_FILENAMES,
     FL2VA_PROCESSOR_ASSET_SECTIONS,
     FIRST_BLOCK_CACHE_DENOISER_PLAN_FILENAMES,
+    MINIMAX_H3_NATIVE_PLUGIN_ABI,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     MiniMaxH3Config,
     REF2VA_DEFAULT_WORKSPACE_LIMIT_BYTES,
     REF2VA_PLAN_FILENAMES,
@@ -54,6 +58,21 @@ from tensorrt_model_connect.families.minimax_h3.plugin import (
 
 
 FAMILY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_ref2va_native_plugin_bundle_metadata_matches_builder_identity() -> None:
+    from tensorrt_model_connect.families.minimax_h3 import native_plugin_builder
+
+    assert native_plugin_builder._PLUGIN_IDENTITY == MINIMAX_H3_NATIVE_PLUGIN_IDENTITY
+    assert native_plugin_builder._PLUGIN_ABI_VERSION == MINIMAX_H3_NATIVE_PLUGIN_ABI
+
+
+def test_native_plugin_sources_are_included_in_source_distributions() -> None:
+    project = tomllib.loads((FAMILY_ROOT.parents[3] / "pyproject.toml").read_text())
+    assert (
+        "src/runtime/models/minimax_h3/native_plugins"
+        in project["tool"]["conan-py-build"]["sdist"]["include"]
+    )
 
 
 def _audio_vae_config() -> dict:
@@ -323,7 +342,6 @@ def test_build_components_builds_and_provenance_binds_audio_decoder(
     monkeypatch.setattr(plugin_module, "numpy_state", lambda _state: {})
     monkeypatch.setattr(plugin_module, "validate_component_key_partition", lambda *_args: None)
     monkeypatch.setattr(plugin_module, "builder_source_sha256", lambda: "c" * 64)
-
     components = MiniMaxH3Plugin().build_components(
         str(model_dir),
         SimpleNamespace(raw={}),
@@ -339,6 +357,7 @@ def test_build_components_builds_and_provenance_binds_audio_decoder(
         parallel_config=SimpleNamespace(mode="single", cp_size=1),
     )
     assert components["audio_vae_decoder"] == b"audio-vae"
+    assert "native_plugin" not in components
     assert audio_calls == {
         "root": str(paths["audio_vae"]),
         "verbose": True,
@@ -417,7 +436,9 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
         sys.modules,
         f"{module_prefix}.vision_conditioner_builder",
         SimpleNamespace(
-            build_vision_conditioner_engine=payload("vision_conditioner"),
+            build_vision_conditioner_engine=lambda *args, ref2va_modality, **kwargs: payload(
+                "vision_conditioner"
+            )(*args, ref2va_modality=ref2va_modality, **kwargs),
             checkpoint_keys=lambda: ("vision.weight",),
         ),
     )
@@ -482,6 +503,7 @@ def test_fl2va_build_packages_every_conditioner_plan_asset_and_receipt(
     assert components["checkpoint_partition"] == "transformer"
     assert components["language_conditioner"] == b"language_conditioner"
     assert components["vision_conditioner"] == b"vision_conditioner"
+    assert "native_plugin" not in components
     assert components["vae_encoder_tile_t1"] == b"vae_encoder_tile_t1"
     assert components["fl2va_denoiser"] == b"fl2va_denoiser"
     assert snapshot_calls == [(model_dir, {"workflow": "fl2va"})]
@@ -617,7 +639,9 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
         sys.modules,
         f"{module_prefix}.vision_conditioner_builder",
         SimpleNamespace(
-            build_vision_conditioner_engine=payload("vision_conditioner"),
+            build_vision_conditioner_engine=lambda *args, ref2va_modality, **kwargs: payload(
+                f"vision_conditioner_{ref2va_modality}"
+            )(*args, ref2va_modality=ref2va_modality, **kwargs),
             checkpoint_keys=lambda: ("vision.weight",),
         ),
     )
@@ -657,6 +681,16 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
     monkeypatch.setattr(plugin_module, "validate_component_key_partition", lambda *_args: None)
     monkeypatch.setattr(plugin_module, "builder_source_sha256", lambda: "c" * 64)
 
+    from tensorrt_model_connect.families.minimax_h3 import native_plugin_builder
+
+    native_plugin = tmp_path / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+    native_plugin.write_bytes(b"native-plugin")
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "ensure_native_plugin",
+        lambda **_kwargs: native_plugin,
+    )
+
     weights = {
         "_workflow": "ref2va",
         "_transformer_subfolder": "transformer_ref",
@@ -678,11 +712,15 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
     assert components["workflow"] == "ref2va"
     assert components["checkpoint_partition"] == "transformer_ref"
     assert components["ref2va_denoiser"] == b"ref2va_denoiser"
+    assert components["vision_conditioner_image"] == b"vision_conditioner_image"
+    assert components["vision_conditioner_video"] == b"vision_conditioner_video"
     assert components["vae_encoder_tile_t1"] == b"vae_encoder_tile_t1"
     assert components["vae_encoder_tile_t17"] == b"vae_encoder_tile_t17"
     assert components["audio_vae_encoder"] == b"audio_encoder"
+    assert components["native_plugin"] == b"native-plugin"
     assert calls["language_conditioner"]["kwargs"]["workflow"] == "ref2va"
-    assert calls["vision_conditioner"]["kwargs"]["workflow"] == "ref2va"
+    assert calls["vision_conditioner_image"]["kwargs"]["ref2va_modality"] == "image"
+    assert calls["vision_conditioner_video"]["kwargs"]["ref2va_modality"] == "video"
     assert calls["ref2va_denoiser"]["kwargs"]["checkpoint_subfolder"] == "transformer_ref"
     assert calls["vae_encoder_tile_t1"]["kwargs"]["num_frames"] == 1
     assert calls["vae_encoder_tile_t17"]["kwargs"]["num_frames"] == 17
@@ -690,11 +728,17 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
         REF2VA_DEFAULT_WORKSPACE_LIMIT_BYTES
     )
     assert set(components["provenance"]["plan_sha256"]) == set(REF2VA_PLAN_FILENAMES)
+    assert set(components["provenance"]["asset_sha256"]) == {
+        "tokenizer.json",
+        *FL2VA_PROCESSOR_ASSET_SECTIONS,
+        MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+    }
 
     sections = dict(MiniMaxH3Plugin().diffusion_bundle_sections(components))
     assert tuple(sections) == (
         "language_conditioner_plan",
-        "vision_conditioner_plan",
+        "vision_conditioner_image_plan",
+        "vision_conditioner_video_plan",
         "vae_encoder_tile_t1_plan",
         "vae_encoder_tile_t17_plan",
         "audio_vae_encoder_plan",
@@ -702,9 +746,14 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
         "ref2va_denoiser_plan",
         "vae_tile_decoder_plan",
         "audio_vae_decoder_plan",
+        MINIMAX_H3_NATIVE_PLUGIN_SECTION,
         "tokenizer.json",
         *FL2VA_PROCESSOR_ASSET_SECTIONS,
     )
+    missing_plugin = dict(components)
+    missing_plugin.pop("native_plugin")
+    with pytest.raises(ValueError, match="native plugin DSO"):
+        MiniMaxH3Plugin().diffusion_bundle_sections(missing_plugin)
     bundle_config = MiniMaxH3Plugin().diffusion_bundle_config(
         SimpleNamespace(raw={"workflow": "ref2va"}), components=components
     )
@@ -718,9 +767,53 @@ def test_ref2va_build_packages_dynamic_reference_plans_and_transformer_ref(
     assert bundle_config["ref2va_max_videos"] == 3
     assert bundle_config["ref2va_max_audios"] == 3
     assert bundle_config["ref2va_max_references"] == 12
+    assert bundle_config["ref2va_vision_plan_layout"] == "split-image-video-v1"
+    assert bundle_config["minimax_h3_native_plugin_section"] == MINIMAX_H3_NATIVE_PLUGIN_SECTION
+    assert bundle_config["minimax_h3_native_plugin_artifact"] == MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+    assert bundle_config["minimax_h3_native_plugin_abi"] == MINIMAX_H3_NATIVE_PLUGIN_ABI
+    assert bundle_config["minimax_h3_native_plugin_identity"] == MINIMAX_H3_NATIVE_PLUGIN_IDENTITY
+    assert (
+        bundle_config["ref2va_language_attention_implementation"] == "tensorrt-bf16-iattention-v1"
+    )
+    assert bundle_config["ref2va_language_attention_precision"] == "bf16"
+    assert "ref2va_language_attention_scale" not in bundle_config
+    assert bundle_config["ref2va_language_q_pre_scale_precision"] == "bf16"
+    assert bundle_config["ref2va_image_vision_attention_implementation"] == "aten-bf16-sdpa-v1"
+    assert bundle_config["ref2va_image_vision_attention_precision"] == "bf16"
+    assert bundle_config["ref2va_image_vision_attention_scale"] == "fp64:0x1.e2b7dddfefa66p-4"
+    assert bundle_config["ref2va_image_vision_linear_implementation"] == "aten-bf16-linear-v1"
+    assert bundle_config["ref2va_image_vision_linear_count"] == 116
+    assert (
+        bundle_config["ref2va_image_vision_layer_norm_implementation"] == "aten-bf16-layer-norm-v1"
+    )
+    assert bundle_config["ref2va_image_vision_layer_norm_count"] == 58
+    assert bundle_config["ref2va_image_vision_patch_implementation"] == "aten-bf16-conv3d-v1"
+    assert bundle_config["ref2va_image_vision_patch_precision"] == "bf16"
+    assert bundle_config["ref2va_image_vision_patch_input_shape"] == [-1, 1536]
+    assert bundle_config["ref2va_image_vision_patch_weight_shape"] == [1152, 3, 2, 16, 16]
+    assert bundle_config["ref2va_image_vision_patch_bias_shape"] == [1152]
+    assert bundle_config["ref2va_image_vision_patch_kernel"] == [2, 16, 16]
+    assert bundle_config["ref2va_image_vision_patch_stride"] == [2, 16, 16]
+    assert bundle_config["ref2va_image_vision_patch_output_shape"] == [-1, 1152]
+    assert (
+        bundle_config["ref2va_video_vision_attention_implementation"]
+        == "tensorrt-fp16-iattention-v1"
+    )
+    assert bundle_config["ref2va_video_vision_attention_precision"] == "fp16"
+    assert "ref2va_image_vision_q_pre_scale_precision" not in bundle_config
+    assert bundle_config["ref2va_video_vision_q_pre_scale_precision"] == "fp16"
+    assert bundle_config["ref2va_image_vision_patch_profile"] == [16384, 16384, 65536]
+    assert bundle_config["ref2va_video_vision_patch_profile"] == [2304, 4032, 4176]
+    assert bundle_config["bundle_loading"]["eager_sections"] == [
+        "tokenizer.json",
+        *FL2VA_PROCESSOR_ASSET_SECTIONS,
+        MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+        "config.json",
+    ]
     assert bundle_config["bundle_loading"]["lazy_sections"] == [
         "language_conditioner_plan",
-        "vision_conditioner_plan",
+        "vision_conditioner_image_plan",
+        "vision_conditioner_video_plan",
         "vae_encoder_tile_t1_plan",
         "vae_encoder_tile_t17_plan",
         "audio_vae_encoder_plan",
@@ -1068,7 +1161,11 @@ def test_plugin_emits_first_block_cache_sections_and_profile() -> None:
 
 def test_production_runtime_is_native_and_onnx_exports_are_build_only() -> None:
     violations = []
-    build_only_torch_modules = {"audio_vae_builder.py", "vae_encoder_builder.py"}
+    build_only_torch_modules = {
+        "audio_vae_builder.py",
+        "native_plugin_builder.py",
+        "vae_encoder_builder.py",
+    }
     for path in FAMILY_ROOT.glob("*.py"):
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -15,6 +16,8 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     DEFAULT_WORKSPACE_LIMIT_BYTES,
     FL2VA_PLAN_FILENAMES,
     FL2VA_PROCESSOR_ASSET_SECTIONS,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     REF2VA_PLAN_FILENAMES,
     default_workspace_limit_bytes,
 )
@@ -140,6 +143,16 @@ def test_main_passes_cli_workspace_to_every_builder(
         asset.parent.mkdir(parents=True, exist_ok=True)
         asset.write_text("{}")
     output = tmp_path / "plans"
+    native_plugin_source = tmp_path / "native-plugin-cache" / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+    native_plugin_source.parent.mkdir()
+    native_plugin_source.write_bytes(b"native-plugin")
+    from tensorrt_model_connect.families.minimax_h3 import native_plugin_builder
+
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "ensure_native_plugin",
+        lambda **_kwargs: native_plugin_source,
+    )
     observed = {}
     module_specs = {
         "text_encoder_builder": (("build_text_encoder_engine", "text_encoder.plan"),),
@@ -176,12 +189,15 @@ def test_main_passes_cli_workspace_to_every_builder(
         for builder_name, plan_name in builders:
 
             def fake_builder(*_args, _plan_name=plan_name, workspace_bytes=None, **_kwargs):
-                observed[_plan_name] = {
+                effective_name = _plan_name
+                if _plan_name == "vision_conditioner.plan" and _kwargs.get("ref2va_modality"):
+                    effective_name = f"vision_conditioner_{_kwargs['ref2va_modality']}.plan"
+                observed[effective_name] = {
                     "workspace_bytes": workspace_bytes,
                     "args": _args,
                     "kwargs": _kwargs,
                 }
-                return _plan_name.encode()
+                return effective_name.encode()
 
             setattr(fake_module, builder_name, fake_builder)
         if module_name == "vae_encoder_builder":
@@ -262,13 +278,28 @@ def test_main_passes_cli_workspace_to_every_builder(
     if workflow in {"fl2va", "ref2va"}:
         expected_assets.update(FL2VA_PROCESSOR_ASSET_SECTIONS)
         assert observed["language_conditioner.plan"]["kwargs"]["workflow"] == workflow
-        assert observed["vision_conditioner.plan"]["kwargs"]["workflow"] == workflow
     if workflow == "fl2va":
+        assert observed["vision_conditioner.plan"]["kwargs"] == {
+            "workflow": "fl2va",
+            "ref2va_modality": None,
+            "consume_weights": True,
+        }
         assert observed["fl2va_denoiser.plan"]["kwargs"]["checkpoint_subfolder"] == "transformer"
         assert observed["vae_encoder_tile_t1.plan"]["kwargs"] == {
             "num_frames": 1,
         }
     if workflow == "ref2va":
+        expected_assets.add(MINIMAX_H3_NATIVE_PLUGIN_SECTION)
+        assert observed["vision_conditioner_image.plan"]["kwargs"] == {
+            "workflow": "ref2va",
+            "ref2va_modality": "image",
+            "consume_weights": False,
+        }
+        assert observed["vision_conditioner_video.plan"]["kwargs"] == {
+            "workflow": "ref2va",
+            "ref2va_modality": "video",
+            "consume_weights": True,
+        }
         assert observed["ref2va_denoiser.plan"]["kwargs"]["checkpoint_subfolder"] == (
             "transformer_ref"
         )
@@ -278,5 +309,14 @@ def test_main_passes_cli_workspace_to_every_builder(
         assert partition_paths == [model / "transformer_ref"]
         assert model / "transformer_ref" in loaded_paths
         assert model / "transformer" not in loaded_paths
+        native_plugin_artifact = output / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+        assert native_plugin_artifact.read_bytes() == b"native-plugin"
+        assert receipt["assets"][MINIMAX_H3_NATIVE_PLUGIN_SECTION]["sha256"] == (
+            hashlib.sha256(b"native-plugin").hexdigest()
+        )
+        native_plugin_artifact.write_bytes(b"tampered-dso")
+        monkeypatch.setattr(sys, "argv", [*argv, "--resume"])
+        with pytest.raises(ValueError, match=MINIMAX_H3_NATIVE_PLUGIN_SECTION):
+            build_native_components.main()
     assert set(receipt["assets"]) == expected_assets
     capsys.readouterr()

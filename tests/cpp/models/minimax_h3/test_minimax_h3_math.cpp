@@ -5,8 +5,12 @@
 
 #include "runtime/models/minimax_h3/pipeline.h"
 
+#include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -24,21 +28,94 @@ void check_near(float actual, float expected, float tolerance, const char* label
     check(std::abs(actual - expected) <= tolerance, label);
 }
 
+uint32_t float_bits(float value) {
+    uint32_t result = 0;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
+}
+
+float float_from_bits(uint32_t bits) {
+    float result = 0.0F;
+    std::memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+void check_bits(float actual, uint32_t expected, const std::string& label) {
+    if (float_bits(actual) != expected) {
+        std::cerr << "FAIL: " << label << " expected_bits=0x" << std::hex << expected
+                  << " actual_bits=0x" << float_bits(actual) << std::dec << '\n';
+        ++failures;
+    }
+}
+
+constexpr std::array<uint32_t, 50> kVideoSigmaBits = {
+    0x3f800000U, 0x3f7f8e6bU, 0x3f7f186dU, 0x3f7e9dc1U, 0x3f7e1e1eU, 0x3f7d9937U, 0x3f7d0eb7U,
+    0x3f7c7e3eU, 0x3f7be76dU, 0x3f7b49d0U, 0x3f7aa4f3U, 0x3f79f853U, 0x3f79435dU, 0x3f788576U,
+    0x3f77bdeeU, 0x3f76ec07U, 0x3f760eeaU, 0x3f7525aaU, 0x3f742f43U, 0x3f732a8eU, 0x3f721643U,
+    0x3f70f0f1U, 0x3f6fb8f9U, 0x3f6e6c83U, 0x3f6d097cU, 0x3f6b8d7eU, 0x3f69f5d3U, 0x3f683f56U,
+    0x3f666666U, 0x3f6466c7U, 0x3f623b88U, 0x3f5fded5U, 0x3f5d49c4U, 0x3f5a740dU, 0x3f5753beU,
+    0x3f53dcb0U, 0x3f4fffffU, 0x3f4bab23U, 0x3f46c6c6U, 0x3f413521U, 0x3f3acf91U, 0x3f336309U,
+    0x3f2aaaaaU, 0x3f20473cU, 0x3f13b13aU, 0x3f042108U, 0x3ee0c7ceU, 0x3ead1207U, 0x3e4ccccdU,
+    0x00000000U,
+};
+
+constexpr std::array<uint32_t, 49> kVideoTimestepBits = {
+    0x00000000U, 0x3ae32a00U, 0x3b679300U, 0x3bb11f80U, 0x3bf0f100U, 0x3c19b240U, 0x3c3c5240U,
+    0x3c607080U, 0x3c831260U, 0x3c96c600U, 0x3cab61a0U, 0x3cc0f5a0U, 0x3cd79460U, 0x3cef5140U,
+    0x3d042120U, 0x3d113f90U, 0x3d1f1160U, 0x3d2da560U, 0x3d3d0bd0U, 0x3d4d5720U, 0x3d5e9bd0U,
+    0x3d70f0f0U, 0x3d823838U, 0x3d8c9be8U, 0x3d97b420U, 0x3da39410U, 0x3db05168U, 0x3dbe0550U,
+    0x3dccccd0U, 0x3ddcc9c8U, 0x3dee23c0U, 0x3e0084acU, 0x3e0ad8f0U, 0x3e162fccU, 0x3e22b108U,
+    0x3e308d40U, 0x3e400004U, 0x3e515374U, 0x3e64e4e8U, 0x3e7b2b7cU, 0x3e8a60deU, 0x3e9939eeU,
+    0x3eaaaaacU, 0x3ebf7188U, 0x3ed89d8cU, 0x3ef7bdf0U, 0x3f0f9c19U, 0x3f2976fcU, 0x3f4ccccdU,
+};
+
+constexpr std::array<uint32_t, 50> kAudioSigmaBits = {
+    0x3f800000U, 0x3f7e3c07U, 0x3f7c6b6aU, 0x3f7a8d9eU, 0x3f78a211U, 0x3f76a82cU, 0x3f749f49U,
+    0x3f7286bcU, 0x3f705dccU, 0x3f6e23b8U, 0x3f6bd7aeU, 0x3f6978d4U, 0x3f67063eU, 0x3f647ef0U,
+    0x3f61e1e1U, 0x3f5f2df2U, 0x3f5c61f2U, 0x3f597c9bU, 0x3f567c8cU, 0x3f53604cU, 0x3f502649U,
+    0x3f4cccceU, 0x3f495207U, 0x3f45b3f6U, 0x3f41f07cU, 0x3f3e0547U, 0x3f39efd4U, 0x3f35ad6bU,
+    0x3f313b13U, 0x3f2c9592U, 0x3f27b960U, 0x3f22a2a2U, 0x3f1d4d1cU, 0x3f17b426U, 0x3f11d2a3U,
+    0x3f0ba2e8U, 0x3f051eb8U, 0x3efc7e3fU, 0x3eedf8c9U, 0x3ede9bd2U, 0x3ece540eU, 0x3ebd0bd1U,
+    0x3eaaaaaaU, 0x3e9714fcU, 0x3e822b63U, 0x3e579436U, 0x3e27904bU, 0x3de7d95cU, 0x3d70f0f1U,
+    0x00000000U,
+};
+
+constexpr std::array<uint32_t, 49> kAudioTimestepBits = {
+    0x00000000U, 0x3be1fc80U, 0x3c652580U, 0x3cae4c40U, 0x3cebbde0U, 0x3d157d40U, 0x3d360b70U,
+    0x3d579440U, 0x3d7a2340U, 0x3d8ee240U, 0x3da14290U, 0x3db43960U, 0x3dc7ce10U, 0x3ddc0880U,
+    0x3df0f0f8U, 0x3e034838U, 0x3e0e7838U, 0x3e1a0d94U, 0x3e260dd0U, 0x3e327ed0U, 0x3e3f66dcU,
+    0x3e4cccc8U, 0x3e5ab7e4U, 0x3e693028U, 0x3e783e10U, 0x3e83f572U, 0x3e8c2058U, 0x3e94a52aU,
+    0x3e9d89daU, 0x3ea6d4dcU, 0x3eb08d40U, 0x3ebababcU, 0x3ec565c8U, 0x3ed097b4U, 0x3edc5abaU,
+    0x3ee8ba30U, 0x3ef5c290U, 0x3f01c0e0U, 0x3f09039cU, 0x3f10b217U, 0x3f18d5f9U, 0x3f217a18U,
+    0x3f2aaaabU, 0x3f347582U, 0x3f3eea4eU, 0x3f4a1af2U, 0x3f561bedU, 0x3f6304d4U, 0x3f70f0f1U,
+};
+
+template <std::size_t SigmaCount, std::size_t TimestepCount>
+void check_schedule_bits(const trtmc::MiniMaxH3Schedule& schedule,
+                         const std::array<uint32_t, SigmaCount>& expected_sigmas,
+                         const std::array<uint32_t, TimestepCount>& expected_timesteps,
+                         const std::string& label) {
+    check(schedule.sigmas.size() == expected_sigmas.size(), (label + " sigma count").c_str());
+    check(schedule.timesteps.size() == expected_timesteps.size(),
+          (label + " timestep count").c_str());
+    if (schedule.sigmas.size() != expected_sigmas.size() ||
+        schedule.timesteps.size() != expected_timesteps.size())
+        return;
+    for (std::size_t index = 0; index < expected_sigmas.size(); ++index)
+        check_bits(schedule.sigmas[index], expected_sigmas[index],
+                   label + " sigma " + std::to_string(index));
+    for (std::size_t index = 0; index < expected_timesteps.size(); ++index)
+        check_bits(schedule.timesteps[index], expected_timesteps[index],
+                   label + " timestep " + std::to_string(index));
+}
+
 void test_pinned_schedules() {
     const auto video = trtmc::make_minimax_h3_schedule(50, 12.0F);
     const auto audio = trtmc::make_minimax_h3_schedule(50, 3.0F);
-    check(video.sigmas.size() == 50 && video.timesteps.size() == 49,
-          "H3 video schedule uses 50 grid points and 49 evaluations");
-    check(audio.sigmas.size() == 50 && audio.timesteps.size() == 49,
-          "H3 audio schedule uses 50 grid points and 49 evaluations");
-    check_near(video.sigmas[1], 0.998266875743866F, 1.0e-7F,
-               "H3 shift-12 schedule matches Diffusers");
-    check_near(audio.sigmas[1], 0.993103444576263F, 1.0e-7F,
-               "H3 shift-3 schedule matches Diffusers");
-    check_near(video.sigmas[48], 0.20000000298023224F, 1.0e-7F,
-               "H3 video penultimate sigma matches Diffusers");
-    check_near(audio.sigmas[48], 0.05882352963089943F, 1.0e-7F,
-               "H3 audio penultimate sigma matches Diffusers");
+    check_schedule_bits(video, kVideoSigmaBits, kVideoTimestepBits,
+                        "H3 shift-12 Diffusers schedule");
+    check_schedule_bits(audio, kAudioSigmaBits, kAudioTimestepBits,
+                        "H3 shift-3 Diffusers schedule");
 }
 
 void test_data_ward_euler_sign() {
@@ -48,6 +125,15 @@ void test_data_ward_euler_sign() {
                                      0.5F);
     check_near(sample[0], 1.125F, 1.0e-7F, "H3 Euler uses positive data-ward velocity");
     check_near(sample[1], -1.9375F, 1.0e-7F, "H3 Euler blend matches reference");
+}
+
+void test_euler_publishes_separate_fp32_operations() {
+    std::vector<float> sample = {float_from_bits(0x3f477037U)};
+    const std::vector<float> velocity = {float_from_bits(0x3ec784e5U)};
+    trtmc::minimax_h3_scheduler_step(sample.data(), velocity.data(), sample.size(), 0.0F, 1.0F,
+                                     float_from_bits(0x3f7e3c07U));
+    check_bits(sample[0], 0x3f482057U,
+               "H3 Euler matches separately published Diffusers FP32 operations");
 }
 
 void test_audio_rows_unpack_to_stereo_vae_batches() {
@@ -350,6 +436,7 @@ void test_ref2va_audio_only_layout_has_no_visual_condition_rows() {
 int main() {
     test_pinned_schedules();
     test_data_ward_euler_sign();
+    test_euler_publishes_separate_fp32_operations();
     test_audio_rows_unpack_to_stereo_vae_batches();
     test_model_card_input_validation();
     test_fl2va_packed_layout_preserves_keyframe_and_media_clock();

@@ -214,10 +214,16 @@ void validate_reference_alignment(const std::vector<AudioVideoReference>& refere
 
 std::pair<std::array<int32_t, 2>, std::array<float, 2>> interpolation_axis(int32_t index,
                                                                            int32_t size) {
-    const float source =
-        size == 1 ? 0.0F
-                  : (static_cast<float>(index) * static_cast<float>(kPositionGridSide - 1)) /
-                        static_cast<float>(size - 1);
+    float source = 0.0F;
+    if (size > 1) {
+        const float end = static_cast<float>(kPositionGridSide - 1);
+        const float step =
+            static_cast<float>(static_cast<double>(end) / static_cast<double>(size - 1));
+        // ATen's FP32 linspace evaluates from the nearest endpoint and uses
+        // one fused multiply-add per coordinate.
+        source = index < size / 2 ? std::fma(step, static_cast<float>(index), 0.0F)
+                                  : std::fma(-step, static_cast<float>(size - 1 - index), end);
+    }
     const int32_t floor_value = static_cast<int32_t>(std::floor(source));
     std::array<int32_t, 2> taps = {
         std::clamp(floor_value, 0, kPositionGridSide - 1),

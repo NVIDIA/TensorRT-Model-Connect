@@ -23,13 +23,41 @@ from .config import (
     FL2VA_KEYFRAME_ROWS_1344X768,
     FL2VA_PROCESSOR_ASSET_SECTIONS,
     FL2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER,
+    MINIMAX_H3_NATIVE_PLUGIN_ABI,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     MINIMAX_H3_WORKFLOWS,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
+    REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_ATTENTION_PRECISION,
+    REF2VA_IMAGE_VISION_ATTENTION_SCALE,
+    REF2VA_IMAGE_VISION_LINEAR_COUNT,
+    REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_LAYER_NORM_COUNT,
+    REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_BIAS_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION,
+    REF2VA_IMAGE_VISION_PATCH_INPUT_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_KERNEL,
+    REF2VA_IMAGE_VISION_PATCH_OUTPUT_SHAPE,
+    REF2VA_IMAGE_VISION_PATCH_PRECISION,
+    REF2VA_IMAGE_VISION_PATCH_PROFILE,
+    REF2VA_IMAGE_VISION_PATCH_STRIDE,
+    REF2VA_IMAGE_VISION_PATCH_WEIGHT_SHAPE,
+    REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION,
+    REF2VA_LANGUAGE_ATTENTION_PRECISION,
+    REF2VA_LANGUAGE_Q_PRE_SCALE_PRECISION,
     REF2VA_MAX_TEXT_ROWS,
     REF2VA_MIN_CONDITION_VIDEO_ROWS,
     REF2VA_OPT_CONDITION_VIDEO_ROWS,
     REF2VA_TRANSFORMER_CHECKPOINT_SUBFOLDER,
+    REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION,
+    REF2VA_VIDEO_VISION_ATTENTION_PRECISION,
+    REF2VA_VIDEO_VISION_PATCH_PROFILE,
+    REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION,
+    REF2VA_VISION_PLAN_LAYOUT,
     SOL_ENGINE_1344X768_124F,
     default_workspace_limit_bytes,
     native_plan_filenames,
@@ -276,6 +304,16 @@ class MiniMaxH3Plugin:
             Path(weights["_model_dir"]),
             workflow=workflow,
         )
+        native_plugin_payload = None
+        if workflow == "ref2va":
+            from .native_plugin_builder import ensure_native_plugin
+
+            native_plugin_path = ensure_native_plugin(verbose=verbose)
+            native_plugin_payload = native_plugin_path.read_bytes()
+            if not native_plugin_payload:
+                raise RuntimeError(
+                    f"MiniMax-H3 native plugin artifact is empty: {native_plugin_path}"
+                )
         from .adaln_builder import build_adaln_precompute_engine
         from .adaln_builder import checkpoint_keys as adaln_checkpoint_keys
         from .dit_builder import (
@@ -402,24 +440,46 @@ class MiniMaxH3Plugin:
             )
             vision_weights = numpy_state(vision_state)
             del vision_state
+            vision_plan_filename = (
+                "vision_conditioner_image.plan"
+                if workflow == "ref2va"
+                else "vision_conditioner.plan"
+            )
             vision_plan = build_vision_conditioner_engine(
                 text_config,
                 vision_weights,
                 workflow=workflow,
+                ref2va_modality="image" if workflow == "ref2va" else None,
                 verbose=verbose,
-                consume_weights=True,
-                workspace_bytes=workspace_limits["vision_conditioner.plan"],
+                consume_weights=workflow != "ref2va",
+                workspace_bytes=workspace_limits[vision_plan_filename],
             )
+            vision_video_plan = None
+            if workflow == "ref2va":
+                vision_video_plan = build_vision_conditioner_engine(
+                    text_config,
+                    vision_weights,
+                    workflow=workflow,
+                    ref2va_modality="video",
+                    verbose=verbose,
+                    consume_weights=True,
+                    workspace_bytes=workspace_limits["vision_conditioner_video.plan"],
+                )
             del vision_weights
             gc.collect()
-            conditioner_components = {
-                "language_conditioner": language_plan,
-                "vision_conditioner": vision_plan,
-            }
+            conditioner_components = {"language_conditioner": language_plan}
             conditioner_plan_sha256 = {
                 "language_conditioner.plan": hashlib.sha256(language_plan).hexdigest(),
-                "vision_conditioner.plan": hashlib.sha256(vision_plan).hexdigest(),
+                vision_plan_filename: hashlib.sha256(vision_plan).hexdigest(),
             }
+            if vision_video_plan is not None:
+                conditioner_components["vision_conditioner_image"] = vision_plan
+                conditioner_components["vision_conditioner_video"] = vision_video_plan
+                conditioner_plan_sha256["vision_conditioner_video.plan"] = hashlib.sha256(
+                    vision_video_plan
+                ).hexdigest()
+            else:
+                conditioner_components["vision_conditioner"] = vision_plan
         else:
             text_state = load_selected_component_state_dict(
                 weights["_text_encoder_dir"], text_encoder_checkpoint_keys()
@@ -579,10 +639,19 @@ class MiniMaxH3Plugin:
                 for name, payload in processor_assets.items()
             },
         }
+        if native_plugin_payload is not None:
+            asset_sha256[MINIMAX_H3_NATIVE_PLUGIN_SECTION] = hashlib.sha256(
+                native_plugin_payload
+            ).hexdigest()
         return {
             "workflow": workflow,
             "checkpoint_partition": checkpoint_partition,
             **conditioner_components,
+            **(
+                {"native_plugin": native_plugin_payload}
+                if native_plugin_payload is not None
+                else {}
+            ),
             "adaln_precompute": adaln_plan,
             **denoiser_components,
             **vae_encoder_components,
@@ -639,9 +708,13 @@ class MiniMaxH3Plugin:
                 or tuple(processor_assets) != FL2VA_PROCESSOR_ASSET_SECTIONS
             ):
                 raise ValueError("MiniMax-H3 Ref2VA components are missing processor config assets")
+            native_plugin = components.get("native_plugin")
+            if not isinstance(native_plugin, bytes) or not native_plugin:
+                raise ValueError("MiniMax-H3 Ref2VA components are missing the native plugin DSO")
             return [
                 ("language_conditioner_plan", components["language_conditioner"]),
-                ("vision_conditioner_plan", components["vision_conditioner"]),
+                ("vision_conditioner_image_plan", components["vision_conditioner_image"]),
+                ("vision_conditioner_video_plan", components["vision_conditioner_video"]),
                 ("vae_encoder_tile_t1_plan", components["vae_encoder_tile_t1"]),
                 ("vae_encoder_tile_t17_plan", components["vae_encoder_tile_t17"]),
                 ("audio_vae_encoder_plan", components["audio_vae_encoder"]),
@@ -649,6 +722,7 @@ class MiniMaxH3Plugin:
                 ("ref2va_denoiser_plan", components["ref2va_denoiser"]),
                 ("vae_tile_decoder_plan", components["vae_decoder"]),
                 ("audio_vae_decoder_plan", components["audio_vae_decoder"]),
+                (MINIMAX_H3_NATIVE_PLUGIN_SECTION, native_plugin),
                 ("tokenizer.json", components["tokenizer_json"]),
                 *processor_assets.items(),
             ]
@@ -741,7 +815,11 @@ class MiniMaxH3Plugin:
                 "vae_encoder_tile_t1_plan",
             ]
         elif workflow == "ref2va":
-            expected_assets = ("tokenizer.json", *FL2VA_PROCESSOR_ASSET_SECTIONS)
+            expected_assets = (
+                "tokenizer.json",
+                *FL2VA_PROCESSOR_ASSET_SECTIONS,
+                MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+            )
             _validate_sha256_map(
                 provenance.get("asset_sha256"),
                 expected_assets,
@@ -751,7 +829,8 @@ class MiniMaxH3Plugin:
             denoiser_sections = ["ref2va_denoiser_plan"]
             conditioner_sections = [
                 "language_conditioner_plan",
-                "vision_conditioner_plan",
+                "vision_conditioner_image_plan",
+                "vision_conditioner_video_plan",
                 "vae_encoder_tile_t1_plan",
                 "vae_encoder_tile_t17_plan",
                 "audio_vae_encoder_plan",
@@ -835,6 +914,62 @@ class MiniMaxH3Plugin:
                     "ref2va_max_videos": 3,
                     "ref2va_max_audios": 3,
                     "ref2va_max_references": 12,
+                    "ref2va_vision_plan_layout": REF2VA_VISION_PLAN_LAYOUT,
+                    "minimax_h3_native_plugin_section": MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+                    "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+                    "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
+                    "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+                    "ref2va_language_attention_implementation": (
+                        REF2VA_LANGUAGE_ATTENTION_IMPLEMENTATION
+                    ),
+                    "ref2va_language_attention_precision": REF2VA_LANGUAGE_ATTENTION_PRECISION,
+                    "ref2va_language_q_pre_scale_precision": (
+                        REF2VA_LANGUAGE_Q_PRE_SCALE_PRECISION
+                    ),
+                    "ref2va_image_vision_attention_implementation": (
+                        REF2VA_IMAGE_VISION_ATTENTION_IMPLEMENTATION
+                    ),
+                    "ref2va_image_vision_attention_precision": (
+                        REF2VA_IMAGE_VISION_ATTENTION_PRECISION
+                    ),
+                    "ref2va_image_vision_attention_scale": (REF2VA_IMAGE_VISION_ATTENTION_SCALE),
+                    "ref2va_image_vision_linear_implementation": (
+                        REF2VA_IMAGE_VISION_LINEAR_IMPLEMENTATION
+                    ),
+                    "ref2va_image_vision_linear_count": REF2VA_IMAGE_VISION_LINEAR_COUNT,
+                    "ref2va_image_vision_layer_norm_implementation": (
+                        REF2VA_IMAGE_VISION_LAYER_NORM_IMPLEMENTATION
+                    ),
+                    "ref2va_image_vision_layer_norm_count": REF2VA_IMAGE_VISION_LAYER_NORM_COUNT,
+                    "ref2va_image_vision_patch_implementation": (
+                        REF2VA_IMAGE_VISION_PATCH_IMPLEMENTATION
+                    ),
+                    "ref2va_image_vision_patch_precision": REF2VA_IMAGE_VISION_PATCH_PRECISION,
+                    "ref2va_image_vision_patch_input_shape": list(
+                        REF2VA_IMAGE_VISION_PATCH_INPUT_SHAPE
+                    ),
+                    "ref2va_image_vision_patch_weight_shape": list(
+                        REF2VA_IMAGE_VISION_PATCH_WEIGHT_SHAPE
+                    ),
+                    "ref2va_image_vision_patch_bias_shape": list(
+                        REF2VA_IMAGE_VISION_PATCH_BIAS_SHAPE
+                    ),
+                    "ref2va_image_vision_patch_kernel": list(REF2VA_IMAGE_VISION_PATCH_KERNEL),
+                    "ref2va_image_vision_patch_stride": list(REF2VA_IMAGE_VISION_PATCH_STRIDE),
+                    "ref2va_image_vision_patch_output_shape": list(
+                        REF2VA_IMAGE_VISION_PATCH_OUTPUT_SHAPE
+                    ),
+                    "ref2va_video_vision_attention_implementation": (
+                        REF2VA_VIDEO_VISION_ATTENTION_IMPLEMENTATION
+                    ),
+                    "ref2va_video_vision_attention_precision": (
+                        REF2VA_VIDEO_VISION_ATTENTION_PRECISION
+                    ),
+                    "ref2va_video_vision_q_pre_scale_precision": (
+                        REF2VA_VIDEO_VISION_Q_PRE_SCALE_PRECISION
+                    ),
+                    "ref2va_image_vision_patch_profile": list(REF2VA_IMAGE_VISION_PATCH_PROFILE),
+                    "ref2va_video_vision_patch_profile": list(REF2VA_VIDEO_VISION_PATCH_PROFILE),
                     "ref2va_reference_min_seconds": 2,
                     "ref2va_reference_max_seconds": 15,
                     "ref2va_vae_tile_size": 256,

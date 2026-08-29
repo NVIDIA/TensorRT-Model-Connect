@@ -117,8 +117,14 @@ __global__ void scheduler_step_kernel(float* sample, const float* velocity, int6
     for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < count;
          index += stride) {
         const float current = sample[index];
-        const float denoised = current + sigma_from_timestep * velocity[index];
-        sample[index] = ratio * current + (1.0F - ratio) * denoised;
+        // Match PyTorch eager's separately published FP32 tensor operations.
+        // Ordinary CUDA expressions contract these pairs into FMA.
+        const float velocity_term = __fmul_rn(sigma_from_timestep, velocity[index]);
+        const float denoised = __fadd_rn(current, velocity_term);
+        const float current_term = __fmul_rn(ratio, current);
+        const float next_weight = __fsub_rn(1.0F, ratio);
+        const float denoised_term = __fmul_rn(next_weight, denoised);
+        sample[index] = __fadd_rn(current_term, denoised_term);
     }
 }
 

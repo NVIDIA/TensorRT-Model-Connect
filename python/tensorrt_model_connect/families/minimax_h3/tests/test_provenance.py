@@ -19,6 +19,10 @@ from tensorrt_model_connect.families.minimax_h3.config import (
     FL2VA_DEFAULT_WORKSPACE_LIMIT_BYTES,
     FL2VA_PLAN_FILENAMES,
     FL2VA_PROCESSOR_ASSET_SECTIONS,
+    MINIMAX_H3_NATIVE_PLUGIN_ABI,
+    MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+    MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+    MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     REF2VA_DEFAULT_WORKSPACE_LIMIT_BYTES,
     REF2VA_MAX_CONDITION_AUDIO_ROWS,
     REF2VA_MAX_CONDITION_VIDEO_ROWS,
@@ -52,6 +56,26 @@ from tensorrt_model_connect.families.minimax_h3.provenance import (
 FAMILY_ROOT = Path(__file__).resolve().parents[1]
 BUILD_HELPER = FAMILY_ROOT.parents[3] / "tests/e2e/models/minimax_h3/build_native_components.py"
 SOURCE_REVISION = "a" * 40
+
+
+def test_builder_source_hash_covers_native_plugin_sources_with_stable_paths(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tensorrt_model_connect.families.minimax_h3 import native_plugin_builder
+
+    first = tmp_path / "first/plugin_creator.cpp"
+    second = tmp_path / "second/plugin_creator.cpp"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"plugin-source")
+    second.write_bytes(b"plugin-source")
+
+    monkeypatch.setattr(native_plugin_builder, "native_plugin_source_files", lambda: (first,))
+    first_digest = builder_source_sha256()
+    monkeypatch.setattr(native_plugin_builder, "native_plugin_source_files", lambda: (second,))
+    assert builder_source_sha256() == first_digest
+    second.write_bytes(b"changed-plugin-source")
+    assert builder_source_sha256() != first_digest
 
 
 def _test_archive_inventory(root: Path) -> dict[str, int | str]:
@@ -347,6 +371,8 @@ def test_ref2va_build_receipt_binds_workflow_partition_plans_and_assets(
         artifact = plans / filename
         artifact.write_bytes(bytes([index]) * index)
         components[filename] = file_record(artifact)
+    native_plugin = plans / MINIMAX_H3_NATIVE_PLUGIN_FILENAME
+    native_plugin.write_bytes(b"native-plugin")
     tokenizer = snapshot / "tokenizer" / "tokenizer.json"
     receipt = {
         "workflow": "ref2va",
@@ -363,6 +389,7 @@ def test_ref2va_build_receipt_binds_workflow_partition_plans_and_assets(
                 relative: file_record(snapshot / relative)
                 for relative in FL2VA_PROCESSOR_ASSET_SECTIONS
             },
+            MINIMAX_H3_NATIVE_PLUGIN_SECTION: file_record(native_plugin),
         },
         "workspace_limit_bytes": dict(REF2VA_DEFAULT_WORKSPACE_LIMIT_BYTES),
         "components": components,
@@ -389,6 +416,40 @@ def test_ref2va_build_receipt_binds_workflow_partition_plans_and_assets(
         hash_file=True,
         workflow="ref2va",
     )
+
+    native_plugin.write_bytes(b"tampered-dso")
+    with pytest.raises(ValueError, match=MINIMAX_H3_NATIVE_PLUGIN_SECTION):
+        validate_build_receipt(
+            receipt,
+            plans_dir=plans,
+            snapshot=snapshot,
+            tokenizer=tokenizer,
+            build_helper=BUILD_HELPER,
+            source_revision=SOURCE_REVISION,
+            profile=SOL_ENGINE_1344X768_124F,
+            hash_files=True,
+            workflow="ref2va",
+        )
+    native_plugin.write_bytes(b"native-plugin")
+
+    for mutation in ("missing", "extra"):
+        malformed_assets = copy.deepcopy(receipt)
+        if mutation == "missing":
+            malformed_assets["assets"].pop(MINIMAX_H3_NATIVE_PLUGIN_SECTION)
+        else:
+            malformed_assets["assets"]["unexpected.so"] = file_record(native_plugin)
+        with pytest.raises(ValueError, match="selected assets"):
+            validate_build_receipt(
+                malformed_assets,
+                plans_dir=plans,
+                snapshot=snapshot,
+                tokenizer=tokenizer,
+                build_helper=BUILD_HELPER,
+                source_revision=SOURCE_REVISION,
+                profile=SOL_ENGINE_1344X768_124F,
+                hash_files=False,
+                workflow="ref2va",
+            )
 
     wrong_partition = copy.deepcopy(receipt)
     wrong_partition["checkpoint_partition"] = "transformer"
@@ -717,7 +778,7 @@ def test_fl2va_snapshot_and_bundle_provenance_cover_every_plan_and_asset(
         BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
         [BundleSection("config.json", json.dumps(malformed).encode())],
     )
-    with pytest.raises(ValueError, match="hash every processor asset"):
+    with pytest.raises(ValueError, match="hash every selected asset"):
         validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
 
 
@@ -757,6 +818,34 @@ def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_an
         "ref2va_max_videos": 3,
         "ref2va_max_audios": 3,
         "ref2va_max_references": 12,
+        "ref2va_vision_plan_layout": "split-image-video-v1",
+        "minimax_h3_native_plugin_section": MINIMAX_H3_NATIVE_PLUGIN_SECTION,
+        "minimax_h3_native_plugin_artifact": MINIMAX_H3_NATIVE_PLUGIN_FILENAME,
+        "minimax_h3_native_plugin_abi": MINIMAX_H3_NATIVE_PLUGIN_ABI,
+        "minimax_h3_native_plugin_identity": MINIMAX_H3_NATIVE_PLUGIN_IDENTITY,
+        "ref2va_language_attention_implementation": "tensorrt-bf16-iattention-v1",
+        "ref2va_language_attention_precision": "bf16",
+        "ref2va_language_q_pre_scale_precision": "bf16",
+        "ref2va_image_vision_attention_implementation": "aten-bf16-sdpa-v1",
+        "ref2va_image_vision_attention_precision": "bf16",
+        "ref2va_image_vision_attention_scale": "fp64:0x1.e2b7dddfefa66p-4",
+        "ref2va_image_vision_linear_implementation": "aten-bf16-linear-v1",
+        "ref2va_image_vision_linear_count": 116,
+        "ref2va_image_vision_layer_norm_implementation": "aten-bf16-layer-norm-v1",
+        "ref2va_image_vision_layer_norm_count": 58,
+        "ref2va_image_vision_patch_implementation": "aten-bf16-conv3d-v1",
+        "ref2va_image_vision_patch_precision": "bf16",
+        "ref2va_image_vision_patch_input_shape": [-1, 1536],
+        "ref2va_image_vision_patch_weight_shape": [1152, 3, 2, 16, 16],
+        "ref2va_image_vision_patch_bias_shape": [1152],
+        "ref2va_image_vision_patch_kernel": [2, 16, 16],
+        "ref2va_image_vision_patch_stride": [2, 16, 16],
+        "ref2va_image_vision_patch_output_shape": [-1, 1152],
+        "ref2va_video_vision_attention_implementation": "tensorrt-fp16-iattention-v1",
+        "ref2va_video_vision_attention_precision": "fp16",
+        "ref2va_video_vision_q_pre_scale_precision": "fp16",
+        "ref2va_image_vision_patch_profile": [16384, 16384, 65536],
+        "ref2va_video_vision_patch_profile": [2304, 4032, 4176],
         "ref2va_reference_min_seconds": 2,
         "ref2va_reference_max_seconds": 15,
         "ref2va_vae_tile_size": 256,
@@ -768,6 +857,7 @@ def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_an
             "eager_sections": [
                 "tokenizer.json",
                 *FL2VA_PROCESSOR_ASSET_SECTIONS,
+                MINIMAX_H3_NATIVE_PLUGIN_SECTION,
                 "config.json",
             ],
             "lazy_sections": [
@@ -786,38 +876,89 @@ def test_ref2va_snapshot_and_bundle_provenance_cover_partition_profiles_plans_an
             )
         },
     }
+    native_plugin_payload = b"native-plugin"
+    config["asset_sha256"][MINIMAX_H3_NATIVE_PLUGIN_SECTION] = hashlib.sha256(
+        native_plugin_payload
+    ).hexdigest()
     bundle = tmp_path / "ref2va.bundle"
-    write_bundle(
-        bundle,
-        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
-        [BundleSection("config.json", json.dumps(config).encode())],
-    )
+
+    def write_ref2va_bundle(
+        selected_config: dict,
+        *,
+        plugin_payload: bytes = native_plugin_payload,
+        include_plugin: bool = True,
+        extra_sections: tuple[BundleSection, ...] = (),
+    ) -> None:
+        sections = [
+            BundleSection(name, b"asset")
+            for name in (
+                "tokenizer.json",
+                *FL2VA_PROCESSOR_ASSET_SECTIONS,
+                *selected_config["bundle_loading"]["lazy_sections"],
+            )
+        ]
+        if include_plugin:
+            sections.append(BundleSection(MINIMAX_H3_NATIVE_PLUGIN_SECTION, plugin_payload))
+        sections.extend(extra_sections)
+        sections.append(BundleSection("config.json", json.dumps(selected_config).encode()))
+        write_bundle(
+            bundle,
+            BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
+            sections,
+        )
+
+    write_ref2va_bundle(config)
 
     validated = validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
     assert validated["checkpoint_partition"] == "transformer_ref"
     assert tuple(validated["plan_sha256"]) == REF2VA_PLAN_FILENAMES
+    assert validated["ref2va_vision_plan_layout"] == "split-image-video-v1"
     assert set(validated["asset_sha256"]) == {
         "tokenizer.json",
         *FL2VA_PROCESSOR_ASSET_SECTIONS,
+        MINIMAX_H3_NATIVE_PLUGIN_SECTION,
     }
+    assert validated["minimax_h3_native_plugin_identity"] == MINIMAX_H3_NATIVE_PLUGIN_IDENTITY
+    assert validated["ref2va_image_vision_patch_implementation"] == "aten-bf16-conv3d-v1"
+    assert validated["ref2va_image_vision_patch_stride"] == [2, 16, 16]
+    assert validated["ref2va_image_vision_linear_implementation"] == "aten-bf16-linear-v1"
+    assert validated["ref2va_image_vision_linear_count"] == 116
+    assert validated["ref2va_image_vision_layer_norm_implementation"] == ("aten-bf16-layer-norm-v1")
+    assert validated["ref2va_image_vision_layer_norm_count"] == 58
+    assert "ref2va_image_vision_q_pre_scale_precision" not in validated
+    assert "ref2va_language_attention_scale" not in validated
+    assert validated["ref2va_language_q_pre_scale_precision"] == "bf16"
+
+    write_ref2va_bundle(config, plugin_payload=b"tampered-plugin")
+    with pytest.raises(ValueError, match="plugin section SHA256"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+    write_ref2va_bundle(config, include_plugin=False)
+    with pytest.raises(ValueError, match="staged-loading contract"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+    write_ref2va_bundle(
+        config,
+        extra_sections=(BundleSection("unexpected_native_plugin.so", b"extra"),),
+    )
+    with pytest.raises(ValueError, match="staged-loading contract"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
 
     malformed = copy.deepcopy(config)
     malformed["ref2va_max_references"] = 11
-    write_bundle(
-        bundle,
-        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
-        [BundleSection("config.json", json.dumps(malformed).encode())],
-    )
+    write_ref2va_bundle(malformed)
     with pytest.raises(ValueError, match="ref2va_max_references"):
         validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
 
     malformed = copy.deepcopy(config)
+    del malformed["ref2va_vision_plan_layout"]
+    write_ref2va_bundle(malformed)
+    with pytest.raises(ValueError, match="ref2va_vision_plan_layout"):
+        validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
+
+    malformed = copy.deepcopy(config)
     malformed["checkpoint_partition"] = "transformer"
-    write_bundle(
-        bundle,
-        BundleInfo(model_id="MiniMaxAI/MiniMax-H3"),
-        [BundleSection("config.json", json.dumps(malformed).encode())],
-    )
+    write_ref2va_bundle(malformed)
     with pytest.raises(ValueError, match="checkpoint partition"):
         validate_native_bundle_config(bundle, source_revision=SOURCE_REVISION)
 
