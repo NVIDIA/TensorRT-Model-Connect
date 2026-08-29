@@ -14,10 +14,18 @@ import yaml
 
 
 assert version("PyYAML") == "6.0.3"
-assert transformers.__version__ == "5.2.0", transformers.__version__
-assert version("huggingface-hub") == "1.22.0"
-assert version("tokenizers") == "0.22.2"
-assert version("einops") == "0.8.2"
+required_versions = {
+    "transformers": "5.2.0",
+    "huggingface-hub": "1.22.0",
+    "tokenizers": "0.22.2",
+    "einops": "0.8.2",
+}
+for distribution, expected in required_versions.items():
+    actual = version(distribution)
+    if actual != expected:
+        raise RuntimeError(
+            f"Sana-WM profile requires {distribution}=={expected}, found {actual}"
+        )
 assert callable(torch.cuda.is_available)
 assert hasattr(torchvision.transforms, "Compose")
 assert hasattr(diffusers, "DiffusionPipeline")
