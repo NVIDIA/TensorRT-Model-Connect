@@ -564,6 +564,8 @@ def test_internal_ci_bridge_publishes_the_private_sanitized_artifact() -> None:
     assert "--name public-failure-payload" in workflow
     assert "--log" not in workflow
     assert "openssl rand -hex 16" in workflow
+    assert "base_sha: $base_sha" in workflow
+    assert "policy_sha: $policy_sha" in workflow
     assert "dispatch_nonce: $dispatch_nonce" in workflow
     assert (
         'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"' in workflow

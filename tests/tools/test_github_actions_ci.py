@@ -411,8 +411,16 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert dispatch.count("HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}") >= 1
 
     assert 'ref: "main"' in dispatch
-    for name in ("pr_number", "head_sha", "dispatch_nonce"):
+    for name in (
+        "pr_number",
+        "head_sha",
+        "base_sha",
+        "policy_sha",
+        "dispatch_nonce",
+    ):
         assert f"{name}: ${name}" in dispatch
+    assert "BASE_SHA: ${{ needs.authorize.outputs.base_sha }}" in dispatch
+    assert "POLICY_SHA: ${{ needs.authorize.outputs.policy_sha }}" in dispatch
     assert "umask 077" in dispatch
     assert "openssl rand -hex 16" in dispatch
     assert '[[ "$dispatch_nonce" =~ ^[0-9a-f]{32}$ ]]' in dispatch
