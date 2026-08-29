@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -63,6 +64,44 @@ def test_python_profile_key_preserves_non_virtualenv_interpreter_path(tmp_path):
     interpreter = tmp_path / "python3"
 
     assert shared_profiles._absolute_python(str(interpreter)) == str(interpreter)
+
+
+def test_profile_overlay_inherits_only_trtmc_owned_paths(monkeypatch, tmp_path):
+    base_site = tmp_path / "base" / "site-packages"
+    profile_site = tmp_path / "profile" / "site-packages"
+    inherited_site = tmp_path / "inherited" / "site-packages"
+    ambient_site = tmp_path / "ambient" / "site-packages"
+    for path in (base_site, profile_site, inherited_site, ambient_site):
+        path.mkdir(parents=True)
+    (base_site / "trtmc_base_python_overlay.pth").write_text(
+        f"{inherited_site}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(ambient_site))
+    monkeypatch.setattr(
+        shared_profiles,
+        "_python_site_packages",
+        lambda python: [str(base_site)] if python == "base" else [str(profile_site)],
+    )
+
+    shared_profiles._write_base_site_packages_overlay("base", "profile")
+
+    overlay = (profile_site / "trtmc_base_python_overlay.pth").read_text(encoding="utf-8")
+    assert str(base_site) in overlay
+    assert str(inherited_site) in overlay
+    assert str(ambient_site) not in overlay
+
+
+def test_profile_overlay_rejects_executable_pth_lines(tmp_path):
+    base_site = tmp_path / "base" / "site-packages"
+    base_site.mkdir(parents=True)
+    (base_site / "trtmc_base_python_overlay.pth").write_text(
+        "import arbitrary_code\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Unsafe inherited profile overlay"):
+        shared_profiles._inherited_overlay_paths([str(base_site)])
 
 
 def test_resolve_case_profile_names_apply_manifest_profiles():
@@ -206,6 +245,77 @@ def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
     assert shared_profiles._profile_install_environment()["MAX_JOBS"] == "2"
 
 
+def test_exact_pin_verification_drops_ambient_pythonpath(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/untrusted/profile/source")
+    calls = []
+    monkeypatch.setattr(
+        shared_profiles,
+        "_run_profile_command",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    shared_profiles._verify_exact_requirements(
+        "custom",
+        sys.executable,
+        {"demo-package": "1.0"},
+    )
+
+    assert "PYTHONPATH" not in calls[0][1]["env"]
+
+
+def test_profile_source_builds_filter_hard_coded_cuda_architectures(monkeypatch, tmp_path):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    (cuda_home / "include").mkdir()
+    (cuda_home / "lib64").mkdir()
+    nvcc.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    nvcc.chmod(0o755)
+    wrapper_root = tmp_path / "wrappers"
+    wrapper_root.mkdir()
+    monkeypatch.setattr(shared_profiles.tempfile, "tempdir", str(wrapper_root))
+    monkeypatch.setenv("CUDA_HOME", str(cuda_home))
+    monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", "10.0;11.0+PTX")
+
+    environment = shared_profiles._profile_install_environment()
+    result = subprocess.run(
+        [
+            str(Path(environment["CUDA_HOME"]) / "bin" / "nvcc"),
+            "-O3",
+            "-gencode",
+            "arch=compute_90,code=sm_90",
+            "-gencode",
+            "arch=compute_100,code=sm_100",
+            "--generate-code=arch=compute_90,code=sm_90",
+            "-gencode=arch=compute_110,code=sm_110",
+            "-arch=sm_90",
+            "--gpu-architecture",
+            "sm_110",
+            "input.cu",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "arch=compute_90,code=sm_90" not in result.stdout
+    assert "arch=compute_100,code=sm_100" in result.stdout
+    assert "arch=compute_110,code=sm_110" in result.stdout
+    assert "sm_90" not in result.stdout
+    assert "sm_110" in result.stdout
+    assert Path(environment["CUDA_HOME"], "include").resolve() == cuda_home / "include"
+
+
+def test_cuda_arch_codes_reject_named_architectures() -> None:
+    assert shared_profiles._cuda_arch_codes("8.7;10.0+PTX;11.0") == (
+        "87",
+        "100",
+        "110",
+    )
+    assert shared_profiles._cuda_arch_codes("Ampere") == ()
+
+
 def test_profile_command_timeout_terminates_descendants(tmp_path):
     sentinel = tmp_path / "orphan-finished"
     child = (
@@ -269,9 +379,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
 
     assert set(profiles) - {shared_profiles.DEFAULT_PROFILE} == expected
     for name in expected:
-        requirements = shared_profiles._read_requirements_text(
-            profiles[name]["requirements"]
-        )
+        requirements = shared_profiles._read_requirements_text(profiles[name]["requirements"])
         pins = shared_profiles._exact_pinned_requirements(requirements)
         assert pins, name
     assert profiles["nemotron_h_reference"]["build_environment"] == {
@@ -347,9 +455,7 @@ def test_profile_lock_rejects_non_deterministic_exact_pin_lookalikes(requirement
 
 def test_profile_registry_validates_supported_global_defaults():
     registry = copy.deepcopy(shared_profiles.load_python_profile_registry())
-    registry["runtime_strategy_defaults"] = {
-        "demo": {"runtime": "reference_common"}
-    }
+    registry["runtime_strategy_defaults"] = {"demo": {"runtime": "reference_common"}}
 
     shared_profiles._validate_python_profile_registry(registry)
 
@@ -424,9 +530,9 @@ def test_profile_registry_rejects_ambiguous_schema_fields():
         registry["profiles"]["reference_common"]["prebuild"] = 1
 
     def declare_two_verification_sources(registry):
-        registry["profiles"]["reference_common"]["verification_script_file"] = (
-            registry["profiles"]["reference_common"]["requirements"]
-        )
+        registry["profiles"]["reference_common"]["verification_script_file"] = registry["profiles"][
+            "reference_common"
+        ]["requirements"]
 
     cases = (
         (add_unknown_top_level, "unknown top-level keys"),
@@ -456,9 +562,7 @@ def test_exact_profile_pin_accepts_only_local_builds_of_same_public_version():
     )
 
 
-def test_prebuilt_only_profile_fails_before_creating_a_runtime_cache(
-    monkeypatch, tmp_path
-):
+def test_prebuilt_only_profile_fails_before_creating_a_runtime_cache(monkeypatch, tmp_path):
     requirements = tmp_path / "empty.lock.txt"
     requirements.write_text("", encoding="utf-8")
     profile_root = tmp_path / "profiles"
@@ -526,7 +630,4 @@ def test_repro_commands_record_profile_exports(tmp_path):
     assert repro["build_bundle"].startswith(
         "/tmp/specialized-python -m tensorrt_model_connect.__main__ build"
     )
-    assert (
-        "TRTMC_PYTHON_PROFILE_SPECIALIZED_PYTHON=/tmp/specialized-python"
-        in repro["profile_env"]
-    )
+    assert "TRTMC_PYTHON_PROFILE_SPECIALIZED_PYTHON=/tmp/specialized-python" in repro["profile_env"]

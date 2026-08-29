@@ -30,7 +30,7 @@ LEGACY_PROFILE_ROOT_ENV = "TRTMC_E2E_PROFILE_ROOT"
 PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
 DEFAULT_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_PROFILE_LAYOUT_VERSION = "overlay-v3-exact-pins"
+_PROFILE_LAYOUT_VERSION = "overlay-v4-hermetic-targeted-cuda"
 _DEFAULT_PROFILE_BUILD_JOBS = "4"
 _PROFILE_INSTALL_TIMEOUT_SECONDS = 7200
 _EXACT_REQUIREMENT_RE = re.compile(
@@ -161,9 +161,7 @@ def _profile_metadata_bool(value: str, field_name: str) -> bool:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    raise ValueError(
-        f"Invalid {field_name} bool {value!r}; expected true or false"
-    )
+    raise ValueError(f"Invalid {field_name} bool {value!r}; expected true or false")
 
 
 def family_python_profile_specs() -> dict[str, dict[str, object]]:
@@ -176,9 +174,7 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
         family_profile_names: set[str] = set()
         raw_specs = raw.get("python_profile_specs", [])
         if not isinstance(raw_specs, list):
-            raise ValueError(
-                f"python_profile_specs for family {family_id} must be a list"
-            )
+            raise ValueError(f"python_profile_specs for family {family_id} must be a list")
         for spec in raw_specs:
             if not isinstance(spec, str):
                 raise ValueError(
@@ -199,20 +195,19 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
             )
             prebuild = (
                 _profile_metadata_bool(parts[4], "python_profile_specs")
-                if len(parts) == 5
+                if len(parts) >= 5
                 else True
             )
             if name in profiles:
-                raise ValueError(
-                    f"Python profile {name!r} is declared by multiple families"
-                )
-            profiles[name] = {
+                raise ValueError(f"Python profile {name!r} is declared by multiple families")
+            profile_spec: dict[str, object] = {
                 "kind": "venv",
                 "requirements": requirements,
                 "verification_script_file": verification_script_file,
                 "system_site_packages": system_site_packages,
                 "prebuild": prebuild,
             }
+            profiles[name] = profile_spec
             family_profile_names.add(name)
         raw_build_environment = raw.get("python_profile_build_environment", [])
         if not isinstance(raw_build_environment, list):
@@ -262,9 +257,7 @@ def family_python_profile_specs() -> dict[str, dict[str, object]]:
 def _profile_asset_path(path_spec: str, *, field: str, profile_name: str) -> Path:
     path = Path(path_spec)
     if not path_spec or path.is_absolute() or ".." in path.parts:
-        raise ValueError(
-            f"Execution profile {profile_name!r} has an unsafe {field} path"
-        )
+        raise ValueError(f"Execution profile {profile_name!r} has an unsafe {field} path")
     resolved = (_PACKAGE_DIR / path).resolve()
     try:
         resolved.relative_to(_PACKAGE_DIR.resolve())
@@ -274,8 +267,7 @@ def _profile_asset_path(path_spec: str, *, field: str, profile_name: str) -> Pat
         ) from error
     if not resolved.is_file():
         raise ValueError(
-            f"Execution profile {profile_name!r} references missing {field} "
-            f"asset {path_spec!r}"
+            f"Execution profile {profile_name!r} references missing {field} asset {path_spec!r}"
         )
     return resolved
 
@@ -308,14 +300,11 @@ def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
             else set()
         )
         if not allowed_keys:
-            raise ValueError(
-                f"Execution profile {name!r} has unsupported kind {kind!r}"
-            )
+            raise ValueError(f"Execution profile {name!r} has unsupported kind {kind!r}")
         unknown_keys = set(raw_spec) - allowed_keys
         if unknown_keys:
             raise ValueError(
-                f"Execution profile {name!r} has unknown keys: "
-                + ", ".join(sorted(unknown_keys))
+                f"Execution profile {name!r} has unknown keys: " + ", ".join(sorted(unknown_keys))
             )
         if kind == "passthrough":
             continue
@@ -343,9 +332,7 @@ def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
             )
         requirements = raw_spec.get("requirements")
         if type(requirements) is not str:
-            raise ValueError(
-                f"Execution profile {name!r} must declare a requirements path"
-            )
+            raise ValueError(f"Execution profile {name!r} must declare a requirements path")
         requirements_path = _profile_asset_path(
             requirements, field="requirements", profile_name=name
         )
@@ -359,14 +346,11 @@ def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
                 "verification_script and verification_script_file"
             )
         if inline_verification is not None and type(inline_verification) is not str:
-            raise ValueError(
-                f"Execution profile {name!r} verification_script must be a string"
-            )
+            raise ValueError(f"Execution profile {name!r} verification_script must be a string")
         if file_verification is not None:
             if type(file_verification) is not str:
                 raise ValueError(
-                    f"Execution profile {name!r} verification_script_file "
-                    "must be a string"
+                    f"Execution profile {name!r} verification_script_file must be a string"
                 )
             _profile_asset_path(
                 file_verification,
@@ -381,18 +365,13 @@ def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
     ):
         section = registry.get(section_name, {})
         if not isinstance(section, Mapping):
-            raise ValueError(
-                f"python_profiles.toml [{section_name}] must be an object"
-            )
+            raise ValueError(f"python_profiles.toml [{section_name}] must be an object")
         for selector, defaults in section.items():
             if type(selector) is not str or not selector.strip():
-                raise ValueError(
-                    f"python_profiles.toml [{section_name}] keys must be strings"
-                )
+                raise ValueError(f"python_profiles.toml [{section_name}] keys must be strings")
             if not isinstance(defaults, Mapping):
                 raise ValueError(
-                    f"python_profiles.toml [{section_name}.{selector}] "
-                    "must be an object"
+                    f"python_profiles.toml [{section_name}.{selector}] must be an object"
                 )
             for phase, profile in defaults.items():
                 if phase not in PROFILE_PHASES:
@@ -465,9 +444,7 @@ def _exact_pinned_requirements(requirements_text: str) -> dict[str, str]:
             )
         normalized_name = re.sub(r"[-_.]+", "-", name).lower()
         if normalized_name in pinned:
-            raise ValueError(
-                f"Python profile requirements declare {name!r} more than once"
-            )
+            raise ValueError(f"Python profile requirements declare {name!r} more than once")
         pinned[normalized_name] = version
     return pinned
 
@@ -499,6 +476,7 @@ def _verify_exact_requirements(
         [profile_python, "-c", script, json.dumps(dict(pinned), sort_keys=True)],
         description=f"verify exact package pins for Python profile {profile_name!r}",
         timeout=300,
+        env=_profile_subprocess_environment(),
     )
 
 
@@ -534,16 +512,13 @@ def _apply_declared_defaults(
     for phase, profile in defaults.items():
         if phase not in PROFILE_PHASES:
             raise ValueError(
-                f"{source} contains unsupported phase {phase!r}; "
-                f"expected one of {PROFILE_PHASES}"
+                f"{source} contains unsupported phase {phase!r}; expected one of {PROFILE_PHASES}"
             )
         name = str(profile).strip()
         if not name:
             raise ValueError(f"{source}[{phase!r}] must be a non-empty string")
         if declared_profiles is not None and name not in declared_profiles:
-            raise ValueError(
-                f"{source}[{phase!r}] selects undeclared profile {name!r}"
-            )
+            raise ValueError(f"{source}[{phase!r}] selects undeclared profile {name!r}")
         profiles[phase] = name
 
 
@@ -668,29 +643,152 @@ def _run_profile_command(
     if process.returncode != 0:
         stderr = (stderr or stdout or "").strip()
         raise RuntimeError(
-            f"Failed to {description}: "
-            f"{stderr or f'command exited with rc={process.returncode}'}"
+            f"Failed to {description}: {stderr or f'command exited with rc={process.returncode}'}"
         )
 
 
-def _profile_install_environment() -> dict[str, str]:
+def _profile_subprocess_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
-    if not environment.get("MAX_JOBS", "").strip():
-        environment["MAX_JOBS"] = _DEFAULT_PROFILE_BUILD_JOBS
     return environment
 
 
-def _python_site_packages(python: str) -> list[str]:
-    script = (
-        "import json, site; "
-        "print(json.dumps(site.getsitepackages()))"
+def _profile_install_environment() -> dict[str, str]:
+    environment = _profile_subprocess_environment()
+    if not environment.get("MAX_JOBS", "").strip():
+        environment["MAX_JOBS"] = _DEFAULT_PROFILE_BUILD_JOBS
+    _configure_targeted_nvcc(environment)
+    return environment
+
+
+def _cuda_arch_codes(value: str) -> tuple[str, ...]:
+    """Translate numeric TORCH_CUDA_ARCH_LIST entries to nvcc codes."""
+    codes: list[str] = []
+    for raw in re.split(r"[;,\s]+", value.strip()):
+        if not raw:
+            continue
+        token = raw.removesuffix("+PTX")
+        match = re.fullmatch(r"([0-9]+)\.([0-9]+)", token)
+        if match is None:
+            return ()
+        code = f"{int(match.group(1))}{match.group(2)}"
+        if code not in codes:
+            codes.append(code)
+    return tuple(codes)
+
+
+def _configure_targeted_nvcc(environment: dict[str, str]) -> None:
+    """Filter hard-coded nvcc targets to the declared PyTorch arch list."""
+    arch_codes = _cuda_arch_codes(environment.get("TORCH_CUDA_ARCH_LIST", ""))
+    if not arch_codes:
+        return
+
+    configured_home = (
+        environment.get("CUDA_HOME", "").strip() or environment.get("CUDA_PATH", "").strip()
     )
+    candidates = []
+    if configured_home:
+        candidates.append(Path(configured_home) / "bin" / "nvcc")
+    discovered_nvcc = shutil.which("nvcc")
+    if discovered_nvcc:
+        candidates.append(Path(discovered_nvcc))
+    candidates.append(Path("/usr/local/cuda/bin/nvcc"))
+    real_nvcc = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if real_nvcc is None:
+        return
+    real_nvcc = real_nvcc.resolve()
+    real_cuda_home = real_nvcc.parent.parent
+
+    identity = hashlib.sha256(f"{real_nvcc}\0{','.join(arch_codes)}".encode("utf-8")).hexdigest()[
+        :12
+    ]
+    wrapper_home = Path(tempfile.gettempdir()) / f"trtmc-cuda-arch-{identity}"
+    wrapper_bin = wrapper_home / "bin"
+    wrapper_nvcc = wrapper_bin / "nvcc"
+    wrapper_bin.mkdir(parents=True, exist_ok=True)
+    for name in ("include", "lib64"):
+        source = real_cuda_home / name
+        target = wrapper_home / name
+        if source.is_dir() and not target.exists():
+            target.symlink_to(source, target_is_directory=True)
+
+    script = """#!/usr/bin/env bash
+set -euo pipefail
+args=()
+saw_gencode=0
+kept_gencode=0
+while (($#)); do
+    if [[ ( "$1" == "-gencode" || "$1" == "--generate-code" ) && $# -ge 2 && "$2" == arch=compute_* ]]; then
+        saw_gencode=1
+        code="${2#arch=compute_}"
+        code="${code%%,*}"
+        if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
+            args+=("$1" "$2")
+            kept_gencode=1
+        fi
+        shift 2
+        continue
+    fi
+    if [[ "$1" == -gencode=arch=compute_* || "$1" == --generate-code=arch=compute_* ]]; then
+        saw_gencode=1
+        code="${1#*=arch=compute_}"
+        code="${code%%,*}"
+        if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
+            args+=("$1")
+            kept_gencode=1
+        fi
+        shift
+        continue
+    fi
+    if [[ ( "$1" == "-arch" || "$1" == "--gpu-architecture" ) && $# -ge 2 && "$2" == sm_* ]]; then
+        saw_gencode=1
+        code="${2#sm_}"
+        if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
+            args+=("$1" "$2")
+            kept_gencode=1
+        fi
+        shift 2
+        continue
+    fi
+    if [[ "$1" == -arch=sm_* || "$1" == --gpu-architecture=sm_* ]]; then
+        saw_gencode=1
+        code="${1#*=sm_}"
+        if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
+            args+=("$1")
+            kept_gencode=1
+        fi
+        shift
+        continue
+    fi
+    args+=("$1")
+    shift
+done
+if ((saw_gencode && !kept_gencode)); then
+    echo "nvcc command has no requested CUDA architecture (${TRTMC_NVCC_ARCH_CODES})" >&2
+    exit 2
+fi
+exec "${TRTMC_REAL_NVCC}" "${args[@]}"
+"""
+    if not wrapper_nvcc.is_file() or wrapper_nvcc.read_text(encoding="utf-8") != script:
+        temporary = wrapper_nvcc.with_name(f"nvcc.tmp.{os.getpid()}")
+        temporary.write_text(script, encoding="utf-8")
+        temporary.chmod(0o755)
+        temporary.replace(wrapper_nvcc)
+
+    environment["CUDA_HOME"] = str(wrapper_home)
+    environment["CUDA_PATH"] = str(wrapper_home)
+    environment["TRTMC_REAL_NVCC"] = str(real_nvcc)
+    environment["TRTMC_NVCC_ARCH_CODES"] = ",".join(arch_codes)
+
+
+def _python_site_packages(python: str) -> list[str]:
+    script = "import json, site; print(json.dumps(site.getsitepackages()))"
     result = subprocess.run(
         [python, "-c", script],
         capture_output=True,
         text=True,
         timeout=30,
+        env=_profile_subprocess_environment(),
     )
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
@@ -701,19 +799,46 @@ def _python_site_packages(python: str) -> list[str]:
     return [str(Path(p).absolute()) for p in json.loads(payload)]
 
 
+def _inherited_overlay_paths(base_paths: list[str]) -> list[str]:
+    """Read only overlays emitted by this module, never arbitrary sys.path."""
+    inherited: list[str] = []
+    for base_path in base_paths:
+        overlay_file = Path(base_path) / "trtmc_base_python_overlay.pth"
+        if not overlay_file.is_file():
+            continue
+        for line_number, raw_line in enumerate(
+            overlay_file.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            path = Path(line)
+            if not path.is_absolute() or line.startswith("import "):
+                raise ValueError(
+                    f"Unsafe inherited profile overlay line {line_number} in "
+                    f"{overlay_file}: {raw_line!r}"
+                )
+            normalized = str(path)
+            if normalized not in inherited:
+                inherited.append(normalized)
+    return inherited
+
+
 def _write_base_site_packages_overlay(base_python: str, profile_python: str) -> None:
     base_paths = _python_site_packages(base_python)
+    inherited_paths = _inherited_overlay_paths(base_paths)
     profile_paths = _python_site_packages(profile_python)
     if not profile_paths:
         raise RuntimeError(
             f"Failed to determine site-packages for profile interpreter {profile_python}"
         )
+    overlay_paths = list(dict.fromkeys([*base_paths, *inherited_paths]))
     package_root = str(_PACKAGE_DIR.parent)
-    if package_root not in base_paths:
-        base_paths.append(package_root)
+    if package_root not in overlay_paths:
+        overlay_paths.append(package_root)
     overlay_file = Path(profile_paths[0]) / "trtmc_base_python_overlay.pth"
     overlay_file.write_text(
-        "\n".join(base_paths) + "\n",
+        "\n".join(overlay_paths) + "\n",
         encoding="utf-8",
     )
 
@@ -727,21 +852,15 @@ def _materialize_venv_profile(
 ) -> str:
     base_python = _absolute_python(base_python)
     if not base_python:
-        raise ValueError(
-            f"Execution profile {profile_name!r} requires a base Python interpreter"
-        )
+        raise ValueError(f"Execution profile {profile_name!r} requires a base Python interpreter")
 
     requirements_spec = str(spec.get("requirements", "") or "").strip()
     if not requirements_spec:
-        raise ValueError(
-            f"Execution profile {profile_name!r} must declare a requirements file"
-        )
+        raise ValueError(f"Execution profile {profile_name!r} must declare a requirements file")
     requirements_text = _read_requirements_text(requirements_spec)
     pinned_requirements = _exact_pinned_requirements(requirements_text)
     verification_script = str(spec.get("verification_script", "") or "").strip()
-    verification_script_file = str(
-        spec.get("verification_script_file", "") or ""
-    ).strip()
+    verification_script_file = str(spec.get("verification_script_file", "") or "").strip()
     if verification_script_file:
         if verification_script:
             raise ValueError(
@@ -798,13 +917,13 @@ def _materialize_venv_profile(
         tmp_python = tmp_dir / "bin" / "python"
         requirements_file = tmp_dir / "requirements.lock.txt"
         requirements_file.write_text(requirements_text, encoding="utf-8")
-
         try:
             create_cmd = [base_python, "-m", "venv", str(tmp_dir)]
             _run_profile_command(
                 create_cmd,
                 description=f"create Python profile {profile_name!r}",
                 timeout=300,
+                env=_profile_subprocess_environment(),
             )
 
             if system_site_packages:
@@ -888,9 +1007,7 @@ def resolve_profile_python(
     if kind in {"base", "passthrough"}:
         return _absolute_python(base_python)
     if kind != "venv":
-        raise ValueError(
-            f"Execution profile {name!r} declares unsupported kind {kind!r}"
-        )
+        raise ValueError(f"Execution profile {name!r} declares unsupported kind {kind!r}")
     return _materialize_venv_profile(
         name,
         spec,
@@ -913,6 +1030,5 @@ def resolve_case_python_profiles(case: Any, base_python: str) -> dict[str, str]:
     """Resolve all execution profile interpreters for a case-like object."""
     profiles = resolve_case_profile_names(case)
     return {
-        phase: resolve_profile_python(profile, base_python)
-        for phase, profile in profiles.items()
+        phase: resolve_profile_python(profile, base_python) for phase, profile in profiles.items()
     }
