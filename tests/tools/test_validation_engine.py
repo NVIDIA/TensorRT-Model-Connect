@@ -6355,6 +6355,10 @@ def test_run_hf_reference_subprocess_passes_asr_family_metadata(
         captured["cmd"] = cmd
         return Result()
 
+    monkeypatch.setenv(
+        "TRTMC_PYTHON_PROFILE_CANARY_REFERENCE_PYTHON",
+        sys.executable,
+    )
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
     args = argparse.Namespace(
         hf_python="",
