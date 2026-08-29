@@ -283,6 +283,8 @@ models:
     workloads: [vbench_ti2v_official_profile_parity]
   whisper-large-v3-turbo:
     workloads: [librispeech_clean_asr]
+  whisper-small-fp16:
+    workloads: [librispeech_clean_asr]
   whisper-tiny-fp16:
     workloads: [librispeech_clean_asr]
   xglm-564m:

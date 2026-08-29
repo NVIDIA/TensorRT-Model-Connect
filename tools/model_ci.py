@@ -15,6 +15,7 @@ model files are never copied.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -26,6 +27,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Sequence
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 uses the declared tomli dependency.
+    import tomli as tomllib
 
 
 MODEL_ROOTS = (
@@ -190,6 +196,7 @@ FULL_UNIT_TEST_ONLY_EXACT = frozenset(
     }
 )
 UNIT_TEST_ONLY_PREFIXES = (
+    "examples/models/cosmos3/dual_spark/",
     "examples/models/nemotron_voicechat/full_duplex/",
     "tests/builder/",
     "tests/cpp/",
@@ -267,6 +274,7 @@ CI_OR_TOOLING_PREFIXES = (
 _MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _MANIFEST_ID_RE = re.compile(r'(?m)^\s*id\s*=\s*"([^"]+)"\s*$')
 _VALIDATION_OPTIONAL_EXTRA_RE = re.compile(r"validation\s*=\s*\[.*\]\s*\Z")
+_PYTEST_RESOURCE_MARKERS = frozenset({"e2e", "gpu", "trt"})
 
 
 class ModelCIError(RuntimeError):
@@ -364,6 +372,201 @@ def _manifest_location(path: str) -> tuple[str, str] | None:
         if len(relative) == 2 and relative[1] == "MODEL.toml":
             return root, relative[0]
     return None
+
+
+def _without_runtime_tests(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _without_runtime_tests(item)
+            for key, item in value.items()
+            if key != "runtime_tests"
+        }
+    if isinstance(value, list):
+        return [_without_runtime_tests(item) for item in value]
+    return value
+
+
+def _runtime_test_locations(
+    value: object,
+    path: tuple[str, ...] = (),
+) -> dict[tuple[str, ...], tuple[str, ...]] | None:
+    locations: dict[tuple[str, ...], tuple[str, ...]] = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            item_path = (*path, key)
+            if key == "runtime_tests":
+                if not isinstance(item, list) or not all(
+                    isinstance(entry, str) for entry in item
+                ):
+                    return None
+                locations[item_path] = tuple(item)
+                continue
+            nested = _runtime_test_locations(item, item_path)
+            if nested is None:
+                return None
+            locations.update(nested)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            nested = _runtime_test_locations(item, (*path, str(index)))
+            if nested is None:
+                return None
+            locations.update(nested)
+    return locations
+
+
+def _is_runtime_test_manifest_only_change(
+    repo_root: Path,
+    change: DiffEntry,
+    base_entries: dict[str, TreeEntry],
+    head_entries: dict[str, TreeEntry],
+) -> bool:
+    path = change.new_path
+    location = _manifest_location(path) if path is not None else None
+    if (
+        change.status != "M"
+        or path is None
+        or change.old_path != path
+        or location is None
+        or location[0] != "src/runtime/models"
+    ):
+        return False
+    base_entry = base_entries.get(path)
+    head_entry = head_entries.get(path)
+    if (
+        base_entry is None
+        or head_entry is None
+        or base_entry.mode != head_entry.mode
+        or base_entry.object_type != "blob"
+        or head_entry.object_type != "blob"
+    ):
+        return False
+    try:
+        base_data = tomllib.loads(_read_blob(repo_root, base_entry.object_id).decode("utf-8"))
+        head_data = tomllib.loads(_read_blob(repo_root, head_entry.object_id).decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    base_locations = _runtime_test_locations(base_data)
+    head_locations = _runtime_test_locations(head_data)
+    return (
+        base_locations is not None
+        and head_locations is not None
+        and len(base_locations) <= 1
+        and len(head_locations) <= 1
+        and all(len(path) <= 2 for path in (*base_locations, *head_locations))
+        and base_locations != head_locations
+        and _without_runtime_tests(base_data) == _without_runtime_tests(head_data)
+    )
+
+
+def _pytest_resource_marker_name(node: ast.AST) -> str | None:
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr in _PYTEST_RESOURCE_MARKERS
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "mark"
+        and isinstance(node.value.value, ast.Name)
+        and node.value.value.id == "pytest"
+    ):
+        return node.attr
+    return None
+
+
+class _PytestResourceMarkerStripper(ast.NodeTransformer):
+    @staticmethod
+    def _decorators(nodes: list[ast.expr]) -> list[ast.expr]:
+        return [node for node in nodes if _pytest_resource_marker_name(node) is None]
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+        node.decorator_list = self._decorators(node.decorator_list)
+        return self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> ast.AST:
+        node.decorator_list = self._decorators(node.decorator_list)
+        return self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+        node.decorator_list = self._decorators(node.decorator_list)
+        return self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> ast.AST | None:
+        if (
+            len(node.targets) != 1
+            or not isinstance(node.targets[0], ast.Name)
+            or node.targets[0].id != "pytestmark"
+        ):
+            return self.generic_visit(node)
+        if _pytest_resource_marker_name(node.value) is not None:
+            return None
+        if isinstance(node.value, (ast.List, ast.Tuple)):
+            node.value.elts = [
+                item
+                for item in node.value.elts
+                if _pytest_resource_marker_name(item) is None
+            ]
+            if not node.value.elts:
+                return None
+        return self.generic_visit(node)
+
+
+def _is_pytest_resource_marker_only_change(
+    repo_root: Path,
+    change: DiffEntry,
+    base_entries: dict[str, TreeEntry],
+    head_entries: dict[str, TreeEntry],
+) -> bool:
+    path = change.new_path
+    parts = PurePosixPath(path).parts if path is not None else ()
+    if (
+        change.status != "M"
+        or path is None
+        or change.old_path != path
+        or len(parts) != 5
+        or parts[:3] != ("tests", "e2e", "models")
+        or not parts[-1].startswith("test_")
+        or not parts[-1].endswith(".py")
+    ):
+        return False
+    base_entry = base_entries.get(path)
+    head_entry = head_entries.get(path)
+    if (
+        base_entry is None
+        or head_entry is None
+        or base_entry.mode != head_entry.mode
+        or base_entry.object_type != "blob"
+        or head_entry.object_type != "blob"
+    ):
+        return False
+    try:
+        base_tree = ast.parse(
+            _read_blob(repo_root, base_entry.object_id).decode("utf-8"),
+            filename=path,
+        )
+        head_tree = ast.parse(
+            _read_blob(repo_root, head_entry.object_id).decode("utf-8"),
+            filename=path,
+        )
+    except (SyntaxError, UnicodeDecodeError):
+        return False
+    base_raw = ast.dump(base_tree, include_attributes=False)
+    head_raw = ast.dump(head_tree, include_attributes=False)
+    _PytestResourceMarkerStripper().visit(base_tree)
+    _PytestResourceMarkerStripper().visit(head_tree)
+    return (
+        base_raw != head_raw
+        and ast.dump(base_tree, include_attributes=False)
+        == ast.dump(head_tree, include_attributes=False)
+    )
+
+
+def _is_family_python_unit_test(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return (
+        len(parts) >= 6
+        and parts[:3] == ("python", "tensorrt_model_connect", "families")
+        and parts[4] == "tests"
+        and parts[-1].startswith("test_")
+        and parts[-1].endswith(".py")
+    )
 
 
 def _validate_model_roots() -> None:
@@ -1004,6 +1207,8 @@ def calculate_impact(
         allow_legacy_device_tier=True,
     )
     head_catalog = discover_catalog(repo_root, head, allow_legacy_shared_runtime=True)
+    base_entries = {entry.path: entry for entry in base_catalog.entries}
+    head_entries = {entry.path: entry for entry in head_catalog.entries}
     affected: set[str] = set()
     fallback_selected: set[str] = set()
     broad_change = False
@@ -1015,6 +1220,20 @@ def calculate_impact(
     )
     serialized_changes: list[dict[str, object]] = []
     for change in _diff_entries(repo_root, comparison_base, head_sha):
+        unit_test_metadata_only = (
+            _is_runtime_test_manifest_only_change(
+                repo_root,
+                change,
+                base_entries,
+                head_entries,
+            )
+            or _is_pytest_resource_marker_only_change(
+                repo_root,
+                change,
+                base_entries,
+                head_entries,
+            )
+        )
         classifications: list[dict[str, object]] = []
         path_catalogs = (
             (change.old_path, base_catalog),
@@ -1026,6 +1245,8 @@ def calculate_impact(
                 continue
             seen_path_revision.add((path, catalog.revision))
             kind, owner = _classify_path(path, catalog)
+            if unit_test_metadata_only or _is_family_python_unit_test(path):
+                kind, owner = "unit_tests", None
             if path == "pyproject.toml" and pyproject_validation_only:
                 kind = "unit_tests"
             item = {"path": path, "kind": kind}
@@ -1056,6 +1277,10 @@ def calculate_impact(
             }
         )
     direct_affected = set(affected)
+    # CPU unit tests are intentionally not selective. Impact analysis still
+    # owns the model-proof matrix, but every non-empty PR diff frontloads the
+    # complete source-only CPU suite before any selective GPU proof starts.
+    frontload_cpu_units = bool(serialized_changes)
     if (
         affected - set(head_catalog.models)
         or affected.intersection(base_catalog.legacy_shared_runtime)
@@ -1105,8 +1330,8 @@ def calculate_impact(
         matrix_models=matrix_models,
         direct_models=direct_affected,
         fallback_models=fallback_selected,
-        run_unit_tests=unit_scope != "none" or broad_change,
-        unit_scope="all" if broad_change else unit_scope,
+        run_unit_tests=frontload_cpu_units,
+        unit_scope="all" if frontload_cpu_units else "none",
     )
     result["base_revision"] = base_catalog.revision
     result["head_revision"] = head_catalog.revision

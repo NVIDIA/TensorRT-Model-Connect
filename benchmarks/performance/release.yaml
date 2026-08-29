@@ -1074,5 +1074,7 @@ additional_profiles:
     inherit: llama.generate
   - model: whisper-large-v3-turbo
     inherit: whisper.transcribe
+  - model: whisper-small-fp16
+    inherit: whisper.transcribe
   - model: xlm-roberta-base
     inherit: roberta.encode

@@ -274,9 +274,9 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
 
     performance_catalog.validate_release_coverage(cases, excluded_profiles)
 
-    assert len(cases) == 108
+    assert len(cases) == 109
     assert len(raw_entries) == 79
-    assert len(raw_additional) == 29
+    assert len(raw_additional) == 30
     assert excluded_profiles == {
         "fast-foundation-stereo": FAST_FOUNDATION_STEREO_EXCLUSION_REASON,
         "lfm2-1.2b": LFM2_EXCLUSION_REASON,
@@ -301,7 +301,7 @@ def test_release_suite_covers_every_non_l0_ready_model_profile() -> None:
         "rerank",
     ]
     assert Counter(perf_matrix._candidate_timing_scope(case) for case in cases) == {
-        "model_call_wall": 24,
+        "model_call_wall": 25,
         "public_pipeline_call_wall": 84,
     }
     assert {case["id"] for case in cases if case["baseline"]["asset_loading_included"]} == {
@@ -2122,7 +2122,7 @@ def test_run_consolidates_results_and_records_replayable_commands(
     assert not scratch_root.exists()
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in results["cases"]}
-    assert len(rows) == 108
+    assert len(rows) == 109
     assert results["environment_config"]["name"] == "test-gb300"
     assert results["environment_config"]["execution"]["minimum_gpu_free_fraction"] == 0.0
     assert results["environment_config"]["source"] == str(environment.resolve())

@@ -51,7 +51,7 @@ depending on host-installed binaries.
 
 The local hook intentionally stays lightweight and does not build the CLI or
 run the complete CPU suite. After pushing, the pull request automatically runs
-source quality, ownership analysis, and the selected source-only C++ and Python
+source quality, ownership analysis, and all source-only CPU-safe C++ and Python
 units on GitHub-hosted public CPU runners. The protected suite retains
 the filesystem-specific cache-reflink contract that public runners cannot
 portably execute.
@@ -151,12 +151,15 @@ performance, and release qualification are different evidence tiers.
 Opening the pull request or pushing a new commit automatically starts
 contributor-visible, GitHub-hosted `Community CPU` validation against GitHub's
 exact pull-request merge revision. Separate jobs run source quality, ownership
-and impact, and source-only C++ and Python units. No comment or maintainer action
-is required.
+and impact, and all source-only CPU-safe C++ and Python units. No comment or
+maintainer action is required.
 
-For directly changed Python unit tests, impact analysis also passes the exact
-test files to the CPU unit job. This includes non-E2E model-owned tests under
-`tests/e2e/models/`; tests marked `gpu`, `trt`, or `e2e` remain excluded.
+The CPU unit job is intentionally non-selective: every pull request runs all
+CPU-safe Python tests and all CTests labeled `cpu`, including model-owned mock
+and contract tests. Tests marked `gpu`, `trt`, or `e2e` remain excluded. Pure
+model E2E entrypoints use the controlled `test_*_e2e.py` filename contract; a
+separate pass still runs any CPU contracts colocated in those files while
+deselecting only `test_model_e2e`.
 
 The test jobs have read-only repository permission and no access to private
 runners, secrets, or GPUs, and every public job uses a GitHub-hosted

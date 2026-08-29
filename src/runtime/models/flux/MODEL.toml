@@ -8,7 +8,8 @@ runtime_strategies = ["diffusion_flux"]
 legacy_runtime_strategy_aliases = ["diffusion|contains|diffusion_backend_type|flux|diffusion_flux"]
 runtime_link_libraries = ["cublas"]
 runtime_tests = [
-  "test_flux_pipeline|test_flux_pipeline.cpp|trtmc_model_flux|_|_",
+  "test_flux_host_contracts|test_flux_host_contracts.cpp|_|_|_",
+  "test_flux_pipeline|test_flux_pipeline.cpp|trtmc_model_flux|_|REQUIRES_GPU",
   "test_flux_generation_plan|test_flux_generation_plan.cpp|_|_|_",
   "test_flux_denoising_step_seam|test_flux_denoising_step_seam.cpp|_|_|_",
   "test_flux_batch_utils|test_flux_batch_utils.cpp|_|_|_",

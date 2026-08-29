@@ -1845,16 +1845,25 @@ def test_plan_selects_refcoco_locateanything_model() -> None:
 def test_plan_selects_librispeech_asr_models() -> None:
     suites = validation_engine.load_suites()
     models = validation_engine.load_manifest_records()
+    whisper_small = next(
+        model for model in models if model["name"] == "whisper-small-fp16"
+    )
+
+    assert whisper_small["hf_revision"] == (
+        "973afd24965f72e36ca33b3055d56a652f456b4d"
+    )
 
     rows = validation_engine.build_plan(suites, models, suite_id="librispeech_clean_asr")
 
     selected = {row["model"]: row for row in rows}
     assert "whisper-tiny-fp16" in selected
     assert selected["whisper-tiny-fp16"]["runtime_strategy"] == "whisper_speech_to_text"
+    assert selected["whisper-small-fp16"]["runtime_strategy"] == "whisper_speech_to_text"
     assert "canary-1b-v2" in selected
     assert selected["canary-1b-v2"]["runtime_strategy"] == "canary_speech_to_text"
     assert set(selected) == {
         "whisper-tiny-fp16",
+        "whisper-small-fp16",
         "whisper-large-v3-turbo",
         "canary-1b-v2",
     }

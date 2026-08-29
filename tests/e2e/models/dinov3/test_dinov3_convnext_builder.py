@@ -22,6 +22,8 @@ def _load_builder(monkeypatch: pytest.MonkeyPatch):
     return importlib.import_module("tensorrt_model_connect.families.dinov3.convnext_builder")
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 @pytest.mark.parametrize("precision", ["fp32", "fp16"])
 def test_real_tensorrt_build_marks_hf_outputs(precision: str) -> None:
     trt = pytest.importorskip("tensorrt")
@@ -317,6 +319,8 @@ def test_build_source_is_native_and_marks_hf_outputs(
     assert "onnx" not in source.lower()
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_real_convnext_fp32_matches_transformers(tmp_path) -> None:
     trt = pytest.importorskip("tensorrt")
     torch = pytest.importorskip("torch")

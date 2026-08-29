@@ -177,7 +177,7 @@ jobs:
     environment:
       name: ci-dispatch
       deployment: false
-    timeout-minutes: 75
+    timeout-minutes: 360
     permissions:
       contents: read
     outputs:
@@ -263,7 +263,10 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          for _ in $(seq 1 220); do
+          # The exact private run can queue behind GPU work. Let the job-level
+          # timeout bound this wait instead of misreporting queue delay as a
+          # terminal Internal CI failure.
+          while true; do
             run="$(
               gh api --method GET \
                 "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/runs/$RUN_ID"

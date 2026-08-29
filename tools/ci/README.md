@@ -58,14 +58,15 @@ that enters the run-owned container and invokes `pipeline` there.
 
 Opening a pull request or pushing a new commit automatically starts Community
 CPU against GitHub's exact pull-request merge revision. Source quality,
-ownership and impact, and selected source-only units run as separate jobs on
-GitHub-hosted public CPU runners.
-
-Impact analysis also passes directly changed, non-E2E Python test files to the
-unit job. The unit job adds those exact targets to its normal scope, so a
-model-owned CPU test under `tests/e2e/models/` is not hidden merely because the
-normal `builder` scope starts at `tests/builder/`. Pytest still excludes tests
-marked `gpu`, `trt`, or `e2e`; the public runner does not execute GPU inference.
+ownership and impact, and the complete source-only CPU unit suite run as
+separate jobs on GitHub-hosted public CPU runners. The unit job does not wait
+for impact analysis: every PR runs all CPU-safe Python tests and all CTests
+labeled `cpu`, including model-owned mock and contract tests. Pytest still
+excludes tests marked `gpu`, `trt`, or `e2e`; the public runner does not execute
+GPU inference. Pure model E2E entrypoints also follow the controlled
+`test_*_e2e.py` filename contract. A separate discovery pass reopens any mixed
+entrypoint file and runs its CPU contracts while deselecting only the exact
+`test_model_e2e` node.
 
 The jobs check out only the event's immutable merge SHA with read-only
 repository permission, no persisted checkout credentials, and no secrets.
@@ -106,15 +107,14 @@ the tested merge revision's first parent and the exact tested merge. It emits:
 - directly affected models;
 - representative fallback models for shared-platform changes;
 - the dynamic model matrix;
-- whether source-only units are required and their scope.
+- the non-selective `all` CPU unit scope used by protected premerge.
 
 This is why a model-only change validates that model, while a CI-platform change
 selects a small representative set instead of all models.
 
-Every model-owned change also selects the `builder` unit scope. That scope runs
-the Python `tests/builder/` suite without a native build. CLI-only changes
-select `cli`; changes that need both scopes, or any broad source/tooling change,
-select `all`.
+Every non-empty PR diff emits the `all` CPU unit scope. Community CPU runs that
+same scope unconditionally and in parallel with impact analysis. Impact
+classification remains selective only for the GPU model-proof matrix.
 
 ### 3. Reject cheap failures first
 

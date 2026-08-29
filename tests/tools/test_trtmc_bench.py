@@ -163,6 +163,7 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
         "flux-schnell-l0": ("generate_image", 1, 5),
         "chronos-bolt-tiny-official": ("solve", 50, 500),
         "nemotron-embed-vl-1b-v2": ("embed", 50, 500),
+        "whisper-small-fp16": ("transcribe", 1, 10),
         "whisper-tiny-fp16": ("transcribe", 1, 10),
         "fast-foundation-stereo": ("disparity", 3, 100),
     }

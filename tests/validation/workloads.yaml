@@ -717,6 +717,7 @@ suites:
     user_contract: exact_transcript
     default_model_names:
       - whisper-tiny-fp16
+      - whisper-small-fp16
       - whisper-large-v3-turbo
       - canary-1b-v2
     dataset:

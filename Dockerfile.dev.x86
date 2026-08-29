@@ -30,7 +30,7 @@ RUN python3.12 -m venv --system-site-packages ${VIRTUAL_ENV} && \
     ln -s /usr/bin/cmake ${VIRTUAL_ENV}/bin/cmake
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-COPY requirements/community-ci.txt /tmp/trtmc-community-ci.txt
+COPY community-ci.txt /tmp/trtmc-community-ci.txt
 
 RUN pip install -U pip && \
     pip install \
