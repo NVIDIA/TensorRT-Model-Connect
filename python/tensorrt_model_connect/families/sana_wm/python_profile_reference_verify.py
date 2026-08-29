@@ -16,7 +16,7 @@ import yaml
 assert version("PyYAML") == "6.0.3"
 required_versions = {
     "transformers": "5.2.0",
-    "huggingface-hub": "1.22.0",
+    "huggingface-hub": "1.26.0",
     "tokenizers": "0.22.2",
     "einops": "0.8.2",
 }
