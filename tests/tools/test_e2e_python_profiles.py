@@ -364,10 +364,14 @@ def test_targeted_cuda_wrapper_rejects_unsafe_private_root(monkeypatch, tmp_path
     nvcc.parent.mkdir(parents=True)
     nvcc.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
     nvcc.chmod(0o755)
-    monkeypatch.setattr(shared_profiles.tempfile, "tempdir", str(tmp_path))
-    wrapper_root = tmp_path / f"trtmc-cuda-wrappers-{shared_profiles.os.geteuid()}-{shared_profiles.os.getpid()}"
+    wrapper_root = tmp_path / "unsafe-wrapper"
     wrapper_root.mkdir(mode=0o755)
     wrapper_root.chmod(0o755)
+    monkeypatch.setattr(
+        shared_profiles.tempfile,
+        "mkdtemp",
+        lambda *, prefix: str(wrapper_root),
+    )
 
     with pytest.raises(RuntimeError, match="Unsafe CUDA wrapper directory"):
         shared_profiles._profile_install_environment(
@@ -376,6 +380,47 @@ def test_targeted_cuda_wrapper_rejects_unsafe_private_root(monkeypatch, tmp_path
                 "TORCH_CUDA_ARCH_LIST": "10.0",
             }
         )
+
+
+def test_targeted_cuda_wrapper_avoids_stale_pid_directory(monkeypatch, tmp_path):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+    monkeypatch.setattr(shared_profiles.tempfile, "tempdir", str(tmp_path))
+    stale_root = tmp_path / (
+        f"trtmc-cuda-wrappers-{shared_profiles.os.geteuid()}-"
+        f"{shared_profiles.os.getpid()}"
+    )
+    stale_root.mkdir(mode=0o755)
+    stale_root.chmod(0o755)
+
+    environment = shared_profiles._profile_install_environment(
+        {
+            "CUDA_HOME": str(cuda_home),
+            "TORCH_CUDA_ARCH_LIST": "10.0",
+        }
+    )
+
+    wrapper_home = Path(environment["CUDA_HOME"])
+    assert wrapper_home.parent != stale_root
+    assert wrapper_home.parent.stat().st_mode & 0o7777 == 0o700
+
+
+def test_private_cuda_wrapper_cleanup_rejects_replaced_root(tmp_path):
+    wrapper_root = tmp_path / "wrapper"
+    wrapper_root.mkdir(mode=0o700)
+    wrapper_root.chmod(0o700)
+    shared_profiles._cleanup_private_cuda_wrapper_root(wrapper_root)
+    assert not wrapper_root.exists()
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    wrapper_root.symlink_to(outside, target_is_directory=True)
+    shared_profiles._cleanup_private_cuda_wrapper_root(wrapper_root)
+    assert wrapper_root.is_symlink()
+    assert outside.is_dir()
 
 
 def test_cuda_arch_codes_reject_named_architectures() -> None:

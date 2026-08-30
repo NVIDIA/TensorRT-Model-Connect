@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import atexit
 import fcntl
 import hashlib
 import json
@@ -724,9 +725,27 @@ def _ensure_private_directory(path: Path) -> None:
         raise RuntimeError(f"Unsafe CUDA wrapper directory: {path}")
 
 
+def _cleanup_private_cuda_wrapper_root(root: Path) -> None:
+    try:
+        metadata = root.lstat()
+    except FileNotFoundError:
+        return
+    if (
+        root.is_symlink()
+        or not root.is_dir()
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o7777 != 0o700
+    ):
+        return
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def _private_cuda_wrapper_root() -> Path:
-    root = Path(tempfile.gettempdir()) / f"trtmc-cuda-wrappers-{os.geteuid()}-{os.getpid()}"
+    root = Path(
+        tempfile.mkdtemp(prefix=f"trtmc-cuda-wrappers-{os.geteuid()}-{os.getpid()}-")
+    )
     _ensure_private_directory(root)
+    atexit.register(_cleanup_private_cuda_wrapper_root, root)
     return root
 
 
