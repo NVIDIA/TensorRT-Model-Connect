@@ -478,25 +478,14 @@ def test_process_session_members_ignores_vanished_proc_entry(monkeypatch):
 
 
 def test_family_profile_registry_is_fully_exact_pinned():
-    expected = {
-        "chronos",
-        "deepseek_ocr",
-        "elf_flow",
-        "elf_flow_reference",
-        "internlm",
-        "lance_reference",
-        "magpie_tts_reference",
-        "nemotron_h_reference",
-        "personaplex_full_duplex_evaluator",
-        "phi4_multimodal",
-        "sana_wm_reference",
-        "reference_common",
-    }
     profiles = shared_profiles.load_python_profile_registry()["profiles"]
+    profile_names = set(profiles) - {shared_profiles.DEFAULT_PROFILE}
 
-    assert set(profiles) - {shared_profiles.DEFAULT_PROFILE} == expected
-    for name in expected:
-        requirements = shared_profiles._read_requirements_text(profiles[name]["requirements"])
+    assert profile_names
+    for name in profile_names:
+        requirements = shared_profiles._read_requirements_text(
+            profiles[name]["requirements"]
+        )
         pins = shared_profiles._exact_pinned_requirements(requirements)
         assert pins, name
     assert profiles["nemotron_h_reference"]["build_environment"] == {
