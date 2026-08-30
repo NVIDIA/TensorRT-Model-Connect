@@ -292,7 +292,7 @@ aliases = ["demo"]
 prefixes = ["demo"]
 default_execution_profiles = ["reference|demo"]
 python_profile_specs = [
-  "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true|true",
+  "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
   "lazy_demo|families/demo/requirements.lock.txt|families/demo/verify.py|true|false",
 ]
 """,
@@ -753,7 +753,9 @@ def test_base_fingerprint_ignores_unrelated_family_loader_changes(
     repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
     baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
 
-    family_loader = repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    family_loader = (
+        repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    )
     family_loader.write_text(
         family_loader.read_text(encoding="utf-8")
         + "\n# Unrelated application-only family parsing change.\n",
@@ -859,7 +861,9 @@ def test_source_contract_does_not_execute_or_fingerprint_family_loader(
 ) -> None:
     repo_root, _, _ = _write_profile_fingerprint_repo(tmp_path)
     baseline = DockerImageManager(repo_root).source_contract()
-    family_loader = repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    family_loader = (
+        repo_root / "python" / "tensorrt_model_connect" / "families" / "__init__.py"
+    )
     family_loader.write_text(
         "raise RuntimeError('family loader must not execute')\n",
         encoding="utf-8",

@@ -649,6 +649,7 @@ def _run_profile_command(
 
 def _profile_subprocess_environment() -> dict[str, str]:
     environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
     environment.pop("PYTHONPATH", None)
     return environment
 
@@ -681,26 +682,57 @@ def _cuda_arch_codes(value: str) -> tuple[str, ...]:
     return tuple(codes)
 
 
+def _real_nvcc(environment: Mapping[str, str]) -> Path | None:
+    configured_home = (
+        environment.get("CUDA_HOME", "").strip()
+        or environment.get("CUDA_PATH", "").strip()
+    )
+    candidates = []
+    if configured_home:
+        candidates.append(Path(configured_home) / "bin" / "nvcc")
+    discovered_nvcc = shutil.which("nvcc", path=environment.get("PATH"))
+    if discovered_nvcc:
+        candidates.append(Path(discovered_nvcc))
+    candidates.append(Path("/usr/local/cuda/bin/nvcc"))
+    selected = next((candidate for candidate in candidates if candidate.is_file()), None)
+    return selected.resolve() if selected is not None else None
+
+
+def _profile_install_identity(environment: Mapping[str, str]) -> dict[str, object]:
+    """Return the effective CUDA inputs that can change installed artifacts."""
+    identity: dict[str, object] = {
+        "torch_cuda_arch_list": environment.get("TORCH_CUDA_ARCH_LIST", ""),
+        "nvcc_arch_codes": environment.get("TRTMC_NVCC_ARCH_CODES", ""),
+    }
+    configured_nvcc = environment.get("TRTMC_REAL_NVCC", "").strip()
+    real_nvcc = Path(configured_nvcc) if configured_nvcc else _real_nvcc(environment)
+    if real_nvcc is None or not real_nvcc.is_file():
+        identity["cuda_home"] = environment.get("CUDA_HOME", "")
+        identity["cuda_path"] = environment.get("CUDA_PATH", "")
+        return identity
+
+    real_nvcc = real_nvcc.resolve()
+    stat = real_nvcc.stat()
+    identity.update(
+        {
+            "cuda_home": str(real_nvcc.parent.parent),
+            "nvcc": str(real_nvcc),
+            "nvcc_size": stat.st_size,
+            "nvcc_mtime_ns": stat.st_mtime_ns,
+        }
+    )
+    return identity
+
+
 def _configure_targeted_nvcc(environment: dict[str, str]) -> None:
     """Filter hard-coded nvcc targets to the declared PyTorch arch list."""
     arch_codes = _cuda_arch_codes(environment.get("TORCH_CUDA_ARCH_LIST", ""))
     if not arch_codes:
         return
 
-    configured_home = (
-        environment.get("CUDA_HOME", "").strip() or environment.get("CUDA_PATH", "").strip()
-    )
-    candidates = []
-    if configured_home:
-        candidates.append(Path(configured_home) / "bin" / "nvcc")
-    discovered_nvcc = shutil.which("nvcc")
-    if discovered_nvcc:
-        candidates.append(Path(discovered_nvcc))
-    candidates.append(Path("/usr/local/cuda/bin/nvcc"))
-    real_nvcc = next((candidate for candidate in candidates if candidate.is_file()), None)
+    real_nvcc = _real_nvcc(environment)
     if real_nvcc is None:
         return
-    real_nvcc = real_nvcc.resolve()
     real_cuda_home = real_nvcc.parent.parent
 
     identity = hashlib.sha256(f"{real_nvcc}\0{','.join(arch_codes)}".encode("utf-8")).hexdigest()[
@@ -877,6 +909,8 @@ def _materialize_venv_profile(
         str(name): str(value)
         for name, value in dict(spec.get("build_environment", {})).items()
     }
+    install_environment = _profile_install_environment(build_environment)
+    install_identity = _profile_install_identity(install_environment)
 
     hash_input = "\n".join(
         [
@@ -887,6 +921,7 @@ def _materialize_venv_profile(
             verification_script,
             f"system_site_packages={int(system_site_packages)}",
             json.dumps(build_environment, separators=(",", ":"), sort_keys=True),
+            json.dumps(install_identity, separators=(",", ":"), sort_keys=True),
         ]
     ).encode("utf-8")
     profile_hash = hashlib.sha256(hash_input).hexdigest()[:12]
@@ -934,7 +969,6 @@ def _materialize_venv_profile(
                 _write_base_site_packages_overlay(base_python, str(tmp_python))
 
             if requirements_text.strip():
-                install_environment = _profile_install_environment(build_environment)
                 _run_profile_command(
                     [
                         str(tmp_python),

@@ -233,6 +233,7 @@ def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_pat
     install = next(call for call in commands if call[1].startswith("install "))
     assert install[3]["env"]["MAX_JOBS"] == "4"
     assert install[3]["env"]["DEMO_FORCE_BUILD"] == "TRUE"
+    assert "PYTHONHOME" not in install[3]["env"]
     assert "PYTHONPATH" not in install[3]["env"]
     assert install[2] == 7200
     verify = next(call for call in commands if call[1].startswith("verify "))
@@ -245,7 +246,8 @@ def test_profile_source_builds_respect_an_explicit_job_limit(monkeypatch):
     assert shared_profiles._profile_install_environment()["MAX_JOBS"] == "2"
 
 
-def test_exact_pin_verification_drops_ambient_pythonpath(monkeypatch):
+def test_exact_pin_verification_drops_ambient_python_paths(monkeypatch):
+    monkeypatch.setenv("PYTHONHOME", "/untrusted/python/home")
     monkeypatch.setenv("PYTHONPATH", "/untrusted/profile/source")
     calls = []
     monkeypatch.setattr(
@@ -260,7 +262,9 @@ def test_exact_pin_verification_drops_ambient_pythonpath(monkeypatch):
         {"demo-package": "1.0"},
     )
 
-    assert "PYTHONPATH" not in calls[0][1]["env"]
+    environment = calls[0][1]["env"]
+    assert "PYTHONHOME" not in environment
+    assert "PYTHONPATH" not in environment
 
 
 def test_profile_source_builds_apply_declared_environment_before_cuda_filter(monkeypatch, tmp_path):
@@ -316,6 +320,35 @@ def test_cuda_arch_codes_reject_named_architectures() -> None:
         "110",
     )
     assert shared_profiles._cuda_arch_codes("Ampere") == ()
+
+
+def test_profile_cache_identity_includes_effective_cuda_inputs(monkeypatch, tmp_path):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+    wrapper_root = tmp_path / "wrappers"
+    wrapper_root.mkdir()
+    monkeypatch.setattr(shared_profiles.tempfile, "tempdir", str(wrapper_root))
+    monkeypatch.setenv("CUDA_HOME", str(cuda_home))
+    monkeypatch.setenv(shared_profiles.PREBUILT_ONLY_ENV, "1")
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+    requirements = tmp_path / "empty.lock.txt"
+    requirements.write_text("", encoding="utf-8")
+    spec = {
+        "requirements": str(requirements),
+        "system_site_packages": False,
+    }
+
+    messages = []
+    for architecture in ("10.0", "11.0"):
+        monkeypatch.setenv("TORCH_CUDA_ARCH_LIST", architecture)
+        with pytest.raises(RuntimeError, match="is not prebuilt") as error:
+            shared_profiles._materialize_venv_profile("custom", spec, sys.executable)
+        messages.append(str(error.value))
+
+    assert messages[0] != messages[1]
 
 
 def test_profile_command_timeout_terminates_descendants(tmp_path):
