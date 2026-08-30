@@ -720,7 +720,7 @@ def _ensure_private_directory(path: Path) -> None:
         path.is_symlink()
         or not path.is_dir()
         or metadata.st_uid != os.geteuid()
-        or metadata.st_mode & 0o7777 != 0o700
+        or metadata.st_mode & 0o077 != 0
     ):
         raise RuntimeError(f"Unsafe CUDA wrapper directory: {path}")
 
@@ -734,7 +734,7 @@ def _cleanup_private_cuda_wrapper_root(root: Path) -> None:
         root.is_symlink()
         or not root.is_dir()
         or metadata.st_uid != os.geteuid()
-        or metadata.st_mode & 0o7777 != 0o700
+        or metadata.st_mode & 0o077 != 0
     ):
         return
     shutil.rmtree(root, ignore_errors=True)

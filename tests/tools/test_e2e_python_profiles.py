@@ -411,7 +411,8 @@ def test_targeted_cuda_wrapper_avoids_stale_pid_directory(monkeypatch, tmp_path)
 def test_private_cuda_wrapper_cleanup_rejects_replaced_root(tmp_path):
     wrapper_root = tmp_path / "wrapper"
     wrapper_root.mkdir(mode=0o700)
-    wrapper_root.chmod(0o700)
+    wrapper_root.chmod(0o2700)
+    shared_profiles._ensure_private_directory(wrapper_root)
     shared_profiles._cleanup_private_cuda_wrapper_root(wrapper_root)
     assert not wrapper_root.exists()
 
