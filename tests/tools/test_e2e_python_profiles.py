@@ -404,8 +404,10 @@ def test_targeted_cuda_wrapper_avoids_stale_pid_directory(monkeypatch, tmp_path)
     )
 
     wrapper_home = Path(environment["CUDA_HOME"])
+    wrapper_metadata = wrapper_home.parent.stat()
     assert wrapper_home.parent != stale_root
-    assert wrapper_home.parent.stat().st_mode & 0o7777 == 0o700
+    assert wrapper_metadata.st_uid == shared_profiles.os.geteuid()
+    assert wrapper_metadata.st_mode & 0o077 == 0
 
 
 def test_private_cuda_wrapper_cleanup_rejects_replaced_root(tmp_path):
