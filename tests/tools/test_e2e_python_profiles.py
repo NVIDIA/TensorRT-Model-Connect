@@ -295,8 +295,11 @@ def test_profile_source_builds_apply_declared_environment_before_cuda_filter(mon
             "--generate-code=arch=compute_90,code=sm_90",
             "-gencode=arch=compute_110,code=sm_110",
             "-arch=sm_90",
+            "-arch",
+            "compute_90",
             "--gpu-architecture",
             "sm_110",
+            "--gpu-architecture=compute_100",
             "input.cu",
         ],
         env=environment,
@@ -305,12 +308,74 @@ def test_profile_source_builds_apply_declared_environment_before_cuda_filter(mon
         check=True,
     )
 
-    assert "arch=compute_90,code=sm_90" not in result.stdout
-    assert "arch=compute_100,code=sm_100" in result.stdout
-    assert "arch=compute_110,code=sm_110" in result.stdout
-    assert "sm_90" not in result.stdout
-    assert "sm_110" in result.stdout
+    assert result.stdout.splitlines() == [
+        "-O3",
+        "-gencode",
+        "arch=compute_100,code=sm_100",
+        "-gencode=arch=compute_110,code=sm_110",
+        "--gpu-architecture",
+        "sm_110",
+        "--gpu-architecture=compute_100",
+        "input.cu",
+    ]
     assert Path(environment["CUDA_HOME"], "include").resolve() == cuda_home / "include"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("-arch", "native"),
+        ("--gpu-architecture", "all"),
+        ("-arch=all-major",),
+        ("--gpu-architecture=native",),
+    ),
+)
+def test_targeted_cuda_wrapper_rejects_architecture_shorthands(
+    monkeypatch, tmp_path, arguments
+):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+    monkeypatch.setattr(shared_profiles.tempfile, "tempdir", str(tmp_path))
+    environment = shared_profiles._profile_install_environment(
+        {
+            "CUDA_HOME": str(cuda_home),
+            "TORCH_CUDA_ARCH_LIST": "10.0",
+        }
+    )
+
+    result = subprocess.run(
+        [str(Path(environment["CUDA_HOME"]) / "bin" / "nvcc"), *arguments],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "architecture shorthand cannot be constrained" in result.stderr
+
+
+def test_targeted_cuda_wrapper_rejects_unsafe_private_root(monkeypatch, tmp_path):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+    monkeypatch.setattr(shared_profiles.tempfile, "tempdir", str(tmp_path))
+    wrapper_root = tmp_path / f"trtmc-cuda-wrappers-{shared_profiles.os.geteuid()}-{shared_profiles.os.getpid()}"
+    wrapper_root.mkdir(mode=0o755)
+    wrapper_root.chmod(0o755)
+
+    with pytest.raises(RuntimeError, match="Unsafe CUDA wrapper directory"):
+        shared_profiles._profile_install_environment(
+            {
+                "CUDA_HOME": str(cuda_home),
+                "TORCH_CUDA_ARCH_LIST": "10.0",
+            }
+        )
 
 
 def test_cuda_arch_codes_reject_named_architectures() -> None:
@@ -349,6 +414,23 @@ def test_profile_cache_identity_includes_effective_cuda_inputs(monkeypatch, tmp_
         messages.append(str(error.value))
 
     assert messages[0] != messages[1]
+
+
+def test_profile_install_identity_is_stable_across_nvcc_mtime_changes(tmp_path):
+    cuda_home = tmp_path / "cuda"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    first = shared_profiles._profile_install_identity(
+        {"CUDA_HOME": str(cuda_home), "TORCH_CUDA_ARCH_LIST": "10.0"}
+    )
+    time.sleep(0.01)
+    nvcc.touch()
+    second = shared_profiles._profile_install_identity(
+        {"CUDA_HOME": str(cuda_home), "TORCH_CUDA_ARCH_LIST": "10.0"}
+    )
+
+    assert first == second
 
 
 def test_profile_command_timeout_terminates_descendants(tmp_path):

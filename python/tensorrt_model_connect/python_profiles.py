@@ -315,17 +315,17 @@ def _validate_python_profile_registry(registry: Mapping[str, Any]) -> None:
                 )
         build_environment = raw_spec.get("build_environment", {})
         if not isinstance(build_environment, Mapping) or any(
-            not isinstance(name, str)
-            or _BUILD_ENVIRONMENT_NAME_RE.fullmatch(name) is None
-            or name in _FORBIDDEN_BUILD_ENVIRONMENT_NAMES
-            or name.startswith(_FORBIDDEN_BUILD_ENVIRONMENT_PREFIXES)
+            not isinstance(variable, str)
+            or _BUILD_ENVIRONMENT_NAME_RE.fullmatch(variable) is None
+            or variable in _FORBIDDEN_BUILD_ENVIRONMENT_NAMES
+            or variable.startswith(_FORBIDDEN_BUILD_ENVIRONMENT_PREFIXES)
             or not isinstance(value, str)
             or not value
             or len(value) > 1024
             or "\x00" in value
             or "\n" in value
             or "\r" in value
-            for name, value in build_environment.items()
+            for variable, value in build_environment.items()
         ):
             raise ValueError(
                 f"Execution profile {name!r} build_environment must contain safe strings"
@@ -698,6 +698,38 @@ def _real_nvcc(environment: Mapping[str, str]) -> Path | None:
     return selected.resolve() if selected is not None else None
 
 
+@lru_cache(maxsize=16)
+def _file_sha256(path_spec: str, size: int, mtime_ns: int) -> str:
+    """Hash a file, using stat fields only to invalidate this process cache."""
+    del size, mtime_ns
+    digest = hashlib.sha256()
+    with Path(path_spec).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ensure_private_directory(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not path.is_dir()
+        or metadata.st_uid != os.geteuid()
+        or metadata.st_mode & 0o7777 != 0o700
+    ):
+        raise RuntimeError(f"Unsafe CUDA wrapper directory: {path}")
+
+
+def _private_cuda_wrapper_root() -> Path:
+    root = Path(tempfile.gettempdir()) / f"trtmc-cuda-wrappers-{os.geteuid()}-{os.getpid()}"
+    _ensure_private_directory(root)
+    return root
+
+
 def _profile_install_identity(environment: Mapping[str, str]) -> dict[str, object]:
     """Return the effective CUDA inputs that can change installed artifacts."""
     identity: dict[str, object] = {
@@ -712,13 +744,14 @@ def _profile_install_identity(environment: Mapping[str, str]) -> dict[str, objec
         return identity
 
     real_nvcc = real_nvcc.resolve()
-    stat = real_nvcc.stat()
+    metadata = real_nvcc.stat()
     identity.update(
         {
             "cuda_home": str(real_nvcc.parent.parent),
             "nvcc": str(real_nvcc),
-            "nvcc_size": stat.st_size,
-            "nvcc_mtime_ns": stat.st_mtime_ns,
+            "nvcc_sha256": _file_sha256(
+                str(real_nvcc), metadata.st_size, metadata.st_mtime_ns
+            ),
         }
     )
     return identity
@@ -738,10 +771,11 @@ def _configure_targeted_nvcc(environment: dict[str, str]) -> None:
     identity = hashlib.sha256(f"{real_nvcc}\0{','.join(arch_codes)}".encode("utf-8")).hexdigest()[
         :12
     ]
-    wrapper_home = Path(tempfile.gettempdir()) / f"trtmc-cuda-arch-{identity}"
+    wrapper_home = _private_cuda_wrapper_root() / identity
     wrapper_bin = wrapper_home / "bin"
     wrapper_nvcc = wrapper_bin / "nvcc"
-    wrapper_bin.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(wrapper_home)
+    _ensure_private_directory(wrapper_bin)
     for name in ("include", "lib64"):
         source = real_cuda_home / name
         target = wrapper_home / name
@@ -776,9 +810,14 @@ while (($#)); do
         shift
         continue
     fi
-    if [[ ( "$1" == "-arch" || "$1" == "--gpu-architecture" ) && $# -ge 2 && "$2" == sm_* ]]; then
+    if [[ ( "$1" == "-arch" || "$1" == "--gpu-architecture" ) && $# -ge 2 ]]; then
         saw_gencode=1
-        code="${2#sm_}"
+        value="$2"
+        if [[ "$value" != sm_* && "$value" != compute_* ]]; then
+            echo "nvcc architecture shorthand cannot be constrained: ${value}" >&2
+            exit 2
+        fi
+        code="${value#*_}"
         if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
             args+=("$1" "$2")
             kept_gencode=1
@@ -786,9 +825,14 @@ while (($#)); do
         shift 2
         continue
     fi
-    if [[ "$1" == -arch=sm_* || "$1" == --gpu-architecture=sm_* ]]; then
+    if [[ "$1" == -arch=* || "$1" == --gpu-architecture=* ]]; then
         saw_gencode=1
-        code="${1#*=sm_}"
+        value="${1#*=}"
+        if [[ "$value" != sm_* && "$value" != compute_* ]]; then
+            echo "nvcc architecture shorthand cannot be constrained: ${value}" >&2
+            exit 2
+        fi
+        code="${value#*_}"
         if [[ ",${TRTMC_NVCC_ARCH_CODES}," == *",${code},"* ]]; then
             args+=("$1")
             kept_gencode=1
