@@ -186,14 +186,78 @@ def _to_numpy_fp32(t) -> np.ndarray:
     return np.asarray(t, dtype=np.float32)
 
 
+
+# Qwen3.8 FP8 checkpoints store the large projections as float8_e4m3 together
+# with a companion "<name>_scale_inv" tensor holding one bf16 scale per
+# weight_block_size block (128x128 for Qwen3.8-27B-FP8). Converting the raw
+# float8 values without applying those scales silently yields wrong weights, so
+# the two are always resolved together.
+_FP8_DTYPE_NAMES = frozenset({
+    "torch.float8_e4m3fn", "float8_e4m3fn", "float8_e4m3",
+    "torch.float8_e5m2", "float8_e5m2",
+})
+_SCALE_INV_SUFFIX = "_scale_inv"
+
+
+def _is_fp8_tensor(t) -> bool:
+    return str(getattr(t, "dtype", "")) in _FP8_DTYPE_NAMES
+
+
+def _apply_block_scales(values: np.ndarray, scale_inv: np.ndarray) -> np.ndarray:
+    """Scale a dequantized FP8 weight in place by its per-block scales.
+
+    ``scale_inv`` carries one entry per block; block extents are derived from the
+    two shapes so the loader does not need to read weight_block_size, and a
+    trailing partial block is handled by clipping. The multiply is done block by
+    block rather than by expanding the scales, because an expanded scale array
+    would be as large as the weight itself.
+    """
+    if values.ndim != 2 or scale_inv.ndim != 2:
+        raise ValueError(
+            f"FP8 block dequantization expects 2-D weight and scales, got "
+            f"{values.ndim}-D and {scale_inv.ndim}-D")
+    rows, cols = values.shape
+    s_rows, s_cols = scale_inv.shape
+    block_r = -(-rows // s_rows)
+    block_c = -(-cols // s_cols)
+    for i in range(s_rows):
+        r0, r1 = i * block_r, min((i + 1) * block_r, rows)
+        if r0 >= r1:
+            break
+        for j in range(s_cols):
+            c0, c1 = j * block_c, min((j + 1) * block_c, cols)
+            if c0 >= c1:
+                break
+            values[r0:r1, c0:c1] *= scale_inv[i, j]
+    return values
+
+
 def _load_tensor(readers: list, name: str) -> np.ndarray:
+    raw = _get_raw_tensor(readers, name)
+    values = _to_numpy_fp32(raw)
+    if not _is_fp8_tensor(raw):
+        return values
+
+    scale_name = name + _SCALE_INV_SUFFIX
+    if not _has_tensor(readers, scale_name):
+        # Refuse to return unscaled float8 values: they look like a plausible
+        # weight tensor and would corrupt the engine silently.
+        raise KeyError(
+            f"FP8 tensor {name!r} has no companion {scale_name!r}; "
+            "cannot dequantize")
+    scale_inv = _to_numpy_fp32(_get_raw_tensor(readers, scale_name))
+    return _apply_block_scales(values, scale_inv)
+
+
+def _get_raw_tensor(readers: list, name: str):
+    """Fetch a tensor from the shard collection without dtype conversion."""
     tensor_map = getattr(readers, "tensor_map", None)
     if tensor_map is not None:
         reader = tensor_map.get(name)
         if reader is None:
             raise KeyError(f"Tensor not found: {name}")
-        return _to_numpy_fp32(reader.get_tensor(name))
+        return reader.get_tensor(name)
     for r in readers:
         if name in r.keys():
-            return _to_numpy_fp32(r.get_tensor(name))
+            return r.get_tensor(name)
     raise KeyError(f"Tensor not found: {name}")

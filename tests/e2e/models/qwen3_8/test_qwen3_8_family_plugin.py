@@ -532,3 +532,86 @@ def test_mock_bundle_serializes_decoder_and_hybrid_config(tmp_path):
     assert runtime_config["mamba_nheads"] == 48
     assert runtime_config["mamba_head_dim"] == 128
     assert runtime_config["conv_dim"] == 10240
+
+
+class _FakeFp8Tensor:
+    """Stands in for a safetensors float8 tensor without needing torch."""
+
+    def __init__(self, values: np.ndarray):
+        self._values = values.astype(np.float32)
+        self.dtype = "torch.float8_e4m3fn"
+
+    def float(self):
+        return self
+
+    def numpy(self):
+        return self._values
+
+
+def test_fp8_weights_are_dequantized_with_their_block_scales(monkeypatch):
+    """FP8 projections are stored with one scale per weight_block_size block.
+
+    Returning the raw float8 values would look like a plausible weight tensor
+    and corrupt the engine silently, so the loader must resolve the companion
+    `_scale_inv` and apply it.
+    """
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    # 4x4 weight, 2x2 blocks -> one scale per 2x2 quadrant
+    values = np.ones((4, 4), dtype=np.float32)
+    scale_inv = np.array([[2.0, 3.0], [4.0, 5.0]], dtype=np.float32)
+    store = {
+        "w": _FakeFp8Tensor(values),
+        "w_scale_inv": scale_inv,
+    }
+
+    monkeypatch.setattr(cm, "_has_tensor", lambda _r, name: name in store)
+    monkeypatch.setattr(cm, "_get_raw_tensor", lambda _r, name: store[name])
+
+    out = cm._load_tensor(["reader"], "w")
+    expected = np.array([
+        [2.0, 2.0, 3.0, 3.0],
+        [2.0, 2.0, 3.0, 3.0],
+        [4.0, 4.0, 5.0, 5.0],
+        [4.0, 4.0, 5.0, 5.0],
+    ], dtype=np.float32)
+    np.testing.assert_allclose(out, expected)
+
+
+def test_fp8_weight_without_scales_is_rejected(monkeypatch):
+    """An FP8 tensor missing its scales must fail loudly, not load unscaled."""
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    store = {"w": _FakeFp8Tensor(np.ones((4, 4), dtype=np.float32))}
+    monkeypatch.setattr(cm, "_has_tensor", lambda _r, name: name in store)
+    monkeypatch.setattr(cm, "_get_raw_tensor", lambda _r, name: store[name])
+
+    with pytest.raises(KeyError, match="no companion"):
+        cm._load_tensor(["reader"], "w")
+
+
+def test_non_fp8_weights_are_untouched(monkeypatch):
+    """A bf16/fp32 checkpoint must not gain any scaling behaviour."""
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    values = np.arange(16, dtype=np.float32).reshape(4, 4)
+    store = {"w": values}
+    monkeypatch.setattr(cm, "_has_tensor", lambda _r, name: name in store)
+    monkeypatch.setattr(cm, "_get_raw_tensor", lambda _r, name: store[name])
+
+    np.testing.assert_allclose(cm._load_tensor(["reader"], "w"), values)
+
+
+def test_block_scales_handle_a_trailing_partial_block():
+    """The last block is clipped when the shape is not a multiple of the block."""
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    values = np.ones((3, 3), dtype=np.float32)
+    scale_inv = np.array([[2.0, 3.0], [4.0, 5.0]], dtype=np.float32)
+    out = cm._apply_block_scales(values, scale_inv)
+    expected = np.array([
+        [2.0, 2.0, 3.0],
+        [2.0, 2.0, 3.0],
+        [4.0, 4.0, 5.0],
+    ], dtype=np.float32)
+    np.testing.assert_allclose(out, expected)
