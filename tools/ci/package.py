@@ -372,6 +372,16 @@ class WheelArchiveValidator:
                 for name in names
                 if "/benchmark/_catalog/" in name and name.endswith("/data/test_img.jpeg")
             ]
+            benchmark_stereo_assets = [
+                name
+                for name in names
+                if name.endswith(
+                    (
+                        "/benchmark/_catalog/fast_foundation_stereo/data/office_left.png",
+                        "/benchmark/_catalog/fast_foundation_stereo/data/office_right.png",
+                    )
+                )
+            ]
             package_cores = [name for name in names if "/bin/libtrtmc_core.so" in name]
             script_cores = [name for name in names if ".data/scripts/libtrtmc_core.so" in name]
             backends = [
@@ -432,6 +442,10 @@ class WheelArchiveValidator:
                 "packaged Wan2.2 FP8 scale asset is missing",
             ),
             (bool(benchmark_image_assets), "packaged benchmark image assets are missing"),
+            (
+                len(benchmark_stereo_assets) == 2,
+                "packaged Fast Foundation Stereo benchmark assets are missing",
+            ),
             (bool(package_cores), "packaged core DSO is missing"),
             (bool(script_cores), "core DSO beside native trtmc script is missing"),
             (

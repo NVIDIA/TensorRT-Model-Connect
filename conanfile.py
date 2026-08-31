@@ -76,6 +76,15 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
         except (OSError, json.JSONDecodeError) as exc:
             raise ConanException(f"cannot read benchmark manifest {manifest}: {exc}") from exc
         references = [("fp8_scales", raw.get("fp8_scales"))]
+        declared_assets = raw.get("benchmark_assets", [])
+        if not isinstance(declared_assets, list):
+            raise ConanException(
+                f"benchmark_assets in benchmark manifest {manifest} must be a list"
+            )
+        references.extend(
+            (f"benchmark_assets[{index}]", declared)
+            for index, declared in enumerate(declared_assets)
+        )
         for index, testcase in enumerate(raw.get("testcases", [])):
             if not isinstance(testcase, dict):
                 continue
