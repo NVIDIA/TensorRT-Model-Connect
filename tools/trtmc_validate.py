@@ -738,7 +738,7 @@ def ensure_reference_sources(
     return ReferenceSourceSelection(environment=environment)
 
 
-def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
+def dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
     raw = str(suite.get("dataset", {}).get("default_path", "") or "")
     if not raw:
         raise ValidationError(f"workload {suite.get('id')} has no default dataset path")
@@ -752,6 +752,10 @@ def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
     except ValueError:
         relative = Path(path.name)
     return dataset_root / relative
+
+
+def _dataset_path(suite: Mapping[str, Any], dataset_root: Path | None) -> Path:
+    return dataset_path(suite, dataset_root)
 
 
 def _run_subprocess(command: Sequence[str], log_path: Path, env: Mapping[str, str]) -> int:
@@ -1971,23 +1975,29 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
-    """Fail before GPU work when source and native build provenance differ."""
-    expected_revision = _source_revision()
+def validate_build_identity(
+    *,
+    trtmc_binary: Path,
+    benchmark_binary: Path,
+    backend_dir: Path | None,
+    model_plugin_dir: Path | None,
+    expected_revision: str,
+) -> dict[str, Any]:
+    """Validate one native build before dependency preparation or GPU work."""
     if not expected_revision:
         raise ValidationError(
             "cannot determine the validation source revision for build identity preflight"
         )
 
-    benchmark_binary = arguments.benchmark_binary.expanduser().resolve()
+    benchmark_binary = benchmark_binary.expanduser().resolve()
     build_root = benchmark_binary.parent
-    trtmc_binary = arguments.trtmc_binary.expanduser().resolve()
+    trtmc_binary = trtmc_binary.expanduser().resolve()
     backend_dir = (
-        arguments.backend_dir.expanduser().resolve() if arguments.backend_dir else build_root
+        backend_dir.expanduser().resolve() if backend_dir else build_root
     )
     model_plugin_dir = (
-        arguments.model_plugin_dir.expanduser().resolve()
-        if arguments.model_plugin_dir
+        model_plugin_dir.expanduser().resolve()
+        if model_plugin_dir
         else build_root / "models"
     )
     worker = build_root / "trtmc_benchmark_worker"
@@ -2021,6 +2031,12 @@ def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
     for label, path in required_files.items():
         if not path.is_file():
             raise ValidationError(f"{label} is missing for build identity preflight: {path}")
+    for label in ("trtmc binary", "dataset benchmark", "benchmark worker"):
+        path = required_files[label]
+        if not os.access(path, os.X_OK):
+            raise ValidationError(
+                f"{label} is not executable for build identity preflight: {path}"
+            )
     if not model_plugin_dir.is_dir():
         raise ValidationError(
             f"model plugin directory is missing for build identity preflight: {model_plugin_dir}"
@@ -2060,6 +2076,17 @@ def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
         "model_plugin_dir": str(model_plugin_dir),
         "artifacts": artifacts,
     }
+
+
+def _validate_build_identity(arguments: argparse.Namespace) -> dict[str, Any]:
+    """Fail before GPU work when source and native build provenance differ."""
+    return validate_build_identity(
+        trtmc_binary=arguments.trtmc_binary,
+        benchmark_binary=arguments.benchmark_binary,
+        backend_dir=arguments.backend_dir,
+        model_plugin_dir=arguments.model_plugin_dir,
+        expected_revision=_source_revision(),
+    )
 
 
 def _write_build_identity(

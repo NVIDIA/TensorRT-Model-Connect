@@ -37,6 +37,24 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py check \
   --model distilgpt2
 ```
 
+Before consuming GPU time, validate the selected target's exact native build
+and Accuracy datasets. This is read-only and returns machine-readable blockers:
+
+```bash
+$TRTMC_CHECK_PYTHON tools/model_checks.py check \
+  --platform gb300 \
+  --environment gb300 \
+  --model distilgpt2 \
+  --revision <40-character-sha> \
+  --target-preflight \
+  --json
+```
+
+The JSON includes `resolved_revision` and `target_preflight`. A missing dataset,
+native executable, TensorRT backend, model-plugin directory, worker metadata,
+or matching embedded worker SHA makes the command fail before profile or bundle
+preparation.
+
 Select exact Accuracy suites per model:
 
 ```bash
@@ -89,8 +107,9 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --run-id gb300-distilgpt2-debug
 ```
 
-The controller creates missing Python profiles, pinned reference-source
-checkouts, and Perf bundles before measurement. Measurement then runs with
+The controller first writes `native-build-identity.json`, then creates missing
+Python profiles, pinned reference-source checkouts, and Perf bundles before
+measurement. Measurement then runs with
 dependency creation and Perf bundle builds disabled. Qualification also rejects
 a dirty worktree, imports outside the active worktree, and a requested revision
 different from HEAD. It rechecks that identity after preparation and before and
@@ -149,6 +168,13 @@ $TRTMC_CHECK_PYTHON tools/model_checks.py run \
   --run-id gb300-accuracy-all \
   --resume
 ```
+
+Resume is task-aware. Accuracy uses `--resume-existing` only when its own
+`accuracy/run.json` exists; an Accuracy task that never initialized starts
+normally in the existing campaign. Perf follows the same rule using its own run
+metadata. A failed combined campaign retains `task_source_identity` for each
+independently successful task so downstream supervision can reuse valid task
+evidence without treating the whole campaign as passed.
 
 After changing code that affects one model, invalidate that model as a unit so
 all of its selected Accuracy and Perf evidence is regenerated on the current

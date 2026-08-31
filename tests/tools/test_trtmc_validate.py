@@ -4733,6 +4733,19 @@ def test_build_identity_preflight_rejects_missing_worker(monkeypatch, tmp_path):
         trtmc_validate._validate_build_identity(arguments)
 
 
+def test_build_identity_preflight_rejects_non_executable_worker(monkeypatch, tmp_path):
+    arguments = _build_identity_arguments(tmp_path)
+    worker = arguments.benchmark_binary.parent / "trtmc_benchmark_worker"
+    worker.chmod(0o644)
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "tested-revision")
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="benchmark worker is not executable",
+    ):
+        trtmc_validate._validate_build_identity(arguments)
+
+
 def test_build_identity_preflight_rejects_mixed_plugin_directory(
     monkeypatch,
     tmp_path,
