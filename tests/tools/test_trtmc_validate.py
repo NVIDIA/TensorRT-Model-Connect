@@ -220,6 +220,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "fast_foundation_stereo_synthetic_parity",
         "lfm2_model_card_sampling_parity",
         "minimax_h3_official_profile_parity",
+        "moge_monocular_geometry_fp32_parity",
         "nemotron_voicechat_model_card_general_conversation",
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
@@ -4730,6 +4731,19 @@ def test_build_identity_preflight_rejects_missing_worker(monkeypatch, tmp_path):
     with pytest.raises(
         trtmc_validate.ValidationError,
         match="benchmark worker is missing",
+    ):
+        trtmc_validate._validate_build_identity(arguments)
+
+
+def test_build_identity_preflight_rejects_non_executable_worker(monkeypatch, tmp_path):
+    arguments = _build_identity_arguments(tmp_path)
+    worker = arguments.benchmark_binary.parent / "trtmc_benchmark_worker"
+    worker.chmod(0o644)
+    monkeypatch.setattr(trtmc_validate, "_source_revision", lambda: "tested-revision")
+
+    with pytest.raises(
+        trtmc_validate.ValidationError,
+        match="benchmark worker is not executable",
     ):
         trtmc_validate._validate_build_identity(arguments)
 

@@ -116,6 +116,7 @@ def _load_cache_helpers() -> dict:
         "_ENTRYPOINT_PATTERNS": [
             "config.json",
             "model_index.json",
+            "model.pt",
             "*.yml",
             "*.yaml",
             "*/config.json",
@@ -124,6 +125,7 @@ def _load_cache_helpers() -> dict:
             "*.safetensors",
             "*.bin",
             "*.pth",
+            "model.pt",
             "*.nemo",
             "model.npz",
             "elf_params.npz",
@@ -323,6 +325,18 @@ def test_pytorch_pth_checkpoint_counts_as_complete_snapshot(tmp_path: Path) -> N
     snapshot.mkdir(parents=True)
     (snapshot / "cfg.yaml").write_text("valid_iters: 8\n")
     (snapshot / "model_best_bp2_serialize.pth").write_bytes(b"checkpoint")
+
+    assert helpers["_snapshot_has_required_files"](snapshot)
+
+
+def test_self_contained_model_pt_counts_as_complete_snapshot(tmp_path: Path) -> None:
+    assert "model.pt" in _literal_string_list("_ENTRYPOINT_PATTERNS")
+    assert "model.pt" in _literal_string_list("_WEIGHT_PATTERNS")
+
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.pt").write_bytes(b"checkpoint")
 
     assert helpers["_snapshot_has_required_files"](snapshot)
 

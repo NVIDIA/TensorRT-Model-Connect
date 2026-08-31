@@ -104,6 +104,7 @@ _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
 _ENTRYPOINT_PATTERNS = [
     "config.json",
     "model_index.json",
+    "model.pt",
     "*.yml",
     "*.yaml",
     "*/config.json",
@@ -112,6 +113,7 @@ _WEIGHT_PATTERNS = [
     "*.safetensors",
     "*.bin",
     "*.pth",
+    "model.pt",
     "sam2.1_hiera_small.pt",
     "*.nemo",
     "model.npz",

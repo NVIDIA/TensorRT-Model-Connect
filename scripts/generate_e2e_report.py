@@ -24,6 +24,7 @@ import base64
 import html
 import importlib.util
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -97,6 +98,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "prompted_segmentation": "segmentation",
     "image_classification": "classification",
     "image_feature_extraction": "generic",
+    "monocular_geometry": "numeric",
     "encoder_only_nlp": "numeric",
     "embedding": "numeric",
     "reranking": "reranking",
@@ -3741,6 +3743,84 @@ def validate_evidence(
                 require(_first_stage_value(
                     result, "ref", ("detections", "boxes")) is not None,
                     "missing reference detections")
+        elif strategy == "monocular_geometry":
+            image = _resolve_input_media(
+                _input_ref(inputs, ("image", "image_path", "input_image")), project_dir)
+            require(_embeddable(image), "missing or unembeddable geometry input")
+            require(_paired_outputs_present(result),
+                    "missing paired TRT/base and reference geometry outputs")
+
+            art_dir = Path(result.get("_artifact_dir") or ".")
+            artifacts = result.get("artifacts") or {}
+            trt_data = _first_stage_data(result, "trt")
+            height = trt_data.get("height")
+            width = trt_data.get("width")
+            dimensions_valid = (
+                type(height) is int
+                and height > 0
+                and type(width) is int
+                and width > 0
+            )
+            require(dimensions_valid, "missing valid TRT/base geometry dimensions")
+            area = height * width if dimensions_valid else 0
+            for key, filename, expected_size in (
+                ("trt_points", "points.f32", area * 3 * 4),
+                ("trt_depth", "depth.f32", area * 4),
+                ("trt_mask", "mask.u8", area),
+            ):
+                path = _resolve_artifact_media(artifacts.get(key), art_dir)
+                require(
+                    path is not None
+                    and path.name == filename
+                    and dimensions_valid
+                    and path.stat().st_size == expected_size,
+                    f"missing or malformed TRT/base {filename}",
+                )
+
+            intrinsics_path = _resolve_artifact_media(
+                artifacts.get("trt_intrinsics"), art_dir)
+            intrinsics_valid = False
+            if intrinsics_path is not None and intrinsics_path.name == "intrinsics.json":
+                try:
+                    payload = json.loads(intrinsics_path.read_text(encoding="utf-8"))
+                    matrix = payload.get("intrinsics") if isinstance(payload, dict) else None
+                    intrinsics_valid = (
+                        isinstance(payload, dict)
+                        and payload.get("normalized") is True
+                        and type(payload.get("height")) is int
+                        and payload["height"] == height
+                        and type(payload.get("width")) is int
+                        and payload["width"] == width
+                        and isinstance(matrix, list)
+                        and len(matrix) == 3
+                        and all(isinstance(row, list) and len(row) == 3 for row in matrix)
+                        and all(
+                            isinstance(value, (int, float))
+                            and not isinstance(value, bool)
+                            and math.isfinite(float(value))
+                            for row in matrix
+                            for value in row
+                        )
+                        and float(matrix[0][0]) > 0.0
+                        and float(matrix[1][1]) > 0.0
+                        and matrix[0][1] == 0.0
+                        and matrix[1][0] == 0.0
+                        and matrix[0][2] == 0.5
+                        and matrix[1][2] == 0.5
+                        and matrix[2] == [0.0, 0.0, 1.0]
+                    )
+                except (OSError, ValueError, OverflowError):
+                    pass
+            require(intrinsics_valid, "missing or malformed TRT/base intrinsics.json")
+
+            reference_path = _resolve_artifact_media(artifacts.get("ref_output"), art_dir)
+            if external_reference:
+                require(
+                    reference_path is not None
+                    and reference_path.suffix == ".npz"
+                    and reference_path.stat().st_size > 0,
+                    "missing reference geometry artifact",
+                )
         elif strategy == "reranking":
             require(bool(_first_stage_value(result, "trt", ("scores",))),
                     "missing TRT/base reranking scores")

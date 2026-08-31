@@ -843,6 +843,21 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
         "dinov3-vits16-pretrain-lvd1689m",
     ]
 
+    geometry = validation_engine.suite_by_id(suites, "moge_monocular_geometry_fp32_parity")
+    assert geometry["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": "tests/e2e/models/moge/data/validation.json",
+        "input_asset_fields": ["image"],
+    }
+    assert geometry["selectors"] == {
+        "model_names": ["moge-2-vitl"],
+        "task_strategies": ["monocular_geometry"],
+        "runtime_strategies": ["moge_monocular_geometry"],
+        "user_contracts": ["metric_monocular_geometry"],
+        "families": ["moge"],
+    }
+    assert geometry["gates"] == {"min_sample_pass_rate": 1.0}
+
     classification = validation_engine.suite_by_id(suites, "imagenette_image_classification")
     assert classification["dataset"]["kind"] == "image_classification_json"
     assert classification["scoring"]["task_metric"] == "top1_accuracy"
@@ -6355,6 +6370,10 @@ def test_run_hf_reference_subprocess_passes_asr_family_metadata(
         captured["cmd"] = cmd
         return Result()
 
+    monkeypatch.setenv(
+        "TRTMC_PYTHON_PROFILE_CANARY_REFERENCE_PYTHON",
+        sys.executable,
+    )
     monkeypatch.setattr(validation_engine.subprocess, "run", fake_run)
     args = argparse.Namespace(
         hf_python="",

@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Alert on external community activity
+
+on:
+  issues:
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
+  discussion:
+    types: [created]
+  discussion_comment:
+    types: [created]
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+# General pull-request comments arrive through issue_comment. Review and diff
+# comment events are intentionally excluded because fork-triggered merge-ref
+# workflows do not receive Actions secrets.
+# These trusted events read GitHub metadata only. They never check out or
+# execute contributor-controlled code.
+permissions: {}
+
+jobs:
+  notify:
+    if: >-
+      github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.event.sender.type != 'Bot' &&
+      (
+        (
+          github.event_name == 'issues' &&
+          github.event.issue.author_association != 'OWNER' &&
+          github.event.issue.author_association != 'MEMBER' &&
+          github.event.issue.author_association != 'COLLABORATOR'
+        ) ||
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.comment.author_association != 'OWNER' &&
+          github.event.comment.author_association != 'MEMBER' &&
+          github.event.comment.author_association != 'COLLABORATOR'
+        ) ||
+        (
+          github.event_name == 'discussion' &&
+          github.event.discussion.author_association != 'OWNER' &&
+          github.event.discussion.author_association != 'MEMBER' &&
+          github.event.discussion.author_association != 'COLLABORATOR'
+        ) ||
+        (
+          github.event_name == 'discussion_comment' &&
+          github.event.comment.author_association != 'OWNER' &&
+          github.event.comment.author_association != 'MEMBER' &&
+          github.event.comment.author_association != 'COLLABORATOR'
+        ) ||
+        (
+          github.event_name == 'pull_request_target' &&
+          github.event.pull_request.author_association != 'OWNER' &&
+          github.event.pull_request.author_association != 'MEMBER' &&
+          github.event.pull_request.author_association != 'COLLABORATOR'
+        )
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Post Slack alert
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ITEM_AUTHOR: ${{ github.event.comment.user.login || github.event.pull_request.user.login || github.event.issue.user.login || github.event.discussion.user.login }}
+          ITEM_AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association || github.event.pull_request.author_association || github.event.issue.author_association || github.event.discussion.author_association }}
+          ITEM_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.discussion.number }}
+          ITEM_TITLE: ${{ github.event.pull_request.title || github.event.issue.title || github.event.discussion.title }}
+          ITEM_URL: ${{ github.event.comment.html_url || github.event.pull_request.html_url || github.event.issue.html_url || github.event.discussion.html_url }}
+          IS_PULL_REQUEST: ${{ github.event_name == 'pull_request_target' || github.event.issue.pull_request != null }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::Missing SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL repository or organization secret."
+            exit 1
+          fi
+
+          case "$EVENT_NAME" in
+            pull_request_target) item_kind="Pull request" ;;
+            issue_comment)
+              if [ "$IS_PULL_REQUEST" = "true" ]; then
+                item_kind="Pull request"
+              else
+                item_kind="Issue"
+              fi
+              ;;
+            issues) item_kind="Issue" ;;
+            discussion|discussion_comment) item_kind="Discussion" ;;
+            *) echo "::error::Unsupported community event: $EVENT_NAME"; exit 1 ;;
+          esac
+
+          payload="$(jq -cn \
+            --arg repository "$REPOSITORY" \
+            --arg kind "$item_kind" \
+            --arg action "$EVENT_ACTION" \
+            --arg author "$ITEM_AUTHOR" \
+            --arg association "$ITEM_AUTHOR_ASSOCIATION" \
+            --arg number "$ITEM_NUMBER" \
+            --arg title "$ITEM_TITLE" \
+            --arg url "$ITEM_URL" \
+            'def slack_escape:
+              gsub("&"; "&amp;") |
+              gsub("<"; "&lt;") |
+              gsub(">"; "&gt;");
+             {text: (":bell: *External community activity*\\n" +
+              "*Repository:* " + $repository + "\\n" +
+              "*Event:* " + $kind + " · " + $action + "\\n" +
+              "*Item:* <" + $url + "|#" + $number + " — " + ($title | slack_escape) + ">\\n" +
+              "*Author:* " + $author + " (" + $association + ")")}')"
+
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data "$payload" \
+            "$SLACK_WEBHOOK_URL"

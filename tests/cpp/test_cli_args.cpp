@@ -201,6 +201,16 @@ void test_disparity_parses_stereo_images() {
     check(args.output_dir == "disparity.f32", "disparity output");
 }
 
+void test_geometry_parses_image_and_output_directory() {
+    auto args = parse(
+        {"trtmc", "geometry", "moge.bundle", "--image", "room.png", "--output", "geometry-out"});
+    check(!args.parse_error, "geometry parses cleanly");
+    check(args.command == "geometry", "geometry command");
+    check(args.bundle_path == "moge.bundle", "geometry bundle");
+    check(args.image_path == "room.png", "geometry image");
+    check(args.output_dir == "geometry-out", "geometry output directory");
+}
+
 void test_inspect_and_config_flags() {
     auto args = parse({"trtmc", "inspect", "bundle.bundle", "--list-engines", "--config",
                        "profile.json", "--set", "audio.seed=7"});
@@ -538,6 +548,7 @@ int main() {
     test_detect_parses_contract_flags();
     test_extract_features_parses_contract_flags();
     test_disparity_parses_stereo_images();
+    test_geometry_parses_image_and_output_directory();
     test_inspect_and_config_flags();
     test_audio_and_solve_flags();
     test_canary_transcription_flags_and_batch();

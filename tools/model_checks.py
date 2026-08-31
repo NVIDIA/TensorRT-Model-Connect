@@ -104,6 +104,15 @@ def build_parser() -> argparse.ArgumentParser:
     check = commands.add_parser("check", help="show task bindings without running them")
     _add_selection_arguments(check)
     check.add_argument("--json", action="store_true", help="print the resolved JSON")
+    check.add_argument(
+        "--environment",
+        help="execution environment ID or YAML; defaults to the platform ID",
+    )
+    check.add_argument(
+        "--target-preflight",
+        action="store_true",
+        help="verify selected datasets and native build on this execution target",
+    )
     run = commands.add_parser("run", help="run resolved task bindings locally")
     _add_selection_arguments(run)
     run.add_argument(
@@ -878,10 +887,81 @@ def _resolve_request(
     return plan, platform
 
 
+def _target_preflight(
+    plan: Mapping[str, Any],
+    environment: Mapping[str, Any],
+    arguments: argparse.Namespace,
+) -> dict[str, Any]:
+    blockers: list[dict[str, Any]] = []
+    try:
+        native_identity = _validate_native_build(environment, arguments.revision)
+        native_build: dict[str, Any] = {
+            "status": "ready",
+            "identity": native_identity,
+        }
+    except (ModelCheckError, trtmc_validate.ValidationError) as error:
+        native_build = {"status": "blocked", "detail": str(error)}
+        blockers.append({"category": "native_build_unavailable", "detail": str(error)})
+
+    suites = {
+        suite["id"]: suite
+        for suite in validation_catalog.load_suites(arguments.suites)
+    }
+    dataset_root = Path(
+        str(environment["tasks"]["accuracy"]["options"]["dataset-root"])
+    )
+    datasets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for binding in _task_bindings(plan, "accuracy"):
+        workload = str(binding["workload"])
+        suite = suites[workload]
+        path = trtmc_validate.dataset_path(suite, dataset_root).resolve()
+        key = (workload, str(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        exists = path.is_file()
+        record = {
+            "workload": workload,
+            "path": str(path),
+            "status": "ready" if exists else "missing",
+        }
+        datasets.append(record)
+        if not exists:
+            blockers.append(
+                {
+                    "category": "dataset_missing",
+                    "workload": workload,
+                    "detail": f"dataset is missing: {path}",
+                }
+            )
+    return {
+        "status": "ready" if not blockers else "blocked",
+        "environment": environment["id"],
+        "environment_source": environment["source"],
+        "revision": arguments.revision,
+        "native_build": native_build,
+        "datasets": datasets,
+        "blockers": blockers,
+    }
+
+
 def _check(arguments: argparse.Namespace) -> int:
-    plan, _ = _resolve_request(arguments)
+    arguments.revision = _resolved_revision(arguments.revision)
+    plan, platform = _resolve_request(arguments)
+    plan["resolved_revision"] = arguments.revision
+    if arguments.target_preflight:
+        environment = load_execution_environment(
+            arguments.environment or str(platform["id"]),
+            platform_id=str(platform["id"]),
+        )
+        plan["target_preflight"] = _target_preflight(plan, environment, arguments)
     print(json.dumps(plan, indent=2) if arguments.json else _render(plan))
-    return 2 if plan["summary"]["blocker_count"] else 0
+    preflight_blocked = (
+        arguments.target_preflight
+        and plan["target_preflight"]["status"] != "ready"
+    )
+    return 2 if plan["summary"]["blocker_count"] or preflight_blocked else 0
 
 
 def _default_run_id(platform_id: str) -> str:
@@ -1194,6 +1274,32 @@ def _resolved_perf_environment(
     raw = _expand_environment(raw, "performance environment")
     destination.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     return destination
+
+
+def _validate_native_build(
+    environment: Mapping[str, Any],
+    revision: str,
+) -> dict[str, Any]:
+    options = environment["tasks"]["accuracy"].get("options", {})
+    required = (
+        "trtmc-binary",
+        "benchmark-binary",
+        "backend-dir",
+        "model-plugin-dir",
+    )
+    missing = [name for name in required if not str(options.get(name, "") or "").strip()]
+    if missing:
+        raise ModelCheckError(
+            "model-check environment is missing native build paths: "
+            + ", ".join(missing)
+        )
+    return trtmc_validate.validate_build_identity(
+        trtmc_binary=Path(str(options["trtmc-binary"])),
+        benchmark_binary=Path(str(options["benchmark-binary"])),
+        backend_dir=Path(str(options["backend-dir"])),
+        model_plugin_dir=Path(str(options["model-plugin-dir"])),
+        expected_revision=revision,
+    )
 
 
 def _perf_command(
@@ -2027,11 +2133,17 @@ def _run(arguments: argparse.Namespace) -> int:
             if command is None:
                 execution_commands.append((task, None))
             elif task == "accuracy":
-                resumed = [*command, "--resume-existing"]
-                task_models = {str(binding["model"]) for binding in task_bindings[task]}
-                for model in sorted(invalidated_models & task_models):
-                    resumed.extend(["--invalidate-model", model])
-                execution_commands.append((task, resumed))
+                run_metadata = execution_root / "accuracy" / "run.json"
+                if run_metadata.is_file():
+                    resumed = [*command, "--resume-existing"]
+                    task_models = {
+                        str(binding["model"]) for binding in task_bindings[task]
+                    }
+                    for model in sorted(invalidated_models & task_models):
+                        resumed.extend(["--invalidate-model", model])
+                    execution_commands.append((task, resumed))
+                else:
+                    execution_commands.append((task, command))
             else:
                 resume_command = _perf_resume_command(
                     environment,
@@ -2069,6 +2181,16 @@ def _run(arguments: argparse.Namespace) -> int:
 
     if arguments.dry_run:
         return 0
+
+    if arguments.intent == "qualification":
+        native_build_identity = _validate_native_build(
+            environment,
+            arguments.revision,
+        )
+        _write_request(
+            execution_root / "native-build-identity.json",
+            native_build_identity,
+        )
 
     if shard is not None:
         _write_request(
@@ -2161,6 +2283,15 @@ def _run(arguments: argparse.Namespace) -> int:
         status = "PASSED" if completed.returncode == 0 else "FAILED"
         print(f"[{index}/{len(runnable)}] {label}: {status}", flush=True)
     tasks_passed = all(code == 0 for code in task_results.values())
+    task_source_identity = (
+        {
+            task: _model_source_identity(execution_root, (task,))
+            for task, returncode in task_results.items()
+            if returncode == 0
+        }
+        if arguments.intent == "qualification"
+        else {}
+    )
     model_source_identity = (
         _model_source_identity(execution_root, task_results)
         if tasks_passed and task_results
@@ -2175,6 +2306,7 @@ def _run(arguments: argparse.Namespace) -> int:
         "resumed": bool(arguments.resume),
         "execution_revision": arguments.revision,
         "task_exit_codes": task_results,
+        "task_source_identity": task_source_identity,
         "model_source_identity": model_source_identity,
         "status": "passed" if tasks_passed and identity_passed else "failed",
     }

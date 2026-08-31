@@ -227,6 +227,7 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
         *workflows.glob("*.yaml"),
     }
     assert sorted(path.name for path in workflow_files) == [
+        "community-activity-slack-alert.yml",
         "community-cpu.yml",
         "internal-ci-bridge.yml",
         "pages.yml",
@@ -248,6 +249,75 @@ def test_source_workflow_inventory_does_not_repeat_premerge_after_merge() -> Non
     assert '      - "website/**"' in pages
     assert "python3 -m tools.ci" not in pages
     assert "actions/workflows/premerge.yml/dispatches" not in pages
+
+
+def test_community_activity_alert_only_posts_trusted_external_metadata() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
+    source = path.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(source)
+    job = workflow["jobs"]["notify"]
+    steps = job["steps"]
+    post = steps[0]
+
+    assert "issues:" in source
+    assert "issue_comment:" in source
+    assert "discussion:" in source
+    assert "discussion_comment:" in source
+    assert "pull_request_target:" in source
+    assert "branches: [main]" in source
+    assert "types: [opened, reopened, synchronize, ready_for_review]" in source
+    assert source.count("types: [created]") == 3
+    assert workflow["permissions"] == {}
+    assert job["permissions"] == {}
+    assert job["timeout-minutes"] == 5
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in job["if"]
+    assert "github.event.sender.type != 'Bot'" in job["if"]
+    association_fields = {
+        "issues": "github.event.issue.author_association",
+        "issue_comment": "github.event.comment.author_association",
+        "discussion": "github.event.discussion.author_association",
+        "discussion_comment": "github.event.comment.author_association",
+        "pull_request_target": "github.event.pull_request.author_association",
+    }
+    for event_name, association in association_fields.items():
+        assert f"github.event_name == '{event_name}'" in job["if"]
+        for trusted in ("OWNER", "MEMBER", "COLLABORATOR"):
+            assert f"{association} != '{trusted}'" in job["if"]
+
+    assert len(steps) == 1
+    assert all("uses" not in step for step in steps)
+    assert "actions/checkout" not in source
+    assert "github.event.pull_request.head" not in source
+    assert set(re.findall(r"secrets\.([A-Z][A-Z0-9_]*)", source)) == {
+        "SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL"
+    }
+    assert post["env"]["SLACK_WEBHOOK_URL"] == (
+        "${{ secrets.SLACK_COMMUNITY_ACTIVITY_WEBHOOK_URL }}"
+    )
+    assert post["env"]["EVENT_NAME"] == "${{ github.event_name }}"
+    assert post["env"]["EVENT_ACTION"] == "${{ github.event.action }}"
+    assert post["env"]["ITEM_TITLE"] == (
+        "${{ github.event.pull_request.title || github.event.issue.title || "
+        "github.event.discussion.title }}"
+    )
+    assert post["env"]["ITEM_URL"].startswith("${{ github.event.comment.html_url ||")
+    assert "github.event.issue.pull_request != null" in post["env"]["IS_PULL_REQUEST"]
+
+    script = post["run"]
+    assert "${{" not in script
+    assert 'if [ -z "$SLACK_WEBHOOK_URL" ]; then' in script
+    for kind in ("Pull request", "Issue", "Discussion"):
+        assert f'item_kind="{kind}"' in script
+    assert 'gsub("&"; "&amp;")' in script
+    assert 'gsub("<"; "&lt;")' in script
+    assert 'gsub(">"; "&gt;")' in script
+    assert "($title | slack_escape)" in script
+    assert '" + $title +' not in script
+    assert "*External community activity*" in script
+    assert '"*Event:* " + $kind + " · " + $action' in script
+    assert "curl --fail-with-body --silent --show-error" in script
+    assert '--data "$payload"' in script
+    assert '"$SLACK_WEBHOOK_URL"' in script
 
 
 def test_only_pages_workflow_creates_deployment_objects() -> None:

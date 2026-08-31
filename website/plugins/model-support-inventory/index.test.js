@@ -374,7 +374,7 @@ test('derives image input and generation options from runtime code', (context) =
   assert.deepEqual(visionLanguage.generateConfigFields, []);
 });
 
-test('publishes LFM2 profiles in model recipes and the website sidebar', () => {
+test('publishes LFM2 and MoGe profiles in model recipes and the website sidebar', () => {
   const repoRoot = path.resolve(__dirname, '..', '..', '..');
   const inventory = collectModelSupportInventory(repoRoot);
   const family = inventory.familyRecipes.find((entry) => entry.family === 'lfm2');
@@ -457,6 +457,19 @@ test('publishes LFM2 profiles in model recipes and the website sidebar', () => {
         entry.family === 'fast_foundation_stereo' &&
         entry.cliCommands.includes('disparity')
     )
+  );
+  const moge = depthEstimation?.families.find((entry) => entry.family === 'moge');
+  assert.deepEqual(moge, {
+    family: 'moge',
+    slug: 'moge',
+    recipeCount: 1,
+    hfIds: ['Ruicheng/moge-2-vitl'],
+    cliCommands: ['geometry'],
+  });
+  const mogeFamily = inventory.familyRecipes.find((entry) => entry.family === 'moge');
+  assert.equal(
+    mogeFamily?.commandContracts[0].syntax,
+    'trtmc geometry <bundle.bundle> --image <input.png> --output <output-directory>'
   );
 
   const sidebar = require(path.join(repoRoot, 'website', 'sidebars.js'));

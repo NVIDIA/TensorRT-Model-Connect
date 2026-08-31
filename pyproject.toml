@@ -42,6 +42,7 @@ fast-foundation-stereo = [
     "torch>=2.6",
     "timm>=1.0",
 ]
+moge = ["torch>=2.4"]
 chronos = ["chronos-forecasting>=2.2.2"]
 # clip: required by tests/e2e/models/flux/e2e_plugins/comparators/clip_metrics.py for
 # CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped

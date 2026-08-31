@@ -25,6 +25,7 @@
 //                        [--negative-prompt "text"] [--height N] [--width N]
 //   trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]
 //   trtmc extract-features <bundle.bundle> --image PATH [--output-json PATH]
+//   trtmc geometry        <bundle.bundle> --image PATH --output DIR
 //   trtmc detect          <bundle.bundle> --image PATH [--output-json PATH]
 //   trtmc inspect         <bundle.bundle> [--list-engines]
 //   trtmc version
@@ -32,6 +33,12 @@
 #include "cli/args.h"
 #include "cli/jsonl_io.h"
 #include "cli/speech_session_helpers.h"
+#if __has_include("runtime/models/moge/geometry.h")
+#include "runtime/models/moge/geometry.h"
+#define TRTMC_CLI_HAS_MOGE_GEOMETRY 1
+#else
+#define TRTMC_CLI_HAS_MOGE_GEOMETRY 0
+#endif
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -922,6 +929,94 @@ int cmd_disparity(const CliArgs& args) {
     return EXIT_SUCCESS;
 }
 
+template <typename Value>
+void write_geometry_binary(const std::filesystem::path& path, const std::vector<Value>& values) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output)
+        throw std::runtime_error("failed to create geometry output: " + path.string());
+    if (!values.empty()) {
+        output.write(reinterpret_cast<const char*>(values.data()),
+                     static_cast<std::streamsize>(values.size() * sizeof(Value)));
+    }
+    output.close();
+    if (!output)
+        throw std::runtime_error("failed to write geometry output: " + path.string());
+}
+
+int cmd_geometry(const CliArgs& args) {
+#if !TRTMC_CLI_HAS_MOGE_GEOMETRY
+    (void)args;
+    std::cerr << "Error: this build does not include the MoGe geometry adapter\n";
+    return EXIT_FAILURE;
+#else
+    if (args.bundle_path.empty() || args.image_path.empty() || args.output_dir.empty()) {
+        std::cerr << "Error: geometry requires bundle + --image + --output\n";
+        return EXIT_FAILURE;
+    }
+
+    auto pipeline = load_pipeline(args);
+    auto* estimator = dynamic_cast<trtmc::moge::IGeometryEstimator*>(pipeline.get());
+    if (estimator == nullptr) {
+        std::cerr << "Error: loaded pipeline does not support monocular geometry\n";
+        return EXIT_FAILURE;
+    }
+    const auto image = trtmc::io::read_image(args.image_path);
+    if (image.empty()) {
+        std::cerr << "Error: failed to load image: " << args.image_path << '\n';
+        return EXIT_FAILURE;
+    }
+    const auto result =
+        estimator->estimate_geometry(image.pixels.data(), image.height, image.width);
+    if (result.height <= 0 || result.width <= 0) {
+        std::cerr << "Error: monocular geometry returned invalid dimensions\n";
+        return EXIT_FAILURE;
+    }
+    const auto area = static_cast<std::size_t>(result.height) * result.width;
+    if (result.points.size() != area * 3U || result.depth.size() != area ||
+        result.mask.size() != area) {
+        std::cerr << "Error: monocular geometry returned incomplete maps\n";
+        return EXIT_FAILURE;
+    }
+
+    const std::filesystem::path directory(args.output_dir);
+    std::filesystem::create_directories(directory);
+    const auto points_path = directory / "points.f32";
+    const auto depth_path = directory / "depth.f32";
+    const auto mask_path = directory / "mask.u8";
+    const auto intrinsics_path = directory / "intrinsics.json";
+    write_geometry_binary(points_path, result.points);
+    write_geometry_binary(depth_path, result.depth);
+    write_geometry_binary(mask_path, result.mask);
+
+    const nlohmann::json matrix = {
+        {result.intrinsics[0], result.intrinsics[1], result.intrinsics[2]},
+        {result.intrinsics[3], result.intrinsics[4], result.intrinsics[5]},
+        {result.intrinsics[6], result.intrinsics[7], result.intrinsics[8]},
+    };
+    const nlohmann::json intrinsics = {
+        {"height", result.height},
+        {"width", result.width},
+        {"intrinsics", matrix},
+        {"normalized", true},
+    };
+    std::ofstream intrinsics_output(intrinsics_path, std::ios::out | std::ios::trunc);
+    if (!intrinsics_output)
+        throw std::runtime_error("failed to create geometry output: " + intrinsics_path.string());
+    intrinsics_output << intrinsics.dump(2) << '\n';
+    intrinsics_output.close();
+    if (!intrinsics_output)
+        throw std::runtime_error("failed to write geometry output: " + intrinsics_path.string());
+
+    const nlohmann::json summary = {
+        {"output", directory.string()},
+        {"height", result.height},
+        {"width", result.width},
+    };
+    std::cout << summary.dump() << '\n';
+    return EXIT_SUCCESS;
+#endif
+}
+
 int cmd_classify(const CliArgs& args) {
     if (args.bundle_path.empty() || args.image_path.empty()) {
         std::cerr << "Error: classify requires bundle + --image\n";
@@ -1749,6 +1844,8 @@ int main(int argc, char** argv) {
             return cmd_segment(args);
         if (args.command == "disparity")
             return cmd_disparity(args);
+        if (args.command == "geometry")
+            return cmd_geometry(args);
         if (args.command == "segment-prompted")
             return cmd_segment_prompted(args);
         if (args.command == "classify")

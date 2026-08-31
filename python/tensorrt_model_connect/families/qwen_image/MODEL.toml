@@ -3,6 +3,12 @@
 
 id = "qwen_image"
 plugin = "qwen_image"
+python_profile_specs = [
+  "qwen_image_reference|families/qwen_image/python_profile_requirements/qwen_image_reference.lock.txt|families/qwen_image/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|qwen_image_reference",
+]
 module = "plugin"
 aliases = [
   "qwen-image",

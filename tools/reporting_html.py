@@ -196,6 +196,7 @@ TASK_TYPE_BY_USER_CONTRACT = {
     "ranking_order": "Query + Documents → Ranking",
     "diffusion_text_generation": "Text → Text",
     "stereo_disparity": "Stereo Images → Disparity",
+    "metric_monocular_geometry": "Image → Metric Geometry",
 }
 
 TASK_TYPE_BY_TASK_STRATEGY = {
@@ -207,6 +208,7 @@ TASK_TYPE_BY_TASK_STRATEGY = {
     "speech_to_text": "Audio → Text",
     "image_classification": "Image → Class",
     "image_feature_extraction": "Image → Features",
+    "monocular_geometry": "Image → Metric Geometry",
     "segmentation": "Image → Mask",
     "prompted_segmentation": "Image + Prompt → Mask",
     "neural_operator": "Time Series → Time Series",

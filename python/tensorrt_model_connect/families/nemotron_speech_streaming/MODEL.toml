@@ -3,6 +3,12 @@
 
 id = "nemotron_speech_streaming"
 plugin = "nemotron_speech_streaming"
+python_profile_specs = [
+  "nemotron_speech_streaming_reference|families/nemotron_speech_streaming/python_profile_requirements/nemotron_speech_streaming_reference.lock.txt|families/nemotron_speech_streaming/python_profile_verify.py|true|true",
+]
+default_execution_profiles = [
+  "reference|nemotron_speech_streaming_reference",
+]
 module = "plugin"
 model_dir_adapter = "nemo_archive.py|resolve_model_dir"
 nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"

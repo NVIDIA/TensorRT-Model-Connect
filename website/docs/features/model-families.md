@@ -22,8 +22,8 @@ On the native path, family plugins can:
 ## Native TensorRT families
 
 Native family packages live in
-`python/tensorrt_model_connect/families/<family>/`. At this revision there are
-78 package manifests. Use the repository validator for the live inventory:
+`python/tensorrt_model_connect/families/<family>/`. Use the repository validator
+for the live inventory:
 
 ```bash
 python3 tools/model_ci.py validate
@@ -41,7 +41,8 @@ Common native TensorRT groups:
 - Audio and speech: Whisper, Canary, Bark, Magpie, PersonaPlex, Nemotron streaming.
 - Diffusion: FLUX, Wan 2.1/2.2, LTX-Video, Qwen-Image, SANA-WM, Z-Image,
   PixArt.
-- Perception: SegFormer, SAM, SAM3, and timm ViT classification.
+- Perception: MoGe monocular geometry, SegFormer, SAM, SAM3, and timm ViT
+  classification.
 - Time-series/operators: Chronos-Bolt, PatchTSMixer, PatchTST, and TimesFM.
 
 ### LocateAnything task contract

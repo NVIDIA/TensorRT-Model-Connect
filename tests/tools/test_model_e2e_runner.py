@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -190,6 +191,10 @@ def test_model_runner_builds_once_then_runs_all_children(monkeypatch, tmp_path) 
     build_calls = []
     run_calls = []
 
+    monkeypatch.setenv(
+        "TRTMC_PYTHON_PROFILE_CANARY_REFERENCE_PYTHON",
+        sys.executable,
+    )
     monkeypatch.setattr(model_runner, "get_model_by_name", lambda *_args: model)
 
     def resolve_bundle(self, case, ctx):
@@ -246,6 +251,10 @@ def test_model_runner_does_not_build_when_all_preflights_skip(
     build_calls = []
     run_calls = []
 
+    monkeypatch.setenv(
+        "TRTMC_PYTHON_PROFILE_CANARY_REFERENCE_PYTHON",
+        sys.executable,
+    )
     monkeypatch.setattr(model_runner, "get_model_by_name", lambda *_args: model)
     monkeypatch.setattr(model_runner, "run_preflight", lambda *_args: (False, []))
 

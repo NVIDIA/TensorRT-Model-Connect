@@ -3,6 +3,12 @@
 
 id = "nemotron_labs_diffusion"
 plugin = "nemotron_labs_diffusion"
+python_profile_specs = [
+  "nemotron_labs_diffusion_reference|families/nemotron_labs_diffusion/python_profile_requirements/reference.lock.txt|families/nemotron_labs_diffusion/python_profile_reference_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|nemotron_labs_diffusion_reference",
+]
 module = "plugin"
 aliases = [
   "nemotron_labs_diffusion",

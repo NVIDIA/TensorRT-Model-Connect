@@ -4,6 +4,13 @@
 id = "deepseek_v2"
 plugin = "deepseek_v2"
 module = "plugin"
+python_profile_specs = [
+  "deepseek_v2|families/deepseek_v2/python_profile_requirements/deepseek_v2.lock.txt|families/deepseek_v2/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "build|deepseek_v2",
+  "reference|deepseek_v2",
+]
 capabilities = ["debug_layer_outputs"]
 aliases = [
   "deepseek_v2",

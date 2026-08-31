@@ -69,3 +69,14 @@ def test_task_type_labels_image_feature_extraction() -> None:
         )
         == "Image → Features"
     )
+
+
+def test_task_type_labels_monocular_geometry() -> None:
+    assert (
+        task_type_label(user_contract="metric_monocular_geometry")
+        == "Image → Metric Geometry"
+    )
+    assert (
+        task_type_label(task_strategy="monocular_geometry")
+        == "Image → Metric Geometry"
+    )

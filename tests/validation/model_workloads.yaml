@@ -34,6 +34,7 @@ sample_limits:
   mmmu_pro_vision_plugin_parity: 5
   mmmu_pro_vision_square_plugin_parity: 5
   minimax_h3_official_profile_parity: 1
+  moge_monocular_geometry_fp32_parity: 1
   newstest2019_en_ru_marian_translation_parity: 10
   ocrbench_v2_unified: 5
   openwebtext_elf_diffusion_text: 5
@@ -175,6 +176,8 @@ models:
     workloads: [mmlu_five_shot_mcq]
   mixtral-stories-15m:
     workloads: [mmlu_continuation_parity]
+  moge-2-vitl:
+    workloads: [moge_monocular_geometry_fp32_parity]
   modernbert-base:
     workloads: [stsbenchmark_encoder_embedding_parity]
   multilingual-e5-small:

@@ -1172,6 +1172,37 @@ suites:
         GB300-only native-reference consistency. Numeric thresholds remain
         owned by the DINOv3 comparator and are not overridden by this suite.
 
+  - id: moge_monocular_geometry_fp32_parity
+    description: >
+      Explicit-1800-token MoGe-2 ViT-L geometry validation on one
+      maintainer-supplied image. The pinned official PyTorch reference and
+      native runtime must preserve final metric-geometry structure and pass
+      model-owned mask, depth, point-map, and normalized-intrinsics numerical
+      thresholds measured on the native FP32 qualification path.
+    user_contract: metric_monocular_geometry
+    task_type: Image → Metric Geometry
+    default_model_names: [moge-2-vitl]
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/moge/data/validation.json
+      input_asset_fields: [image]
+    selectors:
+      model_names: [moge-2-vitl]
+      task_strategies: [monocular_geometry]
+      runtime_strategies: [moge_monocular_geometry]
+      user_contracts: [metric_monocular_geometry]
+      families: [moge]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Single-GPU official-reference FP32 parity validation. Thresholds remain
+        owned by the MoGe comparator and are not overridden by this suite.
+
   - id: imagenette_image_classification
     description: >
       HF-to-TRTMC image-classification parity on Imagenette validation, a

@@ -919,6 +919,105 @@ def test_checked_in_platform_resolves_complete_task_matrices(platform):
     assert model_checks.main(["check", "--platform", platform, "--all", "--json"]) == 0
 
 
+def test_check_target_preflight_reports_missing_dataset(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    revision = "a" * 40
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: revision)
+    monkeypatch.setattr(
+        model_checks,
+        "_validate_native_build",
+        lambda *_args: {"source_revision": revision},
+    )
+
+    assert (
+        model_checks.main(
+            [
+                "check",
+                "--platform",
+                "gb300",
+                "--model",
+                "distilgpt2",
+                "--environment",
+                "gb300",
+                "--target-preflight",
+                "--json",
+            ]
+        )
+        == 2
+    )
+
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["resolved_revision"] == revision
+    assert plan["target_preflight"]["status"] == "blocked"
+    assert plan["target_preflight"]["native_build"]["status"] == "ready"
+    assert plan["target_preflight"]["blockers"][0]["category"] == "dataset_missing"
+
+
+def test_check_target_preflight_accepts_ready_dataset_and_native_build(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    revision = "b" * 40
+    data_root = tmp_path / "data"
+    suites = {
+        suite["id"]: suite
+        for suite in model_checks.validation_catalog.load_suites(
+            model_checks.trtmc_validate.DEFAULT_SUITES
+        )
+    }
+    dataset = model_checks.trtmc_validate.dataset_path(
+        suites["wikitext103_distilgpt2_continuation_parity"],
+        data_root,
+    )
+    dataset.parent.mkdir(parents=True)
+    dataset.write_text("fixture", encoding="utf-8")
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(data_root))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: revision)
+    monkeypatch.setattr(
+        model_checks,
+        "_validate_native_build",
+        lambda *_args: {"source_revision": revision},
+    )
+
+    assert (
+        model_checks.main(
+            [
+                "check",
+                "--platform",
+                "gb300",
+                "--model",
+                "distilgpt2",
+                "--environment",
+                "gb300",
+                "--target-preflight",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["target_preflight"]["status"] == "ready"
+    assert plan["target_preflight"]["datasets"] == [
+        {
+            "workload": "wikitext103_distilgpt2_continuation_parity",
+            "path": str(dataset.resolve()),
+            "status": "ready",
+        }
+    ]
+
+
 def test_e2e_only_profile_keeps_accuracy_and_excludes_perf() -> None:
     arguments = model_checks.build_parser().parse_args(
         ["check", "--platform", "gb300", "--model", "nemotron-voicechat-11b"]
@@ -1141,6 +1240,7 @@ def test_shard_resume_reuses_the_same_member_directory(tmp_path, monkeypatch):
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
     monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
     selection = [
         "run",
         "--platform",
@@ -1155,6 +1255,12 @@ def test_shard_resume_reuses_the_same_member_directory(tmp_path, monkeypatch):
         "0/1",
     ]
     assert model_checks.main([*selection, "--dry-run"]) == 0
+    accuracy_root = (
+        storage
+        / "results/shard-resume-unit/shards/000-of-001/accuracy"
+    )
+    accuracy_root.mkdir(parents=True)
+    (accuracy_root / "run.json").write_text("{}", encoding="utf-8")
     commands = []
 
     def run(command, **_kwargs):
@@ -1263,6 +1369,83 @@ def test_run_default_output_is_concise_and_ends_with_task_summary(
     assert "tools/perf_matrix.py run" not in output
 
 
+def test_failed_qualification_preserves_successful_task_source_identity(
+    tmp_path,
+    monkeypatch,
+):
+    storage = tmp_path / "storage"
+    revision = "a" * 40
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: revision)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
+    monkeypatch.setattr(
+        model_checks,
+        "_prepare_qualification_dependencies",
+        lambda *_args, **_kwargs: {},
+    )
+    identity_calls = []
+
+    def source_identity(_root, tasks):
+        selected = tuple(tasks)
+        identity_calls.append(selected)
+        return {
+            "consistent": True,
+            "models": {
+                "distilgpt2": {
+                    "status": "consistent",
+                    "source_revision": revision,
+                    "tasks": list(selected),
+                }
+            },
+        }
+
+    monkeypatch.setattr(model_checks, "_model_source_identity", source_identity)
+    returncodes = iter((1, 0))
+    monkeypatch.setattr(
+        model_checks.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=next(returncodes)),
+    )
+
+    assert (
+        model_checks.main(
+            [
+                "run",
+                "--platform",
+                "gb300",
+                "--model",
+                "distilgpt2",
+                "--run-id",
+                "partial-task-evidence",
+            ]
+        )
+        == 1
+    )
+
+    result = json.loads(
+        (storage / "results/partial-task-evidence/result.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert result["status"] == "failed"
+    assert result["task_source_identity"] == {
+        "perf": {
+            "consistent": True,
+            "models": {
+                "distilgpt2": {
+                    "status": "consistent",
+                    "source_revision": revision,
+                    "tasks": ["perf"],
+                }
+            },
+        }
+    }
+    assert identity_calls == [("perf",)]
+
+
 def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch, capsys):
     storage = tmp_path / "storage"
     monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
@@ -1271,6 +1454,7 @@ def test_run_verbose_prints_and_forwards_detailed_commands(tmp_path, monkeypatch
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
     monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
     commands = []
 
     def run(command, **_kwargs):
@@ -1311,6 +1495,7 @@ def test_run_forwards_exact_source_revision_to_accuracy_and_perf(tmp_path, monke
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: revision.lower())
     monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
     child_environments = []
     identity_checks = []
 
@@ -1393,6 +1578,7 @@ def test_run_defaults_to_qualification_and_uses_only_prepared_dependencies(tmp_p
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda value: revision)
     monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
     events = []
 
     def prepare(*_args, **_kwargs):
@@ -1441,6 +1627,7 @@ def test_qualification_rechecks_source_identity_after_preparation(tmp_path, monk
     monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _value: revision)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
     calls = 0
 
     def source_identity(_revision, *, require_clean=False):
@@ -1604,6 +1791,7 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
     monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
     monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
     selection = [
         "run",
         "--platform",
@@ -1616,6 +1804,9 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
         "resume-unit",
     ]
     assert model_checks.main([*selection, "--dry-run"]) == 0
+    accuracy_root = storage / "results/resume-unit/accuracy"
+    accuracy_root.mkdir(parents=True)
+    (accuracy_root / "run.json").write_text("{}", encoding="utf-8")
 
     commands = []
 
@@ -1656,6 +1847,92 @@ def test_run_resume_verifies_request_and_resumes_accuracy(tmp_path, monkeypatch)
     ]
     result = json.loads((storage / "results/resume-unit/result.json").read_text(encoding="utf-8"))
     assert result["resumed"] is True
+
+
+def test_run_resume_starts_accuracy_when_task_was_never_initialized(
+    tmp_path,
+    monkeypatch,
+):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
+    monkeypatch.setattr(model_checks, "_model_source_identity", _consistent_source_identity)
+    monkeypatch.setattr(model_checks, "_validate_native_build", lambda *_args: {})
+    monkeypatch.setattr(
+        model_checks,
+        "_prepare_qualification_dependencies",
+        lambda *_args, **_kwargs: {},
+    )
+    selection = [
+        "run",
+        "--platform",
+        "gb300",
+        "--task",
+        "accuracy",
+        "--model",
+        "distilgpt2",
+        "--run-id",
+        "uninitialized-accuracy-resume",
+    ]
+    assert model_checks.main([*selection, "--dry-run"]) == 0
+    accuracy_root = storage / "results/uninitialized-accuracy-resume/accuracy"
+    accuracy_root.mkdir(parents=True)
+    (accuracy_root / "build-identity.json").write_text("{}", encoding="utf-8")
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(model_checks.subprocess, "run", run)
+
+    assert model_checks.main([*selection, "--resume"]) == 0
+    assert len(commands) == 1
+    assert "--resume-existing" not in commands[0]
+
+
+def test_qualification_checks_native_build_before_dependency_preparation(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    storage = tmp_path / "storage"
+    monkeypatch.setenv("TRTMC_CHECK_STORAGE_ROOT", str(storage))
+    monkeypatch.setenv("TRTMC_CHECK_DATASET_ROOT", str(tmp_path / "data"))
+    build = tmp_path / "missing-native-build"
+    (build / "models").mkdir(parents=True)
+    for name in ("trtmc", "trtmc_dataset_benchmark", "libtrtmc_backend_trt.so"):
+        (build / name).write_text("fixture", encoding="utf-8")
+    monkeypatch.setenv("TRTMC_CHECK_BUILD_DIR", str(build))
+    monkeypatch.setenv("TRTMC_CHECK_PYTHON", sys.executable)
+    monkeypatch.setattr(model_checks, "_resolved_revision", lambda _revision: "a" * 40)
+    monkeypatch.setattr(
+        model_checks,
+        "_prepare_qualification_dependencies",
+        lambda *_args, **_kwargs: pytest.fail(
+            "dependency preparation must not start before native preflight"
+        ),
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        model_checks.main(
+            [
+                "run",
+                "--platform",
+                "gb300",
+                "--task",
+                "perf",
+                "--model",
+                "distilgpt2",
+                "--run-id",
+                "missing-native-preflight",
+            ]
+        )
+
+    assert "benchmark worker is missing for build identity preflight" in capsys.readouterr().err
 
 
 def test_unsharded_resume_rejects_request_without_the_frozen_revision(tmp_path):
