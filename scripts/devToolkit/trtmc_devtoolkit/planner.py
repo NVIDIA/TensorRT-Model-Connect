@@ -89,6 +89,16 @@ class Planner:
             python_version=request.python_version,
             allow_experimental=request.allow_experimental,
         )
+        contract = cohort.architectures[architecture]
+        if (
+            request.target.kind == "docker"
+            and request.python_version != contract.container_python_version
+        ):
+            raise DevToolkitError(
+                f"Environment cohort {cohort.id} Docker image uses Python "
+                f"{contract.container_python_version}; requested Python "
+                f"{request.python_version}"
+            )
         revision = self.source_revision_override or source_revision(self.repository)
         fingerprint = request_fingerprint(
             request,

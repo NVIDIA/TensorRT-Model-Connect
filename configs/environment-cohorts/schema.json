@@ -50,6 +50,7 @@
         "required": [
           "dockerfile",
           "docker_context",
+          "container_python_version",
           "wheel_platform",
           "tensorrt_include_dir",
           "tensorrt_library_dir"
@@ -57,6 +58,7 @@
         "properties": {
           "dockerfile": {"type": "string", "minLength": 1},
           "docker_context": {"type": "string", "minLength": 1},
+          "container_python_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
           "wheel_platform": {"type": "string", "pattern": "^manylinux_2_[0-9]+_(x86_64|aarch64)$"},
           "tensorrt_include_dir": {"type": "string", "pattern": "^/"},
           "tensorrt_library_dir": {"type": "string", "pattern": "^/"}

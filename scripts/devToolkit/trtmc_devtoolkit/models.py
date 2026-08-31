@@ -22,6 +22,7 @@ class DevToolkitError(RuntimeError):
 class ArchitectureContract:
     dockerfile: str
     docker_context: str
+    container_python_version: str
     wheel_platform: str
     tensorrt_include_dir: str
     tensorrt_library_dir: str

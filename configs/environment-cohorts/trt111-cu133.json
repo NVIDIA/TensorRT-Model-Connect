@@ -17,6 +17,7 @@
     "x86_64": {
       "dockerfile": "Dockerfile.dev.x86",
       "docker_context": "requirements",
+      "container_python_version": "3.12",
       "wheel_platform": "manylinux_2_39_x86_64",
       "tensorrt_include_dir": "/usr/include/x86_64-linux-gnu",
       "tensorrt_library_dir": "/usr/lib/x86_64-linux-gnu"
@@ -24,6 +25,7 @@
     "aarch64": {
       "dockerfile": "Dockerfile.dev.aarch64",
       "docker_context": "requirements",
+      "container_python_version": "3.12",
       "wheel_platform": "manylinux_2_39_aarch64",
       "tensorrt_include_dir": "/usr/include/aarch64-linux-gnu",
       "tensorrt_library_dir": "/usr/lib/aarch64-linux-gnu"

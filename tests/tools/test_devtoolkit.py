@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,10 +28,12 @@ sys.path.insert(0, str(DEVTOOLKIT_ROOT))
 from trtmc_devtoolkit import (  # noqa: E402
     DevToolkit,
     DockerTarget,
+    LocalTarget,
     PrepareRequest,
     validation_handoff,
 )
 from trtmc_devtoolkit.cohorts import CohortRegistry, normalize_architecture  # noqa: E402
+from trtmc_devtoolkit.doctor import EnvironmentDoctor  # noqa: E402
 from trtmc_devtoolkit.models import DevToolkitError  # noqa: E402
 from trtmc_devtoolkit.planner import image_fingerprint  # noqa: E402
 
@@ -63,8 +67,8 @@ class RecordingRunner:
         elif arguments[:2] == ["docker", "version"]:
             output = "28.0.0\n"
         elif arguments[:2] == ["docker", "exec"]:
-            if "import ctypes, tensorrt" in " ".join(arguments):
-                output = "11.1.0.106 11.1.0.106\n"
+            if "import ctypes, sys, tensorrt" in " ".join(arguments):
+                output = "3.12 11.1.0.106 11.1.0.106\n"
             elif "--query-gpu=compute_cap" in arguments:
                 output = "10.0\n"
             elif arguments[-3:-1] == ["sh", "-c"]:
@@ -73,6 +77,29 @@ class RecordingRunner:
         if check and returncode:
             raise DevToolkitError(f"fake command failed: {arguments}")
         return result
+
+
+class LocalProbeRunner(RecordingRunner):
+    def __init__(self, *, python_version: str = "3.12", native_version: str = "11.1.0.106"):
+        super().__init__()
+        self.python_version = python_version
+        self.native_version = native_version
+
+    def run(self, command, **kwargs) -> subprocess.CompletedProcess[str]:
+        result = super().run(command, **kwargs)
+        arguments = [str(item) for item in command]
+        output = result.stdout
+        if arguments[0] == "nvcc":
+            output = "Cuda compilation tools, release 13.3, V13.3.0\n"
+        elif arguments[0] == "python3.12" and "-c" in arguments:
+            script = arguments[-1]
+            if "sys.version_info" in script:
+                output = f"{self.python_version}\n"
+            elif "import tensorrt" in script:
+                output = "11.1.0.106\n"
+            elif "getInferLib" in script:
+                output = f"{self.native_version}\n"
+        return subprocess.CompletedProcess(arguments, result.returncode, output, result.stderr)
 
 
 def _minimal_repository(tmp_path: Path) -> Path:
@@ -139,6 +166,89 @@ def test_rejects_nearest_or_partial_version_match() -> None:
             python_version="3.12",
             allow_experimental=False,
         )
+
+
+def test_rejects_python_version_not_present_in_docker_image(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    toolkit = DevToolkit.from_checkout(
+        repository,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+    )
+
+    with pytest.raises(DevToolkitError, match="Docker image uses Python 3.12"):
+        toolkit.plan(
+            PrepareRequest(
+                tensorrt="11.1.0.106",
+                cuda="13.3",
+                python_version="3.10",
+                architecture="aarch64",
+                target=DockerTarget(),
+            )
+        )
+
+
+def test_local_doctor_checks_exact_python_and_native_tensorrt(tmp_path: Path) -> None:
+    repository = _minimal_repository(tmp_path)
+    cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
+    include_dir = tmp_path / "include"
+    include_dir.mkdir()
+    (include_dir / "NvInferVersion.h").touch()
+    architecture = replace(
+        cohort.architectures["aarch64"],
+        tensorrt_include_dir=str(include_dir),
+        tensorrt_library_dir=str(tmp_path / "lib"),
+    )
+    cohort = replace(cohort, architectures={"aarch64": architecture})
+    request = PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        architecture="aarch64",
+        target=LocalTarget(python="python3.12"),
+    )
+
+    probes, sm = EnvironmentDoctor(repository, LocalProbeRunner()).inspect(
+        request, cohort, "aarch64"
+    )
+
+    assert sm == "100"
+    assert {probe.name: probe.status for probe in probes}["python"] == "pass"
+    assert {probe.name: probe.status for probe in probes}["tensorrt-native"] == "pass"
+
+
+@pytest.mark.parametrize(
+    ("runner", "failure"),
+    (
+        (LocalProbeRunner(python_version="3.11"), "python: requested 3.12; found 3.11"),
+        (
+            LocalProbeRunner(native_version="11.0.0.1"),
+            "tensorrt-native: requested 11.1.0.106; found 11.0.0.1",
+        ),
+    ),
+)
+def test_local_doctor_rejects_version_mismatch(
+    tmp_path: Path, runner: LocalProbeRunner, failure: str
+) -> None:
+    repository = _minimal_repository(tmp_path)
+    cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
+    include_dir = tmp_path / "include"
+    include_dir.mkdir()
+    (include_dir / "NvInferVersion.h").touch()
+    architecture = replace(
+        cohort.architectures["aarch64"],
+        tensorrt_include_dir=str(include_dir),
+        tensorrt_library_dir=str(tmp_path / "lib"),
+    )
+    cohort = replace(cohort, architectures={"aarch64": architecture})
+    request = PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        architecture="aarch64",
+        target=LocalTarget(python="python3.12"),
+    )
+
+    with pytest.raises(DevToolkitError, match=re.escape(failure)):
+        EnvironmentDoctor(repository, runner).inspect(request, cohort, "aarch64")
 
 
 @pytest.mark.parametrize(

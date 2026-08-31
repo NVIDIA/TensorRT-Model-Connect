@@ -17,6 +17,17 @@ from .runner import Runner, command_output
 CUDA_RELEASE = re.compile(r"release\s+([0-9]+\.[0-9]+)", re.IGNORECASE)
 
 
+def _native_tensorrt_version_script(library: Path) -> str:
+    return (
+        "import ctypes; "
+        f"lib=ctypes.CDLL({str(library)!r}); "
+        "names=('Major','Minor','Patch','Build'); "
+        "funcs=[getattr(lib, f'getInferLib{name}Version') for name in names]; "
+        "[setattr(func, 'restype', ctypes.c_int32) for func in funcs]; "
+        "print('.'.join(str(func()) for func in funcs))"
+    )
+
+
 def _probe_command(
     runner: Runner,
     command: list[str],
@@ -81,12 +92,31 @@ class EnvironmentDoctor:
             for name, command in (
                 ("cmake", ["cmake", "--version"]),
                 ("ninja", ["ninja", "--version"]),
-                ("python", [request.target.python, "--version"]),
             ):
                 result, _ = _probe_command(
                     self.runner, command, cwd=self.repository, name=name
                 )
                 results.append(result)
+            python_result, python_output = _probe_command(
+                self.runner,
+                [
+                    request.target.python,
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ],
+                cwd=self.repository,
+                name="python",
+            )
+            if (
+                python_result.status == "pass"
+                and python_output != request.python_version
+            ):
+                python_result = ProbeResult(
+                    "python",
+                    "fail",
+                    f"requested {request.python_version}; found {python_output}",
+                )
+            results.append(python_result)
             nvcc_result, nvcc_output = _probe_command(
                 self.runner,
                 ["nvcc", "--version"],
@@ -119,6 +149,27 @@ class EnvironmentDoctor:
                     f"requested {cohort.tensorrt_version}; found {trt_output}",
                 )
             results.append(trt_result)
+            library = Path(selected.tensorrt_library_dir) / "libnvinfer.so"
+            native_result, native_output = _probe_command(
+                self.runner,
+                [
+                    request.target.python,
+                    "-c",
+                    _native_tensorrt_version_script(library),
+                ],
+                cwd=self.repository,
+                name="tensorrt-native",
+            )
+            if (
+                native_result.status == "pass"
+                and native_output != cohort.tensorrt_version
+            ):
+                native_result = ProbeResult(
+                    "tensorrt-native",
+                    "fail",
+                    f"requested {cohort.tensorrt_version}; found {native_output}",
+                )
+            results.append(native_result)
             include_dir = Path(
                 os.environ.get("TRTMC_TRT_INCLUDE_DIR")
                 or os.environ.get("TRT_INC_DIR")

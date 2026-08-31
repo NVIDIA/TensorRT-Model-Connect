@@ -229,20 +229,24 @@ class DockerEnvironment:
     def _verify_container(self, plan: PreparationPlan, container: str, sm: str) -> None:
         contract = plan.cohort.architectures[plan.architecture]
         script = (
-            "import ctypes, tensorrt; "
+            "import ctypes, sys, tensorrt; "
             f"assert tensorrt.__version__ == {plan.cohort.tensorrt_version!r}; "
             f"lib=ctypes.CDLL({str(Path(contract.tensorrt_library_dir) / 'libnvinfer.so')!r}); "
             "names=('Major','Minor','Patch','Build'); "
             "funcs=[getattr(lib, f'getInferLib{name}Version') for name in names]; "
             "[setattr(func, 'restype', ctypes.c_int32) for func in funcs]; "
-            "print(tensorrt.__version__, '.'.join(str(func()) for func in funcs))"
+            "python=f'{sys.version_info.major}.{sys.version_info.minor}'; "
+            "print(python, tensorrt.__version__, '.'.join(str(func()) for func in funcs))"
         )
         output = command_output(
             self.runner,
             _docker_exec(container, ["python", "-c", script]),
             cwd=self.repository,
         )
-        expected = f"{plan.cohort.tensorrt_version} {plan.cohort.tensorrt_version}"
+        expected = (
+            f"{plan.request.python_version} {plan.cohort.tensorrt_version} "
+            f"{plan.cohort.tensorrt_version}"
+        )
         if output != expected:
             raise DevToolkitError(
                 f"Container TensorRT Python/native mismatch: expected {expected}, got {output}"

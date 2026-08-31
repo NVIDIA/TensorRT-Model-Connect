@@ -68,6 +68,7 @@ def load_cohort(path: Path) -> EnvironmentCohort:
     fields = (
         "dockerfile",
         "docker_context",
+        "container_python_version",
         "wheel_platform",
         "tensorrt_include_dir",
         "tensorrt_library_dir",
