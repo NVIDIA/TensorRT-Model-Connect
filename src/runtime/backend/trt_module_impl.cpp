@@ -669,30 +669,64 @@ void TrtModuleImpl::finish_timing_event(TimingEvent event) {
 
 void TrtModuleImpl::record_timed_enqueue() {
     TimingEvent timing_event;
-    const bool timing_ok = begin_timing_event(timing_event);
-    if (use_cuda_graph_ && cuda_graph_->ready()) {
-        cuda_graph_->launch(stream_);
-        if (timing_ok)
+    bool timing_ok = begin_timing_event(timing_event);
+    const auto discard_timing = [&]() {
+        if (!timing_ok)
+            return;
+        if (timing_event.start)
+            cudaEventDestroy(timing_event.start);
+        if (timing_event.stop)
+            cudaEventDestroy(timing_event.stop);
+        timing_ok = false;
+    };
+    const auto finish_timing = [&]() {
+        if (timing_ok) {
             finish_timing_event(timing_event);
-        return;
-    }
-    if (use_cuda_graph_) {
-        cuda_graph_->begin_capture(stream_);
-        ctx_->enqueueV3(stream_);
-        if (!cuda_graph_->end_capture(stream_)) {
-            std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
-            use_cuda_graph_ = false;
-            ctx_->enqueueV3(stream_);
-        } else {
-            cuda_graph_->launch(stream_);
+            timing_ok = false;
         }
-        if (timing_ok)
-            finish_timing_event(timing_event);
-        return;
+    };
+
+    try {
+        if (use_cuda_graph_ && cuda_graph_->ready()) {
+            if (!cuda_graph_->launch(stream_))
+                throw std::runtime_error("CUDA graph launch failed");
+            finish_timing();
+            return;
+        }
+        if (use_cuda_graph_) {
+            if (!cuda_graph_->begin_capture(stream_)) {
+                use_cuda_graph_ = false;
+                if (!ctx_->enqueueV3(stream_))
+                    throw std::runtime_error("TensorRT enqueueV3 failed");
+            } else {
+                const bool enqueue_ok = ctx_->enqueueV3(stream_);
+                const bool capture_ok = cuda_graph_->end_capture(stream_);
+                if (!enqueue_ok)
+                    throw std::runtime_error("TensorRT enqueueV3 failed during graph capture");
+                if (!capture_ok) {
+                    std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
+                    use_cuda_graph_ = false;
+                    cuda_graph_->reset();
+                    if (!ctx_->enqueueV3(stream_))
+                        throw std::runtime_error("TensorRT enqueueV3 fallback failed");
+                } else if (!cuda_graph_->launch(stream_)) {
+                    throw std::runtime_error("CUDA graph launch failed");
+                }
+            }
+            finish_timing();
+            return;
+        }
+        if (!ctx_->enqueueV3(stream_))
+            throw std::runtime_error("TensorRT enqueueV3 failed");
+        finish_timing();
+    } catch (...) {
+        if (use_cuda_graph_) {
+            cuda_graph_->reset();
+            use_cuda_graph_ = false;
+        }
+        discard_timing();
+        throw;
     }
-    ctx_->enqueueV3(stream_);
-    if (timing_ok)
-        finish_timing_event(timing_event);
 }
 
 void TrtModuleImpl::flush_timing_events() {
@@ -723,7 +757,10 @@ void TrtModuleImpl::flush_timing_events() {
 }
 
 void TrtModuleImpl::sync() {
-    cudaStreamSynchronize(stream_);
+    const cudaError_t status = cudaStreamSynchronize(stream_);
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("CUDA stream synchronization failed: ") +
+                                 cudaGetErrorString(status));
 }
 
 // --- Forward device async (GPU → GPU, no sync) ---

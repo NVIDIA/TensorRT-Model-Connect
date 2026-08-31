@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build-time settings for the MiniMax-H3 native TensorRT bundle."""
+"""Build-time and runtime settings for the MiniMax-H3 native TensorRT path."""
 
 from __future__ import annotations
 
@@ -18,6 +18,15 @@ from tensorrt_model_connect.runtime_config import (
 # The build CLI currently contributes ``--config`` / ``--set`` values at
 # SESSION_REQUEST priority before forwarding them as opaque family options.
 _BUILD = frozenset({Layer.BUILD_TIME, Layer.BUNDLE_DEFAULT, Layer.SESSION_REQUEST})
+_SESSION = frozenset({Layer.SESSION_REQUEST, Layer.PLATFORM_PROFILE})
+
+
+def _positive_budget_gib(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 < value <= ((2**63 - 1) >> 30)
+    )
 
 
 SCHEMA = Schema(
@@ -37,6 +46,19 @@ SCHEMA = Schema(
             validator=lambda value: (
                 isinstance(value, float) and math.isfinite(value) and value > 0.0
             ),
+        ),
+        ConfigField(
+            name="retain_engines",
+            type_tag="bool",
+            default=False,
+            allowed_layers=_SESSION,
+        ),
+        ConfigField(
+            name="retained_tail_weight_budget_gib",
+            type_tag="int64",
+            default=24,
+            allowed_layers=_SESSION,
+            validator=_positive_budget_gib,
         ),
     ),
 )

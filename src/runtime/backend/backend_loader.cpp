@@ -22,6 +22,7 @@
 namespace trtmc {
 
 IPreboundBackend::~IPreboundBackend() = default;
+IFileBackedBackend::~IFileBackedBackend() = default;
 
 namespace {
 
@@ -41,16 +42,26 @@ std::mutex g_mu;
 std::unordered_map<std::string, CachedBackend> g_cache;
 std::unordered_map<std::string, void*> g_preloaded_dependencies;
 
+#if !defined(_WIN32)
 void cleanup_backends();
+#endif
 
 void register_cleanup_once() {
     static bool registered = false;
     if (!registered) {
+#if defined(_WIN32)
+        // On Windows this cache is deliberately process-lifetime. Running
+        // backend destruction and FreeLibrary from CRT/DLL teardown can
+        // execute under the loader lock after vendor globals are gone. The OS
+        // reclaims these process-global resources safely at exit.
+#else
         std::atexit(cleanup_backends);
+#endif
         registered = true;
     }
 }
 
+#if !defined(_WIN32)
 void cleanup_backends() {
     for (auto& [name, entry] : g_cache) {
         if (entry.backend) {
@@ -71,6 +82,7 @@ void cleanup_backends() {
     }
     g_preloaded_dependencies.clear();
 }
+#endif
 
 internal::DynamicLibraryHandle try_open_backend_dso(const fs::path& path, const std::string& label,
                                                     std::string& tried) {

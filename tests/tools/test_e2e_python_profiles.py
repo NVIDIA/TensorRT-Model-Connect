@@ -111,6 +111,10 @@ def test_resolve_case_python_profiles_uses_manifest_profile_named_env(monkeypatc
     assert profiles["reference"] == str(wrapper)
 
 
+@pytest.mark.skipif(
+    shared_profiles.fcntl is None,
+    reason="runtime profile materialization requires POSIX advisory locks",
+)
 def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path):
     requirements = tmp_path / "empty.lock.txt"
     requirements.write_text("", encoding="utf-8")
@@ -151,6 +155,29 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
         == python
     )
     assert created == ["custom"]
+
+
+def test_materialize_venv_profile_rejects_platform_without_posix_locks(
+    monkeypatch, tmp_path
+):
+    requirements = tmp_path / "empty.lock.txt"
+    requirements.write_text("", encoding="utf-8")
+    monkeypatch.setattr(shared_profiles, "fcntl", None)
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(tmp_path / "profiles"))
+
+    with pytest.raises(
+        RuntimeError,
+        match="Materializing non-base Python profiles is not supported on Windows",
+    ):
+        shared_profiles._materialize_venv_profile(
+            "custom",
+            {
+                "kind": "venv",
+                "requirements": str(requirements),
+                "system_site_packages": False,
+            },
+            sys.executable,
+        )
 
 
 def test_profile_source_builds_use_a_safe_default_job_limit(monkeypatch, tmp_path):

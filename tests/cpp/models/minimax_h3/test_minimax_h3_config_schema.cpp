@@ -9,6 +9,7 @@
 #include "trtmc/runtime/pipeline_plugin_loader.h"
 
 #include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -47,7 +48,7 @@ int main() {
     trtmc::load_model_plugin_for_strategy("diffusion_minimax_h3");
     const auto* schema = schemas.lookup("minimax_h3");
     check(schema != nullptr, "MiniMax-H3 plugin registers model-owned schema");
-    check(schema != nullptr && schema->fields.size() == 1, "MiniMax-H3 schema field count");
+    check(schema != nullptr && schema->fields.size() == 3, "MiniMax-H3 schema field count");
 
     const ConfigBundle defaults = ConfigBundle::build({}, schemas);
     check(defaults.source_of("minimax_h3", "first_block_cache_threshold") == Layer::SchemaDefault,
@@ -55,15 +56,26 @@ int main() {
     check(std::abs(defaults.get<double>("minimax_h3", "first_block_cache_threshold") - 0.025) <
               1.0e-12,
           "cache threshold schema default");
+    check(!defaults.get<bool>("minimax_h3", "retain_engines"),
+          "retained engines are opt-in");
+    check(defaults.get<std::int64_t>("minimax_h3", "retained_tail_weight_budget_gib") == 24,
+          "retained tail budget schema default");
 
     const ConfigBundle overridden = trtmc::config::resolve_cli_config(
-        "", {"minimax_h3.first_block_cache_threshold=0.05"}, {}, schemas);
+        "",
+        {"minimax_h3.first_block_cache_threshold=0.05", "minimax_h3.retain_engines=true",
+         "minimax_h3.retained_tail_weight_budget_gib=30"},
+        {}, schemas);
     check(overridden.source_of("minimax_h3", "first_block_cache_threshold") ==
               Layer::SessionRequest,
           "qualified cache threshold records session provenance");
     check(std::abs(overridden.get<double>("minimax_h3", "first_block_cache_threshold") - 0.05) <
               1.0e-12,
           "qualified cache threshold reaches resolved config");
+    check(overridden.get<bool>("minimax_h3", "retain_engines"),
+          "qualified retained-engine flag reaches resolved config");
+    check(overridden.get<std::int64_t>("minimax_h3", "retained_tail_weight_budget_gib") == 30,
+          "qualified retained tail budget reaches resolved config");
 
     check_invalid(
         [&] {
@@ -78,6 +90,14 @@ int main() {
                     "", {"minimax_h3.first_block_cache_threshold=" + value}, {}, schemas);
             },
             "non-positive or non-finite cache threshold fails closed");
+    }
+    for (const std::string& value : {"0", "-1", "8589934592"}) {
+        check_invalid(
+            [&] {
+                (void)trtmc::config::resolve_cli_config(
+                    "", {"minimax_h3.retained_tail_weight_budget_gib=" + value}, {}, schemas);
+            },
+            "invalid retained tail budget fails closed");
     }
 
     if (failures > 0) {

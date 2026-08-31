@@ -21,7 +21,9 @@ param(
 
     [string]$BuildDirectory = "build-windows-h3",
 
-    [switch]$BuildTests
+    [switch]$BuildTests,
+
+    [switch]$BuildBenchmarks
 )
 
 Set-StrictMode -Version Latest
@@ -57,7 +59,7 @@ function Resolve-SdkDirectory {
     throw "$Label was not found under the selected SDK root"
 }
 
-foreach ($tool in @("cmake", "ninja", "cl.exe")) {
+foreach ($tool in @("cmake", "ninja", "cl.exe", "git")) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "$tool is required; run from an x64 Visual Studio developer PowerShell"
     }
@@ -73,6 +75,10 @@ $CudartLibrary = Join-Path $CudaSdk "lib\x64\cudart.lib"
 if (-not (Test-Path -LiteralPath $CudartLibrary -PathType Leaf)) {
     throw "CUDA 12.9 Toolkit does not contain lib\x64\cudart.lib"
 }
+$CudartRuntime = Join-Path $CudaSdk "bin\cudart64_12.dll"
+if (-not (Test-Path -LiteralPath $CudartRuntime -PathType Leaf)) {
+    throw "CUDA 12.9 Toolkit does not contain bin\cudart64_12.dll"
+}
 
 $NvccVersion = (& (Join-Path $CudaSdk "bin\nvcc.exe") --version 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0 -or $NvccVersion -notmatch "release 12\.9") {
@@ -85,8 +91,17 @@ $BuildPath = if ([IO.Path]::IsPathRooted($BuildDirectory)) {
     [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $BuildDirectory))
 }
 $BuildTestsValue = if ($BuildTests) { "ON" } else { "OFF" }
+$BuildBenchmarksValue = if ($BuildBenchmarks) { "ON" } else { "OFF" }
+$SourceRevision = (& git -C $RepositoryRoot rev-parse HEAD 2>$null | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $SourceRevision -notmatch "^[0-9a-f]{40}$") {
+    throw "The Windows H3 build requires a Git checkout with a valid HEAD revision"
+}
+if ((& git -C $RepositoryRoot status --porcelain | Out-String).Trim()) {
+    throw "The reproducible Windows H3 build requires a clean source checkout"
+}
 
 $env:CUDA_PATH = $CudaSdk
+$env:TRTMC_MINIMAX_H3_SOURCE_REVISION = $SourceRevision
 $ConfigureArguments = @(
     "-S", $RepositoryRoot,
     "-B", $BuildPath,
@@ -110,7 +125,8 @@ $ConfigureArguments = @(
     "-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF",
     "-DTRTMC_ENABLE_TVM_FFI=OFF",
     "-DTRTMC_BUILD_TESTS=$BuildTestsValue",
-    "-DTRTMC_BUILD_BENCHMARKS=OFF",
+    "-DTRTMC_BUILD_BENCHMARKS=$BuildBenchmarksValue",
+    "-DTRTMC_SOURCE_REVISION=$SourceRevision",
     "-DTRTMC_DISTRIBUTABLE_BUILD=ON"
 )
 
@@ -125,10 +141,18 @@ $BuildTargets = @(
     "trtmc_backend_rtx",
     "trtmc_model_minimax_h3"
 )
+if ($BuildBenchmarks) {
+    $BuildTargets += "trtmc_benchmark_worker"
+}
 & cmake --build $BuildPath --parallel --target @BuildTargets
 if ($LASTEXITCODE -ne 0) {
     throw "Native Windows MiniMax H3 build failed with exit code $LASTEXITCODE"
 }
+
+# Keep the redistributable CUDA runtime beside trtmc_core.dll. This also makes
+# child processes reliable when their launcher uses a restricted DLL search
+# policy that omits PATH.
+Copy-Item -LiteralPath $CudartRuntime -Destination $BuildPath -Force
 
 if ($BuildTests) {
     $TestTargets = @(

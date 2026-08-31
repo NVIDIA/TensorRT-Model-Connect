@@ -54,8 +54,11 @@ void TrtLogger::clear_error() {
 }
 
 TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime() {
-    static TrtLogger logger;
-    return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
+    // Backends may be released from an atexit handler after function-static
+    // destruction has begun. Keep the small logger process-lifetime so it
+    // outlives every TensorRT runtime and engine on every platform.
+    static TrtLogger* logger = new TrtLogger();
+    return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(*logger));
 }
 
 } // namespace trtmc

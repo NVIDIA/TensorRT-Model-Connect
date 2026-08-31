@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +16,11 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+try:
+    import fcntl
+except ModuleNotFoundError:  # Windows has no POSIX advisory-lock module.
+    fcntl = None
 
 try:
     import tomllib
@@ -702,6 +706,11 @@ def _materialize_venv_profile(
     root.mkdir(parents=True, exist_ok=True)
 
     with open(lock_path, "w", encoding="utf-8") as lock_file:
+        if fcntl is None:
+            raise RuntimeError(
+                "Materializing non-base Python profiles is not supported on Windows; "
+                "provide a prebuilt interpreter through the profile override environment variable"
+            )
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         if ready_path.is_file() and python_path.is_file():
             return str(python_path.absolute())

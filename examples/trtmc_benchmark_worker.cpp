@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -250,6 +251,12 @@ double finite_sum(const std::vector<float>& values) {
     return std::accumulate(values.begin(), values.end(), 0.0, [](double total, float value) {
         return std::isfinite(value) ? total + value : total;
     });
+}
+
+std::size_t nonfinite_count(const std::vector<float>& values) {
+    return static_cast<std::size_t>(std::count_if(values.begin(), values.end(), [](float value) {
+        return !std::isfinite(value);
+    }));
 }
 
 Json run_generate(trtmc::IPipeline& pipeline, const Json& request, const TimingConfig& timing) {
@@ -495,9 +502,16 @@ std::vector<trtmc::ImageResult> generate_images(trtmc::IPipeline& pipeline,
                                                 const std::vector<std::uint32_t>& seeds,
                                                 const trtmc::io::LoadedImage& input_image,
                                                 const trtmc::GenerateConfig& config) {
-    if (!input_image.empty()) {
-        return {pipeline.generate_image(prompts.front(), input_image.pixels.data(),
-                                        input_image.height, input_image.width, config)};
+    if (prompts.size() == 1) {
+        if (seeds.size() != 1)
+            throw std::runtime_error("single-image generation requires exactly one seed");
+        auto single_config = config;
+        single_config.seed = static_cast<int32_t>(seeds.front());
+        if (!input_image.empty()) {
+            return {pipeline.generate_image(prompts.front(), input_image.pixels.data(),
+                                            input_image.height, input_image.width, single_config)};
+        }
+        return {pipeline.generate_image(prompts.front(), single_config)};
     }
     return pipeline.generate_image_batch(prompts, seeds, config);
 }
@@ -518,27 +532,54 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request,
     }
     Json observations = Json::array();
     for (int index = 0; index < timing.iterations; ++index) {
-        const IterationTimer timer(timing.scope);
-        last = generate();
+        // Drop the previous host result before opening the public-call timing
+        // boundary. Destroying a 124-frame float tensor must not be charged to
+        // the next inference request.
+        last.clear();
+        last.shrink_to_fit();
+        std::vector<trtmc::ImageResult> current;
+        double measured_ms = 0.0;
+        if (prompts.size() == 1) {
+            auto single_config = config;
+            single_config.seed = static_cast<int32_t>(seeds.front());
+            const IterationTimer timer(timing.scope);
+            auto image = input_image.empty()
+                             ? pipeline.generate_image(prompts.front(), single_config)
+                             : pipeline.generate_image(prompts.front(), input_image.pixels.data(),
+                                                       input_image.height, input_image.width,
+                                                       single_config);
+            measured_ms = timer.elapsed_ms();
+            current.push_back(std::move(image));
+        } else {
+            const IterationTimer timer(timing.scope);
+            current = generate();
+            measured_ms = timer.elapsed_ms();
+        }
         const std::size_t generated_pixels =
-            std::accumulate(last.begin(), last.end(), std::size_t{0},
+            std::accumulate(current.begin(), current.end(), std::size_t{0},
                             [](std::size_t count, const trtmc::ImageResult& image) {
                                 return count + image.pixels.size();
                             });
         const std::size_t generated_frames = std::accumulate(
-            last.begin(), last.end(), std::size_t{0},
+            current.begin(), current.end(), std::size_t{0},
             [](std::size_t count, const trtmc::ImageResult& image) {
                 return count + static_cast<std::size_t>(std::max<int32_t>(image.num_frames, 1));
             });
-        const double measured_ms = timer.elapsed_ms();
+        const std::size_t generated_nonfinite =
+            std::accumulate(current.begin(), current.end(), std::size_t{0},
+                            [](std::size_t count, const trtmc::ImageResult& image) {
+                                return count + nonfinite_count(image.pixels);
+                            });
         observations.push_back({
             {"iteration", index},
             {"measured_wall_ms", measured_ms},
             {"runtime_e2e_wall_ms", measured_ms},
-            {"generated_images", last.size()},
+            {"generated_images", current.size()},
             {"generated_frames", generated_frames},
             {"generated_pixels", generated_pixels},
+            {"nonfinite_elements", generated_nonfinite},
         });
+        last = std::move(current);
     }
     if (last.empty()) {
         throw std::runtime_error("generate_image_batch returned no images");
@@ -546,9 +587,11 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request,
     const auto& first = last.front();
     double output_sum = 0.0;
     std::size_t element_count = 0;
+    std::size_t output_nonfinite = 0;
     for (const auto& image : last) {
         output_sum += finite_sum(image.pixels);
         element_count += image.pixels.size();
+        output_nonfinite += nonfinite_count(image.pixels);
     }
     return {
         {"observations", std::move(observations)},
@@ -560,6 +603,7 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request,
              {"channels", first.channels},
              {"num_frames", first.num_frames},
              {"element_count", element_count},
+             {"nonfinite_elements", output_nonfinite},
              {"finite_sum", output_sum},
          }},
     };
@@ -1142,6 +1186,17 @@ int main(int argc, char** argv) {
         }
         output_path = arguments.output_path;
         write_json(output_path, execute(read_json(arguments.request_path)));
+        // This executable is an isolated worker and has no useful process-global
+        // teardown after its result file is closed. TensorRT-RTX may retain DLL
+        // globals past pipeline destruction on Windows, so an opt-in immediate
+        // exit avoids unsafe cross-DLL static destruction without changing the
+        // measured call or the persisted result.
+        const char* fast_exit = std::getenv("TRTMC_BENCHMARK_FAST_EXIT");
+        if (fast_exit != nullptr && fast_exit[0] != '\0' && std::strcmp(fast_exit, "0") != 0) {
+            std::cerr.flush();
+            std::cout.flush();
+            std::_Exit(0);
+        }
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << "trtmc_benchmark_worker: " << exception.what() << '\n';

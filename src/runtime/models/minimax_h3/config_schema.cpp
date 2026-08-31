@@ -7,6 +7,8 @@
 
 #include <any>
 #include <cmath>
+#include <cstdint>
+#include <limits>
 #include <set>
 
 namespace trtmc::config::schemas {
@@ -19,6 +21,13 @@ bool is_positive_finite_double(const std::any& value) {
     return std::isfinite(parsed) && parsed > 0.0;
 }
 
+bool is_positive_budget_gib(const std::any& value) {
+    if (value.type() != typeid(std::int64_t))
+        return false;
+    const auto parsed = std::any_cast<std::int64_t>(value);
+    return parsed > 0 && parsed <= (std::numeric_limits<std::int64_t>::max() >> 30);
+}
+
 } // namespace
 
 Schema make_minimax_h3_schema() {
@@ -28,6 +37,9 @@ Schema make_minimax_h3_schema() {
         {
             ConfigField{"first_block_cache_threshold", "double", std::any{0.025}, session,
                         is_positive_finite_double},
+            ConfigField{"retain_engines", "bool", std::any{false}, session, nullptr},
+            ConfigField{"retained_tail_weight_budget_gib", "int64", std::any{std::int64_t{24}},
+                        session, is_positive_budget_gib},
         },
     };
 }

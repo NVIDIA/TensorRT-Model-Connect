@@ -253,11 +253,17 @@ def test_diffusion_family_build_options_reach_plugin(monkeypatch, tmp_path):
     model_dir = _make_fake_diffusion_model_dir(tmp_path)
     output = tmp_path / "out.bundle"
     args = _build_args(model_dir, output, max_batch_size=1)
-    args.set_flags = ["minimax_h3.first_block_cache=true"]
+    args.set_flags = [
+        "minimax_h3.first_block_cache=true",
+        "minimax_h3.retain_engines=true",
+        "minimax_h3.retained_tail_weight_budget_gib=30",
+    ]
 
     assert cli._cmd_build(args) == 0
 
     assert plugin.calls[0]["family_build_options"]["minimax_h3"] == {
         "first_block_cache": True,
         "first_block_cache_threshold": 0.025,
+        "retain_engines": True,
+        "retained_tail_weight_budget_gib": 30,
     }

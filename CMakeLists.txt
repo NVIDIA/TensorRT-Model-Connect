@@ -907,6 +907,8 @@ target_include_directories(trtmc_test_optimized_runtime PRIVATE
 set_target_properties(trtmc_test_optimized_runtime PROPERTIES
   OUTPUT_NAME trtmc_impl_example_optimized_runtime
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/good"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/good"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/good"
 )
 
 add_library(trtmc_test_wrong_optimized_runtime SHARED EXCLUDE_FROM_ALL
@@ -922,6 +924,8 @@ target_compile_definitions(trtmc_test_wrong_optimized_runtime PRIVATE
 set_target_properties(trtmc_test_wrong_optimized_runtime PROPERTIES
   OUTPUT_NAME trtmc_impl_example_optimized_runtime
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong"
 )
 
 add_library(trtmc_test_wrong_optimized_runtime_abi SHARED EXCLUDE_FROM_ALL
@@ -937,6 +941,8 @@ target_compile_definitions(trtmc_test_wrong_optimized_runtime_abi PRIVATE
 set_target_properties(trtmc_test_wrong_optimized_runtime_abi PROPERTIES
   OUTPUT_NAME trtmc_impl_example_optimized_runtime
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong-abi"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong-abi"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong-abi"
 )
 
 add_library(trtmc_test_optimized_embedding SHARED EXCLUDE_FROM_ALL

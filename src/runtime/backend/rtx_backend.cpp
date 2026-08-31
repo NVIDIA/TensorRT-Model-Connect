@@ -24,8 +24,11 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <system_error>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -48,6 +51,29 @@ struct StreamSetup {
     cudaStream_t stream{nullptr};
     std::shared_ptr<void> owner;
 };
+
+#if defined(_WIN32)
+// Some Windows CUDA configurations report memory-pool support while rejecting
+// the asynchronous allocation path used by TensorRT-RTX. IGpuAsyncAllocator
+// permits a synchronizing implementation, so retain the callback surface while
+// backing it with cudaMalloc/cudaFree on Windows only.
+class SynchronousGpuAllocator final : public nvinfer1::IGpuAsyncAllocator {
+  public:
+    void* allocateAsync(std::uint64_t size, std::uint64_t /*alignment*/,
+                        nvinfer1::AllocatorFlags /*flags*/,
+                        cudaStream_t /*stream*/) noexcept override {
+        if (size == 0 || size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+            return nullptr;
+        void* memory = nullptr;
+        return cudaMalloc(&memory, static_cast<std::size_t>(size)) == cudaSuccess ? memory
+                                                                                  : nullptr;
+    }
+
+    bool deallocateAsync(void* memory, cudaStream_t /*stream*/) noexcept override {
+        return memory == nullptr || cudaFree(memory) == cudaSuccess;
+    }
+};
+#endif
 
 StreamSetup resolve_stream(cudaStream_t requested_stream) {
     if (requested_stream) {
@@ -320,6 +346,10 @@ void apply_weight_streaming_budget(nvinfer1::ICudaEngine& engine, std::int64_t b
         engine.getWeightStreamingBudgetV2() != applied) {
         throw std::runtime_error("[trtmc] TensorRT-RTX rejected the weight streaming budget");
     }
+    std::cerr << "[trtmc.rtx_weight_budget] requested_bytes=" << budget
+              << " streamable_bytes=" << streamable << " applied_bytes=" << applied
+              << " streaming_scratch_bytes=" << engine.getWeightStreamingScratchMemorySize()
+              << '\n';
 }
 
 void validate_optimization_profile(const nvinfer1::ICudaEngine& engine, int32_t profile) {
@@ -336,11 +366,23 @@ void configure_cuda_graphs(nvinfer1::IRuntimeConfig& config, bool enabled) {
 
 } // namespace
 
-class RtxBackend final : public IBackend, public IPreboundBackend {
+class RtxBackend final : public IBackend, public IPreboundBackend, public IFileBackedBackend {
   public:
-    RtxBackend() : runtime_(create_trt_runtime()) {
+    RtxBackend()
+        : runtime_(create_trt_runtime())
+#if defined(_WIN32)
+          , staged_runtime_(create_trt_runtime())
+#endif
+    {
         if (!runtime_)
             throw std::runtime_error("[trtmc] Failed to create TRT-RTX runtime");
+#if defined(_WIN32)
+        if (!staged_runtime_)
+            throw std::runtime_error("[trtmc] Failed to create staged TRT-RTX runtime");
+        // This dedicated runtime serves only file-backed staged plans, so the
+        // synchronizing allocator cannot change ordinary in-memory RTX paths.
+        staged_runtime_->setGpuAllocator(&gpu_allocator_);
+#endif
     }
 
     ~RtxBackend() override {
@@ -373,15 +415,49 @@ class RtxBackend final : public IBackend, public IPreboundBackend {
                             std::uint64_t plan_size, const char* expected_sha256,
                             const ModuleCreateOptions& options,
                             const std::vector<ModuleExternalBinding>& external_bindings,
-                            std::int64_t weight_streaming_budget_bytes) override {
+                            std::int64_t weight_streaming_budget_bytes,
+                            bool retain_engine) override {
+        if (weight_streaming_budget_bytes >= 0 && options.cuda_graphs) {
+            throw std::invalid_argument(
+                "[trtmc] RTX weight streaming is incompatible with CUDA graph capture");
+        }
+        const std::string cache_key = retain_engine
+                                          ? retained_engine_key(expected_sha256,
+                                                                weight_streaming_budget_bytes)
+                                          : std::string{};
+        std::unique_lock<std::mutex> retained_lock;
+        if (retain_engine) {
+            // Serialize retained-engine creation. Two concurrent deserializations
+            // of the same multi-GiB plan can exceed the device-memory envelope
+            // before the losing insertion is released.
+            retained_lock = std::unique_lock<std::mutex>(retained_engines_mutex_);
+            const auto hit = retained_engines_.find(cache_key);
+            if (hit != retained_engines_.end()) {
+                std::cerr << "[trtmc.rtx_engine_cache] hit=1\n";
+                return create_single_module_from_engine(hit->second, options, external_bindings,
+                                                        true);
+            }
+        }
         BoundedPlanStreamReader reader(plan_path, plan_offset, plan_size, expected_sha256);
         reader.verify_sha256();
-        TrtUniquePtr<nvinfer1::ICudaEngine> engine(runtime_->deserializeCudaEngine(reader));
+        TrtUniquePtr<nvinfer1::ICudaEngine> engine(
+            file_backed_runtime().deserializeCudaEngine(reader));
         reader.verify_unchanged();
         if (!engine)
             throw std::runtime_error("[trtmc] Failed to stream-deserialize engine (RTX)");
+        if (retain_engine) {
+            std::shared_ptr<nvinfer1::ICudaEngine> retained(
+                engine.release(), [](nvinfer1::ICudaEngine* value) { delete value; });
+            apply_weight_streaming_budget(*retained, weight_streaming_budget_bytes,
+                                          options.cuda_graphs);
+            auto module = create_single_module_from_engine(retained, options, external_bindings,
+                                                           true);
+            retained_engines_.emplace(cache_key, retained);
+            std::cerr << "[trtmc.rtx_engine_cache] hit=0 retained=1\n";
+            return module;
+        }
         return create_single_module(engine.release(), options, external_bindings,
-                                    weight_streaming_budget_bytes);
+                                    weight_streaming_budget_bytes, true);
     }
 
     BackendDualProfileModules
@@ -460,21 +536,66 @@ class RtxBackend final : public IBackend, public IPreboundBackend {
     const char* name() const override { return "trt_rtx"; }
 
   private:
+#if defined(_WIN32)
+    // Declared before runtime_ so it outlives the runtime and every engine
+    // deserialized through it (members are destroyed in reverse order).
+    SynchronousGpuAllocator gpu_allocator_;
+#endif
     TrtUniquePtr<nvinfer1::IRuntime> runtime_;
+#if defined(_WIN32)
+    TrtUniquePtr<nvinfer1::IRuntime> staged_runtime_;
+#endif
     nvinfer1::IRuntimeCache* runtime_cache_{nullptr};
     std::string cache_path_;
+    std::mutex retained_engines_mutex_;
+    std::unordered_map<std::string, std::shared_ptr<nvinfer1::ICudaEngine>> retained_engines_;
+
+    nvinfer1::IRuntime& file_backed_runtime() {
+#if defined(_WIN32)
+        return *staged_runtime_;
+#else
+        return *runtime_;
+#endif
+    }
+
+    static std::string retained_engine_key(const char* expected_sha256,
+                                           std::int64_t weight_streaming_budget_bytes) {
+        if (expected_sha256 == nullptr || expected_sha256[0] == '\0') {
+            throw std::invalid_argument(
+                "[trtmc] Retained RTX engines require a verified plan SHA-256");
+        }
+        int device = -1;
+        const cudaError_t status = cudaGetDevice(&device);
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("[trtmc] Failed to identify the CUDA device: ") +
+                                     cudaGetErrorString(status));
+        }
+        return std::to_string(device) + ":" + expected_sha256 + ":" +
+               std::to_string(weight_streaming_budget_bytes);
+    }
+
+    std::unique_ptr<ITrtModule> create_single_module_from_engine(
+        const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
+        const ModuleCreateOptions& options,
+        const std::vector<ModuleExternalBinding>& external_bindings,
+        bool use_synchronous_allocator = false) {
+        validate_optimization_profile(*engine, options.optimization_profile);
+        const StreamSetup stream_setup = resolve_stream(options.stream);
+        auto config = create_runtime_config(*engine, options);
+        return create_execution_module(engine, config, stream_setup, options, external_bindings,
+                                       use_synchronous_allocator);
+    }
 
     std::unique_ptr<ITrtModule>
     create_single_module(nvinfer1::ICudaEngine* engine_raw, const ModuleCreateOptions& options,
                          const std::vector<ModuleExternalBinding>& external_bindings,
-                         std::int64_t weight_streaming_budget_bytes) {
+                         std::int64_t weight_streaming_budget_bytes,
+                         bool use_synchronous_allocator = false) {
         std::shared_ptr<nvinfer1::ICudaEngine> engine(
             engine_raw, [](nvinfer1::ICudaEngine* value) { delete value; });
         apply_weight_streaming_budget(*engine, weight_streaming_budget_bytes, options.cuda_graphs);
-        validate_optimization_profile(*engine, options.optimization_profile);
-        const StreamSetup stream_setup = resolve_stream(options.stream);
-        auto config = create_runtime_config(*engine, options);
-        return create_execution_module(engine, config, stream_setup, options, external_bindings);
+        return create_single_module_from_engine(engine, options, external_bindings,
+                                                use_synchronous_allocator);
     }
 
     std::shared_ptr<nvinfer1::IRuntimeConfig>
@@ -493,11 +614,20 @@ class RtxBackend final : public IBackend, public IPreboundBackend {
     create_execution_module(const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
                             const std::shared_ptr<nvinfer1::IRuntimeConfig>& config,
                             const StreamSetup& stream_setup, const ModuleCreateOptions& options,
-                            const std::vector<ModuleExternalBinding>& external_bindings) {
+                            const std::vector<ModuleExternalBinding>& external_bindings,
+                            bool use_synchronous_allocator) {
         std::unique_ptr<nvinfer1::IExecutionContext> context(
             engine->createExecutionContext(config.get()));
         if (!context)
             throw std::runtime_error("[trtmc] Failed to create RTX execution context");
+#if defined(_WIN32)
+        if (use_synchronous_allocator &&
+            !context->setTemporaryStorageAllocator(&gpu_allocator_))
+            throw std::runtime_error(
+                "[trtmc] Failed to set synchronous RTX temporary-storage allocator");
+#else
+        (void)use_synchronous_allocator;
+#endif
         auto module = std::make_unique<TrtModuleImpl>(
             engine.get(), context.get(), stream_setup.stream, options.optimization_profile, nullptr,
             external_bindings);
@@ -529,7 +659,6 @@ class RtxBackend final : public IBackend, public IPreboundBackend {
         delete rt_config;
         if (!ctx)
             throw std::runtime_error("[trtmc] Failed to create RTX execution context");
-
         auto mod =
             std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream, profile_idx);
         if (!mod->ok())

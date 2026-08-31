@@ -142,6 +142,11 @@ struct CacheConfig {
     float threshold{0.025F};
 };
 
+struct HotEngineConfig {
+    bool retain_engines{false};
+    std::int64_t tail_weight_budget_bytes{24LL << 30};
+};
+
 SectionMap index_sections(const BundleInfo& info, bool first_block_cache) {
     constexpr std::array<const char*, 4> monolithic_names = {
         "text_encoder_plan", "adaln_precompute_plan", "denoiser_plan", "vae_tile_decoder_plan"};
@@ -211,11 +216,35 @@ CacheConfig load_cache_config(const PipelineContext& ctx) {
     return result;
 }
 
+HotEngineConfig load_hot_engine_config(const PipelineContext& ctx) {
+    HotEngineConfig result;
+    if (ctx.runtime_config == nullptr)
+        return result;
+    result.retain_engines =
+        ctx.runtime_config->get<bool>("minimax_h3", "retain_engines");
+    const auto budget_gib = ctx.runtime_config->get<std::int64_t>(
+        "minimax_h3", "retained_tail_weight_budget_gib");
+    if (budget_gib <= 0 ||
+        budget_gib > (std::numeric_limits<std::int64_t>::max() >> 30)) {
+        throw std::runtime_error(
+            "MiniMax-H3 retained_tail_weight_budget_gib must be positive");
+    }
+    result.tail_weight_budget_bytes = budget_gib << 30;
+    return result;
+}
+
 const BundleSectionInfo& require_plan_section(const SectionMap& sections, const std::string& name) {
     const auto it = sections.find(name);
     if (it == sections.end())
         throw std::runtime_error("Unknown MiniMax-H3 plan section: " + name);
     return it->second;
+}
+
+bool retain_hot_engine(std::string_view name, const HotEngineConfig& hot) {
+    if (!hot.retain_engines)
+        return false;
+    return name == "denoiser_head_plan" || name == "denoiser_tail_plan" ||
+           name == "denoiser_finish_plan" || name == "vae_tile_decoder_plan";
 }
 
 ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runtime_cache,
@@ -227,7 +256,16 @@ ModuleCreateOptions module_options(cudaStream_t stream, const std::string& runti
     return options;
 }
 
-std::int64_t staged_plan_budget(const std::string& name, const RuntimeMemoryConfig& memory) {
+std::int64_t staged_plan_budget(const std::string& name, const RuntimeMemoryConfig& memory,
+                                const HotEngineConfig& hot) {
+    if (retain_hot_engine(name, hot)) {
+        if (name == "denoiser_head_plan" || name == "denoiser_finish_plan" ||
+            name == "vae_tile_decoder_plan")
+            return std::numeric_limits<std::int64_t>::max();
+        if (name == "denoiser_tail_plan")
+            return std::min<std::int64_t>(memory.weight_streaming_budget_bytes,
+                                          hot.tail_weight_budget_bytes);
+    }
     return (name == "denoiser_head_plan" || name == "denoiser_finish_plan")
                ? 0
                : memory.weight_streaming_budget_bytes;
@@ -236,18 +274,18 @@ std::int64_t staged_plan_budget(const std::string& name, const RuntimeMemoryConf
 std::unique_ptr<ITrtModule>
 load_staged_module(const std::string& name, const BundleSectionInfo& section,
                    const std::string& bundle_path, const PlanSha256Map& plan_sha256,
-                   IPreboundBackend* prebound_backend, const ModuleCreateOptions& options,
+                   IFileBackedBackend* file_backed_backend, const ModuleCreateOptions& options,
                    const std::vector<ModuleExternalBinding>& external_bindings,
-                   const RuntimeMemoryConfig& memory) {
-    if (prebound_backend == nullptr)
+                   const RuntimeMemoryConfig& memory, const HotEngineConfig& hot) {
+    if (file_backed_backend == nullptr)
         throw std::runtime_error("MiniMax-H3 TensorRT-RTX backend lacks file-backed plan support");
     const auto digest = plan_sha256.find(name);
     if (digest == plan_sha256.end())
         throw std::runtime_error("MiniMax-H3 plan SHA-256 is missing: " + name);
     const auto range = ResolveBundleSectionFileRange(bundle_path, section);
-    auto module = prebound_backend->create_module_from_file(
+    auto module = file_backed_backend->create_module_from_file(
         bundle_path.c_str(), range.offset, range.size, digest->second.c_str(), options,
-        external_bindings, staged_plan_budget(name, memory));
+        external_bindings, staged_plan_budget(name, memory, hot), retain_hot_engine(name, hot));
     if (!module)
         throw std::runtime_error("MiniMax-H3 backend rejected file-backed plan deserialization");
     return module;
@@ -272,20 +310,26 @@ std::unique_ptr<ITrtModule> load_module(const std::string& name, cudaStream_t st
                                         const SectionMap& sections, const std::string& bundle_path,
                                         const std::string& runtime_cache, IBackend* backend,
                                         bool cuda_graphs, const RuntimeMemoryConfig& memory,
-                                        const PlanSha256Map& plan_sha256) {
+                                        const PlanSha256Map& plan_sha256,
+                                        const HotEngineConfig& hot) {
     const auto& section = require_plan_section(sections, name);
     const auto options = module_options(stream, runtime_cache, cuda_graphs);
     auto* prebound_backend = dynamic_cast<IPreboundBackend*>(backend);
     if (memory.staged) {
-        return load_staged_module(name, section, bundle_path, plan_sha256, prebound_backend,
-                                  options, external_bindings, memory);
+        auto* file_backed_backend = dynamic_cast<IFileBackedBackend*>(backend);
+        return load_staged_module(name, section, bundle_path, plan_sha256, file_backed_backend,
+                                  options, external_bindings, memory, hot);
     }
     return load_in_memory_module(section, bundle_path, backend, prebound_backend, options,
                                  external_bindings);
 }
 
 MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap sections,
-                                         RuntimeMemoryConfig memory) {
+                                         RuntimeMemoryConfig memory, HotEngineConfig hot) {
+    if (hot.retain_engines && !memory.staged) {
+        throw std::runtime_error(
+            "MiniMax-H3 retained engines require a staged TensorRT-RTX bundle");
+    }
     const std::string bundle_path = ctx.bundle_path;
     const std::string runtime_cache = ctx.runtime_cache_path;
     IBackend* const backend = ctx.backend;
@@ -294,11 +338,11 @@ MiniMaxH3ModuleLoader make_module_loader(const PipelineContext& ctx, SectionMap 
     if (memory.staged)
         plan_sha256 = load_plan_sha256(ctx.config_json, sections);
     return [sections = std::move(sections), bundle_path, runtime_cache, backend, cuda_graphs,
-            memory, plan_sha256 = std::move(plan_sha256)](
+            memory, hot, plan_sha256 = std::move(plan_sha256)](
                const std::string& name, cudaStream_t stream,
                const std::vector<ModuleExternalBinding>& external_bindings) {
         return load_module(name, stream, external_bindings, sections, bundle_path, runtime_cache,
-                           backend, cuda_graphs, memory, plan_sha256);
+                           backend, cuda_graphs, memory, plan_sha256, hot);
     };
 }
 
@@ -310,7 +354,8 @@ class MiniMaxH3Plugin final : public IPipelinePlugin {
         validate_profile(ctx);
         const CacheConfig cache = load_cache_config(ctx);
         auto sections = index_sections(ctx.bundle.info, cache.enabled);
-        auto loader = make_module_loader(ctx, std::move(sections), load_runtime_memory_config(ctx));
+        auto loader = make_module_loader(ctx, std::move(sections), load_runtime_memory_config(ctx),
+                                         load_hot_engine_config(ctx));
         return std::make_unique<MiniMaxH3Pipeline>(std::move(loader), load_tokenizer(ctx.bundle),
                                                    ctx.bundle.info.model_id, cache.enabled,
                                                    cache.threshold);
