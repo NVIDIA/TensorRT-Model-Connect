@@ -12,15 +12,14 @@
 #include <chrono>
 #include <cstring>
 #include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <utility>
 
 #if TRTMC_HAS_TVM_FFI
@@ -439,7 +438,8 @@ std::string write_kernel_so_to_temp(const std::string& global_name, const char* 
         return {};
 
     std::string tmp_path = std::string(dir_buf.data()) + "/" + safe_name + ".so";
-    const int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+    const int fd =
+        ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
     if (fd < 0) {
         ::rmdir(dir_buf.data());
         return {};

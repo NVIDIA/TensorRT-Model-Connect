@@ -387,8 +387,7 @@ bool Qwen38KvCache::ok() const {
         }
         return true;
     };
-    return group_ok(cache_k_) && group_ok(cache_v_) && group_ok(present_k_) &&
-           group_ok(present_v_);
+    return group_ok(cache_k_) && group_ok(cache_v_) && group_ok(present_k_) && group_ok(present_v_);
 }
 
 } // namespace trtmc
