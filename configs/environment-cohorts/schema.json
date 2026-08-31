@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NVIDIA/TensorRT-Model-Connect/schemas/environment-cohort-v1.json",
+  "title": "TRTMC environment cohort",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "status",
+    "tensorrt",
+    "cuda",
+    "python_versions",
+    "architectures"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]+$"},
+    "status": {"enum": ["supported", "experimental"]},
+    "tensorrt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "apt_version"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "apt_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "cuda": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"}
+      }
+    },
+    "python_versions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"}
+    },
+    "architectures": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"enum": ["x86_64", "aarch64"]},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "dockerfile",
+          "docker_context",
+          "wheel_platform",
+          "tensorrt_include_dir",
+          "tensorrt_library_dir"
+        ],
+        "properties": {
+          "dockerfile": {"type": "string", "minLength": 1},
+          "docker_context": {"type": "string", "minLength": 1},
+          "wheel_platform": {"type": "string", "pattern": "^manylinux_2_[0-9]+_(x86_64|aarch64)$"},
+          "tensorrt_include_dir": {"type": "string", "pattern": "^/"},
+          "tensorrt_library_dir": {"type": "string", "pattern": "^/"}
+        }
+      }
+    }
+  }
+}
