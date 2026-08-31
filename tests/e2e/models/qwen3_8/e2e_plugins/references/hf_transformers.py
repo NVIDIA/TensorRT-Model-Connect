@@ -116,8 +116,13 @@ def _decode_vl_generated_text(
     return ""
 
 
-def _resolve_cached_model_ref(hf_id: str) -> str:
-    """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
+def _resolve_cached_model_ref(hf_id: str, revision: str = "") -> str:
+    """Prefer a locally cached HF snapshot to avoid Hub API rate limits.
+
+    A manifest that pins ``hf_revision`` must resolve that exact commit, not
+    whatever ``main`` currently points at; the reference runs with
+    ``trust_remote_code``, so the revision decides which code executes.
+    """
     if not hf_id:
         return hf_id
     p = Path(hf_id)
@@ -127,7 +132,10 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(hf_id, local_files_only=True)
+        kwargs = {"local_files_only": True}
+        if revision:
+            kwargs["revision"] = revision
+        return snapshot_download(hf_id, **kwargs)
     except Exception:
         return hf_id
 
@@ -336,7 +344,12 @@ class HfTransformersReference:
         max_new_tokens = case.inputs.get("max_new_tokens", 30)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
+        # A resolved snapshot path is already the pinned commit; a bare hf_id is
+        # not, so the revision must travel with the loader call.
+        revision_kwargs = (
+            {"revision": case.hf_revision}
+            if case.hf_revision and not Path(model_ref).exists() else {})
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         contract_config = case.metadata.get("contract_config", {})
@@ -349,6 +362,7 @@ class HfTransformersReference:
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            revision_kwargs = {revision_kwargs!r}
             prompt = {prompt!r}
             max_new_tokens = {max_new_tokens}
             trust_remote_code = {trust_remote_code!r}
@@ -361,7 +375,7 @@ class HfTransformersReference:
                 return t.detach().float().cpu().numpy()
 
             tokenizer = AutoTokenizer.from_pretrained(
-                model_ref, trust_remote_code=trust_remote_code)
+                model_ref, trust_remote_code=trust_remote_code, **revision_kwargs)
             if use_chat_template:
                 messages = [{{"role": "user", "content": prompt}}]
                 try:
@@ -380,10 +394,12 @@ class HfTransformersReference:
             load_kwargs = {{
                 "trust_remote_code": trust_remote_code,
                 "torch_dtype": {torch_dtype_expr},
+                **revision_kwargs,
             }}
             # Detect encoder-decoder models by checking config
             from transformers import AutoConfig
-            _cfg = AutoConfig.from_pretrained(model_ref, trust_remote_code=trust_remote_code)
+            _cfg = AutoConfig.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code, **revision_kwargs)
             is_seq2seq = getattr(_cfg, "is_encoder_decoder", False)
 
             if is_seq2seq:
@@ -494,7 +510,12 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "Hello world")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
+        # A resolved snapshot path is already the pinned commit; a bare hf_id is
+        # not, so the revision must travel with the loader call.
+        revision_kwargs = (
+            {"revision": case.hf_revision}
+            if case.hf_revision and not Path(model_ref).exists() else {})
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -503,6 +524,7 @@ class HfTransformersReference:
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            revision_kwargs = {revision_kwargs!r}
             prompt = {prompt!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
@@ -576,7 +598,12 @@ class HfTransformersReference:
         prompt = case.inputs.get("prompt", "What is machine learning?")
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
+        # A resolved snapshot path is already the pinned commit; a bare hf_id is
+        # not, so the revision must travel with the loader call.
+        revision_kwargs = (
+            {"revision": case.hf_revision}
+            if case.hf_revision and not Path(model_ref).exists() else {})
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -585,6 +612,7 @@ class HfTransformersReference:
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            revision_kwargs = {revision_kwargs!r}
             prompt = {prompt!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
@@ -728,7 +756,12 @@ class HfTransformersReference:
             documents = [document] if document else []
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
+        # A resolved snapshot path is already the pinned commit; a bare hf_id is
+        # not, so the revision must travel with the loader call.
+        revision_kwargs = (
+            {"revision": case.hf_revision}
+            if case.hf_revision and not Path(model_ref).exists() else {})
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
@@ -737,6 +770,7 @@ class HfTransformersReference:
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            revision_kwargs = {revision_kwargs!r}
             prompt = {prompt!r}
             documents = {documents!r}
             trust_remote_code = {trust_remote_code!r}
@@ -883,7 +917,12 @@ class HfTransformersReference:
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         hf_id = case.hf_id
-        model_ref = _resolve_cached_model_ref(hf_id)
+        model_ref = _resolve_cached_model_ref(hf_id, case.hf_revision)
+        # A resolved snapshot path is already the pinned commit; a bare hf_id is
+        # not, so the revision must travel with the loader call.
+        revision_kwargs = (
+            {"revision": case.hf_revision}
+            if case.hf_revision and not Path(model_ref).exists() else {})
         fallback_text = prompt
         torch_dtype_expr = _torch_dtype_for_case(case)
 
@@ -898,6 +937,7 @@ class HfTransformersReference:
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
+            revision_kwargs = {revision_kwargs!r}
             prompt = {prompt!r}
             fallback_text = {fallback_text!r}
             max_new_tokens = {max_new_tokens}

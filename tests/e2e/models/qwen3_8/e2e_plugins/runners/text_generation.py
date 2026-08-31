@@ -627,7 +627,7 @@ class TextGenerationCausalRunner:
 
         if result.returncode != 0 or runtime_error:
             truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "", "cpp_binary")
+                result.stderr, ctx.artifacts_dir or "", "cpp_binary", case.name)
             meta["stderr_truncated"] = truncated
             if log_path:
                 meta["stderr_log"] = log_path

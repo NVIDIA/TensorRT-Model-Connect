@@ -351,10 +351,17 @@ class HybridTrtRunner:
                         cache_buf + offset, present_buf,
                         row_bytes, D2D, stream)
                 else:
-                    cudart.cudaMemcpyAsync(
-                        cache_buf, cache_buf + row_bytes,
-                        (self.max_cache_length - 1) * row_bytes,
-                        D2D, stream)
+                    # cudaMemcpyAsync is undefined for overlapping ranges, so the
+                    # cache-full shift stages through scratch, matching
+                    # Qwen38KvCache::advance() in the native runtime. One buffer
+                    # serves every layer because the copies are stream-ordered.
+                    shift_bytes = (self.max_cache_length - 1) * row_bytes
+                    if shift_bytes > 0:
+                        scratch = self._shift_scratch(shift_bytes)
+                        cudart.cudaMemcpyAsync(
+                            scratch, cache_buf + row_bytes, shift_bytes, D2D, stream)
+                        cudart.cudaMemcpyAsync(
+                            cache_buf, scratch, shift_bytes, D2D, stream)
                     offset = (self.max_cache_length - 1) * row_bytes
                     cudart.cudaMemcpyAsync(
                         cache_buf + offset, present_buf,
@@ -408,6 +415,23 @@ class HybridTrtRunner:
             all_results.append(self.step(next_token))
         return all_results
 
+    def _shift_scratch(self, nbytes: int) -> int:
+        """Device scratch for the cache-full shift, allocated on first overflow.
+
+        Mirrors Qwen38KvCache::shift_scratch() in the native runtime: a cache
+        that never fills never pays for the allocation.
+        """
+        current = getattr(self, "_d_shift_scratch", 0)
+        if current and getattr(self, "_shift_scratch_bytes", 0) >= nbytes:
+            return current
+        if current:
+            cudart.cudaFree(current)
+        err, ptr = cudart.cudaMalloc(nbytes)
+        _check_cuda(err)
+        self._d_shift_scratch = ptr
+        self._shift_scratch_bytes = nbytes
+        return ptr
+
     def __del__(self):
         if cudart is None:
             return
@@ -425,6 +449,8 @@ class HybridTrtRunner:
         bufs.extend(self._d_present_v)
         for d_ptr in self._d_debug.values():
             bufs.append(d_ptr)
+        if getattr(self, "_d_shift_scratch", 0):
+            bufs.append(self._d_shift_scratch)
         for d_ptr in bufs:
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):

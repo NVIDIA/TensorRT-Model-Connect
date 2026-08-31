@@ -329,17 +329,23 @@ void Qwen38KvCache::advance(int32_t n_tokens) {
         // src and dst overlap inside the same allocation, and cudaMemcpyAsync
         // is undefined for overlapping ranges, so stage through scratch. One
         // buffer serves every layer because all copies are ordered on stream_.
-        auto* scratch = static_cast<uint8_t*>(shift_scratch().data());
+        DeviceTensor& scratch_tensor = shift_scratch();
+        if (shift_bytes > 0 && !scratch_tensor.ok())
+            throw std::runtime_error(
+                "Qwen38KvCache: failed to allocate scratch for the cache shift");
+        auto* scratch = static_cast<uint8_t*>(scratch_tensor.data());
         for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
             auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
             auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(scratch, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
-                            stream_);
-            cudaMemcpyAsync(ck, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(scratch, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
-                            stream_);
-            cudaMemcpyAsync(cv, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            if (shift_bytes > 0) {
+                cudaMemcpyAsync(scratch, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
+                                stream_);
+                cudaMemcpyAsync(ck, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+                cudaMemcpyAsync(scratch, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
+                                stream_);
+                cudaMemcpyAsync(cv, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            }
             cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
                             cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,

@@ -137,18 +137,20 @@ static void test_mamba_pipeline() {
     cfg.vocab_size = 4;
     cfg.id_eos = 2; // argmax=2=eos
 
-    trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
-                                      "MambaPipeline");
-    check(std::string(pipeline.pipeline_type()) == "MambaPipeline", "mamba name");
+    // Scoped so the pipeline destructor runs while `stream` is still valid.
+    {
+        trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
+                                          "MambaPipeline");
+        check(std::string(pipeline.pipeline_type()) == "MambaPipeline", "mamba name");
 
-    trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 5;
-    auto result = pipeline.generate_ids({1}, gen_cfg);
+        trtmc::GenerateConfig gen_cfg;
+        gen_cfg.max_new_tokens = 5;
+        auto result = pipeline.generate_ids({1}, gen_cfg);
 
-    // argmax=2=eos → stops after 1 generated token
-    check(result.token_ids.size() == 2, "mamba: input + 1 generated");
-    check(result.token_ids[1] == 2, "mamba: generated token = 2 (eos)");
-
+        // argmax=2=eos → stops after 1 generated token
+        check(result.token_ids.size() == 2, "mamba: input + 1 generated");
+        check(result.token_ids[1] == 2, "mamba: generated token = 2 (eos)");
+    }
     cudaStreamDestroy(stream);
 }
 
@@ -176,18 +178,20 @@ static void test_rwkv_pipeline() {
     cfg.vocab_size = 4;
     cfg.id_eos = 99; // never hit
 
-    trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
-                                      "RwkvPipeline");
-    check(std::string(pipeline.pipeline_type()) == "RwkvPipeline", "rwkv name");
+    // Scoped so the pipeline destructor runs while `stream` is still valid.
+    {
+        trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
+                                          "RwkvPipeline");
+        check(std::string(pipeline.pipeline_type()) == "RwkvPipeline", "rwkv name");
 
-    trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 3;
-    auto result = pipeline.generate_ids({0}, gen_cfg);
+        trtmc::GenerateConfig gen_cfg;
+        gen_cfg.max_new_tokens = 3;
+        auto result = pipeline.generate_ids({0}, gen_cfg);
 
-    check(result.token_ids.size() == 4, "rwkv: input + 3 generated");
-    check(result.token_ids[1] == 2, "rwkv: all gen tokens = 2");
-    check(result.token_ids[3] == 2, "rwkv: last gen = 2");
-
+        check(result.token_ids.size() == 4, "rwkv: input + 3 generated");
+        check(result.token_ids[1] == 2, "rwkv: all gen tokens = 2");
+        check(result.token_ids[3] == 2, "rwkv: last gen = 2");
+    }
     cudaStreamDestroy(stream);
 }
 
@@ -210,8 +214,10 @@ static void test_hybrid_pipeline() {
     auto* tok = network->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
     auto* pos =
         network->addInput("position_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
+    // Qwen38KvCache(1, /*max_length=*/4, ...) writes a decode mask of width
+    // max_length + 1 = 5. Declaring 4 here would silently drop the final column.
     auto* mask =
-        network->addInput("attention_mask", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {4}});
+        network->addInput("attention_mask", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {5}});
 
     float cl[4] = {0.1f, 0.2f, 0.9f, 0.3f};
     auto* c = network->addConstant(nvinfer1::Dims{1, {4}},
@@ -251,17 +257,19 @@ static void test_hybrid_pipeline() {
     cfg.id_eos = 2;
     cfg.has_position_input = true;
 
-    trtmc::RecurrentPipeline pipeline(std::move(module), std::move(hybrid), cfg, stream,
-                                      "HybridPipeline");
-    check(std::string(pipeline.pipeline_type()) == "HybridPipeline", "hybrid name");
+    // Scoped so the pipeline destructor runs while `stream` is still valid.
+    {
+        trtmc::RecurrentPipeline pipeline(std::move(module), std::move(hybrid), cfg, stream,
+                                          "HybridPipeline");
+        check(std::string(pipeline.pipeline_type()) == "HybridPipeline", "hybrid name");
 
-    trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 5;
-    auto result = pipeline.generate_ids({0}, gen_cfg);
+        trtmc::GenerateConfig gen_cfg;
+        gen_cfg.max_new_tokens = 5;
+        auto result = pipeline.generate_ids({0}, gen_cfg);
 
-    check(result.token_ids.size() == 2, "hybrid: input + eos");
-    check(result.token_ids[1] == 2, "hybrid: eos generated");
-
+        check(result.token_ids.size() == 2, "hybrid: input + eos");
+        check(result.token_ids[1] == 2, "hybrid: eos generated");
+    }
     cudaStreamDestroy(stream);
 }
 
@@ -290,23 +298,25 @@ static void test_generate_applies_chat_template() {
     cfg.chat_template_format = "chatml";
 
     auto tokenizer = std::make_shared<RecordingTokenizer>();
-    trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
-                                      "MambaPipeline", tokenizer);
+    // Scoped so the pipeline destructor runs while `stream` is still valid.
+    {
+        trtmc::RecurrentPipeline pipeline(std::move(module), std::move(rs), cfg, stream,
+                                          "MambaPipeline", tokenizer);
 
-    trtmc::GenerateConfig gen_cfg;
-    gen_cfg.max_new_tokens = 1;
-    gen_cfg.use_chat_template = true;
-    gen_cfg.enable_thinking = false;
-    auto result = pipeline.generate("What is the capital of France?", gen_cfg);
+        trtmc::GenerateConfig gen_cfg;
+        gen_cfg.max_new_tokens = 1;
+        gen_cfg.use_chat_template = true;
+        gen_cfg.enable_thinking = false;
+        auto result = pipeline.generate("What is the capital of France?", gen_cfg);
 
-    check(result.text == "Paris", "chat template: generated text decodes");
-    check(tokenizer->last_text.find("<|im_start|>user\n") != std::string::npos,
-          "chat template: user prefix");
-    check(tokenizer->last_text.find("What is the capital of France?") != std::string::npos,
-          "chat template: prompt retained");
-    check(tokenizer->last_text.find("<think>\n\n</think>\n\n") != std::string::npos,
-          "chat template: no-thinking block is closed");
-
+        check(result.text == "Paris", "chat template: generated text decodes");
+        check(tokenizer->last_text.find("<|im_start|>user\n") != std::string::npos,
+              "chat template: user prefix");
+        check(tokenizer->last_text.find("What is the capital of France?") != std::string::npos,
+              "chat template: prompt retained");
+        check(tokenizer->last_text.find("<think>\n\n</think>\n\n") != std::string::npos,
+              "chat template: no-thinking block is closed");
+    }
     cudaStreamDestroy(stream);
 }
 

@@ -102,6 +102,9 @@ class Qwen38Plugin final : public IPipelinePlugin {
         require_positive(mamba_d_state, "mamba_d_state");
         require_positive(mamba_d_conv, "mamba_d_conv");
         require_positive(kv_dim, "num_key_value_heads * head_dim");
+        // A zero capacity would send advance() down the cache-full branch on the
+        // very first step, where shift_bytes is computed from max_length_ - 1.
+        require_positive(ctx.config.max_cache_length, "max_cache_length");
 
         // Qwen38KvCache for the attention layers
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
