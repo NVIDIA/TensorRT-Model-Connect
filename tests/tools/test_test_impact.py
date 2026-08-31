@@ -1555,6 +1555,25 @@ class TestNoImpact:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "configs/environment-cohorts/schema.json",
+            "configs/environment-cohorts/trt111-cu133.json",
+            "scripts/devToolkit/README.md",
+            "scripts/devToolkit/examples/prepare_environment.py",
+            "scripts/devToolkit/trtmc_devtoolkit/api.py",
+        ],
+    )
+    def test_devtoolkit_contract_triggers_tools_tier(self, imap, path):
+        """devToolkit contracts run their tools tests without model proofs."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "devtoolkit_contract"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_test_impact_tool_triggers_tools_tier(self, imap):
         """Changing impact analysis should run tools-tier tests."""
         match = test_impact.classify_file("tools/test_impact.py", imap)

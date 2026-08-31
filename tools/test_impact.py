@@ -2036,6 +2036,19 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=491,
+            name="devtoolkit_contract",
+            matcher=_path_startswith_any(
+                ("configs/environment-cohorts/", "scripts/devToolkit/")
+            ),
+            resolver=_match_result(
+                "devtoolkit_contract", _no_models, ["tools"], False
+            ),
+            covered_by=(
+                "TestNoImpact.test_devtoolkit_contract_triggers_tools_tier",
+            ),
+        ),
+        ClassificationRule(
+            priority=492,
             name="source_container_contract",
             matcher=_path_in({"Dockerfile.dev.aarch64", "Dockerfile.dev.x86"}),
             resolver=_match_result(
@@ -2046,7 +2059,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=492,
+            priority=493,
             name="community_cpu_contract",
             matcher=_path_in(
                 {
@@ -2065,14 +2078,14 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=493,
+            priority=494,
             name="github_ci_config",
             matcher=_path_startswith(".github/"),
             resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=494,
+            priority=495,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,
