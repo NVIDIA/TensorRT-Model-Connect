@@ -52,6 +52,7 @@ def write_success(
     wheel: Path | None,
     bundle: Path | None,
 ) -> Path:
+    (plan.state_dir / "failure-summary.json").unlink(missing_ok=True)
     return write_json(
         plan.state_dir / "receipt.json",
         {
@@ -75,6 +76,7 @@ def write_success(
 
 
 def write_failure(plan: PreparationPlan, error: BaseException) -> Path:
+    (plan.state_dir / "receipt.json").unlink(missing_ok=True)
     return write_json(
         plan.state_dir / "failure-summary.json",
         {

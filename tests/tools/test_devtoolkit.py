@@ -35,8 +35,9 @@ from trtmc_devtoolkit import (  # noqa: E402
 )
 from trtmc_devtoolkit.cohorts import CohortRegistry, normalize_architecture  # noqa: E402
 from trtmc_devtoolkit.doctor import EnvironmentDoctor  # noqa: E402
-from trtmc_devtoolkit.models import DevToolkitError  # noqa: E402
+from trtmc_devtoolkit.models import DevToolkitError, EnvironmentHandle  # noqa: E402
 from trtmc_devtoolkit.planner import image_fingerprint  # noqa: E402
+from trtmc_devtoolkit.receipt import write_failure, write_success  # noqa: E402
 from trtmc_devtoolkit.targets import (  # noqa: E402
     LocalEnvironment,
     _development_runtime_environment,
@@ -86,6 +87,13 @@ class RecordingRunner:
                 output = "10.0\n"
             elif arguments[-3:-1] == ["sh", "-c"]:
                 output = "100"
+        elif "-c" in arguments and "importlib.metadata.requires" in arguments[-1]:
+            output = json.dumps(
+                [
+                    "sentencepiece>=0.1.99",
+                    "apache-tvm-ffi==0.1.12",
+                ]
+            )
         result = subprocess.CompletedProcess(arguments, returncode, output, "")
         if check and returncode:
             raise DevToolkitError(f"fake command failed: {arguments}")
@@ -423,6 +431,73 @@ def test_managed_local_editable_install_preserves_cohort_tensorrt_version() -> N
     )
     assert runner.environments[editable_index] is not None
     assert runner.environments[editable_index]["TRTMC_PACKAGE_TENSORRT_VERSION"] == "11.2.1.2"
+
+
+def test_system_local_installs_base_dependencies_without_replacing_tensorrt() -> None:
+    runner = RecordingRunner()
+    toolkit = DevToolkit.from_checkout(
+        REPO_ROOT,
+        source_revision_override="a" * 40,
+        runner=runner,
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.2.1.2",
+            cuda="13.3",
+            architecture="aarch64",
+            target=LocalTarget(python="python3.12", dependency_mode="system"),
+        )
+    )
+
+    LocalEnvironment(REPO_ROOT, runner)._build_install(
+        plan,
+        Path("/system/venv/bin/python"),
+        {"PATH": "/system/venv/bin"},
+        "110",
+    )
+
+    installs = [
+        command
+        for command in runner.commands
+        if command[:4] == ["/system/venv/bin/python", "-m", "pip", "install"]
+    ]
+    assert "--no-deps" in installs[0]
+    assert installs[1][-2:] == ["sentencepiece>=0.1.99", "apache-tvm-ffi==0.1.12"]
+    assert not any(argument.lower().startswith("tensorrt") for argument in installs[1][4:])
+
+
+def test_terminal_receipts_are_mutually_exclusive(tmp_path: Path) -> None:
+    toolkit = DevToolkit.from_checkout(
+        REPO_ROOT,
+        state_root=tmp_path / "runs",
+        source_revision_override="a" * 40,
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.2.1.2",
+            cuda="13.3",
+            architecture="aarch64",
+            target=LocalTarget(),
+        )
+    )
+    environment = EnvironmentHandle(
+        kind="local",
+        fingerprint=plan.run_id,
+        trtmc="/run/trtmc",
+        python="/run/python",
+        activate_command=". /run/activate.sh",
+    )
+
+    write_failure(plan, RuntimeError("first attempt"))
+    write_success(plan, environment, wheel=None, bundle=None)
+
+    assert (plan.state_dir / "receipt.json").is_file()
+    assert not (plan.state_dir / "failure-summary.json").exists()
+
+    write_failure(plan, RuntimeError("retry"))
+
+    assert not (plan.state_dir / "receipt.json").exists()
+    assert (plan.state_dir / "failure-summary.json").is_file()
 
 
 @pytest.mark.parametrize(

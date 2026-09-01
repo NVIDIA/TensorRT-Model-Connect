@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -22,6 +23,39 @@ from .toolchain import ManagedLocalProvisioner
 IMAGE_FINGERPRINT_LABEL = "org.nvidia.trtmc.devtoolkit-input-fingerprint"
 RUN_LABEL = "org.nvidia.trtmc.devtoolkit-run"
 CONTAINER_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]+")
+
+
+def _installed_base_requirements(
+    python: Path,
+    runner: Runner,
+    *,
+    repository: Path,
+    environment: dict[str, str],
+) -> list[str]:
+    """Read the editable distribution's requirements without selecting TensorRT wheels."""
+    script = (
+        "import importlib.metadata, json; "
+        "requirements=importlib.metadata.requires('tensorrt-model-connect') or []; "
+        "print(json.dumps([item for item in requirements "
+        "if not item.lstrip().lower().startswith('tensorrt')]))"
+    )
+    raw = command_output(
+        runner,
+        [python, "-c", script],
+        cwd=repository,
+        env=environment,
+    )
+    try:
+        requirements = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise DevToolkitError(
+            "Could not read TRTMC Python requirements from editable package metadata"
+        ) from error
+    if not isinstance(requirements, list) or not all(
+        isinstance(requirement, str) and requirement.strip() for requirement in requirements
+    ):
+        raise DevToolkitError("TRTMC editable package metadata contains invalid requirements")
+    return requirements
 
 
 def _python_tag(version: str) -> str:
@@ -532,6 +566,11 @@ class LocalEnvironment:
             cwd=self.repository,
             env=runtime_env,
         )
+        self.runner.run(
+            [python, "-m", "pip", "check"],
+            cwd=self.repository,
+            env=runtime_env,
+        )
         handle = EnvironmentHandle(
             kind="local",
             fingerprint=plan.run_id,
@@ -566,6 +605,19 @@ class LocalEnvironment:
                 cwd=self.repository,
                 env=editable_environment,
             )
+            if plan.request.target.dependency_mode == "system":
+                requirements = _installed_base_requirements(
+                    python,
+                    self.runner,
+                    repository=self.repository,
+                    environment=editable_environment,
+                )
+                if requirements:
+                    self.runner.run(
+                        [python, "-m", "pip", "install", *requirements],
+                        cwd=self.repository,
+                        env=editable_environment,
+                    )
             trt_include = environment.get("TRTMC_TRT_INCLUDE_DIR", contract.tensorrt_include_dir)
             trt_library = environment.get(
                 "TRTMC_TRT_LIBRARY",
