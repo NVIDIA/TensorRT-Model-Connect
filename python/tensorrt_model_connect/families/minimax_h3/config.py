@@ -139,7 +139,8 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 text rows must satisfy 1 <= min <= opt <= max")
         if self.sequence_length != self.padded_sequence_length:
             raise ValueError(
-                "MiniMax-H3 padded_sequence_length must equal the maximum packed sequence"
+                "MiniMax-H3 requires no packed-sequence padding: "
+                "padded_sequence_length must equal the maximum packed sequence"
             )
         if self.rope_freq_dim * 6 > self.head_dim:
             raise ValueError("MiniMax-H3 rotary channels exceed head_dim")
