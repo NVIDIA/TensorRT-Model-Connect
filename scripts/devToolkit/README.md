@@ -5,8 +5,10 @@ TensorRT-Model-Connect build and installation environment. It is not installed
 as a console command and does not modify the host NVIDIA driver, CUDA toolkit,
 or TensorRT installation.
 
-The first checked-in environment cohort is TensorRT `11.1.0.106` with CUDA
-`13.3` on Linux `x86_64` and `aarch64`.
+Checked-in Local cohorts cover TensorRT `11.1.0.106` and `11.2.1.2` with CUDA
+`13.3` on Linux `x86_64` and `aarch64`. The checked-in Docker development
+images currently cover TensorRT `11.1.0.106` only; unsupported target/version
+combinations fail during planning.
 
 ## Docker development environment
 
@@ -51,7 +53,7 @@ fall back to the checkout.
 from trtmc_devtoolkit import DevToolkit, LocalTarget, PrepareRequest
 
 request = PrepareRequest(
-    tensorrt="11.1.0.106",
+    tensorrt="11.2.1.2",
     cuda="13.3",
     target=LocalTarget(python="python3.12", gpu="0"),
     mode="development",

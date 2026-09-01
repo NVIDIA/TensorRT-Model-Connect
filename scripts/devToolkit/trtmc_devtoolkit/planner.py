@@ -87,6 +87,7 @@ class Planner:
             cuda=request.cuda,
             architecture=architecture,
             python_version=request.python_version,
+            target=request.target.kind,
             allow_experimental=request.allow_experimental,
         )
         contract = cohort.architectures[architecture]

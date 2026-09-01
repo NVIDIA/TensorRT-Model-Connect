@@ -135,6 +135,7 @@ def test_resolves_exact_supported_cohort() -> None:
         cuda="13.3",
         architecture="aarch64",
         python_version="3.12",
+        target="docker",
         allow_experimental=False,
     )
 
@@ -155,13 +156,50 @@ def test_checked_in_cohorts_match_schema_and_package_default() -> None:
     with (REPO_ROOT / "pyproject.toml").open("rb") as stream:
         package = tomllib.load(stream)["tool"]["tensorrt-model-connect"]["package"]
 
-    supported = [cohort for cohort in cohorts if cohort["status"] == "supported"]
-    assert len(supported) == 1
-    assert supported[0]["tensorrt"]["version"] == package["default-tensorrt-version"]
+    docker_supported = [
+        cohort
+        for cohort in cohorts
+        if cohort["status"] == "supported" and "docker" in cohort["targets"]
+    ]
+    assert len(docker_supported) == 1
+    assert docker_supported[0]["tensorrt"]["version"] == package["default-tensorrt-version"]
     for architecture in ("x86_64", "aarch64"):
-        dockerfile = REPO_ROOT / supported[0]["architectures"][architecture]["dockerfile"]
+        dockerfile = REPO_ROOT / docker_supported[0]["architectures"][architecture]["dockerfile"]
         assert f"tensorrt.__version__ == '{package['default-tensorrt-version']}'" in (
             dockerfile.read_text(encoding="utf-8")
+        )
+
+
+def test_resolves_trt112_managed_local_cohort() -> None:
+    registry = CohortRegistry(REPO_ROOT / "configs" / "environment-cohorts")
+
+    cohort = registry.resolve(
+        tensorrt="11.2.1.2",
+        cuda="13.3",
+        architecture="x86_64",
+        python_version="3.12",
+        target="local",
+        allow_experimental=False,
+    )
+
+    assert cohort.id == "trt112-cu133"
+    assert cohort.targets == ("local",)
+    assert cohort.architectures["x86_64"].tensorrt_headers.sha256 == (
+        "419b21ac4cdb18b4ddf65b72e5e816fccab9db789730aa96cf228da982104e29"
+    )
+
+
+def test_rejects_trt112_docker_target_before_provisioning() -> None:
+    toolkit = DevToolkit.from_checkout(REPO_ROOT)
+
+    with pytest.raises(DevToolkitError, match="does not support the docker target"):
+        toolkit.plan(
+            PrepareRequest(
+                tensorrt="11.2.1.2",
+                cuda="13.3",
+                architecture="x86_64",
+                target=DockerTarget(),
+            )
         )
 
 
@@ -174,6 +212,7 @@ def test_rejects_nearest_or_partial_version_match() -> None:
             cuda="13.3",
             architecture="aarch64",
             python_version="3.12",
+            target="local",
             allow_experimental=False,
         )
 

@@ -13,6 +13,7 @@ from typing import Literal
 PrepareMode = Literal["development", "installed"]
 CohortStatus = Literal["supported", "experimental"]
 LocalDependencyMode = Literal["managed", "system"]
+TargetKind = Literal["local", "docker"]
 
 
 class DevToolkitError(RuntimeError):
@@ -52,6 +53,7 @@ class EnvironmentCohort:
     schema_version: int
     id: str
     status: CohortStatus
+    targets: tuple[TargetKind, ...]
     tensorrt_version: str
     tensorrt_apt_version: str
     cuda_version: str

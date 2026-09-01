@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "id": "trt111-cu133",
+  "id": "trt112-cu133",
   "status": "supported",
-  "targets": ["local", "docker"],
+  "targets": ["local"],
   "tensorrt": {
-    "version": "11.1.0.106",
-    "apt_version": "11.1.0.106-1+cuda13.3"
+    "version": "11.2.1.2",
+    "apt_version": "11.2.1.2-1+cuda13.3"
   },
   "cuda": {
     "version": "13.3"
@@ -32,7 +32,7 @@
       {"name": "nvidia-nvjitlink", "version": "13.3.33"},
       {"name": "nvidia-cublas", "version": "13.6.1.10"},
       {"name": "nvidia-curand", "version": "10.4.3.29"},
-      {"name": "tensorrt", "version": "11.1.0.106"}
+      {"name": "tensorrt", "version": "11.2.1.2"}
     ]
   },
   "architectures": {
@@ -44,8 +44,8 @@
       "tensorrt_include_dir": "/usr/include/x86_64-linux-gnu",
       "tensorrt_library_dir": "/usr/lib/x86_64-linux-gnu",
       "tensorrt_headers": {
-        "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/libnvinfer-headers-dev_11.1.0.106-1+cuda13.3_amd64.deb",
-        "sha256": "af7870ee878dc9afb5ed4236654bcb2663e133dca78432cfcafad74b36a1e88a"
+        "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/libnvinfer-headers-dev_11.2.1.2-1+cuda13.3_amd64.deb",
+        "sha256": "419b21ac4cdb18b4ddf65b72e5e816fccab9db789730aa96cf228da982104e29"
       }
     },
     "aarch64": {
@@ -56,8 +56,8 @@
       "tensorrt_include_dir": "/usr/include/aarch64-linux-gnu",
       "tensorrt_library_dir": "/usr/lib/aarch64-linux-gnu",
       "tensorrt_headers": {
-        "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/libnvinfer-headers-dev_11.1.0.106-1+cuda13.3_arm64.deb",
-        "sha256": "b0304cf0e5e4f7596562706a9826a80f76b0d0c95b49406a52a9e9a398546254"
+        "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/libnvinfer-headers-dev_11.2.1.2-1+cuda13.3_arm64.deb",
+        "sha256": "2937bbf91b0d75bf07699e1004bc124ed63355f5700dbedd4dcada7752376cd2"
       }
     }
   }

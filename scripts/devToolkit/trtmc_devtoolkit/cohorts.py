@@ -47,10 +47,18 @@ def load_cohort(path: Path) -> EnvironmentCohort:
         raise DevToolkitError(f"{path}: schema_version must be 1")
     cohort_id = payload.get("id")
     status = payload.get("status")
+    targets = payload.get("targets")
     if not isinstance(cohort_id, str) or not cohort_id:
         raise DevToolkitError(f"{path}: id must be a non-empty string")
     if status not in {"supported", "experimental"}:
         raise DevToolkitError(f"{path}: status must be supported or experimental")
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or not all(target in {"local", "docker"} for target in targets)
+        or len(targets) != len(set(targets))
+    ):
+        raise DevToolkitError(f"{path}: targets must contain unique local/docker values")
     tensorrt = payload.get("tensorrt", {})
     cuda = payload.get("cuda", {})
     trt_version = tensorrt.get("version")
@@ -132,6 +140,7 @@ def load_cohort(path: Path) -> EnvironmentCohort:
         schema_version=1,
         id=cohort_id,
         status=status,
+        targets=tuple(targets),
         tensorrt_version=trt_version,
         tensorrt_apt_version=apt_version,
         cuda_version=cuda_version,
@@ -163,6 +172,7 @@ class CohortRegistry:
         cuda: str,
         architecture: str,
         python_version: str,
+        target: str,
         allow_experimental: bool,
     ) -> EnvironmentCohort:
         matches = [
@@ -183,6 +193,11 @@ class CohortRegistry:
         if cohort.status == "experimental" and not allow_experimental:
             raise DevToolkitError(
                 f"Environment cohort {cohort.id} is experimental; opt in explicitly"
+            )
+        if target not in cohort.targets:
+            raise DevToolkitError(
+                f"Environment cohort {cohort.id} does not support the {target} target; "
+                f"supported targets: {', '.join(cohort.targets)}"
             )
         if architecture not in cohort.architectures:
             raise DevToolkitError(
