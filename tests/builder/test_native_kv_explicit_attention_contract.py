@@ -15,6 +15,7 @@ _FIXED_KV_OWNERS = {
     _FAMILIES / "qwen" / "graph_ops.py",
     _FAMILIES / "llama" / "graph_ops.py",
     _FAMILIES / "lfm2" / "model.py",
+    _FAMILIES / "lfm2_moe" / "model.py",
 }
 
 

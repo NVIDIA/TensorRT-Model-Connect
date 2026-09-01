@@ -147,6 +147,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "LiquidAI/LFM2-8B-A1B",
+      "revision": "c1c44ff9fc00db3ebf4516970563f5f383d23670",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "lfm2_moe",
+      "architectures": [
+        "Lfm2MoeForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "MiniMaxAI/MiniMax-H3",
       "revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
       "revision_source": "declared",

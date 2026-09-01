@@ -158,6 +158,8 @@ models:
     workloads: [mmlu_continuation_parity]
   lfm2-700m:
     workloads: [mmlu_continuation_parity]
+  lfm2-8b-a1b:
+    workloads: [mmlu_continuation_parity]
   magpie-tts-357m:
     workloads: [seedtts_en_tts_intelligibility]
   mamba-130m:

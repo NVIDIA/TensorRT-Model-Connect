@@ -30,6 +30,10 @@ excluded_profiles:
     reason: *lfm2_performance_exclusion
   - model: lfm2-700m
     reason: *lfm2_performance_exclusion
+  - model: lfm2-8b-a1b
+    reason: >-
+      LFM2-MoE functional and reference-parity qualification is present, but
+      this change does not add a matching release-performance workload or receipt.
   - model: minimax-h3-768p
     reason: >-
       The pinned Diffusers reference for MiniMax-H3 has not yet been integrated
