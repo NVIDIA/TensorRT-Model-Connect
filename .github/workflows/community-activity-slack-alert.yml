@@ -75,7 +75,6 @@ jobs:
           ITEM_TITLE: ${{ github.event.pull_request.title || github.event.issue.title || github.event.discussion.title }}
           ITEM_URL: ${{ github.event.comment.html_url || github.event.pull_request.html_url || github.event.issue.html_url || github.event.discussion.html_url }}
           IS_PULL_REQUEST: ${{ github.event_name == 'pull_request_target' || github.event.issue.pull_request != null }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -99,7 +98,6 @@ jobs:
           esac
 
           payload="$(jq -cn \
-            --arg repository "$REPOSITORY" \
             --arg kind "$item_kind" \
             --arg action "$EVENT_ACTION" \
             --arg author "$ITEM_AUTHOR" \
@@ -115,7 +113,6 @@ jobs:
              {
                text: (":bell: External community activity\n" +
                  $kind + " #" + $number + " · " + $action + "\n" +
-                 $repository + "\n" +
                  $author + " (" + $association + ")"),
                blocks: [
                  {
@@ -129,10 +126,8 @@ jobs:
                  {
                    type: "section",
                    fields: [
-                     {type: "mrkdwn", text: ("*Repository:*\n" + $repository)},
                      {type: "mrkdwn", text: ("*Event:*\n" + $kind + " · " + $action)},
-                     {type: "mrkdwn", text: ("*Author:*\n" + $author)},
-                     {type: "mrkdwn", text: ("*Association:*\n" + $association)}
+                     {type: "mrkdwn", text: ("*Author:*\n" + $author + " (" + $association + ")")}
                    ]
                  },
                  {

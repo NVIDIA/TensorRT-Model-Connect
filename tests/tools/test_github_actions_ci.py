@@ -330,8 +330,11 @@ def test_community_activity_alert_uses_structured_slack_blocks() -> None:
     assert 'type: "plain_text"' in script
     assert 'type: "section"' in script
     assert 'fields: [' in script
-    for label in ("Repository", "Event", "Author", "Association"):
+    for label in ("Event", "Author"):
         assert f'"*{label}:*\\n"' in script
+    assert '"*Repository:*\\n"' not in script
+    assert '"*Association:*\\n"' not in script
+    assert "$repository" not in script
 
 
 def test_only_pages_workflow_creates_deployment_objects() -> None:
