@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -36,6 +37,11 @@ from trtmc_devtoolkit.cohorts import CohortRegistry, normalize_architecture  # n
 from trtmc_devtoolkit.doctor import EnvironmentDoctor  # noqa: E402
 from trtmc_devtoolkit.models import DevToolkitError  # noqa: E402
 from trtmc_devtoolkit.planner import image_fingerprint  # noqa: E402
+from trtmc_devtoolkit.targets import (  # noqa: E402
+    _development_runtime_environment,
+    _write_local_activation,
+)
+from trtmc_devtoolkit.toolchain import ManagedLocalProvisioner  # noqa: E402
 
 
 class RecordingRunner:
@@ -57,10 +63,14 @@ class RecordingRunner:
         self.commands.append(arguments)
         output = ""
         returncode = 0
-        if arguments[:3] in (
-            ["docker", "image", "inspect"],
-            ["docker", "container", "inspect"],
-        ) and "--format" not in arguments:
+        if (
+            arguments[:3]
+            in (
+                ["docker", "image", "inspect"],
+                ["docker", "container", "inspect"],
+            )
+            and "--format" not in arguments
+        ):
             returncode = 1
         elif arguments[0] == "nvidia-smi":
             output = "NVIDIA GB300, GPU-uuid, 595.58.03, 10.0, 191000\n"
@@ -204,7 +214,7 @@ def test_local_doctor_checks_exact_python_and_native_tensorrt(tmp_path: Path) ->
         tensorrt="11.1.0.106",
         cuda="13.3",
         architecture="aarch64",
-        target=LocalTarget(python="python3.12"),
+        target=LocalTarget(python="python3.12", dependency_mode="system"),
     )
 
     probes, sm = EnvironmentDoctor(repository, LocalProbeRunner()).inspect(
@@ -244,11 +254,101 @@ def test_local_doctor_rejects_version_mismatch(
         tensorrt="11.1.0.106",
         cuda="13.3",
         architecture="aarch64",
-        target=LocalTarget(python="python3.12"),
+        target=LocalTarget(python="python3.12", dependency_mode="system"),
     )
 
     with pytest.raises(DevToolkitError, match=re.escape(failure)):
         EnvironmentDoctor(repository, runner).inspect(request, cohort, "aarch64")
+
+
+def test_managed_local_doctor_checks_bootstrap_prerequisites_not_system_toolchain(
+    tmp_path: Path,
+) -> None:
+    repository = _minimal_repository(tmp_path)
+    cohort = CohortRegistry(repository / "configs" / "environment-cohorts").load_all()[0]
+    runner = LocalProbeRunner()
+    request = PrepareRequest(
+        tensorrt="11.1.0.106",
+        cuda="13.3",
+        architecture="aarch64",
+        target=LocalTarget(python="python3.12", dependency_mode="managed"),
+    )
+
+    probes, sm = EnvironmentDoctor(repository, runner).inspect(request, cohort, "aarch64")
+
+    names = {probe.name for probe in probes}
+    assert sm == "100"
+    assert {"cxx-compiler", "git", "dpkg-deb", "python"} <= names
+    assert "cuda-toolkit" not in names
+    assert "tensorrt-python" not in names
+    assert not any(command[0] == "nvcc" for command in runner.commands)
+
+
+def test_managed_toolchain_header_and_linker_contract(tmp_path: Path) -> None:
+    header = tmp_path / "NvInferVersion.h"
+    header.write_text(
+        "\n".join(
+            (
+                "#define TRT_MAJOR_ENTERPRISE 11",
+                "#define TRT_MINOR_ENTERPRISE 1",
+                "#define TRT_PATCH_ENTERPRISE 0",
+                "#define TRT_BUILD_ENTERPRISE 106",
+                "#define NV_TENSORRT_MAJOR TRT_MAJOR_ENTERPRISE",
+                "#define NV_TENSORRT_MINOR TRT_MINOR_ENTERPRISE",
+                "#define NV_TENSORRT_PATCH TRT_PATCH_ENTERPRISE",
+                "#define NV_TENSORRT_BUILD TRT_BUILD_ENTERPRISE",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    library_dir = tmp_path / "lib"
+    library_dir.mkdir()
+    (library_dir / "libnvinfer.so.11").touch()
+
+    assert ManagedLocalProvisioner._header_version(header) == "11.1.0.106"
+    linker = ManagedLocalProvisioner._ensure_linker_name(library_dir, "libnvinfer.so", "11")
+
+    assert linker.is_symlink()
+    assert linker.resolve() == library_dir / "libnvinfer.so.11"
+
+
+def test_local_activation_restores_full_runtime_environment(tmp_path: Path) -> None:
+    venv = tmp_path / "venv with spaces"
+    activate = venv / "bin" / "activate"
+    activate.parent.mkdir(parents=True)
+    activate.write_text("export FROM_VENV=ready\n", encoding="utf-8")
+    script = tmp_path / "activate.sh"
+    environment = {
+        "CUDA_HOME": "/managed cuda",
+        "TRTMC_MODEL_PLUGIN_DIR": "/models/it's-ready",
+    }
+
+    _write_local_activation(script, venv, environment)
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            '. "$1"; printf "%s\\n" "$FROM_VENV" "$CUDA_HOME" "$TRTMC_MODEL_PLUGIN_DIR"',
+            "bash",
+            str(script),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == ["ready", "/managed cuda", "/models/it's-ready"]
+    assert f". {shlex.quote(str(activate))}" in script.read_text(encoding="utf-8")
+
+
+def test_development_runtime_environment_places_native_cli_on_path(tmp_path: Path) -> None:
+    build = tmp_path / "build-sm103"
+
+    environment = _development_runtime_environment({"PATH": "/venv/bin"}, build)
+
+    assert environment["PATH"] == f"{build}:/venv/bin"
+    assert environment["TRTMC_MODEL_PLUGIN_DIR"] == str(build / "models")
 
 
 @pytest.mark.parametrize(
@@ -309,7 +409,9 @@ def test_plan_is_read_only_and_apply_prepares_owned_container(
     receipt = json.loads(result.receipt.read_text(encoding="utf-8"))
     assert receipt["status"] == "ready"
     assert receipt["environment"]["container_name"] == "trtmc-dev-gb300-test"
-    docker_build = next(command for command in runner.commands if command[:2] == ["docker", "build"])
+    docker_build = next(
+        command for command in runner.commands if command[:2] == ["docker", "build"]
+    )
     assert docker_build[-1] == str(repository / "requirements")
     docker_run = next(command for command in runner.commands if command[:2] == ["docker", "run"])
     assert f"org.nvidia.trtmc.devtoolkit-run={plan.run_id}" in docker_run

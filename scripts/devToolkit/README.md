@@ -62,9 +62,33 @@ result = toolkit.apply(toolkit.plan(request))
 print(result.environment.activate_command)
 ```
 
-Local preparation first requires an already matching CUDA/TensorRT toolchain.
-It creates a managed venv under `.devtoolkit/` and never runs `apt`, changes
-system library links, or installs drivers.
+Source the printed command to enter the prepared environment. The generated
+activation script restores the venv, selected CUDA/TensorRT paths, GPU
+selection, and development model-plugin path in a new shell.
+
+The default managed Local mode creates an isolated venv under `.devtoolkit/`,
+installs the cohort's exact pinned CUDA compiler/runtime and TensorRT
+Python/native packages, downloads a checksum-pinned TensorRT header artifact,
+and builds against those user-owned paths. It does not run `apt`, change system
+library links, or install a driver. The NVIDIA driver and a host C++ compiler
+remain prerequisites. The first preparation downloads several GiB; pip's cache
+is reused by later runs.
+
+To validate and reuse an already provisioned system toolchain instead, opt into
+the fail-closed system mode:
+
+```python
+target = LocalTarget(
+    python="python3.12",
+    gpu="0",
+    dependency_mode="system",
+)
+```
+
+System mode requires exact CUDA, TensorRT Python/native libraries, headers,
+CMake, and Ninja before preparation starts. Managed mode ignores conflicting
+system CUDA/TensorRT installations and records the selected user-owned paths in
+the environment handle and receipt.
 
 ## Optional model smoke
 

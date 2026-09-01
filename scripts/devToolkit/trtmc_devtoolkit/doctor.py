@@ -56,9 +56,7 @@ class EnvironmentDoctor:
         results: list[ProbeResult] = []
         selected = cohort.architectures[architecture]
         if shutil.disk_usage(self.repository).free < 20 * 1024**3:
-            results.append(
-                ProbeResult("disk-space", "warning", "less than 20 GiB is free")
-            )
+            results.append(ProbeResult("disk-space", "warning", "less than 20 GiB is free"))
         else:
             results.append(ProbeResult("disk-space", "pass", "at least 20 GiB is free"))
 
@@ -89,13 +87,21 @@ class EnvironmentDoctor:
             )
             results.append(docker_result)
         else:
-            for name, command in (
-                ("cmake", ["cmake", "--version"]),
-                ("ninja", ["ninja", "--version"]),
-            ):
-                result, _ = _probe_command(
-                    self.runner, command, cwd=self.repository, name=name
+            managed = request.target.dependency_mode == "managed"
+            commands = (
+                (
+                    ("cxx-compiler", ["c++", "--version"]),
+                    ("git", ["git", "--version"]),
+                    ("dpkg-deb", ["dpkg-deb", "--version"]),
                 )
+                if managed
+                else (
+                    ("cmake", ["cmake", "--version"]),
+                    ("ninja", ["ninja", "--version"]),
+                )
+            )
+            for name, command in commands:
+                result, _ = _probe_command(self.runner, command, cwd=self.repository, name=name)
                 results.append(result)
             python_result, python_output = _probe_command(
                 self.runner,
@@ -107,16 +113,23 @@ class EnvironmentDoctor:
                 cwd=self.repository,
                 name="python",
             )
-            if (
-                python_result.status == "pass"
-                and python_output != request.python_version
-            ):
+            if python_result.status == "pass" and python_output != request.python_version:
                 python_result = ProbeResult(
                     "python",
                     "fail",
                     f"requested {request.python_version}; found {python_output}",
                 )
             results.append(python_result)
+            if managed:
+                failures = [result for result in results if result.status == "fail"]
+                if failures:
+                    detail = "; ".join(f"{result.name}: {result.detail}" for result in failures)
+                    raise DevToolkitError(f"Environment doctor failed: {detail}")
+                if not sm:
+                    raise DevToolkitError(
+                        "Environment doctor could not resolve the selected GPU SM"
+                    )
+                return tuple(results), sm
             nvcc_result, nvcc_output = _probe_command(
                 self.runner,
                 ["nvcc", "--version"],
@@ -160,10 +173,7 @@ class EnvironmentDoctor:
                 cwd=self.repository,
                 name="tensorrt-native",
             )
-            if (
-                native_result.status == "pass"
-                and native_output != cohort.tensorrt_version
-            ):
+            if native_result.status == "pass" and native_output != cohort.tensorrt_version:
                 native_result = ProbeResult(
                     "tensorrt-native",
                     "fail",

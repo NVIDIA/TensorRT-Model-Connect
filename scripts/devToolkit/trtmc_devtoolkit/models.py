@@ -12,10 +12,28 @@ from typing import Literal
 
 PrepareMode = Literal["development", "installed"]
 CohortStatus = Literal["supported", "experimental"]
+LocalDependencyMode = Literal["managed", "system"]
 
 
 class DevToolkitError(RuntimeError):
     """A user-facing environment preparation error."""
+
+
+@dataclass(frozen=True)
+class PackagePin:
+    name: str
+    version: str
+
+
+@dataclass(frozen=True)
+class DownloadArtifact:
+    url: str
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ManagedLocalContract:
+    python_packages: tuple[PackagePin, ...]
 
 
 @dataclass(frozen=True)
@@ -26,6 +44,7 @@ class ArchitectureContract:
     wheel_platform: str
     tensorrt_include_dir: str
     tensorrt_library_dir: str
+    tensorrt_headers: DownloadArtifact
 
 
 @dataclass(frozen=True)
@@ -38,6 +57,7 @@ class EnvironmentCohort:
     cuda_version: str
     python_versions: tuple[str, ...]
     architectures: dict[str, ArchitectureContract]
+    managed_local: ManagedLocalContract
     source: Path = field(compare=False)
 
 
@@ -63,10 +83,11 @@ class DockerTarget:
 
 @dataclass(frozen=True)
 class LocalTarget:
-    """Prepare a managed venv without modifying system CUDA or TensorRT."""
+    """Prepare a local venv without modifying system CUDA, TensorRT, or drivers."""
 
     python: str = "python3"
     gpu: str = "0"
+    dependency_mode: LocalDependencyMode = "managed"
     kind: Literal["local"] = "local"
 
 

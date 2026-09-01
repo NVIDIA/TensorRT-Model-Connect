@@ -11,7 +11,8 @@
     "tensorrt",
     "cuda",
     "python_versions",
-    "architectures"
+    "architectures",
+    "managed_local"
   ],
   "properties": {
     "schema_version": {"const": 1},
@@ -40,6 +41,26 @@
       "uniqueItems": true,
       "items": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"}
     },
+    "managed_local": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python_packages"],
+      "properties": {
+        "python_packages": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+              "version": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
     "architectures": {
       "type": "object",
       "minProperties": 1,
@@ -53,7 +74,8 @@
           "container_python_version",
           "wheel_platform",
           "tensorrt_include_dir",
-          "tensorrt_library_dir"
+          "tensorrt_library_dir",
+          "tensorrt_headers"
         ],
         "properties": {
           "dockerfile": {"type": "string", "minLength": 1},
@@ -61,7 +83,16 @@
           "container_python_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
           "wheel_platform": {"type": "string", "pattern": "^manylinux_2_[0-9]+_(x86_64|aarch64)$"},
           "tensorrt_include_dir": {"type": "string", "pattern": "^/"},
-          "tensorrt_library_dir": {"type": "string", "pattern": "^/"}
+          "tensorrt_library_dir": {"type": "string", "pattern": "^/"},
+          "tensorrt_headers": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["url", "sha256"],
+            "properties": {
+              "url": {"type": "string", "pattern": "^https://"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
         }
       }
     }

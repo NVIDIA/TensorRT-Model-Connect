@@ -13,6 +13,27 @@
     "3.10",
     "3.12"
   ],
+  "managed_local": {
+    "python_packages": [
+      {"name": "cmake", "version": "4.3.0"},
+      {"name": "ninja", "version": "1.13.2"},
+      {"name": "patchelf", "version": "0.19.1.0"},
+      {"name": "setuptools", "version": "81.0.0"},
+      {"name": "apache-tvm-ffi", "version": "0.1.12"},
+      {"name": "cuda-python", "version": "13.0.3"},
+      {"name": "numpy", "version": "2.4.4"},
+      {"name": "transformers", "version": "5.2.0"},
+      {"name": "nvidia-cuda-nvcc", "version": "13.3.73"},
+      {"name": "nvidia-cuda-runtime", "version": "13.3.29"},
+      {"name": "nvidia-cuda-crt", "version": "13.3.73"},
+      {"name": "nvidia-cuda-cccl", "version": "13.3.3.4.1"},
+      {"name": "nvidia-cuda-nvrtc", "version": "13.3.33"},
+      {"name": "nvidia-nvjitlink", "version": "13.3.33"},
+      {"name": "nvidia-cublas", "version": "13.6.1.10"},
+      {"name": "nvidia-curand", "version": "10.4.3.29"},
+      {"name": "tensorrt", "version": "11.1.0.106"}
+    ]
+  },
   "architectures": {
     "x86_64": {
       "dockerfile": "Dockerfile.dev.x86",
@@ -20,7 +41,11 @@
       "container_python_version": "3.12",
       "wheel_platform": "manylinux_2_39_x86_64",
       "tensorrt_include_dir": "/usr/include/x86_64-linux-gnu",
-      "tensorrt_library_dir": "/usr/lib/x86_64-linux-gnu"
+      "tensorrt_library_dir": "/usr/lib/x86_64-linux-gnu",
+      "tensorrt_headers": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/libnvinfer-headers-dev_11.1.0.106-1+cuda13.3_amd64.deb",
+        "sha256": "af7870ee878dc9afb5ed4236654bcb2663e133dca78432cfcafad74b36a1e88a"
+      }
     },
     "aarch64": {
       "dockerfile": "Dockerfile.dev.aarch64",
@@ -28,7 +53,11 @@
       "container_python_version": "3.12",
       "wheel_platform": "manylinux_2_39_aarch64",
       "tensorrt_include_dir": "/usr/include/aarch64-linux-gnu",
-      "tensorrt_library_dir": "/usr/lib/aarch64-linux-gnu"
+      "tensorrt_library_dir": "/usr/lib/aarch64-linux-gnu",
+      "tensorrt_headers": {
+        "url": "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/libnvinfer-headers-dev_11.1.0.106-1+cuda13.3_arm64.deb",
+        "sha256": "b0304cf0e5e4f7596562706a9826a80f76b0d0c95b49406a52a9e9a398546254"
+      }
     }
   }
 }
