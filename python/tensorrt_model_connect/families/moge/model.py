@@ -993,11 +993,12 @@ def _build_native_engine(
     if hasattr(config, "builder_optimization_level"):
         # TRT 11.2 optimization level 3 tries to absorb the dynamic FP32
         # decomposable-attention chain into one Myelin ForeignNode, whose
-        # dynamic BMM fallback has no implementation. Level 0 preserves the
-        # native IAttention decomposition and builds the full 64..2048 profile.
-        config.builder_optimization_level = 0
+        # dynamic BMM fallback has no implementation. Level 1 preserves the
+        # native IAttention decomposition and full 64..2048 profile while
+        # still timing tactics instead of accepting the first valid choice.
+        config.builder_optimization_level = 1
     if hasattr(config, "avg_timing_iterations"):
-        config.avg_timing_iterations = 1
+        config.avg_timing_iterations = 3
     if hasattr(config, "max_aux_streams"):
         config.max_aux_streams = 0
     if verbose:

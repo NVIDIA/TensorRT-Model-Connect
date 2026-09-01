@@ -122,6 +122,8 @@ def test_production_builder_is_fixed_and_tensor_rt_native_only() -> None:
         "GELU_ERF",
         "first_transpose=(0, 3, 1, 2)",
         "_NUM_TOKENS = 1800",
+        "config.builder_optimization_level = 1",
+        "config.avg_timing_iterations = 3",
     ):
         assert required in source
     for output in ("points", "mask", "metric_scale"):
