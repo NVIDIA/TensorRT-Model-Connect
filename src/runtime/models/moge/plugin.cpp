@@ -37,7 +37,8 @@ class MogePlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& context) override {
         return std::make_unique<MogePipeline>(load_moge_engine(context),
-                                              context.bundle.info.model_id);
+                                              context.bundle.info.model_id,
+                                              context.bundle.info.precision == "fp16");
     }
 };
 

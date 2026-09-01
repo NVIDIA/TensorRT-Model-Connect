@@ -32,6 +32,8 @@ _NUM_TOKENS = 1800
 _MIN_IMAGE_SIZE = 64
 _OPT_IMAGE_SIZE = 518
 _MAX_IMAGE_SIZE = 2048
+_FAST_IMAGE_HEIGHT = 540
+_FAST_IMAGE_WIDTH = 960
 
 
 def _require_torch():
@@ -56,10 +58,13 @@ def _checkpoint_digest(path: Path) -> str:
 class _NativeMogeGraph:
     """Small family-local vocabulary for composing the exact MoGe graph."""
 
-    def __init__(self, trt: Any, network: Any, state: dict[str, Any]) -> None:
+    def __init__(
+        self, trt: Any, network: Any, state: dict[str, Any], *, fast_path: bool = False
+    ) -> None:
         self.trt = trt
         self.network = network
         self.state = state
+        self.fast_path = fast_path
         # TensorRT may retain host weight views until serialization finishes.
         self._host_weights: list[np.ndarray] = []
 
@@ -236,11 +241,20 @@ class _NativeMogeGraph:
         *,
         stride: int = 1,
         replicate_padding: int = 0,
+        compute_dtype: Any | None = None,
     ) -> Any:
         weight = self._array(f"{module}.weight")
         if weight.ndim != 4:
             raise ValueError(f"MoGe convolution {module!r} does not have a 4D kernel")
         bias = self._array(f"{module}.bias", (weight.shape[0],))
+        compute_dtype = compute_dtype or self.trt.float32
+        if compute_dtype == self.trt.float16:
+            weight = np.ascontiguousarray(weight, dtype=np.float16)
+            bias = np.ascontiguousarray(bias, dtype=np.float16)
+            self._host_weights.extend((weight, bias))
+        elif compute_dtype != self.trt.float32:
+            raise ValueError(f"Unsupported MoGe convolution compute dtype: {compute_dtype}")
+        tensor = self.cast(tensor, compute_dtype, f"{name}.input_cast")
         padded = self.replicate_pad(tensor, replicate_padding, f"{name}.pad")
         layer = self._layer(
             self.network.add_convolution_nd(
@@ -257,12 +271,27 @@ class _NativeMogeGraph:
         layer.padding_nd = (0, 0)
         return layer.get_output(0)
 
-    def deconvolution(self, tensor: Any, module: str, name: str) -> Any:
+    def deconvolution(
+        self,
+        tensor: Any,
+        module: str,
+        name: str,
+        *,
+        compute_dtype: Any | None = None,
+    ) -> Any:
         weight = self._array(f"{module}.weight")
         if weight.ndim != 4:
             raise ValueError(f"MoGe deconvolution {module!r} does not have a 4D kernel")
         output_channels = int(weight.shape[1])
         bias = self._array(f"{module}.bias", (output_channels,))
+        compute_dtype = compute_dtype or self.trt.float32
+        if compute_dtype == self.trt.float16:
+            weight = np.ascontiguousarray(weight, dtype=np.float16)
+            bias = np.ascontiguousarray(bias, dtype=np.float16)
+            self._host_weights.extend((weight, bias))
+        elif compute_dtype != self.trt.float32:
+            raise ValueError(f"Unsupported MoGe deconvolution compute dtype: {compute_dtype}")
+        tensor = self.cast(tensor, compute_dtype, f"{name}.input_cast")
         layer = self._layer(
             self.network.add_deconvolution_nd(
                 tensor,
@@ -278,15 +307,45 @@ class _NativeMogeGraph:
         layer.padding_nd = (0, 0)
         return layer.get_output(0)
 
-    def linear(self, tensor: Any, module: str, name: str) -> Any:
+    def linear(
+        self,
+        tensor: Any,
+        module: str,
+        name: str,
+        *,
+        compute_dtype: Any | None = None,
+        output_dtype: Any | None = None,
+    ) -> Any:
         weight = self._array(f"{module}.weight")
         if weight.ndim != 2:
             raise ValueError(f"MoGe linear {module!r} does not have a 2D weight")
         output_width, input_width = (int(value) for value in weight.shape)
         bias = self._array(f"{module}.bias", (output_width,))
+        compute_dtype = compute_dtype or self.trt.float32
+        if compute_dtype == self.trt.float16:
+            constant_dtype = np.float16
+            weight = np.ascontiguousarray(weight, dtype=np.float16)
+            bias = np.ascontiguousarray(bias, dtype=np.float16)
+            self._host_weights.extend((weight, bias))
+        elif compute_dtype != self.trt.float32:
+            raise ValueError(f"Unsupported MoGe linear compute dtype: {compute_dtype}")
+        else:
+            constant_dtype = np.float32
+        tensor = self.cast(tensor, compute_dtype, f"{name}.input_cast")
         rank = len(tuple(tensor.shape))
-        matrix_shape = (1,) * max(0, rank - 2) + (output_width, input_width)
-        rhs = self.constant(weight.reshape(matrix_shape), name=f"{name}.weight")
+        restore_shape = None
+        if rank > 2:
+            input_shape = self.shape(tensor, f"{name}.input_shape")
+            leading = [
+                self.shape_index(input_shape, index, f"{name}.output_dim_{index}")
+                for index in range(rank - 1)
+            ]
+            restore_shape = self.shape_concat(
+                [*leading, self.shape_value(output_width, f"{name}.output_width")],
+                f"{name}.output_shape",
+            )
+            tensor = self.reshape(tensor, (-1, input_width), f"{name}.input_rows")
+        rhs = self.constant(weight, dtype=constant_dtype, name=f"{name}.weight")
         product = self._layer(
             self.network.add_matrix_multiply(
                 tensor,
@@ -297,11 +356,17 @@ class _NativeMogeGraph:
             "matrix multiply",
             f"{name}.matmul",
         ).get_output(0)
-        bias_shape = (1,) * (rank - 1) + (output_width,)
-        bias_tensor = self.constant(bias.reshape(bias_shape), name=f"{name}.bias")
-        return self.binary(
+        bias_tensor = self.constant(
+            bias.reshape(1, output_width), dtype=constant_dtype, name=f"{name}.bias"
+        )
+        result = self.binary(
             product, bias_tensor, self.trt.ElementWiseOperation.SUM, f"{name}.bias_add"
         )
+        if restore_shape is not None:
+            result = self.reshape(result, restore_shape, f"{name}.restore")
+        if output_dtype is not None:
+            result = self.cast(result, output_dtype, f"{name}.output_cast")
+        return result
 
     def layer_norm(self, tensor: Any, module: str, name: str) -> Any:
         rank = len(tuple(tensor.shape))
@@ -438,7 +503,16 @@ class _NativeMogeGraph:
     def attention(self, hidden: Any, layer_index: int, total_tokens: Any) -> Any:
         prefix = f"encoder.backbone.blocks.{layer_index}.attn"
         name = f"vit.block.{layer_index}.attention"
-        qkv = self.linear(hidden, f"{prefix}.qkv", f"{name}.qkv")
+        if self.fast_path:
+            qkv = self.linear(
+                hidden,
+                f"{prefix}.qkv",
+                f"{name}.qkv",
+                compute_dtype=self.trt.float16,
+                output_dtype=self.trt.float32,
+            )
+        else:
+            qkv = self.linear(hidden, f"{prefix}.qkv", f"{name}.qkv")
         component_shape = self.shape_concat(
             [
                 self.shape_value(1, f"{name}.batch"),
@@ -476,6 +550,10 @@ class _NativeMogeGraph:
         ]
         scale = self.constant([[[[0.125]]]], name=f"{name}.scale")
         q = self.binary(q, scale, self.trt.ElementWiseOperation.PROD, f"{name}.q_scaled")
+        if self.fast_path:
+            q = self.cast(q, self.trt.float16, f"{name}.q_fp16")
+            k = self.cast(k, self.trt.float16, f"{name}.k_fp16")
+            v = self.cast(v, self.trt.float16, f"{name}.v_fp16")
         add_attention_v2 = getattr(self.network, "add_attention_v2", None)
         if callable(add_attention_v2):
             layer = add_attention_v2(
@@ -490,7 +568,7 @@ class _NativeMogeGraph:
                 q, k, v, self.trt.AttentionNormalizationOp.SOFTMAX, False
             )
         attention = self._layer(layer, "IAttention", name)
-        attention.decomposable = True
+        attention.decomposable = not self.fast_path
         if hasattr(attention, "query_form"):
             attention.query_form = self.trt.AttentionIOForm.PADDED_BHND
             attention.key_value_form = self.trt.AttentionIOForm.PADDED_BHND
@@ -508,6 +586,14 @@ class _NativeMogeGraph:
             f"{name}.context",
             first_transpose=(0, 2, 1, 3),
         )
+        if self.fast_path:
+            return self.linear(
+                context,
+                f"{prefix}.proj",
+                f"{name}.projection",
+                compute_dtype=self.trt.float16,
+                output_dtype=self.trt.float32,
+            )
         return self.linear(context, f"{prefix}.proj", f"{name}.projection")
 
     def transformer_block(self, hidden: Any, index: int, total_tokens: Any) -> Any:
@@ -528,9 +614,26 @@ class _NativeMogeGraph:
             hidden, attention, self.trt.ElementWiseOperation.SUM, f"{name}.attention_residual"
         )
         normalized = self.layer_norm(hidden, f"{prefix}.norm2", f"{name}.norm2")
-        mlp = self.linear(normalized, f"{prefix}.mlp.fc1", f"{name}.mlp.fc1")
+        if self.fast_path:
+            mlp = self.linear(
+                normalized,
+                f"{prefix}.mlp.fc1",
+                f"{name}.mlp.fc1",
+                compute_dtype=self.trt.float16,
+            )
+        else:
+            mlp = self.linear(normalized, f"{prefix}.mlp.fc1", f"{name}.mlp.fc1")
         mlp = self.gelu(mlp, f"{name}.mlp.gelu")
-        mlp = self.linear(mlp, f"{prefix}.mlp.fc2", f"{name}.mlp.fc2")
+        if self.fast_path:
+            mlp = self.linear(
+                mlp,
+                f"{prefix}.mlp.fc2",
+                f"{name}.mlp.fc2",
+                compute_dtype=self.trt.float16,
+                output_dtype=self.trt.float32,
+            )
+        else:
+            mlp = self.linear(mlp, f"{prefix}.mlp.fc2", f"{name}.mlp.fc2")
         gamma2 = self.weight_constant(
             f"{prefix}.ls2.gamma",
             expected=(_HIDDEN,),
@@ -755,20 +858,37 @@ class _NativeMogeGraph:
         class_vector = self.reshape(last_class, (1, _HIDDEN), "vit.class_vector")
         return encoded, class_vector, base_h, base_w, aspect
 
-    def residual_conv_block(self, tensor: Any, module: str, name: str) -> Any:
+    def residual_conv_block(
+        self, tensor: Any, module: str, name: str, *, compute_dtype: Any
+    ) -> Any:
         hidden = self.relu(tensor, f"{name}.relu1")
         hidden = self.convolution(
-            hidden, f"{module}.layers.2", f"{name}.conv1", replicate_padding=1
+            hidden,
+            f"{module}.layers.2",
+            f"{name}.conv1",
+            replicate_padding=1,
+            compute_dtype=compute_dtype,
         )
         hidden = self.relu(hidden, f"{name}.relu2")
         hidden = self.convolution(
-            hidden, f"{module}.layers.5", f"{name}.conv2", replicate_padding=1
+            hidden,
+            f"{module}.layers.5",
+            f"{name}.conv2",
+            replicate_padding=1,
+            compute_dtype=compute_dtype,
         )
         return self.binary(hidden, tensor, self.trt.ElementWiseOperation.SUM, f"{name}.residual")
 
-    def resample(self, tensor: Any, module: str, level: int, name: str) -> Any:
+    def resample(
+        self, tensor: Any, module: str, level: int, name: str, *, compute_dtype: Any
+    ) -> Any:
         if level < 3:
-            tensor = self.deconvolution(tensor, f"{module}.0", f"{name}.deconvolution")
+            tensor = self.deconvolution(
+                tensor,
+                f"{module}.0",
+                f"{name}.deconvolution",
+                compute_dtype=compute_dtype,
+            )
         else:
             shape = self.shape(tensor, f"{name}.input_shape")
             height = self.shape_index(shape, 2, f"{name}.height")
@@ -779,7 +899,13 @@ class _NativeMogeGraph:
             tensor = self.resize_nchw_to_hw(
                 tensor, output_h, output_w, self.trt.InterpolationMode.LINEAR, f"{name}.resize"
             )
-        return self.convolution(tensor, f"{module}.1", f"{name}.convolution", replicate_padding=1)
+        return self.convolution(
+            tensor,
+            f"{module}.1",
+            f"{name}.convolution",
+            replicate_padding=1,
+            compute_dtype=compute_dtype,
+        )
 
     def conv_stack(
         self,
@@ -788,12 +914,16 @@ class _NativeMogeGraph:
         num_res_blocks: tuple[int, ...],
         *,
         final_projection: bool,
+        compute_dtype: Any,
     ) -> list[Any]:
         outputs: list[Any] = []
         current = None
         for level, feature in enumerate(inputs):
             projected = self.convolution(
-                feature, f"{prefix}.input_blocks.{level}", f"{prefix}.level.{level}.input"
+                feature,
+                f"{prefix}.input_blocks.{level}",
+                f"{prefix}.level.{level}.input",
+                compute_dtype=compute_dtype,
             )
             current = (
                 projected
@@ -810,6 +940,7 @@ class _NativeMogeGraph:
                     current,
                     f"{prefix}.res_blocks.{level}.{block}",
                     f"{prefix}.level.{level}.block.{block}",
+                    compute_dtype=compute_dtype,
                 )
             output = current
             if final_projection and level == len(inputs) - 1:
@@ -817,6 +948,7 @@ class _NativeMogeGraph:
                     current,
                     f"{prefix}.output_blocks.{level}",
                     f"{prefix}.level.{level}.output",
+                    compute_dtype=compute_dtype,
                 )
             outputs.append(output)
             if level < len(inputs) - 1:
@@ -825,6 +957,7 @@ class _NativeMogeGraph:
                     f"{prefix}.resamplers.{level}",
                     level,
                     f"{prefix}.level.{level}.resample",
+                    compute_dtype=compute_dtype,
                 )
         return outputs
 
@@ -851,14 +984,27 @@ class _NativeMogeGraph:
             else:
                 features.append(uv)
 
+        decoder_dtype = self.trt.float16 if self.fast_path else self.trt.float32
         neck = self.conv_stack(
-            features, "neck", (0, 2, 2, 2, 0), final_projection=False
+            features,
+            "neck",
+            (0, 2, 2, 2, 0),
+            final_projection=False,
+            compute_dtype=decoder_dtype,
         )
         points = self.conv_stack(
-            neck, "points_head", (0, 1, 1, 1, 0), final_projection=True
+            neck,
+            "points_head",
+            (0, 1, 1, 1, 0),
+            final_projection=True,
+            compute_dtype=decoder_dtype,
         )[-1]
         mask = self.conv_stack(
-            neck, "mask_head", (0, 1, 1, 1, 0), final_projection=True
+            neck,
+            "mask_head",
+            (0, 1, 1, 1, 0),
+            final_projection=True,
+            compute_dtype=decoder_dtype,
         )[-1]
         scale = self.linear(class_vector, "scale_head.0", "scale_head.0")
         scale = self.relu(scale, "scale_head.1")
@@ -932,8 +1078,10 @@ class _NativeMogeGraph:
 def _build_native_engine(
     state: dict[str, Any],
     *,
+    precision: str,
     verbose: bool,
 ) -> bytes:
+    fast_path = precision == "fp16"
     trt = trt_compat.get_trt()
     logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -942,10 +1090,11 @@ def _build_native_engine(
     )
     if network is None:
         raise RuntimeError("TensorRT failed to create the MoGe network")
-    image = network.add_input("image", trt.float32, (1, -1, -1, 3))
+    input_dims = (1, _FAST_IMAGE_HEIGHT, _FAST_IMAGE_WIDTH, 3) if fast_path else (1, -1, -1, 3)
+    image = network.add_input("image", trt.float32, input_dims)
     if image is None:
         raise RuntimeError("TensorRT rejected the MoGe image input")
-    graph = _NativeMogeGraph(trt, network, state)
+    graph = _NativeMogeGraph(trt, network, state, fast_path=fast_path)
     input_shape = graph.shape(image, "input_hwc.shape")
     input_h = graph.shape_index(input_shape, 1, "input_hwc.height")
     input_w = graph.shape_index(input_shape, 2, "input_hwc.width")
@@ -978,34 +1127,44 @@ def _build_native_engine(
     config = builder.create_builder_config()
     tf32 = getattr(trt.BuilderFlag, "TF32", None)
     if tf32 is not None:
-        config.clear_flag(tf32)
+        if fast_path:
+            config.set_flag(tf32)
+        else:
+            config.clear_flag(tf32)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
     profile = builder.create_optimization_profile()
-    profile.set_shape(
-        "image",
-        (1, _MIN_IMAGE_SIZE, _MIN_IMAGE_SIZE, 3),
-        (1, _OPT_IMAGE_SIZE, _OPT_IMAGE_SIZE, 3),
-        (1, _MAX_IMAGE_SIZE, _MAX_IMAGE_SIZE, 3),
-    )
+    if fast_path:
+        fast_shape = (1, _FAST_IMAGE_HEIGHT, _FAST_IMAGE_WIDTH, 3)
+        profile.set_shape("image", fast_shape, fast_shape, fast_shape)
+    else:
+        profile.set_shape(
+            "image",
+            (1, _MIN_IMAGE_SIZE, _MIN_IMAGE_SIZE, 3),
+            (1, _OPT_IMAGE_SIZE, _OPT_IMAGE_SIZE, 3),
+            (1, _MAX_IMAGE_SIZE, _MAX_IMAGE_SIZE, 3),
+        )
     if not profile:
         raise RuntimeError("Failed to configure the MoGe dynamic image profile")
     config.add_optimization_profile(profile)
     if hasattr(config, "builder_optimization_level"):
-        # TRT 11.2 optimization level 3 tries to absorb the dynamic FP32
-        # decomposable-attention chain into one Myelin ForeignNode, whose
-        # dynamic BMM fallback has no implementation. Level 1 preserves the
-        # native IAttention decomposition and full 64..2048 profile while
-        # still timing tactics instead of accepting the first valid choice.
-        config.builder_optimization_level = 1
+        # Level 3 enables the static FP16 fused-attention fast path. The broad
+        # dynamic FP32 graph stays at level 1 because level 3 absorbs its
+        # decomposable attention into an unsupported dynamic-BMM ForeignNode.
+        config.builder_optimization_level = 3 if fast_path else 1
     if hasattr(config, "avg_timing_iterations"):
         config.avg_timing_iterations = 3
     if hasattr(config, "max_aux_streams"):
         config.max_aux_streams = 0
     if verbose:
+        profile_label = (
+            f"{_FAST_IMAGE_WIDTH}x{_FAST_IMAGE_HEIGHT}"
+            if fast_path
+            else f"{_MIN_IMAGE_SIZE}..{_MAX_IMAGE_SIZE}"
+        )
         print(
             "[trtmc build] Building native MoGe TensorRT graph "
             f"({network.num_layers} layers, num_tokens={_NUM_TOKENS}, "
-            f"profile={_MIN_IMAGE_SIZE}..{_MAX_IMAGE_SIZE}) ...",
+            f"precision={precision}, profile={profile_label}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, config)
@@ -1026,10 +1185,8 @@ def build_moge_engine(
     checkpoint_path = model_root / _CHECKPOINT
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"MoGe checkpoint not found: {checkpoint_path}")
-    if precision != "fp32":
-        raise ValueError(
-            "The native MoGe-2 ViT-L accuracy contract supports precision='fp32' only"
-        )
+    if precision not in {"fp32", "fp16"}:
+        raise ValueError("The native MoGe-2 ViT-L builder supports precision='fp32' or 'fp16' only")
     checkpoint_sha256 = _checkpoint_digest(checkpoint_path)
     if checkpoint_sha256 != _CHECKPOINT_SHA256:
         raise ValueError(
@@ -1046,5 +1203,6 @@ def build_moge_engine(
     )
     return _build_native_engine(
         checkpoint["model"],
+        precision=precision,
         verbose=verbose,
     )
