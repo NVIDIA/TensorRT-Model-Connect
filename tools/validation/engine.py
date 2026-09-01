@@ -11294,6 +11294,79 @@ def run_full_duplex_bench_comparison(
     return summary
 
 
+
+def run_avgen_bench_vis_scoring(
+    *,
+    python: str,
+    bundle_predictions: Path,
+    answers: Path,
+    work_dir: Path,
+    scoring: Mapping[str, Any],
+    gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run the dependency-heavy pinned AVGen-Bench Vis evaluator."""
+
+    evaluator_root_env = str(scoring.get("evaluator_root_env", "TRTMC_AVGEN_BENCH_REPO"))
+    evaluator_root = os.environ.get(evaluator_root_env, "").strip()
+    if not evaluator_root:
+        raise ValueError(
+            f"AVGen-Bench Vis scoring requires {evaluator_root_env} to point to "
+            "the pinned evaluator checkout"
+        )
+    output_path = work_dir / "summary.json"
+    command = [
+        python,
+        str(REPO_ROOT / "tools" / "avgen_bench_vis_score.py"),
+        "--predictions",
+        str(bundle_predictions),
+        "--answers",
+        str(answers),
+        "--output",
+        str(output_path),
+        "--evaluator-root",
+        evaluator_root,
+        "--model-id",
+        str(scoring.get("model_id", "q-future/one-align")),
+        "--model-revision",
+        str(
+            scoring.get(
+                "model_revision",
+                "dcc603b95aa0ebd82afa696d4a1e20d11fc80ddb",
+            )
+        ),
+        "--device",
+        str(scoring.get("device", "cuda:0")),
+        "--required-sample-count",
+        str(int(gates.get("required_sample_count", 235))),
+        "--min-structural-pass-rate",
+        str(float(gates.get("min_structural_pass_rate", 1.0))),
+        "--min-avgen-vis-mean",
+        str(float(gates.get("min_avgen_vis_mean", 0.8))),
+    ]
+    completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    (work_dir / "avgen_bench_vis_score.log").write_text(
+        f"$ {shlex.join(command)}\n{completed.stdout}{completed.stderr}",
+        encoding="utf-8",
+    )
+    if completed.returncode not in {0, 1}:
+        raise RuntimeError(
+            "AVGen-Bench Vis scorer failed "
+            f"(rc={completed.returncode}); see {work_dir / 'avgen_bench_vis_score.log'}"
+        )
+    if not output_path.is_file():
+        raise RuntimeError(
+            "AVGen-Bench Vis scorer produced no summary; see "
+            f"{work_dir / 'avgen_bench_vis_score.log'}"
+        )
+    summary = json.loads(output_path.read_text(encoding="utf-8"))
+    expected_status = "passed" if completed.returncode == 0 else "failed"
+    if summary.get("status") != expected_status:
+        raise RuntimeError(
+            "AVGen-Bench Vis scorer exit status does not match summary; see "
+            f"{work_dir / 'avgen_bench_vis_score.log'}"
+        )
+    return summary
+
 def _full_duplex_gate_actuals(summary: Mapping[str, Any]) -> dict[str, float]:
     metrics = summary.get("metrics", {})
     metrics = metrics if isinstance(metrics, Mapping) else {}
@@ -11611,6 +11684,54 @@ def eval_one_model(
                     "error": (
                         f"{len(summary['gate_failures'])} Full-Duplex-Bench "
                         "HF/TRTMC metric delta gate(s) failed"
+                    ),
+                }
+            )
+    elif scorer == "avgen_bench_vis":
+        scoring = suite.get("scoring", {})
+        scorer_profile = str(scoring.get("python_profile", "") or "")
+        if not scorer_profile:
+            raise ValueError("AVGen-Bench Vis scoring requires scoring.python_profile")
+        scorer_python = resolve_profile_python(
+            scorer_profile,
+            str(getattr(args, "hf_python", "") or sys.executable),
+        )
+        summary = run_avgen_bench_vis_scoring(
+            python=scorer_python,
+            bundle_predictions=work_dir / "bundle_predictions.json",
+            answers=answers_path,
+            work_dir=work_dir,
+            scoring=scoring,
+            gates=suite.get("gates", {}),
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "sample_count": summary["sample_count"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "structural_pass_rate": summary["structural_pass_rate"],
+            "avgen_vis_mean": summary["avgen_vis_mean"],
+            "avgen_vis_min": summary["avgen_vis_min"],
+            "avgen_vis_max": summary["avgen_vis_max"],
+            "metrics": {
+                "avgen_vis": {
+                    "mean": summary["avgen_vis_mean"],
+                    "min": summary["avgen_vis_min"],
+                    "max": summary["avgen_vis_max"],
+                }
+            },
+            "gates": summary["gates"],
+            "gate_failures": summary["gate_failures"],
+            "benchmark_provenance": summary.get("benchmark_provenance", {}),
+        }
+        if summary["gate_failures"]:
+            result.update(
+                {
+                    "error_type": "BenchmarkGateError",
+                    "error": (
+                        f"{len(summary['gate_failures'])} AVGen-Bench Vis aggregate gate(s) failed"
                     ),
                 }
             )

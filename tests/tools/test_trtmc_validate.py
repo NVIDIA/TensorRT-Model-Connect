@@ -117,7 +117,10 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
     )
 
     assert catalog["models"]["minimax-h3-768p"] == {
-        "workloads": ["minimax_h3_official_profile_parity"],
+        "workloads": [
+            "minimax_h3_official_profile_parity",
+            "minimax_h3_avgen_bench_vis_task_accuracy",
+        ],
     }
     assert validation_catalog.suite_match_reason(suite, model) == (
         True,
@@ -148,6 +151,34 @@ def test_minimax_h3_catalog_uses_model_owned_official_profile() -> None:
         "video_width": 1344,
         "num_inference_steps": 50,
     }
+
+    task_accuracy = next(
+        value for value in suites if value["id"] == "minimax_h3_avgen_bench_vis_task_accuracy"
+    )
+    assert catalog["sample_limits"][task_accuracy["id"]] == 235
+    assert task_accuracy["reference"] == {"mode": "metric_only"}
+    assert task_accuracy["dataset"] == {
+        "kind": "model_plugin_json",
+        "default_path": ("/mnt/data/avgen-bench-prompts-1049eaba-minimax-h3-video-v1/dataset.json"),
+        "input_asset_fields": ["prompt_file"],
+    }
+    assert task_accuracy["scoring"] == {
+        "scorer": "avgen_bench_vis",
+        "python_profile": "minimax_h3_avgen_vis_evaluator",
+        "evaluator_root_env": "TRTMC_AVGEN_BENCH_REPO",
+        "model_id": "q-future/one-align",
+        "model_revision": "dcc603b95aa0ebd82afa696d4a1e20d11fc80ddb",
+        "device": "cuda:0",
+    }
+    assert task_accuracy["gates"] == {
+        "required_sample_count": 235,
+        "min_structural_pass_rate": 1.0,
+        "min_avgen_vis_mean": 0.8,
+    }
+    assert validation_catalog.suite_match_reason(task_accuracy, model) == (
+        True,
+        "selected",
+    )
 
 
 def test_dataset_path_keeps_repository_owned_default_with_dataset_root(
@@ -224,7 +255,7 @@ def test_catalog_defines_sample_limit_for_every_dataset_workload():
         "seedtts_en_omni_audio_parity",
         "vbench_ti2v_official_profile_parity",
     }
-    assert max(catalog["sample_limits"].values()) == 150
+    assert max(catalog["sample_limits"].values()) == 235
     assert catalog["sample_limits"]["full_duplex_bench_behavior_parity"] == 150
     assert catalog["sample_limits"]["mmlu_five_shot_mcq"] == 20
     assert catalog["sample_limits"]["dpg_bench_diffusion_image"] == 5
@@ -2689,6 +2720,30 @@ def test_suite_specific_scorer_environment_is_materialized_on_demand() -> None:
     assert profiles == (
         trtmc_validate.COMMON_REFERENCE_PROFILE,
         "personaplex_full_duplex_evaluator",
+    )
+
+
+def test_minimax_h3_avgen_scorer_uses_authorized_external_environment() -> None:
+    profiles = trtmc_validate.binding_profiles(
+        trtmc_validate.Binding("minimax-h3-768p", "minimax_h3_avgen_bench_vis_task_accuracy"),
+        task_models={
+            "minimax-h3-768p": {
+                "family": "minimax_h3",
+                "runtime_strategy": "diffusion_minimax_h3",
+                "reference_backend": "hf_diffusers",
+            }
+        },
+        suites={
+            "minimax_h3_avgen_bench_vis_task_accuracy": {
+                "scoring": {"python_profile": "minimax_h3_avgen_vis_evaluator"}
+            }
+        },
+    )
+
+    assert profiles == (
+        trtmc_validate.COMMON_REFERENCE_PROFILE,
+        "minimax_h3_reference",
+        "minimax_h3_avgen_vis_evaluator",
     )
 
 

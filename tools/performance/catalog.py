@@ -24,6 +24,7 @@ SUITE_SCHEMA = "trtmc.perf-suite/v2"
 L0_PROFILE_PATTERN = re.compile(r"(?:^|-)l0(?:-|$)", re.IGNORECASE)
 TASK_REFERENCE_ADAPTERS = {
     "hf-diffusers",
+    "hf-diffusers-minimax-h3-video",
     "hf-qwen3-omni",
     "hf-transformers-asr",
     "hf-transformers-embedding",

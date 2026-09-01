@@ -1200,6 +1200,7 @@ _PRIMARY_COMPARISON_METRICS = (
     "exact_match_rate",
 )
 _PRIMARY_METRIC_BY_MODE = {
+    "avgen_bench_vis": "avgen_vis_mean",
     "asr_transcript": "prediction_agreement_rate",
     "continuation": "token_prefix_agreement",
     "diffusion_image_clip_parity": "overall_pass_rate",
@@ -1250,6 +1251,10 @@ _COMPARISON_METRICS = (
     "mean_relative_l2",
     "max_relative_l2",
     "max_absolute_error",
+    "structural_pass_rate",
+    "avgen_vis_mean",
+    "avgen_vis_min",
+    "avgen_vis_max",
 )
 _EXECUTION_ERROR_FIELDS = ("error", "exception", "traceback", "failure_class")
 

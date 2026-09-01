@@ -1900,6 +1900,53 @@ suites:
         GB300-only full-profile validation. The model-owned comparator keeps
         the checked-in visual thresholds; this suite adds no threshold override.
 
+  - id: minimax_h3_avgen_bench_vis_task_accuracy
+    description: >
+      Candidate-only task accuracy over all 235 prompts from pinned AVGen-Bench.
+      The official Q-Align video scorer evaluates the five frames selected by
+      AVGen-Bench's 1 fps policy from MiniMax-H3's fixed 124-frame, 24 fps output.
+      This reports only the Vis component: TRTMC currently does not export the
+      generated audio, so this workload excludes Aud, AV-sync, lip-sync, Basic,
+      and Total scores.
+    task_type: Text → Video (AVGen-Bench Vis component only)
+    user_contract: diffusion_video
+    default_model_names: [minimax-h3-768p]
+    dataset:
+      kind: model_plugin_json
+      default_path: >-
+        /mnt/data/avgen-bench-prompts-1049eaba-minimax-h3-video-v1/dataset.json
+      input_asset_fields: [prompt_file]
+    selectors:
+      model_names: [minimax-h3-768p]
+      task_strategies: [diffusion_media_generation]
+      runtime_strategies: [diffusion_minimax_h3]
+      user_contracts: [diffusion_video]
+      families: [minimax_h3]
+    reference:
+      mode: metric_only
+    scoring:
+      scorer: avgen_bench_vis
+      python_profile: minimax_h3_avgen_vis_evaluator
+      evaluator_root_env: TRTMC_AVGEN_BENCH_REPO
+      model_id: q-future/one-align
+      model_revision: dcc603b95aa0ebd82afa696d4a1e20d11fc80ddb
+      device: cuda:0
+    gates:
+      required_sample_count: 235
+      min_structural_pass_rate: 1.0
+      min_avgen_vis_mean: 0.80
+    gate_metric_kinds:
+      min_structural_pass_rate: proportion
+      min_avgen_vis_mean: continuous
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only formal task accuracy. The S-Lab-licensed Q-Align evaluator
+        requires an authorized external Python environment and explicit
+        TRTMC_ACCEPT_QALIGN_SLAB_1_0=1 acknowledgement; TRTMC does not download
+        or redistribute the evaluator.
+
   - id: lfm2_model_card_sampling_parity
     description: >
       Fixed-seed parity for the pinned LFM2-350M BF16 model-card sampling

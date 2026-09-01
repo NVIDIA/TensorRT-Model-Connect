@@ -55,6 +55,7 @@ MAGPIE_SPEAKER_ENCODER_URL = (
 )
 ADAPTERS = (
     "hf-diffusers",
+    "hf-diffusers-minimax-h3-video",
     "hf-qwen3-omni",
     "hf-transformers-asr",
     "hf-transformers-embedding",
@@ -1353,6 +1354,7 @@ def _diffusion_pipeline(
             else ("FluxPipeline",)
         ),
         "ltx_video": ("LTXPipeline", "LTXVideoPipeline", "DiffusionPipeline"),
+        "minimax_h3": ("ModularPipeline",),
         "pixart": ("PixArtSigmaPipeline", "DiffusionPipeline"),
         "qwen_image": ("QwenImagePipeline", "DiffusionPipeline"),
         "sana_wm": ("SanaVideoPipeline", "DiffusionPipeline"),
@@ -1380,6 +1382,33 @@ def _diffusion_pipeline(
             _cached_snapshot_path(model_id, requested_revision, "model_index.json")
             or model_source
         )
+    if arguments.family == "minimax_h3":
+        manager_class = getattr(diffusers, "ComponentsManager", None)
+        pipeline_class = getattr(diffusers, "ModularPipeline", None)
+        if manager_class is None or pipeline_class is None:
+            raise RuntimeError("Diffusers does not provide the MiniMax-H3 modular pipeline API")
+        load_options = {
+            "trust_remote_code": bool(
+                options.get("trust_remote_code", arguments.trust_remote_code)
+            ),
+            "local_files_only": arguments.local_files_only,
+        }
+        if requested_revision and model_source == model_id:
+            load_options["revision"] = requested_revision
+        pipeline = pipeline_class.from_pretrained(
+            model_source,
+            components_manager=manager_class(),
+            **load_options,
+        )
+        component_options = {
+            "dtype": _torch_dtype(torch_module, arguments.precision),
+            "pretrained_model_name_or_path": model_source,
+            "local_files_only": arguments.local_files_only,
+        }
+        if requested_revision and model_source == model_id:
+            component_options["revision"] = requested_revision
+        pipeline.load_components(**component_options)
+        return pipeline
     errors = []
     for name in classes:
         pipeline_class = getattr(diffusers, name, None)
@@ -1443,6 +1472,48 @@ def _load_diffusers(
     request: Mapping[str, Any],
     options: Mapping[str, Any],
 ) -> Session:
+    diffusers_revision = ""
+    transformers_revision = ""
+    transformers_repo = str(options.get("transformers_repo", "") or "")
+    if bool(options.get("require_pinned_transformers_source", False)):
+        expected_revision = str(options.get("transformers_compat_revision", "") or "")
+        transformers_revision = _pinned_checkout_revision(
+            transformers_repo,
+            expected_revision,
+            repository="MiniMax-H3 Transformers reference",
+        )
+        source_root = Path(transformers_repo).resolve() / "src"
+        entrypoint = source_root / "transformers" / "__init__.py"
+        if not entrypoint.is_file():
+            raise ValueError(f"MiniMax-H3 Transformers checkout is incomplete: {entrypoint}")
+        imported = sys.modules.get("transformers")
+        imported_path = Path(str(getattr(imported, "__file__", "") or ""))
+        if imported is not None and source_root not in imported_path.parents:
+            raise ValueError(
+                "Transformers was imported before the pinned MiniMax-H3 source was activated"
+            )
+        if str(source_root) not in sys.path:
+            sys.path.insert(0, str(source_root))
+    diffusers_repo = str(options.get("diffusers_repo", "") or "")
+    if bool(options.get("require_pinned_diffusers_source", False)):
+        expected_revision = str(options.get("diffusers_revision", "") or "")
+        diffusers_revision = _pinned_checkout_revision(
+            diffusers_repo,
+            expected_revision,
+            repository="MiniMax-H3 Diffusers reference",
+        )
+        source_root = Path(diffusers_repo).resolve() / "src"
+        entrypoint = source_root / "diffusers" / "__init__.py"
+        if not entrypoint.is_file():
+            raise ValueError(f"MiniMax-H3 Diffusers checkout is incomplete: {entrypoint}")
+        imported = sys.modules.get("diffusers")
+        imported_path = Path(str(getattr(imported, "__file__", "") or ""))
+        if imported is not None and source_root not in imported_path.parents:
+            raise ValueError(
+                "Diffusers was imported before the pinned MiniMax-H3 source was activated"
+            )
+        if str(source_root) not in sys.path:
+            sys.path.insert(0, str(source_root))
     import inspect
     import torch
     from PIL import Image
@@ -1517,6 +1588,15 @@ def _load_diffusers(
     if arguments.family == "qwen_image" and cfg_scale >= 0:
         values["true_cfg_scale"] = cfg_scale
     values["output_type"] = "np"
+    output_fields = options.get("output_fields")
+    if output_fields is not None:
+        if (
+            not isinstance(output_fields, list)
+            or not output_fields
+            or any(not isinstance(name, str) or not name for name in output_fields)
+        ):
+            raise ValueError("output_fields must be a non-empty list of names")
+        values["output"] = list(output_fields)
     image_path = str(request.get("image_path", "") or "")
     if image_path and ("image" in accepted or accepts_extra):
         values["image"] = Image.open(_asset_path(arguments, request, "image_path")).convert("RGB")
@@ -1541,12 +1621,15 @@ def _load_diffusers(
     else:
         seeds = seed
     if "generator" in accepted or accepts_extra:
+        generator_device = str(options.get("generator_device", "cuda"))
+        if generator_device not in {"cpu", "cuda"}:
+            raise ValueError("generator_device must be cpu or cuda")
         if isinstance(seeds, list):
             call_values["generator"] = [
-                torch.Generator("cuda").manual_seed(value) for value in seeds
+                torch.Generator(generator_device).manual_seed(value) for value in seeds
             ]
         else:
-            call_values["generator"] = torch.Generator("cuda").manual_seed(seeds)
+            call_values["generator"] = torch.Generator(generator_device).manual_seed(seeds)
 
     def invoke() -> Mapping[str, Any]:
         if "generator" in call_values:
@@ -1560,6 +1643,11 @@ def _load_diffusers(
         media = getattr(result, "images", None)
         if media is None:
             media = getattr(result, "frames", None)
+        if media is None and isinstance(result, Mapping):
+            for name in output_fields or ("videos", "images", "frames"):
+                media = result.get(name)
+                if media is not None:
+                    break
         media_type = str(request.get("media_type", "image"))
         return _media_summary(media, media_type)
 
@@ -1572,6 +1660,13 @@ def _load_diffusers(
         else _resolved_revision(arguments, getattr(pipeline, "transformer", pipeline))
     )
     reference_model = str(options.get("model_id", getattr(arguments, "model", "unresolved")))
+    dependencies = None
+    if diffusers_revision:
+        dependencies = {
+            "https://github.com/huggingface/diffusers.git": diffusers_revision,
+        }
+        if transformers_revision:
+            dependencies["https://github.com/huggingface/transformers.git"] = transformers_revision
     return Session(
         invoke,
         revision,
@@ -1582,6 +1677,7 @@ def _load_diffusers(
             "repository": f"https://huggingface.co/{reference_model}",
             "revision": revision,
         },
+        reference_dependencies=dependencies,
     )
 
 
@@ -2279,6 +2375,7 @@ LOADERS: dict[
     str, Callable[[argparse.Namespace, Mapping[str, Any], Mapping[str, Any]], Session]
 ] = {
     "hf-diffusers": _load_diffusers,
+    "hf-diffusers-minimax-h3-video": _load_diffusers,
     "hf-qwen3-omni": _load_qwen3_omni,
     "hf-transformers-asr": _load_asr,
     "hf-transformers-embedding": _load_embedding,

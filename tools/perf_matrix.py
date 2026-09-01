@@ -1237,16 +1237,17 @@ def _resolved_adapter_options(baseline: Mapping[str, Any]) -> dict[str, Any]:
     configured = baseline.get("adapter_options", {})
     options = dict(configured) if isinstance(configured, Mapping) else {}
     adapter = str(baseline.get("adapter", ""))
-    external_checkout = {
-        "upstream-elf": ("reference_repo", "TRTMC_ELF_REFERENCE_REPO"),
-        "upstream-lance": ("reference_repo", "TRTMC_LANCE_REFERENCE_REPO"),
-        "upstream-sana-wm": (
-            "reference_repo",
-            "TRTMC_SANA_WM_REFERENCE_REPO",
+    external_checkouts = {
+        "hf-diffusers-minimax-h3-video": (
+            ("diffusers_repo", "TRTMC_MINIMAX_H3_DIFFUSERS_REPO"),
+            ("transformers_repo", "TRTMC_MINIMAX_H3_TRANSFORMERS_REPO"),
         ),
-        "pytorch-personaplex": ("official_repo", "PERSONAPLEX_OFFICIAL_REPO"),
-    }.get(adapter)
-    if external_checkout is not None:
+        "upstream-elf": (("reference_repo", "TRTMC_ELF_REFERENCE_REPO"),),
+        "upstream-lance": (("reference_repo", "TRTMC_LANCE_REFERENCE_REPO"),),
+        "upstream-sana-wm": (("reference_repo", "TRTMC_SANA_WM_REFERENCE_REPO"),),
+        "pytorch-personaplex": (("official_repo", "PERSONAPLEX_OFFICIAL_REPO"),),
+    }.get(adapter, ())
+    for external_checkout in external_checkouts:
         option_name, environment_name = external_checkout
         environment_value = os.environ.get(environment_name, "").strip()
         if option_name not in options and environment_value:
