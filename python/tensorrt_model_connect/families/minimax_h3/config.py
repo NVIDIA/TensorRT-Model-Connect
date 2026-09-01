@@ -6,6 +6,8 @@
 The default profile is the 124-frame, 1344x768 shape used by the public
 Sol-Engine H3 benchmark. Structural row counts are explicit because prompt
 packing is part of the engine ABI and must match the Hugging Face reference.
+Text rows are dynamic; ``text_rows`` remains the maximum for compatible
+bundle metadata.
 """
 
 from __future__ import annotations
@@ -89,6 +91,8 @@ class MiniMaxH3Config:
     norm_eps: float = 1.0e-5
     video_rows: int = 37296
     audio_rows: int = 414
+    min_text_rows: int = 1
+    opt_text_rows: int = 128
     text_rows: int = 537
     padded_sequence_length: int = 38247
     max_timestep_count: int = 4
@@ -98,6 +102,14 @@ class MiniMaxH3Config:
     @property
     def sequence_length(self) -> int:
         return self.video_rows + self.audio_rows + self.text_rows
+
+    @property
+    def min_sequence_length(self) -> int:
+        return self.video_rows + self.audio_rows + self.min_text_rows
+
+    @property
+    def opt_sequence_length(self) -> int:
+        return self.video_rows + self.audio_rows + self.opt_text_rows
 
     @property
     def padding_rows(self) -> int:
@@ -123,8 +135,12 @@ class MiniMaxH3Config:
             raise ValueError("MiniMax-H3 native runtime currently requires context_parallel_size=1")
         if self.attention_size <= self.hidden_size:
             raise ValueError("MiniMax-H3 attention width must exceed its residual width")
+        if not 1 <= self.min_text_rows <= self.opt_text_rows <= self.text_rows:
+            raise ValueError("MiniMax-H3 text rows must satisfy 1 <= min <= opt <= max")
         if self.sequence_length != self.padded_sequence_length:
-            raise ValueError("MiniMax-H3 single-device profile requires no packed-sequence padding")
+            raise ValueError(
+                "MiniMax-H3 padded_sequence_length must equal the maximum packed sequence"
+            )
         if self.rope_freq_dim * 6 > self.head_dim:
             raise ValueError("MiniMax-H3 rotary channels exceed head_dim")
         if not isinstance(self.first_block_cache, bool):

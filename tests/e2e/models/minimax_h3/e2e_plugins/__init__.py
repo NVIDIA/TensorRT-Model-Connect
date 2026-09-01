@@ -102,7 +102,13 @@ def source_revision(case: E2ECase, ctx: RunContext) -> str:
     if config.get("context_parallel_size") != 1:
         raise ValueError("MiniMax-H3 E2E bundle is not single-device")
     if config.get("padded_sequence_length") != 38247:
-        raise ValueError("MiniMax-H3 E2E bundle does not use the unpadded sequence")
+        raise ValueError("MiniMax-H3 E2E bundle has the wrong maximum packed sequence")
+    if (
+        config.get("text_rows_min"),
+        config.get("text_rows_opt"),
+        config.get("text_rows_max"),
+    ) != (1, 128, 537):
+        raise ValueError("MiniMax-H3 E2E bundle has an invalid dynamic text profile")
     if config.get("vae_tile_batch") != 28:
         raise ValueError("MiniMax-H3 E2E bundle does not decode all spatial tiles in one batch")
     cache_mode = config.get("denoiser_cache_mode", "monolithic")

@@ -13,6 +13,8 @@ import pytest
 
 from tensorrt_model_connect.families.minimax_h3.config import (
     DEFAULT_WORKSPACE_LIMIT_BYTES,
+    MiniMaxH3Config,
+    SOL_ENGINE_1344X768_124F,
     default_workspace_limit_bytes,
 )
 from tests.e2e.models.minimax_h3.build_native_components import (
@@ -42,6 +44,32 @@ def test_workspace_limits_preserve_defaults_or_apply_exact_override() -> None:
         "denoiser_finish.plan",
         "vae_tile_decoder.plan",
     }
+
+
+def test_dynamic_text_profile_preserves_the_537_token_maximum() -> None:
+    profile = SOL_ENGINE_1344X768_124F
+
+    assert (profile.min_text_rows, profile.opt_text_rows, profile.text_rows) == (1, 128, 537)
+    assert (
+        profile.min_sequence_length,
+        profile.opt_sequence_length,
+        profile.sequence_length,
+    ) == (37711, 37838, 38247)
+    assert profile.padded_sequence_length == profile.sequence_length
+    profile.validate()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"min_text_rows": 0},
+        {"min_text_rows": 129, "opt_text_rows": 128},
+        {"opt_text_rows": 538},
+    ],
+)
+def test_dynamic_text_profile_rejects_invalid_bounds(overrides: dict[str, int]) -> None:
+    with pytest.raises(ValueError, match="1 <= min <= opt <= max"):
+        MiniMaxH3Config(**overrides).validate()
 
 
 @pytest.mark.parametrize("raw", ["0", "-1", "1.5", "bad"])

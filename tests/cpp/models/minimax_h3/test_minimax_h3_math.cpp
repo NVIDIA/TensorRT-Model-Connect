@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -50,10 +51,36 @@ void test_data_ward_euler_sign() {
     check_near(sample[1], -1.9375F, 1.0e-7F, "H3 Euler blend matches reference");
 }
 
+void test_variable_text_position_layout() {
+    constexpr int32_t media_rows = 414 + 37296;
+    for (const int32_t text_rows : {1, 84, 218, 537}) {
+        const auto positions = trtmc::make_minimax_h3_position_ids(text_rows);
+        check(positions.size() == static_cast<std::size_t>(text_rows + media_rows) * 3,
+              "H3 packed positions follow the actual text length");
+        check_near(positions[static_cast<std::size_t>(text_rows) * 3],
+                   static_cast<float>(text_rows), 0.0F,
+                   "H3 audio rotary time starts after actual text rows");
+        const auto video_start = static_cast<std::size_t>(text_rows + 414) * 3;
+        check_near(positions[video_start], static_cast<float>(text_rows), 0.0F,
+                   "H3 video rotary time starts after actual text rows");
+    }
+
+    for (const int32_t text_rows : {0, 538}) {
+        bool rejected = false;
+        try {
+            (void)trtmc::make_minimax_h3_position_ids(text_rows);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "H3 position layout rejects text rows outside its profile");
+    }
+}
+
 } // namespace
 
 int main() {
     test_pinned_schedules();
     test_data_ward_euler_sign();
+    test_variable_text_position_layout();
     return failures == 0 ? 0 : 1;
 }
