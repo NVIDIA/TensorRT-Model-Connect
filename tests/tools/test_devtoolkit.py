@@ -38,6 +38,7 @@ from trtmc_devtoolkit.doctor import EnvironmentDoctor  # noqa: E402
 from trtmc_devtoolkit.models import DevToolkitError  # noqa: E402
 from trtmc_devtoolkit.planner import image_fingerprint  # noqa: E402
 from trtmc_devtoolkit.targets import (  # noqa: E402
+    LocalEnvironment,
     _development_runtime_environment,
     _write_local_activation,
 )
@@ -47,6 +48,7 @@ from trtmc_devtoolkit.toolchain import ManagedLocalProvisioner  # noqa: E402
 class RecordingRunner:
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
+        self.environments: list[dict[str, str] | None] = []
 
     def run(
         self,
@@ -58,9 +60,10 @@ class RecordingRunner:
         capture_output: bool = False,
         timeout: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del cwd, env, capture_output, timeout
+        del cwd, capture_output, timeout
         arguments = [str(item) for item in command]
         self.commands.append(arguments)
+        self.environments.append(dict(env) if env is not None else None)
         output = ""
         returncode = 0
         if (
@@ -388,6 +391,38 @@ def test_development_runtime_environment_places_native_cli_on_path(tmp_path: Pat
 
     assert environment["PATH"] == f"{build}:/venv/bin"
     assert environment["TRTMC_MODEL_PLUGIN_DIR"] == str(build / "models")
+
+
+def test_managed_local_editable_install_preserves_cohort_tensorrt_version() -> None:
+    runner = RecordingRunner()
+    toolkit = DevToolkit.from_checkout(
+        REPO_ROOT,
+        source_revision_override="a" * 40,
+        runner=runner,
+    )
+    plan = toolkit.plan(
+        PrepareRequest(
+            tensorrt="11.2.1.2",
+            cuda="13.3",
+            architecture="x86_64",
+            target=LocalTarget(python="python3.12"),
+        )
+    )
+
+    LocalEnvironment(REPO_ROOT, runner)._build_install(
+        plan,
+        Path("/managed/venv/bin/python"),
+        {"PATH": "/managed/venv/bin"},
+        "100",
+    )
+
+    editable_index = next(
+        index
+        for index, command in enumerate(runner.commands)
+        if command[:4] == ["/managed/venv/bin/python", "-m", "pip", "install"]
+    )
+    assert runner.environments[editable_index] is not None
+    assert runner.environments[editable_index]["TRTMC_PACKAGE_TENSORRT_VERSION"] == "11.2.1.2"
 
 
 @pytest.mark.parametrize(

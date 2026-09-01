@@ -502,8 +502,11 @@ class LocalEnvironment:
                 command.append("--system-site-packages")
             command.append(venv)
             self.runner.run(command, cwd=self.repository)
+        provisioner = None
+        managed = None
         if target.dependency_mode == "managed":
-            managed = ManagedLocalProvisioner(self.repository, self.runner).prepare(plan, venv)
+            provisioner = ManagedLocalProvisioner(self.repository, self.runner)
+            managed = provisioner.prepare(plan, venv)
             environment = managed.environment(venv, gpu=target.gpu)
         else:
             environment = {
@@ -512,6 +515,8 @@ class LocalEnvironment:
                 "CUDA_VISIBLE_DEVICES": target.gpu,
             }
         wheel = self._build_install(plan, python, environment, sm)
+        if provisioner is not None and managed is not None:
+            provisioner.verify(plan, python, managed)
         if plan.request.mode == "development":
             build = plan.state_dir / f"build-sm{sm}"
             trtmc = build / "trtmc"
@@ -552,10 +557,14 @@ class LocalEnvironment:
             if plan.request.target.dependency_mode == "system":
                 editable.append("--no-deps")
             editable.extend(["-e", ".", "-C", "py-only=true"])
+            editable_environment = {
+                **environment,
+                "TRTMC_PACKAGE_TENSORRT_VERSION": plan.cohort.tensorrt_version,
+            }
             self.runner.run(
                 editable,
                 cwd=self.repository,
-                env=environment,
+                env=editable_environment,
             )
             trt_include = environment.get("TRTMC_TRT_INCLUDE_DIR", contract.tensorrt_include_dir)
             trt_library = environment.get(

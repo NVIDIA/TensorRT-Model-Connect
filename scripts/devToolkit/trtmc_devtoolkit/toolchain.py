@@ -147,7 +147,7 @@ class ManagedLocalProvisioner:
             cudart_library=cudart,
             cublas_library=cublas,
         )
-        self._verify(plan, python, toolchain)
+        self.verify(plan, python, toolchain)
         return toolchain
 
     def _prepare_headers(
@@ -232,7 +232,7 @@ class ManagedLocalProvisioner:
         linker.symlink_to(versioned.name)
         return linker
 
-    def _verify(
+    def verify(
         self,
         plan: PreparationPlan,
         python: Path,
