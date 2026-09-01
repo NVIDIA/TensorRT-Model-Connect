@@ -232,21 +232,115 @@ def _apply_block_scales(values: np.ndarray, scale_inv: np.ndarray) -> np.ndarray
     return values
 
 
+
+# ModelOpt MIXED_PRECISION checkpoints (RadixArk/Qwen3.8-27B-NVFP4) carry two
+# schemes side by side, described by quantization_config.config_groups:
+#
+#   FP8   attention and DeltaNet projections: float8_e4m3 weights with a single
+#         per-tensor "<name>.weight_scale".
+#   NVFP4 MLP projections and lm_head: 4-bit E2M1 values packed two per uint8,
+#         a per-16-element "<name>.weight_scale" stored as float8_e4m3, and a
+#         global "<name>.weight_scale_2".
+#
+# "<name>.input_scale" describes activations and is unused here: the graph runs
+# in fp16 and quantizes nothing at runtime.
+_PER_TENSOR_SCALE_SUFFIX = ".weight_scale"
+_GLOBAL_SCALE_SUFFIX = ".weight_scale_2"
+
+# E2M1: one sign bit, two exponent bits, one mantissa bit, exponent bias 1.
+# Subnormals give 0 and 0.5; the normals are 1, 1.5, 2, 3, 4, 6.
+_E2M1_MAGNITUDES = np.array(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+
+
+def _scale_key(name: str, suffix: str) -> str:
+    """Map "<...>.weight" to its sibling scale tensor name."""
+    base = name[: -len(".weight")] if name.endswith(".weight") else name
+    return base + suffix
+
+
+def _decode_e2m1(nibbles: np.ndarray) -> np.ndarray:
+    magnitudes = _E2M1_MAGNITUDES[nibbles & 0x07]
+    return np.where(nibbles & 0x08, -magnitudes, magnitudes)
+
+
+def _unpack_nvfp4(packed: np.ndarray) -> np.ndarray:
+    """Expand uint8 pairs of E2M1 values into a float32 array of twice the width.
+
+    The low nibble holds the even column and the high nibble the odd one, which
+    is the packing ModelOpt emits.
+    """
+    if packed.ndim != 2:
+        raise ValueError(f"NVFP4 weights must be 2-D, got {packed.ndim}-D")
+    packed = packed.astype(np.uint8, copy=False)
+    rows, packed_cols = packed.shape
+    out = np.empty((rows, packed_cols * 2), dtype=np.float32)
+    out[:, 0::2] = _decode_e2m1(packed & 0x0F)
+    out[:, 1::2] = _decode_e2m1(packed >> 4)
+    return out
+
+
+def _apply_group_scales(values: np.ndarray, group_scale: np.ndarray,
+                        global_scale: float) -> np.ndarray:
+    """Scale unpacked NVFP4 values by their per-group and global scales.
+
+    Reshaping to (rows, groups, group_size) lets the per-group multiply happen in
+    place; expanding the scales to the weight's own size would cost as much
+    memory again, and lm_head alone is 248320 x 5120.
+    """
+    rows, cols = values.shape
+    s_rows, s_cols = group_scale.shape
+    if s_rows != rows or cols % s_cols:
+        raise ValueError(
+            f"NVFP4 scale shape {group_scale.shape} does not tile weight shape "
+            f"{values.shape}")
+    group_size = cols // s_cols
+    view = values.reshape(rows, s_cols, group_size)
+    view *= group_scale.astype(np.float32).reshape(rows, s_cols, 1)
+    return (values * np.float32(global_scale)) if global_scale != 1.0 else values
+
+
 def _load_tensor(readers: list, name: str) -> np.ndarray:
     raw = _get_raw_tensor(readers, name)
+
+    # NVFP4: 4-bit values packed two per uint8, identified by the global scale
+    # that only this scheme carries. Checked before the dtype tests because the
+    # payload arrives as plain uint8.
+    global_key = _scale_key(name, _GLOBAL_SCALE_SUFFIX)
+    if _has_tensor(readers, global_key):
+        group_key = _scale_key(name, _PER_TENSOR_SCALE_SUFFIX)
+        if not _has_tensor(readers, group_key):
+            raise KeyError(
+                f"NVFP4 tensor {name!r} has {global_key!r} but no {group_key!r}; "
+                "cannot dequantize")
+        packed = np.asarray(raw.numpy() if hasattr(raw, "numpy") else raw)
+        group_scale = _to_numpy_fp32(_get_raw_tensor(readers, group_key))
+        global_scale = float(
+            _to_numpy_fp32(_get_raw_tensor(readers, global_key)).reshape(-1)[0])
+        return _apply_group_scales(_unpack_nvfp4(packed), group_scale, global_scale)
+
     values = _to_numpy_fp32(raw)
     if not _is_fp8_tensor(raw):
         return values
 
-    scale_name = name + _SCALE_INV_SUFFIX
-    if not _has_tensor(readers, scale_name):
-        # Refuse to return unscaled float8 values: they look like a plausible
-        # weight tensor and would corrupt the engine silently.
-        raise KeyError(
-            f"FP8 tensor {name!r} has no companion {scale_name!r}; "
-            "cannot dequantize")
-    scale_inv = _to_numpy_fp32(_get_raw_tensor(readers, scale_name))
-    return _apply_block_scales(values, scale_inv)
+    # Qwen native FP8: one scale per weight_block_size block.
+    block_key = name + _SCALE_INV_SUFFIX
+    if _has_tensor(readers, block_key):
+        block_scale = _to_numpy_fp32(_get_raw_tensor(readers, block_key))
+        return _apply_block_scales(values, block_scale)
+
+    # ModelOpt FP8: a single per-tensor scale.
+    tensor_key = _scale_key(name, _PER_TENSOR_SCALE_SUFFIX)
+    if _has_tensor(readers, tensor_key):
+        scale = _to_numpy_fp32(_get_raw_tensor(readers, tensor_key)).reshape(-1)[0]
+        values *= np.float32(scale)
+        return values
+
+    # Refuse to return unscaled float8 values: they look like a plausible weight
+    # tensor and would corrupt the engine silently.
+    raise KeyError(
+        f"FP8 tensor {name!r} has no companion {block_key!r} or {tensor_key!r}; "
+        "cannot dequantize")
 
 
 def _get_raw_tensor(readers: list, name: str):

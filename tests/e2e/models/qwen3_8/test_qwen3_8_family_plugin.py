@@ -615,3 +615,93 @@ def test_block_scales_handle_a_trailing_partial_block():
         [4.0, 4.0, 5.0],
     ], dtype=np.float32)
     np.testing.assert_allclose(out, expected)
+
+
+class _FakeTensor:
+    """Reader stand-in returning a fixed payload for any requested name."""
+
+    def __init__(self, values, dtype: str = ""):
+        self._values = values
+        self.dtype = dtype
+
+    def float(self):
+        return self
+
+    def numpy(self):
+        return self._values
+
+
+def _nvfp4_store(name, packed, group_scale, global_scale):
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+    return {
+        name: _FakeTensor(packed),
+        cm._scale_key(name, ".weight_scale"): group_scale,
+        cm._scale_key(name, ".weight_scale_2"): np.array([global_scale], dtype=np.float32),
+    }
+
+
+def test_nvfp4_weights_are_unpacked_and_double_scaled(monkeypatch):
+    """NVFP4 packs two E2M1 values per byte, low nibble first.
+
+    A wrong nibble order or magnitude table still yields plausible numbers, so
+    the expected values are spelled out rather than recomputed.
+    """
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    # Low nibble is the even column: 0x10 -> (0x0, 0x1) = (0.0, 0.5),
+    # 0x32 -> (0x2, 0x3) = (1.0, 1.5), 0x9E -> (0xE, 0x9) = (-4.0, -0.5).
+    packed = np.array([[0x10, 0x32], [0x9E, 0x00]], dtype=np.uint8)
+    group_scale = np.array([[2.0], [10.0]], dtype=np.float32)  # one group of 4
+    store = _nvfp4_store("m.weight", packed, group_scale, 3.0)
+
+    monkeypatch.setattr(cm, "_has_tensor", lambda _r, n: n in store)
+    monkeypatch.setattr(cm, "_get_raw_tensor", lambda _r, n: store[n])
+
+    out = cm._load_tensor(["r"], "m.weight")
+    expected = np.array([
+        [0.0, 0.5, 1.0, 1.5],
+        [-4.0, -0.5, 0.0, 0.0],
+    ], dtype=np.float32) * np.array([[2.0], [10.0]], dtype=np.float32) * 3.0
+    np.testing.assert_allclose(out, expected, rtol=1e-6)
+
+
+def test_nvfp4_without_group_scale_is_rejected(monkeypatch):
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    name = "m.weight"
+    store = {
+        name: _FakeTensor(np.zeros((2, 2), dtype=np.uint8)),
+        cm._scale_key(name, ".weight_scale_2"): np.array([1.0], dtype=np.float32),
+    }
+    monkeypatch.setattr(cm, "_has_tensor", lambda _r, n: n in store)
+    monkeypatch.setattr(cm, "_get_raw_tensor", lambda _r, n: store[n])
+
+    with pytest.raises(KeyError, match="no .*weight_scale"):
+        cm._load_tensor(["r"], name)
+
+
+def test_modelopt_per_tensor_fp8_scale_is_applied(monkeypatch):
+    """ModelOpt FP8 uses one scalar scale, unlike Qwen's per-block scale_inv."""
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    name = "m.weight"
+    store = {
+        name: _FakeFp8Tensor(np.full((2, 2), 3.0, dtype=np.float32)),
+        cm._scale_key(name, ".weight_scale"): np.array([0.5], dtype=np.float32),
+    }
+    monkeypatch.setattr(cm, "_has_tensor", lambda _r, n: n in store)
+    monkeypatch.setattr(cm, "_get_raw_tensor", lambda _r, n: store[n])
+
+    np.testing.assert_allclose(
+        cm._load_tensor(["r"], name), np.full((2, 2), 1.5, dtype=np.float32))
+
+
+def test_e2m1_magnitudes_match_the_format():
+    """0 and 0.5 are subnormal; 1, 1.5, 2, 3, 4, 6 are the normals."""
+    from tensorrt_model_connect.families.qwen3_8 import checkpoint_mapper as cm
+
+    nibbles = np.arange(16, dtype=np.uint8)
+    decoded = cm._decode_e2m1(nibbles)
+    expected = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+    np.testing.assert_allclose(decoded[:8], expected)
+    np.testing.assert_allclose(decoded[8:], -expected)
