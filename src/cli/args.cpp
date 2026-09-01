@@ -209,6 +209,8 @@ void print_usage() {
            "  trtmc disparity       <bundle.bundle> --image LEFT --right-image RIGHT "
            "--output PATH\n"
            "  trtmc geometry        <bundle.bundle> --image PATH --output DIR\n"
+           "  trtmc act             <bundle.bundle> --image PATH --state STATE.f32 "
+           "--output ACTIONS.f32 --control-hz F [--benchmark N] [--warmup N]\n"
            "  trtmc segment-prompted <bundle.bundle> --image PATH --output DIR "
            "[--point-x F] [--point-y F] [--background] [--prompt TEXT] [--hf-python PATH]\n"
            "  trtmc classify        <bundle.bundle> --image PATH [--benchmark N] [--warmup N]\n"
@@ -286,6 +288,7 @@ CliArgs parse_args(int argc, char** argv) {
                                        "segment-prompted",
                                        "disparity",
                                        "geometry",
+                                       "act",
                                        "classify",
                                        "detect",
                                        "extract-features",
@@ -309,6 +312,8 @@ CliArgs parse_args(int argc, char** argv) {
         args.error_message = "Unknown command: " + args.command;
         return args;
     }
+    if (args.command == "act")
+        args.benchmark = 10;
 
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -519,6 +524,20 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--right-image" && need_value(arg)) {
             args.right_image_path = argv[++i];
+            continue;
+        }
+        if (arg == "--state" && need_value(arg)) {
+            args.state_path = argv[++i];
+            continue;
+        }
+        if (arg == "--control-hz" && need_value(arg)) {
+            auto value = parse_float_value(arg, "a finite number > 0");
+            if (!value || *value <= 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number > 0";
+                return args;
+            }
+            args.control_frequency_hz = *value;
             continue;
         }
         if (arg == "--lora-adapter" && need_value(arg)) {
@@ -852,6 +871,12 @@ CliArgs parse_args(int argc, char** argv) {
     if (args.command == "run" && !args.prompts_file.empty() && !args.image_path.empty()) {
         args.parse_error = true;
         args.error_message = "--prompts-file cannot be combined with --image";
+    }
+    if (args.command == "act" &&
+        (args.bundle_path.empty() || args.image_path.empty() || args.state_path.empty() ||
+         args.output_dir.empty() || args.control_frequency_hz <= 0.0F)) {
+        args.parse_error = true;
+        args.error_message = "act requires bundle + --image + --state + --output + --control-hz";
     }
 
     return args;

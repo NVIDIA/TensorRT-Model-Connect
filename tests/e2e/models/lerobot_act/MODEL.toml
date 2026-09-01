@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "lerobot_act"
+plugin = "lerobot_act"
+test_manifests = ["manifests/act-aloha-sim-transfer-cube.json"]
+
+[model_reference_cache]
+repository = "https://github.com/huggingface/lerobot.git"
+revision = "3c0a209f9fac4d2a57617e686a7f2a2309144ba2"
+relative_path = "lerobot_act/reference/LeRobot-3c0a209f9fac"
+entrypoint = "lerobot/common/policies/act/modeling_act.py"
+environment_variable = "TRTMC_LEROBOT_SOURCE_DIR"
+
+[e2e_defaults.robot_action_chunk]
+reference_backend = "lerobot_act_torch"
+oracle_level = "L1_external_reference"
+stages = [{ name = "recorded_action_chunk", required = true }]
+input_fields = [
+  { input = "episode_index", manifest = "episode_index" },
+  { input = "frame_index", manifest = "frame_index" },
+  { input = "control_frequency_hz", manifest = "control_frequency_hz" },
+]
+preflight_requirements = [
+  { kind = "python_module_available", args = { module = "torch", phase = "reference" }, gating = true },
+  { kind = "python_module_available", args = { module = "torchvision", phase = "reference" }, gating = true },
+  { kind = "python_module_available", args = { module = "pyarrow", phase = "runtime" }, gating = true },
+  { kind = "python_module_available", args = { module = "imageio_ffmpeg", phase = "runtime" }, gating = true },
+]

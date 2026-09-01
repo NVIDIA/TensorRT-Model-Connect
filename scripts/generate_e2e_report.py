@@ -102,6 +102,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "encoder_only_nlp": "numeric",
     "embedding": "numeric",
     "reranking": "reranking",
+    "robot_action_chunk": "numeric",
     "neural_operator": "neural_operator",
     "omni_multimodal": "omni",
     # Kept explicit for forward-compatible manifests.  Unknown strategies

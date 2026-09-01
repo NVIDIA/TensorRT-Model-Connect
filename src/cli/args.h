@@ -22,6 +22,7 @@ struct CliArgs {
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
     std::string right_image_path;
+    std::string state_path;
     std::string lora_adapter_path;
     std::string lora_adapter_id{"default"};
     std::string output_dir;
@@ -49,6 +50,7 @@ struct CliArgs {
     int num_samples{1};
     int benchmark{0}; // >0: run N timed iterations after warmup
     int warmup{1};    // number of warmup iterations before timing
+    float control_frequency_hz{0.0F};
     float temperature{1.0F};
     float top_p{1.0F};
     float min_p{0.0F};

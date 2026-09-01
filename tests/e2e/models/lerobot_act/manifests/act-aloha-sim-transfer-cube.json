@@ -1,0 +1,42 @@
+{
+  "name": "act-aloha-sim-transfer-cube",
+  "hf_id": "lerobot/act_aloha_sim_transfer_cube_human",
+  "hf_revision": "ba73b2766f1371cdc133ca4efb97eb090d744625",
+  "bundle": "act-aloha-sim-transfer-cube.bundle",
+  "benchmark_exclusion_reason": "Robotics control-loop qualification uses the pinned recorded ALOHA replay contract rather than the generic inference benchmark catalog.",
+  "family": "lerobot_act",
+  "runtime_strategy": "lerobot_act_action_chunk",
+  "task_strategy": "robot_action_chunk",
+  "precision": "fp32",
+  "trust_remote_code": false,
+  "execution_profiles": {
+    "build": "base",
+    "runtime": "lerobot_act_reference",
+    "reference": "lerobot_act_reference"
+  },
+  "e2e_parallel_resource": "exclusive_gpu",
+  "e2e_min_free_gpu_memory_mib": 8192,
+  "build_timeout_s": 3600,
+  "testcases": [
+    {
+      "name": "act-aloha-sim-transfer-cube-recorded-episode-0-frame-0",
+      "trace_id": "IT-E2E-LEROBOT-ACT-01",
+      "test_type": "robot_action_chunk",
+      "reference_family": "robot_action_chunk",
+      "reference_precision": "fp32",
+      "user_contract": "recorded_robot_action_chunk",
+      "ci_tier": "default",
+      "episode_index": 0,
+      "frame_index": 0,
+      "control_frequency_hz": 50,
+      "dataset_id": "lerobot/aloha_sim_transfer_cube_human",
+      "dataset_revision": "6a43d500f101255823a9d2b9dc244eeb01a2cd31",
+      "dataset_codebase_version": "v3.0",
+      "task_environment": "AlohaTransferCube-v0",
+      "gym_aloha_version": "0.1.1",
+      "lerobot_source_revision": "3c0a209f9fac4d2a57617e686a7f2a2309144ba2",
+      "policy_checkpoint_sha256": "42772891cb6eba1e7bc36ad8e12c0fa0723c61f036fa235c725ce6026e6e81df",
+      "notes": "Runs the native FP32 ACT graph on episode 0 frame 0 from the immutable LeRobot ALOHA transfer-cube recording, compares all 100x14 unnormalized actions with the exact training-source PyTorch policy, and emits the chunk at the recorded 50 Hz control frequency. Physical robot safety is explicitly outside this qualification."
+    }
+  ]
+}

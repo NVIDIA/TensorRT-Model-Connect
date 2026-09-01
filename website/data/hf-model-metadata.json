@@ -882,6 +882,15 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "lerobot/act_aloha_sim_transfer_cube_human",
+      "revision": "ba73b2766f1371cdc133ca4efb97eb090d744625",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "microsoft/Phi-3-mini-4k-instruct",
       "revision": "f39ac1d28e925b323eae81227eaba4464caced4e",
       "revision_source": "resolved",

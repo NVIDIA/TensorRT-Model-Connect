@@ -1,0 +1,16 @@
+{
+  "threshold_overrides": {
+    "action_max_abs_error": 0.00005,
+    "action_mean_abs_error": 0.000005,
+    "action_rmse": 0.00001,
+    "action_step_capacity_hz": 50.0,
+    "chunk_inference_p95_ms": 2000.0,
+    "control_effective_hz": 49.0,
+    "control_p99_abs_jitter_ms": 5.0,
+    "control_missed_deadlines": 0.0,
+    "gpu_memory_delta_mib": 1024.0,
+    "peak_resident_memory_mib": 2048.0,
+    "startup_ms": 5000.0,
+    "training_bounds_fraction": 1.0
+  }
+}

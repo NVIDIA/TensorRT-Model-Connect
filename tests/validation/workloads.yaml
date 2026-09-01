@@ -1204,6 +1204,38 @@ suites:
         Single-GPU official-reference FP32 parity validation. Thresholds remain
         owned by the MoGe comparator and are not overridden by this suite.
 
+  - id: lerobot_act_recorded_control_fp32_parity
+    description: >
+      Native FP32 ACT control qualification on episode 0 frame 0 from the
+      immutable LeRobot ALOHA transfer-cube recording. The exact pinned
+      training-source PyTorch policy and TRTMC runtime consume the same RGB
+      image and 14-value robot state, compare all 100x14 unnormalized actions,
+      and gate training bounds, chunk latency, memory, and 50 Hz recorded
+      control replay. Physical robot safety is outside this qualification.
+    user_contract: recorded_robot_action_chunk
+    task_type: Robot Observation → Action Chunk
+    default_model_names: [act-aloha-sim-transfer-cube]
+    dataset:
+      kind: model_plugin_json
+      default_path: tests/e2e/models/lerobot_act/data/validation.json
+    selectors:
+      model_names: [act-aloha-sim-transfer-cube]
+      task_strategies: [robot_action_chunk]
+      runtime_strategies: [lerobot_act_action_chunk]
+      user_contracts: [recorded_robot_action_chunk]
+      families: [lerobot_act]
+    scoring:
+      scorer: model_plugin_parity
+    gates:
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only exact-source parity and recorded control-loop qualification.
+        Numeric and systems thresholds remain owned by the LeRobot ACT
+        comparator and are not overridden by this suite.
+
   - id: imagenette_image_classification
     description: >
       HF-to-TRTMC image-classification parity on Imagenette validation, a
