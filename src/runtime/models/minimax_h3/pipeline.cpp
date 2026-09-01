@@ -225,9 +225,13 @@ void fill_audio_position_ids(std::vector<float>& positions,
     }
 }
 
-std::vector<float> make_position_ids(int32_t text_rows) {
+void validate_text_rows(int32_t text_rows) {
     if (text_rows < kMinTextRows || text_rows > kMaxTextRows)
         throw std::invalid_argument("MiniMax-H3 text rows must be between 1 and 537");
+}
+
+std::vector<float> make_position_ids(int32_t text_rows) {
+    validate_text_rows(text_rows);
     const int32_t sequence_rows = text_rows + kMediaRows;
     std::vector<float> positions(static_cast<std::size_t>(sequence_rows) * 3, 0.0F);
     for (int32_t index = 0; index < text_rows; ++index)
