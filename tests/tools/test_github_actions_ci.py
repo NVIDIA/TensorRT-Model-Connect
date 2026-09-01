@@ -313,11 +313,25 @@ def test_community_activity_alert_only_posts_trusted_external_metadata() -> None
     assert 'gsub(">"; "&gt;")' in script
     assert "($title | slack_escape)" in script
     assert '" + $title +' not in script
-    assert "*External community activity*" in script
-    assert '"*Event:* " + $kind + " · " + $action' in script
+    assert "External community activity" in script
+    assert '"*Event:*\\n" + $kind + " · " + $action' in script
     assert "curl --fail-with-body --silent --show-error" in script
     assert '--data "$payload"' in script
     assert '"$SLACK_WEBHOOK_URL"' in script
+
+
+def test_community_activity_alert_uses_structured_slack_blocks() -> None:
+    path = REPO_ROOT / ".github" / "workflows" / "community-activity-slack-alert.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    script = workflow["jobs"]["notify"]["steps"][0]["run"]
+
+    assert r"\\n" not in script
+    assert 'type: "header"' in script
+    assert 'type: "plain_text"' in script
+    assert 'type: "section"' in script
+    assert 'fields: [' in script
+    for label in ("Repository", "Event", "Author", "Association"):
+        assert f'"*{label}:*\\n"' in script
 
 
 def test_only_pages_workflow_creates_deployment_objects() -> None:

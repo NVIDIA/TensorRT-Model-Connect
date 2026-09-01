@@ -111,11 +111,40 @@ jobs:
               gsub("&"; "&amp;") |
               gsub("<"; "&lt;") |
               gsub(">"; "&gt;");
-             {text: (":bell: *External community activity*\\n" +
-              "*Repository:* " + $repository + "\\n" +
-              "*Event:* " + $kind + " · " + $action + "\\n" +
-              "*Item:* <" + $url + "|#" + $number + " — " + ($title | slack_escape) + ">\\n" +
-              "*Author:* " + $author + " (" + $association + ")")}')"
+             ($title | slack_escape) as $safe_title |
+             {
+               text: (":bell: External community activity\n" +
+                 $kind + " #" + $number + " · " + $action + "\n" +
+                 $repository + "\n" +
+                 $author + " (" + $association + ")"),
+               blocks: [
+                 {
+                   type: "header",
+                   text: {
+                     type: "plain_text",
+                     text: "🔔 External community activity",
+                     emoji: true
+                   }
+                 },
+                 {
+                   type: "section",
+                   fields: [
+                     {type: "mrkdwn", text: ("*Repository:*\n" + $repository)},
+                     {type: "mrkdwn", text: ("*Event:*\n" + $kind + " · " + $action)},
+                     {type: "mrkdwn", text: ("*Author:*\n" + $author)},
+                     {type: "mrkdwn", text: ("*Association:*\n" + $association)}
+                   ]
+                 },
+                 {
+                   type: "section",
+                   text: {
+                     type: "mrkdwn",
+                     text: ("*" + $kind + " #" + $number + "*\n" +
+                       "<" + $url + "|" + $safe_title + ">")
+                   }
+                 }
+               ]
+             }')"
 
           curl --fail-with-body --silent --show-error \
             --request POST \
