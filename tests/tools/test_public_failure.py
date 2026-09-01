@@ -570,8 +570,11 @@ def test_internal_ci_bridge_publishes_the_private_sanitized_artifact() -> None:
     assert (
         'expected_title="Source PR #$PR_NUMBER · $HEAD_SHA · dispatch $dispatch_nonce"' in workflow
     )
-    assert '"dispatch_nonce": os.environ["EXPECTED_DISPATCH_NONCE"]' in workflow
+    assert 'expected_dispatch_nonce=os.environ["EXPECTED_DISPATCH_NONCE"]' in workflow
     assert "validate_public_failure(report)" in workflow
+    assert "validate_failure_identity(" in workflow
+    assert "commit_parents=graph.commit_parents" in workflow
+    assert "is_ancestor=graph.is_ancestor" in workflow
     assert "assert_public_payload_safe(report, document)" in workflow
     assert "name: public-failure-log" in workflow
     assert workflow.count("TRTMC Internal CI / Automated premerge gate") == 2

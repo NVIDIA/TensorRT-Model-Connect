@@ -506,8 +506,11 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "--name public-failure-payload" in dispatch
     assert "--log" not in dispatch
     assert "validate_public_failure(report)" in dispatch
+    assert "validate_failure_identity(" in dispatch
+    assert "commit_parents=graph.commit_parents" in dispatch
+    assert "is_ancestor=graph.is_ancestor" in dispatch
     assert "EXPECTED_DISPATCH_NONCE" in dispatch
-    assert '"dispatch_nonce": os.environ["EXPECTED_DISPATCH_NONCE"]' in dispatch
+    assert 'expected_dispatch_nonce=os.environ["EXPECTED_DISPATCH_NONCE"]' in dispatch
     assert "assert_public_payload_safe(report, document)" in dispatch
     assert "name: public-failure-log" in dispatch
     assert "Automated internal CI failed; open the public failure log" in publish
@@ -515,7 +518,9 @@ def test_internal_ci_bridge_only_dispatches_an_exact_trusted_head() -> None:
     assert "always() && needs.authorize.result == 'success'" in workflow
     assert "cancelled|timed_out|skipped|neutral|action_required" in workflow
     assert 'payload_size" -gt 65536' in dispatch
-    assert '"base_sha": os.environ["EXPECTED_BASE_SHA"]' in dispatch
+    assert '"base_sha": os.environ["EXPECTED_BASE_SHA"]' not in dispatch
+    assert "current_base" not in publish
+    assert "The PR base changed during internal CI" not in publish
     assert publish.index("- name: Publish the terminal automated status") < publish.index(
         "- name: Print public-failure.log"
     )
