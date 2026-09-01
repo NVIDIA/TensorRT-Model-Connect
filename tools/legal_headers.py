@@ -57,6 +57,10 @@ HASH_STYLE = HeaderStyle(
     lines=(f"# {COPYRIGHT_TEXT}", f"# {LICENSE_TEXT}"),
     preserves_python_preamble=True,
 )
+BATCH_STYLE = HeaderStyle(
+    name="batch-rem",
+    lines=(f"@REM {COPYRIGHT_TEXT}", f"@REM {LICENSE_TEXT}"),
+)
 NATIVE_STYLE = HeaderStyle(
     name="native-block",
     lines=("/*", f" * {COPYRIGHT_TEXT}", f" * {LICENSE_TEXT}", " */"),
@@ -77,6 +81,7 @@ STYLE_BY_SUFFIX: Mapping[str, HeaderStyle] = {
     ".bash": HASH_STYLE,
     ".zsh": HASH_STYLE,
     ".ps1": HASH_STYLE,
+    ".cmd": BATCH_STYLE,
     ".cmake": HASH_STYLE,
     ".mk": HASH_STYLE,
     ".mak": HASH_STYLE,
@@ -399,7 +404,7 @@ def _header_offset(data: bytes, style: HeaderStyle) -> int:
 
 def _marker_text(line: bytes) -> tuple[str, bytes] | None:
     content = _without_line_ending(line).lstrip()
-    for prefix in (b"//", b"/*", b"#", b"*"):
+    for prefix in (b"//", b"/*", b"#", b"*", b"@REM"):
         if content.startswith(prefix):
             content = content[len(prefix) :].lstrip()
             break

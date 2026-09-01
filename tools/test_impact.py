@@ -1708,6 +1708,31 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestNoImpact.test_e2e_schedule_metadata_tools_only",),
         ),
         ClassificationRule(
+            priority=398,
+            name="minimax_h3_windows_reproduction_helper",
+            matcher=_path_in(
+                {
+                    "requirements/windows-h3-fastvideo-vsa.txt",
+                    "scripts/install_windows_h3_fastvideo_vsa.cmd",
+                    "scripts/install_windows_h3_fastvideo_vsa.ps1",
+                    "scripts/run_windows_h3_fastvideo_vsa.ps1",
+                    "scripts/run_windows_h3_hot_benchmark.ps1",
+                    "third_party/fastvideo/LICENSE",
+                    "third_party/fastvideo/README.md",
+                    "third_party/fastvideo/windows-h3-vsa.patch",
+                }
+            ),
+            resolver=_match_result(
+                "minimax_h3_windows_reproduction_helper",
+                _minimax_h3_models,
+                ["tools"],
+                False,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_minimax_h3_windows_reproduction_helpers",
+            ),
+        ),
+        ClassificationRule(
             priority=399,
             name="minimax_h3_windows_build_script",
             matcher=_path_equals("scripts/build_windows_h3.ps1"),

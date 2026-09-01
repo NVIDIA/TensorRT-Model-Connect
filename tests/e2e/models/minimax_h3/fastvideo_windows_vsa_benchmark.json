@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "profile_id": "minimax-h3-windows-fastvideo-vsa-sm121-v1",
+  "status": "completed",
+  "measurement_date": "2026-09-01",
+  "measurement_boundary": {
+    "name": "fastvideo-reported-generation-request",
+    "includes": [
+      "conditioning",
+      "denoising-and-cold-regional-compile",
+      "full-h3-video-vae",
+      "audio-decode",
+      "output-save"
+    ],
+    "excludes": [
+      "model-and-adapter-downloads",
+      "pre-request-generator-construction"
+    ]
+  },
+  "hardware": {
+    "gpu_product": "NVIDIA RTX Spark N1X",
+    "gpu_memory_mib": 63424,
+    "compute_capability": "12.1",
+    "driver_version": "616.67",
+    "operating_system": "Windows 11",
+    "os_build": 28000,
+    "os_architecture": "Arm64",
+    "process_architecture": "X64",
+    "python_architecture": "AMD64",
+    "python_bits": 64
+  },
+  "software": {
+    "fastvideo_revision": "3d8ac9d14bd697a89ede8f170cbfbca012a9edcc",
+    "fastvideo_patch_sha256": "4acaad0552a75971715006ec364a374537c3a38106f5d9c5dd4f20c85bd6bbd6",
+    "python_version": "3.13.5",
+    "torch_version": "2.12.0+cu130",
+    "triton_windows_version": "3.7.1.post27",
+    "ptxas_version": "12.9.86",
+    "ptxas_sha256": "bb89f22b3afe5d63141c5d83838c7aff9df66171a02d3c501376c8d7904eae0b",
+    "base_model_revision": "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
+    "adapter_revision": "bcf40ca6f457ed66f8badf13514943e390205fca",
+    "adapter_sha256": "42dc502a2078f166c396a1fa75f29728d1844363652d345d5ef3e2b444ed6470"
+  },
+  "workload": {
+    "height": 768,
+    "width": 1344,
+    "num_frames": 345,
+    "fps": 24,
+    "seed": 0,
+    "scheduler_grid_points": 5,
+    "transformer_forwards": 4,
+    "attention_backend": "VIDEO_SPARSE_ATTN_H3",
+    "vsa_sparsity": 0.9,
+    "vsa_tile_size": 64,
+    "vsa_kernel": "triton",
+    "video_decode_backend": "h3-vae",
+    "execution": {
+      "profile": "all",
+      "num_gpus": 1,
+      "execution_backend": "mp",
+      "regional_torch_compile": true,
+      "whole_model_torch_compile": false,
+      "compile_vae": true,
+      "parallel_vae": false,
+      "replicated_dit": true,
+      "h3_sequential_load": true,
+      "lazy_module_load": true,
+      "pin_cpu_memory": true,
+      "warmup_requests": 0,
+      "measured_requests": 1
+    }
+  },
+  "memory": {
+    "long_sequence_policy": "no-grad-inplace-gate-merge",
+    "reproduction_runner_allocator": "platform-default",
+    "benchmark_allocator_request": "expandable_segments:True",
+    "benchmark_allocator_observation": "unsupported-on-windows-and-not-enabled"
+  },
+  "timing_seconds": {
+    "conditioning": 104.645687,
+    "denoising_and_cold_regional_compile": 987.096343,
+    "full_h3_video_vae": 252.945621,
+    "audio_decode": 3.436426,
+    "stage_sum": 1348.124077,
+    "generated_media": 1355.396,
+    "output_save": 2.069,
+    "request_wall": 1358.751
+  },
+  "target_comparison": {
+    "target_request_wall_seconds": 600,
+    "achieved": false,
+    "request_wall_minutes": 22.64585
+  },
+  "media": {
+    "container": "mp4",
+    "size_bytes": 9386238,
+    "sha256": "4e48850904ce696e97ec9ed5b05f9d6d6ac2628e29018d2d34a6ddee061670e8",
+    "video_codec": "h264",
+    "video_frames": 345,
+    "video_width": 1344,
+    "video_height": 768,
+    "video_fps": 24,
+    "video_duration_seconds": 14.375,
+    "audio_codec": "aac",
+    "audio_channels": 2,
+    "audio_sample_rate_hz": 32000,
+    "audio_duration_seconds": 14.432,
+    "audio_samples": 461824,
+    "audio_peak_db": -4.79,
+    "audio_rms_db": -21.23
+  }
+}

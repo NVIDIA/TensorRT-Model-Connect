@@ -6,6 +6,18 @@ notices are provided for attribution and do not modify the license terms of
 the TensorRT-Model-Connect project.
 
 -------------------------------------------------------------------------------
+FastVideo
+-------------------------------------------------------------------------------
+
+This product includes a source patch derived from FastVideo:
+
+  https://github.com/hao-ai-lab/FastVideo/tree/3d8ac9d14bd697a89ede8f170cbfbca012a9edcc
+
+The patch adds Windows single-GPU runtime support and a compile-safe MiniMax H3
+tile-64 Triton VSA inference route. FastVideo is licensed under the Apache
+License, Version 2.0. A copy is provided in `third_party/fastvideo/LICENSE`.
+
+-------------------------------------------------------------------------------
 stb
 -------------------------------------------------------------------------------
 

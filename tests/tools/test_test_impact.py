@@ -1747,6 +1747,30 @@ class TestE2EDataFiles:
 
 
 class TestUnitTiers:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "requirements/windows-h3-fastvideo-vsa.txt",
+            "scripts/install_windows_h3_fastvideo_vsa.cmd",
+            "scripts/install_windows_h3_fastvideo_vsa.ps1",
+            "scripts/run_windows_h3_fastvideo_vsa.ps1",
+            "scripts/run_windows_h3_hot_benchmark.ps1",
+            "third_party/fastvideo/LICENSE",
+            "third_party/fastvideo/README.md",
+            "third_party/fastvideo/windows-h3-vsa.patch",
+        ],
+    )
+    def test_minimax_h3_windows_reproduction_helpers(self, imap, path):
+        """Windows reproduction helpers select MiniMax H3 and tools tests."""
+        imap.family_to_models["minimax_h3"] = ["minimax-h3-case"]
+
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "minimax_h3_windows_reproduction_helper"
+        assert match.models == ["minimax-h3-case"]
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_minimax_h3_windows_build_script(self, imap):
         """The Windows helper selects its model owner and builder tests."""
         imap.family_to_models["minimax_h3"] = ["minimax-h3-case"]

@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Unified diff files require a one-character context marker on blank lines.
+third_party/fastvideo/windows-h3-vsa.patch text eol=lf -whitespace

@@ -42,6 +42,7 @@ const sidebars = {
         'getting-started/installation',
         'getting-started/source-build',
         'getting-started/windows-native-h3',
+        'getting-started/windows-fastvideo-h3-vsa',
         'getting-started/quick-start',
         'getting-started/troubleshooting'
       ]
