@@ -41,7 +41,7 @@ Common native TensorRT groups:
 - Audio and speech: Whisper, Canary, Bark, Magpie, PersonaPlex, Nemotron streaming.
 - Diffusion: FLUX, Wan 2.1/2.2, LTX-Video, Qwen-Image, SANA-WM, Z-Image,
   PixArt.
-- Perception: MoGe monocular geometry, SegFormer, SAM, SAM3, and timm ViT
+- Perception: MoGe monocular geometry, SegFormer, SAM, SAM3, timm ViT, and timm ResNet
   classification.
 - Time-series/operators: Chronos-Bolt, PatchTSMixer, PatchTST, and TimesFM.
 

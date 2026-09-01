@@ -1839,7 +1839,7 @@ def _load_vision(
     kwargs = _load_kwargs(arguments, torch)
     processor_kwargs = _processor_kwargs(arguments)
 
-    if arguments.family == "timm_vit":
+    if arguments.family in {"timm_vit", "timm_resnet"}:
         import timm
         from timm.data import create_transform, resolve_model_data_config
 

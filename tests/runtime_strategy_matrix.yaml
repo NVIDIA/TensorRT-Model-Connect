@@ -60,6 +60,7 @@
     "moge_monocular_geometry",
     "lerobot_act_action_chunk",
     "timm_vit_image_classification",
+    "timm_resnet_image_classification",
     "whisper_speech_to_text",
     "canary_speech_to_text",
     "nemotron_speech_streaming_speech_to_text_rnnt",
@@ -931,6 +932,17 @@
       "comparator_class": "image_classification.ImageClassificationComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timm_vit_image_classification'].",
+      "performance_mode": "single_pass"
+    },
+    "timm_resnet_image_classification": {
+      "task_strategy": "image_classification",
+      "cli_commands": [
+        "classify"
+      ],
+      "runner_class": "image_classification.ImageClassificationRunner",
+      "comparator_class": "image_classification.ImageClassificationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['timm_resnet_image_classification'].",
       "performance_mode": "single_pass"
     },
     "qwen_vl_vision_language": {

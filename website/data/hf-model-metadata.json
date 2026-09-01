@@ -1312,6 +1312,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "timm/resnet50.a1_in1k",
+      "revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [
+        "resnet50"
+      ],
+      "architecture_source": "config.architecture"
+    },
+    {
       "hf_id": "timm/vit_base_patch16_224.augreg_in21k_ft_in1k",
       "revision": "2ec9fb3d7bb664aac471ac44582c94d18de33780",
       "revision_source": "resolved",
