@@ -194,12 +194,28 @@ void test_focal_recovery_failure_is_reported() {
     }
 }
 
+void test_fast_path_rejects_non_960x540_input() {
+    constexpr int32_t size = 64;
+    auto module = std::make_unique<FakeMogeModule>(size, size);
+    trtmc::MogePipeline pipeline(std::move(module), "moge-2-vitl", true);
+    auto image = rgb_image(size, size);
+
+    try {
+        (void)pipeline.estimate_geometry(image.data(), size, size);
+        check(false, "MoGe FP16 fast path rejects another shape");
+    } catch (const std::invalid_argument& error) {
+        check(std::string(error.what()).find("960x540") != std::string::npos,
+              "MoGe FP16 fast-path shape error is explicit");
+    }
+}
+
 } // namespace
 
 int main() {
     test_pipeline_recovers_metric_geometry_from_hwc_input();
     test_invalid_mask_materializes_infinity();
     test_focal_recovery_failure_is_reported();
+    test_fast_path_rejects_non_960x540_input();
     if (g_failures != 0) {
         std::cerr << g_failures << " MoGe pipeline test(s) failed\n";
         return 1;

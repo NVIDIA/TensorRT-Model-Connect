@@ -55,6 +55,7 @@ def test_plugin_keeps_model_state_local_and_rejects_unimplemented_modes(
     (tmp_path / "model.pt").write_bytes(b"checkpoint")
     config = SimpleNamespace(raw={})
 
+    assert family_plugin.plugin.default_build_precision == "fp32"
     assert family_plugin.plugin.load_weights(str(tmp_path), config) == {
         "model_dir": str(tmp_path.resolve())
     }
@@ -122,7 +123,11 @@ def test_production_builder_is_fixed_and_tensor_rt_native_only() -> None:
         "GELU_ERF",
         "first_transpose=(0, 3, 1, 2)",
         "_NUM_TOKENS = 1800",
-        "config.builder_optimization_level = 1",
+        "_FAST_IMAGE_HEIGHT = 540",
+        "_FAST_IMAGE_WIDTH = 960",
+        "attention.decomposable = not self.fast_path",
+        "compute_dtype=self.trt.float16",
+        "config.builder_optimization_level = 3 if fast_path else 1",
         "config.avg_timing_iterations = 3",
     ):
         assert required in source
@@ -130,10 +135,12 @@ def test_production_builder_is_fixed_and_tensor_rt_native_only() -> None:
         assert f'("{output}",' in source
 
 
-def test_build_rejects_unqualified_precision_and_wrong_checkpoint(tmp_path: Path) -> None:
+def test_build_rejects_unknown_precision_and_wrong_checkpoint(tmp_path: Path) -> None:
     (tmp_path / "model.pt").write_bytes(b"wrong checkpoint")
 
-    with pytest.raises(ValueError, match="supports precision='fp32' only"):
-        model_module.build_moge_engine(str(tmp_path), precision="fp16")
+    with pytest.raises(ValueError, match="supports precision='fp32' or 'fp16' only"):
+        model_module.build_moge_engine(str(tmp_path), precision="bf16")
     with pytest.raises(ValueError, match="checkpoint SHA-256 mismatch"):
         model_module.build_moge_engine(str(tmp_path), precision="fp32")
+    with pytest.raises(ValueError, match="checkpoint SHA-256 mismatch"):
+        model_module.build_moge_engine(str(tmp_path), precision="fp16")

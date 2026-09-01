@@ -17,7 +17,8 @@ namespace trtmc {
 
 class MogePipeline final : public IPipeline, public moge::IGeometryEstimator {
   public:
-    MogePipeline(std::unique_ptr<ITrtModule> model, std::string model_id);
+    MogePipeline(std::unique_ptr<ITrtModule> model, std::string model_id,
+                 bool fixed_fast_shape = false);
 
     moge::GeometryResult estimate_geometry(const float* pixels, int32_t height,
                                            int32_t width) override;
@@ -28,6 +29,7 @@ class MogePipeline final : public IPipeline, public moge::IGeometryEstimator {
   private:
     std::unique_ptr<ITrtModule> model_;
     std::string model_id_;
+    bool fixed_fast_shape_{false};
 };
 
 } // namespace trtmc

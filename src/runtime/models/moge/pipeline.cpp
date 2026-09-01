@@ -355,8 +355,10 @@ moge::GeometryResult postprocess_geometry(const float* affine_points,
 
 } // namespace
 
-MogePipeline::MogePipeline(std::unique_ptr<ITrtModule> model, std::string model_id)
-    : model_(std::move(model)), model_id_(std::move(model_id)) {
+MogePipeline::MogePipeline(std::unique_ptr<ITrtModule> model, std::string model_id,
+                           bool fixed_fast_shape)
+    : model_(std::move(model)), model_id_(std::move(model_id)),
+      fixed_fast_shape_(fixed_fast_shape) {
     if (!model_ || !model_->ok())
         throw std::runtime_error("MogePipeline: invalid model");
 }
@@ -364,6 +366,9 @@ MogePipeline::MogePipeline(std::unique_ptr<ITrtModule> model, std::string model_
 moge::GeometryResult MogePipeline::estimate_geometry(const float* pixels, int32_t height,
                                                      int32_t width) {
     validate_image_input(pixels, height, width);
+    if (fixed_fast_shape_ && (height != 540 || width != 960)) {
+        throw std::invalid_argument("MoGe FP16 fast path requires a 960x540 image");
+    }
 
     Tensor image{const_cast<float*>(pixels), {1, height, width, 3}, DType::kFloat32};
     const auto outputs = model_->forward({{"image", image}});
