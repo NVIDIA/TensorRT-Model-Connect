@@ -115,15 +115,15 @@ def checkpoint_keys(
 
 
 def _slice_modulation(network, selected, index: int, rows: int, width: int):
-    value = network.add_slice(selected, (0, index, 0), (rows, 1, width), (1, 1, 1)).get_output(0)
+    value = op.dynamic_slice(network, selected, (0, index, 0), (None, 1, width))
     reshape = network.add_shuffle(value)
-    reshape.reshape_dims = (rows, width)
+    reshape.reshape_dims = (-1, width)
     return reshape.get_output(0)
 
 
 def _per_head_norm(network, tensor, weight, profile: MiniMaxH3Config, rows: int):
     reshape = network.add_shuffle(tensor)
-    reshape.reshape_dims = (rows, profile.num_heads, profile.head_dim)
+    reshape.reshape_dims = (-1, profile.num_heads, profile.head_dim)
     normalized = op.rms_norm(
         network, reshape.get_output(0), weight, profile.head_dim, profile.norm_eps
     )
@@ -135,7 +135,7 @@ def _per_head_norm(network, tensor, weight, profile: MiniMaxH3Config, rows: int)
 def _rope_tables(network, position_ids, profile: MiniMaxH3Config, rows: int):
     positions = op.cast(network, position_ids, trt.float32)
     position_shape = network.add_shuffle(positions)
-    position_shape.reshape_dims = (rows, 3, 1)
+    position_shape.reshape_dims = (-1, 3, 1)
     inverse = 1.0 / (
         10000.0
         ** (
@@ -148,7 +148,7 @@ def _rope_tables(network, position_ids, profile: MiniMaxH3Config, rows: int):
         position_shape.get_output(0), inverse, trt.ElementWiseOperation.PROD
     ).get_output(0)
     flatten = network.add_shuffle(frequency)
-    flatten.reshape_dims = (1, rows, 3 * profile.rope_freq_dim)
+    flatten.reshape_dims = (1, -1, 3 * profile.rope_freq_dim)
     cos = network.add_unary(flatten.get_output(0), trt.UnaryOperation.COS).get_output(0)
     sin = network.add_unary(flatten.get_output(0), trt.UnaryOperation.SIN).get_output(0)
     return cos, sin
@@ -237,7 +237,7 @@ def _refine_text(network, text, weights, profile: MiniMaxH3Config):
     hidden = op.linear(
         network, text, weights["context_embedder.weight"], weights["context_embedder.bias"]
     )
-    rows = profile.text_rows
+    rows = -1
     for index in range(profile.num_refiner_layers):
         prefix = f"token_refiner.refiner_blocks.{index}"
         normalized = op.rms_norm(
@@ -303,7 +303,7 @@ def _transformer_block(
 ):
     """Add one native H3 transformer block and return its residual stream."""
 
-    rows = profile.sequence_length
+    rows = -1
     prefix = f"transformer_blocks.{index}"
     selected = op.gather_rows(network, block_modulation, adaln_indices)
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
@@ -348,7 +348,7 @@ def _transformer_block(
 
 
 def _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile):
-    rows = profile.sequence_length
+    rows = -1
     selected = op.gather_rows(network, final_modulation, timestep_indices)
     final_shift = _slice_modulation(network, selected, 0, rows, profile.hidden_size)
     final_scale = _slice_modulation(network, selected, 1, rows, profile.hidden_size)
@@ -381,18 +381,15 @@ def _mark_full_velocity_outputs(network, hidden, weights):
 def _mark_sliced_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Config):
     """Project only rows consumed by the audio and video scheduler updates."""
 
-    audio_hidden = network.add_slice(
+    audio_hidden = op.slice_rows_from_end(
+        network,
         hidden,
-        (profile.text_rows, 0),
-        (profile.audio_rows, profile.hidden_size),
-        (1, 1),
-    ).get_output(0)
-    video_hidden = network.add_slice(
-        hidden,
-        (profile.text_rows + profile.audio_rows, 0),
-        (profile.video_rows, profile.hidden_size),
-        (1, 1),
-    ).get_output(0)
+        offset=profile.audio_rows + profile.video_rows,
+        rows=profile.audio_rows,
+    )
+    video_hidden = op.slice_rows_from_end(
+        network, hidden, offset=profile.video_rows, rows=profile.video_rows
+    )
     video = op.linear(
         network,
         video_hidden,
@@ -427,6 +424,42 @@ def _native_builder(verbose: bool, workspace_bytes: int | None):
     # Hugging Face keeps TF32 disabled for the FP32 input/output projections.
     config.clear_flag(trt.BuilderFlag.TF32)
     return logger, builder, network, config
+
+
+def _add_dynamic_profile(
+    builder,
+    config,
+    profile: MiniMaxH3Config,
+    *,
+    text_inputs: tuple[str, ...] = (),
+    packed_inputs: tuple[str, ...] = (),
+) -> None:
+    optimization = builder.create_optimization_profile()
+    text_shapes = (
+        profile.min_text_rows,
+        profile.opt_text_rows,
+        profile.text_rows,
+    )
+    packed_shapes = (
+        profile.min_sequence_length,
+        profile.opt_sequence_length,
+        profile.sequence_length,
+    )
+    for name in text_inputs:
+        optimization.set_shape(
+            name,
+            min=(text_shapes[0], profile.text_dim),
+            opt=(text_shapes[1], profile.text_dim),
+            max=(text_shapes[2], profile.text_dim),
+        )
+    for name in packed_inputs:
+        width = 3 if name == "position_ids" else profile.hidden_size
+        if name in ("adaln_indices", "timestep_indices"):
+            shapes = tuple((rows,) for rows in packed_shapes)
+        else:
+            shapes = tuple((rows, width) for rows in packed_shapes)
+        optimization.set_shape(name, min=shapes[0], opt=shapes[1], max=shapes[2])
+    config.add_optimization_profile(optimization)
 
 
 def _serialize(
@@ -465,7 +498,7 @@ def build_dit_engine(
     profile.validate()
     if profile.first_block_cache:
         raise ValueError("MiniMax-H3 first_block_cache profile requires the split DiT builders")
-    rows = profile.sequence_length
+    rows = -1
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
 
     video = network.add_input(
@@ -474,12 +507,17 @@ def build_dit_engine(
     audio = network.add_input(
         "audio_hidden_states", trt.float32, (profile.audio_rows, profile.audio_in_channels)
     )
-    text = network.add_input(
-        "encoder_hidden_states", trt.float32, (profile.text_rows, profile.text_dim)
+    text = network.add_input("encoder_hidden_states", trt.float32, (-1, profile.text_dim))
+    positions = network.add_input("position_ids", trt.float32, (-1, 3))
+    adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
+    timestep_indices = network.add_input("timestep_indices", trt.int32, (-1,))
+    _add_dynamic_profile(
+        builder,
+        config,
+        profile,
+        text_inputs=("encoder_hidden_states",),
+        packed_inputs=("position_ids", "adaln_indices", "timestep_indices"),
     )
-    positions = network.add_input("position_ids", trt.float32, (rows, 3))
-    adaln_indices = network.add_input("adaln_indices", trt.int32, (rows,))
-    timestep_indices = network.add_input("timestep_indices", trt.int32, (rows,))
     block_modulations = [
         network.add_input(
             f"block_modulation_{index}",
@@ -497,8 +535,8 @@ def build_dit_engine(
     hidden = _packed_hidden(network, video, audio, text, weights, profile)
 
     cos, sin = _rope_tables(network, positions, profile, rows)
-    # Pristine Diffusers packs exactly 38,247 rows on one device, so its
-    # attention mask is None. Preserve that contract without synthetic padding.
+    # The dynamic packed sequence contains live rows only, like Diffusers, so
+    # its attention mask remains None for every supported prompt length.
     for index in range(profile.num_layers):
         hidden = _transformer_block(
             network,
@@ -513,7 +551,7 @@ def build_dit_engine(
         )
 
     hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
-    _mark_full_velocity_outputs(network, hidden, weights)
+    _mark_sliced_velocity_outputs(network, hidden, weights, profile)
 
     op.validate_native_network(
         network,
@@ -523,7 +561,8 @@ def build_dit_engine(
 
     print(
         f"[minimax-h3] building native DiT: layers={profile.num_layers}, "
-        f"packed={profile.sequence_length}, devices=1",
+        f"packed={profile.min_sequence_length}..{profile.sequence_length} "
+        f"(opt={profile.opt_sequence_length}), devices=1",
         file=sys.stderr,
     )
     return _serialize(
@@ -554,7 +593,7 @@ def build_dit_head_engine(
     """Build packing, text refinement, block zero, and the native cache metric."""
 
     _require_first_block_cache_profile(profile)
-    rows = profile.sequence_length
+    rows = -1
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
     video = network.add_input(
         "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)
@@ -562,18 +601,23 @@ def build_dit_head_engine(
     audio = network.add_input(
         "audio_hidden_states", trt.float32, (profile.audio_rows, profile.audio_in_channels)
     )
-    text = network.add_input(
-        "encoder_hidden_states", trt.float32, (profile.text_rows, profile.text_dim)
-    )
-    positions = network.add_input("position_ids", trt.float32, (rows, 3))
-    adaln_indices = network.add_input("adaln_indices", trt.int32, (rows,))
+    text = network.add_input("encoder_hidden_states", trt.float32, (-1, profile.text_dim))
+    positions = network.add_input("position_ids", trt.float32, (-1, 3))
+    adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
     block_modulation = network.add_input(
         "block_modulation_0",
         trt.bfloat16,
         (profile.adaln_table_rows, 6, profile.hidden_size),
     )
     previous_head_residual = network.add_input(
-        "previous_head_residual", trt.bfloat16, (rows, profile.hidden_size)
+        "previous_head_residual", trt.bfloat16, (-1, profile.hidden_size)
+    )
+    _add_dynamic_profile(
+        builder,
+        config,
+        profile,
+        text_inputs=("encoder_hidden_states",),
+        packed_inputs=("position_ids", "adaln_indices", "previous_head_residual"),
     )
 
     pre_block_hidden = _packed_hidden(network, video, audio, text, weights, profile)
@@ -633,7 +677,8 @@ def build_dit_head_engine(
         label="DiT FirstBlockCache head",
     )
     print(
-        f"[minimax-h3] building native DiT cache head: packed={rows}, devices=1",
+        f"[minimax-h3] building native DiT cache head: "
+        f"packed={profile.min_sequence_length}..{profile.sequence_length}, devices=1",
         file=sys.stderr,
     )
     return _serialize(
@@ -658,11 +703,17 @@ def build_dit_tail_engine(
     """Build blocks one through 49 and expose their reusable total residual."""
 
     _require_first_block_cache_profile(profile)
-    rows = profile.sequence_length
+    rows = -1
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
-    head_hidden = network.add_input("head_hidden", trt.bfloat16, (rows, profile.hidden_size))
-    positions = network.add_input("position_ids", trt.float32, (rows, 3))
-    adaln_indices = network.add_input("adaln_indices", trt.int32, (rows,))
+    head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
+    positions = network.add_input("position_ids", trt.float32, (-1, 3))
+    adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
+    _add_dynamic_profile(
+        builder,
+        config,
+        profile,
+        packed_inputs=("head_hidden", "position_ids", "adaln_indices"),
+    )
     block_modulations = {
         index: network.add_input(
             f"block_modulation_{index}",
@@ -697,7 +748,7 @@ def build_dit_tail_engine(
     )
     print(
         f"[minimax-h3] building native DiT cache tail: blocks=1-{profile.num_layers - 1}, "
-        f"packed={rows}, devices=1",
+        f"packed={profile.min_sequence_length}..{profile.sequence_length}, devices=1",
         file=sys.stderr,
     )
     return _serialize(
@@ -722,11 +773,16 @@ def build_dit_finish_engine(
     """Apply a selected tail residual, final norm, and consumed-row projections."""
 
     _require_first_block_cache_profile(profile)
-    rows = profile.sequence_length
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
-    head_hidden = network.add_input("head_hidden", trt.bfloat16, (rows, profile.hidden_size))
-    tail_residual = network.add_input("tail_residual", trt.bfloat16, (rows, profile.hidden_size))
-    timestep_indices = network.add_input("timestep_indices", trt.int32, (rows,))
+    head_hidden = network.add_input("head_hidden", trt.bfloat16, (-1, profile.hidden_size))
+    tail_residual = network.add_input("tail_residual", trt.bfloat16, (-1, profile.hidden_size))
+    timestep_indices = network.add_input("timestep_indices", trt.int32, (-1,))
+    _add_dynamic_profile(
+        builder,
+        config,
+        profile,
+        packed_inputs=("head_hidden", "tail_residual", "timestep_indices"),
+    )
     final_modulation = network.add_input(
         "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
     )
@@ -741,7 +797,8 @@ def build_dit_finish_engine(
         label="DiT FirstBlockCache finish",
     )
     print(
-        f"[minimax-h3] building native DiT cache finish: packed={rows}, devices=1",
+        f"[minimax-h3] building native DiT cache finish: "
+        f"packed={profile.min_sequence_length}..{profile.sequence_length}, devices=1",
         file=sys.stderr,
     )
     return _serialize(

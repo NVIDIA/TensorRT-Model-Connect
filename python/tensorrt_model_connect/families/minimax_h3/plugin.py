@@ -58,6 +58,9 @@ def _effective_build_config(raw: dict) -> dict:
 def _fixed_profile(raw: dict):
     expected = {
         "text_rows": SOL_ENGINE_1344X768_124F.text_rows,
+        "text_rows_min": SOL_ENGINE_1344X768_124F.min_text_rows,
+        "text_rows_opt": SOL_ENGINE_1344X768_124F.opt_text_rows,
+        "text_rows_max": SOL_ENGINE_1344X768_124F.text_rows,
         "audio_rows": SOL_ENGINE_1344X768_124F.audio_rows,
         "video_rows": SOL_ENGINE_1344X768_124F.video_rows,
         "padded_sequence_length": SOL_ENGINE_1344X768_124F.padded_sequence_length,
@@ -401,6 +404,9 @@ class MiniMaxH3Plugin:
             "denoiser_cache_mode": ("first_block" if profile.first_block_cache else "monolithic"),
             "first_block_cache_threshold": _first_block_cache_threshold(raw),
             "text_rows": profile.text_rows,
+            "text_rows_min": profile.min_text_rows,
+            "text_rows_opt": profile.opt_text_rows,
+            "text_rows_max": profile.text_rows,
             "audio_rows": profile.audio_rows,
             "video_rows": profile.video_rows,
             "padded_sequence_length": profile.padded_sequence_length,

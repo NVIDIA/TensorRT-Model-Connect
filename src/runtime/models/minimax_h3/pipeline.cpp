@@ -28,7 +28,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr int32_t kTextRows = 537;
+constexpr int32_t kMinTextRows = 1;
+constexpr int32_t kMaxTextRows = 537;
 constexpr int32_t kTextDim = 5120;
 constexpr int32_t kAudioLatents = 207;
 constexpr int32_t kAudioRows = 414;
@@ -41,7 +42,8 @@ constexpr int32_t kPatchHeight = 2;
 constexpr int32_t kPatchWidth = 2;
 constexpr int32_t kPatchDim = 96;
 constexpr int32_t kVideoRows = 37296;
-constexpr int32_t kSequenceRows = 38247;
+constexpr int32_t kMediaRows = kAudioRows + kVideoRows;
+constexpr int32_t kMaxSequenceRows = kMaxTextRows + kMediaRows;
 constexpr int32_t kLayers = 50;
 constexpr int32_t kHidden = 5376;
 constexpr int32_t kTimestepSlots = 4;
@@ -211,20 +213,24 @@ std::vector<float> unpatchify_video(const std::vector<float>& rows) {
 }
 
 void fill_audio_position_ids(std::vector<float>& positions,
-                             const std::array<double, kLatentWidth / kPatchWidth>& width_grid) {
+                             const std::array<double, kLatentWidth / kPatchWidth>& width_grid,
+                             int32_t text_rows) {
     for (int32_t channel = 0; channel < 2; ++channel) {
         for (int32_t index = 0; index < kAudioLatents; ++index) {
-            const int32_t row = kTextRows + channel * kAudioLatents + index;
-            positions[static_cast<std::size_t>(row) * 3] = static_cast<float>(kTextRows + index);
+            const int32_t row = text_rows + channel * kAudioLatents + index;
+            positions[static_cast<std::size_t>(row) * 3] = static_cast<float>(text_rows + index);
             positions[static_cast<std::size_t>(row) * 3 + 2] =
                 static_cast<float>(channel == 0 ? width_grid.front() : width_grid.back());
         }
     }
 }
 
-std::vector<float> make_position_ids() {
-    std::vector<float> positions(static_cast<std::size_t>(kSequenceRows) * 3, 0.0F);
-    for (int32_t index = 0; index < kTextRows; ++index)
+std::vector<float> make_position_ids(int32_t text_rows) {
+    if (text_rows < kMinTextRows || text_rows > kMaxTextRows)
+        throw std::invalid_argument("MiniMax-H3 text rows must be between 1 and 537");
+    const int32_t sequence_rows = text_rows + kMediaRows;
+    std::vector<float> positions(static_cast<std::size_t>(sequence_rows) * 3, 0.0F);
+    for (int32_t index = 0; index < text_rows; ++index)
         positions[static_cast<std::size_t>(index) * 3] = static_cast<float>(index);
 
     const double sqrt_area = std::sqrt(static_cast<double>(kLatentHeight * kLatentWidth));
@@ -241,10 +247,10 @@ std::vector<float> make_position_ids() {
         width_grid[i] =
             (width_left + static_cast<double>(i) * width_ratio / width_grid.size()) * 32.0;
 
-    fill_audio_position_ids(positions, width_grid);
+    fill_audio_position_ids(positions, width_grid, text_rows);
 
-    double time = kTextRows;
-    int32_t row = kTextRows + kAudioRows;
+    double time = text_rows;
+    int32_t row = text_rows + kAudioRows;
     for (int32_t frame = 0; frame < kLatentFrames; ++frame) {
         for (double y : height_grid) {
             for (double x : width_grid) {
@@ -257,7 +263,7 @@ std::vector<float> make_position_ids() {
         const int32_t multiple = frame % 5 == 0 ? 1 : 4;
         time += (5.0 / 3.0) * multiple;
     }
-    if (row != kSequenceRows)
+    if (row != sequence_rows)
         throw std::logic_error("MiniMax-H3 position row construction failed");
     return positions;
 }
@@ -268,17 +274,18 @@ struct DenoiserMetadata {
     std::vector<int32_t> timestep_indices;
 };
 
-DenoiserMetadata make_denoiser_metadata() {
+DenoiserMetadata make_denoiser_metadata(int32_t text_rows) {
+    const int32_t sequence_rows = text_rows + kMediaRows;
     DenoiserMetadata result;
-    result.positions = make_position_ids();
-    result.adaln_indices.resize(kSequenceRows);
-    result.timestep_indices.resize(kSequenceRows);
-    for (int32_t row = 0; row < kSequenceRows; ++row) {
+    result.positions = make_position_ids(text_rows);
+    result.adaln_indices.resize(sequence_rows);
+    result.timestep_indices.resize(sequence_rows);
+    for (int32_t row = 0; row < sequence_rows; ++row) {
         int32_t tag = 0;
         int32_t timestep = 0;
-        if (row < kTextRows) {
+        if (row < text_rows) {
             tag = 1;
-        } else if (row < kTextRows + kAudioRows) {
+        } else if (row < text_rows + kAudioRows) {
             tag = 2;
             timestep = 1;
         }
@@ -346,6 +353,22 @@ void bind_external_checked(ITrtModule& module, const char* name, void* pointer, 
     module.bind_external(name, pointer);
     if (module.device_ptr(name) != pointer)
         throw std::runtime_error(std::string("MiniMax-H3 external binding failed for ") + name);
+}
+
+void bind_external_dynamic_input_checked(ITrtModule& module, const char* name, void* pointer,
+                                         DType dtype, std::initializer_list<int64_t> runtime_shape,
+                                         std::initializer_list<int64_t> max_shape) {
+    const std::vector<int64_t> actual(runtime_shape);
+    const std::vector<int64_t> maximum(max_shape);
+    if (pointer == nullptr || !module.has_input(name) || !module.input_is_dynamic(name) ||
+        module.tensor_dtype(name) != dtype || module.optimization_profile_count() != 1 ||
+        module.input_profile_shape(name, 0, ProfileShapeSelector::kMax) != maximum)
+        throw std::runtime_error(std::string("MiniMax-H3 dynamic split plan ABI mismatch for ") +
+                                 name);
+    module.bind_external(name, pointer, actual);
+    if (module.device_ptr(name) != pointer || module.tensor_shape(name) != actual)
+        throw std::runtime_error(std::string("MiniMax-H3 dynamic external binding failed for ") +
+                                 name);
 }
 
 void denormalize_latents(std::vector<float>& latent) {
@@ -565,9 +588,14 @@ bool device_tensors_ready(std::initializer_list<const DeviceTensor*> tensors) {
 
 } // namespace
 
+std::vector<float> make_minimax_h3_position_ids(int32_t text_rows) {
+    return make_position_ids(text_rows);
+}
+
 struct MiniMaxH3Pipeline::ResidentState {
     std::string prompt;
     std::vector<float> text_embeddings;
+    int32_t text_rows{0};
     std::vector<StepModulation> modulations;
     std::unique_ptr<DeviceTensor> head_hidden;
     std::unique_ptr<DeviceTensor> head_residual;
@@ -652,20 +680,30 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
     frame_major_rgb.reset();
     prompt.clear();
     text_embeddings.clear();
+    text_rows = 0;
     const auto ids = tokenizer.encode(requested_prompt);
-    if (ids.size() != kTextRows)
+    if (ids.size() < static_cast<std::size_t>(kMinTextRows) ||
+        ids.size() > static_cast<std::size_t>(kMaxTextRows))
         throw std::invalid_argument(
-            "MiniMax-H3 GB300 profile requires exactly 537 prompt tokens; got " +
+            "MiniMax-H3 native profile supports 1 to 537 prompt tokens without truncation; got " +
             std::to_string(ids.size()));
+    const int32_t requested_text_rows = static_cast<int32_t>(ids.size());
+    std::vector<int32_t> position_ids(ids.size());
+    for (int32_t index = 0; index < requested_text_rows; ++index)
+        position_ids[static_cast<std::size_t>(index)] = index;
     auto module = loader("text_encoder_plan", stream);
     module->set_timing_label("text_encoder_plan");
     TensorMap inputs;
     inputs.emplace("input_ids",
-                   Tensor{const_cast<int32_t*>(ids.data()), {kTextRows}, DType::kInt32});
+                   Tensor{const_cast<int32_t*>(ids.data()), {requested_text_rows}, DType::kInt32});
+    inputs.emplace("position_ids",
+                   Tensor{position_ids.data(), {requested_text_rows}, DType::kInt32});
     const auto outputs = module->forward(inputs);
-    text_embeddings = copy_float(require_output(outputs, "encoder_hidden_states"),
-                                 static_cast<std::size_t>(kTextRows) * kTextDim, "text encoder");
+    text_embeddings =
+        copy_float(require_output(outputs, "encoder_hidden_states"),
+                   static_cast<std::size_t>(requested_text_rows) * kTextDim, "text encoder");
     module->sync();
+    text_rows = requested_text_rows;
     prompt = requested_prompt;
 }
 
@@ -691,6 +729,9 @@ bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(bool first_block_cac
 
 void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     const MiniMaxH3ModuleLoader& loader, cudaStream_t stream) {
+    if (text_rows < kMinTextRows || text_rows > kMaxTextRows)
+        throw std::logic_error("MiniMax-H3 text embeddings are not prepared");
+    const int32_t sequence_rows = text_rows + kMediaRows;
     auto head = loader("denoiser_head_plan", stream);
     auto tail = loader("denoiser_tail_plan", stream);
     auto finish = loader("denoiser_finish_plan", stream);
@@ -698,10 +739,10 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     tail->set_timing_label("denoiser_tail_plan");
     finish->set_timing_label("denoiser_finish_plan");
 
-    DeviceTensor new_head_hidden({kSequenceRows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_head_residual({kSequenceRows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_previous_head_residual({kSequenceRows, kHidden}, DType::kBFloat16, stream);
-    DeviceTensor new_tail_residual({kSequenceRows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_head_hidden({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_head_residual({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_previous_head_residual({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
+    DeviceTensor new_tail_residual({kMaxSequenceRows, kHidden}, DType::kBFloat16, stream);
     DeviceTensor new_video_rows({kVideoRows, kPatchDim}, DType::kFloat32, stream);
     DeviceTensor new_audio_rows({kAudioRows, kAudioChannels}, DType::kFloat32, stream);
     DeviceTensor new_video_velocity({kVideoRows, kPatchDim}, DType::kFloat32, stream);
@@ -722,23 +763,27 @@ void MiniMaxH3Pipeline::ResidentState::load_first_block_cache_denoiser(
     auto resident_audio_velocity = std::make_unique<DeviceTensor>(std::move(new_audio_velocity));
 
     bind_external_checked(*head, "head_hidden", resident_head_hidden->data(), false,
-                          DType::kBFloat16, {kSequenceRows, kHidden});
+                          DType::kBFloat16, {kMaxSequenceRows, kHidden});
     bind_external_checked(*head, "head_residual", resident_head_residual->data(), false,
-                          DType::kBFloat16, {kSequenceRows, kHidden});
-    bind_external_checked(*head, "previous_head_residual", resident_previous_head_residual->data(),
-                          true, DType::kBFloat16, {kSequenceRows, kHidden});
+                          DType::kBFloat16, {kMaxSequenceRows, kHidden});
+    bind_external_dynamic_input_checked(*head, "previous_head_residual",
+                                        resident_previous_head_residual->data(), DType::kBFloat16,
+                                        {sequence_rows, kHidden}, {kMaxSequenceRows, kHidden});
     bind_external_checked(*head, "video_hidden_states", resident_video_rows->data(), true,
                           DType::kFloat32, {kVideoRows, kPatchDim});
     bind_external_checked(*head, "audio_hidden_states", resident_audio_rows->data(), true,
                           DType::kFloat32, {kAudioRows, kAudioChannels});
-    bind_external_checked(*tail, "head_hidden", resident_head_hidden->data(), true,
-                          DType::kBFloat16, {kSequenceRows, kHidden});
+    bind_external_dynamic_input_checked(*tail, "head_hidden", resident_head_hidden->data(),
+                                        DType::kBFloat16, {sequence_rows, kHidden},
+                                        {kMaxSequenceRows, kHidden});
     bind_external_checked(*tail, "tail_residual", resident_tail_residual->data(), false,
-                          DType::kBFloat16, {kSequenceRows, kHidden});
-    bind_external_checked(*finish, "head_hidden", resident_head_hidden->data(), true,
-                          DType::kBFloat16, {kSequenceRows, kHidden});
-    bind_external_checked(*finish, "tail_residual", resident_tail_residual->data(), true,
-                          DType::kBFloat16, {kSequenceRows, kHidden});
+                          DType::kBFloat16, {kMaxSequenceRows, kHidden});
+    bind_external_dynamic_input_checked(*finish, "head_hidden", resident_head_hidden->data(),
+                                        DType::kBFloat16, {sequence_rows, kHidden},
+                                        {kMaxSequenceRows, kHidden});
+    bind_external_dynamic_input_checked(*finish, "tail_residual", resident_tail_residual->data(),
+                                        DType::kBFloat16, {sequence_rows, kHidden},
+                                        {kMaxSequenceRows, kHidden});
     bind_external_checked(*finish, "video_velocity", resident_video_velocity->data(), false,
                           DType::kFloat32, {kVideoRows, kPatchDim});
     bind_external_checked(*finish, "audio_velocity", resident_audio_velocity->data(), false,
@@ -780,6 +825,7 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_first_block_cache_denoiser(
     auto& head = *denoiser_head;
     auto& tail = *denoiser_tail;
     auto& finish = *denoiser_finish;
+    const int64_t sequence_rows = static_cast<int64_t>(metadata.adaln_indices.size());
     head.reset_execution_context();
     tail.reset_execution_context();
     finish.reset_execution_context();
@@ -794,11 +840,11 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_first_block_cache_denoiser(
         auto& modulation = modulations[step];
         TensorMap head_inputs;
         head_inputs.emplace("encoder_hidden_states",
-                            Tensor{text_embeddings.data(), {kTextRows, kTextDim}, DType::kFloat32});
+                            Tensor{text_embeddings.data(), {text_rows, kTextDim}, DType::kFloat32});
         head_inputs.emplace("position_ids",
-                            Tensor{metadata.positions.data(), {kSequenceRows, 3}, DType::kFloat32});
+                            Tensor{metadata.positions.data(), {sequence_rows, 3}, DType::kFloat32});
         head_inputs.emplace("adaln_indices",
-                            Tensor{metadata.adaln_indices.data(), {kSequenceRows}, DType::kInt32});
+                            Tensor{metadata.adaln_indices.data(), {sequence_rows}, DType::kInt32});
         append_block_modulation_inputs(head_inputs, modulation, 0, 1);
         const auto head_outputs = head.forward(head_inputs);
         const float metric =
@@ -809,10 +855,10 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_first_block_cache_denoiser(
             TensorMap tail_inputs;
             tail_inputs.emplace(
                 "position_ids",
-                Tensor{metadata.positions.data(), {kSequenceRows, 3}, DType::kFloat32});
+                Tensor{metadata.positions.data(), {sequence_rows, 3}, DType::kFloat32});
             tail_inputs.emplace(
                 "adaln_indices",
-                Tensor{metadata.adaln_indices.data(), {kSequenceRows}, DType::kInt32});
+                Tensor{metadata.adaln_indices.data(), {sequence_rows}, DType::kInt32});
             append_block_modulation_inputs(tail_inputs, modulation, 1, kLayers);
             tail.forward_async(tail_inputs);
             if (!previous_head_residual->copy_from(*head_residual))
@@ -825,7 +871,7 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_first_block_cache_denoiser(
         TensorMap finish_inputs;
         finish_inputs.emplace(
             "timestep_indices",
-            Tensor{metadata.timestep_indices.data(), {kSequenceRows}, DType::kInt32});
+            Tensor{metadata.timestep_indices.data(), {sequence_rows}, DType::kInt32});
         append_final_modulation_input(finish_inputs, modulation);
         finish.forward_async(finish_inputs);
         minimax_h3::scheduler_step_cuda_async(
@@ -852,6 +898,7 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_monolithic_denoiser(
     std::vector<float>& audio_rows_host) {
     DenoiserStats stats;
     auto& module = *denoiser;
+    const int64_t sequence_rows = static_cast<int64_t>(metadata.adaln_indices.size());
     module.reset_execution_context();
     for (std::size_t step = 0; step < video_schedule.timesteps.size(); ++step) {
         TensorMap inputs;
@@ -861,27 +908,19 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_monolithic_denoiser(
             "audio_hidden_states",
             Tensor{audio_rows_host.data(), {kAudioRows, kAudioChannels}, DType::kFloat32});
         inputs.emplace("encoder_hidden_states",
-                       Tensor{text_embeddings.data(), {kTextRows, kTextDim}, DType::kFloat32});
+                       Tensor{text_embeddings.data(), {text_rows, kTextDim}, DType::kFloat32});
         inputs.emplace("position_ids",
-                       Tensor{metadata.positions.data(), {kSequenceRows, 3}, DType::kFloat32});
+                       Tensor{metadata.positions.data(), {sequence_rows, 3}, DType::kFloat32});
         inputs.emplace("adaln_indices",
-                       Tensor{metadata.adaln_indices.data(), {kSequenceRows}, DType::kInt32});
+                       Tensor{metadata.adaln_indices.data(), {sequence_rows}, DType::kInt32});
         inputs.emplace("timestep_indices",
-                       Tensor{metadata.timestep_indices.data(), {kSequenceRows}, DType::kInt32});
+                       Tensor{metadata.timestep_indices.data(), {sequence_rows}, DType::kInt32});
         append_modulation_inputs(inputs, modulations[step]);
         const auto outputs = module.forward(inputs);
-        auto video_all =
-            copy_float(require_output(outputs, "video_velocity"),
-                       static_cast<std::size_t>(kSequenceRows) * kPatchDim, "video velocity");
-        auto audio_all =
-            copy_float(require_output(outputs, "audio_velocity"),
-                       static_cast<std::size_t>(kSequenceRows) * kAudioChannels, "audio velocity");
-        const auto video_begin =
-            video_all.begin() + static_cast<std::ptrdiff_t>(kTextRows + kAudioRows) * kPatchDim;
-        std::vector<float> video_velocity_host(video_begin, video_begin + video_rows_host.size());
-        const auto audio_begin =
-            audio_all.begin() + static_cast<std::ptrdiff_t>(kTextRows) * kAudioChannels;
-        std::vector<float> audio_velocity_host(audio_begin, audio_begin + audio_rows_host.size());
+        auto video_velocity_host = copy_float(require_output(outputs, "video_velocity"),
+                                              video_rows_host.size(), "video velocity");
+        auto audio_velocity_host = copy_float(require_output(outputs, "audio_velocity"),
+                                              audio_rows_host.size(), "audio velocity");
         minimax_h3_scheduler_step(video_rows_host.data(), video_velocity_host.data(),
                                   video_rows_host.size(), video_schedule.timesteps[step],
                                   video_schedule.sigmas[step], video_schedule.sigmas[step + 1]);
@@ -1114,7 +1153,7 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
     auto video_rows = patchify_video(video_tensor);
     video_tensor.clear();
     video_tensor.shrink_to_fit();
-    auto metadata = make_denoiser_metadata();
+    auto metadata = make_denoiser_metadata(resident_->text_rows);
 
     const auto denoiser_begin = Clock::now();
     const bool denoiser_resident_hit =

@@ -195,6 +195,57 @@ def gather_rows(network, table, indices):
     return network.add_gather(table, indices, 0).get_output(0)
 
 
+def _shape_dim(network, tensor, axis: int):
+    """Return one runtime dimension as a one-element shape tensor."""
+
+    shape = network.add_shape(tensor).get_output(0)
+    return network.add_slice(shape, (axis,), (1,), (1,)).get_output(0)
+
+
+def _shape_vector(network, values):
+    parts = [
+        constant(network, np.asarray([value], dtype=np.int64), dtype=np.int64)
+        if isinstance(value, (int, np.integer))
+        else value
+        for value in values
+    ]
+    if len(parts) == 1:
+        return parts[0]
+    concat = network.add_concatenation(parts)
+    concat.axis = 0
+    return concat.get_output(0)
+
+
+def dynamic_slice(network, tensor, starts: tuple[int, ...], sizes: tuple[int | None, ...]):
+    """Slice a tensor while preserving dimensions marked ``None`` at runtime."""
+
+    if len(starts) != len(sizes):
+        raise ValueError("MiniMax-H3 dynamic slice rank mismatch")
+    runtime_sizes = [
+        _shape_dim(network, tensor, axis) if size is None else size
+        for axis, size in enumerate(sizes)
+    ]
+    initial_sizes = tuple(1 if size is None else size for size in sizes)
+    layer = network.add_slice(tensor, starts, initial_sizes, (1,) * len(sizes))
+    layer.set_input(2, _shape_vector(network, runtime_sizes))
+    return layer.get_output(0)
+
+
+def slice_rows_from_end(network, tensor, *, offset: int, rows: int):
+    """Take fixed rows from a dynamic 2-D tensor, measured from its end."""
+
+    total_rows = _shape_dim(network, tensor, 0)
+    offset_tensor = constant(network, np.asarray([offset], dtype=np.int64), dtype=np.int64)
+    start_row = network.add_elementwise(
+        total_rows, offset_tensor, trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    width = int(tensor.shape[1])
+    layer = network.add_slice(tensor, (0, 0), (rows, width), (1, 1))
+    layer.set_input(1, _shape_vector(network, (start_row, 0)))
+    layer.set_input(2, _shape_vector(network, (rows, width)))
+    return layer.get_output(0)
+
+
 def modulate(network, normalized, shift, scale):
     one = constant(
         network,
@@ -228,9 +279,8 @@ def gated_residual(network, residual, update, gate):
 
 def swiglu(network, tensor, weight_in, weight_out, ffn_dim: int):
     projected = linear(network, tensor, weight_in)
-    rows = int(projected.shape[0])
-    value = network.add_slice(projected, (0, 0), (rows, ffn_dim), (1, 1)).get_output(0)
-    gate = network.add_slice(projected, (0, ffn_dim), (rows, ffn_dim), (1, 1)).get_output(0)
+    value = dynamic_slice(network, projected, (0, 0), (None, ffn_dim))
+    gate = dynamic_slice(network, projected, (0, ffn_dim), (None, ffn_dim))
     activated = silu(network, gate)
     hidden = network.add_elementwise(value, activated, trt.ElementWiseOperation.PROD).get_output(0)
     return linear(network, hidden, weight_out)
@@ -243,27 +293,25 @@ def fused_qkv(network, tensor, weights: dict, prefix: str):
         [weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0
     )
     packed = linear(network, tensor, packed_weight)
-    rows = int(packed.shape[0])
     width = int(packed.shape[1]) // 3
     return tuple(
-        network.add_slice(packed, (0, index * width), (rows, width), (1, 1)).get_output(0)
-        for index in range(3)
+        dynamic_slice(network, packed, (0, index * width), (None, width)) for index in range(3)
     )
 
 
 def rows_to_heads(network, tensor, rows: int, heads: int, head_dim: int):
     reshape = network.add_shuffle(tensor)
-    reshape.reshape_dims = (rows, heads, head_dim)
+    reshape.reshape_dims = (-1, heads, head_dim)
     reshape.second_transpose = trt.Permutation([1, 0, 2])
     batch = network.add_shuffle(reshape.get_output(0))
-    batch.reshape_dims = (1, heads, rows, head_dim)
+    batch.reshape_dims = (1, heads, -1, head_dim)
     return batch.get_output(0)
 
 
 def heads_to_rows(network, tensor, rows: int, width: int):
     reshape = network.add_shuffle(tensor)
     reshape.first_transpose = trt.Permutation([0, 2, 1, 3])
-    reshape.reshape_dims = (rows, width)
+    reshape.reshape_dims = (-1, width)
     return reshape.get_output(0)
 
 
@@ -284,21 +332,13 @@ def partial_rope(
     value = rows_to_heads(network, tensor, rows, heads, head_dim)
     if interleaved:
         raise ValueError("MiniMax-H3 uses rotate-half, non-interleaved RoPE")
-    stride = (1, 1, 1, 1)
-    rotary = network.add_slice(
-        value, (0, 0, 0, 0), (1, heads, rows, rotary_dim), stride
-    ).get_output(0)
-    passthrough = network.add_slice(
-        value,
-        (0, 0, 0, rotary_dim),
-        (1, heads, rows, head_dim - rotary_dim),
-        stride,
-    ).get_output(0)
-    half = rotary_dim // 2
-    first = network.add_slice(rotary, (0, 0, 0, 0), (1, heads, rows, half), stride).get_output(0)
-    second = network.add_slice(rotary, (0, 0, 0, half), (1, heads, rows, half), stride).get_output(
-        0
+    rotary = dynamic_slice(network, value, (0, 0, 0, 0), (1, heads, None, rotary_dim))
+    passthrough = dynamic_slice(
+        network, value, (0, 0, 0, rotary_dim), (1, heads, None, head_dim - rotary_dim)
     )
+    half = rotary_dim // 2
+    first = dynamic_slice(network, rotary, (0, 0, 0, 0), (1, heads, None, half))
+    second = dynamic_slice(network, rotary, (0, 0, 0, half), (1, heads, None, half))
     negative_second = network.add_unary(second, trt.UnaryOperation.NEG).get_output(0)
     rotated_layer = network.add_concatenation((negative_second, first))
     rotated_layer.axis = 3
@@ -306,7 +346,7 @@ def partial_rope(
     def duplicate_table(table):
         table = cast(network, table, value.dtype)
         reshape = network.add_shuffle(table)
-        reshape.reshape_dims = (1, 1, rows, half)
+        reshape.reshape_dims = (1, 1, -1, half)
         duplicate = network.add_concatenation((reshape.get_output(0), reshape.get_output(0)))
         duplicate.axis = 3
         return duplicate.get_output(0)
