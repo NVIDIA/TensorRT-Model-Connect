@@ -6,7 +6,7 @@
   "gypfile": true,
   "scripts": {
     "build": "node-gyp rebuild",
-    "test": "node example.js"
+    "test": "node --test test.js"
   },
   "dependencies": {
     "node-addon-api": "^8.0.0"
