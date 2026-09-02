@@ -158,6 +158,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "MiniMaxAI/MiniMax-Music3",
+      "revision": "fbdf52fbaaca799592917417eb05f1899f1255ec",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "minimax_music3",
+      "architectures": [
+        "MiniMaxMusic3ForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "OpenGVLab/InternVL3-2B-hf",
       "revision": "cb57a075cb75a2e6d1b668b128d48bb00ae321d2",
       "revision_source": "resolved",

@@ -22,7 +22,7 @@ namespace {
 
 // Mirrors runtime_config_schema.MAX_CAPTION_CHARS / MAX_AUDIO_FRAMES.
 constexpr std::size_t kMaxCaptionChars = 20000;
-constexpr std::int64_t kMaxAudioFrames = 9000;
+constexpr std::int32_t kMaxAudioFrames = 9000;
 
 bool is_bounded_caption(const std::any& value) {
     if (value.type() != typeid(std::string))
@@ -35,11 +35,11 @@ bool is_bounded_caption(const std::any& value) {
 bool is_frame_budget(const std::any& value) {
     if (value.type() == typeid(std::int32_t)) {
         const auto frames = std::any_cast<std::int32_t>(value);
-        return frames >= 1 && static_cast<std::int64_t>(frames) <= kMaxAudioFrames;
+        return frames >= 1 && frames <= kMaxAudioFrames;
     }
     if (value.type() == typeid(std::int64_t)) {
         const auto frames = std::any_cast<std::int64_t>(value);
-        return frames >= 1 && frames <= kMaxAudioFrames;
+        return frames >= 1 && frames <= static_cast<std::int64_t>(kMaxAudioFrames);
     }
     return false;
 }
@@ -54,8 +54,11 @@ Schema make_music_minimax_music3_schema() {
             // Empty caption means unconditioned on a description; the lyrics
             // travel in the request prompt, not here.
             ConfigField{"caption", "string", std::any{std::string{}}, session, is_bounded_caption},
-            ConfigField{"max_frames", "int32", std::any{static_cast<std::int32_t>(kMaxAudioFrames)},
-                        session, is_frame_budget},
+            // Spelled out rather than written as kMaxAudioFrames: the
+            // documentation site compares this default with the Python one as
+            // text, and every other family writes the literal here too.
+            ConfigField{"max_frames", "int32", std::any{std::int32_t{9000}}, session,
+                        is_frame_budget},
             ConfigField{"seed", "int64", std::any{std::int64_t{-1}}, session, nullptr},
         },
     };
