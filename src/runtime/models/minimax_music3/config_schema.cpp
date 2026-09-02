@@ -1,0 +1,66 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// Registration for the "music_minimax_music3" namespace schema.
+// Mirrors python/tensorrt_model_connect/families/minimax_music3/
+// runtime_config_schema.py -- the field names, types, defaults and bounds are
+// the same on both sides, and the Python module is the source of truth.
+
+#include "runtime/models/minimax_music3/config_schema.h"
+
+#include <any>
+#include <cstddef>
+#include <cstdint>
+#include <set>
+#include <string>
+
+namespace trtmc::config::schemas {
+
+namespace {
+
+// Mirrors runtime_config_schema.MAX_CAPTION_CHARS / MAX_AUDIO_FRAMES.
+constexpr std::size_t kMaxCaptionChars = 20000;
+constexpr std::int64_t kMaxAudioFrames = 9000;
+
+bool is_bounded_caption(const std::any& value) {
+    if (value.type() != typeid(std::string))
+        return false;
+    return std::any_cast<const std::string&>(value).size() <= kMaxCaptionChars;
+}
+
+// The frame budget drives how many windows the denoiser runs, so a zero or a
+// negative would silently produce no audio rather than fail.
+bool is_frame_budget(const std::any& value) {
+    if (value.type() == typeid(std::int32_t)) {
+        const auto frames = std::any_cast<std::int32_t>(value);
+        return frames >= 1 && static_cast<std::int64_t>(frames) <= kMaxAudioFrames;
+    }
+    if (value.type() == typeid(std::int64_t)) {
+        const auto frames = std::any_cast<std::int64_t>(value);
+        return frames >= 1 && frames <= kMaxAudioFrames;
+    }
+    return false;
+}
+
+} // namespace
+
+Schema make_music_minimax_music3_schema() {
+    const std::set<Layer> session = {Layer::SessionRequest, Layer::PlatformProfile};
+    return Schema{
+        "music_minimax_music3",
+        {
+            // Empty caption means unconditioned on a description; the lyrics
+            // travel in the request prompt, not here.
+            ConfigField{"caption", "string", std::any{std::string{}}, session, is_bounded_caption},
+            ConfigField{"max_frames", "int32", std::any{static_cast<std::int32_t>(kMaxAudioFrames)},
+                        session, is_frame_budget},
+            ConfigField{"seed", "int64", std::any{std::int64_t{-1}}, session, nullptr},
+        },
+    };
+}
+
+REGISTER_CONFIG_SCHEMA_FACTORY_WITH_MANIFEST(register_minimax_music3_schema,
+                                             make_music_minimax_music3_schema);
+} // namespace trtmc::config::schemas
