@@ -163,6 +163,8 @@ def _effective_gate(
     required: float,
     sample_count: int,
 ) -> dict[str, Any]:
+    if kind == "exact":
+        return {"kind": kind, "sample_count": sample_count}
     if kind == "proportion_drop":
         allowed_drop_count = math.floor(required * sample_count + 1e-12)
         return {
@@ -525,7 +527,11 @@ def evaluate_shadow_gates(
             )
             continue
         effective = _effective_gate(
-            kind=_metric_kind(metric_name, configured_kind),
+            kind=(
+                "exact"
+                if operator == "=="
+                else _metric_kind(metric_name, configured_kind)
+            ),
             actual=actual,
             required=required,
             sample_count=sample_count,

@@ -287,6 +287,20 @@ def test_shadow_gate_metrics_include_plugin_task_accuracy() -> None:
     }
 
 
+def test_shadow_gate_metrics_prefer_task_aggregate_over_sample_range() -> None:
+    metrics = trtmc_validate._shadow_gate_metrics(
+        {"metrics": {"sample_pass_rate": 1.0}},
+        {
+            "metrics": {
+                "query_count": {"mean": 16.0, "min": 16.0, "max": 16.0},
+            },
+            "task_accuracy": {"query_count": 128},
+        },
+    )
+
+    assert metrics == {"sample_pass_rate": 1.0, "query_count": 128}
+
+
 def test_resolve_binding_requires_an_explicit_choice_for_multi_workload_model():
     catalog = {
         "sample_limits": {
@@ -1445,6 +1459,55 @@ def test_accuracy_shadow_gate_preserves_worst_nested_metric(tmp_path):
     assert evaluation["status"] == "fail"
     assert evaluation["checks"][0]["metric"] == "max_pixel_mean"
     assert evaluation["checks"][0]["actual"] == 0.9
+
+
+def test_accuracy_shadow_gate_uses_task_aggregate_for_exact_count(tmp_path):
+    case_dir = tmp_path / "model-a" / "suite-a"
+    case_dir.mkdir(parents=True)
+    result_path = case_dir / "comparison.json"
+    result_path.write_text("{}", encoding="utf-8")
+    result = trtmc_validate._normalize_result(
+        {
+            "model": "model-a",
+            "workload": "suite-a",
+            "execution": {"status": "completed", "exit_code": 0},
+            "comparison": {
+                "status": "agreement",
+                "metrics": {"sample_pass_rate": 1.0, "valid_count": 8},
+                "failures": [],
+            },
+            "validation": {"status": "passed"},
+            "raw_result": {
+                "status": "passed",
+                "valid_count": 8,
+                "metrics": {
+                    "query_count": {"mean": 16.0, "min": 16.0, "max": 16.0},
+                },
+                "task_accuracy": {"query_count": 128},
+                "configured_gates": {"expected_query_count": 128},
+                "gate_policy": "blocking",
+            },
+            "reproduce": {
+                "dataset": {"sample_limit": 8, "prepared_input_count": 8},
+            },
+        }
+    )
+
+    public = trtmc_validate._public_accuracy_result(tmp_path, result_path, result)
+
+    evaluation = public["comparison"]["gate_evaluation"]
+    assert evaluation["status"] == "pass"
+    assert evaluation["checks"] == [
+        {
+            "gate": "expected_query_count",
+            "metric": "query_count",
+            "operator": "==",
+            "actual": 128.0,
+            "required": 128.0,
+            "verdict": "pass",
+            "effective": {"kind": "exact", "sample_count": 8},
+        }
+    ]
 
 
 def test_accuracy_adapter_resumes_an_interrupted_case_as_a_new_attempt(tmp_path, monkeypatch):

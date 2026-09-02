@@ -1056,6 +1056,8 @@ additional_profiles:
     inherit: deepseek_v2.generate
   - model: dinov3-convnext-tiny-pretrain-lvd1689m
     inherit: dinov3.extract_features
+    baseline:
+      max_image_feature_relative_frobenius: 0.015
   - model: flux-2-dev
     inherit: flux.generate_image
   - model: flux-2-dev-fp8

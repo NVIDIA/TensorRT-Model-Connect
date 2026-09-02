@@ -438,6 +438,10 @@ def test_exact_gate_uses_equality_instead_of_a_range() -> None:
 
     assert evaluation["status"] == "fail"
     assert evaluation["checks"][0]["operator"] == "=="
+    assert evaluation["checks"][0]["effective"] == {
+        "kind": "exact",
+        "sample_count": 1,
+    }
 
 
 def test_non_numeric_threshold_is_an_invalid_shadow_policy() -> None:

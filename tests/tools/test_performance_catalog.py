@@ -29,6 +29,18 @@ def test_release_suite_includes_fast_foundation_stereo() -> None:
     assert case["id"] == "fast_foundation_stereo.disparity"
 
 
+def test_release_suite_uses_model_owned_dinov3_parity_thresholds() -> None:
+    suite = performance_catalog.load_suite(SUITE)
+    cases = {case["model"]: case for case in suite.cases if case["family"] == "dinov3"}
+
+    assert cases["dinov3-vits16-pretrain-lvd1689m"]["baseline"][
+        "max_image_feature_relative_frobenius"
+    ] == 0.01
+    assert cases["dinov3-convnext-tiny-pretrain-lvd1689m"]["baseline"][
+        "max_image_feature_relative_frobenius"
+    ] == 0.015
+
+
 def test_selection_rejects_multiple_modes() -> None:
     suite = performance_catalog.load_suite(SUITE)
 
