@@ -70,6 +70,20 @@ void test_lyrics_keep_only_leading_tags() {
                 "an untagged line survives whole");
 }
 
+void test_lyrics_split_on_tag_and_caret_separators() {
+    // A tag that is not the first thing on its line does not swallow the line;
+    // instead each side of it becomes its own line, and a caret separator does
+    // the same. Both are what the checkpoint's own formatter produces, so a
+    // silent loss of either would change the sung structure.
+    check_equal(normalize_lyrics("words [verse] more"), "[start]\nwords\n[verse]\nmore",
+                "an inline tag splits its line");
+    check_equal(normalize_lyrics("one ^ two"), "[start]\none\ntwo", "a caret separates lines");
+    check_equal(normalize_lyrics("line one ^ line two ^ line three"),
+                "[start]\nline one\nline two\nline three", "every caret separates");
+    check_equal(normalize_lyrics("text [Chorus] tail"), "[start]\ntext\n[chorus]\ntail",
+                "an inline tag is split and lowercased");
+}
+
 void test_lyrics_lowercase_their_tags() {
     check_equal(normalize_lyrics("[Verse]"), "[start]\n[verse]", "tags are lowercased");
     check_equal(normalize_lyrics("[CHORUS]"), "[start]\n[chorus]", "uppercase tags too");
@@ -119,6 +133,7 @@ int main() {
     test_caption_rewrites_special_tags();
     test_caption_strips_markdown();
     test_lyrics_keep_only_leading_tags();
+    test_lyrics_split_on_tag_and_caret_separators();
     test_lyrics_lowercase_their_tags();
     test_lyrics_always_open_with_start();
     test_assembled_prompt_carries_the_structure();

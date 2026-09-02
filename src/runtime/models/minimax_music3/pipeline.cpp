@@ -396,15 +396,9 @@ MinimaxMusic3TextToMusicPipeline::tokenize_prompt(const std::string& lyrics) con
     return ids;
 }
 
-AudioResult MinimaxMusic3TextToMusicPipeline::generate_audio(const std::string& prompt,
-                                                             const GenerateConfig& cfg) {
-    if (!tokenizer_)
-        throw std::runtime_error("MiniMax-Music3 needs a tokenizer to read its prompt");
-
-    const auto prompt_ids = tokenize_prompt(prompt);
-    const int32_t frames = std::min(
-        config_.max_frames, cfg.max_new_tokens > 0 ? cfg.max_new_tokens : config_.max_audio_frames);
-
+std::vector<float>
+MinimaxMusic3TextToMusicPipeline::collect_frame_states(const std::vector<int32_t>& prompt_ids,
+                                                       int32_t frames, const GenerateConfig& cfg) {
     std::vector<float> frame_hidden;
     if (const char* injected = std::getenv("TRTMC_MM3_FRAME_HIDDEN")) {
         // Bisection aid: run the conditioning, the denoiser and the vocoder on
@@ -429,6 +423,56 @@ AudioResult MinimaxMusic3TextToMusicPipeline::generate_audio(const std::string& 
         out.write(reinterpret_cast<const char*>(frame_hidden.data()),
                   static_cast<std::streamsize>(frame_hidden.size() * sizeof(float)));
     }
+    return frame_hidden;
+}
+
+// Carry [L - 2h, L - h), which is the reference's slice: the frames the
+// neighbouring window will blend its own head toward.
+std::vector<float>
+MinimaxMusic3TextToMusicPipeline::carry_overlap(const std::vector<float>& latents,
+                                                int32_t latent_length) const {
+    const auto channels = static_cast<std::size_t>(config_.latent_channels);
+    const auto start = static_cast<std::size_t>(std::max(0, latent_length - 2 * kOverlapCarry));
+    const auto stop = static_cast<std::size_t>(
+        std::max(static_cast<int32_t>(start), latent_length - kOverlapCarry));
+    std::vector<float> carried(channels * (stop - start));
+    for (std::size_t channel = 0; channel < channels; ++channel) {
+        const auto row = channel * static_cast<std::size_t>(latent_length);
+        std::copy(latents.begin() + static_cast<std::ptrdiff_t>(row + start),
+                  latents.begin() + static_cast<std::ptrdiff_t>(row + stop),
+                  carried.begin() + static_cast<std::ptrdiff_t>(channel * (stop - start)));
+    }
+    return carried;
+}
+
+// Every window but the first drops crop_left and every window but the last
+// drops crop_right, so the two crops remove exactly one overlap per seam. The
+// widths are latent frames, so they scale by the hop.
+void MinimaxMusic3TextToMusicPipeline::append_window(const std::vector<float>& chunk,
+                                                     std::size_t window, std::size_t window_count,
+                                                     std::vector<float>& samples) const {
+    const int32_t left = window == 0 ? 0 : config_.crop_left_latent;
+    const int32_t right = window + 1 == window_count ? 0 : config_.crop_right_latent;
+    const auto begin =
+        static_cast<std::size_t>(left) * config_.latent_hop_length * config_.output_channels;
+    const auto end = chunk.size() - static_cast<std::size_t>(right) * config_.latent_hop_length *
+                                        config_.output_channels;
+    if (begin >= end)
+        throw std::runtime_error("MiniMax-Music3 window crop removed the whole window");
+    samples.insert(samples.end(), chunk.begin() + static_cast<std::ptrdiff_t>(begin),
+                   chunk.begin() + static_cast<std::ptrdiff_t>(end));
+}
+
+AudioResult MinimaxMusic3TextToMusicPipeline::generate_audio(const std::string& prompt,
+                                                             const GenerateConfig& cfg) {
+    if (!tokenizer_)
+        throw std::runtime_error("MiniMax-Music3 needs a tokenizer to read its prompt");
+
+    const auto prompt_ids = tokenize_prompt(prompt);
+    const int32_t frames = std::min(
+        config_.max_frames, cfg.max_new_tokens > 0 ? cfg.max_new_tokens : config_.max_audio_frames);
+
+    const auto frame_hidden = collect_frame_states(prompt_ids, frames, cfg);
 
     const int32_t steps = cfg.num_steps > 0 ? cfg.num_steps : config_.default_inference_steps;
     const auto starts = chunk_starts(frames, config_.chunk_frames, config_.chunk_hop);
@@ -442,43 +486,12 @@ AudioResult MinimaxMusic3TextToMusicPipeline::generate_audio(const std::string& 
         const auto latents = denoise_window(condition, latent_length, steps,
                                             static_cast<uint64_t>(cfg.seed) + window, previous);
 
-        // Carry [L - 2h, L - h) to the next window, which is the reference's
-        // slice: the frames the neighbour will blend its own head toward.
-        {
-            const auto channels = static_cast<std::size_t>(config_.latent_channels);
-            const auto start =
-                static_cast<std::size_t>(std::max(0, latent_length - 2 * kOverlapCarry));
-            const auto stop = static_cast<std::size_t>(
-                std::max(static_cast<int32_t>(start), latent_length - kOverlapCarry));
-            std::vector<float> next_previous(channels * (stop - start));
-            for (std::size_t channel = 0; channel < channels; ++channel) {
-                std::copy(
-                    latents.begin() +
-                        static_cast<std::ptrdiff_t>(
-                            channel * static_cast<std::size_t>(latent_length) + start),
-                    latents.begin() + static_cast<std::ptrdiff_t>(
-                                          channel * static_cast<std::size_t>(latent_length) + stop),
-                    next_previous.begin() + static_cast<std::ptrdiff_t>(channel * (stop - start)));
-            }
-            previous = std::move(next_previous);
-        }
+        previous = carry_overlap(latents, latent_length);
         report_stage("latents", latents.data(), latents.size());
         auto chunk = decode_waveform(latents, latent_length);
         report_stage("waveform", chunk.data(), chunk.size());
 
-        // Every window but the first drops crop_left and every window but the
-        // last drops crop_right, so the two crops remove exactly one overlap
-        // per seam. The widths are latent frames, so they scale by the hop.
-        const int32_t left = window == 0 ? 0 : config_.crop_left_latent;
-        const int32_t right = window + 1 == starts.size() ? 0 : config_.crop_right_latent;
-        const auto begin =
-            static_cast<std::size_t>(left) * config_.latent_hop_length * config_.output_channels;
-        const auto end = chunk.size() - static_cast<std::size_t>(right) *
-                                            config_.latent_hop_length * config_.output_channels;
-        if (begin >= end)
-            throw std::runtime_error("MiniMax-Music3 window crop removed the whole window");
-        samples.insert(samples.end(), chunk.begin() + static_cast<std::ptrdiff_t>(begin),
-                       chunk.begin() + static_cast<std::ptrdiff_t>(end));
+        append_window(chunk, window, starts.size(), samples);
     }
 
     // Crop only what the padding added. A generation shorter than one window
@@ -653,7 +666,7 @@ void MinimaxMusic3TextToMusicPipeline::sample_residual_codes(const DepthStep& st
     // so nothing else has to carry them.
     {
         TensorMap final_inputs;
-        final_inputs[kDepthHiddenInput] = Tensor{const_cast<float*>(conditional_hidden),
+        final_inputs[kDepthHiddenInput] = Tensor{const_cast<float*>(frame_hidden),
                                                  {1, 1, config_.language_model_hidden_size},
                                                  DType::kFloat32};
         final_inputs[kDepthCodesInput] =
@@ -761,6 +774,44 @@ void MinimaxMusic3TextToMusicPipeline::record_frame(const EmittedFrame& frame,
     }
 }
 
+// The checkpoint samples with a fixed top-k; a request that leaves the draw
+// unset gets that rather than greedy decoding, which loops on this model.
+GenerateConfig MinimaxMusic3TextToMusicPipeline::sampling_config(const GenerateConfig& cfg) {
+    GenerateConfig draw = cfg;
+    if (draw.top_k <= 1)
+        draw.top_k = minimax_music3::kArSamplingTopK;
+    if (draw.temperature <= 0.0F)
+        draw.temperature = 1.0F;
+    return draw;
+}
+
+void MinimaxMusic3TextToMusicPipeline::report_semantic_codes(const std::vector<int32_t>& codes,
+                                                             int32_t emitted) {
+    if (std::getenv("TRTMC_MM3_DEBUG") == nullptr || emitted <= 0)
+        return;
+    std::cerr << "[mm3] semantic_codes";
+    for (int32_t frame = 0; frame < std::min(emitted, 24); ++frame)
+        std::cerr << ' ' << codes[static_cast<std::size_t>(frame)];
+    std::cerr << '\n';
+    std::vector<int32_t> seen(codes.begin(), codes.begin() + static_cast<std::ptrdiff_t>(emitted));
+    std::sort(seen.begin(), seen.end());
+    seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
+    std::cerr << "[mm3] distinct_semantic_codes = " << seen.size() << " of " << emitted << '\n';
+}
+
+// Only the ends of the schedule are worth reporting: a drift shows up as a
+// difference between where the window starts and where it lands.
+void MinimaxMusic3TextToMusicPipeline::report_denoise_step(std::size_t index,
+                                                           std::size_t sigma_count,
+                                                           const std::vector<float>& guided,
+                                                           const std::vector<float>& latents) {
+    if (index != 0 && index + 2 != sigma_count)
+        return;
+    const bool first = index == 0;
+    report_stage(first ? "velocity_first" : "velocity_last", guided.data(), guided.size());
+    report_stage(first ? "latents_first" : "latents_last", latents.data(), latents.size());
+}
+
 std::vector<int32_t>
 MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& prompt_ids,
                                                  int32_t frames, const GenerateConfig& cfg,
@@ -805,11 +856,7 @@ MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& pro
 
     report_prompt_pass(frame_hidden, conditional);
 
-    GenerateConfig draw = cfg;
-    if (draw.top_k <= 1)
-        draw.top_k = minimax_music3::kArSamplingTopK;
-    if (draw.temperature <= 0.0F)
-        draw.temperature = 1.0F;
+    const GenerateConfig draw = sampling_config(cfg);
 
     // The reference runs max_frames + 1 draws and keeps the last max_frames of
     // them: the first advances the state past <|audio_start|> and is not a
@@ -843,18 +890,7 @@ MinimaxMusic3TextToMusicPipeline::generate_codes(const std::vector<int32_t>& pro
                                     frame_embed_.data());
         ++position;
     }
-    if (std::getenv("TRTMC_MM3_DEBUG") != nullptr && emitted > 0) {
-        // A degenerate loop shows up here before it shows up in the audio.
-        std::cerr << "[mm3] semantic_codes";
-        for (int32_t frame = 0; frame < std::min(emitted, 24); ++frame)
-            std::cerr << ' ' << codes[static_cast<std::size_t>(frame)];
-        std::cerr << '\n';
-        std::vector<int32_t> seen(codes.begin(),
-                                  codes.begin() + static_cast<std::ptrdiff_t>(emitted));
-        std::sort(seen.begin(), seen.end());
-        seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
-        std::cerr << "[mm3] distinct_semantic_codes = " << seen.size() << " of " << emitted << '\n';
-    }
+    report_semantic_codes(codes, emitted);
     report_stage_count("frames_emitted", static_cast<std::size_t>(emitted));
     if (emitted == 0)
         throw std::runtime_error("MiniMax-Music3 emitted no frames");
@@ -989,10 +1025,7 @@ std::vector<float> MinimaxMusic3TextToMusicPipeline::denoise_window(
 
         guide_velocity(dit, inputs, condition, latent_length, guided);
 
-        if (index == 0 || index + 2 == sigmas.size()) {
-            report_stage(index == 0 ? "velocity_first" : "velocity_last", guided.data(), count);
-            report_stage(index == 0 ? "latents_first" : "latents_last", latents.data(), count);
-        }
+        report_denoise_step(index, sigmas.size(), guided, latents);
 
         // Flow matching's Euler step: the field points from noise toward data,
         // so the state moves by the sigma difference along it.

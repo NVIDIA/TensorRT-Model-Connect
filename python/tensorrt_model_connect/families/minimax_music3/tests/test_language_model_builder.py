@@ -64,37 +64,47 @@ _TRT = SimpleNamespace(
 )
 
 
-def _weights(layers: int, prefix: str = "model"):
-    rng = np.random.default_rng(0)
-    w = {f"{prefix}.norm.weight": np.ones(lm.HIDDEN_SIZE, dtype=np.float32)}
+def _weight_shapes(layers: int, prefix: str = "model"):
+    """The checkpoint's tensor names and shapes, without the tensors.
+
+    One layer of this model is 0.77 GB of float32, so the inventory is kept
+    separate from the data: a test that only counts names must not allocate
+    36 layers to do it.
+    """
+
+    shapes = {f"{prefix}.norm.weight": (lm.HIDDEN_SIZE,)}
     for layer in range(layers):
         b = f"{prefix}.layers.{layer}"
-        w[f"{b}.self_attn.q_proj.weight"] = rng.standard_normal(
-            (lm.query_width(), lm.HIDDEN_SIZE)).astype(np.float32) * 0.01
+        shapes[f"{b}.self_attn.q_proj.weight"] = (lm.query_width(), lm.HIDDEN_SIZE)
         for name in ("k_proj", "v_proj"):
-            w[f"{b}.self_attn.{name}.weight"] = rng.standard_normal(
-                (lm.key_value_width(), lm.HIDDEN_SIZE)).astype(np.float32) * 0.01
-        w[f"{b}.self_attn.o_proj.weight"] = rng.standard_normal(
-            (lm.HIDDEN_SIZE, lm.HIDDEN_SIZE)).astype(np.float32) * 0.01
-        w[f"{b}.self_attn.q_norm.weight"] = np.ones(lm.HEAD_DIM, dtype=np.float32)
-        w[f"{b}.self_attn.k_norm.weight"] = np.ones(lm.HEAD_DIM, dtype=np.float32)
-        w[f"{b}.mlp.gate_proj.weight"] = rng.standard_normal(
-            (lm.INTERMEDIATE_SIZE, lm.HIDDEN_SIZE)).astype(np.float32) * 0.01
-        w[f"{b}.mlp.up_proj.weight"] = rng.standard_normal(
-            (lm.INTERMEDIATE_SIZE, lm.HIDDEN_SIZE)).astype(np.float32) * 0.01
-        w[f"{b}.mlp.down_proj.weight"] = rng.standard_normal(
-            (lm.HIDDEN_SIZE, lm.INTERMEDIATE_SIZE)).astype(np.float32) * 0.01
-        w[f"{b}.input_layernorm.weight"] = np.ones(lm.HIDDEN_SIZE, dtype=np.float32)
-        w[f"{b}.post_attention_layernorm.weight"] = np.ones(
-            lm.HIDDEN_SIZE, dtype=np.float32)
-    return w
+            shapes[f"{b}.self_attn.{name}.weight"] = (lm.key_value_width(), lm.HIDDEN_SIZE)
+        shapes[f"{b}.self_attn.o_proj.weight"] = (lm.HIDDEN_SIZE, lm.HIDDEN_SIZE)
+        shapes[f"{b}.self_attn.q_norm.weight"] = (lm.HEAD_DIM,)
+        shapes[f"{b}.self_attn.k_norm.weight"] = (lm.HEAD_DIM,)
+        for name in ("gate_proj", "up_proj"):
+            shapes[f"{b}.mlp.{name}.weight"] = (lm.INTERMEDIATE_SIZE, lm.HIDDEN_SIZE)
+        shapes[f"{b}.mlp.down_proj.weight"] = (lm.HIDDEN_SIZE, lm.INTERMEDIATE_SIZE)
+        shapes[f"{b}.input_layernorm.weight"] = (lm.HIDDEN_SIZE,)
+        shapes[f"{b}.post_attention_layernorm.weight"] = (lm.HIDDEN_SIZE,)
+    return shapes
+
+
+def _weights(layers: int, prefix: str = "model"):
+    # Norms are ones and projections are small random values; the builder is
+    # exercised for the graph it emits, not for what the numbers come to.
+    rng = np.random.default_rng(0)
+    return {
+        name: (np.ones(shape, dtype=np.float32) if name.endswith("norm.weight")
+               else rng.standard_normal(shape).astype(np.float32) * 0.01)
+        for name, shape in _weight_shapes(layers, prefix).items()
+    }
 
 
 def test_weight_fixture_matches_the_published_layer_inventory() -> None:
     """Eleven tensors per layer plus the final norm."""
 
-    assert len(_weights(1)) == lm.TENSORS_PER_LAYER + 1
-    assert len(_weights(36)) == 36 * lm.TENSORS_PER_LAYER + 1
+    assert len(_weight_shapes(1)) == lm.TENSORS_PER_LAYER + 1
+    assert len(_weight_shapes(36)) == 36 * lm.TENSORS_PER_LAYER + 1
 
 
 def _build(seq_len=8, layers=2):
